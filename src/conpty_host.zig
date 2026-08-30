@@ -31,6 +31,8 @@ const error_file_not_found = 2;
 const error_pipe_connected = 535;
 const error_pipe_busy = 231;
 const still_active = 259;
+const security_sqos_present = 0x00100000;
+const security_identification = 0x00010000;
 
 const Tag = enum(u8) {
     attach = 1,
@@ -387,6 +389,33 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
 
     var security = try PipeSecurity.init(alloc);
     defer security.deinit();
+
+    // Create the one pipe instance before advertising the name, and keep it alive
+    // for the whole host lifetime. The \\.\pipe namespace is machine-global and
+    // any local user can both enumerate it and create a name in it, so the DACL
+    // below protects the object this process created but never reserves the name
+    // itself. Destroying and recreating the instance between clients would leave
+    // the name unowned in the gap, letting a different, lower-privileged user
+    // stand up a permissive pipe of the same name; FIRST_PIPE_INSTANCE would then
+    // fail this host closed, but a reconnecting client does not authenticate the
+    // server and would hand its keystrokes to the impostor. Reusing one instance
+    // removes that window entirely.
+    var security_attributes = security.attributes();
+    const pipe = windows.kernel32.CreateNamedPipeW(
+        pipe_name_w.ptr,
+        pipe_access_duplex | file_flag_first_pipe_instance,
+        windows.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
+        1,
+        max_frame_payload,
+        max_frame_payload,
+        0,
+        &security_attributes,
+    );
+    if (pipe == windows.INVALID_HANDLE_VALUE) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    defer _ = windows.CloseHandle(pipe);
+
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     try stdout_writer.interface.print(
@@ -396,25 +425,6 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     try stdout_writer.interface.flush();
 
     while (shellRunning(command.pid.?)) {
-        var security_attributes = security.attributes();
-        // FIRST_PIPE_INSTANCE fails closed on a collision. It does not prevent a
-        // same-user process from squatting this name between recreated instances;
-        // same-user attackers are outside this feasibility spike's threat model.
-        const pipe = windows.kernel32.CreateNamedPipeW(
-            pipe_name_w.ptr,
-            pipe_access_duplex | file_flag_first_pipe_instance,
-            windows.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
-            1,
-            max_frame_payload,
-            max_frame_payload,
-            0,
-            &security_attributes,
-        );
-        if (pipe == windows.INVALID_HANDLE_VALUE) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        }
-        defer _ = windows.CloseHandle(pipe);
-
         // Spike limitation: this synchronous accept has no cancellation. If the
         // shell exits with no client attached, the host waits here until a client
         // connects. Product code would need an overlapped, cancellable accept.
@@ -427,6 +437,15 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
             error.BrokenPipe, error.NoData, error.PipeNotConnected => {},
             else => return err,
         };
+
+        // Discards whatever is still buffered in the instance, so the next client
+        // cannot observe the previous client's bytes, and returns the instance to
+        // a listening state for the next accept. All other per-client state
+        // (replay snapshot, ring cursor, frame buffers) is local to serveClient
+        // and is rebuilt on the next call. Max instances stays 1, so the
+        // one-client-at-a-time invariant is unchanged; a second client now sees
+        // ERROR_PIPE_BUSY instead of ERROR_FILE_NOT_FOUND, and connectClient
+        // already retries on both.
         _ = DisconnectNamedPipe(pipe);
     }
 }
@@ -649,13 +668,19 @@ fn attachInput(context: InputContext) void {
 fn connectClient(pipe_name: [:0]const u16) !windows.HANDLE {
     const deadline = std.time.nanoTimestamp() + (10 * std.time.ns_per_s);
     while (true) {
+        // Named pipes default to SecurityImpersonation when the caller supplies no
+        // SQOS, which would let any server on the other end impersonate this
+        // client. Pin identification level so a server can learn who we are but
+        // cannot act as us. This does NOT authenticate the server; the host keeps
+        // its single pipe instance alive precisely so the name is never available
+        // for an impostor to claim.
         const pipe = windows.kernel32.CreateFileW(
             pipe_name.ptr,
             windows.GENERIC_READ | windows.GENERIC_WRITE,
             0,
             null,
             windows.OPEN_EXISTING,
-            windows.FILE_ATTRIBUTE_NORMAL,
+            windows.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
             null,
         );
         if (pipe != windows.INVALID_HANDLE_VALUE) return pipe;

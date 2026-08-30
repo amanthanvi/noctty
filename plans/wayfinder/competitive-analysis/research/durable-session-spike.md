@@ -340,8 +340,10 @@ in `src/Command.zig`, owns one `pwsh.exe`, drains ConPTY output on a
 dedicated thread even with no client, retains raw output in a
 preallocated 1 MiB overwrite ring, and accepts one client at a time on
 a named pipe. Its actual security controls are an explicit protected
-current-user SDDL DACL, `FILE_FLAG_FIRST_PIPE_INSTANCE`, and
-`PIPE_REJECT_REMOTE_CLIENTS`. The retained `LOCAL` prefix only affects
+current-user SDDL DACL, `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+`PIPE_REJECT_REMOTE_CLIENTS`, a single pipe instance created before the
+name is advertised and held for the host's lifetime, and clients that
+connect at `SECURITY_IDENTIFICATION`. The retained `LOCAL` prefix only affects
 AppContainer name resolution; it is not an access-control property for
 ordinary desktop processes. Its deliberately disposable protocol has
 only attach, detach, resize, input, and output frames.
@@ -375,14 +377,14 @@ recorded PIDs.
 The latest hardened green run reported:
 
 ```text
-CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":68268,"killed_client_pid":58724,"shell_pid":23320,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2576380,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38449152,"observed_host_private_max_detached_bytes":38449152,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
+CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":5724,"killed_client_pid":58092,"shell_pid":65196,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2575980,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38436864,"observed_host_private_max_detached_bytes":38436864,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote+persistent-instance","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
 ```
 
 The memory evidence is intentionally precise and observational: total
-process private memory was 38,449,152 bytes before detached overflow, so
+process private memory was 38,436,864 bytes before detached overflow, so
 the whole process was not and cannot be under a 1 MiB ring cap. The
 retained-output allocation never exceeded 1,048,576 bytes, and the
-sampled private-memory growth while draining at least 2,576,380 bytes
+sampled private-memory growth while draining at least 2,575,980 bytes
 detached was 0 bytes in this one run. The structural guarantee is the
 ring's retained-byte bound; the process-memory figure is not a guarantee
 or a long-duration whole-process memory budget. An
@@ -405,10 +407,41 @@ it no longer blocks ConPTY draining; multi-session and multi-client
 lifecycle; broker crashes; elevation and integrity-level separation;
 upgrade/protocol migration; long-duration memory behavior; and
 adversarial validation from another user or integrity level. The DACL
-construction was exercised only by the owning user. The pipe instance is
-closed and recreated between clients, so a same-user process can squat
-the name during that gap; same-user attackers are explicitly outside
-this feasibility spike's threat model. Synchronous `ConnectNamedPipe`
+construction was exercised only by the owning user.
+
+An earlier revision described the pipe-name gap as a same-user squat and
+dismissed it as out of scope. That was wrong, and the correction matters.
+The `\\.\pipe` namespace is machine-global, creating a name in it needs
+no privilege, and the namespace is enumerable: from an ordinary process,
+listing `\\.\pipe` returned 542 entries including this spike's randomly
+named instance,
+`\\.\pipe\LOCAL\noctty-conpty-host-probe-52876839e78448b49d07ef7589cebee7`.
+An unguessable name is therefore not a control. The DACL protects the
+object this host creates; it never reserves the name. So a *different,
+lower-privileged* local user — not merely a same-user process — could
+have claimed the name in any window where no instance existed. This
+host's `FILE_FLAG_FIRST_PIPE_INSTANCE` would fail it closed on the next
+accept, but the client performs no server authentication, so a
+reconnecting client would have disclosed its terminal input to the
+impostor. That is a cross-user disclosure path, and it was outside what
+the stated same-user scope covered.
+
+The host now creates its one instance before advertising the name and
+reuses it across clients via `DisconnectNamedPipe` and a fresh
+`ConnectNamedPipe` on the same handle, so the name is never unowned
+while the host lives. `DisconnectNamedPipe` discards data still buffered
+in the instance, and all per-client state is local to `serveClient`, so
+a new client cannot observe the previous client's bytes. Max instances
+stays 1, preserving one client at a time. Clients also connect with
+`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so no server can
+capture an impersonation token from a client that reaches it.
+
+Two related gaps stay open deliberately. An attacker who owns the name
+*before* this host starts still denies service — fail closed, no
+disclosure. And a client launched when no host is running has nothing to
+authenticate against. Closing that needs client-side server
+authentication, such as `GetNamedPipeServerProcessId` plus an owner-SID
+comparison, which is product work rather than spike work. Synchronous `ConnectNamedPipe`
 also has no timeout, so the host can remain blocked if the shell exits
 while no client is attached. No application integration was attempted.
 
