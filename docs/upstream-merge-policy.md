@@ -95,11 +95,17 @@ main, represented as `1.3.2-dev`, not a released upstream tag.
 Every merge window must run:
 
 ```powershell
-zig fmt --check src
+pwsh -NoProfile -File scripts/check-zig-format.ps1
 zig build -Demit-exe=true
 zig build test -Demit-test-exe=true
 pwsh -NoProfile -File scripts/check-source-format.ps1
 ```
+
+Use `scripts/check-zig-format.ps1` rather than a bare `zig fmt --check src`.
+The tracked generated table `src/build/uucode_tables.zig` is not `zig fmt`
+clean under the pinned Zig 0.15.2, so the bare command fails on an unmodified
+checkout and cannot serve as a merge-window gate. The script formats every
+other tracked Zig source under `src/` and `pkg/` plus `build.zig`.
 
 When scripts or validation harnesses change, also run:
 

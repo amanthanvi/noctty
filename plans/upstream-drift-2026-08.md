@@ -302,8 +302,11 @@ The list is ordered chronologically and has no known cross-item dependency.
 Each of the seven was applied with `git cherry-pick --no-commit -n <sha>` in an
 index-writable worktree, inspected, and committed with a
 `(cherry picked from upstream <sha>)` trailer. The slice was then gated with
-`zig fmt --check src`, `zig build -Demit-exe=true`, and the full
-`zig build test -Demit-test-exe=true` suite.
+`scripts/check-zig-format.ps1`, `zig build -Demit-exe=true`, and the full
+`zig build test -Demit-test-exe=true` suite. (The format gate is the script,
+not a bare `zig fmt --check src`: the tracked generated
+`src/build/uucode_tables.zig` is not `zig fmt` clean under the pinned Zig
+0.15.2, so the bare command fails on an unmodified checkout.)
 
 Those gates certify `83027407e66e`, `e44f5cb0fa1a`, and `a8c3ab1915c9`.
 The renderer/input picks `ac67a6160c81`, `9c9cf3e82174`, `9e6e2ea96458`, and
