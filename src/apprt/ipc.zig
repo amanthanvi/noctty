@@ -139,6 +139,22 @@ pub const AutomationActionTarget = union(enum) {
     surface_id: u64,
 };
 
+/// Target used by the stable Win32 automation verbs. Omitted targets are
+/// represented by `.focused`, never by a numeric zero.
+pub const AutomationTarget = union(enum) {
+    focused,
+    surface_id: u64,
+    window_id: u32,
+};
+
+pub const AutomationCommand = union(enum) {
+    focus: AutomationTarget,
+    send_text: struct {
+        target: AutomationTarget,
+        text: []const u8,
+    },
+};
+
 pub const Action = union(enum) {
     // A GUIDE TO ADDING NEW ACTIONS:
     //

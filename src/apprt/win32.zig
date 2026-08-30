@@ -1063,6 +1063,7 @@ fn sendNewWindowIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
     arguments: ?[]const [:0]const u8,
+    response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -1084,12 +1085,13 @@ fn sendNewWindowIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAck(pipe);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
 
 fn sendListWindowsIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    response_timeout_ms: u64,
 ) !?[]u8 {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
@@ -1106,7 +1108,7 @@ fn sendListWindowsIpc(
     return try win32_ipc.readDataResponseWithTimeout(
         alloc,
         pipe,
-        win32_ipc.automation_response_timeout_ms,
+        response_timeout_ms,
     );
 }
 
@@ -1115,6 +1117,7 @@ fn sendPerformActionIpc(
     pipe_name: [:0]const u16,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
@@ -1128,7 +1131,54 @@ fn sendPerformActionIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+}
+
+fn sendFocusIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    response_timeout_ms: u64,
+) !bool {
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+
+    const request = try win32_ipc.encodeFocusRequest(alloc, target);
+    defer alloc.free(request);
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+}
+
+fn sendAutomationTextIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    value: []const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+
+    const request = try win32_ipc.encodeSendTextRequest(alloc, target, value);
+    defer alloc.free(request);
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+}
+
+fn automationTextAllowed(text: []const u8) bool {
+    if (text.len == 0 or text.len > win32_ipc.max_action_text_len) return false;
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp <= 0x1F or cp == 0x7F or (cp >= 0x80 and cp <= 0x9F)) return false;
+    }
+    return win32_paste_protection.inspect(text).severity != .control_chars;
 }
 
 /// Configuration keys a forwarded `new_window` argv is allowed to set.
@@ -1391,6 +1441,7 @@ fn sendLaunchLayoutIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
     name: []const u8,
+    response_timeout_ms: u64,
 ) !bool {
     // Validate before probing the pipe. The caller uses `false` as the cold
     // start fallback, so connecting first would let an invalid name spawn an
@@ -1406,7 +1457,7 @@ fn sendLaunchLayoutIpc(
     defer _ = windows.CloseHandle(pipe);
 
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
 
 fn trySendStartupLaunchLayoutIpc(
@@ -1415,7 +1466,12 @@ fn trySendStartupLaunchLayoutIpc(
     name: ?[]const u8,
 ) !?bool {
     const layout_name = name orelse return null;
-    return try sendLaunchLayoutIpc(alloc, pipe_name, layout_name);
+    return try sendLaunchLayoutIpc(
+        alloc,
+        pipe_name,
+        layout_name,
+        win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 const LaunchLayoutIpcArgument = union(enum) {
@@ -1887,6 +1943,14 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
+        .focus => handleFocusIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 automation focus IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .send_text => handleSendTextIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 automation send-text IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
     }
     return kind;
 }
@@ -1987,6 +2051,55 @@ fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
+fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    const target = win32_ipc.decodeFocusPayload(pipe) catch |err| switch (err) {
+        error.InvalidAutomationTarget => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
+            return;
+        },
+        else => return err,
+    };
+    requestAutomationCommand(app, .{ .focus = target }) catch |err| {
+        const status: u8 = switch (err) {
+            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
+            error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
+            else => return err,
+        };
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    var payload = win32_ipc.decodeSendTextPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+        error.InvalidAutomationText => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+            return;
+        },
+        error.InvalidAutomationTarget => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
+            return;
+        },
+        else => return err,
+    };
+    defer payload.deinit(app.core_app.alloc);
+    requestAutomationCommand(app, .{ .send_text = .{
+        .target = payload.target,
+        .text = payload.text,
+    } }) catch |err| {
+        const status: u8 = switch (err) {
+            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
+            error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
+            error.AutomationPolicyRefused => win32_ipc.ack_automation_policy_refused,
+            else => return err,
+        };
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
 fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
     const request = try CoreApp.Message.AutomationWindowListRequest.create(alloc);
     defer request.release();
@@ -2026,6 +2139,23 @@ fn requestAutomationAction(
         .mailbox = &app.core_app.mailbox,
     };
     if (mailbox.push(.{ .automation_action = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
+        return error.IPCFailed;
+    }
+
+    try waitForAutomationCompletion(app, &request.completed);
+    if (request.err) |err| return err;
+}
+
+fn requestAutomationCommand(app: *App, command: apprt.ipc.AutomationCommand) !void {
+    const request = try CoreApp.Message.AutomationCommandRequest.create(app.core_app.alloc, command);
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
+    const mailbox: CoreApp.Mailbox = .{
+        .rt_app = app,
+        .mailbox = &app.core_app.mailbox,
+    };
+    if (mailbox.push(.{ .automation_command = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
         request.release();
         return error.IPCFailed;
     }
@@ -2369,6 +2499,13 @@ pub const App = struct {
     /// Test-only seam for automation snapshots built without a live core
     /// surface. Returned strings are owned by the caller.
     test_automation_pwd: ?*const fn (Allocator, *Surface) anyerror!?[]const u8 = null,
+    /// Test-only seam proving automation uses the protected paste encoder.
+    test_automation_paste: ?*const fn (
+        surface: *Surface,
+        state: apprt.ClipboardRequest,
+        text: [:0]const u8,
+        confirmed: bool,
+    ) anyerror!void = null,
     /// Test-only interleaving seam for the focus revision race between a
     /// structural split-close prepare and commit.
     test_before_split_undo_shell_commit: ?*const fn (
@@ -3981,6 +4118,7 @@ pub const App = struct {
             self.core_app.alloc,
             pipe_name,
             arguments,
+            win32_ipc.automation_response_timeout_ms,
         );
     }
 
@@ -5357,6 +5495,7 @@ pub const App = struct {
         target: apprt.ipc.Target,
         comptime action: apprt.ipc.Action.Key,
         value: apprt.ipc.Action.Value(action),
+        response_timeout_ms: u64,
     ) !bool {
         switch (action) {
             .new_window => {
@@ -5368,8 +5507,8 @@ pub const App = struct {
                 const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
                 defer alloc.free(pipe_name);
                 const forwarded = switch (launch_layout) {
-                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments),
-                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name),
+                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments, response_timeout_ms),
+                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name, response_timeout_ms),
                 };
                 if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
@@ -5380,10 +5519,11 @@ pub const App = struct {
     pub fn queryAutomationWindowList(
         alloc: Allocator,
         target: apprt.ipc.Target,
+        response_timeout_ms: u64,
     ) !?[]u8 {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
-        return try sendListWindowsIpc(alloc, pipe_name);
+        return try sendListWindowsIpc(alloc, pipe_name, response_timeout_ms);
     }
 
     pub fn performAutomationAction(
@@ -5391,10 +5531,74 @@ pub const App = struct {
         target: apprt.ipc.Target,
         action_target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
+        response_timeout_ms: u64,
     ) !bool {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
-        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text);
+        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text, response_timeout_ms);
+    }
+
+    pub fn focusAutomationTarget(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendFocusIpc(alloc, pipe_name, automation_target, response_timeout_ms);
+    }
+
+    pub fn sendAutomationText(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        text: []const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendAutomationTextIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            text,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn performAutomationCommand(self: *App, command: apprt.ipc.AutomationCommand) !void {
+        switch (command) {
+            .focus => |target| {
+                const surface = switch (target) {
+                    .surface_id => |id| self.findSurfaceById(id),
+                    .window_id => |id| self.activeSurfaceForHost(id),
+                    .focused => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                self.activateSurface(surface);
+            },
+            .send_text => |value| {
+                const surface = switch (value.target) {
+                    .surface_id => |id| self.findSurfaceById(id),
+                    .focused, .window_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                if (!automationTextAllowed(value.text)) return error.AutomationPolicyRefused;
+
+                const text_z = try self.core_app.alloc.dupeZ(u8, value.text);
+                defer self.core_app.alloc.free(text_z);
+                if (self.test_automation_paste) |paste| {
+                    paste(surface, .paste, text_z, false) catch |err| switch (err) {
+                        error.UnsafePaste => return error.AutomationPolicyRefused,
+                        else => return err,
+                    };
+                } else {
+                    surface.core().completeClipboardRequest(.paste, text_z, false) catch |err| switch (err) {
+                        error.UnsafePaste => return error.AutomationPolicyRefused,
+                        else => return err,
+                    };
+                }
+            },
+        }
     }
 
     pub fn buildAutomationWindowListJson(
@@ -30974,6 +31178,144 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     // creatable from a test. Both are argued from the fail-closed structure
     // of `ipcPipeServerIsTrusted` (every error path returns false, and the
     // final comparison is `server_rid >= own_rid`), not observed.
+}
+
+test "automation focus selects exact targets without fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 11, .register = true },
+            .{ .storage = &host_b, .id = 12, .register = true },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a },
+            .{ .storage = &surface_b, .host = &host_a },
+            .{ .storage = &surface_c, .host = &host_b },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 1 },
+            .{ .host = &host_a, .surface = &surface_b, .id = 2 },
+            .{ .host = &host_b, .surface = &surface_c, .id = 3 },
+        },
+    });
+    defer session.deinit();
+    surface_a.core_surface.id = 101;
+    surface_b.core_surface.id = 102;
+    surface_c.core_surface.id = 103;
+
+    try app.performAutomationCommand(.{ .focus = .{ .surface_id = 102 } });
+    try std.testing.expectEqual(@as(usize, 1), host_a.active_tab);
+    try app.performAutomationCommand(.{ .focus = .{ .window_id = 12 } });
+    try std.testing.expectEqual(&surface_c, host_b.activeSurface().?);
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .focus = .{ .surface_id = 999 } }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .focus = .focused }),
+    );
+}
+
+test "automation send text enforces receiver policy and protected paste path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Hook = struct {
+        var calls: usize = 0;
+        var expected: []const u8 = "";
+        var unsafe = false;
+        fn paste(
+            surface: *Surface,
+            state: apprt.ClipboardRequest,
+            text: [:0]const u8,
+            confirmed: bool,
+        ) !void {
+            try std.testing.expectEqual(@as(u64, 201), surface.core().id);
+            try std.testing.expectEqual(apprt.ClipboardRequest.paste, state);
+            try std.testing.expectEqualStrings(expected, text);
+            try std.testing.expect(!confirmed);
+            calls += 1;
+            if (unsafe) return error.UnsafePaste;
+        }
+    };
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    surface.core_surface.id = 201;
+    app.test_automation_paste = &Hook.paste;
+    Hook.calls = 0;
+
+    for ([_][]const u8{ "printable UTF-8: \xcf\x80", "$HOME && echo ok | more" }) |text| {
+        Hook.expected = text;
+        try app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 201 },
+            .text = text,
+        } });
+    }
+    try std.testing.expectEqual(@as(usize, 2), Hook.calls);
+    Hook.expected = "unsafe";
+    Hook.unsafe = true;
+    try std.testing.expectError(
+        error.AutomationPolicyRefused,
+        app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 201 },
+            .text = "unsafe",
+        } }),
+    );
+    Hook.unsafe = false;
+
+    const refused = [_][]const u8{
+        "\r",
+        "\n",
+        "\t",
+        "\x00",
+        "\x1b",
+        "\x7f",
+        "\xc2\x80",
+    };
+    for (refused) |text| {
+        try std.testing.expectError(
+            error.AutomationPolicyRefused,
+            app.performAutomationCommand(.{ .send_text = .{
+                .target = .{ .surface_id = 201 },
+                .text = text,
+            } }),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 3), Hook.calls);
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .send_text = .{ .target = .focused, .text = "ok" } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 999 },
+            .text = "ok",
+        } }),
+    );
 }
 
 test "win32 IPC silent client read is bounded" {

@@ -69,6 +69,12 @@ pub const Action = enum {
     /// Restore the default-terminal selection saved by noctty.
     @"unregister-default-terminal",
 
+    // Focus a specific window or surface in the running noctty instance.
+    focus,
+
+    // Send policy-bounded printable text to a surface in the running instance.
+    @"send-text",
+
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
         // we are done looking for commands. This special case enables

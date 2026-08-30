@@ -20,6 +20,8 @@ pub const ack_invalid_automation_action: u8 = 2;
 pub const ack_unsafe_automation_action: u8 = 3;
 pub const ack_invalid_automation_target: u8 = 4;
 pub const ack_no_automation_target: u8 = 5;
+pub const ack_automation_target_not_found: u8 = 6;
+pub const ack_automation_policy_refused: u8 = 7;
 pub const max_data_response_len: u32 = 16 * 1024 * 1024;
 pub const max_action_text_len: u32 = 16 * 1024;
 pub const max_new_window_argc: u32 = 4096;
@@ -31,13 +33,24 @@ pub const RequestKind = enum(u8) {
     new_window = 1,
     list_windows = 2,
     perform_action = 3,
-    // Values 4-7 are owned by PR #196 (issue #144).
+    focus = 6,
+    send_text = 7,
     launch_layout = 8,
 };
 
 pub const PerformActionPayload = struct {
     target: apprt.ipc.AutomationActionTarget,
     action_text: []u8,
+};
+
+pub const SendTextPayload = struct {
+    target: apprt.ipc.AutomationTarget,
+    text: []u8,
+
+    pub fn deinit(self: *@This(), alloc: Allocator) void {
+        alloc.free(self.text);
+        self.* = undefined;
+    }
 };
 
 fn appendU32(dst: *std.ArrayList(u8), alloc: Allocator, value: u32) !void {
@@ -50,6 +63,33 @@ fn appendU64(dst: *std.ArrayList(u8), alloc: Allocator, value: u64) !void {
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &buf, value, .little);
     try dst.appendSlice(alloc, &buf);
+}
+
+fn appendAutomationTarget(
+    dst: *std.ArrayList(u8),
+    alloc: Allocator,
+    target: apprt.ipc.AutomationTarget,
+) !void {
+    const tag: u8, const value: u64 = switch (target) {
+        .focused => .{ 0, 0 },
+        .surface_id => |id| if (id == 0) return error.InvalidAutomationTarget else .{ 1, id },
+        .window_id => |id| if (id == 0) return error.InvalidAutomationTarget else .{ 2, id },
+    };
+    try dst.append(alloc, tag);
+    try appendU64(dst, alloc, value);
+}
+
+fn decodeAutomationTarget(src: *const [9]u8) !apprt.ipc.AutomationTarget {
+    const value = readU64(src[1..9]);
+    return switch (src[0]) {
+        0 => if (value == 0) .focused else error.InvalidAutomationTarget,
+        1 => if (value != 0) .{ .surface_id = value } else error.InvalidAutomationTarget,
+        2 => if (value != 0 and value <= std.math.maxInt(u32))
+            .{ .window_id = @intCast(value) }
+        else
+            error.InvalidAutomationTarget,
+        else => error.InvalidAutomationTarget,
+    };
 }
 
 fn readU32(src: []const u8) u32 {
@@ -149,7 +189,39 @@ pub fn encodeLaunchLayoutRequest(
     try encoded.append(alloc, @intFromEnum(RequestKind.launch_layout));
     try appendU32(&encoded, alloc, @intCast(name.len));
     try encoded.appendSlice(alloc, name);
+    return try encoded.toOwnedSlice(alloc);
+}
 
+pub fn encodeFocusRequest(
+    alloc: Allocator,
+    target: apprt.ipc.AutomationTarget,
+) ![]u8 {
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(alloc);
+    try appendU32(&encoded, alloc, wire_version);
+    try encoded.append(alloc, @intFromEnum(RequestKind.focus));
+    try appendAutomationTarget(&encoded, alloc, target);
+    return try encoded.toOwnedSlice(alloc);
+}
+
+pub fn encodeSendTextRequest(
+    alloc: Allocator,
+    target: apprt.ipc.AutomationTarget,
+    text: []const u8,
+) ![]u8 {
+    if (text.len == 0 or text.len > max_action_text_len or
+        !std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null)
+    {
+        return error.InvalidAutomationText;
+    }
+
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(alloc);
+    try appendU32(&encoded, alloc, wire_version);
+    try encoded.append(alloc, @intFromEnum(RequestKind.send_text));
+    try appendAutomationTarget(&encoded, alloc, target);
+    try appendU32(&encoded, alloc, @intCast(text.len));
+    try encoded.appendSlice(alloc, text);
     return try encoded.toOwnedSlice(alloc);
 }
 
@@ -257,6 +329,32 @@ fn validateLaunchLayoutName(name: []const u8) !void {
     win32_layouts.validateName(name) catch return error.InvalidAutomationAction;
 }
 
+pub fn decodeFocusPayload(pipe: windows.HANDLE) !apprt.ipc.AutomationTarget {
+    var encoded: [9]u8 = undefined;
+    try readExactUntil(pipe, &encoded, deadline());
+    return try decodeAutomationTarget(&encoded);
+}
+
+pub fn decodeSendTextPayload(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) !SendTextPayload {
+    const deadline_ms = deadline();
+    var header: [13]u8 = undefined;
+    try readExactUntil(pipe, &header, deadline_ms);
+    const target = try decodeAutomationTarget(header[0..9]);
+    const len = readU32(header[9..13]);
+    if (len == 0 or len > max_action_text_len) return error.InvalidAutomationText;
+
+    const text = try alloc.alloc(u8, len);
+    errdefer alloc.free(text);
+    try readExactUntil(pipe, text, deadline_ms);
+    if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) {
+        return error.InvalidAutomationText;
+    }
+    return .{ .target = target, .text = text };
+}
+
 pub fn writeAck(pipe: windows.HANDLE, success: bool) !void {
     return writeAckStatus(pipe, if (success) ack_success else ack_failure);
 }
@@ -283,6 +381,8 @@ pub fn readAckWithTimeout(pipe: windows.HANDLE, timeout_ms: u64) !bool {
         ack_unsafe_automation_action => error.UnsafeAutomationAction,
         ack_invalid_automation_target => error.InvalidAutomationTarget,
         ack_no_automation_target => error.NoAutomationTarget,
+        ack_automation_target_not_found => error.AutomationTargetNotFound,
+        ack_automation_policy_refused => error.AutomationPolicyRefused,
         else => error.InvalidIpcResponse,
     };
 }
@@ -418,6 +518,223 @@ pub fn writeAll(pipe: windows.HANDLE, src: []const u8) !void {
         }
         if (write_len == 0) return error.WriteFailed;
         offset += write_len;
+    }
+}
+
+fn automationTargetBytes(tag: u8, value: u64) [9]u8 {
+    var encoded: [9]u8 = undefined;
+    encoded[0] = tag;
+    std.mem.writeInt(u64, encoded[1..9], value, .little);
+    return encoded;
+}
+
+fn writeAutomationSendTextPayload(
+    file: *std.fs.File,
+    target: [9]u8,
+    declared_len: u32,
+    body: []const u8,
+) !void {
+    try file.setEndPos(0);
+    try file.seekTo(0);
+    try file.writeAll(&target);
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, declared_len, .little);
+    try file.writeAll(&len_buf);
+    try file.writeAll(body);
+    try file.seekTo(0);
+}
+
+test "win32 automation wire and status numeric pins" {
+    try std.testing.expectEqual(@as(u32, 1), wire_version);
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(RequestKind.new_window));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(RequestKind.list_windows));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(RequestKind.perform_action));
+    try std.testing.expectEqual(@as(u8, 6), @intFromEnum(RequestKind.focus));
+    try std.testing.expectEqual(@as(u8, 7), @intFromEnum(RequestKind.send_text));
+    try std.testing.expectEqual(@as(u8, 0), ack_success);
+    try std.testing.expectEqual(@as(u8, 1), ack_failure);
+    try std.testing.expectEqual(@as(u8, 2), ack_invalid_automation_action);
+    try std.testing.expectEqual(@as(u8, 3), ack_unsafe_automation_action);
+    try std.testing.expectEqual(@as(u8, 4), ack_invalid_automation_target);
+    try std.testing.expectEqual(@as(u8, 5), ack_no_automation_target);
+    try std.testing.expectEqual(@as(u8, 6), ack_automation_target_not_found);
+    try std.testing.expectEqual(@as(u8, 7), ack_automation_policy_refused);
+}
+
+test "win32 automation focus request round trip" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("automation-focus.bin", .{ .read = true });
+    defer file.close();
+
+    for ([_]apprt.ipc.AutomationTarget{
+        .{ .surface_id = 42 },
+        .{ .window_id = 17 },
+    }) |target| {
+        const request = try encodeFocusRequest(std.testing.allocator, target);
+        defer std.testing.allocator.free(request);
+        try file.setEndPos(0);
+        try file.seekTo(0);
+        try file.writeAll(request);
+        try file.seekTo(0);
+        try std.testing.expectEqual(RequestKind.focus, try decodeRequestKind(file.handle));
+        try std.testing.expectEqual(target, try decodeFocusPayload(file.handle));
+    }
+}
+
+test "win32 automation send text request round trip" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const target: apprt.ipc.AutomationTarget = .{ .surface_id = 0x1234 };
+    const text = "printable £ ✓ ; | $(allowed) https://example.com mixed";
+    const request = try encodeSendTextRequest(std.testing.allocator, target, text);
+    defer std.testing.allocator.free(request);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("automation-send-text.bin", .{ .read = true });
+    defer file.close();
+    try file.writeAll(request);
+    try file.seekTo(0);
+
+    try std.testing.expectEqual(RequestKind.send_text, try decodeRequestKind(file.handle));
+    var payload = try decodeSendTextPayload(std.testing.allocator, file.handle);
+    defer payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(target, payload.target);
+    try std.testing.expectEqualStrings(text, payload.text);
+}
+
+test "win32 automation target tags reject invalid forms" {
+    try std.testing.expectEqual(
+        apprt.ipc.AutomationTarget.focused,
+        try decodeAutomationTarget(&automationTargetBytes(0, 0)),
+    );
+    try std.testing.expectEqual(
+        apprt.ipc.AutomationTarget{ .surface_id = 42 },
+        try decodeAutomationTarget(&automationTargetBytes(1, 42)),
+    );
+    try std.testing.expectEqual(
+        apprt.ipc.AutomationTarget{ .window_id = 17 },
+        try decodeAutomationTarget(&automationTargetBytes(2, 17)),
+    );
+
+    for ([_][9]u8{
+        automationTargetBytes(0, 1),
+        automationTargetBytes(1, 0),
+        automationTargetBytes(2, 0),
+        automationTargetBytes(2, @as(u64, std.math.maxInt(u32)) + 1),
+        automationTargetBytes(3, 1),
+    }) |encoded| {
+        try std.testing.expectError(error.InvalidAutomationTarget, decodeAutomationTarget(&encoded));
+    }
+
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        encodeFocusRequest(std.testing.allocator, .{ .surface_id = 0 }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        encodeFocusRequest(std.testing.allocator, .{ .window_id = 0 }),
+    );
+}
+
+test "win32 automation send text codec enforces text contract" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const target: apprt.ipc.AutomationTarget = .{ .surface_id = 42 };
+    const max_text = try std.testing.allocator.alloc(u8, max_action_text_len);
+    defer std.testing.allocator.free(max_text);
+    @memset(max_text, 'x');
+    const max_request = try encodeSendTextRequest(std.testing.allocator, target, max_text);
+    defer std.testing.allocator.free(max_request);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("automation-send-text-contract.bin", .{ .read = true });
+    defer file.close();
+    try file.writeAll(max_request);
+    try file.seekTo(0);
+    try std.testing.expectEqual(RequestKind.send_text, try decodeRequestKind(file.handle));
+    var max_payload = try decodeSendTextPayload(std.testing.allocator, file.handle);
+    defer max_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, max_action_text_len), max_payload.text.len);
+
+    const over_text = try std.testing.allocator.alloc(u8, max_action_text_len + 1);
+    defer std.testing.allocator.free(over_text);
+    @memset(over_text, 'x');
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        encodeSendTextRequest(std.testing.allocator, target, ""),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        encodeSendTextRequest(std.testing.allocator, target, over_text),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        encodeSendTextRequest(std.testing.allocator, target, &.{0xFF}),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        encodeSendTextRequest(std.testing.allocator, target, "a\x00b"),
+    );
+
+    const raw_target = automationTargetBytes(1, 42);
+    try writeAutomationSendTextPayload(&file, raw_target, 0, "");
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        decodeSendTextPayload(std.testing.allocator, file.handle),
+    );
+    try writeAutomationSendTextPayload(&file, raw_target, max_action_text_len + 1, "");
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        decodeSendTextPayload(std.testing.allocator, file.handle),
+    );
+    try writeAutomationSendTextPayload(&file, raw_target, 1, &.{0xFF});
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        decodeSendTextPayload(std.testing.allocator, file.handle),
+    );
+    try writeAutomationSendTextPayload(&file, raw_target, 3, "a\x00b");
+    try std.testing.expectError(
+        error.InvalidAutomationText,
+        decodeSendTextPayload(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 automation send text partial EOF frees allocation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("automation-send-text-eof.bin", .{ .read = true });
+    defer file.close();
+    try writeAutomationSendTextPayload(&file, automationTargetBytes(1, 42), 3, "x");
+    try std.testing.expectError(
+        error.EndOfStream,
+        decodeSendTextPayload(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 automation ack maps target and policy statuses" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("automation-ack.bin", .{ .read = true });
+    defer file.close();
+
+    for ([_]struct { status: u8, expected: anyerror }{
+        .{ .status = ack_automation_target_not_found, .expected = error.AutomationTargetNotFound },
+        .{ .status = ack_automation_policy_refused, .expected = error.AutomationPolicyRefused },
+    }) |case| {
+        try file.setEndPos(0);
+        try file.seekTo(0);
+        try writeAckStatus(file.handle, case.status);
+        try file.seekTo(0);
+        try std.testing.expectError(case.expected, readAck(file.handle));
     }
 }
 

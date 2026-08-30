@@ -401,6 +401,13 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 request.completed.store(true, .release);
                 request.release();
             },
+            .automation_command => |request| {
+                rt_app.performAutomationCommand(request.command) catch |err| {
+                    request.err = err;
+                };
+                request.completed.store(true, .release);
+                request.release();
+            },
             .close => |surface| self.closeSurface(surface),
             .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.message),
             .redraw_surface => |surface| try self.redrawSurface(rt_app, surface),
@@ -875,6 +882,9 @@ pub const Message = union(enum) {
     /// Perform a safe parsed keybinding action on the app thread.
     automation_action: *AutomationActionRequest,
 
+    /// Perform a stable automation verb on the app thread.
+    automation_command: *AutomationCommandRequest,
+
     /// Close a surface. This notifies the runtime that a surface
     /// should close.
     close: *Surface,
@@ -899,6 +909,7 @@ pub const Message = union(enum) {
             .new_window => |message| message.deinit(alloc),
             .automation_window_list => |request| request.release(),
             .automation_action => |request| request.release(),
+            .automation_command => |request| request.release(),
             .surface_message => |payload| {
                 var message = payload.message;
                 message.deinit();
@@ -971,6 +982,41 @@ pub const Message = union(enum) {
         }
     };
 
+    pub const AutomationCommandRequest = struct {
+        alloc: Allocator,
+        refs: std.atomic.Value(u32) = .init(1),
+        command: apprt.ipc.AutomationCommand,
+        completed: std.atomic.Value(bool) = .init(false),
+        err: ?anyerror = null,
+
+        pub fn create(alloc: Allocator, command: apprt.ipc.AutomationCommand) !*@This() {
+            const request = try alloc.create(@This());
+            errdefer alloc.destroy(request);
+            const owned: apprt.ipc.AutomationCommand = switch (command) {
+                .focus => |target| .{ .focus = target },
+                .send_text => |value| .{ .send_text = .{
+                    .target = value.target,
+                    .text = try alloc.dupe(u8, value.text),
+                } },
+            };
+            request.* = .{ .alloc = alloc, .command = owned };
+            return request;
+        }
+
+        pub fn retain(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+
+        pub fn release(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            switch (self.command) {
+                .send_text => |value| self.alloc.free(value.text),
+                .focus => {},
+            }
+            self.alloc.destroy(self);
+        }
+    };
+
     const NewWindow = struct {
         /// The parent surface
         parent: ?*Surface = null,
@@ -1001,6 +1047,22 @@ test "queued automation messages release consumer ownership during teardown" {
     list_request.retain();
     list_request.release();
     (Message{ .automation_window_list = list_request }).deinit(std.testing.allocator);
+
+    const focus_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .focus = .{ .surface_id = 42 } },
+    );
+    focus_request.retain();
+    focus_request.release();
+    (Message{ .automation_command = focus_request }).deinit(std.testing.allocator);
+
+    const text_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .send_text = .{ .target = .{ .surface_id = 42 }, .text = "hello" } },
+    );
+    text_request.retain();
+    text_request.release();
+    (Message{ .automation_command = text_request }).deinit(std.testing.allocator);
 }
 
 /// Mailbox is the way that other threads send the app thread messages.
