@@ -19,12 +19,19 @@ const max_pattern_bytes = 4096;
 const max_searches_per_pattern = 4096;
 const max_candidate_count = 4096;
 
+// Windows paths may contain spaces (`C:\Program Files\...`), so the body class
+// has to allow them. The lookahead stops the run at whitespace that begins
+// *another* path, which is otherwise swallowed: `C:\one D:\two` matched as
+// `C:\one D` and then lost the second path entirely, because scanning resumed
+// past its drive letter. A space followed by ordinary prose is still consumed
+// — regex cannot tell `C:\Program Files\x` from `C:\a.txt copied ok` without
+// touching the filesystem, and truncating at the first space would break the
+// single most common Windows path shape.
+const path_body = "(?:(?!\\s(?:[A-Za-z]:\\\\|\\\\\\\\))[^\\x00\\r\\n<>:\"|?*])+";
 const windows_drive_path =
-    \\(?<![A-Za-z0-9_])[A-Za-z]:\\[^\x00\r\n<>:"|?*]+
-;
+    "(?<![A-Za-z0-9_])[A-Za-z]:\\\\" ++ path_body;
 const windows_unc_path =
-    \\(?<![\\A-Za-z0-9_])\\\\[A-Za-z0-9._-]+\\[^\x00\r\n<>:"|?*]+
-;
+    "(?<![\\\\A-Za-z0-9_])\\\\\\\\[A-Za-z0-9._-]+\\\\" ++ path_body;
 const git_sha =
     \\\b[0-9A-Fa-f]{7,40}\b
 ;
@@ -742,6 +749,40 @@ test "hints: wide characters do not truncate a matched path" {
         scan.matchText(0),
         spanText(scan.text, scan.map, matched.first, matched.last).?,
     );
+}
+
+// Two paths on one row used to collapse into one wrong target: the first
+// match swallowed the space and the second path's drive letter, and scanning
+// then resumed past it so the second path was never labeled at all.
+test "hints: adjacent paths on one row stay separate" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var state = try renderFixture(
+        alloc,
+        80,
+        3,
+        "C:\\one D:\\two\r\n" ++
+            "C:\\Program Files\\app.exe \\\\srv\\share\\b.txt\r\n" ++
+            "END",
+    );
+    defer state.deinit(alloc);
+
+    var scan = try scanRenderState(alloc, &state, &default_patterns);
+    defer scan.deinit(alloc);
+
+    const expected = [_][]const u8{
+        "C:\\one",
+        "D:\\two",
+        // Spaces inside a path are still part of it.
+        "C:\\Program Files\\app.exe",
+        "\\\\srv\\share\\b.txt",
+    };
+    try testing.expectEqual(expected.len, scan.matches.len);
+    for (expected, 0..) |want, index| {
+        try testing.expectEqualStrings(want, scan.matchText(index));
+    }
 }
 
 test "hints: scan negative fixture has no matches" {
