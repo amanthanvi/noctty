@@ -102,6 +102,135 @@ pub fn knownFolderPathUtf8(
     return buf[0..len];
 }
 
+pub fn isInstallerManagedInstallDir(install_dir: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    var dir = std.fs.openDirAbsolute(install_dir, .{ .iterate = true }) catch return false;
+    defer dir.close();
+
+    var has_uninstaller_exe = false;
+    var has_uninstaller_dat = false;
+    var iter = dir.iterate();
+    while (iter.next() catch return false) |entry| {
+        if (entry.kind != .file) continue;
+        has_uninstaller_exe = has_uninstaller_exe or isInnoUninstallerFileName(entry.name, ".exe");
+        has_uninstaller_dat = has_uninstaller_dat or isInnoUninstallerFileName(entry.name, ".dat");
+        if (has_uninstaller_exe and has_uninstaller_dat) return true;
+    }
+
+    return false;
+}
+
+fn isInnoUninstallerFileName(name: []const u8, extension: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(name, "unins") and
+        name.len > "unins".len + extension.len and
+        std.ascii.eqlIgnoreCase(name[name.len - extension.len ..], extension);
+}
+
+pub fn innoUninstallRegistryMatchesInstallDir(install_dir: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    // dist/windows/noctty.iss deliberately retains this AppId. Inno appends
+    // `_is1` to AppId for its uninstall key and records InstallLocation there.
+    const uninstall_subkey = std.unicode.utf8ToUtf16LeStringLiteral(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\io.github.amanthanvi.winghostty_is1",
+    );
+    const install_location_name = std.unicode.utf8ToUtf16LeStringLiteral("InstallLocation");
+    var registered_buf: [windows.PATH_MAX_WIDE:0]u16 = undefined;
+    var registered_bytes: windows.DWORD = @sizeOf(@TypeOf(registered_buf));
+    const status = windows.advapi32.RegGetValueW(
+        windows.HKEY_LOCAL_MACHINE,
+        uninstall_subkey,
+        install_location_name,
+        windows.advapi32.RRF.RT_REG_SZ |
+            windows.advapi32.RRF.SUBKEY_WOW6464KEY |
+            windows.advapi32.RRF.ZEROONFAILURE,
+        null,
+        @ptrCast(&registered_buf),
+        &registered_bytes,
+    );
+    if (status != @intFromEnum(windows.Win32Error.SUCCESS)) return false;
+    if (registered_bytes < @sizeOf(u16) or
+        registered_bytes > @sizeOf(@TypeOf(registered_buf)) or
+        registered_bytes % @sizeOf(u16) != 0)
+    {
+        return false;
+    }
+    const registered_len = registered_bytes / @sizeOf(u16);
+    if (registered_buf[registered_len - 1] != 0) return false;
+
+    return registeredInstallLocationMatchesWtf8(
+        registered_buf[0 .. registered_len - 1],
+        install_dir,
+    );
+}
+
+fn registeredInstallLocationMatchesWtf8(registered: []const u16, install_dir: []const u8) bool {
+    var install_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+    const install_len = std.unicode.wtf8ToWtf16Le(&install_buf, install_dir) catch return false;
+    return windowsInstallPathsEqual(registered, install_buf[0..install_len]);
+}
+
+fn windowsInstallPathsEqual(a_raw: []const u16, b_raw: []const u16) bool {
+    const a = trimTrailingWindowsSeparators(a_raw);
+    const b = trimTrailingWindowsSeparators(b_raw);
+    return CompareStringOrdinal(
+        a.ptr,
+        @intCast(a.len),
+        b.ptr,
+        @intCast(b.len),
+        windows.TRUE,
+    ) == cstr_equal;
+}
+
+fn trimTrailingWindowsSeparators(path: []const u16) []const u16 {
+    var end = path.len;
+    while (end > 0 and (path[end - 1] == '\\' or path[end - 1] == '/')) end -= 1;
+    return path[0..end];
+}
+
+// CSTR_EQUAL from CompareStringOrdinal's Microsoft Win32 contract.
+const cstr_equal: i32 = 2;
+
+extern "kernel32" fn CompareStringOrdinal(
+    string1: [*]const u16,
+    length1: i32,
+    string2: [*]const u16,
+    length2: i32,
+    ignore_case: windows.BOOL,
+) callconv(.winapi) i32;
+
+test "Windows installer management recognizes Inno uninstaller markers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
+    try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
+    try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
+    try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const install_dir = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(install_dir);
+    try tmp.dir.writeFile(.{ .sub_path = "unins000.exe", .data = "uninstaller executable" });
+    try std.testing.expect(!isInstallerManagedInstallDir(install_dir));
+    try tmp.dir.writeFile(.{ .sub_path = "unins000.dat", .data = "uninstaller data" });
+    try std.testing.expect(isInstallerManagedInstallDir(install_dir));
+}
+
+test "Windows installer registry paths compare case-insensitively with trailing separators" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(windowsInstallPathsEqual(
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty\\"),
+        std.unicode.utf8ToUtf16LeStringLiteral("c:\\program files\\noctty"),
+    ));
+    try std.testing.expect(!windowsInstallPathsEqual(
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty-old"),
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Program Files\\Noctty"),
+    ));
+    try std.testing.expect(registeredInstallLocationMatchesWtf8(
+        &[_]u16{ 'C', ':', '\\', 0xd800 },
+        "C:\\\xed\xa0\x80",
+    ));
+}
+
 pub const exp = struct {
     pub const HPCON = windows.LPVOID;
 

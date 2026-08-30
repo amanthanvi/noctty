@@ -15,10 +15,13 @@ pub const portable_marker_names = [_][]const u8{
     "config.ghostty",
 };
 
-fn portableMarkerInDir(directory: std.fs.Dir) ?[]const u8 {
+const PortableMarker = enum { explicit, legacy_config };
+
+fn portableMarkerInDir(directory: std.fs.Dir) ?PortableMarker {
     for (portable_marker_names) |name| {
         const stat = directory.statFile(name) catch continue;
-        if (stat.kind == .file) return name;
+        if (stat.kind != .file) continue;
+        return if (std.mem.eql(u8, name, "config.ghostty")) .legacy_config else .explicit;
     }
     return null;
 }
@@ -26,9 +29,22 @@ fn portableMarkerInDir(directory: std.fs.Dir) ?[]const u8 {
 /// Detect portable mode from a real executable directory. Markers must be
 /// regular files so an unrelated directory cannot relocate application data.
 pub fn detectPortableRoot(alloc: Allocator, exe_dir: []const u8) !?[]u8 {
+    return detectPortableRootWithInstallerManaged(alloc, exe_dir, null);
+}
+
+fn detectPortableRootWithInstallerManaged(
+    alloc: Allocator,
+    exe_dir: []const u8,
+    installer_managed_override: ?bool,
+) !?[]u8 {
     var directory = try std.fs.openDirAbsolute(exe_dir, .{});
     defer directory.close();
-    _ = portableMarkerInDir(directory) orelse return null;
+    const marker = portableMarkerInDir(directory) orelse return null;
+    if (marker == .legacy_config) {
+        const installer_managed = installer_managed_override orelse
+            (builtin.os.tag == .windows and windows_os.innoUninstallRegistryMatchesInstallDir(exe_dir));
+        if (installer_managed) return null;
+    }
     return try alloc.dupe(u8, exe_dir);
 }
 
@@ -263,6 +279,29 @@ test "portable marker detection requires a regular file" {
     const expected_crash = try std.fs.path.join(alloc, &.{ path_root, "crash" });
     defer alloc.free(expected_crash);
     try testing.expectEqualStrings(expected_crash, crash_path);
+}
+
+test "ambiguous portable config marker does not override an installer-managed directory" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exe_dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(exe_dir);
+
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "user configuration" });
+    try testing.expect((try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)) == null);
+    const legacy_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, false)).?;
+    defer alloc.free(legacy_root);
+    try testing.expectEqualStrings(exe_dir, legacy_root);
+
+    for ([_][]const u8{ "noctty.portable", "portable.txt" }) |explicit_marker| {
+        try tmp.dir.writeFile(.{ .sub_path = explicit_marker, .data = explicit_marker });
+        const explicit_root = (try detectPortableRootWithInstallerManaged(alloc, exe_dir, true)).?;
+        defer alloc.free(explicit_root);
+        try testing.expectEqualStrings(exe_dir, explicit_root);
+        try tmp.dir.deleteFile(explicit_marker);
+    }
 }
 
 test "cache directory paths" {
