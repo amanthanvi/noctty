@@ -1471,6 +1471,14 @@ fn integrityRidFromSidString(sid: []const u16) ?u32 {
 /// `GENERIC_ALL` for `user_sid`. When `integrity_sid` is non-null a
 /// mandatory-label ACE with the `NO_WRITE_UP` policy is appended, which is
 /// what keeps a lower-integrity process from opening the pipe for write.
+///
+/// RESIDUAL: `NO_WRITE_UP` does not deny reads, and a bare `READ_CONTROL`
+/// open is enough to occupy the server's single pipe instance — it does not
+/// need `GENERIC_READ`. The next legitimate client then fails with
+/// `ERROR_PIPE_BUSY`. That is an availability limit only (nothing is
+/// disclosed and no request can be submitted), and it is recorded in
+/// docs/windows.md along with the two candidate fixes and why neither is
+/// applied yet. Observed on hardware by the desktop lane, not inferred.
 fn buildIpcPipeSddl(
     buf: []u16,
     user_sid: []const u16,

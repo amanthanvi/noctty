@@ -322,10 +322,30 @@ DACL whose single ACE grants access to the SID of the token that owns
 the running noctty process. When that process runs above medium
 integrity, a `NO_WRITE_UP` mandatory-label ACE is added as well, so a
 filtered (non-elevated) token of the same account cannot drive an
-elevated instance. The label sets `NO_WRITE_UP` only, so a
-lower-integrity process can still open the pipe for *reading*; it can
-occupy a pipe instance (bounded by the server's read timeout) but cannot
-submit a request.
+elevated instance. That denial is observed: a client whose open is
+refused logs `single-instance pipe exists but is not accessible to this
+token; starting a local instance` and goes on to open its own window.
+
+**Known residual — a lower-integrity process can stall the channel.** The
+label sets `NO_WRITE_UP` only, so it does not deny reads. A plain
+`READ_CONTROL` open is enough — it need not even ask for `GENERIC_READ`.
+Because the server offers one pipe instance at a time, a single such open
+makes the next legitimate client fail with `ERROR_PIPE_BUSY` while the
+server logs an `IpcTimeout`. The attacker learns nothing and can submit
+nothing; the cost is availability of the automation channel, bounded by
+the server's read timeout and repeatable.
+
+This is not fixed here, and two candidate fixes were considered and
+rejected for now. Keeping a spare listening instance is only a speed
+bump: an attacker opens one more. Adding `NO_READ_UP` to the label is the
+plausible real fix and cannot break a legitimate client (mandatory policy
+only ever denies principals *below* the object, and the legitimate client
+is already refused by `NO_WRITE_UP` if it is lower), but whether
+`NO_READ_UP` actually denies a bare `READ_CONTROL` open is not something
+this project has verified on hardware, and shipping an unverified change
+to a mandatory label is worse than recording a known limit. The
+experiment that settles it: from a lower-integrity process, open the pipe
+with `READ_CONTROL` only, against a server whose label carries `NRNW`.
 
 **This is not a privilege boundary.** Any code already running as your
 user is fully trusted with this channel: it can list your windows,
