@@ -1527,11 +1527,22 @@ fn buildIpcPipeSddl(
 /// process drive an elevated instance's pipe. Returning the label SID here
 /// lets the caller add `S:(ML;;NW;;;S-1-16-<rid>)`, which blocks write-up.
 ///
-/// RESIDUAL: the policy is `NW` only, not `NR`/`NX`. A lower-integrity
-/// process can still open the pipe for READ and occupy a pipe instance --
-/// an availability nuisance against an elevated instance, bounded by the
-/// server's read timeout. `NR` would close that but is a larger behavioral
-/// change; it is tracked as a follow-up rather than done here.
+/// RESIDUAL: the policy is `NW` only, not `NR`/`NX`. See the fuller note on
+/// `buildIpcPipeSddl`; in short, and now measured rather than assumed, a
+/// medium-integrity process can open an elevated instance's pipe for
+/// `GENERIC_READ` -- a bare `READ_CONTROL` is enough, it need not request
+/// read data access at all -- and `WriteFile` on that handle then fails
+/// `win32=5`. So this is an OCCUPANCY problem, not an access break, but the
+/// server offers one pipe instance at a time, so one such handle makes the
+/// next legitimate client fail `win32=231 ERROR_PIPE_BUSY`.
+///
+/// `NR` closes it, and that is no longer a supposition: the elevation work
+/// labels its elevated endpoint `NWNR`, and hardware verification shows the
+/// `NR` denies every medium open including `GENERIC_READ` and
+/// `READ_CONTROL`. It is supplied there rather than duplicated here, since
+/// both would collide on the same SDDL term for no net gain once they land,
+/// and changing the label here would invalidate this PR's live descriptor
+/// readback.
 ///
 /// Returns null at or below medium integrity (where the label would be a
 /// no-op). The returned string is OS-allocated; free it with `sys.LocalFree`.
