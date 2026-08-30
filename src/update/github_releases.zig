@@ -11,14 +11,22 @@ const log = std.log.scoped(.update_github_releases);
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/noctty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/noctty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
+// Microsoft PE/COFF Machine values, mirrored by
+// scripts/windows-architecture.ps1.
+const pe_machine_amd64: u16 = 0x8664;
+const pe_machine_arm64: u16 = 0xaa64;
+// Microsoft PE/COFF places the PE-header file pointer at DOS offset 0x3c.
+const pe_header_pointer_offset: u64 = 0x3c;
 const windows_asset_metadata = switch (builtin.cpu.arch) {
     .aarch64 => .{
         .arch = "arm64",
         .checksums_asset_name = "SHA256SUMS-windows-arm64.txt",
+        .pe_machine = pe_machine_arm64,
     },
     .x86_64 => .{
         .arch = "x64",
         .checksums_asset_name = "SHA256SUMS-windows-x64.txt",
+        .pe_machine = pe_machine_amd64,
     },
     else => @compileError("unsupported Windows architecture for installer assets"),
 };
@@ -286,6 +294,20 @@ fn openStateLock(path: []const u8) !std.fs.File {
     if (std.fs.path.dirname(path)) |dir_path| try std.fs.cwd().makePath(dir_path);
     var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
     const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{path});
+    return std.fs.createFileAbsolute(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+    });
+}
+
+fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !std.fs.File {
+    const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
+    const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
+    defer alloc.free(updates_dir);
+    try std.fs.cwd().makePath(updates_dir);
+    const lock_path = try std.fs.path.join(alloc, &.{ updates_dir, "staging-work.lock" });
+    defer alloc.free(lock_path);
     return std.fs.createFileAbsolute(lock_path, .{
         .read = true,
         .truncate = false,
@@ -637,13 +659,24 @@ pub fn stageWindowsInstall(
     release: *const Release,
     kind: portable_apply.StagedKind,
 ) !StagedWindowsInstall {
+    return stageWindowsInstallWithDownloader(
+        alloc,
+        state_path,
+        release,
+        kind,
+        downloadUrlToFile,
+    );
+}
+
+fn stageWindowsInstallWithDownloader(
+    alloc: Allocator,
+    state_path: []const u8,
+    release: *const Release,
+    kind: portable_apply.StagedKind,
+    comptime download: anytype,
+) !StagedWindowsInstall {
     const candidate = release.windows_install orelse return error.WindowsInstallNotEligible;
     if (!std.fs.path.isAbsolute(state_path)) return error.InvalidStatePath;
-    const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
-    var state = try loadState(alloc, state_path);
-    defer state.deinit(alloc);
-    if (state.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
 
     const asset_name, const asset_url = switch (kind) {
         .installer => .{ candidate.installer_name, candidate.installer_url },
@@ -657,6 +690,12 @@ pub fn stageWindowsInstall(
     {
         return error.PortablePayloadManifestUnavailable;
     }
+
+    const staging_lock = try openStagingWorkLock(alloc, state_path);
+    defer staging_lock.close();
+    var baseline = try loadState(alloc, state_path);
+    defer baseline.deinit(alloc);
+    if (baseline.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
 
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
@@ -674,12 +713,12 @@ pub fn stageWindowsInstall(
     } else null;
     defer if (manifest_path) |value| alloc.free(value);
 
-    try downloadUrlToFile(alloc, candidate.checksums_url, checksums_path);
+    try download(alloc, candidate.checksums_url, checksums_path);
     if (manifest_path) |path| {
-        try downloadUrlToFile(alloc, candidate.portable_manifest_url.?, path);
+        try download(alloc, candidate.portable_manifest_url.?, path);
         try verifyPortablePayloadManifest(path);
     }
-    try downloadUrlToFile(alloc, asset_url, artifact_path);
+    try download(alloc, asset_url, artifact_path);
 
     const checksums = try std.fs.cwd().readFileAlloc(alloc, checksums_path, 1024 * 1024);
     defer alloc.free(checksums);
@@ -719,28 +758,39 @@ pub fn stageWindowsInstall(
     const sha256_hex = try alloc.dupe(u8, &std.fmt.bytesToHex(actual_digest, .lower));
     errdefer alloc.free(sha256_hex);
 
-    replaceOptionalOwned(alloc, &state.staged_version, try alloc.dupe(u8, release.version_text));
-    state.staged_kind = kind;
-    clearOptionalOwned(alloc, &state.staged_installer_path);
-    clearOptionalOwned(alloc, &state.staged_portable_path);
-    clearOptionalOwned(alloc, &state.staged_payload_path);
-    switch (kind) {
-        .installer => replaceOptionalOwned(alloc, &state.staged_installer_path, try alloc.dupe(u8, artifact_path)),
-        .portable => {
-            replaceOptionalOwned(alloc, &state.staged_portable_path, try alloc.dupe(u8, artifact_path));
-            replaceOptionalOwned(alloc, &state.staged_payload_path, try alloc.dupe(u8, payload_path.?));
-        },
+    {
+        const state_lock = try openStateLock(state_path);
+        defer state_lock.close();
+        var fresh = try loadState(alloc, state_path);
+        defer fresh.deinit(alloc);
+        if (fresh.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
+        if (!stagedTransactionEqual(&baseline, &fresh)) {
+            return error.UpdateStateChangedDuringStaging;
+        }
+
+        replaceOptionalOwned(alloc, &fresh.staged_version, try alloc.dupe(u8, release.version_text));
+        fresh.staged_kind = kind;
+        clearOptionalOwned(alloc, &fresh.staged_installer_path);
+        clearOptionalOwned(alloc, &fresh.staged_portable_path);
+        clearOptionalOwned(alloc, &fresh.staged_payload_path);
+        switch (kind) {
+            .installer => replaceOptionalOwned(alloc, &fresh.staged_installer_path, try alloc.dupe(u8, artifact_path)),
+            .portable => {
+                replaceOptionalOwned(alloc, &fresh.staged_portable_path, try alloc.dupe(u8, artifact_path));
+                replaceOptionalOwned(alloc, &fresh.staged_payload_path, try alloc.dupe(u8, payload_path.?));
+            },
+        }
+        replaceOptionalOwned(alloc, &fresh.staged_sha256, try alloc.dupe(u8, sha256_hex));
+        replaceOptionalOwned(alloc, &fresh.staged_feed_url, try alloc.dupe(u8, release_feed_url));
+        fresh.staged_at = std.time.timestamp();
+        fresh.apply_requested_at = 0;
+        fresh.portable_apply_phase = null;
+        clearOptionalOwned(alloc, &fresh.portable_backup_path);
+        clearOptionalOwned(alloc, &fresh.portable_confirmation_token);
+        fresh.portable_watcher_pid = 0;
+        fresh.portable_watcher_started_at = 0;
+        try saveState(state_path, &fresh);
     }
-    replaceOptionalOwned(alloc, &state.staged_sha256, try alloc.dupe(u8, sha256_hex));
-    replaceOptionalOwned(alloc, &state.staged_feed_url, try alloc.dupe(u8, release_feed_url));
-    state.staged_at = std.time.timestamp();
-    state.apply_requested_at = 0;
-    state.portable_apply_phase = null;
-    clearOptionalOwned(alloc, &state.portable_backup_path);
-    clearOptionalOwned(alloc, &state.portable_confirmation_token);
-    state.portable_watcher_pid = 0;
-    state.portable_watcher_started_at = 0;
-    try saveState(state_path, &state);
 
     return .{
         .kind = kind,
@@ -749,6 +799,31 @@ pub fn stageWindowsInstall(
         .payload_path = payload_path,
         .sha256_hex = sha256_hex,
     };
+}
+
+fn stagedTransactionEqual(a: *const State, b: *const State) bool {
+    return optionalStringEqual(a.staged_version, b.staged_version) and
+        a.staged_kind == b.staged_kind and
+        optionalStringEqual(a.staged_installer_path, b.staged_installer_path) and
+        optionalStringEqual(a.staged_portable_path, b.staged_portable_path) and
+        optionalStringEqual(a.staged_payload_path, b.staged_payload_path) and
+        optionalStringEqual(a.staged_sha256, b.staged_sha256) and
+        optionalStringEqual(a.staged_feed_url, b.staged_feed_url) and
+        a.staged_at == b.staged_at and
+        a.apply_requested_at == b.apply_requested_at and
+        a.portable_apply_phase == b.portable_apply_phase and
+        optionalStringEqual(a.portable_backup_path, b.portable_backup_path) and
+        optionalStringEqual(a.portable_confirmation_token, b.portable_confirmation_token) and
+        a.portable_watcher_pid == b.portable_watcher_pid and
+        a.portable_watcher_started_at == b.portable_watcher_started_at;
+}
+
+fn optionalStringEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |a_value| {
+        const b_value = b orelse return false;
+        return std.mem.eql(u8, a_value, b_value);
+    }
+    return b == null;
 }
 
 /// `release_feed_url` is the feed in effect right now. A staged installer
@@ -2218,10 +2293,45 @@ fn verifyPortablePayloadBinaries(alloc: Allocator, payload_root: []const u8) !vo
             !std.ascii.eqlIgnoreCase(extension, ".dll")) continue;
         const path = try std.fs.path.join(alloc, &.{ payload_root, entry.path });
         defer alloc.free(path);
+        try verifyPortablePeMachine(path);
         try verifyAuthenticodeSignature(path, null);
         verified_binary_count += 1;
     }
     if (verified_binary_count == 0) return error.IncompletePortablePayload;
+}
+
+fn verifyPortablePeMachine(path: []const u8) !void {
+    const actual = try readPeMachine(path);
+    if (actual != windows_asset_metadata.pe_machine) {
+        return error.PortablePayloadArchitectureMismatch;
+    }
+}
+
+fn readPeMachine(path: []const u8) !u16 {
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+
+    var dos_signature: [2]u8 = undefined;
+    if (try file.preadAll(&dos_signature, 0) != dos_signature.len or
+        !std.mem.eql(u8, &dos_signature, "MZ"))
+    {
+        return error.InvalidPortableExecutable;
+    }
+
+    // Microsoft PE/COFF specifies the PE-header file offset at DOS offset
+    // 0x3c, followed by "PE\0\0" and the two-byte COFF Machine field.
+    var pe_offset_bytes: [4]u8 = undefined;
+    if (try file.preadAll(&pe_offset_bytes, pe_header_pointer_offset) != pe_offset_bytes.len) {
+        return error.InvalidPortableExecutable;
+    }
+    const pe_offset = std.mem.readInt(u32, &pe_offset_bytes, .little);
+    var pe_prefix: [6]u8 = undefined;
+    if (try file.preadAll(&pe_prefix, pe_offset) != pe_prefix.len or
+        !std.mem.eql(u8, pe_prefix[0..4], "PE\x00\x00"))
+    {
+        return error.InvalidPortableExecutable;
+    }
+    return std.mem.readInt(u16, pe_prefix[4..6], .little);
 }
 
 fn portableRelativePathAlloc(alloc: Allocator, path: []const u8) ![]u8 {
@@ -3645,6 +3755,90 @@ test "authenticated portable manifest rejects mismatched non-PE resource" {
     );
 }
 
+test "portable update validates PE machine from file bytes" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const PeFixture = struct {
+        fn bytes(machine: u16) [pe_header_pointer_offset + 4 + 6]u8 {
+            var result: [pe_header_pointer_offset + 4 + 6]u8 = @splat(0);
+            @memcpy(result[0..2], "MZ");
+            const pe_offset: u32 = pe_header_pointer_offset + 4;
+            std.mem.writeInt(u32, result[pe_header_pointer_offset..][0..4], pe_offset, .little);
+            @memcpy(result[pe_offset..][0..4], "PE\x00\x00");
+            std.mem.writeInt(u16, result[pe_offset + 4 ..][0..2], machine, .little);
+            return result;
+        }
+    };
+    const matching = PeFixture.bytes(windows_asset_metadata.pe_machine);
+    const mismatched_machine = switch (builtin.cpu.arch) {
+        .x86_64 => pe_machine_arm64,
+        .aarch64 => pe_machine_amd64,
+        else => unreachable,
+    };
+    const mismatched = PeFixture.bytes(mismatched_machine);
+    try tmp.dir.writeFile(.{ .sub_path = "matching.exe", .data = &matching });
+    try tmp.dir.writeFile(.{ .sub_path = "mismatched.exe", .data = &mismatched });
+    try tmp.dir.writeFile(.{ .sub_path = "truncated.exe", .data = "MZ" });
+    var out_of_bounds = matching;
+    std.mem.writeInt(u32, out_of_bounds[pe_header_pointer_offset..][0..4], std.math.maxInt(u32), .little);
+    try tmp.dir.writeFile(.{ .sub_path = "out-of-bounds.exe", .data = &out_of_bounds });
+
+    const matching_path = try tmp.dir.realpathAlloc(alloc, "matching.exe");
+    defer alloc.free(matching_path);
+    const mismatched_path = try tmp.dir.realpathAlloc(alloc, "mismatched.exe");
+    defer alloc.free(mismatched_path);
+    const truncated_path = try tmp.dir.realpathAlloc(alloc, "truncated.exe");
+    defer alloc.free(truncated_path);
+    const out_of_bounds_path = try tmp.dir.realpathAlloc(alloc, "out-of-bounds.exe");
+    defer alloc.free(out_of_bounds_path);
+
+    try verifyPortablePeMachine(matching_path);
+    try std.testing.expectError(
+        error.PortablePayloadArchitectureMismatch,
+        verifyPortablePeMachine(mismatched_path),
+    );
+    try std.testing.expectError(
+        error.InvalidPortableExecutable,
+        verifyPortablePeMachine(truncated_path),
+    );
+    try std.testing.expectError(
+        error.InvalidPortableExecutable,
+        verifyPortablePeMachine(out_of_bounds_path),
+    );
+}
+
+test "update staging transaction comparison uses content" {
+    const alloc = std.testing.allocator;
+    var baseline: State = .{
+        .dismissed_version = try alloc.dupe(u8, "dismissed-before"),
+        .staged_version = try alloc.dupe(u8, "1.3.199"),
+        .staged_kind = .installer,
+        .staged_installer_path = try alloc.dupe(u8, "C:\\stage\\old.exe"),
+        .staged_sha256 = try alloc.dupe(u8, "old-digest"),
+        .staged_at = 100,
+        .apply_requested_at = 200,
+    };
+    defer baseline.deinit(alloc);
+    var fresh: State = .{
+        .dismissed_version = try alloc.dupe(u8, "dismissed-during-download"),
+        .staged_version = try alloc.dupe(u8, "1.3.199"),
+        .staged_kind = .installer,
+        .staged_installer_path = try alloc.dupe(u8, "C:\\stage\\old.exe"),
+        .staged_sha256 = try alloc.dupe(u8, "old-digest"),
+        .staged_at = 100,
+        .apply_requested_at = 200,
+    };
+    defer fresh.deinit(alloc);
+
+    try std.testing.expect(stagedTransactionEqual(&baseline, &fresh));
+    fresh.apply_requested_at += 1;
+    try std.testing.expect(!stagedTransactionEqual(&baseline, &fresh));
+    fresh.apply_requested_at = baseline.apply_requested_at;
+    fresh.staged_version.?[fresh.staged_version.?.len - 1] = '8';
+    try std.testing.expect(!stagedTransactionEqual(&baseline, &fresh));
+}
+
 test "state JSON writer escapes ASCII control characters" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3791,6 +3985,92 @@ test "update redirect target resolution refuses garbage target" {
             "//[",
         ),
     );
+}
+
+test "update staging leaves state lock available during stalled download" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/releases/1.3.200"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "noctty-1.3.200-windows-x64-setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/stalled-setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/stalled-checksums.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+
+    const Stall = struct {
+        var entered: std.Thread.ResetEvent = .{};
+        var continue_event: std.Thread.ResetEvent = .{};
+
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            entered.set();
+            continue_event.wait();
+            return error.TestDownloadStopped;
+        }
+    };
+    Stall.entered.reset();
+    Stall.continue_event.reset();
+    const StageContext = struct {
+        state_path: []const u8,
+        release: *const Release,
+        unexpected_error: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var staged = stageWindowsInstallWithDownloader(
+                std.heap.page_allocator,
+                self.state_path,
+                self.release,
+                .installer,
+                Stall.download,
+            ) catch |err| {
+                if (err != error.TestDownloadStopped) {
+                    self.unexpected_error = err;
+                    Stall.entered.set();
+                }
+                return;
+            };
+            staged.deinit(std.heap.page_allocator);
+        }
+    };
+    var context: StageContext = .{ .state_path = state_path, .release = &release };
+    const stage_thread = try std.Thread.spawn(.{}, StageContext.run, .{&context});
+    defer {
+        Stall.continue_event.set();
+        stage_thread.join();
+    }
+    Stall.entered.wait();
+    if (context.unexpected_error) |err| return err;
+
+    var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{state_path});
+    const competing_lock = std.fs.createFileAbsolute(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }) catch |err| switch (err) {
+        error.WouldBlock => null,
+        else => return err,
+    };
+    const state_lock_available = competing_lock != null;
+    if (competing_lock) |file| {
+        file.close();
+        try recordDismissal(alloc, state_path, "1.3.200");
+    }
+
+    try std.testing.expect(state_lock_available);
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expectEqualStrings("1.3.200", loaded.dismissed_version.?);
 }
 
 test "windows install staging rejects relative state path before download" {
