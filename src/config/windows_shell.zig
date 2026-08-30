@@ -229,8 +229,8 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
 }
 
 /// Prepare a command for Windows spawning. This applies the guarded UTF-8
-/// preamble to bare cmd launches and translates WSL working directories into
-/// `wsl.exe --cd ...` without paying a shell trampoline cost.
+/// preamble to payload-free cmd launches and translates WSL working
+/// directories into `wsl.exe --cd ...` without paying a shell trampoline cost.
 pub fn prepareCommand(
     alloc: Allocator,
     command: Command,
@@ -381,8 +381,8 @@ fn prepareCommandWithLookup(
     utf8_console: bool,
     lookup: anytype,
 ) !Command {
-    if (utf8_console and try isBareCmdCommand(alloc, command)) {
-        return try prepareBareCmdUtf8(alloc, command);
+    if (utf8_console) {
+        if (try prepareCmdUtf8(alloc, command)) |prepared| return prepared;
     }
 
     if (!isWslCommand(command)) return try command.clone(alloc);
@@ -403,37 +403,109 @@ fn prepareCommandWithLookup(
     };
 }
 
-fn isBareCmdCommand(alloc: Allocator, command: Command) !bool {
-    return switch (command) {
-        .direct => |argv| argv.len == 1 and
-            (isExecutableName(argv[0], "cmd") or
-                isExecutableName(argv[0], "cmd.exe")),
-        .shell => {
-            var arg_iter = try command.argIterator(alloc);
-            defer arg_iter.deinit();
+/// The silent code-page switch we run before an interactive Command Prompt
+/// draws its first prompt. `chcp` is idempotent, so this is a no-op when the
+/// console already uses code page 65001.
+const cmd_utf8_preamble = "chcp 65001 >nul";
 
-            const argv0 = arg_iter.next() orelse return false;
-            if (!isExecutableName(argv0, "cmd") and
-                !isExecutableName(argv0, "cmd.exe")) return false;
-            return arg_iter.next() == null;
-        },
-    };
+/// Build the UTF-8 preamble form of a `cmd.exe` launch, or `null` when the
+/// launch must be left byte-for-byte unchanged.
+///
+/// Only an interactive Command Prompt that carries no command payload of its
+/// own is rewritten. Non-payload switches (`/d`, `/q`, `/v:on`, ...) are kept
+/// in their original order and `/K "chcp 65001 >nul"` is appended after them.
+fn prepareCmdUtf8(alloc: Allocator, command: Command) !?Command {
+    var arg_iter = try command.argIterator(alloc);
+    defer arg_iter.deinit();
+
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(alloc);
+
+    const argv0 = arg_iter.next() orelse return null;
+    if (!isExecutableName(argv0, "cmd") and
+        !isExecutableName(argv0, "cmd.exe")) return null;
+    try args.append(alloc, argv0);
+
+    while (arg_iter.next()) |arg| {
+        if (classifyCmdArg(arg) == .unsupported) return null;
+        try args.append(alloc, arg);
+    }
+
+    try args.append(alloc, "/K");
+    try args.append(alloc, cmd_utf8_preamble);
+    return try directCommand(alloc, args.items);
 }
 
-fn prepareBareCmdUtf8(alloc: Allocator, command: Command) !Command {
-    return switch (command) {
-        .direct => |argv| try prepareBareCmdUtf8Argv0(alloc, argv[0]),
-        .shell => shell: {
-            var arg_iter = try command.argIterator(alloc);
-            defer arg_iter.deinit();
-            const argv0 = arg_iter.next() orelse unreachable;
-            break :shell try prepareBareCmdUtf8Argv0(alloc, argv0);
-        },
-    };
-}
+const CmdArg = enum {
+    /// A switch run carrying only non-payload options. Safe to preserve and
+    /// to append our own `/K` after.
+    option,
 
-fn prepareBareCmdUtf8Argv0(alloc: Allocator, argv0: []const u8) !Command {
-    return try directCommand(alloc, &.{ argv0, "/K", "chcp 65001 >nul" });
+    /// A command payload switch or a token we don't recognize. The launch is
+    /// left untouched.
+    unsupported,
+};
+
+/// Classify one `cmd.exe` argument.
+///
+/// `cmd.exe` only treats `/` as a switch prefix (`-c` is a positional), and it
+/// accepts fused switch runs such as `/d/q/c` and `/v:on/c`, so a run has to be
+/// walked to the end before it can be called payload-free.
+fn classifyCmdArg(arg: []const u8) CmdArg {
+    if (arg.len < 2 or arg[0] != '/') return .unsupported;
+
+    var i: usize = 0;
+    while (i < arg.len) {
+        // A fused run repeats the `/` separator: `/d/q/v:on`.
+        if (arg[i] == '/') {
+            i += 1;
+            if (i >= arg.len) return .unsupported;
+        }
+
+        switch (std.ascii.toLower(arg[i])) {
+            // `/c` and `/r` run a command and terminate; `/k` runs a command
+            // and stays interactive. All three carry the user's own payload,
+            // which we never touch.
+            'c', 'r', 'k' => return .unsupported,
+
+            // Valueless options: ANSI/Unicode piped output, quiet echo,
+            // AutoRun suppression, and quoting mode.
+            'a', 'u', 'q', 'd', 's' => i += 1,
+
+            // `/e:on`, `/f:off`, `/v:on`.
+            'e', 'f', 'v' => {
+                i += 1;
+                if (i >= arg.len or arg[i] != ':') return .unsupported;
+                i += 1;
+                if (asciiStartsWithIgnoreCase(arg[i..], "off")) {
+                    i += "off".len;
+                } else if (asciiStartsWithIgnoreCase(arg[i..], "on")) {
+                    i += "on".len;
+                } else return .unsupported;
+            },
+
+            // `/t:fg` takes one or two hex color digits.
+            't' => {
+                i += 1;
+                if (i >= arg.len or arg[i] != ':') return .unsupported;
+                i += 1;
+                var digits: usize = 0;
+                while (digits < 2 and i < arg.len and std.ascii.isHex(arg[i])) {
+                    i += 1;
+                    digits += 1;
+                }
+                if (digits == 0) return .unsupported;
+            },
+
+            else => return .unsupported,
+        }
+
+        // A run either ends here or continues with another `/`. Anything else
+        // is a fused payload such as `/cecho hi`.
+        if (i < arg.len and arg[i] != '/') return .unsupported;
+    }
+
+    return .option;
 }
 
 pub fn isWslCommand(command: Command) bool {
@@ -2057,7 +2129,7 @@ test "utf8-console decision covers modes and guarded code pages" {
     try testing.expect(!shouldApplyUtf8Console(.never, 1252, 65001));
 }
 
-test "utf8-console cmd preamble only changes bare cmd" {
+test "utf8-console cmd preamble leaves payload launches unchanged" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -2117,4 +2189,97 @@ test "utf8-console cmd preamble only changes bare cmd" {
 
     try testing.expect(prepared_trampoline == .shell);
     try testing.expectEqualStrings("cmd.exe /c echo ok", prepared_trampoline.shell);
+}
+
+test "classifyCmdArg separates option-only switches from payload switches" {
+    const testing = std.testing;
+
+    for ([_][]const u8{
+        "/d",      "/Q",     "/a",    "/u",      "/s",
+        "/d/q",    "/D/Q/A", "/e:on", "/E:OFF",  "/f:off",
+        "/v:on",   "/t:0A",  "/t:f",  "/d/v:on", "/v:on/q",
+        "/t:0a/q", "/s/d",
+    }) |arg| {
+        try testing.expectEqual(CmdArg.option, classifyCmdArg(arg));
+    }
+
+    for ([_][]const u8{
+        // Payload switches, separate and fused.
+        "/c",       "/K",         "/r",     "/d/q/c", "/v:on/c",
+        "/e:on/k",  "/cecho",     "/Kchcp", "/s/c",
+        // Not a switch at all: cmd has no `-` prefix.
+          "-c",
+        "-d",       "script.bat",
+        // Malformed or unknown switch runs.
+        "/",      "/z",     "/e",
+        "/e:maybe", "/t",         "/t:",    "/t:zz",  "/d/",
+        "/v:onx",
+    }) |arg| {
+        try testing.expectEqual(CmdArg.unsupported, classifyCmdArg(arg));
+    }
+}
+
+test "utf8-console cmd preamble preserves option-only switches" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const lookup = struct {
+        fn lookup(_: Allocator, _: []const u8) !?[]u8 {
+            return null;
+        }
+    }.lookup;
+
+    // Separate switches keep their order and gain the preamble.
+    const separate = try directCommand(alloc, &.{ "cmd.exe", "/d", "/q" });
+    defer separate.deinit(alloc);
+    const prepared_separate = try prepareCommandWithLookup(alloc, separate, null, false, true, lookup);
+    defer prepared_separate.deinit(alloc);
+
+    try testing.expectEqual(@as(usize, 5), prepared_separate.direct.len);
+    try testing.expectEqualStrings("cmd.exe", prepared_separate.direct[0]);
+    try testing.expectEqualStrings("/d", prepared_separate.direct[1]);
+    try testing.expectEqualStrings("/q", prepared_separate.direct[2]);
+    try testing.expectEqualStrings("/K", prepared_separate.direct[3]);
+    try testing.expectEqualStrings("chcp 65001 >nul", prepared_separate.direct[4]);
+
+    // Combined switch runs are preserved verbatim.
+    const combined = try directCommand(alloc, &.{ "cmd.exe", "/d/q", "/v:on" });
+    defer combined.deinit(alloc);
+    const prepared_combined = try prepareCommandWithLookup(alloc, combined, null, false, true, lookup);
+    defer prepared_combined.deinit(alloc);
+
+    try testing.expectEqual(@as(usize, 5), prepared_combined.direct.len);
+    try testing.expectEqualStrings("/d/q", prepared_combined.direct[1]);
+    try testing.expectEqualStrings("/v:on", prepared_combined.direct[2]);
+    try testing.expectEqualStrings("/K", prepared_combined.direct[3]);
+    try testing.expectEqualStrings("chcp 65001 >nul", prepared_combined.direct[4]);
+
+    // A shell-form option-only launch normalizes into direct argv.
+    const shell_options: Command = .{ .shell = "\"C:\\Windows\\System32\\cmd.exe\" /d /q" };
+    const prepared_shell = try prepareCommandWithLookup(alloc, shell_options, null, false, true, lookup);
+    defer prepared_shell.deinit(alloc);
+
+    try testing.expect(prepared_shell == .direct);
+    try testing.expectEqual(@as(usize, 5), prepared_shell.direct.len);
+    try testing.expectEqualStrings("C:\\Windows\\System32\\cmd.exe", prepared_shell.direct[0]);
+    try testing.expectEqualStrings("/K", prepared_shell.direct[3]);
+
+    // A fused payload switch after options is still left untouched.
+    for ([_][]const []const u8{
+        &.{ "cmd.exe", "/d", "/q", "/c", "echo ok" },
+        &.{ "cmd.exe", "/d/q/c", "echo ok" },
+        &.{ "cmd.exe", "/v:on/c", "echo ok" },
+        &.{ "cmd.exe", "/k", "echo ok" },
+        &.{ "cmd.exe", "/cecho ok" },
+    }) |argv| {
+        const original = try directCommand(alloc, argv);
+        defer original.deinit(alloc);
+        const prepared = try prepareCommandWithLookup(alloc, original, null, false, true, lookup);
+        defer prepared.deinit(alloc);
+
+        try testing.expectEqual(original.direct.len, prepared.direct.len);
+        for (original.direct, prepared.direct) |expected, actual| {
+            try testing.expectEqualStrings(expected, actual);
+        }
+    }
 }

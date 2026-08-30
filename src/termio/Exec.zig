@@ -880,7 +880,6 @@ const Subprocess = struct {
             false;
 
         // Setup our shell integration, if we can.
-        var powershell_utf8_console = false;
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
                 cfg.command orelse switch (builtin.os.tag) {
@@ -924,6 +923,7 @@ const Subprocess = struct {
                 default_shell_command,
                 &env,
                 force,
+                utf8_console,
             ) orelse {
                 log.info("automatic shell integration not injected", .{});
                 break :shell default_shell_command;
@@ -933,10 +933,6 @@ const Subprocess = struct {
                 "shell integration automatically injected shell={}",
                 .{integration.shell},
             );
-
-            if (utf8_console and integration.shell == .powershell) {
-                powershell_utf8_console = true;
-            }
 
             break :shell integration.command;
         };
@@ -959,13 +955,6 @@ const Subprocess = struct {
                 entry.key_ptr.*,
                 entry.value_ptr.*,
             );
-        }
-
-        // This is an internal, per-launch signal. Do not inherit or allow an
-        // env override to replay a decision from a differently configured shell.
-        env.remove("GHOSTTY_UTF8_CONSOLE");
-        if (powershell_utf8_console) {
-            try env.put("GHOSTTY_UTF8_CONSOLE", "1");
         }
 
         // Build our args list

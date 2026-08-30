@@ -153,10 +153,17 @@ pub const InjectError = error{ OutOfMemory, EmptyCommand };
 /// explicit command launch modes (`-Command`, `-File`, etc.) because
 /// appending our own `-Command` would change exit behavior or drop user
 /// payload.
+///
+/// `utf8_console` asks `integration.ps1` to switch the console encodings to
+/// UTF-8. It travels inside the `-Command` payload as a PowerShell variable
+/// rather than as a child environment variable: profiles run before our
+/// `-Command` does, so an environment variable would already have been
+/// inherited by anything a profile spawned.
 pub fn buildInjectedArgv(
     alloc: Allocator,
     pwsh_argv: []const []const u8,
     integration_path: []const u8,
+    utf8_console: bool,
 ) InjectError!?[]const [:0]const u8 {
     if (pwsh_argv.len == 0) return InjectError.EmptyCommand;
 
@@ -166,7 +173,7 @@ pub fn buildInjectedArgv(
         return InjectError.OutOfMemory;
     defer alloc.free(escaped);
 
-    const cmd_val = buildCommandValue(alloc, escaped) catch
+    const cmd_val = buildCommandValue(alloc, escaped, utf8_console) catch
         return InjectError.OutOfMemory;
     defer alloc.free(cmd_val);
 
@@ -381,8 +388,22 @@ fn isValueTakingInteractiveFlag(arg: []const u8) bool {
         isExactFlag(arg, "WorkingDirectory", &.{ "wd", "wo" });
 }
 
-fn buildCommandValue(alloc: Allocator, escaped: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "& {{ . '{s}' }}", .{escaped});
+/// The variable `integration.ps1` reads to decide whether to force UTF-8
+/// console encodings. It only ever exists in the script block scope that
+/// dot-sources the integration script, so it is gone by the time the
+/// interactive session starts and no child process can inherit it.
+pub const utf8_console_variable = "__ghostty_utf8_console";
+
+fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) ![]u8 {
+    if (!utf8_console) {
+        return std.fmt.allocPrint(alloc, "& {{ . '{s}' }}", .{escaped});
+    }
+
+    return std.fmt.allocPrint(
+        alloc,
+        "& {{ ${s} = $true; . '{s}' }}",
+        .{ utf8_console_variable, escaped },
+    );
 }
 
 /// Escape a path for a PowerShell single-quoted string (`'` -> `''`).
@@ -449,7 +470,7 @@ test "escapeForPwshSingleQuote: consecutive quotes" {
 
 test "buildInjectedArgv: interactive shell injects without changing banner semantics" {
     const argv = [_][]const u8{"pwsh.exe"};
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\Users\\test\\integration.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\Users\\test\\integration.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -461,9 +482,28 @@ test "buildInjectedArgv: interactive shell injects without changing banner seman
     try std.testing.expectEqualStrings("& { . 'C:\\Users\\test\\integration.ps1' }", r[3]);
 }
 
+test "buildInjectedArgv: utf8 console travels in the command payload" {
+    const argv = [_][]const u8{"pwsh.exe"};
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", true)).?;
+    defer {
+        for (r) |s| std.testing.allocator.free(s);
+        std.testing.allocator.free(r);
+    }
+    try std.testing.expectEqual(@as(usize, 4), r.len);
+    try std.testing.expectEqualStrings("-Command", r[2]);
+    try std.testing.expectEqualStrings(
+        "& { $__ghostty_utf8_console = $true; . 'C:\\int.ps1' }",
+        r[3],
+    );
+
+    // The decision must never become part of the child environment, or a
+    // profile that runs before our -Command would leak it to its own children.
+    try std.testing.expect(std.mem.indexOf(u8, r[3], "env:") == null);
+}
+
 test "buildInjectedArgv: preserves existing prefix flags" {
     const argv = [_][]const u8{ "pwsh.exe", "-ExecutionPolicy", "Bypass", "-NoProfile" };
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -480,7 +520,7 @@ test "buildInjectedArgv: preserves existing prefix flags" {
 
 test "buildInjectedArgv: preserves slash-prefixed interactive flags" {
     const argv = [_][]const u8{ "pwsh.exe", "/NoProfile" };
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -495,7 +535,7 @@ test "buildInjectedArgv: preserves slash-prefixed interactive flags" {
 
 test "buildInjectedArgv: existing noexit is not duplicated for powershell.exe" {
     const argv = [_][]const u8{ "powershell.exe", "-NoExit", "-NoProfile" };
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -510,7 +550,7 @@ test "buildInjectedArgv: existing noexit is not duplicated for powershell.exe" {
 
 test "buildInjectedArgv: existing slash noexit is not duplicated" {
     const argv = [_][]const u8{ "powershell.exe", "/NoExit", "/NoProfile" };
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -525,7 +565,7 @@ test "buildInjectedArgv: existing slash noexit is not duplicated" {
 
 test "buildInjectedArgv: path with single quote" {
     const argv = [_][]const u8{"pwsh.exe"};
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\don't\\integration.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\don't\\integration.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -535,47 +575,47 @@ test "buildInjectedArgv: path with single quote" {
 
 test "buildInjectedArgv: skips explicit command mode" {
     const argv = [_][]const u8{ "pwsh.exe", "-Command", "Get-Date" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips short command alias" {
     const argv = [_][]const u8{ "pwsh.exe", "-c", "Get-Date" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips long command prefix" {
     const argv = [_][]const u8{ "pwsh.exe", "-Com", "Get-Date" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips attached command form" {
     const argv = [_][]const u8{ "pwsh.exe", "-Command:Get-Date" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips attached file form" {
     const argv = [_][]const u8{ "pwsh.exe", "-File:.\\script.ps1" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips attached encoded command form" {
     const argv = [_][]const u8{ "pwsh.exe", "-EncodedCommand:QQA=" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips slash version form" {
     const argv = [_][]const u8{ "pwsh.exe", "/Version" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips slash noninteractive form" {
     const argv = [_][]const u8{ "pwsh.exe", "/NonInteractive" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: existing noexit prefix is not duplicated" {
     const argv = [_][]const u8{ "pwsh.exe", "-NoEx", "-NoProfile" };
-    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")).?;
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
     defer {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
@@ -590,42 +630,42 @@ test "buildInjectedArgv: existing noexit prefix is not duplicated" {
 
 test "buildInjectedArgv: skips ambiguous no prefix" {
     const argv = [_][]const u8{ "pwsh.exe", "-No" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips empty flag names" {
     const argv = [_][]const u8{ "pwsh.exe", "-:Get-Date" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips empty slash flag names" {
     const argv = [_][]const u8{ "pwsh.exe", "/:Get-Date" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips positional script path after prefix flags" {
     const argv = [_][]const u8{ "pwsh.exe", "-NoProfile", ".\\script.ps1" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips encoded arguments mode" {
     const argv = [_][]const u8{ "powershell.exe", "-EncodedArguments", "QQA=" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips help mode" {
     const argv = [_][]const u8{ "pwsh.exe", "-?" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: skips version mode" {
     const argv = [_][]const u8{ "powershell.exe", "-Version", "5.1" };
-    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1")) == null);
+    try std.testing.expect((try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)) == null);
 }
 
 test "buildInjectedArgv: empty argv" {
     const argv = [_][]const u8{};
-    try std.testing.expectError(InjectError.EmptyCommand, buildInjectedArgv(std.testing.allocator, &argv, "p"));
+    try std.testing.expectError(InjectError.EmptyCommand, buildInjectedArgv(std.testing.allocator, &argv, "p", false));
 }
 
 test "installIfStale: first install writes" {

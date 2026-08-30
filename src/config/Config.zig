@@ -3190,9 +3190,11 @@ keybind: Keybinds = .{},
 ///   * `never` - Do not set an environment signal, change Command Prompt
 ///     arguments, or alter PowerShell console encodings.
 ///
-/// For a bare interactive `cmd.exe`, the preamble runs `chcp 65001` silently
-/// before the prompt and is a no-op when the live console is already UTF-8;
-/// cmd launches with any command tail are left unchanged.
+/// For an interactive `cmd.exe` with no command payload of its own, the
+/// preamble runs `chcp 65001` silently before the prompt and is a no-op when
+/// the live console is already UTF-8. Non-payload switches (`/d`, `/q`,
+/// `/v:on`, ...) are preserved in order and the preamble is appended after
+/// them; a `/c`, `/r`, or `/k` payload is left byte-for-byte unchanged.
 ///
 /// The PowerShell half is performed by the injected shell-integration script,
 /// not by noctty itself: it sets `[Console]::InputEncoding` and

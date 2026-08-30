@@ -1,10 +1,14 @@
 # Noctty shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
 
-$ghosttyUtf8Console = $env:GHOSTTY_UTF8_CONSOLE
-Remove-Item Env:GHOSTTY_UTF8_CONSOLE -ErrorAction SilentlyContinue
+# Per-launch UTF-8 console request. noctty sets $__ghostty_utf8_console in the
+# scope that dot-sources this script, never in the environment: profiles run
+# before our -Command does, so an environment variable would already have been
+# inherited by anything a profile spawned. Get-Variable keeps this safe under
+# Set-StrictMode when the variable is absent (manual dot-sourcing).
+$ghosttyUtf8Console = Get-Variable -Name '__ghostty_utf8_console' -ValueOnly -ErrorAction SilentlyContinue
 
-if ($ghosttyUtf8Console -eq '1') {
+if ($ghosttyUtf8Console) {
     try {
         if (([Console]::InputEncoding.CodePage -ne 65001) -or
             ([Console]::OutputEncoding.CodePage -ne 65001)) {
