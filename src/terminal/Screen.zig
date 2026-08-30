@@ -1674,6 +1674,18 @@ pub inline fn resize(
         self.kitty_images.dirty = true;
     }
 
+    // A column shrink without reflow (the primary screen takes this path
+    // whenever DEC wraparound is off, and the alternate screen always does)
+    // clears every cell past the new width and clamps tracked pins to it,
+    // rather than moving the text somewhere else. A retained command record
+    // would survive that with its span silently truncated, so the recovered
+    // text would be a *different* command than the one that ran — a truncated
+    // path or a dropped redirect. Drop the record instead of recovering a
+    // half command.
+    if (!opts.reflow and opts.cols < self.pages.cols) {
+        self.semantic_command.reset(&self.pages);
+    }
+
     // Release the cursor style while resizing just
     // in case the cursor ends up on a different page.
     const cursor_style = self.cursor.style;
@@ -10513,6 +10525,109 @@ test "Screen: last-command has no region without shell integration or D" {
     try s.testWriteString("\nstill running");
 
     try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Screen: last-command drops a record shifted onto the active input row" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // A complete command whose whole lifecycle sits on row 0.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString(" one");
+    try s.semanticPromptEndCommand();
+
+    // A new prompt on row 1 whose input the user has NOT submitted.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("rm -rf secret");
+
+    // The scrolling fast path rotates row contents and shifts tracked pins by
+    // hand without marking them garbage, so the completed record's prompt pin
+    // lands on the row now holding the unsubmitted input.
+    try s.pages.eraseRowBounded(.{ .active = .{ .y = 0 } }, 7);
+
+    // The record must not resurrect as the unsubmitted line.
+    const command = try s.lastCommandString(alloc);
+    if (command) |v| {
+        defer alloc.free(v);
+        try testing.expect(std.mem.indexOf(u8, v, "rm -rf secret") == null);
+    }
+}
+
+test "Screen: last-command treats output starting after the D cursor as empty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Leave output-tagged rows below where the next command will finish.
+    s.cursorSetSemanticContent(.output);
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("stale output below");
+
+    // A command on row 0 that produces no output at all, so its OSC 133;D
+    // cursor sits above the stale output rows the highlight will find.
+    s.cursorAbsolute(0, 0);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo silent");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+
+    // Must not hand back the stale rows as this command's output.
+    const output = try s.lastCommandOutputString(alloc);
+    if (output) |v| {
+        defer alloc.free(v);
+        try testing.expect(std.mem.indexOf(u8, v, "stale output below") == null);
+    }
+}
+
+test "Screen: last-command drops a record truncated by a non-reflow column shrink" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("Remove-Item C:\\keep\\this\\path");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString(" done");
+    try s.semanticPromptEndCommand();
+
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("Remove-Item C:\\keep\\this\\path", command);
+    }
+
+    // Shrinking columns without reflow clears every cell past the new width
+    // and clamps tracked pins, so the retained span would silently become a
+    // shorter, different command.
+    try s.resize(.{ .cols = 16, .rows = 8, .reflow = false });
+
     try testing.expect((try s.lastCommandString(alloc)) == null);
 }
 

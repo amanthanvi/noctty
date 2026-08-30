@@ -6537,8 +6537,8 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .page_down }, .mods = .{ .shift = true, .ctrl = true } },
                 .{ .jump_to_prompt = 1 },
             );
-            // `rerun_last_command` deliberately has no default binding: it
-            // submits a command, and `ctrl+shift+r` is the chord our own
+            // `insert_last_command` deliberately has no default binding:
+            // `ctrl+shift+r`, the obvious chord for it, is what our own
             // getting-started guide shows users rebinding to reload_config.
             // It stays available from the command palette and user keybinds.
             if (comptime builtin.target.os.tag == .windows) {

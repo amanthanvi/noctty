@@ -165,10 +165,10 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Copy the output of the most recent completed command to the clipboard. Requires OSC 133 shell integration.",
         }},
 
-        .rerun_last_command => comptime &.{.{
-            .action = .rerun_last_command,
-            .title = "Rerun Last Command",
-            .description = "Run the most recent recoverable single-line command again. Requires OSC 133 B/C command marks.",
+        .insert_last_command => comptime &.{.{
+            .action = .insert_last_command,
+            .title = "Insert Last Command",
+            .description = "Put the most recent recoverable single-line command back on the prompt without submitting it. Requires OSC 133 B/C command marks.",
         }},
 
         .copy_url_to_clipboard => comptime &.{.{
@@ -822,7 +822,7 @@ test "command defaults expose last-command and prompt navigation verbs" {
         .{ .jump_to_prompt = -1 },
         .{ .jump_to_prompt = 1 },
         .copy_last_command_output,
-        .rerun_last_command,
+        .insert_last_command,
     };
     var found = [_]bool{false} ** expected.len;
 

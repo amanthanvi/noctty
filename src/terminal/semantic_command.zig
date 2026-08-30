@@ -34,6 +34,11 @@ pub const OutputRegion = union(enum) {
 };
 
 pub fn deinit(self: *SemanticCommand, pages: *PageList) void {
+    self.reset(pages);
+}
+
+/// Drop every retained pin. The tracker is reusable afterwards.
+pub fn reset(self: *SemanticCommand, pages: *PageList) void {
     self.clearPending(pages);
     self.clearActive(pages);
     self.clearCompleted(pages);
@@ -101,6 +106,15 @@ pub fn endCommand(
     // stale rows. Clamp to the last text cell at or before the D cursor.
     const output_end = if (pages.highlightSemanticContent(prompt.*, .output)) |hl| end: {
         if (!cursor.before(hl.end)) break :end try pages.trackPin(hl.end);
+
+        // The D cursor can land *above* the first cell the output highlight
+        // found — a command that printed nothing, with an older output-marked
+        // row still sitting below the cursor. There is no output region at
+        // all in that case. Falling through would both keep `hl.start` (a
+        // cell after D, so `copy_last_command_output` would hand back stale
+        // text) and build a `.left_up` iterator whose limit is after its
+        // start, which asserts under slow runtime safety.
+        if (cursor.before(hl.start)) break :end null;
 
         var clamped = hl.start;
         var cell_it = cursor.cellIterator(.left_up, hl.start);
@@ -243,7 +257,35 @@ fn clearCompleted(self: *SemanticCommand, pages: *PageList) void {
 fn lastCompleted(self: *const SemanticCommand) ?Completed {
     const command = self.completed orelse return null;
     if (!pinIsValid(command.prompt)) return null;
+    if (!self.precedesActiveInput(command)) return null;
     return command;
+}
+
+/// A completed command has to sit strictly above the prompt the user is
+/// typing into right now.
+///
+/// The invalidation hooks above cover the paths that erase rows, but they are
+/// not the only ways a row moves. `PageList.eraseRowBounded` (the scrolling
+/// fast path), `Terminal.insertLines` and `Terminal.deleteLines` all rotate
+/// row contents and then *shift tracked pins by hand* without marking them
+/// garbage — so a retained record can be carried onto the row holding
+/// unsubmitted input, and `pinIsValid` still passes because that row is a
+/// real prompt row. Rather than hooking every one of those hot paths (and
+/// paying for it on every scroll, and silently regressing the next time one
+/// is added), re-check the relationship at read time.
+///
+/// `pending` is the prompt whose OSC 133;B input mark has been seen but whose
+/// output has not — precisely "the line the user is typing". When no input
+/// mark is outstanding there is nothing unsubmitted to protect and the record
+/// stands.
+fn precedesActiveInput(self: *const SemanticCommand, command: Completed) bool {
+    const pending = self.pending orelse return true;
+    if (sameRow(command.prompt.*, pending.*)) return false;
+    return command.prompt.*.before(pending.*);
+}
+
+fn sameRow(a: Pin, b: Pin) bool {
+    return a.node == b.node and a.y == b.y;
 }
 
 fn pinIsValid(pin: *const Pin) bool {

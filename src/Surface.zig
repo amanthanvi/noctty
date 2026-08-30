@@ -6195,7 +6195,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             return true;
         },
 
-        .rerun_last_command => {
+        .insert_last_command => {
             const command = command: {
                 self.renderer_state.mutex.lock();
                 defer self.renderer_state.mutex.unlock();
@@ -6205,14 +6205,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 // the bytes would land somewhere the user did not intend.
                 if (self.io.terminal.screens.active_key != .primary) {
                     log.info(
-                        "rerun last command ignored: the alternate screen is active",
+                        "insert last command ignored: the alternate screen is active",
                         .{},
                     );
                     return true;
                 }
                 if (self.io.terminal.screens.active.semanticPromptCommandRunning()) {
                     log.info(
-                        "rerun last command ignored: a command is still running",
+                        "insert last command ignored: a command is still running",
                         .{},
                     );
                     return true;
@@ -6223,35 +6223,40 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 );
             } orelse {
                 log.info(
-                    "rerun last command ignored: no recoverable complete OSC 133 B/C region is available",
+                    "insert last command ignored: no recoverable complete OSC 133 B/C region is available",
                     .{},
                 );
                 return true;
             };
             defer self.alloc.free(command);
 
-            if (!rerunCommandIsSafe(command)) {
+            if (!insertCommandIsSafe(command)) {
                 log.info(
-                    "rerun last command ignored: recovered command is empty, multiline, invalid UTF-8, or contains control characters",
+                    "insert last command ignored: recovered command is empty, multiline, invalid UTF-8, or contains control characters",
                     .{},
                 );
                 return true;
             }
 
-            const write = try self.alloc.alloc(u8, command.len + 1);
-            defer self.alloc.free(write);
-            @memcpy(write[0..command.len], command);
-            write[command.len] = '\r';
-
-            self.queueIo(try termio.Message.writeReq(
-                self.alloc,
-                write,
-            ), .unlocked);
-
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
-            self.scrollToBottom() catch |err| {
-                log.warn("error scrolling to bottom err={}", .{err});
+            // Deliberately no trailing carriage return. OSC 133 marks carry no
+            // provenance: every byte the terminal sees is written by the child
+            // PTY, so any program that can print can also forge a complete
+            // A/B/C/D lifecycle around text of its choosing and have it
+            // retained as "the last command". Submitting that text on a single
+            // keypress would turn "display untrusted output" into "execute
+            // attacker-chosen command". We hand the text to the shell's line
+            // editor through the same encoder clipboard pastes use — bracketed
+            // when the terminal asked for it — and let the user read it and
+            // press Enter themselves.
+            self.completeClipboardPaste(command, false) catch |err| switch (err) {
+                error.UnsafePaste => {
+                    log.info(
+                        "insert last command ignored: recovered command failed paste protection",
+                        .{},
+                    );
+                    return true;
+                },
+                else => return err,
             };
 
             return true;
@@ -7363,11 +7368,13 @@ fn completeClipboardPaste(
     };
 }
 
-/// Rerun uses the same unsafe-paste detector as clipboard paste, then applies
-/// the stricter contract required for unattended command execution: one
-/// non-empty UTF-8 line with no control or Unicode line-separator characters.
-fn rerunCommandIsSafe(data: []const u8) bool {
-    if (data.len == 0 or data.len > rerun_command_max_len) return false;
+/// Insert uses the same unsafe-paste detector as clipboard paste, then applies
+/// a stricter contract than a normal paste: one non-empty UTF-8 line with no
+/// control or Unicode line-separator characters. The recovered text is never
+/// submitted for the user, but it still has to reach the prompt as exactly the
+/// one line they can see.
+fn insertCommandIsSafe(data: []const u8) bool {
+    if (data.len == 0 or data.len > insert_command_max_len) return false;
     if (!input.paste.isSafe(data)) return false;
 
     const view = std.unicode.Utf8View.init(data) catch return false;
@@ -7392,32 +7399,32 @@ fn rerunCommandIsSafe(data: []const u8) bool {
     return true;
 }
 
-/// Recovered command text longer than this is rejected rather than submitted.
+/// Recovered command text longer than this is rejected rather than inserted.
 /// A recovered line that long is far more likely to be a mis-parse than
 /// something the user actually typed.
-const rerun_command_max_len: usize = 4096;
+const insert_command_max_len: usize = 4096;
 
-test "Surface: last-command rerun safety reuses paste protection and rejects controls" {
+test "Surface: last-command insert safety reuses paste protection and rejects controls" {
     const testing = std.testing;
 
-    try testing.expect(rerunCommandIsSafe("Write-Output 'safe'"));
-    try testing.expect(!rerunCommandIsSafe(""));
-    try testing.expect(!rerunCommandIsSafe("one\ntwo"));
-    try testing.expect(!rerunCommandIsSafe("one\rtwo"));
-    try testing.expect(!rerunCommandIsSafe("one\ttwo"));
-    try testing.expect(!rerunCommandIsSafe("one\x1b[201~two"));
-    try testing.expect(!rerunCommandIsSafe("one\xC2\x85two"));
-    try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xA8two"));
-    try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xA9two"));
-    try testing.expect(!rerunCommandIsSafe("one\xC0two"));
-    try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xAEtwo"));
-    try testing.expect(!rerunCommandIsSafe("one\xE2\x81\xA6two"));
-    try testing.expect(!rerunCommandIsSafe("one\xEF\xBB\xBFtwo"));
+    try testing.expect(insertCommandIsSafe("Write-Output 'safe'"));
+    try testing.expect(!insertCommandIsSafe(""));
+    try testing.expect(!insertCommandIsSafe("one\ntwo"));
+    try testing.expect(!insertCommandIsSafe("one\rtwo"));
+    try testing.expect(!insertCommandIsSafe("one\ttwo"));
+    try testing.expect(!insertCommandIsSafe("one\x1b[201~two"));
+    try testing.expect(!insertCommandIsSafe("one\xC2\x85two"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x80\xA8two"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x80\xA9two"));
+    try testing.expect(!insertCommandIsSafe("one\xC0two"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x80\xAEtwo"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x81\xA6two"));
+    try testing.expect(!insertCommandIsSafe("one\xEF\xBB\xBFtwo"));
 
-    const too_long = "e" ** (rerun_command_max_len + 1);
-    try testing.expect(!rerunCommandIsSafe(too_long));
-    const at_limit = "e" ** rerun_command_max_len;
-    try testing.expect(rerunCommandIsSafe(at_limit));
+    const too_long = "e" ** (insert_command_max_len + 1);
+    try testing.expect(!insertCommandIsSafe(too_long));
+    const at_limit = "e" ** insert_command_max_len;
+    try testing.expect(insertCommandIsSafe(at_limit));
 }
 
 fn completeClipboardReadOSC52(
