@@ -1472,13 +1472,21 @@ fn integrityRidFromSidString(sid: []const u16) ?u32 {
 /// mandatory-label ACE with the `NO_WRITE_UP` policy is appended, which is
 /// what keeps a lower-integrity process from opening the pipe for write.
 ///
-/// RESIDUAL: `NO_WRITE_UP` does not deny reads, and a bare `READ_CONTROL`
-/// open is enough to occupy the server's single pipe instance — it does not
-/// need `GENERIC_READ`. The next legitimate client then fails with
-/// `ERROR_PIPE_BUSY`. That is an availability limit only (nothing is
-/// disclosed and no request can be submitted), and it is recorded in
-/// docs/windows.md along with the two candidate fixes and why neither is
-/// applied yet. Observed on hardware by the desktop lane, not inferred.
+/// RESIDUAL: `NO_WRITE_UP` does not deny reads, so a medium-integrity
+/// process can open an elevated instance's pipe for `GENERIC_READ` (a bare
+/// `READ_CONTROL` suffices). `WriteFile` on that handle then fails with
+/// `win32=5`, so this is an OCCUPANCY problem, not an access break —
+/// nothing is disclosed and no request can be submitted. But the server
+/// offers one pipe instance at a time, so one such open makes the next
+/// legitimate client fail with `win32=231 ERROR_PIPE_BUSY`. All of this is
+/// observed on hardware, not inferred.
+///
+/// The fix is `NO_READ_UP`, and it lands with the elevation work rather
+/// than here: that change labels the elevated endpoint `NWNR`, and the
+/// added `NR` has been verified on hardware to deny every medium open
+/// including `GENERIC_READ` and `READ_CONTROL`. Duplicating it here would
+/// collide on the same SDDL term for no net gain, and would invalidate the
+/// live descriptor readback recorded in docs/windows.md.
 fn buildIpcPipeSddl(
     buf: []u16,
     user_sid: []const u16,

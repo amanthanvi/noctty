@@ -322,30 +322,47 @@ DACL whose single ACE grants access to the SID of the token that owns
 the running noctty process. When that process runs above medium
 integrity, a `NO_WRITE_UP` mandatory-label ACE is added as well, so a
 filtered (non-elevated) token of the same account cannot drive an
-elevated instance. That denial is observed: a client whose open is
-refused logs `single-instance pipe exists but is not accessible to this
-token; starting a local instance` and goes on to open its own window.
+elevated instance.
+
+That denial is **observed against a real elevated instance**, not
+inferred. From a medium-integrity process, `CreateFileW` on the elevated
+instance's pipe fails with `win32=5` for both
+`GENERIC_READ | GENERIC_WRITE` and `GENERIC_WRITE` alone — the refusal
+happens at `CreateFileW`, not as a timeout or a missing acknowledgement.
+At the command line `+perform-action` and `+list-windows` exit 1 with
+"No matching noctty instance is listening", and `+new-window` exits 0
+having quietly started its **own** local instance rather than driving the
+elevated one. From an elevated shell `+perform-action new_tab` still
+succeeds, so `NO_WRITE_UP` does not lock out the intended client. The
+live descriptor reads back
+`D:P(A;;FA;;;S-1-5-21-...-1001)S:AI(ML;;NW;;;HI)`, confirming the label
+survives object creation; a medium-integrity instance reads back the same
+DACL with an **empty** label, which is correct and proves the readback
+distinguishes present from absent.
 
 **Known residual — a lower-integrity process can stall the channel.** The
-label sets `NO_WRITE_UP` only, so it does not deny reads. A plain
-`READ_CONTROL` open is enough — it need not even ask for `GENERIC_READ`.
-Because the server offers one pipe instance at a time, a single such open
-makes the next legitimate client fail with `ERROR_PIPE_BUSY` while the
-server logs an `IpcTimeout`. The attacker learns nothing and can submit
-nothing; the cost is availability of the automation channel, bounded by
-the server's read timeout and repeatable.
+label sets `NO_WRITE_UP` only, so it does not deny *reads*: a medium
+process can open the elevated instance's pipe for `GENERIC_READ` (a bare
+`READ_CONTROL` is enough — it need not ask for read data access at all).
+`WriteFile` on that handle then fails with `win32=5`, so this is an
+**occupancy problem, not an access break**: the squatter learns nothing
+and can submit nothing. But because the server offers one pipe instance
+at a time, a single such open makes the next legitimate client fail with
+`win32=231 ERROR_PIPE_BUSY` while the server logs
+`failed to process win32 IPC client err=error.IpcTimeout`. The cost is
+availability of the automation channel, bounded by the server's read
+timeout and repeatable.
 
-This is not fixed here, and two candidate fixes were considered and
-rejected for now. Keeping a spare listening instance is only a speed
-bump: an attacker opens one more. Adding `NO_READ_UP` to the label is the
-plausible real fix and cannot break a legitimate client (mandatory policy
-only ever denies principals *below* the object, and the legitimate client
-is already refused by `NO_WRITE_UP` if it is lower), but whether
-`NO_READ_UP` actually denies a bare `READ_CONTROL` open is not something
-this project has verified on hardware, and shipping an unverified change
-to a mandatory label is worse than recording a known limit. The
-experiment that settles it: from a lower-integrity process, open the pipe
-with `READ_CONTROL` only, against a server whose label carries `NRNW`.
+**This residual is closed by the elevation work, not here.** That change
+labels the elevated endpoint `NWNR` instead of `NW`, and the added
+`NO_READ_UP` denies *every* medium-integrity open — including
+`GENERIC_READ` and `READ_CONTROL` — which has been verified on hardware
+against a live elevated instance. It is deliberately not duplicated in
+this change: the two would collide on the same SDDL term for no net gain
+once both land, and altering the label here would invalidate the
+descriptor readback recorded above. Keeping a spare listening instance
+was also considered and rejected as a speed bump — an attacker simply
+opens one more.
 
 **This is not a privilege boundary.** Any code already running as your
 user is fully trusted with this channel: it can list your windows,
