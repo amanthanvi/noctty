@@ -152,9 +152,15 @@ pub fn prepareBackup(
 }
 
 pub fn backupIsComplete(alloc: Allocator, backup_root: []const u8) bool {
-    if (pathIsWindowsReparsePoint(backup_root)) return false;
-    verifyBackupManifest(alloc, backup_root, null) catch return false;
+    validateBackup(alloc, backup_root) catch return false;
     return true;
+}
+
+pub fn validateBackup(alloc: Allocator, backup_root: []const u8) !void {
+    if (try pathIsWindowsReparsePointChecked(alloc, backup_root)) {
+        return error.IncompletePortableUpdateBackup;
+    }
+    try verifyBackupManifest(alloc, backup_root, null);
 }
 
 pub fn swapPayload(
@@ -189,7 +195,7 @@ pub fn rollback(
     install_root: []const u8,
     backup_root: []const u8,
 ) !void {
-    if (!backupIsComplete(alloc, backup_root)) return error.IncompletePortableUpdateBackup;
+    try validateBackup(alloc, backup_root);
     try verifyBackupManifest(alloc, backup_root, install_root);
 }
 
@@ -379,10 +385,13 @@ fn verifyBackupManifest(
             alloc.free(key);
             return error.IncompletePortableUpdateBackup;
         }
-        const expected = try parseSha256Hex(hex);
+        const expected = parseSha256Hex(hex) catch return error.IncompletePortableUpdateBackup;
         const backup_path = try joinPortableRelativePath(alloc, backup_root, name);
         defer alloc.free(backup_path);
-        const actual = sha256File(backup_path) catch return error.IncompletePortableUpdateBackup;
+        const actual = sha256File(backup_path) catch |err| switch (err) {
+            error.FileNotFound => return error.IncompletePortableUpdateBackup,
+            else => return err,
+        };
         if (!std.mem.eql(u8, &expected, &actual)) return error.IncompletePortableUpdateBackup;
 
         if (restore_root) |root| {
@@ -500,12 +509,22 @@ fn pathKind(path: []const u8) !std.fs.File.Kind {
 }
 
 fn pathIsWindowsReparsePoint(path: []const u8) bool {
+    return pathIsWindowsReparsePointChecked(std.heap.page_allocator, path) catch false;
+}
+
+fn pathIsWindowsReparsePointChecked(alloc: Allocator, path: []const u8) !bool {
     if (builtin.os.tag != .windows) return false;
-    const path_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path) catch return false;
-    defer std.heap.page_allocator.free(path_w);
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
+    defer alloc.free(path_w);
     const attributes = std.os.windows.kernel32.GetFileAttributesW(path_w.ptr);
-    return attributes != std.os.windows.INVALID_FILE_ATTRIBUTES and
-        attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    if (attributes == std.os.windows.INVALID_FILE_ATTRIBUTES) {
+        const err = std.os.windows.kernel32.GetLastError();
+        return switch (err) {
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+            else => std.os.windows.unexpectedError(err),
+        };
+    }
+    return attributes & std.os.windows.FILE_ATTRIBUTE_REPARSE_POINT != 0;
 }
 
 const movefile_replace_existing: u32 = 0x1;

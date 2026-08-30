@@ -221,6 +221,14 @@ otherwise noctty restores the backup. A new build that exits with an error
 during the bounded startup check, or a swap that remains unconfirmed on a later
 launch, also rolls back and relaunches the previous build.
 
+If recovery files are lost after a swap, noctty abandons the unrecoverable
+transaction, launches the installed build, and shows a warning with manual
+recovery guidance. `NOCTTY_PORTABLE_UPDATE_BYPASS=1` is the manual escape hatch
+for portable-update startup recovery: set it only for the process being
+launched to skip that recovery attempt. This bypass does not verify, complete,
+or roll back the update, so reinstall or update manually afterward if the
+installed build is inconsistent.
+
 Portable apply fails closed until a release publishes that signed complete-file
 manifest. Releases without it are not downloaded or staged for portable apply;
 the update notice opens the normal GitHub release page for manual updating.
