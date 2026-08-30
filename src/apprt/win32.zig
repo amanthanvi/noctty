@@ -4250,7 +4250,7 @@ pub const App = struct {
             return;
         }
 
-        if (!isInstallerManagedInstallDir(install_dir)) {
+        if (!internal_os.windows.isInstallerManagedInstallDir(install_dir)) {
             self.showUpdateInfo(updateApplyFailureMessage(error.InvalidInstallPath)) catch |banner_err| {
                 log.warn("failed to show updater apply failure err={}", .{banner_err});
             };
@@ -4309,7 +4309,7 @@ pub const App = struct {
         }
         const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
         defer self.core_app.alloc.free(install_dir);
-        return isInstallerManagedInstallDir(install_dir) and
+        return internal_os.windows.isInstallerManagedInstallDir(install_dir) and
             updatepkg.hasStagedWindowsInstall(self.core_app.alloc, state_path, .installer);
     }
 
@@ -7839,29 +7839,6 @@ fn currentInstallDir(alloc: Allocator) ![]u8 {
     errdefer alloc.free(exe_path);
     const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidInstallPath;
     return alloc.realloc(exe_path, dir.len);
-}
-
-fn isInstallerManagedInstallDir(install_dir: []const u8) bool {
-    var dir = std.fs.openDirAbsolute(install_dir, .{ .iterate = true }) catch return false;
-    defer dir.close();
-
-    var has_uninstaller_exe = false;
-    var has_uninstaller_dat = false;
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        has_uninstaller_exe = has_uninstaller_exe or isInnoUninstallerFileName(entry.name, ".exe");
-        has_uninstaller_dat = has_uninstaller_dat or isInnoUninstallerFileName(entry.name, ".dat");
-        if (has_uninstaller_exe and has_uninstaller_dat) return true;
-    }
-
-    return false;
-}
-
-fn isInnoUninstallerFileName(name: []const u8, extension: []const u8) bool {
-    return std.ascii.startsWithIgnoreCase(name, "unins") and
-        name.len > "unins".len + extension.len and
-        std.ascii.eqlIgnoreCase(name[name.len - extension.len ..], extension);
 }
 
 fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: []const u8) ![]u8 {
@@ -35331,13 +35308,6 @@ test "win32 installer apply args double embedded quotes" {
     defer alloc.free(args);
 
     try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\wing\"\"hostty\"") != null);
-}
-
-test "win32 installer apply guard recognizes Inno uninstaller markers" {
-    try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
-    try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
-    try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
-    try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
 }
 
 test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {
