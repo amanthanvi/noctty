@@ -245,6 +245,21 @@ test "automation-action safety rejects terminal input and crash actions" {
     // full scrollback, so it is terminal input too.
     try std.testing.expect(!isSafeAutomationAction(.clear_screen));
 
+    // undo/redo REPLAY a previously captured action, so allowlisting them
+    // would re-open every action they can replay. The Win32 undo stack can
+    // hold a `clear_screen` entry, and redoing it calls
+    // `reapplyUndoableAction`, which queues the same
+    // `.clear_screen{ .history = true }` io message the direct action does
+    // (src/apprt/win32.zig `reapplyUndoableAction`) -- i.e. a pty write and a
+    // full scrollback erase, reachable without ever naming `clear_screen`.
+    // Undo additionally restores a snapshot title straight into the apprt
+    // cache, bypassing the title sanitizer these setters otherwise enforce.
+    // Gating on the replayed entry would mean plumbing the automation origin
+    // through the whole apprt action dispatch; refusing both is the
+    // deny-by-default answer and costs only IPC-driven undo/redo.
+    try std.testing.expect(!isSafeAutomationAction(.undo));
+    try std.testing.expect(!isSafeAutomationAction(.redo));
+
     // Key table actions only move the binding stack and stay allowed.
     try std.testing.expect(isSafeAutomationAction(.deactivate_all_key_tables));
 }
@@ -284,6 +299,9 @@ test "automation-action dispatch rejects unsafe actions before dispatching" {
         "end_key_sequence",
         "clear_screen",
         "paste_from_clipboard",
+        // Reachable pty writes by replay rather than by name.
+        "undo",
+        "redo",
     }) |action_text| {
         try std.testing.expectError(
             error.UnsafeAutomationAction,
@@ -750,8 +768,6 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .toggle_visibility,
         .toggle_background_opacity,
         .check_for_updates,
-        .undo,
-        .redo,
         .activate_key_table,
         .activate_key_table_once,
         .deactivate_key_table,

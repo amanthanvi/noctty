@@ -331,9 +331,20 @@ submit a request.
 user is fully trusted with this channel: it can list your windows,
 perform allowlisted actions, and open new windows. Treat the automation
 surface the way you would treat your own shell — it reduces exposure to
-other accounts and to the network, not to malware running as you. The
-pipe *name* is also not protected; another process running as you can
-create it first.
+other accounts and to the network, not to malware running as you.
+
+The pipe *name* is derived from `--class` alone, so it is predictable and
+lives in the machine-wide named-pipe namespace: any local account can
+create it before noctty does. noctty therefore authenticates the **server**
+as well as the client. Before writing anything to a pipe it did not create,
+a client resolves the serving process with `GetNamedPipeServerProcessId` and
+requires that process's token user SID to match its own; a mismatch is
+treated as "no instance we can reach", and the launch starts its own local
+instance instead. This runs before the first write, which is also before a
+server could call `ImpersonateNamedPipeClient`. It stops another *account*
+from harvesting forwarded arguments or forging an acknowledgement; it does
+not — and cannot — stop another process running as **you**, which is the
+same trust boundary as everything else in this section.
 
 List windows, tabs, and panes:
 
@@ -360,6 +371,12 @@ arbitrary file helper actions (`text`, `csi`, `esc`,
 `paste_from_clipboard`, `write_screen_file`, `end_key_sequence`,
 `clear_screen`, and `crash`), and new keybinding action variants stay
 disabled for automation until they are reviewed and allowlisted.
+
+`undo` and `redo` are refused for the same reason. They do not name a
+dangerous action themselves — they *replay* one that was captured earlier,
+and the Win32 undo stack can hold a `clear_screen` entry whose replay
+queues the same write `clear_screen` was delisted for. An action that can
+re-run another action inherits everything that action can do.
 
 `+new-window` forwards command-line arguments to the running instance.
 The running instance applies an **allowlist**: only window-scoped

@@ -397,6 +397,12 @@ pub const TOKEN_QUERY = 0x0008;
 pub const TokenUser = 1;
 pub const TokenIntegrityLevel = 25;
 
+/// Least privilege that still permits `OpenProcessToken` on another
+/// process, used to authenticate the IPC pipe server. Deliberately NOT
+/// `PROCESS_QUERY_INFORMATION`, which additionally grants access this check
+/// has no use for.
+pub const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
 /// Relative identifier of the medium mandatory integrity level
 /// (`S-1-16-8192`). Windows treats an object with no mandatory label as
 /// medium integrity, so a label ACE is only worth adding above this.

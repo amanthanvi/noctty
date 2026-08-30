@@ -795,6 +795,90 @@ fn resolveIpcPipeNameForTarget(
 /// instance we can talk to"; callers must treat them the same and fall back
 /// to running locally. They are kept distinct only so the unreachable case
 /// can be logged differently.
+/// Backing store for a copied SID. `SECURITY_MAX_SID_SIZE` is 68 bytes, so
+/// 256 is ample. The alignment is required, not cosmetic: a `SID` ends in an
+/// array of `DWORD` sub-authorities, and `EqualSid` reads them as such.
+const SidBuffer = [256]u8;
+const sid_buffer_align = @alignOf(u32);
+
+/// Copy the current process token's user SID into `buf`, returning the
+/// populated prefix.
+fn currentUserSidBytes(buf: *align(sid_buffer_align) SidBuffer) ![]u8 {
+    var token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) == 0) return error.TokenQueryFailed;
+    defer _ = windows.CloseHandle(token);
+    return try tokenUserSidBytes(token, buf);
+}
+
+fn tokenUserSidBytes(
+    token: windows.HANDLE,
+    buf: *align(sid_buffer_align) SidBuffer,
+) ![]u8 {
+    var token_user_buf: [256]u8 align(@alignOf(sys.TOKEN_USER)) = undefined;
+    var token_user_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenUser,
+        &token_user_buf,
+        token_user_buf.len,
+        &token_user_len,
+    ) == 0) return error.TokenQueryFailed;
+
+    const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
+    const sid_len = sys.GetLengthSid(token_user.User.Sid);
+    if (sid_len == 0 or sid_len > buf.len) return error.TokenQueryFailed;
+
+    const sid_bytes: [*]const u8 = @ptrCast(token_user.User.Sid);
+    @memcpy(buf[0..sid_len], sid_bytes[0..sid_len]);
+    return buf[0..sid_len];
+}
+
+/// Is the process serving this pipe running as the same user we are?
+///
+/// The single-instance pipe name is derived only from `--class`, so it is
+/// PREDICTABLE and lives in the machine-wide named-pipe namespace. Any local
+/// account can therefore pre-create `\\.\pipe\noctty.<class>` before we do.
+/// The server-side owner-only DACL does not help here: it protects the pipe
+/// WE create, not the one we CONNECT to. Without this check a squatter would
+/// receive our forwarded startup arguments (including the working directory)
+/// and could return a forged ack, so the real instance never starts and the
+/// user gets no window -- a cross-account disclosure plus a startup denial.
+///
+/// Authenticating BEFORE the first write is what makes this sufficient:
+/// `ImpersonateNamedPipeClient` fails with `ERROR_CANNOT_IMPERSONATE` until
+/// the client has written to the pipe, so a hostile server cannot borrow our
+/// token in the window between connect and this check.
+///
+/// Fails CLOSED: any error answers "not ours".
+fn ipcPipeServerIsSameUser(pipe: windows.HANDLE) bool {
+    var server_pid: u32 = 0;
+    if (sys.GetNamedPipeServerProcessId(pipe, &server_pid) == 0) return false;
+
+    const process = sys.OpenProcess(
+        c.PROCESS_QUERY_LIMITED_INFORMATION,
+        windows.FALSE,
+        server_pid,
+    ) orelse return false;
+    defer _ = windows.CloseHandle(process);
+
+    var server_token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(process, c.TOKEN_QUERY, &server_token) == 0) return false;
+    defer _ = windows.CloseHandle(server_token);
+
+    var server_buf: SidBuffer align(sid_buffer_align) = undefined;
+    const server_sid = tokenUserSidBytes(server_token, &server_buf) catch return false;
+
+    var own_buf: SidBuffer align(sid_buffer_align) = undefined;
+    const own_sid = currentUserSidBytes(&own_buf) catch return false;
+
+    if (server_sid.len != own_sid.len) return false;
+    return sys.EqualSid(@ptrCast(server_sid.ptr), @ptrCast(own_sid.ptr)) != 0;
+}
+
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
@@ -807,7 +891,18 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
             windows.FILE_ATTRIBUTE_NORMAL,
             null,
         );
-        if (handle != windows.INVALID_HANDLE_VALUE) return handle;
+        if (handle != windows.INVALID_HANDLE_VALUE) {
+            if (!ipcPipeServerIsSameUser(handle)) {
+                _ = windows.CloseHandle(handle);
+                log.warn(
+                    "single-instance pipe is served by a process belonging to " ++
+                        "another user; refusing to forward anything to it",
+                    .{},
+                );
+                return error.PipeUnreachable;
+            }
+            return handle;
+        }
 
         const err = windows.kernel32.GetLastError();
         switch (err) {
@@ -1229,6 +1324,22 @@ fn normalizeForwardedStartupArg(
         const expanded = homedir.expandHome(trimmed, &home_buf) catch trimmed;
         var realpath_buf: [std.fs.max_path_bytes]u8 = undefined;
         const normalized = cwd.realpath(expanded, &realpath_buf) catch expanded;
+
+        // The key check above is not enough for this one option: the server
+        // refuses the ENTIRE argv on a bad working-directory VALUE, and it
+        // has already acknowledged the request by then, so the launching
+        // process exits having produced no window at all. Dropping just this
+        // argument here is what makes the "still gets a window" promise
+        // above true for `--working-directory=\\host\share` and friends.
+        if (!forwardedWorkingDirectoryAllowed(normalized)) {
+            log.warn(
+                "not forwarding --working-directory to the running instance: " ++
+                    "value is not a local absolute path",
+                .{},
+            );
+            return null;
+        }
+
         return try std.fmt.allocPrintSentinel(
             alloc,
             "--working-directory={s}",
@@ -15770,15 +15881,62 @@ fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
 
 /// True when `title` contains a byte that must not survive into a stored
 /// window/tab title. See `sanitizeTitleAlloc` for why.
+/// Control code points that must never survive into a stored title.
+fn isTitleControlCodepoint(cp: u21) bool {
+    // C0 controls and DEL.
+    if (cp < 0x20 or cp == 0x7F) return true;
+    // C1 controls U+0080..U+009F, which include 8-bit CSI (U+009B) and
+    // 8-bit ST (U+009C).
+    if (cp >= 0x80 and cp <= 0x9F) return true;
+    return false;
+}
+
+/// One scanned unit of a title: the bytes to keep (empty when the unit must
+/// be dropped) and the offset of the next unit.
+const TitleUnit = struct {
+    keep: []const u8,
+    next: usize,
+};
+
+/// Decode one UTF-8 unit, dropping controls and anything that is not valid
+/// UTF-8.
+///
+/// This is deliberately CODE-POINT oriented rather than byte oriented. A
+/// byte-level filter for the range 0x80..0x9F would corrupt ordinary text,
+/// because those bytes also occur as UTF-8 CONTINUATION bytes -- `U+20AC`
+/// (the euro sign) is `E2 82 AC`, whose second byte is 0x82. Decoding first
+/// means a raw `0x9B` is recognized as an 8-bit CSI and removed while `€`
+/// survives intact.
+///
+/// Invalid UTF-8 is dropped one byte at a time rather than passed through:
+/// it cannot be rendered meaningfully, and letting it through would also let
+/// an OVERLONG encoding of a C1 control (for example `E0 82 9B`) evade the
+/// control check. `std.unicode.utf8Decode` rejects overlong forms and
+/// surrogates, so this fails closed. Dropping the trailing bytes of a
+/// truncated sequence also removes the lone-`0xC2` tail that would otherwise
+/// leave invalid UTF-8 in the stored title.
+fn nextTitleUnit(title: []const u8, i: usize) TitleUnit {
+    const len = std.unicode.utf8ByteSequenceLength(title[i]) catch {
+        return .{ .keep = "", .next = i + 1 };
+    };
+    if (i + len > title.len) return .{ .keep = "", .next = title.len };
+
+    const seq = title[i .. i + len];
+    const cp = std.unicode.utf8Decode(seq) catch {
+        return .{ .keep = "", .next = i + 1 };
+    };
+    if (isTitleControlCodepoint(cp)) return .{ .keep = "", .next = i + len };
+    return .{ .keep = seq, .next = i + len };
+}
+
 fn titleNeedsSanitize(title: []const u8) bool {
     var i: usize = 0;
-    while (i < title.len) : (i += 1) {
-        const byte = title[i];
-        if (byte < 0x20 or byte == 0x7F) return true;
-        // UTF-8 encoding of the C1 controls U+0080..U+009F, which includes
-        // 8-bit CSI (U+009B) and ST (U+009C).
-        if (byte == 0xC2 and i + 1 < title.len and
-            title[i + 1] >= 0x80 and title[i + 1] <= 0x9F) return true;
+    while (i < title.len) {
+        const unit = nextTitleUnit(title, i);
+        // A kept unit is always at least one byte, so an empty `keep` means
+        // this unit was dropped.
+        if (unit.keep.len == 0) return true;
+        i = unit.next;
     }
     return false;
 }
@@ -15805,16 +15963,10 @@ fn sanitizeTitleAlloc(alloc: Allocator, title: []const u8) Allocator.Error!?[]u8
     try out.ensureTotalCapacity(alloc, title.len);
 
     var i: usize = 0;
-    while (i < title.len) : (i += 1) {
-        const byte = title[i];
-        if (byte < 0x20 or byte == 0x7F) continue;
-        if (byte == 0xC2 and i + 1 < title.len and
-            title[i + 1] >= 0x80 and title[i + 1] <= 0x9F)
-        {
-            i += 1;
-            continue;
-        }
-        out.appendAssumeCapacity(byte);
+    while (i < title.len) {
+        const unit = nextTitleUnit(title, i);
+        out.appendSliceAssumeCapacity(unit.keep);
+        i = unit.next;
     }
 
     return try out.toOwnedSlice(alloc);
@@ -28367,6 +28519,91 @@ fn testMapGenericAllToFileAllAlloc(alloc: Allocator, sddl: []const u8) ![]u8 {
     return std.mem.replaceOwned(u8, alloc, sddl, ";;GA;;", ";;FA;;");
 }
 
+/// Drop the `AI` / `AR` ACL control flags from SDDL text.
+///
+/// `CreateNamedPipeW` hands our descriptor to the object manager, which runs
+/// the auto-inheritance algorithm and stamps `SE_SACL_AUTO_INHERITED` on the
+/// copy it attaches (the DACL escapes this only because we mark it protected).
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW` then renders `S:AI(`
+/// where the descriptor we asked for renders `S:(` — so a comparison of the two
+/// spellings fails on any host that gets a label at all, i.e. an ELEVATED one.
+/// That is why this only ever reproduced on CI: a medium-integrity developer
+/// machine emits no label, so there is no SACL to stamp.
+///
+/// These two flags record how an ACL was assembled, never who may do what, so
+/// normalizing them away loses no access-control coverage. `P` is deliberately
+/// NOT stripped — assertion (3) below still requires a protected DACL.
+fn testStripAclAutoInheritFlagsAlloc(alloc: Allocator, sddl: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < sddl.len) {
+        // ACL flags only appear between an ACL introducer and its first ACE.
+        if (!isTestSddlAclIntroducer(sddl, i)) {
+            try out.append(alloc, sddl[i]);
+            i += 1;
+            continue;
+        }
+
+        try out.appendSlice(alloc, sddl[i .. i + 2]);
+        i += 2;
+        while (i < sddl.len and sddl[i] != '(' and !isTestSddlAclIntroducer(sddl, i)) {
+            if (sddl[i] == 'A' and
+                i + 1 < sddl.len and
+                (sddl[i + 1] == 'I' or sddl[i + 1] == 'R'))
+            {
+                i += 2;
+                continue;
+            }
+            try out.append(alloc, sddl[i]);
+            i += 1;
+        }
+    }
+
+    return out.toOwnedSlice(alloc);
+}
+
+fn isTestSddlAclIntroducer(sddl: []const u8, i: usize) bool {
+    return (sddl[i] == 'D' or sddl[i] == 'S') and
+        i + 1 < sddl.len and
+        sddl[i + 1] == ':';
+}
+
+test "win32 SDDL auto-inherit normalization keeps every access-bearing field" {
+    const alloc = std.testing.allocator;
+
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        // The exact shape CI produced on an elevated runner.
+        .{
+            .in = "D:P(A;;FA;;;LA)S:AI(ML;;NW;;;HI)",
+            .want = "D:P(A;;FA;;;LA)S:(ML;;NW;;;HI)",
+        },
+        // Already normalized: unchanged.
+        .{
+            .in = "D:P(A;;FA;;;LA)S:(ML;;NW;;;HI)",
+            .want = "D:P(A;;FA;;;LA)S:(ML;;NW;;;HI)",
+        },
+        // Medium integrity: no label, therefore no SACL at all.
+        .{ .in = "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)", .want = "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)" },
+        // AR as well as AI, and on both ACLs.
+        .{ .in = "D:AIAR(A;;FA;;;LA)S:AR(ML;;NW;;;HI)", .want = "D:(A;;FA;;;LA)S:(ML;;NW;;;HI)" },
+        // `P` survives -- losing it would silently allow an inheritable ACE.
+        .{ .in = "D:PAI(A;;FA;;;LA)", .want = "D:P(A;;FA;;;LA)" },
+        // Trustee aliases that merely CONTAIN A/I/R live inside ACEs, which the
+        // flag scan never enters. AN (Anonymous) and AU are the ones that matter.
+        .{ .in = "D:P(A;;FA;;;AN)(A;;FA;;;AU)", .want = "D:P(A;;FA;;;AN)(A;;FA;;;AU)" },
+        // Owner and group sections are copied through untouched.
+        .{ .in = "O:LAG:BAD:PAI(A;;FA;;;LA)", .want = "O:LAG:BAD:P(A;;FA;;;LA)" },
+    };
+
+    for (cases) |case| {
+        const got = try testStripAclAutoInheritFlagsAlloc(alloc, case.in);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(case.want, got);
+    }
+}
+
 test "win32 IPC pipe descriptor attaches the expected DACL and label" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -28428,7 +28665,13 @@ test "win32 IPC pipe descriptor attaches the expected DACL and label" {
     try std.testing.expectEqual(@as(u32, 0), status);
     defer _ = sys.LocalFree(attached.?);
 
-    const actual = try testDescriptorSddlAlloc(alloc, attached.?, information);
+    const attached_text = try testDescriptorSddlAlloc(alloc, attached.?, information);
+    defer alloc.free(attached_text);
+
+    // Only the auto-inheritance bookkeeping the object manager stamps on the
+    // attached copy is normalized away; every access-bearing field of the live
+    // descriptor is compared exactly. See testStripAclAutoInheritFlagsAlloc.
+    const actual = try testStripAclAutoInheritFlagsAlloc(alloc, attached_text);
     defer alloc.free(actual);
 
     // (1) What the pipe carries must equal what we asked for, once generic
@@ -28857,6 +29100,104 @@ test "win32 title sanitizing strips control bytes from IPC and OSC titles" {
         defer alloc.free(out);
         try std.testing.expectEqualStrings("a0mbc", out);
     }
+
+    // RAW 8-bit C1 bytes, not the two-byte UTF-8 form. An IPC payload is
+    // arbitrary bytes, so nothing forces a pipe writer to spell C1 the way
+    // the previous byte-pair check expected.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\x9b0mb\x9cc\x80d\x9fe")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a0mbcde", out);
+    }
+
+    // The bytes 0x80..0x9F are also UTF-8 CONTINUATION bytes, so stripping
+    // them at the byte level would corrupt ordinary text. U+20AC is
+    // `E2 82 AC` and U+0161 is `C5 A1`; both must survive untouched.
+    try std.testing.expect(try sanitizeTitleAlloc(alloc, "10 \u{20ac} \u{0161}") == null);
+
+    // An OVERLONG encoding of U+009B must not slip past by dodging the
+    // canonical two-byte form. `utf8Decode` rejects it, so it is dropped.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\xe0\x82\x9bb")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("ab", out);
+    }
+
+    // Invalid UTF-8 is removed rather than stored: a lone continuation byte,
+    // and a truncated lead byte at the very end of the input.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\xffb")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("ab", out);
+    }
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "ab\xc2")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("ab", out);
+    }
+
+    // A dropped unit never stalls the scan.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "\x9b\x9b\x9b")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("", out);
+    }
+}
+
+test "win32 IPC client authenticates the pipe server as the same user" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        alloc,
+        "\\\\.\\pipe\\noctty-ipc-serverauth-{d}",
+        .{sys.GetTickCount64()},
+        0,
+    );
+    defer alloc.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name_utf8);
+    defer alloc.free(pipe_name);
+
+    const server = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE |
+            c.PIPE_READMODE_BYTE |
+            win32_ipc.pipe_nowait |
+            c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        1024,
+        1024,
+        0,
+        null,
+    );
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
+
+    // `connectToIpcPipe` performs the authentication itself, so connecting
+    // to OUR OWN server succeeding is what proves the check ran and passed
+    // rather than being skipped: if the SID comparison were broken in the
+    // "reject" direction this returns `error.PipeUnreachable` instead.
+    const client = try connectToIpcPipe(pipe_name);
+    defer _ = windows.CloseHandle(client);
+
+    // And directly, so a future refactor that drops the call site still
+    // fails a test rather than silently disabling the check.
+    try std.testing.expect(ipcPipeServerIsSameUser(client));
+
+    // The comparison operates on a real, well-formed SID rather than an
+    // empty slice that would trivially compare equal.
+    var own_buf: SidBuffer align(sid_buffer_align) = undefined;
+    const own_sid = try currentUserSidBytes(&own_buf);
+    try std.testing.expect(own_sid.len >= 8);
+    try std.testing.expectEqual(@as(u8, 1), own_sid[0]); // SID revision
+
+    // NOTE: the REJECT direction cannot be exercised here. It needs a pipe
+    // server running under a different local account, which this suite
+    // cannot create. The negative case is argued from the fail-closed
+    // structure of `ipcPipeServerIsSameUser` (every error path returns
+    // false), not observed.
 }
 
 test "win32 IPC silent client read is bounded" {
