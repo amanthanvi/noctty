@@ -16668,6 +16668,7 @@ const Host = struct {
         hdc: HDC,
         client_rect: RECT,
         tab_h: i32,
+        band_bottom: i32,
         paint_top: bool,
         theme: *const ThemeColors,
     ) void {
@@ -16685,11 +16686,17 @@ const Host = struct {
 
         // Tab bar (only when visible)
         if (paint_top and tab_h > 0) {
+            // Fill the whole chrome band, not just the tab row. The tab
+            // metric and the caption metric are scaled independently and can
+            // land a pixel apart at DPIs that are not a multiple of 24 (110
+            // dpi: 45 px vs 46 px), and everything below stacks from the
+            // greater of the two. Filling only `tab_h` would leave that pixel
+            // row stale between the tab strip and the terminal.
             const tab_rect = RECT{
                 .left = 0,
                 .top = 0,
                 .right = client_rect.right,
-                .bottom = tab_h,
+                .bottom = @max(tab_h, band_bottom),
             };
             fillSolidRect(hdc, tab_rect, titlebar_theme.chrome_bg);
 
@@ -16762,13 +16769,17 @@ const Host = struct {
                 self.paintCaptionButtons(hdc, client_rect, titlebar_theme);
             }
 
+            // The separator belongs on the band boundary the terminal
+            // actually starts at, so it tracks `contentBands` rather than the
+            // tab metric alone.
+            const separator_bottom = @max(tab_h, band_bottom);
             fillSolidRect(
                 hdc,
                 .{
                     .left = 0,
-                    .top = tab_h - 1,
+                    .top = separator_bottom - 1,
                     .right = client_rect.right,
-                    .bottom = tab_h,
+                    .bottom = separator_bottom,
                 },
                 titlebar_theme.chrome_border,
             );
@@ -17784,7 +17795,7 @@ const Host = struct {
         const paint_status = paintRectVisible(hdc, ps.rcPaint, status_rect);
         const banner_y: i32 = bands.content_top + self.scaled(2);
 
-        self.paintChromeTabBar(hdc, client_rect, tab_h, paint_top, theme);
+        self.paintChromeTabBar(hdc, client_rect, tab_h, bands.overlay_top, paint_top, theme);
         if (!self.paintChromeOverlay(hdc, alloc, client_rect, tab_h, bands, paint_top, theme)) return;
         self.paintChromeContentLane(hdc, content_rect, paint_content, theme);
         self.paintChromeInspectorPanel(
@@ -18766,6 +18777,31 @@ fn titlebarTextColor(theme: *const ThemeColors, config: *const configpkg.Config)
     return theme.text_primary;
 }
 
+/// Unpack a Win32 COLORREF (0x00BBGGRR) into an RGB triple.
+fn rgbFromColorRef(color: u32) terminal.color.RGB {
+    return .{
+        .r = @truncate(color & 0xFF),
+        .g = @truncate((color >> 8) & 0xFF),
+        .b = @truncate((color >> 16) & 0xFF),
+    };
+}
+
+/// Which palette a configured titlebar background should be painted with.
+///
+/// The point of deriving a polarity at all is readability, so decide it by
+/// the readability itself rather than by a fixed luminance cutoff. A cutoff
+/// misclassifies saturated midtones: `#00C800` sits at ~0.46 perceived
+/// luminance, so `< 0.5` calls it dark and puts the dark palette's near-white
+/// glyphs on bright green at roughly 1.7:1, where the light palette's dark
+/// glyphs reach about 7.6:1. Comparing the two candidates' actual WCAG
+/// contrast against the configured background picks the readable side and
+/// still agrees with the cutoff on ordinary near-black and near-white values.
+fn titlebarBandIsDark(background: terminal.color.RGB) bool {
+    const dark_text = rgbFromColorRef(darkTheme().text_primary);
+    const light_text = rgbFromColorRef(lightTheme().text_primary);
+    return background.contrast(dark_text) >= background.contrast(light_text);
+}
+
 fn clientTitlebarTheme(
     theme: *const ThemeColors,
     config: *const configpkg.Config,
@@ -18785,11 +18821,11 @@ fn clientTitlebarTheme(
         // focus ring on a light band. `chrome_bg` stays the explicit value,
         // and `accent` stays the theme's own — `themeSurface` already adapts
         // the accent through `is_dark`.
-        result.is_dark = (terminal.color.RGB{
+        result.is_dark = titlebarBandIsDark(.{
             .r = background.r,
             .g = background.g,
             .b = background.b,
-        }).perceivedLuminance() < 0.5;
+        });
         const derived_theme = if (result.is_dark) darkTheme() else lightTheme();
         result.text_primary = derived_theme.text_primary;
         result.text_secondary = derived_theme.text_secondary;
@@ -31734,6 +31770,68 @@ test "win32 configuredHostWindowPosition requires both coordinates" {
     const position = configuredHostWindowPosition(&config).?;
     try std.testing.expectEqual(@as(i32, 120), position.x);
     try std.testing.expectEqual(@as(i32, -40), position.y);
+}
+
+// The `win32_nc_layout` tests model the tab bottom with `scaleDim`, the same
+// round-to-nearest the caption metric uses, so by construction they cannot see
+// the divergence. Production scales the tab metric through
+// `win32_chrome_state.scaled`, which truncates. Pin the gap here, where both
+// real functions are reachable.
+test "Issue150 chrome band spans both scaling policies at fractional DPI" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // 40 DIP at 110 dpi is 45.83 px: truncated 45, rounded 46.
+    const dpi: u32 = 110;
+    const tab_bottom = win32_chrome_state.scaled(host_tab_height_integrated, dpi);
+    const caption_bottom = win32_nc_layout.metricsDefault(
+        dpi,
+        host_caption_button_h,
+    ).caption_button_h;
+    try std.testing.expectEqual(@as(i32, 45), tab_bottom);
+    try std.testing.expectEqual(@as(i32, 46), caption_bottom);
+
+    // Everything below the chrome stacks from the greater of the two, so the
+    // painted band has to reach it as well. `paintChromeTabBar` fills and
+    // draws its separator through this value rather than through `tab_h`,
+    // otherwise row 45 is left stale between the tab strip and the terminal.
+    const bands = win32_nc_layout.contentBands(tab_bottom, caption_bottom, 0, 0);
+    try std.testing.expectEqual(caption_bottom, bands.overlay_top);
+    try std.testing.expectEqual(caption_bottom, bands.content_top);
+    try std.testing.expect(bands.overlay_top > tab_bottom);
+
+    // The shipped 96 dpi path is unaffected: both policies agree.
+    try std.testing.expectEqual(
+        win32_chrome_state.scaled(host_tab_height_integrated, 96),
+        win32_nc_layout.metricsDefault(96, host_caption_button_h).caption_button_h,
+    );
+}
+
+test "win32 titlebar band polarity follows readability, not a luminance cutoff" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Ordinary near-black / near-white agree with the old cutoff.
+    try std.testing.expect(titlebarBandIsDark(.{ .r = 0, .g = 0, .b = 0 }));
+    try std.testing.expect(!titlebarBandIsDark(.{ .r = 255, .g = 255, .b = 255 }));
+    try std.testing.expect(titlebarBandIsDark(.{ .r = 19, .g = 39, .b = 56 }));
+    try std.testing.expect(!titlebarBandIsDark(.{ .r = 240, .g = 241, .b = 242 }));
+
+    // Saturated midtone: perceived luminance is 0.46, so a `< 0.5` cutoff
+    // called this dark and picked near-white glyphs. Dark glyphs read far
+    // better, so the band must be treated as light.
+    const green: terminal.color.RGB = .{ .r = 0, .g = 200, .b = 0 };
+    try std.testing.expect(green.perceivedLuminance() < 0.5);
+    try std.testing.expect(!titlebarBandIsDark(green));
+    try std.testing.expect(
+        green.contrast(rgbFromColorRef(lightTheme().text_primary)) >
+            green.contrast(rgbFromColorRef(darkTheme().text_primary)),
+    );
+
+    // COLORREF packing is 0x00BBGGRR; a wrong unpack would silently invert
+    // every decision above.
+    const unpacked = rgbFromColorRef(rgb(1, 2, 3));
+    try std.testing.expectEqual(@as(u8, 1), unpacked.r);
+    try std.testing.expectEqual(@as(u8, 2), unpacked.g);
+    try std.testing.expectEqual(@as(u8, 3), unpacked.b);
 }
 
 test "win32 titlebar colors honor ghostty overrides" {
