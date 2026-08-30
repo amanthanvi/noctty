@@ -3433,24 +3433,48 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
 
     // `launch-layout` is CLI-only. A configuration file is read on every
     // start, so honoring it from a file would replay the saved layout on each
-    // launch and suppress ordinary session restore. Any value a file sets is
-    // discarded here; a value already present came from the command line
+    // launch and suppress ordinary session restore. Discard both the parsed
+    // value and the replay step the file appended: `loadTheme` and
+    // `changeConditionalState` re-run `_replay_steps` through `loadIter`,
+    // which does not pass through here, so leaving the step behind would
+    // resurrect the value. A value already present came from the command line
     // (`loadCliArgs` runs before `loadRecursiveFiles`) and is preserved.
     const cli_launch_layout = self.@"launch-layout";
+    const replay_len_before = self._replay_steps.items.len;
     try self.loadIter(alloc, &iter);
-    if (self.@"launch-layout") |name| {
-        const from_file = if (cli_launch_layout) |prior|
-            !std.mem.eql(u8, name, prior)
-        else
-            true;
-        if (from_file) log.warn(
-            "{s}: ignoring launch-layout={s}; it can only be set on the command line",
-            .{ path, name },
-        );
-    }
+    if (dropFileLaunchLayoutSteps(self, replay_len_before)) |name| log.warn(
+        "{s}: ignoring launch-layout={s}; it can only be set on the command line",
+        .{ path, name },
+    );
     self.@"launch-layout" = cli_launch_layout;
 
     try self.expandPaths(std.fs.path.dirname(path).?);
+}
+
+/// Remove the `--launch-layout` steps a configuration file appended to the
+/// replay log at or after `from`, returning the last value it set. Replay
+/// (`loadTheme`, `changeConditionalState`) feeds steps straight to `loadIter`,
+/// so a step left behind would restore a value the caller just discarded.
+fn dropFileLaunchLayoutSteps(self: *Config, from: usize) ?[]const u8 {
+    const prefix = "--launch-layout";
+    var found: ?[]const u8 = null;
+    var i = self._replay_steps.items.len;
+    while (i > from) {
+        i -= 1;
+        const arg: []const u8 = switch (self._replay_steps.items[i]) {
+            .arg => |value| value,
+            .conditional_arg => |value| value.arg,
+            else => continue,
+        };
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        if (arg.len > prefix.len and arg[prefix.len] != '=') continue;
+        // Iterating backwards, so the first match is the file's last word.
+        if (found == null) {
+            found = if (arg.len > prefix.len) arg[prefix.len + 1 ..] else "";
+        }
+        _ = self._replay_steps.orderedRemove(i);
+    }
+    return found;
 }
 
 test "launch-layout is ignored in configuration files" {
@@ -3471,6 +3495,24 @@ test "launch-layout is ignored in configuration files" {
         try cfg.finalize();
 
         try testing.expect(cfg.@"launch-layout" == null);
+
+        // And it must not come back through replay. `finalize` -> `loadTheme`
+        // and `changeConditionalState` both re-run `_replay_steps` through
+        // `loadIter`, which does not pass through `loadReader`.
+        for (cfg._replay_steps.items) |step| {
+            const arg: []const u8 = switch (step) {
+                .arg => |value| value,
+                .conditional_arg => |value| value.arg,
+                else => continue,
+            };
+            try testing.expect(!std.mem.startsWith(u8, arg, "--launch-layout"));
+        }
+
+        var replayed = try Config.default(alloc);
+        defer replayed.deinit();
+        var replay_it = Replay.iterator(cfg._replay_steps.items, &replayed);
+        try replayed.loadIter(alloc, &replay_it);
+        try testing.expect(replayed.@"launch-layout" == null);
     }
 
     // A command-line value survives a later file load (`loadRecursiveFiles`
