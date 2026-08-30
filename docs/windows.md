@@ -574,10 +574,16 @@ scrollback, and `0`/`$` to jump within a line. `y` or Enter copies and exits;
 
 Only the keyboard is gated. The mouse keeps working normally in copy mode: a
 click replaces the copy-mode selection, and if the running program has enabled
-mouse reporting it still receives mouse escape sequences.
+mouse reporting it still receives mouse escape sequences. Dragging files or
+text onto the window is a mouse gesture too, so a drop still pastes into the
+running program while copy mode is active — through the usual
+`clipboard-paste-protection` confirmation, not around it.
 
 These bindings live in the `copy_mode` key table, so they can be replaced
-with normal `keybind = copy_mode/...` entries.
+with normal `keybind = copy_mode/...` entries. Note that `copy_mode` is one
+mode, not a re-enterable table: activating `copy_mode` again from a nested
+table does not stack a second copy mode, and leaving copy mode unwinds every
+table that was pushed on top of it.
 
 ## Quick terminal and global hotkeys
 

@@ -3076,29 +3076,17 @@ pub const TerminalProvider = struct {
         const self = fromText(self_text);
         out.* = com.SupportedTextSelection_None;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.state.role == .edit) {
-            out.* = com.SupportedTextSelection_Single;
-            return com.S_OK;
-        }
 
-        // A terminal advertises a selection only while one actually exists
-        // (copy mode, or a mouse drag). Clients that honor `None` never call
-        // GetSelection, so reporting `None` while GetSelection returns a real
-        // range would hide the copy-mode selection from them.
-        if (self.state.role == .terminal) {
-            const snapshot = self.terminalSnapshot() catch |err| return switch (err) {
-                error.ElementNotAvailable => com.UIA_E_ELEMENTNOTAVAILABLE,
-                else => com.E_OUTOFMEMORY,
-            };
-            // Unlike GetSelection, nothing here takes ownership of the
-            // snapshot's document text or geometry, so free all three.
-            defer {
-                self.alloc.free(snapshot.visible_text);
-                self.alloc.free(snapshot.document_text);
-                if (snapshot.geometry) |geometry| self.alloc.free(geometry.cell_for_byte);
-            }
-            if (snapshot.has_selection) out.* = com.SupportedTextSelection_Single;
-        }
+        // This is a capability, not a snapshot of the current selection.
+        // Clients query it once, cache the answer and use it to decide whether
+        // GetSelection is worth calling at all, so answering `None` because
+        // nothing is selected right now permanently hides every later
+        // selection -- copy mode and mouse drags both -- from them. Both roles
+        // support exactly one selection, always: an edit box a mutable one, a
+        // terminal a read-only one.
+        out.* = switch (self.state.role) {
+            .edit, .terminal => com.SupportedTextSelection_Single,
+        };
         return com.S_OK;
     }
 
@@ -5086,10 +5074,13 @@ test "TerminalProvider GetSelection reports the caret range and real selections"
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
 
+    // The capability does not depend on there being a selection right now.
+    // Clients cache this answer, so it has to describe the control, not the
+    // current snapshot.
     var selection: i32 = -1;
     const hr = TerminalProvider.get_SupportedTextSelection(&p.text_iface, &selection);
     try std.testing.expectEqual(com.S_OK, hr);
-    try std.testing.expectEqual(com.SupportedTextSelection_None, selection);
+    try std.testing.expectEqual(com.SupportedTextSelection_Single, selection);
 
     // No user selection: the documented contract is a degenerate range at
     // the insertion point, not an empty array. The terminal always has one.
@@ -6332,8 +6323,8 @@ test "terminal provider exposes an active read-only selection" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    // A terminal reporting a real selection range must also advertise that it
-    // supports one; clients honoring `None` never call GetSelection.
+    // A terminal always advertises that it supports one selection; clients
+    // honoring `None` never call GetSelection.
     var supported: i32 = com.SupportedTextSelection_None;
     try std.testing.expectEqual(
         com.S_OK,

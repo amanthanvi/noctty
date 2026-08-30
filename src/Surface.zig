@@ -3440,21 +3440,26 @@ fn copyModeTableIsActive(self: *const Surface) bool {
     return stack.len > 0 and stack[stack.len - 1].set == table;
 }
 
-/// How many tables must be popped to remove the copy-mode table from the
+/// How many tables must be popped to remove every copy-mode entry from the
 /// stack, or 0 if it is not on the stack at all.
 ///
 /// Copy mode is not necessarily innermost: users can activate further tables
 /// from within it (`keybind = copy_mode/t=activate_key_table:foo`), which
 /// buries it. Popping only once in that case removes the wrong table and
 /// strands copy_mode.
+///
+/// The search runs outward-in, from the bottom of the stack, so a stack that
+/// contains copy_mode more than once (reachable through a custom
+/// `activate_key_table:copy_mode` binding) is unwound completely.
+/// `copy_mode_active` is a single flag, so exactly one copy mode exists no
+/// matter how many times the table was pushed; leaving a second copy of it
+/// behind with the flag cleared is the wedge this count exists to prevent.
 fn copyModePopCount(
     stack: []const KeyTableEntry,
     table: *const input.Binding.Set,
 ) usize {
-    var i: usize = stack.len;
-    while (i > 0) {
-        i -= 1;
-        if (stack[i].set == table) return stack.len - i;
+    for (stack, 0..) |entry, i| {
+        if (entry.set == table) return stack.len - i;
     }
     return 0;
 }
@@ -3501,15 +3506,29 @@ test "copy mode pops every table down to and including copy_mode" {
         }, copy_mode),
     );
 
-    // Re-entered copy mode: stop at the innermost occurrence so the outer one
-    // is left for its own exit, keeping one pop-group per toggle.
+    // Copy mode pushed twice (a custom `activate_key_table:copy_mode` inside
+    // a table reached from copy mode). Stopping at the innermost occurrence
+    // would leave the outer one on the stack with `copy_mode_active` cleared,
+    // and its catch_all would then eat every key once the tables above it
+    // were popped. Unwind all of it.
     try testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 4),
         copyModePopCount(&.{
             .{ .set = copy_mode, .once = false },
             .{ .set = other, .once = false },
             .{ .set = copy_mode, .once = false },
             .{ .set = inner, .once = false },
+        }, copy_mode),
+    );
+
+    // A table activated before copy mode still survives a duplicated entry.
+    try testing.expectEqual(
+        @as(usize, 3),
+        copyModePopCount(&.{
+            .{ .set = other, .once = false },
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = false },
+            .{ .set = copy_mode, .once = false },
         }, copy_mode),
     );
 }
@@ -3565,10 +3584,10 @@ fn startCopyMode(self: *Surface) anyerror!bool {
 fn toggleCopyMode(self: *Surface) anyerror!bool {
     if (!self.copy_mode_active) return try self.startCopyMode();
 
-    // Pop every table down to and including copy_mode, not just one. A user
-    // can activate another table from inside copy mode, which buries
-    // copy_mode; popping once would remove only the inner table and strand
-    // copy_mode on the stack with `copy_mode_active` cleared. Its
+    // Pop every table down to and including the outermost copy_mode, not just
+    // one. A user can activate another table from inside copy mode, which
+    // buries copy_mode; popping once would remove only the inner table and
+    // strand copy_mode on the stack with `copy_mode_active` cleared. Its
     // `catch_all = ignore` then swallows every key — including the binding
     // that would exit — while `startCopyMode` refuses because the stack is
     // non-empty, wedging the keyboard until a config reload.
