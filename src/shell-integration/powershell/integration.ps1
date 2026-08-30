@@ -5,8 +5,11 @@
 # scope that dot-sources this script, never in the environment: profiles run
 # before our -Command does, so an environment variable would already have been
 # inherited by anything a profile spawned. Get-Variable keeps this safe under
-# Set-StrictMode when the variable is absent (manual dot-sourcing).
-$ghosttyUtf8Console = Get-Variable -Name '__ghostty_utf8_console' -ValueOnly -ErrorAction SilentlyContinue
+# Set-StrictMode when the variable is absent (manual dot-sourcing). -Scope Local
+# is explicit so a profile's $PSDefaultParameterValues['Get-Variable:Scope']
+# cannot redirect the lookup to a global of the same name: an explicitly passed
+# parameter always wins over a default-parameter value.
+$ghosttyUtf8Console = Get-Variable -Name '__ghostty_utf8_console' -Scope Local -ValueOnly -ErrorAction SilentlyContinue
 
 if ($ghosttyUtf8Console) {
     try {

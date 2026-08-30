@@ -3184,8 +3184,8 @@ keybind: Keybinds = .{},
 ///
 ///   * `auto` (default) - Enable UTF-8 unless either the machine ANSI or OEM
 ///     code page is a legacy CJK page: 932 (Shift-JIS), 936 (GBK), 949
-///     (Unified Hangul Code), or 950 (Big5). Those code pages are left
-///     unchanged to avoid breaking programs that depend on them.
+///     (Unified Hangul Code), 950 (Big5), or 1361 (Johab). Those code pages
+///     are left unchanged to avoid breaking programs that depend on them.
 ///   * `always` - Enable UTF-8 even when a legacy CJK code page is active.
 ///   * `never` - Do not set an environment signal, change Command Prompt
 ///     arguments, or alter PowerShell console encodings.

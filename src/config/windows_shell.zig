@@ -29,7 +29,9 @@ pub const DefaultShell = enum {
 pub const ProfileKind = windows_shell_types.ProfileKind;
 pub const Utf8Console = windows_shell_types.Utf8Console;
 
-const legacy_cjk_code_pages = [_]u32{ 932, 936, 949, 950 };
+/// ANSI/OEM code pages where forcing 65001 would mojibake legacy programs.
+/// 932 Shift-JIS, 936 GBK, 949 Unified Hangul Code, 950 Big5, 1361 Johab.
+const legacy_cjk_code_pages = [_]u32{ 932, 936, 949, 950, 1361 };
 
 pub fn shouldApplyUtf8Console(
     mode: Utf8Console,
@@ -469,8 +471,10 @@ fn classifyCmdArg(arg: []const u8) CmdArg {
             'c', 'r', 'k' => return .unsupported,
 
             // Valueless options: ANSI/Unicode piped output, quiet echo,
-            // AutoRun suppression, and quoting mode.
-            'a', 'u', 'q', 'd', 's' => i += 1,
+            // AutoRun suppression, and quoting mode. `/x` and `/y` are the
+            // OS/2-compatibility spellings of `/e:on` and `/e:off`, which
+            // `cmd /?` documents and which take no value.
+            'a', 'u', 'q', 'd', 's', 'x', 'y' => i += 1,
 
             // `/e:on`, `/f:off`, `/v:on`.
             'e', 'f', 'v' => {
@@ -2115,7 +2119,7 @@ test "utf8-console decision covers modes and guarded code pages" {
         try testing.expectEqual(case.utf8, shouldApplyUtf8Console(case.mode, 65001, 65001));
     }
 
-    for ([_]u32{ 932, 936, 949, 950 }) |code_page| {
+    for ([_]u32{ 932, 936, 949, 950, 1361 }) |code_page| {
         try testing.expect(!shouldApplyUtf8Console(.auto, code_page, 437));
         try testing.expect(!shouldApplyUtf8Console(.auto, 1252, code_page));
     }
@@ -2195,10 +2199,14 @@ test "classifyCmdArg separates option-only switches from payload switches" {
     const testing = std.testing;
 
     for ([_][]const u8{
-        "/d",      "/Q",     "/a",    "/u",      "/s",
-        "/d/q",    "/D/Q/A", "/e:on", "/E:OFF",  "/f:off",
-        "/v:on",   "/t:0A",  "/t:f",  "/d/v:on", "/v:on/q",
+        "/d",      "/Q",      "/a",    "/u",      "/s",
+        "/d/q",    "/D/Q/A",  "/e:on", "/E:OFF",  "/f:off",
+        "/v:on",   "/t:0A",   "/t:f",  "/d/v:on", "/v:on/q",
         "/t:0a/q", "/s/d",
+        // `cmd /?`: "for compatibility reasons, /X is the same as /E:ON,
+        // /Y is the same as /E:OFF". Both are valueless.
+           "/x",    "/Y",      "/x/q",
+        "/d/y",    "/x/v:on",
     }) |arg| {
         try testing.expectEqual(CmdArg.option, classifyCmdArg(arg));
     }
