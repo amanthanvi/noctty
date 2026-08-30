@@ -407,6 +407,13 @@ move fails, the original file is left untouched. Older builds parse the
 schema strictly, so downgrading while a saved state contains `scrollback`
 can quarantine that file as `.corrupt`.
 
+A snapshot that merely exceeds the limits above (too many lines, a line over
+16 KiB, or the shared budget) is dropped on load and the window's layout still
+comes back. A snapshot of the wrong shape, such as a hand-edited
+`"lines": "not-an-array"`, makes the whole document malformed and takes the
+quarantine path instead, so that window's layout is not restored. Nothing is
+deleted either way.
+
 Three consecutive pre-ready startup failures select an ephemeral safe mode:
 built-in config, no session restore. `noctty --safe-mode` picks it for one
 launch. Safe mode never overwrites your config or quarantined state.
