@@ -14,12 +14,23 @@ const GUID = windows.GUID;
 const HANDLE = windows.HANDLE;
 const HRESULT = windows.HRESULT;
 const HWND = windows.HWND;
+const LONG = windows.LONG;
 
 pub const WM_POWERBROADCAST: windows.UINT = 0x0218;
 pub const PBT_POWERSETTINGCHANGE: windows.WPARAM = 0x8013;
 
 const DEVICE_NOTIFY_WINDOW_HANDLE: DWORD = 0;
 const DWMWA_CLOAKED: DWORD = 14;
+
+/// DWM cloak transitions (virtual-desktop switches, shell show/hide
+/// animations, suspended UWP hosts) have NO window message. The documented
+/// signal is this WinEvent pair, so a cloak-aware presenter has to hook it.
+const EVENT_OBJECT_CLOAKED: DWORD = 0x8017;
+const EVENT_OBJECT_UNCLOAKED: DWORD = 0x8018;
+const WINEVENT_OUTOFCONTEXT: DWORD = 0x0000;
+const OBJID_WINDOW: LONG = 0;
+const CHILDID_SELF: LONG = 0;
+
 const POLL_INTERVAL_MS: u64 = 30 * std.time.ms_per_s;
 /// Focused, non-saver surfaces keep this cadence, which must stay equal to
 /// the renderer thread's DRAW_INTERVAL (asserted there at comptime).
@@ -76,6 +87,27 @@ extern "dwmapi" fn DwmGetWindowAttribute(
     value_size: DWORD,
 ) callconv(.winapi) HRESULT;
 
+const WinEventProc = *const fn (
+    hook: ?HANDLE,
+    event: DWORD,
+    hwnd: ?HWND,
+    id_object: LONG,
+    id_child: LONG,
+    event_thread: DWORD,
+    event_time_ms: DWORD,
+) callconv(.winapi) void;
+
+extern "user32" fn SetWinEventHook(
+    event_min: DWORD,
+    event_max: DWORD,
+    module: ?HANDLE,
+    callback: WinEventProc,
+    process_id: DWORD,
+    thread_id: DWORD,
+    flags: DWORD,
+) callconv(.winapi) ?HANDLE;
+extern "user32" fn UnhookWinEvent(hook: HANDLE) callconv(.winapi) BOOL;
+
 const on_battery_bit: u8 = 1 << 0;
 const saver_bit: u8 = 1 << 1;
 
@@ -107,14 +139,108 @@ pub const HostVisibility = struct {
     cloaked: bool,
 };
 
-/// Owns the two notification registrations associated with one host HWND.
+/// Called on the UI thread when DWM reports that one of our own top-level
+/// windows was cloaked or uncloaked. Installed by the apprt, which owns the
+/// HWND -> host mapping this module deliberately knows nothing about.
+pub const CloakEventHandler = *const fn (hwnd: HWND) void;
+
+/// All of the following are touched only from the UI/pump thread: hosts are
+/// created and destroyed there, and `WINEVENT_OUTOFCONTEXT` callbacks are
+/// delivered through that same thread's message queue. Plain (non-atomic)
+/// state is therefore correct here; see `cloakWinEventProc`.
+var cloak_handler: ?CloakEventHandler = null;
+var cloak_hook: ?HANDLE = null;
+var cloak_hook_refs: usize = 0;
+
+/// Install (or clear) the cloak handler. Safe to call before any host exists;
+/// events that arrive with no handler installed are dropped.
+pub fn setCloakEventHandler(handler: ?CloakEventHandler) void {
+    cloak_handler = handler;
+}
+
+/// Pure WinEvent filter. The hook range also carries events for accessible
+/// child objects, which are not window cloak transitions and must be ignored.
+pub fn isHostCloakEvent(event: DWORD, id_object: LONG, id_child: LONG) bool {
+    if (event != EVENT_OBJECT_CLOAKED and event != EVENT_OBJECT_UNCLOAKED) return false;
+    return id_object == OBJID_WINDOW and id_child == CHILDID_SELF;
+}
+
+fn cloakWinEventProc(
+    hook: ?HANDLE,
+    event: DWORD,
+    hwnd: ?HWND,
+    id_object: LONG,
+    id_child: LONG,
+    event_thread: DWORD,
+    event_time_ms: DWORD,
+) callconv(.winapi) void {
+    _ = hook;
+    _ = event_thread;
+    _ = event_time_ms;
+    if (!isHostCloakEvent(event, id_object, id_child)) return;
+    const target = hwnd orelse return;
+    const handler = cloak_handler orelse return;
+    // The hook is registered WINEVENT_OUTOFCONTEXT and scoped to this
+    // thread, so Windows delivers this from inside our own message pump.
+    // We are on the UI thread and may touch host state directly; nothing
+    // here may be moved to another thread.
+    handler(target);
+}
+
+/// Reference-counted because one thread-scoped hook already covers every host
+/// window on the pump thread; registering one per host would multiply every
+/// callback by the window count.
+fn acquireCloakHook() void {
+    cloak_hook_refs += 1;
+    if (cloak_hook != null or cloak_hook_refs != 1) return;
+    cloak_hook = SetWinEventHook(
+        EVENT_OBJECT_CLOAKED,
+        EVENT_OBJECT_UNCLOAKED,
+        null,
+        cloakWinEventProc,
+        sys.GetCurrentProcessId(),
+        sys.GetCurrentThreadId(),
+        WINEVENT_OUTOFCONTEXT,
+    );
+    if (cloak_hook == null) {
+        // Degrade to the message-driven refreshes (WM_ACTIVATE,
+        // WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WM_EXITSIZEMOVE) rather than
+        // failing window creation.
+        log.warn(
+            "DWM cloak notifications unavailable err={}",
+            .{windows.kernel32.GetLastError()},
+        );
+    }
+}
+
+fn releaseCloakHook() void {
+    if (cloak_hook_refs == 0) return;
+    cloak_hook_refs -= 1;
+    if (cloak_hook_refs != 0) return;
+    if (cloak_hook) |hook| {
+        if (UnhookWinEvent(hook) == 0) {
+            log.warn(
+                "failed to unhook DWM cloak notifications err={}",
+                .{windows.kernel32.GetLastError()},
+            );
+        }
+        cloak_hook = null;
+    }
+}
+
+/// Owns the power notification registrations and the shared cloak WinEvent
+/// reference associated with one host HWND.
 pub const Notifications = struct {
     acdc: ?HANDLE = null,
     saver: ?HANDLE = null,
     energy_saver: ?HANDLE = null,
+    /// Guards against the second `deinit` (WM_DESTROY plus Host.deinit)
+    /// dropping a reference twice, matching the handle fields' reset below.
+    cloak_hook_held: bool = false,
 
     pub fn init(hwnd: HWND) Notifications {
         pollIfStale();
+        acquireCloakHook();
 
         const acdc = RegisterPowerSettingNotification(
             @ptrCast(hwnd),
@@ -145,10 +271,16 @@ pub const Notifications = struct {
             log.debug("energy-saver notifications unavailable err={}", .{windows.kernel32.GetLastError()});
         }
 
-        return .{ .acdc = acdc, .saver = saver, .energy_saver = energy_saver };
+        return .{
+            .acdc = acdc,
+            .saver = saver,
+            .energy_saver = energy_saver,
+            .cloak_hook_held = true,
+        };
     }
 
     pub fn deinit(self: *Notifications) void {
+        if (self.cloak_hook_held) releaseCloakHook();
         if (self.acdc) |handle| {
             if (UnregisterPowerSettingNotification(handle) == 0) {
                 log.warn("failed to unregister AC/DC power notification err={}", .{windows.kernel32.GetLastError()});
@@ -245,7 +377,18 @@ pub fn snapshot() Snapshot {
 /// missed. The atomic claim ensures calls cannot query more often than once per
 /// 30 seconds across all renderer threads.
 pub fn pollIfStale() void {
-    const now = sys.GetTickCount64();
+    pollIfStaleWith(sys.GetTickCount64(), readSystemPowerStatus);
+}
+
+/// Reader indirection so the slot-accounting policy above can be tested
+/// without a real `GetSystemPowerStatus`.
+const PowerStatusReader = *const fn (status: *SYSTEM_POWER_STATUS) bool;
+
+fn readSystemPowerStatus(status: *SYSTEM_POWER_STATUS) bool {
+    return GetSystemPowerStatus(status) != 0;
+}
+
+fn pollIfStaleWith(now: u64, read: PowerStatusReader) void {
     var previous = last_poll_tick_ms.load(.acquire);
     if (previous != 0 and now -| previous < POLL_INTERVAL_MS) return;
     while (true) {
@@ -262,7 +405,7 @@ pub fn pollIfStale() void {
     // next 30 seconds of fallback, so hand the slot back on failure.
     const generation = push_generation.load(.acquire);
     var raw: SYSTEM_POWER_STATUS = undefined;
-    if (GetSystemPowerStatus(&raw) == 0) {
+    if (!read(&raw)) {
         last_poll_tick_ms.store(previous, .release);
         return;
     }
@@ -270,9 +413,7 @@ pub fn pollIfStale() void {
     // A WM_POWERBROADCAST push that landed while we were inside the
     // syscall is strictly fresher than what we just read. Drop the poll
     // rather than overwrite it; the next poll or push corrects us anyway.
-    const value = parseSystemPowerStatus(raw, snapshot());
-    if (push_generation.load(.acquire) != generation) return;
-    publishSnapshot(value);
+    publishPolledSnapshot(parseSystemPowerStatus(raw, snapshot()), generation);
 }
 
 /// Monotonic millisecond clock shared with Win32 notification and visibility
@@ -360,8 +501,25 @@ fn unpackSnapshot(bits: u8) Snapshot {
     };
 }
 
-fn publishSnapshot(value: Snapshot) void {
-    snapshot_bits.store(packSnapshot(value), .release);
+/// Publish a polled snapshot only if no notification landed since the caller
+/// sampled `generation`.
+///
+/// A plain store guarded by a preceding generation load is NOT enough: a push
+/// can bump the generation and complete its own update in the window between
+/// that load and the store, and the full-byte store would then erase it. The
+/// compare-exchange closes that window. `publishSetting` bumps the generation
+/// BEFORE it mutates the byte, so any push whose write could land after ours
+/// has already made the generation check below fail, and any push that lands
+/// between our load and our exchange makes the exchange itself fail and sends
+/// us back through that check.
+fn publishPolledSnapshot(value: Snapshot, generation: u32) void {
+    const next = packSnapshot(value);
+    var current = snapshot_bits.load(.acquire);
+    while (true) {
+        if (push_generation.load(.acquire) != generation) return;
+        if (current == next) return;
+        current = snapshot_bits.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return;
+    }
 }
 
 fn publishSetting(update: SettingUpdate) void {
@@ -492,12 +650,28 @@ test "power render policy preserves focused non-saver pacing" {
         .{ .on_battery = false, .is_saver = false },
         config,
     ));
+    // Battery alone is NOT a saver trigger. `auto` is documented in
+    // Config.zig ("Battery Saver is active, or ... Energy Saver is active")
+    // and docs/windows.md as following the saver signals only, so an
+    // unplugged laptop with saver off keeps its full cadence, focused or not.
     try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
         true,
         true,
         .{ .on_battery = true, .is_saver = false },
         config,
     ));
+    // 60 fps here so the expected value distinguishes the unfocused cap (17)
+    // from saver pacing (34) instead of colliding with it at 30 fps.
+    var sixty = config;
+    sixty.unfocused_render_fps = 60;
+    try std.testing.expectEqual(@as(?u64, 17), minimumPresentIntervalMs(
+        false,
+        true,
+        .{ .on_battery = true, .is_saver = false },
+        sixty,
+    ));
+    try std.testing.expect(!saverRenderingActive(.auto, .{ .on_battery = true, .is_saver = false }));
+    try std.testing.expect(saverRenderingActive(.auto, .{ .on_battery = false, .is_saver = true }));
     try std.testing.expectEqual(@as(?u64, null), minimumPresentIntervalMs(
         true,
         false,
@@ -554,6 +728,98 @@ test "power render policy caps saver and unfocused surfaces" {
         .{ .is_saver = true },
         forced,
     ));
+}
+
+fn resetPowerGlobalsForTest() void {
+    last_poll_tick_ms.store(0, .release);
+    snapshot_bits.store(0, .release);
+    push_generation.store(0, .release);
+}
+
+test "power poll claims the 30 s slot only on a successful read" {
+    const readers = struct {
+        var calls: usize = 0;
+
+        fn fail(status: *SYSTEM_POWER_STATUS) bool {
+            calls += 1;
+            status.* = std.mem.zeroes(SYSTEM_POWER_STATUS);
+            return false;
+        }
+
+        fn ok(status: *SYSTEM_POWER_STATUS) bool {
+            calls += 1;
+            status.* = .{
+                .ACLineStatus = 0,
+                .BatteryFlag = 1,
+                .BatteryLifePercent = 50,
+                .SystemStatusFlag = 1,
+                .BatteryLifeTime = 0,
+                .BatteryFullLifeTime = 0,
+            };
+            return true;
+        }
+    };
+
+    resetPowerGlobalsForTest();
+    defer resetPowerGlobalsForTest();
+
+    // A failed query must hand the slot back instead of costing the next
+    // 30 seconds of fallback coverage.
+    readers.calls = 0;
+    pollIfStaleWith(1_000, readers.fail);
+    try std.testing.expectEqual(@as(usize, 1), readers.calls);
+    try std.testing.expectEqual(@as(u64, 0), last_poll_tick_ms.load(.acquire));
+
+    // ...so the very next caller still gets to poll.
+    readers.calls = 0;
+    pollIfStaleWith(1_001, readers.ok);
+    try std.testing.expectEqual(@as(usize, 1), readers.calls);
+    try std.testing.expectEqual(@as(u64, 1_001), last_poll_tick_ms.load(.acquire));
+    try std.testing.expectEqual(
+        Snapshot{ .on_battery = true, .is_saver = true },
+        snapshot(),
+    );
+
+    // A successful query does hold the slot for the whole interval.
+    readers.calls = 0;
+    pollIfStaleWith(1_002, readers.ok);
+    try std.testing.expectEqual(@as(usize, 0), readers.calls);
+    pollIfStaleWith(1_001 + POLL_INTERVAL_MS, readers.ok);
+    try std.testing.expectEqual(@as(usize, 1), readers.calls);
+}
+
+test "power poll publication yields to a notification that raced it" {
+    resetPowerGlobalsForTest();
+    defer resetPowerGlobalsForTest();
+
+    // The push lands while the poll is still inside the status syscall: it
+    // bumps the generation and wins the byte, and the poll must not undo it.
+    const raced = push_generation.load(.acquire);
+    publishSetting(.{ .is_saver = true });
+    publishPolledSnapshot(.{ .on_battery = true, .is_saver = false }, raced);
+    try std.testing.expectEqual(
+        Snapshot{ .on_battery = false, .is_saver = true },
+        snapshot(),
+    );
+
+    // With no racing push the poll publishes normally.
+    const quiet = push_generation.load(.acquire);
+    publishPolledSnapshot(.{ .on_battery = true, .is_saver = false }, quiet);
+    try std.testing.expectEqual(
+        Snapshot{ .on_battery = true, .is_saver = false },
+        snapshot(),
+    );
+}
+
+test "power cloak winevent filter accepts only window-level cloak transitions" {
+    try std.testing.expect(isHostCloakEvent(EVENT_OBJECT_CLOAKED, OBJID_WINDOW, CHILDID_SELF));
+    try std.testing.expect(isHostCloakEvent(EVENT_OBJECT_UNCLOAKED, OBJID_WINDOW, CHILDID_SELF));
+    // Accessible child/sub-objects share the hooked event range.
+    try std.testing.expect(!isHostCloakEvent(EVENT_OBJECT_UNCLOAKED, OBJID_WINDOW, 3));
+    try std.testing.expect(!isHostCloakEvent(EVENT_OBJECT_CLOAKED, -4, CHILDID_SELF));
+    // Neighbouring EVENT_OBJECT_* values must not refresh visibility.
+    try std.testing.expect(!isHostCloakEvent(EVENT_OBJECT_CLOAKED - 1, OBJID_WINDOW, CHILDID_SELF));
+    try std.testing.expect(!isHostCloakEvent(EVENT_OBJECT_UNCLOAKED + 1, OBJID_WINDOW, CHILDID_SELF));
 }
 
 test "power visibility policy rejects hidden minimized and cloaked hosts" {

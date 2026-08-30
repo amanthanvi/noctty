@@ -1570,6 +1570,10 @@ pub const App = struct {
             .launcher_profile_target = detectDefaultProfileTarget(core_app.alloc),
             .startup_profile_picker = detectStartupProfilePicker(core_app.alloc),
         };
+        // Install before any host window exists, so the very first
+        // SetWinEventHook registration already has somewhere to deliver.
+        cloak_event_app = self;
+        win32_power.setCloakEventHandler(&onHostCloakEvent);
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
@@ -1887,6 +1891,10 @@ pub const App = struct {
             self.shell_compositor.deinit();
             self.shell_compositor_initialized = false;
         }
+        // After destroyAllWindows: every Host has released its cloak-hook
+        // reference by now, so no further callback can reach a freed App.
+        win32_power.setCloakEventHandler(null);
+        cloak_event_app = null;
         self.hosts.deinit(self.core_app.alloc);
         self.windows.deinit(self.core_app.alloc);
         self.global_hotkeys.deinit(self.core_app.alloc);
@@ -17620,6 +17628,29 @@ fn getHost(hwnd: HWND) ?*Host {
     return windowData(Host, hwnd);
 }
 
+/// Target of the DWM cloak/uncloak WinEvent hook. Set for the lifetime of the
+/// App so the callback can resolve an HWND without a global `getHost`, which
+/// would be unsafe here: other window classes in this apprt store unrelated
+/// payloads in `GWLP_USERDATA`, and the hook sees every window on this thread.
+var cloak_event_app: ?*App = null;
+
+/// Runs on the UI thread (WINEVENT_OUTOFCONTEXT delivers through our own
+/// message pump), so it may touch host state directly.
+///
+/// A cloak transition has no window message, so without this a virtual-desktop
+/// switch that uncloaks a background window would leave `surfaces_visible`
+/// false; hidden surfaces skip rendering entirely, so nothing would repair it
+/// until an unrelated message arrived.
+fn onHostCloakEvent(hwnd: HWND) void {
+    const app = cloak_event_app orelse return;
+    for (app.hosts.items) |host| {
+        const host_hwnd = host.hwnd orelse continue;
+        if (host_hwnd != hwnd) continue;
+        host.refreshSurfaceVisibility();
+        return;
+    }
+}
+
 fn refocusActiveSurface(host: *Host) void {
     if (host.activeSurface()) |surface| {
         if (surface.hwnd) |surface_hwnd| _ = sys.SetFocus(surface_hwnd);
@@ -18394,12 +18425,12 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
         c.WM_ACTIVATE => {
             // Cloak/uncloak (virtual-desktop switches, shell animations)
-            // has NO documented window message -- the documented signal is
-            // the EVENT_OBJECT_CLOAKED/UNCLOAKED WinEvent, which would need
-            // a SetWinEventHook and is the principled fix. Until then, a
-            // cloaked host renders nothing, so refresh on activation and on
-            // show/hide as well to guarantee a self-healing path back to
-            // visible rather than a permanently frozen window.
+            // has NO window message -- the documented signal is the
+            // EVENT_OBJECT_CLOAKED/UNCLOAKED WinEvent, which
+            // `win32_power.Notifications` now hooks. This refresh is the
+            // belt-and-braces path for a missed or unavailable hook: a
+            // cloaked host renders nothing, so a stale `surfaces_visible`
+            // would otherwise mean a permanently frozen window.
             if (host) |v| v.refreshSurfaceVisibility();
             if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {

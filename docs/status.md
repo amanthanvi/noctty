@@ -143,6 +143,11 @@ and lands incrementally.
   `ghostty-org/ghostty`.
 - Crash capture is local-only, and some hard-abort paths may still
   terminate before Windows can produce a dump.
+- Power- and visibility-aware render pacing has not been exercised on a
+  machine with a battery, and the DWM cloak/uncloak WinEvent path has not
+  been observed across a real virtual-desktop switch. Both are argued from
+  the documented Win32 contracts and covered by unit tests over the pure
+  policy and event-filter functions only.
 
 ## Out of scope
 

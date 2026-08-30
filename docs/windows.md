@@ -127,10 +127,27 @@ and defaults to `30`. Values below `1` are treated as `1`; values above
 often than every 8 ms.
 `power-saver-rendering` accepts `auto`, `on`, or `off` and defaults to
 `auto`: `auto` follows Windows Battery Saver or Energy Saver, `on` forces
-saver pacing, and `off` disables it. Focused surfaces retain their normal
-cadence when saver pacing is inactive. Saver pacing caps presentation at
-about 30 fps. Minimized and DWM-cloaked host windows do not present until
-they become visible again.
+saver pacing, and `off` disables it. `auto` deliberately does **not** key
+off battery power alone: running unplugged with saver off keeps the normal
+cadence, because throttling a focused terminal merely because a laptop is
+unplugged is a far more aggressive default than following the saver signal
+the user actually opted into. Focused surfaces retain their normal cadence
+when saver pacing is inactive. Saver pacing caps presentation at about
+30 fps. Minimized and DWM-cloaked host windows do not present until they
+become visible again.
+
+Cloak and uncloak have no window message, so noctty hooks the documented
+`EVENT_OBJECT_CLOAKED` / `EVENT_OBJECT_UNCLOAKED` WinEvents with a single
+`SetWinEventHook` scoped to this process and the UI thread. Without it, a
+virtual-desktop switch that uncloaks a background window need not send
+`WM_ACTIVATE`, `WM_SHOWWINDOW`, or `WM_WINDOWPOSCHANGED`, and since hidden
+surfaces skip rendering entirely there would be no self-healing path back
+to visible. The window messages above remain as a fallback for a missed
+event or a failed hook registration, which degrades to the previous
+behaviour rather than failing window creation. This hook path is argued
+from the Win32 contract and covered by unit tests over the pure event
+filter; it has not been observed on hardware -- see the status caveat
+below.
 
 Focus here is **per surface, not per window**. In a split, only the pane
 with keyboard focus presents at the full rate; the other panes are
