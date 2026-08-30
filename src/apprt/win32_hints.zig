@@ -301,10 +301,13 @@ pub fn renderStateText(
         len += 1;
     }
 
-    return .{
-        .text = try alloc.realloc(text, len),
-        .map = try alloc.realloc(map, len),
-    };
+    // Assign each shrink back to its variable before the next fallible call:
+    // `realloc` may move, and the errdefers above free whatever the variable
+    // holds when they run. Reallocating straight into the result would leave
+    // them pointing at freed storage if the second shrink failed.
+    text = try alloc.realloc(text, len);
+    map = try alloc.realloc(map, len);
+    return .{ .text = text, .map = map };
 }
 
 /// Scan one already-snapshotted visible render state. The render-state string
