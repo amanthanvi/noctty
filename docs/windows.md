@@ -340,10 +340,17 @@ as well as the client. Before writing anything to a pipe it did not create,
 a client resolves the serving process with `GetNamedPipeServerProcessId` and
 requires that process's token user SID to match its own; a mismatch is
 treated as "no instance we can reach", and the launch starts its own local
-instance instead. This runs before the first write, which is also before a
-server could call `ImpersonateNamedPipeClient`. It stops another *account*
-from harvesting forwarded arguments or forging an acknowledgement; it does
-not — and cannot — stop another process running as **you**, which is the
+instance instead.
+
+Clients also open the pipe with `SECURITY_SQOS_PRESENT |
+SECURITY_IDENTIFICATION`. A named-pipe server impersonates at
+`SecurityImpersonation` by default, so without that flag a squatting server
+could act *as* the connecting user; with it, the server can determine who
+connected but cannot use the token to open anything.
+
+Together these stop another *account* from harvesting forwarded arguments,
+forging an acknowledgement, or borrowing the connecting user's token. They
+do not — and cannot — stop another process running as **you**, which is the
 same trust boundary as everything else in this section.
 
 List windows, tabs, and panes:

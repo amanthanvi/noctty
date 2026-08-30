@@ -848,10 +848,13 @@ fn tokenUserSidBytes(
 /// and could return a forged ack, so the real instance never starts and the
 /// user gets no window -- a cross-account disclosure plus a startup denial.
 ///
-/// Authenticating BEFORE the first write is what makes this sufficient:
-/// `ImpersonateNamedPipeClient` fails with `ERROR_CANNOT_IMPERSONATE` until
-/// the client has written to the pipe, so a hostile server cannot borrow our
-/// token in the window between connect and this check.
+/// This runs before the first write. `ImpersonateNamedPipeClient` is
+/// documented to impersonate "the security context of the last message read
+/// from the pipe", so a server that has read nothing from us has no context
+/// to assume. That ordering is a defence in depth rather than the guarantee,
+/// though: the guarantee is that `connectToIpcPipe` opens with
+/// `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, which caps the server
+/// at an identification-only token whatever the timing.
 ///
 /// Fails CLOSED: any error answers "not ours".
 fn ipcPipeServerIsSameUser(pipe: windows.HANDLE) bool {
@@ -888,7 +891,11 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
             0,
             null,
             windows.OPEN_EXISTING,
-            windows.FILE_ATTRIBUTE_NORMAL,
+            // Deny impersonation outright rather than relying on the server
+            // never having read a message from us. See the constants.
+            windows.FILE_ATTRIBUTE_NORMAL |
+                c.SECURITY_SQOS_PRESENT |
+                c.SECURITY_IDENTIFICATION,
             null,
         );
         if (handle != windows.INVALID_HANDLE_VALUE) {
