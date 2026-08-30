@@ -79,10 +79,16 @@ $allowlistSet = [Collections.Generic.HashSet[string]]::new(
     [string[]] $allowlist,
     [StringComparer]::Ordinal
 )
-foreach ($authoredPage in (Get-ChildItem -LiteralPath $sourceRoot -File)) {
+# Recursive, with no directory exemptions, matching authoredPageNames() in
+# scripts/build-site-assets.mjs. A page authored at site/guides/setup.html is
+# otherwise invisible to both registries and to this check, and 404s live.
+foreach ($authoredPage in (Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force)) {
     if ($authoredPage.Extension -notin @('.html', '.htm')) { continue }
-    if (-not $allowlistSet.Contains($authoredPage.Name)) {
-        throw "Authored site page is missing from the deploy payload allowlist: $($authoredPage.Name)"
+    $authoredRelativePath = $authoredPage.FullName.Substring(
+        $sourcePrefix.Length
+    ).Replace('\', '/')
+    if (-not $allowlistSet.Contains($authoredRelativePath)) {
+        throw "Authored site page is missing from the deploy payload allowlist: $authoredRelativePath"
     }
 }
 

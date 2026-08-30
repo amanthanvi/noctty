@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -9,12 +10,31 @@ const repoDir = resolve(siteDir, "..");
 const trustHtml = readFileSync(join(siteDir, "why-noctty.html"), "utf8");
 
 // Docs cited by the trust page and the migration guides that land with another
-// pull request. Each entry must be removed once its PR merges; until then the
-// link-resolution checks below skip it and say why.
+// pull request. Each entry names the dependency it waits on so the exemption
+// can retire itself: waiting for one exact path to appear would keep skipping a
+// genuinely broken link forever if that PR lands the document somewhere else.
 const PENDING_DOCS = new Map([
-  ["docs/windows-benchmark-methodology.md", "#121 / PR #191"],
-  ["docs/accessibility-matrix.md", "#145 / PR #192"],
+  [
+    "docs/windows-benchmark-methodology.md",
+    { issue: "#121", pr: "#191", label: "#121 / PR #191" },
+  ],
+  [
+    "docs/accessibility-matrix.md",
+    { issue: "#145", pr: "#192", label: "#145 / PR #192" },
+  ],
 ]);
+
+const MIGRATION_GUIDES = [
+  "docs/migrate-from-windows-terminal.md",
+  "docs/migrate-from-git-bash.md",
+];
+
+// A repository-relative link target, resolved from the document that carries
+// it rather than assumed to sit beside it.
+const linkTargetPath = (fromRelativePath, target) =>
+  posix.normalize(
+    posix.join(posix.dirname(fromRelativePath), target.split("#", 1)[0]),
+  );
 
 // This page publishes no performance figure of its own; every number lives in
 // docs/windows-benchmark-methodology.md, so a re-measurement can never strand
@@ -26,11 +46,18 @@ const PERFORMANCE_FIGURE_PATTERNS = [
   // Durations.
   /\b\d[\d,]*(?:\.\d+)?\s*(?:ms|milliseconds?|µs|μs|us|microseconds?|ns|nanoseconds?|seconds?|minutes?)\b/i,
   /\b\d[\d,]*(?:\.\d+)?\s+s\b/,
-  // Rates.
+  // Rates, abbreviated and spelled out. "60 fps" and "60 frames per second"
+  // are the same published figure, so the guard cannot depend on the author
+  // reaching for an abbreviation.
   /\b\d[\d,]*(?:\.\d+)?\s*(?:fps|Hz|kHz|MHz|GHz)\b/i,
-  // Byte sizes and throughput, decimal or binary, with or without "per second".
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera)?hertz\b/i,
+  // Any quantity stated as a rate over a unit of time or work, whatever the
+  // unit is written as: frames, keystrokes, cells, bytes, mebibytes, glyphs.
+  // Bounded to three words so it cannot straddle two unrelated clauses.
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:[\w-]+[\s-]+){0,3}per\s+(?:second|minute|hour|frame|millisecond|microsecond|nanosecond)\b/i,
+  // Byte sizes and throughput, decimal or binary, abbreviated or spelled out.
   /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B(?:\s*\/\s*s(?:ec)?)?\b/,
-  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera)bytes?(?:\s+per\s+second)?\b/i,
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?(?:\s+per\s+second)?\b/i,
   // Percentages framed as a performance delta.
   /\b\d+(?:\.\d+)?\s*(?:%|percent)\s*(?:\w+[\s-]+){0,3}(?:faster|slower|improvement|improved|reduction|reduced|speed-?up|overhead|gain|drop|regression|less|fewer|more)\b/i,
   /\b(?:faster|slower|improvement|reduction|speed-?up|overhead|gain|regression)\b[^.]{0,24}?\b\d+(?:\.\d+)?\s*(?:%|percent)/i,
@@ -38,6 +65,28 @@ const PERFORMANCE_FIGURE_PATTERNS = [
   /\b\d+(?:\.\d+)?\s*(?:x|×)\s*(?:faster|slower|throughput|speed|performance)\b/i,
   /\b\d+(?:\.\d+)?(?:x|×)\b(?!\d)/,
 ];
+
+// Terminals a comparison could name, plus the unnamed stand-ins for one.
+const RIVAL_TERMINAL =
+  "Windows\\s+Terminal|conhost|cmd\\.exe|Alacritty|WezTerm|kitty|mintty|" +
+  "ConEmu|Cmder|Hyper|iTerm2?|PuTTY";
+const RIVAL_REFERENT = `${RIVAL_TERMINAL}|(?:another|any\\s+other|every\\s+other|other|competing|rival|mainstream)\\s+terminals?|the\\s+competition`;
+
+// Verbs that only ever assert a ranking, wherever they appear.
+const RANKING_VERB =
+  "outperform(?:s|ed|ing)?|outclass(?:es|ed|ing)?|outpac(?:e|es|ed|ing)|" +
+  "outrun(?:s|ning)?|outstrip(?:s|ped|ping)?|outdo(?:es|ing)?|" +
+  "outmatch(?:es|ed|ing)?|outgun(?:s|ned|ning)?|beats?\\b|" +
+  "dominat(?:e|es|ed|ing)";
+// Verbs and phrases that assert a ranking once a rival is in the same clause.
+// "Noctty's throughput exceeds Alacritty's" carries no preposition at all.
+const COMPARATIVE_VERB =
+  `${RANKING_VERB}|exceed(?:s|ed|ing)?|surpass(?:es|ed|ing)?|` +
+  "overtak(?:e|es|en|ing)|eclips(?:e|es|ed|ing)|edg(?:e|es|ed)\\s+out|" +
+  "trail(?:s|ed|ing)?|(?:lag|fall|fell|falls)(?:s|ged|ging|ing)?\\s+behind|" +
+  "(?:pull|pulls|pulled|come|comes|came)\\s+(?:out\\s+)?ahead|ahead\\s+of|" +
+  "stack(?:s|ed)?\\s+up\\s+(?:well\\s+)?against|" +
+  "fast(?:er|est)|slow(?:er|est)|quicker|lower|higher|leaner|lighter";
 
 // The page positions the fork without ranking it against anybody. No
 // cross-terminal speed claim of any kind is permitted, so the guard has to
@@ -47,16 +96,30 @@ const CROSS_TERMINAL_CLAIM_PATTERNS = [
   /\bslow(?:er|est)\b/i,
   /\b(?:quick|snapp|smooth|responsiv|light|lean)(?:er|est)\b/i,
   /\bblazing(?:ly)?\b/i,
-  /\boutperform(?:s|ed|ing)?\b/i,
-  /\boutclass(?:es|ed|ing)?\b/i,
-  /\b(?:beats|outruns)\b/i,
+  new RegExp(`\\b(?:${RANKING_VERB})`, "i"),
   /\b(?:best[-\s]performing|most\s+performant|leading\s+terminal)\b/i,
   // "lower latency", "higher throughput", "less memory use than ...".
   /\b(?:lower|higher|less|fewer|more|better|worse|reduced|improved|greater)\s+(?:\w+[\s-]+){0,3}(?:latency|throughput|frame\s?times?|start-?up|overhead|performance|speed|fps|memory\s+use)\b/i,
+  // The same claim with the quantity first: "throughput is higher", "start-up
+  // comes in lower". A preposition is not required for a ranking to be stated.
+  /\b(?:latency|throughput|frame\s?times?|start-?up|overhead|performance|speed|fps|memory\s+use)\b[^.!?;]{0,32}?\b(?:is|are|was|were|runs?|sits?|stays?|lands?|comes?\s+in)\s+(?:\w+[\s-]+){0,2}(?:lower|higher|less|fewer|more|better|worse|reduced|improved|greater)\b/i,
   // Multipliers of a performance quantity.
   /\b(?:twice|thrice|double|triple|\d+(?:\.\d+)?\s*(?:x|×|times))\s+(?:the\s+)?(?:\w+\s+){0,2}(?:throughput|speed|performance|latency|faster|slower|frame\s?rate|framerate)\b/i,
   // Any measurement stated relative to a named competitor.
-  /\b(?:than|versus|vs\.?|compared\s+(?:to|with)|against)\s+(?:\w+\s+){0,2}(?:Windows\s+Terminal|conhost|cmd\.exe|Alacritty|WezTerm|kitty|mintty|ConEmu|Cmder|Hyper|iTerm2?|PuTTY)\b/i,
+  new RegExp(
+    `\\b(?:than|versus|vs\\.?|compared\\s+(?:to|with)|against|relative\\s+to)\\s+(?:\\w+\\s+){0,2}(?:${RIVAL_TERMINAL})\\b`,
+    "i",
+  ),
+  // A comparative verb and a rival in the same clause, in either order and
+  // with no preposition between them.
+  new RegExp(
+    `\\b(?:${COMPARATIVE_VERB})\\b[^.!?;]{0,60}?\\b(?:${RIVAL_REFERENT})\\b`,
+    "i",
+  ),
+  new RegExp(
+    `\\b(?:${RIVAL_REFERENT})\\b[^.!?;]{0,60}?\\b(?:${COMPARATIVE_VERB})\\b`,
+    "i",
+  ),
 ];
 
 function findClaimViolations(text, patterns) {
@@ -66,16 +129,130 @@ function findClaimViolations(text, patterns) {
     .map((match) => match[0].replace(/\s+/g, " ").trim());
 }
 
-// A skip that outlives its reason is a hole. Once the document is on the
-// branch, the entry has to go, and the link checks below become enforcing.
-test("no pending-document exemption outlives the document landing", () => {
-  const landed = [...PENDING_DOCS.keys()].filter((relativePath) =>
-    existsSync(join(repoDir, relativePath)),
+function git(...args) {
+  try {
+    return execFileSync("git", args, {
+      cwd: repoDir,
+      encoding: "utf8",
+      timeout: 20_000,
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+}
+
+// The integration branch, however this checkout happens to name it. A
+// single-branch or shallow clone may have neither, in which case the
+// main-side signals below are unavailable and say so.
+const mainRef = ["main", "origin/main", "refs/remotes/origin/main"].find(
+  (ref) => git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`) !== null,
+);
+
+// "Similar name" is deliberately loose: same file name, or the same stem once
+// case and separators are normalised away.
+const nameKey = (path) =>
+  basename(path)
+    .toLowerCase()
+    .replace(/\.[^.]*$/, "")
+    .replace(/[^a-z0-9]/g, "");
+
+function pathsNamedLike(candidates, relativePath) {
+  const wanted = nameKey(relativePath);
+  return candidates.filter(
+    (candidate) => candidate !== relativePath && nameKey(candidate) === wanted,
   );
+}
+
+const trackedPaths = (git("ls-files", "-co", "--exclude-standard") ?? "")
+  .split("\n")
+  .filter(Boolean);
+
+const mainPaths = mainRef
+  ? (git("ls-tree", "-r", "--name-only", mainRef) ?? "")
+      .split("\n")
+      .filter(Boolean)
+  : [];
+
+// A skip that outlives its reason is a hole. Waiting for one exact path to
+// reappear is not enough: if the dependency lands the document somewhere else,
+// the exemption keeps skipping a genuinely broken link while the suite stays
+// green. So the exemption retires on any of these, whichever arrives first:
+// the file is here, a document with the same name is here under another path,
+// the file or a same-named one is on main, or main carries the merge of the PR
+// this entry waits on. What it cannot see: a checkout with no main ref (the
+// main-side signals are then skipped, and the diagnostic says so), or a
+// dependency that both renames the document past recognition and lands with a
+// commit subject that omits its PR number.
+test("no pending-document exemption outlives the dependency it waits on", (t) => {
+  if (!mainRef) {
+    t.diagnostic(
+      "no main ref in this checkout; only worktree signals are available",
+    );
+  }
+  const stale = [];
+  for (const [relativePath, pending] of PENDING_DOCS) {
+    const reasons = [];
+    if (existsSync(join(repoDir, relativePath))) {
+      reasons.push("it is on this branch");
+    }
+    const renamedHere = pathsNamedLike(trackedPaths, relativePath);
+    if (renamedHere.length > 0) {
+      reasons.push(`this branch carries ${renamedHere.join(", ")}`);
+    }
+    if (mainRef) {
+      if (mainPaths.includes(relativePath)) {
+        reasons.push(`${mainRef} carries it`);
+      }
+      const renamedOnMain = pathsNamedLike(mainPaths, relativePath);
+      if (renamedOnMain.length > 0) {
+        reasons.push(`${mainRef} carries ${renamedOnMain.join(", ")}`);
+      }
+      const merged = git(
+        "log",
+        "--max-count=1",
+        "--format=%h %s",
+        "--fixed-strings",
+        `--grep=(${pending.pr})`,
+        mainRef,
+      );
+      if (merged && merged.trim()) {
+        reasons.push(`PR ${pending.pr} is on ${mainRef}: ${merged.trim()}`);
+      }
+    }
+    if (reasons.length > 0) {
+      stale.push(`${relativePath} (${reasons.join("; ")})`);
+    }
+  }
   assert.deepEqual(
-    landed,
+    stale,
     [],
-    `remove the PENDING_DOCS entries for ${landed.join(", ")}; the links are now checkable`,
+    `the dependency landed, so these PENDING_DOCS entries must go and their links become checkable: ${stale.join(" | ")}`,
+  );
+});
+
+// An exemption nobody cites is also an exemption that outlived its reason.
+test("every pending-document exemption is still cited by something", () => {
+  const cited = new Set(
+    [
+      ...trustHtml.matchAll(
+        /https:\/\/github\.com\/amanthanvi\/noctty\/blob\/main\/([^"#]+)/g,
+      ),
+    ].map((match) => match[1]),
+  );
+  for (const relativePath of MIGRATION_GUIDES) {
+    const markdown = readFileSync(join(repoDir, relativePath), "utf8");
+    for (const match of markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      if (/^(?:https?:|#)/.test(match[1])) continue;
+      cited.add(linkTargetPath(relativePath, match[1]));
+    }
+  }
+  const uncited = [...PENDING_DOCS.keys()].filter((path) => !cited.has(path));
+  assert.deepEqual(
+    uncited,
+    [],
+    `nothing links to ${uncited.join(", ")} any more; drop the PENDING_DOCS entry`,
   );
 });
 
@@ -174,7 +351,9 @@ test("trust page links to repository files that exist", (t) => {
   for (const relativePath of new Set(linked)) {
     const pending = PENDING_DOCS.get(relativePath);
     if (pending) {
-      t.diagnostic(`${relativePath} lands with ${pending}; not checked yet`);
+      t.diagnostic(
+        `${relativePath} lands with ${pending.label}; not checked yet`,
+      );
       continue;
     }
     assert.ok(
@@ -184,34 +363,26 @@ test("trust page links to repository files that exist", (t) => {
   }
 });
 
-for (const relativePath of [
-  "docs/migrate-from-windows-terminal.md",
-  "docs/migrate-from-git-bash.md",
-]) {
+for (const relativePath of MIGRATION_GUIDES) {
   test(`${relativePath} has no broken local Markdown links`, (t) => {
-    const absolutePath = join(repoDir, relativePath);
-    const markdown = readFileSync(absolutePath, "utf8");
+    const markdown = readFileSync(join(repoDir, relativePath), "utf8");
     for (const match of markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
       const target = match[1];
       if (/^(?:https?:|#)/.test(target)) continue;
-      const localPath = target.split("#", 1)[0];
-      const pending = PENDING_DOCS.get(`docs/${localPath}`);
+      const resolved = linkTargetPath(relativePath, target);
+      const pending = PENDING_DOCS.get(resolved);
       if (pending) {
-        t.diagnostic(`${localPath} lands with ${pending}; not checked yet`);
+        t.diagnostic(
+          `${resolved} lands with ${pending.label}; not checked yet`,
+        );
         continue;
       }
-      assert.ok(
-        existsSync(resolve(dirname(absolutePath), localPath)),
-        `missing ${target}`,
-      );
+      assert.ok(existsSync(join(repoDir, resolved)), `missing ${target}`);
     }
   });
 }
 
-for (const relativePath of [
-  "docs/migrate-from-windows-terminal.md",
-  "docs/migrate-from-git-bash.md",
-]) {
+for (const relativePath of MIGRATION_GUIDES) {
   test(`${relativePath} keeps the honest-gap section`, () => {
     const markdown = readFileSync(join(repoDir, relativePath), "utf8");
     assert.match(markdown, /## Honest gaps/);

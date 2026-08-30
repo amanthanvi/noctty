@@ -153,6 +153,19 @@ export function getHeaderContract(directory = siteRoot) {
 // carries. The declared SITE_PAGES array must match this exactly: a reference
 // the registry does not know about would ship unversioned behind a
 // cache key check that still reported everything current.
+// One attribute value in any of the three forms HTML permits: double-quoted,
+// single-quoted, and unquoted. Reading only double-quoted values would let
+// src='/install.js' stay invisible to discovery and ship without a cache key
+// while every check still reported the site current.
+function attributeValue(attrs, name) {
+  const match = new RegExp(
+    `\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'\`=<>]+))`,
+    "i",
+  ).exec(attrs);
+  if (!match) return null;
+  return match[1] ?? match[2] ?? match[3] ?? null;
+}
+
 function referencedLocalAssets(html) {
   const referenced = new Set();
   const add = (raw) => {
@@ -162,13 +175,12 @@ function referencedLocalAssets(html) {
     if (normalized) referenced.add(normalized);
   };
   for (const [, attrs] of html.matchAll(/<script\b([^>]*)>/gi)) {
-    const src = /\ssrc\s*=\s*"([^"]*)"/i.exec(attrs);
-    if (src) add(src[1]);
+    add(attributeValue(attrs, "src"));
   }
   for (const [, attrs] of html.matchAll(/<link\b([^>]*)>/gi)) {
-    if (!/\srel\s*=\s*"[^"]*\bstylesheet\b[^"]*"/i.test(attrs)) continue;
-    const href = /\shref\s*=\s*"([^"]*)"/i.exec(attrs);
-    if (href) add(href[1]);
+    const rel = attributeValue(attrs, "rel");
+    if (!rel || !/\bstylesheet\b/i.test(rel)) continue;
+    add(attributeValue(attrs, "href"));
   }
   return referenced;
 }
@@ -177,12 +189,24 @@ function referencedLocalAssets(html) {
 // exist. SITE_PAGES here and the deploy allowlist in
 // scripts/build-site-payload.ps1 are checked against it independently, so a
 // new page cannot be half-registered in one of them.
+// Discovery is recursive and has no directory exemptions, matching the deploy
+// allowlist check in scripts/build-site-payload.ps1 exactly. A page authored at
+// site/guides/setup.html is otherwise invisible to both registries and to this
+// drift check, and 404s in production.
 function authoredPageNames(directory = siteRoot) {
-  return fs
-    .readdirSync(directory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /\.html$/i.test(entry.name))
-    .map((entry) => entry.name)
-    .sort();
+  const found = [];
+  const walk = (current, prefix) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(path.join(current, entry.name), relativePath);
+      } else if (entry.isFile() && /\.html?$/i.test(entry.name)) {
+        found.push(relativePath);
+      }
+    }
+  };
+  walk(directory, "");
+  return found.sort();
 }
 
 function assertPageRegistryCoversSite() {
@@ -225,21 +249,32 @@ function assertDeclaredAssetsAreComplete(htmlName, html, assets) {
 function withAssetCacheKeys(html, htmlPath, assets) {
   let result = html;
   for (const [asset, digest] of Object.entries(assets)) {
-    const pattern = new RegExp(
-      `(["'])(/?)${escapeRegExp(asset)}(?:\\?v=[^"']*)?\\1`,
-      "g",
+    const escaped = escapeRegExp(asset);
+    // Every attribute form referencedLocalAssets can see has to be versionable
+    // here too, or a reference discovery flagged would fail as "missing".
+    const quoted = new RegExp(`(["'])(/?)${escaped}(?:\\?v=[^"']*)?\\1`, "g");
+    const unquoted = new RegExp(
+      `((?:\\ssrc|\\shref)\\s*=\\s*)(/?)${escaped}(?:\\?v=[^\\s"'\`=<>]*)?(?=[\\s/>])`,
+      "gi",
     );
-    if (!pattern.test(result)) {
+    if (!quoted.test(result) && !unquoted.test(result)) {
       throw new Error(
         `${htmlPath} does not reference required local asset ${asset}.`,
       );
     }
-    pattern.lastIndex = 0;
-    result = result.replace(
-      pattern,
-      (_match, quote, rootPrefix) =>
-        `${quote}${rootPrefix}${asset}?v=${digest}${quote}`,
-    );
+    quoted.lastIndex = 0;
+    unquoted.lastIndex = 0;
+    result = result
+      .replace(
+        quoted,
+        (_match, quote, rootPrefix) =>
+          `${quote}${rootPrefix}${asset}?v=${digest}${quote}`,
+      )
+      .replace(
+        unquoted,
+        (_match, prefix, rootPrefix) =>
+          `${prefix}${rootPrefix}${asset}?v=${digest}`,
+      );
   }
   return result;
 }
