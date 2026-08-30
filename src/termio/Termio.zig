@@ -723,11 +723,14 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
 
     // Deinit our old config. We do this in the lock because the
     // stream handler may be referencing the old config (i.e. enquiry resp)
-    const color_scheme_report = installDerivedConfigForColorSchemeReport(
-        &self.config,
-        config,
-        self.terminal.modes.get(.report_color_scheme),
-    );
+    //
+    // This must happen before `StreamHandler.changeConfig` below: that queues
+    // the mode 2031 report, and the queued message is drained against
+    // `self.config`. Installing after it would answer with the outgoing
+    // scheme. There is deliberately no direct write here — the queued report
+    // is the single source of these bytes, so an OS scheme flip produces
+    // exactly one report.
+    installDerivedConfig(&self.config, config);
 
     // Update our stream handler. The stream handler uses the same
     // renderer mutex so this is safe to do despite being executed
@@ -763,21 +766,14 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
             config.image_storage_limit,
         );
     }
-
-    if (color_scheme_report) |report| {
-        try self.queueWrite(td, report, false);
-    }
 }
 
-fn installDerivedConfigForColorSchemeReport(
-    current: *DerivedConfig,
-    replacement: *DerivedConfig,
-    report_enabled: bool,
-) ?[]const u8 {
+/// Replace the live derived config. Split out so the ordering contract with
+/// the queued mode 2031 report is testable: whatever is installed here is what
+/// `colorSchemeReportLocked` will report.
+fn installDerivedConfig(current: *DerivedConfig, replacement: *DerivedConfig) void {
     current.deinit();
     current.* = replacement.*;
-    if (!report_enabled) return null;
-    return colorSchemeReportBytes(current.conditional_state.theme);
 }
 
 /// Resize the terminal.
@@ -1389,13 +1385,14 @@ test "issue149 OS scheme flip reports only the newly installed scheme" {
     defer installed.deinit();
     var replacement = try DerivedConfig.init(testing.allocator, &config, .{ .theme = .dark });
 
-    const report = installDerivedConfigForColorSchemeReport(
-        &installed,
-        &replacement,
-        true,
-    ) orelse return error.TestExpectedEqual;
+    // `changeConfig` installs before `StreamHandler.changeConfig` queues the
+    // mode 2031 report, and that queued message is drained against the live
+    // config. So whatever this leaves installed is exactly what gets reported:
+    // the incoming scheme, never the outgoing one.
+    installDerivedConfig(&installed, &replacement);
 
     try testing.expectEqual(configpkg.ConditionalState.Theme.dark, installed.conditional_state.theme);
+    const report = colorSchemeReportBytes(installed.conditional_state.theme);
     try testing.expectEqualStrings(colorSchemeReportBytes(.dark), report);
     try testing.expect(!std.mem.eql(u8, colorSchemeReportBytes(.light), report));
 }

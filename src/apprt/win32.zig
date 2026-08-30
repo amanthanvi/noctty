@@ -2585,6 +2585,14 @@ fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
 /// launch is given up as unresolved.
 const recovery_ready_persist_attempts: u8 = 3;
 
+/// Delay before a retried ready-marker write. `GetMessageW` blocks, so an
+/// otherwise idle app produces no further ticks on its own and each remaining
+/// attempt has to be scheduled. The delay is what makes these retries able to
+/// outlast a brief anti-virus or backup handle hold; bounded by the retry
+/// budget, the safe-mode notice is released at most
+/// `(recovery_ready_persist_attempts - 1) * this` late.
+const recovery_ready_retry_delay_ms: u32 = 750;
+
 /// Retry budget for the ready marker, spent across message-loop ticks.
 ///
 /// The ready marker is the only thing that breaks a failure streak, so a
@@ -3166,6 +3174,7 @@ pub const App = struct {
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
+    recovery_retry_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
     /// A normal last-host close destroys the native/session model before
@@ -3501,6 +3510,7 @@ pub const App = struct {
             self.stopUndoPruneTimer();
             self.stopQuitTimer();
             self.stopTerminalHandoffIdleTimer();
+            self.stopRecoveryRetryTimer();
             drainDeferredUiaDisconnects(ui_thread_id);
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             self.running = false;
@@ -3691,6 +3701,13 @@ pub const App = struct {
             }
 
             if (msg.message == c.WM_TIMER) {
+                if (self.recovery_retry_timer_id) |timer_id| {
+                    if (msg.wParam == timer_id) {
+                        self.stopRecoveryRetryTimer();
+                        self.resolveRecoveryStartup();
+                        continue;
+                    }
+                }
                 if (self.terminal_handoff_idle_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
                         self.stopTerminalHandoffIdleTimer();
@@ -3790,6 +3807,7 @@ pub const App = struct {
         self.stopUndoPruneTimer();
         self.stopQuitTimer();
         self.stopTerminalHandoffIdleTimer();
+        self.stopRecoveryRetryTimer();
         self.update_check_running.store(false, .release);
         if (self.update_notice) |*notice| {
             notice.deinit(self.core_app.alloc);
@@ -4238,6 +4256,7 @@ pub const App = struct {
         if (!self.recovery_ready_resolved) {
             if (self.markRecoveryReady()) {
                 self.recovery_ready_resolved = true;
+                self.stopRecoveryRetryTimer();
             } else |err| {
                 if (self.recovery_ready_retry.recordFailure(err)) {
                     log.warn(
@@ -4245,11 +4264,13 @@ pub const App = struct {
                         .{ self.recovery_ready_retry.failures, err },
                     );
                     self.recovery_ready_resolved = true;
+                    self.stopRecoveryRetryTimer();
                 } else {
                     log.warn(
-                        "win32 recovery: ready marker attempt {d} failed err={}; retrying next tick",
-                        .{ self.recovery_ready_retry.failures, err },
+                        "win32 recovery: ready marker attempt {d} failed err={}; retrying in {d}ms",
+                        .{ self.recovery_ready_retry.failures, err, recovery_ready_retry_delay_ms },
                     );
+                    self.scheduleRecoveryRetry();
                 }
             }
         }
@@ -5396,6 +5417,38 @@ pub const App = struct {
             log.err("failed to re-register terminal handoff class object err={}", .{err});
         };
         return false;
+    }
+
+    /// Schedule the next ready-marker attempt.
+    ///
+    /// `GetMessageW` blocks, so an idle app generates no further ticks and the
+    /// retry budget would never be spent — an `initial-window = false` launch
+    /// in particular can reach its quit timer without another tick at all,
+    /// leaving the attempt unresolved on disk and the safe-mode notice
+    /// unreleased. The timer both guarantees the attempt and spaces it out;
+    /// a bare wake would busy-retry and could not outlast a handle hold.
+    ///
+    /// Bounded by `RecoveryReadyRetry`: only a failure that has not exhausted
+    /// the budget reaches here, so at most
+    /// `recovery_ready_persist_attempts - 1` timers are ever armed.
+    fn scheduleRecoveryRetry(self: *App) void {
+        self.stopRecoveryRetryTimer();
+        const timer_id = sys.SetTimer(null, 0, recovery_ready_retry_delay_ms, null);
+        if (timer_id == 0) {
+            log.warn("failed to start win32 recovery retry timer err={}", .{windows.kernel32.GetLastError()});
+            // Fall back to an immediate wake: a spaced retry is better, but
+            // an unresolved launch that never retries at all is worse.
+            self.wakeup();
+            return;
+        }
+        self.recovery_retry_timer_id = timer_id;
+    }
+
+    fn stopRecoveryRetryTimer(self: *App) void {
+        if (self.recovery_retry_timer_id) |timer_id| {
+            _ = sys.KillTimer(null, timer_id);
+            self.recovery_retry_timer_id = null;
+        }
     }
 
     fn stopUndoPruneTimer(self: *App) void {
@@ -35140,6 +35193,28 @@ test "win32 recovery ready marker keeps retrying transient write failures" {
     var oom: RecoveryReadyRetry = .{};
     try std.testing.expect(oom.recordFailure(error.OutOfMemory));
     try std.testing.expectEqual(@as(u8, 1), oom.failures);
+}
+
+test "win32 recovery ready marker schedules a bounded number of retries" {
+    // `GetMessageW` blocks, so an attempt that is not scheduled simply never
+    // runs; an unbounded schedule would spin the loop instead. Drive the same
+    // decision `resolveRecoveryStartup` makes: arm another timer only while
+    // the budget survives.
+    var retry: RecoveryReadyRetry = .{};
+    var attempts: u8 = 0;
+    var scheduled: u8 = 0;
+    while (true) {
+        attempts += 1;
+        if (retry.recordFailure(error.AccessDenied)) break;
+        scheduled += 1;
+        try std.testing.expect(scheduled < recovery_ready_persist_attempts);
+    }
+    try std.testing.expectEqual(recovery_ready_persist_attempts, attempts);
+    try std.testing.expectEqual(recovery_ready_persist_attempts - 1, scheduled);
+
+    // OutOfMemory resolves on the first failure, so it arms no timer at all.
+    var oom: RecoveryReadyRetry = .{};
+    try std.testing.expect(oom.recordFailure(error.OutOfMemory));
 }
 
 test "win32 safe mode notice waits for the launch to resolve on disk" {
