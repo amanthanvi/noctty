@@ -2581,6 +2581,55 @@ fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
     return if (decision == .safe_mode) recovery_safe_mode_banner else null;
 }
 
+/// How many message-loop ticks may attempt the ready-marker write before the
+/// launch is given up as unresolved.
+const recovery_ready_persist_attempts: u8 = 3;
+
+/// Retry budget for the ready marker, spent across message-loop ticks.
+///
+/// The ready marker is the only thing that breaks a failure streak, so a
+/// transient write failure must not be latched as handled — that leaves the
+/// launch unresolved on disk for the whole session and feeds the automatic
+/// safe mode this branch exists to stop. Retries deliberately ride real
+/// message-loop ticks rather than an in-line sleep loop: an earlier ~20 ms
+/// three-attempt loop was removed because it could not outlast an anti-virus
+/// or backup handle hold, whereas tick-spaced attempts can.
+const RecoveryReadyRetry = struct {
+    failures: u8 = 0,
+
+    /// Records a failed attempt. Returns true when the launch should be
+    /// treated as resolved and no later tick should try again.
+    fn recordFailure(self: *RecoveryReadyRetry, err: anyerror) bool {
+        self.failures +|= 1;
+        // OutOfMemory will not clear by waiting and every retry allocates
+        // again, so stop immediately rather than spending the budget.
+        if (err == error.OutOfMemory) return true;
+        return self.failures >= recovery_ready_persist_attempts;
+    }
+};
+
+/// Sequencing for the safe-mode dialog.
+///
+/// The notice is armed at the initial-window boundary but released only once
+/// the launch is resolved on disk, so a process terminated while the modal is
+/// up has already broken the failure streak.
+const RecoverySafeModeNotice = struct {
+    armed: bool = false,
+    released: bool = false,
+
+    fn arm(self: *RecoverySafeModeNotice, decision: win32_recovery.Decision) void {
+        if (recoverySafeModeNotice(decision) != null) self.armed = true;
+    }
+
+    /// Returns true at most once, and only after the ledger write for this
+    /// launch has succeeded or exhausted its retries.
+    fn release(self: *RecoverySafeModeNotice, launch_resolved: bool) bool {
+        if (!self.armed or self.released or !launch_resolved) return false;
+        self.released = true;
+        return true;
+    }
+};
+
 /// Ownerless by design; do not "fix" this to take the primary Host HWND.
 ///
 /// The notice runs on a detached thread that nothing joins, so it can outlive
@@ -3217,7 +3266,11 @@ pub const App = struct {
     /// never forwarded through the serialized single-instance IPC channel.
     embedding_mode: bool = false,
     recovery_startup: RecoveryStartup = .{},
-    recovery_first_tick_completed: bool = false,
+    /// True once this launch is recorded on disk as resolved — either the
+    /// ready marker landed or its bounded retries were exhausted.
+    recovery_ready_resolved: bool = false,
+    recovery_ready_retry: RecoveryReadyRetry = .{},
+    recovery_safe_mode_notice: RecoverySafeModeNotice = .{},
     /// Top-level shell composition only. Terminal child HWNDs retain their
     /// existing WGL/SwapBuffers ownership regardless of this backend state.
     shell_compositor_driver: win32_compositor_native.NativeDriver = undefined,
@@ -3432,7 +3485,11 @@ pub const App = struct {
             // Forwarding is a successful startup outcome for this process.
             // Mark it ready so repeated new-window launches cannot accumulate
             // false crash-loop evidence and trigger automatic safe mode.
-            self.markRecoveryReady();
+            // This process exits immediately, so there is no later tick to
+            // retry on; the failure is logged and the attempt stays unresolved.
+            self.markRecoveryReady() catch |err| {
+                log.warn("win32 recovery: forwarded launch ready marker failed err={}", .{err});
+            };
             return;
         }
 
@@ -3508,9 +3565,12 @@ pub const App = struct {
 
         if (self.windows.items.len > 0) self.markRecoveryWindowCreated();
 
-        if (recoverySafeModeNotice(self.recovery_startup.decision)) |notice| {
-            self.showRecoverySafeModeNotice(notice);
-        }
+        // Armed here, released by `resolveRecoveryStartup` once the ready
+        // marker is on disk. Spawning it here would let thread scheduling put
+        // the modal on screen while the ledger still holds an unresolved
+        // attempt, so killing the process at the dialog would preserve the
+        // failure streak.
+        self.recovery_safe_mode_notice.arm(self.recovery_startup.decision);
 
         if (!self.embedding_mode) self.initializeJumpList();
         if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
@@ -3521,6 +3581,12 @@ pub const App = struct {
             };
         }
         if (!self.embedding_mode and self.windows.items.len == 0) self.startQuitTimer();
+
+        // Guarantee the loop reaches at least one tick. Resolving this launch
+        // in the ledger and releasing the safe-mode notice both hang off
+        // `tickCoreApp`, so neither may depend on some other subsystem
+        // happening to post a wake first.
+        self.wakeup();
 
         var msg: MSG = undefined;
         while (true) {
@@ -4155,12 +4221,44 @@ pub const App = struct {
 
     fn tickCoreApp(self: *App) !void {
         try self.core_app.tick(self);
-        if (self.recovery_first_tick_completed) return;
-        // A launch is unresolved until the outer Win32 message loop completes
-        // its first core-app tick. Renderer and PTY work that continues on
-        // other threads after this boundary is outside recovery accounting.
-        self.recovery_first_tick_completed = true;
-        self.markRecoveryReady();
+        self.resolveRecoveryStartup();
+    }
+
+    /// Record this launch as resolved in the startup ledger.
+    ///
+    /// A launch is unresolved until the outer Win32 message loop completes its
+    /// first core-app tick. Renderer and PTY work that continues on other
+    /// threads after this boundary is outside recovery accounting.
+    ///
+    /// The write is attempted again on later ticks while the retry budget
+    /// lasts: latching "handled" on the first attempt would let one transient
+    /// sharing violation leave the launch unresolved for the whole session,
+    /// which is exactly the crash-loop evidence that selects safe mode.
+    fn resolveRecoveryStartup(self: *App) void {
+        if (!self.recovery_ready_resolved) {
+            if (self.markRecoveryReady()) {
+                self.recovery_ready_resolved = true;
+            } else |err| {
+                if (self.recovery_ready_retry.recordFailure(err)) {
+                    log.warn(
+                        "win32 recovery: ready marker unresolved after {d} attempt(s) err={}",
+                        .{ self.recovery_ready_retry.failures, err },
+                    );
+                    self.recovery_ready_resolved = true;
+                } else {
+                    log.warn(
+                        "win32 recovery: ready marker attempt {d} failed err={}; retrying next tick",
+                        .{ self.recovery_ready_retry.failures, err },
+                    );
+                }
+            }
+        }
+
+        // Only now may the safe-mode dialog appear: killing the process while
+        // that modal is up must not preserve the failure streak.
+        if (self.recovery_safe_mode_notice.release(self.recovery_ready_resolved)) {
+            self.showRecoverySafeModeNotice(recovery_safe_mode_banner);
+        }
     }
 
     fn markRecoveryWindowCreated(self: *App) void {
@@ -4185,7 +4283,10 @@ pub const App = struct {
         @memcpy(current, persisted[0..current.len]);
     }
 
-    fn markRecoveryReady(self: *App) void {
+    /// Errors are the retryable ones only: everything deterministic (no
+    /// ledger, nothing to mark, an unmergeable record) returns normally so a
+    /// caller's retry budget is not spent on a failure that cannot clear.
+    fn markRecoveryReady(self: *App) !void {
         if (self.recovery_startup.count == 0) return;
         const memory_attempts = self.recovery_startup.attempts[0..self.recovery_startup.count];
         const target_started_at = memory_attempts[memory_attempts.len - 1].started_at_unix_ms;
@@ -4232,7 +4333,10 @@ pub const App = struct {
             path,
             &self.recovery_startup,
             merged,
-        ) catch |err| log.warn("win32 recovery: ready marker persist failed err={}", .{err});
+        ) catch |err| {
+            log.warn("win32 recovery: ready marker persist failed err={}", .{err});
+            return err;
+        };
     }
 
     fn restoreSessionWindow(
@@ -35017,6 +35121,43 @@ test "win32 recovery fallback failure is consumed by next startup" {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "startup-attempts.json.tmp-"));
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "startup-attempts.json.pending-"));
     }
+}
+
+test "win32 recovery ready marker keeps retrying transient write failures" {
+    // A failed attempt must not resolve the launch: latching on the first
+    // failure is what leaves an unresolved attempt on disk for the whole
+    // session and feeds a false safe-mode streak.
+    var transient: RecoveryReadyRetry = .{};
+    try std.testing.expect(!transient.recordFailure(error.AccessDenied));
+    try std.testing.expect(!transient.recordFailure(error.Unexpected));
+    try std.testing.expectEqual(@as(u8, 2), transient.failures);
+
+    // The budget is bounded: the third failure gives up.
+    try std.testing.expect(transient.recordFailure(error.AccessDenied));
+    try std.testing.expectEqual(recovery_ready_persist_attempts, transient.failures);
+
+    // OutOfMemory stops immediately without spending the budget.
+    var oom: RecoveryReadyRetry = .{};
+    try std.testing.expect(oom.recordFailure(error.OutOfMemory));
+    try std.testing.expectEqual(@as(u8, 1), oom.failures);
+}
+
+test "win32 safe mode notice waits for the launch to resolve on disk" {
+    // Never armed outside safe mode.
+    var normal: RecoverySafeModeNotice = .{};
+    normal.arm(.normal);
+    normal.arm(.quarantine_session);
+    try std.testing.expect(!normal.release(true));
+
+    var safe: RecoverySafeModeNotice = .{};
+    safe.arm(.safe_mode);
+    // Held back while the ledger still holds an unresolved attempt, so a
+    // process killed at the dialog has already broken the failure streak.
+    try std.testing.expect(!safe.release(false));
+    try std.testing.expect(!safe.released);
+    try std.testing.expect(safe.release(true));
+    // Every later tick calls this; the dialog must spawn exactly once.
+    try std.testing.expect(!safe.release(true));
 }
 
 test "win32 recovery safe mode always has a visible notice" {
