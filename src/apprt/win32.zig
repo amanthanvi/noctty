@@ -18120,6 +18120,24 @@ fn restoreTerminalScrollbackSnapshot(
     snapshot: win32_session_state.ScrollbackSnapshot,
     max_lines_requested: usize,
 ) !usize {
+    const screen = terminal_state.screens.active;
+
+    // The snapshot only survives the shell's startup paint because the
+    // `scrollClear` below moves it into history first. With `scrollback-limit
+    // = 0` there is no history to move it into, so restoring would report
+    // success and then show the user nothing. Refuse instead of lying.
+    if (screen.no_scrollback) return error.SnapshotNeedsScrollback;
+
+    // `Surface.init` starts the I/O thread before `createWindowSurface`
+    // returns, so the child may already have painted by the time restore runs.
+    // Printing a snapshot underneath a live prompt and then scrolling the lot
+    // into history would bury the shell's own prompt and leave it painting
+    // into a pane it believes is still on screen. A pane that has not been
+    // painted yet still has its cursor at the origin, so treat anything else
+    // as "too late" and skip: a missing snapshot is recoverable, a desynced
+    // shell is not.
+    if (screen.cursor.x != 0 or screen.cursor.y != 0) return error.PaneAlreadyPainted;
+
     const max_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
     const first_line = snapshot.lines.len - @min(snapshot.lines.len, max_lines);
     var restored_lines: usize = 0;
@@ -35161,6 +35179,62 @@ test "win32 session scrollback restore survives pwsh ConPTY startup repaint" {
     defer std.testing.allocator.free(screen);
     try std.testing.expect(std.mem.indexOf(u8, screen, "L12") != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, "--- RESTORED SNAPSHOT END |") != null);
+}
+
+test "win32 session scrollback restore refuses panes it cannot restore safely" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const lines = [_][]const u8{ "L01", "L02" };
+    const snapshot: win32_session_state.ScrollbackSnapshot = .{
+        .captured_at_unix_ms = 0,
+        .lines = &lines,
+    };
+
+    // `scrollback-limit = 0`: `scrollClear` has nowhere to move the snapshot,
+    // so a "successful" restore would leave the user with nothing.
+    {
+        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            .cols = 80,
+            .rows = 8,
+            .max_scrollback = 0,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+        try std.testing.expect(terminal_state.screens.active.no_scrollback);
+        try std.testing.expectError(
+            error.SnapshotNeedsScrollback,
+            restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+        );
+    }
+
+    // The child painted before restore ran. Restoring here would scroll the
+    // shell's own prompt into history and desync it from the pane.
+    {
+        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            .cols = 80,
+            .rows = 8,
+            .max_scrollback = 1024,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+
+        var stream = terminal_state.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("PS C:\\src> ");
+        try std.testing.expect(terminal_state.screens.active.cursor.x != 0);
+
+        try std.testing.expectError(
+            error.PaneAlreadyPainted,
+            restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+        );
+
+        const screen = try terminal_state.screens.active.dumpStringAlloc(
+            std.testing.allocator,
+            .{ .screen = .{} },
+        );
+        defer std.testing.allocator.free(screen);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "PS C:\\src>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "L01") == null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "SNAPSHOT END") == null);
+    }
 }
 
 test "win32 session save skips quick terminal tabs" {
