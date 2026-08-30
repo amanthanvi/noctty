@@ -33,6 +33,7 @@ const error_pipe_busy = 231;
 const still_active = 259;
 const security_sqos_present = 0x00100000;
 const security_identification = 0x00010000;
+const process_query_limited_information = 0x1000;
 
 const Tag = enum(u8) {
     attach = 1,
@@ -91,35 +92,49 @@ extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     descriptor: *?*anyopaque,
     descriptor_size: ?*windows.DWORD,
 ) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn GetNamedPipeServerProcessId(
+    pipe: windows.HANDLE,
+    process_id: *windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn OpenProcess(
+    access: windows.DWORD,
+    inherit_handle: windows.BOOL,
+    process_id: windows.DWORD,
+) callconv(.winapi) ?windows.HANDLE;
+
+// Token user SID of `process` in canonical string form. Callers compare these
+// strings to decide whether two handles belong to the same user.
+fn tokenUserSidAlloc(alloc: Allocator, process: windows.HANDLE) ![]u8 {
+    var token: ?windows.HANDLE = null;
+    if (OpenProcessToken(process, token_query, &token) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    defer _ = windows.CloseHandle(token.?);
+
+    var token_buffer: [512]u8 align(@alignOf(TokenUser)) = undefined;
+    var token_len: windows.DWORD = 0;
+    if (GetTokenInformation(
+        token.?,
+        token_user_class,
+        &token_buffer,
+        token_buffer.len,
+        &token_len,
+    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+
+    const token_user: *const TokenUser = @ptrCast(&token_buffer);
+    var sid_w: ?[*:0]u16 = null;
+    if (ConvertSidToStringSidW(token_user.user.sid, &sid_w) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    defer _ = LocalFree(sid_w);
+    return std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(sid_w.?));
+}
 
 const PipeSecurity = struct {
     descriptor: *anyopaque,
 
     fn init(alloc: Allocator) !PipeSecurity {
-        var token: ?windows.HANDLE = null;
-        if (OpenProcessToken(windows.GetCurrentProcess(), token_query, &token) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        }
-        defer _ = windows.CloseHandle(token.?);
-
-        var token_buffer: [512]u8 align(@alignOf(TokenUser)) = undefined;
-        var token_len: windows.DWORD = 0;
-        if (GetTokenInformation(
-            token.?,
-            token_user_class,
-            &token_buffer,
-            token_buffer.len,
-            &token_len,
-        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
-
-        const token_user: *const TokenUser = @ptrCast(&token_buffer);
-        var sid_w: ?[*:0]u16 = null;
-        if (ConvertSidToStringSidW(token_user.user.sid, &sid_w) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        }
-        defer _ = LocalFree(sid_w);
-
-        const sid = try std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(sid_w.?));
+        const sid = try tokenUserSidAlloc(alloc, windows.GetCurrentProcess());
         defer alloc.free(sid);
         const sddl = try std.fmt.allocPrintSentinel(
             alloc,
@@ -277,9 +292,12 @@ const StatsContext = struct {
     stop: std.atomic.Value(bool) = .init(false),
 };
 
-// Samples the ring on its own thread so a stalled stderr consumer can only
-// stall diagnostics, never ConPTY draining. One final sample is published after
-// `stop` is observed so the last totals are never lost on shutdown.
+// Samples the ring on its own thread so a stalled stderr consumer can only stall
+// diagnostics, never ConPTY draining. This thread is detached and never joined:
+// the print below can block indefinitely on a stderr pipe nobody reads, and a
+// thread already inside WriteFile cannot observe `stop`, so teardown must not
+// wait on it. `stop` is still honoured for the ordinary case, where it lets the
+// sampler publish one last set of totals and exit promptly.
 fn reportRingStats(context: *StatsContext) void {
     var last_total: u64 = 0;
     while (true) {
@@ -346,8 +364,17 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     const pipe_name_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name);
     defer alloc.free(pipe_name_w);
 
-    var ring = Ring{ .bytes = try alloc.alloc(u8, ring_size) };
-    defer alloc.free(ring.bytes);
+    // The stats sampler is deliberately never joined (see the teardown below), so
+    // it can still be running when serve returns. Everything it reads therefore
+    // has to outlive this frame: the ring, its backing bytes, and the sampler
+    // context come from the page allocator and are never freed. This host is a
+    // one-shot process, so the OS reclaims them at exit. Keeping them out of the
+    // GPA also stops its leak report from firing at teardown, which would itself
+    // be another blocking write to the stderr we may already be stuck on.
+    const ring = try std.heap.page_allocator.create(Ring);
+    ring.* = .{ .bytes = try std.heap.page_allocator.alloc(u8, ring_size) };
+    const stats_context = try std.heap.page_allocator.create(StatsContext);
+    stats_context.* = .{ .ring = ring };
 
     var pty = try Pty.open(.{ .ws_row = 24, .ws_col = 80 });
     var command: Command = .{
@@ -366,16 +393,18 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
         .rt_post_fork_info = undefined,
     };
     var drain_thread: ?std.Thread = null;
-    var stats_context = StatsContext{ .ring = &ring };
-    var stats_thread: ?std.Thread = null;
     defer {
         command.closeWindowsJobObject();
         pty.deinit();
+        // Joining the drain thread is safe: pty.deinit closed the handle it reads,
+        // so its ReadFile returns and it exits.
         if (drain_thread) |thread| thread.join();
-        if (stats_thread) |thread| {
-            stats_context.stop.store(true, .release);
-            thread.join();
-        }
+        // Signal the stats sampler but never join it. If stderr is a pipe nobody
+        // drains, the sampler can be blocked inside a write, and no signal wakes a
+        // thread already inside WriteFile, so joining it would hang teardown and
+        // leave this broker alive after its shell exited. Abandoning it is safe
+        // because everything it touches is intentionally never freed.
+        stats_context.stop.store(true, .release);
         if (command.pid) |process| _ = windows.CloseHandle(process);
     }
 
@@ -383,9 +412,10 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     const shell_pid = win32_job_object.GetProcessId(command.pid.?);
     if (shell_pid == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
 
-    var drain_context = DrainContext{ .output = pty.out_pipe, .ring = &ring };
+    var drain_context = DrainContext{ .output = pty.out_pipe, .ring = ring };
     drain_thread = try std.Thread.spawn(.{}, drainConpty, .{&drain_context});
-    stats_thread = try std.Thread.spawn(.{}, reportRingStats, .{&stats_context});
+    const stats_thread = try std.Thread.spawn(.{}, reportRingStats, .{stats_context});
+    stats_thread.detach();
 
     var security = try PipeSecurity.init(alloc);
     defer security.deinit();
@@ -433,7 +463,7 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
             return windows.unexpectedError(windows.kernel32.GetLastError());
         }
 
-        serveClient(alloc, pipe, &pty, &ring, command.pid.?) catch |err| switch (err) {
+        serveClient(alloc, pipe, &pty, ring, command.pid.?) catch |err| switch (err) {
             error.BrokenPipe, error.NoData, error.PipeNotConnected => {},
             else => return err,
         };
@@ -621,7 +651,7 @@ fn attach(alloc: Allocator, args: []const [:0]u8) !void {
     defer alloc.free(pipe_name);
     const pipe_name_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name);
     defer alloc.free(pipe_name_w);
-    const pipe = try connectClient(pipe_name_w);
+    const pipe = try connectClient(alloc, pipe_name_w);
     defer _ = windows.CloseHandle(pipe);
 
     try sendFrame(pipe, .attach, "");
@@ -665,7 +695,39 @@ fn attachInput(context: InputContext) void {
     }
 }
 
-fn connectClient(pipe_name: [:0]const u16) !windows.HANDLE {
+// A client must not hand its keystrokes to whatever happens to own the pipe name.
+// The host holding one instance for its lifetime closes the between-client gap,
+// but that says nothing about a name an attacker owned *before* the host started,
+// nor about running `attach` when no host is running at all. In both cases the
+// open below succeeds against the attacker's pipe and the host's own fail-closed
+// behaviour protects only the host. So confirm the server process runs as this
+// user before any frame is sent. Anything that cannot be positively confirmed is
+// untrusted, including an OpenProcess that fails because the server belongs to
+// another user.
+fn verifyPipeServer(alloc: Allocator, pipe: windows.HANDLE) !void {
+    var server_pid: windows.DWORD = 0;
+    if (GetNamedPipeServerProcessId(pipe, &server_pid) == 0) {
+        return error.UntrustedPipeServer;
+    }
+    const server = OpenProcess(
+        process_query_limited_information,
+        windows.FALSE,
+        server_pid,
+    ) orelse return error.UntrustedPipeServer;
+    defer _ = windows.CloseHandle(server);
+
+    const server_sid = tokenUserSidAlloc(alloc, server) catch return error.UntrustedPipeServer;
+    defer alloc.free(server_sid);
+    const own_sid = try tokenUserSidAlloc(alloc, windows.GetCurrentProcess());
+    defer alloc.free(own_sid);
+
+    // This closes the cross-user path only. A same-user attacker, and a
+    // same-user attacker at a different integrity level, both still pass; those
+    // stay explicit residuals of the spike.
+    if (!std.mem.eql(u8, server_sid, own_sid)) return error.UntrustedPipeServer;
+}
+
+fn connectClient(alloc: Allocator, pipe_name: [:0]const u16) !windows.HANDLE {
     const deadline = std.time.nanoTimestamp() + (10 * std.time.ns_per_s);
     while (true) {
         // Named pipes default to SecurityImpersonation when the caller supplies no
@@ -683,7 +745,11 @@ fn connectClient(pipe_name: [:0]const u16) !windows.HANDLE {
             windows.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
             null,
         );
-        if (pipe != windows.INVALID_HANDLE_VALUE) return pipe;
+        if (pipe != windows.INVALID_HANDLE_VALUE) {
+            errdefer _ = windows.CloseHandle(pipe);
+            try verifyPipeServer(alloc, pipe);
+            return pipe;
+        }
 
         const last_error = windows.kernel32.GetLastError();
         const last_error_int = @intFromEnum(last_error);

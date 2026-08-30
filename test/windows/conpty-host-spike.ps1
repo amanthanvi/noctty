@@ -413,7 +413,7 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
         observed_host_private_max_detached_bytes = $maxPrivate
         observed_host_private_growth_bytes = $privateGrowth
         observed_private_growth_within_ring_cap = $true
-        pipe_security = 'current-user-DACL+first-instance+reject-remote+persistent-instance'
+        pipe_security = 'current-user-DACL+first-instance+reject-remote+persistent-instance+client-verifies-server-sid'
         detach_frame = $true
         ceiling = 'same-logon-session-only;never-logoff-or-reboot'
     }

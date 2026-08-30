@@ -342,8 +342,9 @@ preallocated 1 MiB overwrite ring, and accepts one client at a time on
 a named pipe. Its actual security controls are an explicit protected
 current-user SDDL DACL, `FILE_FLAG_FIRST_PIPE_INSTANCE`,
 `PIPE_REJECT_REMOTE_CLIENTS`, a single pipe instance created before the
-name is advertised and held for the host's lifetime, and clients that
-connect at `SECURITY_IDENTIFICATION`. The retained `LOCAL` prefix only affects
+name is advertised and held for the host's lifetime, clients that
+connect at `SECURITY_IDENTIFICATION`, and clients that authenticate the
+server's owner SID before sending any frame. The retained `LOCAL` prefix only affects
 AppContainer name resolution; it is not an access-control property for
 ordinary desktop processes. Its deliberately disposable protocol has
 only attach, detach, resize, input, and output frames.
@@ -377,14 +378,14 @@ recorded PIDs.
 The latest hardened green run reported:
 
 ```text
-CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":5724,"killed_client_pid":58092,"shell_pid":65196,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2575980,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38436864,"observed_host_private_max_detached_bytes":38436864,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote+persistent-instance","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
+CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":38276,"killed_client_pid":24636,"shell_pid":14080,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2579093,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38449152,"observed_host_private_max_detached_bytes":38449152,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote+persistent-instance+client-verifies-server-sid","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
 ```
 
 The memory evidence is intentionally precise and observational: total
-process private memory was 38,436,864 bytes before detached overflow, so
+process private memory was 38,449,152 bytes before detached overflow, so
 the whole process was not and cannot be under a 1 MiB ring cap. The
 retained-output allocation never exceeded 1,048,576 bytes, and the
-sampled private-memory growth while draining at least 2,575,980 bytes
+sampled private-memory growth while draining at least 2,579,093 bytes
 detached was 0 bytes in this one run. The structural guarantee is the
 ring's retained-byte bound; the process-memory figure is not a guarantee
 or a long-duration whole-process memory budget. An
@@ -398,6 +399,18 @@ the ring every 20 ms, because a synchronous stderr write on the drain
 thread would block whenever stderr is a pipe whose reader stops
 consuming — which would backpressure ConPTY through the very
 measurement instrument used to prove detached draining.
+
+That sampler is detached and is never joined at teardown. The same
+blocking write that must stay off the drain thread would otherwise stall
+shutdown instead: a thread already inside `WriteFile` cannot observe a
+stop flag, so joining it would hang teardown and leave a broker alive
+after its shell had exited — the one lifetime property this spike
+exists to claim. Teardown therefore signals the sampler and abandons it.
+Abandoning it is only safe because the ring, its backing bytes and the
+sampler's context are allocated from the page allocator and never freed;
+the host is a one-shot process and the OS reclaims them at exit. Keeping
+them out of the GPA also stops its leak report from firing at teardown,
+which would itself be another blocking write to the same stderr.
 
 Residual unknowns remain product-sized: arbitrary third-party and
 complex TUI behavior beyond this synthetic polling alt-screen probe; a
@@ -436,12 +449,35 @@ stays 1, preserving one client at a time. Clients also connect with
 `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so no server can
 capture an impersonation token from a client that reaches it.
 
-Two related gaps stay open deliberately. An attacker who owns the name
-*before* this host starts still denies service — fail closed, no
-disclosure. And a client launched when no host is running has nothing to
-authenticate against. Closing that needs client-side server
-authentication, such as `GetNamedPipeServerProcessId` plus an owner-SID
-comparison, which is product work rather than spike work. Synchronous `ConnectNamedPipe`
+A second correction is needed, because the revision that introduced the
+persistent instance then claimed the remaining cases were "fail closed,
+no disclosure". That was also wrong. `FILE_FLAG_FIRST_PIPE_INSTANCE`
+fails the *host* closed; it says nothing about the *client*. When an
+attacker owns the name before the host starts, or when `attach` runs
+with no host at all, the client's open still succeeds against the
+attacker's pipe and the client then sends its attach frame and its
+stdin. Confirmed directly: with no host running and an impostor holding
+`\\.\pipe\LOCAL\noctty-conpty-host-<name>`, the client connected and the
+impostor received the attach frame `01 00 00 00 00`. That is disclosure,
+not denial of service, and `SECURITY_IDENTIFICATION` does not help — it
+prevents impersonation, not capture.
+
+So the client now authenticates the server before sending any frame:
+`GetNamedPipeServerProcessId` on the opened handle, then `OpenProcess`,
+then a token-user SID comparison against the current user, failing
+closed as `error.UntrustedPipeServer` on any step it cannot positively
+confirm — including an `OpenProcess` that fails because the server
+belongs to another user. The green run below exercised the accepting
+path across all five clients.
+
+What remains is now stated exactly: this closes the *cross-user* case.
+A same-user impostor still passes the SID comparison, as does a
+same-user impostor at a different integrity level. Those are real and
+unclosed, and integrity-level separation stays on the residual list
+above. The honest summary is that a different local user can no longer
+capture terminal input in any of these windows, and a same-user attacker
+still can — which is consistent with the spike's stated threat model
+rather than an unexamined assumption about it. Synchronous `ConnectNamedPipe`
 also has no timeout, so the host can remain blocked if the shell exits
 while no client is attached. No application integration was attempted.
 
