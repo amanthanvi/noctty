@@ -1989,4 +1989,13 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     var message = app_queue.pop().?;
     message.deinit(alloc);
     try std.testing.expect(app_queue.pop() == null);
+
+    // A UNC cwd must drop the URI's leading slash instead of being reported as
+    // the invalid path `/\\server\share\dir`.
+    stream.nextSlice("\x1b]9;9;kitty-shell-cwd://localhost/\\\\server\\share\\dir\x1b\\");
+    try std.testing.expectEqualStrings("\\\\server\\share\\dir", term.getPwd().?);
+
+    var unc_message = app_queue.pop().?;
+    unc_message.deinit(alloc);
+    try std.testing.expect(app_queue.pop() == null);
 }

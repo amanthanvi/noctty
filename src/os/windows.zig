@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const windows = std.os.windows;
 
 // Export any constants or functions we need from the Windows API so
@@ -36,6 +37,32 @@ pub const FOLDERID_LocalAppData = windows.FOLDERID_LocalAppData;
 
 pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
 pub extern "kernel32" fn GetOEMCP() callconv(.winapi) windows.UINT;
+pub extern "kernel32" fn GetDriveTypeW(
+    lpRootPathName: ?windows.LPCWSTR,
+) callconv(.winapi) windows.UINT;
+
+/// `GetDriveTypeW` return values, as documented at
+/// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew
+pub const DRIVE_UNKNOWN: windows.UINT = 0;
+pub const DRIVE_NO_ROOT_DIR: windows.UINT = 1;
+pub const DRIVE_REMOVABLE: windows.UINT = 2;
+pub const DRIVE_FIXED: windows.UINT = 3;
+pub const DRIVE_REMOTE: windows.UINT = 4;
+pub const DRIVE_CDROM: windows.UINT = 5;
+pub const DRIVE_RAMDISK: windows.UINT = 6;
+
+/// Classify the drive named by an ASCII drive letter such as 'C'. This only
+/// reads the local drive/mount table, so it does not touch the network even
+/// for a disconnected mapped drive. Returns `DRIVE_UNKNOWN` for anything that
+/// is not a drive letter.
+pub fn driveTypeForLetter(letter: u8) windows.UINT {
+    if (builtin.os.tag != .windows) return DRIVE_UNKNOWN;
+    if (!std.ascii.isAlphabetic(letter)) return DRIVE_UNKNOWN;
+
+    // GetDriveTypeW requires the trailing backslash.
+    const root: [3:0]u16 = .{ letter, ':', '\\' };
+    return GetDriveTypeW(&root);
+}
 
 pub const KnownFolderPathError = error{
     BufferTooSmall,

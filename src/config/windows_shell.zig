@@ -533,6 +533,14 @@ pub fn isWslPath(path: []const u8) bool {
 /// WSL paths stay WSL-style so they can be inherited into later WSL shells.
 pub fn osc7PathToLocal(alloc: Allocator, path: []const u8) ![]const u8 {
     if (isWindowsUriPath(path)) return try uriPathToWindows(alloc, path);
+    // A UNC path carried in a URI keeps the URI's leading `/`. Strip it before
+    // the WSL check below, which would otherwise treat the whole string as a
+    // POSIX path and hand back an unusable `/\\server\share` cwd.
+    if (isUncUriPath(path)) {
+        const unc = path[1..];
+        if (isWslPath(unc)) return try normalizeWslPath(alloc, unc);
+        return try alloc.dupe(u8, unc);
+    }
     if (isWslPath(path)) return try normalizeWslPath(alloc, path);
     return try alloc.dupe(u8, path);
 }
@@ -542,6 +550,7 @@ pub fn osc7PathToLocal(alloc: Allocator, path: []const u8) ![]const u8 {
 pub fn pathToWsl(alloc: Allocator, path: []const u8) !?[]const u8 {
     if (path.len == 0) return null;
     if (isWindowsUriPath(path)) return try pathToWsl(alloc, path[1..]);
+    if (isUncUriPath(path)) return try pathToWsl(alloc, path[1..]);
     if (isWslPath(path)) return try normalizeWslPath(alloc, path);
 
     if (!isDriveAbsolutePath(path)) return null;
@@ -1292,6 +1301,17 @@ fn isWindowsUriPath(path: []const u8) bool {
         isSeparator(path[3]);
 }
 
+/// True for a UNC path that still carries the leading `/` of the URI it came
+/// from, e.g. `/\\server\share\dir`. cmd's `$P` expands to a raw UNC path, so
+/// `kitty-shell-cwd://localhost/$P` yields exactly this shape.
+fn isUncUriPath(path: []const u8) bool {
+    return path.len >= 4 and
+        path[0] == '/' and
+        path[1] == '\\' and
+        path[2] == '\\' and
+        !isSeparator(path[3]);
+}
+
 pub fn isDriveAbsolutePath(path: []const u8) bool {
     return path.len >= 3 and
         std.ascii.isAlphabetic(path[0]) and
@@ -1804,6 +1824,53 @@ test "osc7PathToLocal converts windows file uri path" {
     defer alloc.free(result);
 
     try testing.expectEqualStrings("C:\\Users\\aman\\src", result);
+}
+
+test "osc7PathToLocal strips the uri slash from a unc path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const share = try osc7PathToLocal(alloc, "/\\\\server\\share\\dir");
+    defer alloc.free(share);
+    try testing.expectEqualStrings("\\\\server\\share\\dir", share);
+
+    const root = try osc7PathToLocal(alloc, "/\\\\server\\share");
+    defer alloc.free(root);
+    try testing.expectEqualStrings("\\\\server\\share", root);
+
+    // A UNC path pointing back into WSL is still normalized to a WSL path.
+    const wsl = try osc7PathToLocal(alloc, "/\\\\wsl.localhost\\Ubuntu\\home\\aman");
+    defer alloc.free(wsl);
+    try testing.expectEqualStrings("/home/aman", wsl);
+
+    // Real POSIX paths must not be mistaken for UNC.
+    const posix = try osc7PathToLocal(alloc, "/home/aman/src");
+    defer alloc.free(posix);
+    try testing.expectEqualStrings("/home/aman/src", posix);
+}
+
+test "isUncUriPath only matches uri-carried unc paths" {
+    const testing = std.testing;
+
+    try testing.expect(isUncUriPath("/\\\\server\\share"));
+    try testing.expect(isUncUriPath("/\\\\s\\a"));
+    try testing.expect(!isUncUriPath("/home/aman"));
+    try testing.expect(!isUncUriPath("//server/share"));
+    try testing.expect(!isUncUriPath("\\\\server\\share"));
+    try testing.expect(!isUncUriPath("/\\\\"));
+    try testing.expect(!isUncUriPath("/\\\\\\share"));
+    try testing.expect(!isUncUriPath("/C:/Users"));
+}
+
+test "pathToWsl rejects a uri-carried unc path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    try testing.expect(try pathToWsl(alloc, "/\\\\server\\share\\dir") == null);
+
+    const wsl = (try pathToWsl(alloc, "/\\\\wsl.localhost\\Ubuntu\\home\\aman")).?;
+    defer alloc.free(wsl);
+    try testing.expectEqualStrings("/home/aman", wsl);
 }
 
 test "shellPwd drops invalid non-wsl cwd roots" {

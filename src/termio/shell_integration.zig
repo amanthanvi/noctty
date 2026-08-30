@@ -576,6 +576,23 @@ const CmdClinkDetectionCache = struct {
 };
 var cmd_clink_detection_cache: CmdClinkDetectionCache = .{};
 
+/// cmd's PROMPT parser consumes `$` plus the character that follows it as a
+/// single code, and `$$` is a literal `$`. A user prompt ending in an odd
+/// number of `$` therefore pairs its dangling `$` with the `$E` that opens our
+/// suffix: `E]133;B` would print as visible text and the prompt region would
+/// never be closed. `$S` expands to one space, so it absorbs the dangling `$`
+/// without dropping any of the user's prompt.
+/// https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/prompt
+const cmd_prompt_dollar_separator = "S";
+
+fn cmdPromptEndsInDanglingDollar(prompt: []const u8) bool {
+    var trailing: usize = 0;
+    while (trailing < prompt.len and
+        prompt[prompt.len - 1 - trailing] == '$') : (trailing += 1)
+    {}
+    return trailing % 2 == 1;
+}
+
 /// Build a cmd PROMPT value that preserves the user's prompt while adding
 /// prompt boundaries and the current working directory. `$E` is ESC in cmd's
 /// PROMPT syntax; ESC followed by `\\` terminates each OSC sequence.
@@ -586,10 +603,16 @@ fn buildCmdPrompt(alloc: Allocator, existing: ?[]const u8) ![]u8 {
         }
     }
 
+    const body = existing orelse cmd_default_prompt;
+    const separator: []const u8 = if (cmdPromptEndsInDanglingDollar(body))
+        cmd_prompt_dollar_separator
+    else
+        "";
+
     return try std.fmt.allocPrint(
         alloc,
-        "{s}{s}{s}",
-        .{ cmd_prompt_prefix, existing orelse cmd_default_prompt, cmd_prompt_suffix },
+        "{s}{s}{s}{s}",
+        .{ cmd_prompt_prefix, body, separator, cmd_prompt_suffix },
     );
 }
 
@@ -745,14 +768,15 @@ fn clinkInstalledUncached(
             &.{ local_app_data, "clink" },
         );
         defer alloc.free(local_clink_dir);
-        if (try directoryContainsClink(alloc, local_clink_dir)) return true;
+        if (cmdDirProbeAllowed(local_clink_dir) and
+            try directoryContainsClink(alloc, local_clink_dir)) return true;
     }
 
     if (path.len > 0) {
         var dirs = std.mem.splitScalar(u8, path, ';');
         while (dirs.next()) |raw_dir| {
             const dir = std.mem.trim(u8, raw_dir, " \t\"");
-            if (cmdPathEntrySafeToProbe(dir) and
+            if (cmdDirProbeAllowed(dir) and
                 try directoryContainsClink(alloc, dir)) return true;
         }
     }
@@ -760,11 +784,31 @@ fn clinkInstalledUncached(
     return false;
 }
 
+/// Whether we are willing to hit the filesystem for `dir` while starting a
+/// shell. This runs under the detection cache mutex, so any probe that blocks
+/// stalls every concurrently starting cmd session.
+fn cmdDirProbeAllowed(dir: []const u8) bool {
+    if (!cmdPathEntrySafeToProbe(dir)) return false;
+    return cmdDriveTypeSafeToProbe(
+        internal_os.windows.driveTypeForLetter(dir[0]),
+    );
+}
+
 fn cmdPathEntrySafeToProbe(dir: []const u8) bool {
     return dir.len >= 3 and
         std.ascii.isAlphabetic(dir[0]) and
         dir[1] == ':' and
         (dir[2] == '\\' or dir[2] == '/');
+}
+
+/// Drive-letter syntax alone does not prove a path is local: a mapped network
+/// drive such as `Z:\tools` looks identical to `C:\tools`, and probing one
+/// whose server is unreachable can block for the SMB timeout. Skip remote
+/// drives and drive letters with nothing mounted; anything else (including
+/// `DRIVE_UNKNOWN`, which some virtual disk stacks report) stays probeable.
+fn cmdDriveTypeSafeToProbe(drive_type: u32) bool {
+    return drive_type != internal_os.windows.DRIVE_REMOTE and
+        drive_type != internal_os.windows.DRIVE_NO_ROOT_DIR;
 }
 
 fn directoryContainsClink(alloc: Allocator, dir: []const u8) !bool {
@@ -803,6 +847,41 @@ test "cmd prompt construction preserves user prompt" {
         "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
         prompt,
     );
+}
+
+test "cmd prompt construction separates a dangling trailing dollar" {
+    const testing = std.testing;
+
+    try testing.expect(cmdPromptEndsInDanglingDollar("$P$G$"));
+    try testing.expect(cmdPromptEndsInDanglingDollar("$"));
+    try testing.expect(cmdPromptEndsInDanglingDollar("$P$$$"));
+    try testing.expect(!cmdPromptEndsInDanglingDollar("$P$G"));
+    try testing.expect(!cmdPromptEndsInDanglingDollar("$P$$"));
+    try testing.expect(!cmdPromptEndsInDanglingDollar("$P$$$$"));
+    try testing.expect(!cmdPromptEndsInDanglingDollar("$P$G "));
+    try testing.expect(!cmdPromptEndsInDanglingDollar(""));
+
+    // Without the separator this would emit `$$E]133;B`, which cmd renders as
+    // a literal `$` followed by the visible text `E]133;B`.
+    const dangling = try buildCmdPrompt(testing.allocator, "$P$G$");
+    defer testing.allocator.free(dangling);
+    try testing.expectEqualStrings(
+        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
+        dangling,
+    );
+
+    // An even trailing run is already self-escaping and is left alone.
+    const balanced = try buildCmdPrompt(testing.allocator, "$P$G$$");
+    defer testing.allocator.free(balanced);
+    try testing.expectEqualStrings(
+        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
+        balanced,
+    );
+
+    // Re-wrapping the separated prompt must still be a no-op.
+    const repeated = try buildCmdPrompt(testing.allocator, dangling);
+    defer testing.allocator.free(repeated);
+    try testing.expectEqualStrings(dangling, repeated);
 }
 
 test "cmd prompt construction is idempotent" {
@@ -913,6 +992,24 @@ test "cmd Clink detection covers PATH and LocalAppData" {
     try testing.expect(!cmdPathEntrySafeToProbe("\\\\server\\share\\clink"));
     try testing.expect(!cmdPathEntrySafeToProbe("//server/share/clink"));
     try testing.expect(cmdPathEntrySafeToProbe("D:/absolute/clink"));
+}
+
+test "cmd Clink probe skips remote and unmounted drive letters" {
+    const testing = std.testing;
+
+    // Documented GetDriveTypeW results:
+    // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew
+    try testing.expect(!cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_REMOTE));
+    try testing.expect(!cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_NO_ROOT_DIR));
+    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_FIXED));
+    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_REMOVABLE));
+    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_CDROM));
+    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_RAMDISK));
+    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_UNKNOWN));
+
+    // Syntax rejection still short-circuits before any drive query.
+    try testing.expect(!cmdDirProbeAllowed("\\\\server\\share\\clink"));
+    try testing.expect(!cmdDirProbeAllowed("relative\\clink"));
 }
 
 test "cmd Clink setup fails closed for semicolon integration path" {
