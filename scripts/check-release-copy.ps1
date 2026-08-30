@@ -164,7 +164,7 @@ $architectures = Get-WindowsPackageArchitectures
 $placeholderVersion = "<version>"
 
 foreach ($arch in $architectures) {
-    foreach ($kind in @("setup", "portable", "checksums")) {
+    foreach ($kind in @("setup", "portable", "manifest", "checksums")) {
         $placeholderName = New-WindowsPackageArtifactName -Version $placeholderVersion -Architecture $arch -Kind $kind
         Require-Contains -RelativePath "PACKAGING.md" -Needle $placeholderName -Reason "Packaging docs must match scripts/windows-architecture.ps1 artifact naming."
     }
@@ -176,6 +176,7 @@ Require-Contains -RelativePath "PACKAGING.md" -Needle "Release workflow requires
 foreach ($docsPath in @("docs/getting-started.md", "docs/windows.md")) {
     Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-setup.exe" -Reason "Install docs should describe both x64 and ARM64 setup artifacts."
     Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-portable.zip" -Reason "Install docs should describe both x64 and ARM64 portable artifacts."
+    Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-portable.manifest.ps1" -Reason "Install docs should describe both signed portable payload manifests."
     Require-Contains -RelativePath $docsPath -Needle "SHA256SUMS-windows-<arch>.txt" -Reason "Checksum guidance should use architecture-specific checksum files."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\bx64\b" -Reason "Install docs should name the supported release architectures."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\barm64\b" -Reason "Install docs should name the supported release architectures."
@@ -196,7 +197,7 @@ if ($latestVersion) {
         Add-Failure "README.md: latest stable release is $latestVersion; expected $ExpectedVersion."
     }
     foreach ($arch in $architectures) {
-        foreach ($kind in @("setup", "portable", "checksums")) {
+        foreach ($kind in @("setup", "portable", "manifest", "checksums")) {
             $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
             Require-Contains -RelativePath "README.md" -Needle $artifactName -Reason "README latest-release table should list every current public artifact."
         }
@@ -248,7 +249,7 @@ if ($CheckRemoteLatest) {
 
                 $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
                 foreach ($arch in $architectures) {
-                    foreach ($kind in @("setup", "portable", "checksums")) {
+                    foreach ($kind in @("setup", "portable", "manifest", "checksums")) {
                         $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
                         if ($assetNames -notcontains $artifactName) {
                             Add-Failure "GitHub latest release $expectedTag is missing expected asset $artifactName."

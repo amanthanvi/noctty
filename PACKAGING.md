@@ -5,8 +5,10 @@ Releases. The public packaging targets are:
 
 - `noctty-<version>-windows-x64-setup.exe`
 - `noctty-<version>-windows-x64-portable.zip`
+- `noctty-<version>-windows-x64-portable.manifest.ps1`
 - `noctty-<version>-windows-arm64-setup.exe`
 - `noctty-<version>-windows-arm64-portable.zip`
+- `noctty-<version>-windows-arm64-portable.manifest.ps1`
 - `SHA256SUMS-windows-x64.txt`
 - `SHA256SUMS-windows-arm64.txt`
 - `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
@@ -34,9 +36,10 @@ then produces:
 
 1. An Inno Setup installer
 2. A portable ZIP
-3. SHA256 checksums for published assets
-4. A release icon asset
-5. Generated package-manager metadata
+3. An Authenticode-signed portable payload manifest
+4. SHA256 checksums for published assets
+5. A release icon asset
+6. Generated package-manager metadata
 
 Local unsigned packaging is allowed for smoke validation, but the GitHub
 Release workflow requires signing and fails closed when signing is absent.
@@ -205,6 +208,7 @@ Recommended order:
 6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
+   - signed portable payload manifest
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets

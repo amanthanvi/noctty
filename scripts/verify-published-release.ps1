@@ -68,6 +68,76 @@ function Get-ChecksumEntries {
     return $entries
 }
 
+function Assert-PortableManifestMatchesPayload {
+    param(
+        [Parameter(Mandatory)] [string]$ManifestPath,
+        [Parameter(Mandatory)] [string]$PayloadRoot,
+        [Parameter(Mandatory)] [string]$Label
+    )
+
+    $managedRootFiles = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($name in @(
+        'noctty.com',
+        'noctty.exe',
+        'ghostty-vt.dll',
+        'LICENSE',
+        'config-template.ghostty',
+        'README.md',
+        'noctty.ico',
+        'share'
+    )) {
+        [void]$managedRootFiles.Add($name)
+    }
+
+    $entries = [System.Collections.Generic.Dictionary[string,string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($rawLine in [System.IO.File]::ReadAllLines($ManifestPath)) {
+        $line = $rawLine.Trim([char[]]" `t`r")
+        $match = [regex]::Match($line, '^(?<hash>[0-9a-fA-F]{64})[ \t]+\*?(?<name>.+)$')
+        if (-not $match.Success) { continue }
+        $name = $match.Groups['name'].Value
+        if (-not $managedRootFiles.Contains($name) -and
+            -not $name.StartsWith('share/', [System.StringComparison]::Ordinal)) {
+            throw "$Label contains an unmanaged payload path: $name"
+        }
+        if ($entries.ContainsKey($name)) {
+            throw "$Label contains duplicate payload path: $name"
+        }
+        $entries.Add($name, $match.Groups['hash'].Value.ToLowerInvariant())
+    }
+
+    $payloadFiles = [System.Collections.Generic.Dictionary[string,string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File)) {
+        $name = [System.IO.Path]::GetRelativePath($PayloadRoot, $file.FullName).Replace('\', '/')
+        if (-not $managedRootFiles.Contains($name) -and
+            -not $name.StartsWith('share/', [System.StringComparison]::Ordinal)) {
+            throw "$Label payload contains an unmanaged file: $name"
+        }
+        $payloadFiles.Add(
+            $name,
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        )
+    }
+
+    $missing = @($payloadFiles.Keys | Where-Object { -not $entries.ContainsKey($_) })
+    $unexpected = @($entries.Keys | Where-Object { -not $payloadFiles.ContainsKey($_) })
+    if ($entries.Count -ne $payloadFiles.Count -or
+        $missing.Count -gt 0 -or
+        $unexpected.Count -gt 0) {
+        throw "$Label file set mismatch. Missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')."
+    }
+    foreach ($name in $payloadFiles.Keys) {
+        if ($entries[$name] -ne $payloadFiles[$name]) {
+            throw "$Label hash mismatch for $name."
+        }
+    }
+}
+
 function Test-GhAttestationAvailable {
     & gh attestation verify --help *> $null
     if ($LASTEXITCODE -eq 0) { return $true }
@@ -124,12 +194,13 @@ $expectedNames = [System.Collections.Generic.List[string]]::new()
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup))
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable))
+    $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest))
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
 }
 $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
 $expectedNames.Add('noctty-icon.svg')
-if ($expectedNames.Count -ne 8) {
-    throw "Published release contract must require exactly eight assets; generated $($expectedNames.Count)."
+if ($expectedNames.Count -ne 10) {
+    throw "Published release contract must require exactly ten assets; generated $($expectedNames.Count)."
 }
 
 $assets = @($release.assets)
@@ -164,6 +235,7 @@ try {
     if ($allowedPins.Count -eq 0) { throw 'Updater publisher-pin allowlist is empty.' }
     $trustSelfSigned = ([string]$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
 
+    $attestationEvidenceCount = 0
     foreach ($asset in $assets) {
         $path = Join-Path $DownloadDirectory ([string]$asset.name)
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -177,11 +249,12 @@ try {
         if ($actualHash -ne $digest.Substring(7).ToLowerInvariant()) {
             throw "GitHub digest mismatch for asset $($asset.name)."
         }
-        if ($verifyAttestations) {
+        if ($verifyAttestations -and [string]$asset.name -ne 'noctty-icon.svg') {
             Assert-PublishedAttestation `
                 -Path $path `
                 -Label ([string]$asset.name) `
                 -Repository $repository
+            $attestationEvidenceCount += 1
         }
     }
 
@@ -198,6 +271,7 @@ try {
     foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         $setupName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup
         $portableName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable
+        $manifestName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest
         $checksumsName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums
         $checksums = Get-ChecksumEntries -Path (Join-Path $DownloadDirectory $checksumsName)
         $expectedChecksumNames = @($setupName, $portableName)
@@ -217,9 +291,18 @@ try {
             -Label "Setup $architecture" `
             -AllowedPins $allowedPins `
             -TrustSelfSigned $trustSelfSigned))
+        $signatureEvidence.Add((Assert-PublishedSignature `
+            -Path (Join-Path $DownloadDirectory $manifestName) `
+            -Label "Portable manifest $architecture" `
+            -AllowedPins $allowedPins `
+            -TrustSelfSigned $trustSelfSigned))
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
+        Assert-PortableManifestMatchesPayload `
+            -ManifestPath (Join-Path $DownloadDirectory $manifestName) `
+            -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+            -Label "Portable manifest $architecture"
         foreach ($relativePath in @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')) {
             $binaryPath = Join-Path $extractDirectory $relativePath
             if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
@@ -233,24 +316,24 @@ try {
         }
     }
 
-    if ($signatureEvidence.Count -ne 8) {
-        throw "Published release must contain exactly eight verified PE signatures; found $($signatureEvidence.Count)."
+    if ($signatureEvidence.Count -ne 10) {
+        throw "Published release must contain exactly ten verified Authenticode signatures; found $($signatureEvidence.Count)."
     }
 
     $thumbprints = @($signatureEvidence | ForEach-Object { $_.Thumbprint } | Sort-Object -Unique)
     $pins = @($signatureEvidence | ForEach-Object { $_.SpkiSha256 } | Sort-Object -Unique)
     if ($thumbprints.Count -ne 1 -or $pins.Count -ne 1) {
-        throw "Published release binaries are not signed by one consistent certificate (thumbprints=$($thumbprints -join ', '); pins=$($pins -join ', '))."
+        throw "Published release files are not signed by one consistent certificate (thumbprints=$($thumbprints -join ', '); pins=$($pins -join ', '))."
     }
 
     $attestationSummary = if ($verifyAttestations) {
-        "$($assets.Count) provenance attestations"
+        "$attestationEvidenceCount provenance attestations"
     } elseif ($requiresAttestation) {
         'provenance skipped because gh attestation verify is unavailable'
     } else {
         "provenance not required before v$firstAttestedVersion"
     }
-    Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $attestationSummary, $($signatureEvidence.Count) signed PE files, SPKI $($pins[0]))" -ForegroundColor Green
+    Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $attestationSummary, $($signatureEvidence.Count) signed files, SPKI $($pins[0]))" -ForegroundColor Green
 }
 finally {
     if ($createdTempDirectory -and (Test-Path -LiteralPath $DownloadDirectory)) {

@@ -41,13 +41,14 @@ function New-WindowsPackageArtifactName {
     param(
         [string]$Version,
         [string]$Architecture,
-        [ValidateSet("portable", "setup", "checksums", "legacy-checksums")]
+        [ValidateSet("portable", "manifest", "setup", "checksums", "legacy-checksums")]
         [string]$Kind
     )
 
     $arch = (Get-WindowsPackageArchitecture -Architecture $Architecture).Name
     switch ($Kind) {
         "portable" { return "noctty-$Version-windows-$arch-portable.zip" }
+        "manifest" { return "noctty-$Version-windows-$arch-portable.manifest.ps1" }
         "setup" { return "noctty-$Version-windows-$arch-setup.exe" }
         "checksums" { return "SHA256SUMS-windows-$arch.txt" }
         "legacy-checksums" { return "SHA256SUMS.txt" }

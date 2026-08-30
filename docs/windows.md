@@ -23,6 +23,8 @@ Each release publishes signed Windows artifacts for x64 and ARM64:
   with Start menu shortcuts and app identity metadata.
 - `noctty-<version>-windows-<arch>-portable.zip`: portable use
   without an installer.
+- `noctty-<version>-windows-<arch>-portable.manifest.ps1`: signed
+  complete-file metadata for portable updates.
 - `SHA256SUMS-windows-<arch>.txt`: architecture-specific checksums.
 
 Chocolatey installs are available with `choco install noctty`.

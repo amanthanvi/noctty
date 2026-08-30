@@ -2605,6 +2605,7 @@ $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
+$windowsArchitecture = Join-Path $repoRoot 'scripts\windows-architecture.ps1'
 $windowsBuildCapabilities = Join-Path $repoRoot 'scripts\windows-build-capabilities.ps1'
 $signingTrust = Join-Path $repoRoot 'scripts\signing-trust.ps1'
 $signingTrustTest = Join-Path $repoRoot 'scripts\test-signing-trust.ps1'
@@ -2626,6 +2627,7 @@ $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
 $windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
+$windowsArchitectureText = Get-Content -LiteralPath $windowsArchitecture -Raw
 $signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
 $signingTrustTestText = Get-Content -LiteralPath $signingTrustTest -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
@@ -6704,7 +6706,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '4538a35268e112821f9a69c4d99bddc7e5f4b9df968beff660519bc224f30237'
+    '31e92f3f4fef47a277185a0caae6a46dae2f5cb212b3df432d8340de27eaec75'
 $readinessWorkflowSha256 =
     '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7858,16 +7860,20 @@ Assert-TextContract `
 foreach ($subject in @(
     'noctty-${{ steps.meta.outputs.version }}-windows-x64-setup.exe',
     'noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.zip',
+    'noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.manifest.ps1',
     'SHA256SUMS-windows-x64.txt',
     'noctty-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe',
     'noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip',
+    'noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.manifest.ps1',
     'SHA256SUMS-windows-arm64.txt',
-    'SHA256SUMS.txt',
-    'noctty-icon.svg'
+    'SHA256SUMS.txt'
 )) {
     if (@([regex]::Matches($attestationStep, [regex]::Escape($subject))).Count -ne 1) {
         throw "Release provenance must attest exactly one subject named $subject."
     }
+}
+if ($attestationStep -match 'noctty-icon\.svg') {
+    throw 'Release provenance must not attest the static release icon.'
 }
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
@@ -7876,8 +7882,8 @@ Assert-TextContract `
     -Context "$releaseWorkflow :: Verify published release copy and assets"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
-    -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
-    -Description 'GitHub release commands pin the fork and mutations fail closed' `
+    -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?New-WindowsPackageArtifactName -Version \$version -Architecture \$arch -Kind manifest.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Description 'GitHub release commands publish both manifests, pin the fork, and fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
 $defenderScanStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
@@ -7904,6 +7910,33 @@ $signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
     -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $windowsArchitectureText `
+    -Pattern '(?s)ValidateSet\("portable", "manifest", "setup", "checksums", "legacy-checksums"\).*?"manifest" \{ return "noctty-\$Version-windows-\$arch-portable\.manifest\.ps1" \}' `
+    -Description 'portable manifest asset naming has one architecture-aware definition' `
+    -Context $windowsArchitecture
+Assert-TextContract `
+    -Content $windowsPackagerText `
+    -Pattern '(?s)function Write-PortablePayloadManifest.*?Get-ChildItem -LiteralPath \$PayloadRoot -Recurse -File.*?StartsWith\(\$payloadRootFull.*?resolved outside the payload root.*?Substring\(\$payloadRootFull\.Length\)\.Replace\("\\", "/"\).*?StartsWith\("share/".*?\.Sort\(\[System\.StringComparer\]::Ordinal\).*?# noctty portable payload manifest.*?Get-FileHash -Algorithm SHA256.*?WriteAllText.*?UTF8Encoding\]::new\(\$false\)' `
+    -Description 'packager emits a sorted managed-path manifest with a leading comment and BOM-free UTF-8' `
+    -Context $windowsPackager
+Assert-TextContract `
+    -Content $windowsPackagerText `
+    -Pattern '(?s)CreateFromDirectory\(.*?Write-PortablePayloadManifest -PayloadRoot \$portableRoot -OutputPath \$manifestPath.*?Certificate = \$signingConfig\.Certificate.*?HashAlgorithm = "SHA256".*?TimestampServer = \$signingConfig\.TimestampUrl.*?Set-AuthenticodeSignature @manifestSigningParameters.*?Assert-ValidSignature -PathToCheck \$manifestPath' `
+    -Description 'packager signs and validates the post-ZIP portable manifest with the release certificate and timestamp policy' `
+    -Context $windowsPackager
+# test\windows\flagship\Invoke-PortableSmoke.ps1 runs the packager through
+# powershell.exe, so it must stay Windows PowerShell 5.1 compatible. .NET
+# Framework's System.IO.Path has no GetRelativePath; using it fails only in the
+# smoke job, never in a pwsh 7 run.
+if ($windowsPackagerText -match '\[System\.IO\.Path\]::GetRelativePath') {
+    throw "$windowsPackager must not call [System.IO.Path]::GetRelativePath; it is unavailable in Windows PowerShell 5.1, which runs the portable smoke harness."
+}
+Assert-TextContract `
+    -Content $signedArtifactStep `
+    -Pattern '(?ms)ReadAllLines\(\$ManifestPath\).*?\[0-9a-fA-F\]\{64\}.*?GetRelativePath.*?Get-FileHash -Algorithm SHA256.*?file set mismatch.*?hash mismatch.*?-Kind manifest.*?Missing required release asset.*?Assert-ReleaseSignature -Path \$manifest.*?Assert-PortableManifestMatchesPayload' `
+    -Description 'release workflow verifies manifest presence, Authenticode pin, exact payload set, and payload hashes before publication' `
+    -Context "$releaseWorkflow :: Verify signed release artifacts"
 $signingTrustConsumers = @(
     [pscustomobject]@{
         Context = $publishedReleaseVerifier
@@ -8062,19 +8095,20 @@ foreach ($contract in @(
         -Context $signingTrustTest
 }
 foreach ($contract in @(
-    @{ Pattern = '\$expectedNames\.Count -ne 8'; Description = 'published verifier requires the exact eight-asset set' },
+    @{ Pattern = '\$expectedNames\.Count -ne 10'; Description = 'published verifier requires the exact ten-asset set' },
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
     @{ Pattern = '(?s)\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
     @{ Pattern = "\`$firstAttestedVersion = \[version\]'1\.3\.124'"; Description = 'published verifier preserves the first attested release boundary' },
     @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?installed GitHub CLI does not provide the gh attestation verify subcommand.*?Write-Warning .*?return \$false'; Description = 'published verifier degrades visibly when the local gh attestation subcommand is unavailable' },
     @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?\$env:GITHUB_ACTIONS -eq .true.*?throw "Cannot verify build provenance attestations.*?Write-Warning'; Description = 'published verifier fails rather than warns when CI cannot verify provenance at all' },
     @{ Pattern = '(?s)function Assert-PublishedAttestation.*?gh attestation verify \$Path --repo \$Repository.*?\$LASTEXITCODE -ne 0.*?attestation is missing or invalid'; Description = 'published verifier fails closed on missing or invalid provenance' },
-    @{ Pattern = '(?s)foreach \(\$asset in \$assets\).*?\$actualHash -ne \$digest\.Substring.*?if \(\$verifyAttestations\).*?Assert-PublishedAttestation.*?-Repository \$repository'; Description = 'published verifier checks provenance for every downloaded release asset after its GitHub digest' },
+    @{ Pattern = '(?s)foreach \(\$asset in \$assets\).*?\$actualHash -ne \$digest\.Substring.*?if \(\$verifyAttestations -and \[string\]\$asset\.name -ne ''noctty-icon\.svg''\).*?Assert-PublishedAttestation.*?-Repository \$repository'; Description = 'published verifier checks provenance for every attested asset after its GitHub digest while excluding the static icon' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
-    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
+    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 10'; Description = 'published verifier validates exactly ten downloaded Authenticode signatures including both manifests' },
     @{ Pattern = '(?s)Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin.*?\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1'; Description = 'published verifier binds every downloaded signer to one updater SPKI' },
     @{ Pattern = "noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
+    @{ Pattern = '(?s)function Assert-PortableManifestMatchesPayload.*?ReadAllLines\(\$ManifestPath\).*?ContainsKey\(\$name\).*?GetRelativePath.*?Get-FileHash -Algorithm SHA256.*?file set mismatch.*?hash mismatch'; Description = 'published verifier requires each manifest to match the extracted portable file set and hashes' }
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Assert-TextContract `

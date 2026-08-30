@@ -3938,6 +3938,39 @@ test "update staging refuses a new target when obsolete pruning is blocked" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.200", .{}));
 }
 
+test "portable update verifies generated manifest format with signature block" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("payload/share/themes");
+    try tmp.dir.writeFile(.{ .sub_path = "payload/README.md", .data = "fixture readme\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "payload/share/themes/fixture", .data = "fixture theme\n" });
+    const payload_root = try tmp.dir.realpathAlloc(alloc, "payload");
+    defer alloc.free(payload_root);
+
+    const manifest =
+        "# noctty portable payload manifest\r\n" ++
+        "2401991f812e1120dba531307019b3831c41d3727816b71e2feeeeedb3bbad86 *README.md\r\n" ++
+        "488df3f545562e88e4867aaf4447b25c9a5f3c111bb01f209b13c86c09ab0839 *share/themes/fixture\r\n" ++
+        "\r\n" ++
+        "# SIG # Begin signature block\r\n" ++
+        "# dGVzdA==\r\n" ++
+        "# SIG # End signature block\r\n";
+    try verifyPortablePayloadAgainstManifest(alloc, payload_root, manifest);
+
+    const missing_file_manifest =
+        "# noctty portable payload manifest\r\n" ++
+        "2401991f812e1120dba531307019b3831c41d3727816b71e2feeeeedb3bbad86 *README.md\r\n" ++
+        "\r\n" ++
+        "# SIG # Begin signature block\r\n" ++
+        "# dGVzdA==\r\n" ++
+        "# SIG # End signature block\r\n";
+    try std.testing.expectError(
+        error.PortablePayloadManifestEntryMissing,
+        verifyPortablePayloadAgainstManifest(alloc, payload_root, missing_file_manifest),
+    );
+}
+
 test "state JSON writer escapes ASCII control characters" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});

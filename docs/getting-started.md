@@ -31,6 +31,7 @@ both architectures ship every asset:
 
 - Installer: `noctty-<version>-windows-<arch>-setup.exe`
 - Portable ZIP: `noctty-<version>-windows-<arch>-portable.zip`
+- Portable payload manifest: `noctty-<version>-windows-<arch>-portable.manifest.ps1`
 - Checksums: `SHA256SUMS-windows-<arch>.txt`
 
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
