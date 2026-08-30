@@ -102,15 +102,31 @@ function Invoke-HarnessWithPassSentinel {
         [Parameter(Mandatory)] [string] $ScriptName,
         [Parameter(Mandatory)] [int] $TimeoutSeconds,
         [string[]] $AdditionalArguments = @(),
-        [string] $ScenarioSlug = ''
+        [string] $ScenarioSlug = '',
+        # Outer kill deadline for the whole harness process. Defaults to one
+        # scenario plus slack, which is right for the single-scenario harnesses.
+        # A harness that runs several scenarios sequentially applies
+        # -TimeoutSeconds to each of them, so its total budget has to be stated
+        # explicitly or the runner kills a run in which no scenario was late.
+        [int] $WaitTimeoutSeconds = 0
     )
 
     $run = Start-Harness -ScriptName $ScriptName -TimeoutSeconds $TimeoutSeconds -AdditionalArguments $AdditionalArguments -ScenarioSlug $ScenarioSlug
-    $waitMilliseconds = [int][Math]::Ceiling(($TimeoutSeconds + 5) * 1000)
+    $waitBudgetSeconds = if ($WaitTimeoutSeconds -gt 0) { $WaitTimeoutSeconds } else { $TimeoutSeconds + 5 }
+    $waitMilliseconds = [int][Math]::Ceiling($waitBudgetSeconds * 1000)
+    # Single-scenario harnesses report the per-scenario deadline, which is the
+    # only number that means anything for them. Multi-scenario runs report the
+    # whole budget so the message is not mistaken for a scenario timeout.
+    $timeoutDetail = if ($WaitTimeoutSeconds -gt 0) {
+        "${waitBudgetSeconds}s total budget (per-scenario deadline ${TimeoutSeconds}s)"
+    }
+    else {
+        "${TimeoutSeconds}s"
+    }
     if (-not $run.Process.WaitForExit($waitMilliseconds)) {
         Stop-InteractiveWin11Process -Process $run.Process -RequireLiveRoot
         throw @"
-$($run.Script) timed out after ${TimeoutSeconds}s
+$($run.Script) timed out after ${timeoutDetail}
 stdout ($($run.Stdout)):
 $(Get-HarnessLog -Path $run.Stdout)
 
@@ -215,7 +231,9 @@ Invoke-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -
 Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-configured-size.ps1' -TimeoutSeconds 15
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20
-Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 30 -AdditionalArguments @('-ConfiguredScenariosOnly') -ScenarioSlug 'configured'
+# Three configured scenarios run sequentially in one process, each with its
+# own 30s deadline, so the outer budget covers all three plus startup.
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 30 -WaitTimeoutSeconds 115 -AdditionalArguments @('-ConfiguredScenariosOnly') -ScenarioSlug 'configured'
 if ($env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
     Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 25
 }

@@ -378,17 +378,31 @@ try {
     }
     catch { $timeoutMessage = $_.Exception.Message }
 
-    if ($passSentinelStartCalls.Count -ne 4 -or
+    # A harness that runs several scenarios sequentially applies -TimeoutSeconds
+    # to each one, so the outer kill deadline has to be stated separately or a
+    # run in which no scenario was late still gets killed. The override must
+    # replace the budget outright, not add to the per-scenario default.
+    $budgetMessage = ''
+    try {
+        Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 17 `
+            -WaitTimeoutSeconds 115 -ScenarioSlug 'budget'
+    }
+    catch { $budgetMessage = $_.Exception.Message }
+
+    if ($passSentinelStartCalls.Count -ne 5 -or
         $passSentinelStartCalls[0].ScenarioSlug -cne 'control-lf' -or
         $passSentinelStartCalls[0].AdditionalArguments -cnotcontains 'unicode-lf' -or
-        $passSentinelLogCalls -ne 8 -or
+        $passSentinelLogCalls -ne 10 -or
         $passSentinelSummaryCalls -ne 3 -or
-        $passSentinelWaitCalls.Count -ne 4 -or
-        @($passSentinelWaitCalls | Where-Object { $_ -ne 22000 }).Count -ne 0 -or
+        $passSentinelWaitCalls.Count -ne 5 -or
+        @($passSentinelWaitCalls[0..3] | Where-Object { $_ -ne 22000 }).Count -ne 0 -or
+        $passSentinelWaitCalls[4] -ne 115000 -or
+        $passSentinelStartCalls[4].TimeoutSeconds -ne 17 -or
         $missingPassMessage -notlike '*did not report PASS*' -or
         $nonzeroMessage -notlike '*exited with code 23*' -or
         $timeoutMessage -notlike '*timed out after 17s*' -or
-        $script:passSentinelStopCalls -ne 1 -or
+        $budgetMessage -notlike '*timed out after 115s total budget (per-scenario deadline 17s)*' -or
+        $script:passSentinelStopCalls -ne 2 -or
         -not [object]::ReferenceEquals($script:passSentinelStoppedProcess, $processProbe) -or
         -not $script:passSentinelStopRequiredLiveRoot) {
         throw 'Pass-sentinel runner must reject missing PASS, nonzero exit, and timeout; timeout must stop the exact live root.'
