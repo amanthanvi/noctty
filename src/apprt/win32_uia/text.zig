@@ -208,16 +208,40 @@ pub fn snapshotTerminalAccessiblePlainText(
     const viewport_top = pages.getTopLeft(.viewport);
     const active_top = pages.getTopLeft(.active);
     const history_rows = accessibleHistoryRows(pages.cols, !screen.no_scrollback);
-    const document_top = switch (active_top.upOverflow(history_rows)) {
+    const viewport_bottom = pages.getBottomRight(.viewport) orelse return error.UnknownPoint;
+    const active_bottom = pages.getBottomRight(.active) orelse return error.UnknownPoint;
+    const history_top = switch (active_top.upOverflow(history_rows)) {
         .offset => |pin| pin,
         .overflow => |overflow| overflow.end,
     };
-    const viewport_bottom = pages.getBottomRight(.viewport) orelse return error.UnknownPoint;
-    const active_bottom = pages.getBottomRight(.active) orelse return error.UnknownPoint;
+
+    // The window is history plus one viewport of rows. It normally ends at the
+    // active screen so the caret stays inside it, but a viewport scrolled
+    // farther back than the history budget would otherwise fall outside the
+    // window entirely and leave `visible_range` empty while a full screen of
+    // text is on display. Slide the same-sized window up to the viewport
+    // instead of growing it; the off-window caret degrades to the document end.
+    const document_top = if (viewport_top.isBetween(history_top, active_bottom))
+        history_top
+    else
+        viewport_top;
+    const budget_rows = history_rows + @as(usize, pages.rows);
+    const budget_bottom: terminal.Pin = blk: {
+        var pin = switch (document_top.downOverflow(budget_rows -| 1)) {
+            .offset => |value| value,
+            .overflow => |overflow| overflow.end,
+        };
+        pin.x = active_bottom.x;
+        break :blk pin;
+    };
+    const document_bottom = if (budget_bottom.isBetween(document_top, active_bottom))
+        budget_bottom
+    else
+        active_bottom;
 
     var formatter = terminal.formatter.PageListFormatter.init(pages, .plain);
     formatter.top_left = document_top;
-    formatter.bottom_right = active_bottom;
+    formatter.bottom_right = document_bottom;
     formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
     try formatter.format(&text_writer.writer);
 
@@ -636,6 +660,46 @@ test "accessible snapshot keeps the live caret truthful while scrolled back" {
     try std.testing.expect(!std.meta.eql(active.visible_range, scrolled.visible_range));
     try std.testing.expect(scrolled.caret_offset > scrolled.visible_range.end);
     try std.testing.expectEqual(@as(u8, 'i'), scrolled.text[scrolled.caret_offset]);
+}
+
+test "accessible snapshot keeps a deeply scrolled viewport inside the document window" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 20,
+        .rows = 3,
+        .max_scrollback = 10_000_000,
+    });
+    defer t.deinit(std.testing.allocator);
+
+    var line: [32]u8 = undefined;
+    for (0..900) |index| {
+        const value = try std.fmt.bufPrint(&line, "row-{d:0>3}\n", .{index});
+        try t.printString(value);
+    }
+
+    // Scroll farther back than the history budget, so the viewport and the
+    // active screen can no longer share one bounded window.
+    t.screens.active.scroll(.top);
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    // The viewport is on screen, so it must be reported as visible rather than
+    // collapsed to a degenerate range at the end of the document.
+    try std.testing.expect(snapshot.visible_range.start < snapshot.visible_range.end);
+    const visible = snapshot.text[snapshot.visible_range.start..snapshot.visible_range.end];
+    try std.testing.expect(std.mem.indexOf(u8, visible, "row-000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "row-002") != null);
+    for (snapshot.cell_for_byte[snapshot.visible_range.start..snapshot.visible_range.end]) |cell| {
+        try std.testing.expect(cell.row >= 0);
+        try std.testing.expect(cell.row < 3);
+    }
+
+    // Sliding the window must not grow it past the same history budget.
+    var line_count: usize = 1;
+    for (snapshot.text) |byte| if (byte == '\n') {
+        line_count += 1;
+    };
+    const history_rows = accessibleHistoryRows(t.screens.active.pages.cols, true);
+    try std.testing.expect(line_count <= history_rows + 3);
 }
 
 test "accessible snapshot exposes ordered terminal selection and active end" {

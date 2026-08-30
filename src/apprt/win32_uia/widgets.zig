@@ -2038,8 +2038,18 @@ pub const ChromeControlProvider = struct {
 
     pub fn disconnect(self: *ChromeControlProvider) com.HRESULT {
         self.detach();
-        if (self.disconnected.swap(true, .acq_rel)) return com.S_OK;
-        return com.UiaDisconnectProvider(&self.base);
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        return self.finishDisconnect(com.UiaDisconnectProvider(&self.base));
+    }
+
+    /// Latch the terminal disconnect flag only once UIA has actually released
+    /// the provider. `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` is transient and the
+    /// deferred-disconnect pass retries it; latching on failure would turn
+    /// that retry into a silent `S_OK` that drops the creation reference while
+    /// the provider is still registered for an HWND that is already gone.
+    fn finishDisconnect(self: *ChromeControlProvider, hr: com.HRESULT) com.HRESULT {
+        if (hr == com.S_OK) self.disconnected.store(true, .release);
+        return hr;
     }
 
     pub fn raiseNameChanged(self: *ChromeControlProvider) void {
@@ -2408,8 +2418,15 @@ pub const ChromeControlProvider = struct {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         return sendButtonClicked(self.hwnd);
     }
+    /// The tab container reports `CanSelectMultiple = false`, so UIA defines
+    /// `AddToSelection` on an item that is not already selected as an invalid
+    /// operation rather than a silent tab switch. `Select` remains the
+    /// documented way to move the selection.
     fn AddToSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
-        return Select(p);
+        const self = fromSelectionItem(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = self.state.selected orelse return com.E_NOTIMPL;
+        return if (selected(self.state.ctx, self.state.tag)) com.S_OK else com.UIA_E_INVALIDOPERATION;
     }
     fn RemoveFromSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
         const self = fromSelectionItem(p);
@@ -6391,6 +6408,106 @@ test "uia ChromeControlProvider exposes live chrome patterns and detaches safely
         ChromeControlProvider.GetPropertyValue(&item.base, constants.UIA_NamePropertyId, &value),
     );
     try std.testing.expectEqual(calls_before_detach, context.name_calls);
+}
+
+test "ChromeControlProvider tab items enforce required single selection" {
+    const Context = struct {
+        selected_tag: usize = 1,
+
+        fn name(_: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "tab {d}", .{tag}) catch "";
+        }
+        fn selected(ctx: *anyopaque, tag: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.selected_tag == tag;
+        }
+    };
+
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
+    }.GetDesktopWindow;
+    const hwnd = GetDesktopWindow();
+    var context: Context = .{};
+    const context_ptr: *anyopaque = @ptrCast(&context);
+
+    const selected_tab = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .tab_item,
+        .tag = 1,
+        .name = Context.name,
+        .selected = Context.selected,
+    });
+    defer _ = ChromeControlProvider.Release(&selected_tab.base);
+    defer selected_tab.detach();
+
+    const unselected_tab = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .tab_item,
+        .tag = 2,
+        .name = Context.name,
+        .selected = Context.selected,
+    });
+    defer _ = ChromeControlProvider.Release(&unselected_tab.base);
+    defer unselected_tab.detach();
+
+    // CanSelectMultiple is false, so AddToSelection may only confirm an
+    // already selected tab; it must never switch tabs behind the client.
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.AddToSelection(&selected_tab.selection_item_iface),
+    );
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        ChromeControlProvider.AddToSelection(&unselected_tab.selection_item_iface),
+    );
+
+    // IsSelectionRequired is true, so the selected tab cannot be deselected.
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        ChromeControlProvider.RemoveFromSelection(&selected_tab.selection_item_iface),
+    );
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.RemoveFromSelection(&unselected_tab.selection_item_iface),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), context.selected_tag);
+}
+
+test "ChromeControlProvider disconnect latches only after UIA releases it" {
+    const Context = struct {
+        fn name(_: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "chrome {d}", .{tag}) catch "";
+        }
+    };
+
+    var context: usize = 0;
+    const provider = try ChromeControlProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        .{
+            .ctx = @ptrCast(&context),
+            .role = .decorative,
+            .name = Context.name,
+        },
+    );
+    defer _ = ChromeControlProvider.Release(&provider.base);
+
+    // A transient input-sync rejection must leave the provider undisconnected
+    // so the deferred retry reaches UIA again instead of short circuiting to
+    // S_OK and releasing the creation reference on a registered provider.
+    try std.testing.expectEqual(
+        com.RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+        provider.finishDisconnect(com.RPC_E_CANTCALLOUT_ININPUTSYNCCALL),
+    );
+    try std.testing.expect(!provider.disconnected.load(.acquire));
+
+    try std.testing.expectEqual(com.S_OK, provider.finishDisconnect(com.S_OK));
+    try std.testing.expect(provider.disconnected.load(.acquire));
+
+    // Disconnect stays idempotent once UIA has released the provider.
+    try std.testing.expectEqual(com.S_OK, provider.disconnect());
+    try std.testing.expect(provider.disconnected.load(.acquire));
 }
 
 test "SettingsControlProvider exposes ValueProvider only for edit controls" {
