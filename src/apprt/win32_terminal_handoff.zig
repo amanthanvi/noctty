@@ -135,6 +135,7 @@ extern "advapi32" fn OpenProcessToken(
     DesiredAccess: DWORD,
     TokenHandle: *HANDLE,
 ) callconv(.winapi) BOOL;
+extern "advapi32" fn RevertToSelf() callconv(.winapi) BOOL;
 extern "advapi32" fn OpenThreadToken(
     ThreadHandle: HANDLE,
     DesiredAccess: DWORD,
@@ -247,6 +248,79 @@ pub const PendingSession = struct {
 
 pub const QueueSessionFn = *const fn (ctx: *anyopaque, pending: *PendingSession) bool;
 
+/// Identifier handed to the UI thread in place of a `PendingSession` pointer.
+///
+/// It travels in an `LPARAM`, so it is sized to the platform word. Zero is
+/// never issued: a message carrying no identifier and a message carrying an
+/// identifier we never handed out are the same thing, and both are dropped.
+pub const PendingId = usize;
+
+/// Process-owned table of handoff sessions waiting for the UI thread.
+///
+/// The wake-up for a completed handoff is a thread message, and any process on
+/// this desktop at our integrity level can post that message with an `LPARAM`
+/// of its choosing. Carrying the `PendingSession` pointer in the message would
+/// mean dereferencing, deinitializing and freeing an address the sender picked,
+/// so the message carries only an identifier that is resolved here. An
+/// identifier we never issued - or issued and already consumed - resolves to
+/// null, and the message is dropped without touching any session.
+pub const PendingQueue = struct {
+    mutex: std.Thread.Mutex = .{},
+    entries: std.ArrayList(Entry) = .empty,
+    next_id: PendingId = 1,
+
+    const Entry = struct {
+        id: PendingId,
+        session: *PendingSession,
+    };
+
+    /// Takes ownership of `session` and returns the identifier that stands for
+    /// it. The identifier is never zero.
+    pub fn insert(
+        self: *PendingQueue,
+        alloc: Allocator,
+        session: *PendingSession,
+    ) Allocator.Error!PendingId {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const id = self.next_id;
+        self.next_id +%= 1;
+        if (self.next_id == 0) self.next_id = 1;
+        try self.entries.append(alloc, .{ .id = id, .session = session });
+        return id;
+    }
+
+    /// Resolves `id` and hands ownership back to the caller, or returns null
+    /// when the identifier was never issued or has already been consumed.
+    pub fn take(self: *PendingQueue, id: PendingId) ?*PendingSession {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.id != id) continue;
+            _ = self.entries.orderedRemove(index);
+            return entry.session;
+        }
+        return null;
+    }
+
+    pub fn isEmpty(self: *PendingQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.entries.items.len == 0;
+    }
+
+    /// Destroys every session that never reached the UI thread.
+    pub fn drain(self: *PendingQueue, alloc: Allocator) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.entries.items) |entry| {
+            entry.session.deinit();
+            alloc.destroy(entry.session);
+        }
+        self.entries.clearAndFree(alloc);
+    }
+};
+
 pub const Server = struct {
     alloc: Allocator,
     queue_ctx: *anyopaque,
@@ -254,6 +328,8 @@ pub const Server = struct {
     factory: ClassFactory,
     cookie: ?DWORD = null,
     lock_count: std.atomic.Value(u32) = .init(0),
+    live_objects: std.atomic.Value(u32) = .init(0),
+    pending: PendingQueue = .{},
 
     pub fn init(alloc: Allocator, queue_ctx: *anyopaque, queue_session: QueueSessionFn) Server {
         return .{
@@ -288,12 +364,38 @@ pub const Server = struct {
         if (hr < 0) log.warn("CoRevokeClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
     }
 
-    /// True while a COM client holds the class object alive through
-    /// IClassFactory::LockServer. An activation that is slower than the idle
-    /// timeout sits in exactly this state between CoGetClassObject and
-    /// CreateInstance, so the idle path must not exit while it is set.
-    pub fn isLocked(self: *const Server) bool {
-        return self.lock_count.load(.acquire) > 0;
+    /// Takes ownership of `session` and returns the identifier the UI thread
+    /// will use to claim it back.
+    pub fn queuePending(self: *Server, session: *PendingSession) Allocator.Error!PendingId {
+        return self.pending.insert(self.alloc, session);
+    }
+
+    /// Claims the session an identifier stands for, or null when the
+    /// identifier is not one we issued and still owe.
+    pub fn takePending(self: *Server, id: PendingId) ?*PendingSession {
+        return self.pending.take(id);
+    }
+
+    /// Destroys every queued session. Only safe once the class object is
+    /// revoked and the UI thread has stopped consuming handoffs.
+    pub fn drainPending(self: *Server) void {
+        self.pending.drain(self.alloc);
+    }
+
+    /// True while the class object must stay registered.
+    ///
+    /// Three things keep it alive. A client can hold it through
+    /// IClassFactory::LockServer, which is where an activation slower than the
+    /// idle timeout sits between CoGetClassObject and CreateInstance. A client
+    /// can also hold an ITerminalHandoff3 instance it created: LockServer is
+    /// optional in the COM contract, so a client may legally create the object
+    /// and call EstablishPtyHandoff later without ever locking, and an
+    /// out-of-process server must outlive the objects it handed out. Finally a
+    /// completed handoff may still be waiting for the UI thread to adopt it.
+    pub fn isBusy(self: *Server) bool {
+        return self.lock_count.load(.acquire) > 0 or
+            self.live_objects.load(.acquire) > 0 or
+            !self.pending.isEmpty();
     }
 };
 
@@ -388,6 +490,10 @@ const TerminalHandoff = struct {
             .refcount = .init(1),
             .server = server,
         };
+        // Counted from creation to final release so the idle path cannot kill
+        // the process underneath a client that holds this object but has not
+        // called LockServer.
+        _ = server.live_objects.fetchAdd(1, .monotonic);
         return self;
     }
 
@@ -418,7 +524,9 @@ const TerminalHandoff = struct {
         const self = fromBase(base);
         const previous = self.refcount.fetchSub(1, .acq_rel);
         if (previous == 1) {
+            const server = self.server;
             self.server.alloc.destroy(self);
+            _ = server.live_objects.fetchSub(1, .acq_rel);
             return 0;
         }
         return previous - 1;
@@ -600,7 +708,43 @@ const Win32ComCallerIntegrityOps = struct {
     fn revert(_: *@This()) HRESULT {
         return CoRevertToSelf();
     }
+
+    /// Whether this thread still carries an impersonation token. A failure
+    /// that is not ERROR_NO_TOKEN tells us nothing, so it counts as still
+    /// impersonating: the recovery path is cheap and being wrong the other way
+    /// is not survivable.
+    fn isImpersonating(_: *@This()) bool {
+        var token: HANDLE = undefined;
+        if (OpenThreadToken(windows.GetCurrentThread(), TOKEN_QUERY, windows.TRUE, &token) != 0) {
+            _ = windows.CloseHandle(token);
+            return true;
+        }
+        return windows.kernel32.GetLastError() != .NO_TOKEN;
+    }
+
+    /// Drop the impersonation token without going through COM. CoRevertToSelf
+    /// can fail for reasons of its own bookkeeping while the underlying thread
+    /// token is still detachable.
+    fn forceRevert(_: *@This()) bool {
+        return RevertToSelf() != 0;
+    }
 };
+
+const RevertRecovery = enum { recovered, leaked };
+
+/// What became of the impersonation token after CoRevertToSelf failed.
+///
+/// The thread that runs EstablishPtyHandoff is the process message loop. It
+/// goes on to create windows, read configuration, write session state and
+/// spawn shells, so leaving it impersonating the COM caller is not a failed
+/// handoff, it is every later operation running under someone else's token.
+/// Confirm the token is really still attached, try once to drop it directly,
+/// and confirm again.
+fn recoverFromFailedRevertWithOps(ops: anytype) RevertRecovery {
+    if (!ops.isImpersonating()) return .recovered;
+    if (!ops.forceRevert()) return .leaked;
+    return if (ops.isImpersonating()) .leaked else .recovered;
+}
 
 fn comCallerIntegrityRidWithOps(ops: anytype) ComCallerIntegrity {
     if (ops.impersonate() < 0) return .com_impersonation_failed;
@@ -620,7 +764,21 @@ fn comCallerIntegrityRidWithOps(ops: anytype) ComCallerIntegrity {
 
 fn comCallerIntegrityRid() ComCallerIntegrity {
     var ops: Win32ComCallerIntegrityOps = .{};
-    return comCallerIntegrityRidWithOps(&ops);
+    const result = comCallerIntegrityRidWithOps(&ops);
+    switch (result) {
+        .com_revert_failed => if (recoverFromFailedRevertWithOps(&ops) == .leaked) {
+            // Refusing this one handoff is not enough: the message loop would
+            // keep running as the caller. Taking the process down loses the
+            // adopted windows it hosts, and that is the cheaper loss - Windows
+            // falls back to a console window for the pending launch, while
+            // continuing would act on the user's registry, files and child
+            // processes under an identity we did not choose and cannot drop.
+            log.err("CoRevertToSelf failed and the handoff thread is still impersonating the COM caller", .{});
+            @panic("terminal handoff thread could not stop impersonating its COM caller");
+        },
+        else => {},
+    }
+    return result;
 }
 
 const HandoffIntegrityAuthorization = enum {
@@ -780,6 +938,34 @@ fn requireCompatibleConsoleHalf(value: ?[]const u8) RegistrationError!void {
     }
 }
 
+fn consoleHalfTextAlloc(alloc: Allocator) (Allocator.Error || RegistrationError)!?[]u8 {
+    const raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_console_name);
+    defer if (raw) |value| value.deinit(alloc);
+    return if (raw) |value| try registrySzToUtf8Alloc(alloc, value) else null;
+}
+
+const SelectionCommit = enum { already_selected, commit };
+
+/// Whether the terminal half may be written, given what the console half looks
+/// like right now.
+///
+/// DelegationConsole and DelegationTerminal are two independent values and the
+/// user can change their default terminal in Settings while we are part way
+/// through writing our own keys. Registration checks the console half early to
+/// fail fast, but the check that matters is this one, immediately before the
+/// commit: a stale check would let us publish a pair whose console half is the
+/// inbox console or a stranger's CLSID and still report success. Rejecting
+/// here is enough because nothing has been written yet, so the user keeps the
+/// terminal they already had - no rollback to get wrong.
+fn decideSelectionCommit(
+    terminal_is_ours: bool,
+    console_half: ?[]const u8,
+) RegistrationError!SelectionCommit {
+    if (terminal_is_ours) return .already_selected;
+    try requireCompatibleConsoleHalf(console_half);
+    return .commit;
+}
+
 pub fn nocttyExePathForLauncher(alloc: Allocator, launcher_path: []const u8) ![]u8 {
     const dir = std.fs.path.dirname(launcher_path) orelse return error.InvalidExecutablePath;
     const candidate = try std.fs.path.join(alloc, &.{ dir, "noctty.exe" });
@@ -812,9 +998,7 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     const proxy_file = std.fs.openFileAbsolute(proxy_path, .{}) catch return error.ProxyDllMissing;
     proxy_file.close();
 
-    const console_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_console_name);
-    defer if (console_raw) |value| value.deinit(alloc);
-    const console_text = if (console_raw) |value| try registrySzToUtf8Alloc(alloc, value) else null;
+    const console_text = try consoleHalfTextAlloc(alloc);
     defer if (console_text) |value| alloc.free(value);
     try requireCompatibleConsoleHalf(console_text);
 
@@ -894,11 +1078,20 @@ fn selectTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!bool 
     const current = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
     defer if (current) |value| value.deinit(alloc);
     const is_ours = if (current) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
-    if (is_ours) {
-        const saved = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
-        saved.deinit(alloc);
-        return false;
+
+    // Re-read the console half here rather than trusting the check
+    // registration made before it started writing.
+    const console_text = try consoleHalfTextAlloc(alloc);
+    defer if (console_text) |value| alloc.free(value);
+    switch (try decideSelectionCommit(is_ours, console_text)) {
+        .already_selected => {
+            const saved = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
+            saved.deinit(alloc);
+            return false;
+        },
+        .commit => {},
     }
+
     try savePreviousTerminal(alloc, current);
     try writeRegistrySz(alloc, startup_key_utf8, delegation_terminal_name, clsid_text);
     return true;
@@ -1282,6 +1475,126 @@ test "handoff COM caller inspection always reverts successful impersonation" {
     );
     try std.testing.expectEqual(@as(usize, 1), revert_failed.revert_count);
     try std.testing.expectEqual(@as(usize, 1), revert_failed.close_count);
+}
+
+test "handoff revert failure is only survivable once the token is gone" {
+    const State = struct {
+        impersonating: bool,
+        force_ok: bool,
+        force_count: usize = 0,
+
+        fn isImpersonating(self: *@This()) bool {
+            return self.impersonating;
+        }
+
+        fn forceRevert(self: *@This()) bool {
+            self.force_count += 1;
+            if (self.force_ok) self.impersonating = false;
+            return self.force_ok;
+        }
+    };
+
+    // CoRevertToSelf reported failure but the thread carries no token, so
+    // nothing runs as the caller and the handoff can just fail.
+    var already_clean: State = .{ .impersonating = false, .force_ok = true };
+    try std.testing.expectEqual(RevertRecovery.recovered, recoverFromFailedRevertWithOps(&already_clean));
+    try std.testing.expectEqual(@as(usize, 0), already_clean.force_count);
+
+    var force_works: State = .{ .impersonating = true, .force_ok = true };
+    try std.testing.expectEqual(RevertRecovery.recovered, recoverFromFailedRevertWithOps(&force_works));
+    try std.testing.expectEqual(@as(usize, 1), force_works.force_count);
+
+    // The token outlived both attempts. The caller must not keep serving.
+    var stuck: State = .{ .impersonating = true, .force_ok = false };
+    try std.testing.expectEqual(RevertRecovery.leaked, recoverFromFailedRevertWithOps(&stuck));
+    try std.testing.expectEqual(@as(usize, 1), stuck.force_count);
+}
+
+test "handoff pending queue resolves only identifiers it issued" {
+    const Queue = struct {
+        fn call(_: *anyopaque, _: *PendingSession) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    const alloc = std.testing.allocator;
+    var server = Server.init(alloc, &context, Queue.call);
+    defer server.drainPending();
+
+    const session = try alloc.create(PendingSession);
+    session.* = .{
+        .alloc = alloc,
+        .adopted = null,
+        .title = try alloc.dupe(u8, "noctty"),
+    };
+    const id = try server.queuePending(session);
+    try std.testing.expect(id != 0);
+    try std.testing.expect(server.isBusy());
+
+    // A forged message carries an identifier we never handed out. It must be
+    // dropped without disturbing the session that is genuinely waiting.
+    try std.testing.expect(server.takePending(0) == null);
+    try std.testing.expect(server.takePending(id +% 1) == null);
+    try std.testing.expect(server.takePending(std.math.maxInt(PendingId)) == null);
+    try std.testing.expect(server.isBusy());
+
+    try std.testing.expectEqual(session, server.takePending(id).?);
+    try std.testing.expect(!server.isBusy());
+
+    // Replaying the real identifier must not hand the session out twice.
+    try std.testing.expect(server.takePending(id) == null);
+    session.deinit();
+    alloc.destroy(session);
+}
+
+test "handoff server stays alive for objects that never called LockServer" {
+    const Queue = struct {
+        fn call(_: *anyopaque, _: *PendingSession) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    var server = Server.init(std.testing.allocator, &context, Queue.call);
+    try std.testing.expect(!server.isBusy());
+
+    const handoff = try TerminalHandoff.create(&server);
+    // No LockServer call: the object alone has to keep the server alive.
+    try std.testing.expectEqual(@as(u32, 0), server.lock_count.load(.acquire));
+    try std.testing.expect(server.isBusy());
+
+    var out: ?*anyopaque = null;
+    try std.testing.expectEqual(com.S_OK, handoff.base.vtbl.QueryInterface(&handoff.base, &IID_ITerminalHandoff3, &out));
+    try std.testing.expectEqual(@as(u32, 1), handoff.base.vtbl.Release(&handoff.base));
+    try std.testing.expect(server.isBusy());
+
+    try std.testing.expectEqual(@as(u32, 0), handoff.base.vtbl.Release(&handoff.base));
+    try std.testing.expect(!server.isBusy());
+}
+
+test "handoff selection commit rechecks the console half before writing" {
+    // Registration already passed its own console check; by the time the
+    // selection is written the value can be something else entirely.
+    try std.testing.expectEqual(
+        SelectionCommit.commit,
+        try decideSelectionCommit(false, "{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}"),
+    );
+    try std.testing.expectError(
+        error.CompatibleConsoleHandoffMissing,
+        decideSelectionCommit(false, inbox_console_sentinel),
+    );
+    try std.testing.expectError(
+        error.CompatibleConsoleHandoffMissing,
+        decideSelectionCommit(false, null),
+    );
+    try std.testing.expectError(
+        error.InvalidConsoleHandoff,
+        decideSelectionCommit(false, "not-a-guid"),
+    );
+    // Already selected writes nothing, so there is no pair to mismatch.
+    try std.testing.expectEqual(
+        SelectionCommit.already_selected,
+        try decideSelectionCommit(true, inbox_console_sentinel),
+    );
 }
 
 test "handoff failure trace stays within its byte budget" {

@@ -2694,7 +2694,7 @@ pub const App = struct {
         defer if (terminal_handoff_server) |*server| {
             self.terminal_handoff_server = null;
             server.revoke();
-            self.drainQueuedTerminalHandoffs();
+            server.drainPending();
         };
         if (self.embedding_mode) {
             if (!self.com_initialized) return error.ComApartmentUnavailable;
@@ -2703,8 +2703,11 @@ pub const App = struct {
                 self,
                 queueTerminalHandoff,
             );
-            try terminal_handoff_server.?.register();
+            // Publish before registering: once the class object is live a
+            // client can activate it, and the session queue has to be
+            // reachable from the very first handoff.
             self.terminal_handoff_server = &terminal_handoff_server.?;
+            try terminal_handoff_server.?.register();
             self.startTerminalHandoffIdleTimer();
         }
 
@@ -2798,12 +2801,20 @@ pub const App = struct {
             }
 
             if (msg.message == c.WM_WINHOSTTY_TERMINAL_HANDOFF) {
-                if (msg.lParam == 0) {
-                    log.err("terminal handoff message had no pending session", .{});
+                // The message carries an opaque identifier, never a pointer.
+                // Any process on this desktop at our integrity level can post
+                // into this loop, and a pointer taken from the message would be
+                // an address of the sender's choosing that we dereference,
+                // deinitialize and free. Identifiers are resolved against the
+                // server's own table and anything unrecognized is dropped.
+                const server = self.terminal_handoff_server orelse {
+                    log.warn("terminal handoff message arrived without a handoff server", .{});
                     continue;
-                }
-                const pending: *win32_terminal_handoff.PendingSession =
-                    @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+                };
+                const pending = server.takePending(terminalHandoffId(msg.lParam)) orelse {
+                    log.warn("ignoring terminal handoff message with an unknown session id", .{});
+                    continue;
+                };
                 defer {
                     pending.deinit();
                     self.core_app.alloc.destroy(pending);
@@ -4399,13 +4410,15 @@ pub const App = struct {
         const server = self.terminal_handoff_server orelse return true;
 
         // A client between CoGetClassObject and CreateInstance holds a
-        // LockServer reference. Exiting there would fail its activation.
-        if (server.isLocked()) return false;
+        // LockServer reference, and a client that created an ITerminalHandoff3
+        // without locking still owns a live object. Exiting under either one
+        // would fail its activation.
+        if (server.isBusy()) return false;
 
         // Revoke first, then re-check. After the revoke no new activation can
         // arrive, so anything observed now is everything that can exist.
         server.revoke();
-        if (!server.isLocked() and !self.hasQueuedTerminalHandoff()) return true;
+        if (!server.isBusy()) return true;
 
         // Something landed in the gap between the check and the revoke. Take
         // the class object back and keep serving.
@@ -4413,35 +4426,6 @@ pub const App = struct {
             log.err("failed to re-register terminal handoff class object err={}", .{err});
         };
         return false;
-    }
-
-    fn hasQueuedTerminalHandoff(self: *App) bool {
-        _ = self;
-        var msg: MSG = undefined;
-        return sys.PeekMessageW(
-            &msg,
-            null,
-            c.WM_WINHOSTTY_TERMINAL_HANDOFF,
-            c.WM_WINHOSTTY_TERMINAL_HANDOFF,
-            c.PM_NOREMOVE,
-        ) != 0;
-    }
-
-    fn drainQueuedTerminalHandoffs(self: *App) void {
-        var msg: MSG = undefined;
-        while (sys.PeekMessageW(
-            &msg,
-            null,
-            c.WM_WINHOSTTY_TERMINAL_HANDOFF,
-            c.WM_WINHOSTTY_TERMINAL_HANDOFF,
-            c.PM_REMOVE,
-        ) != 0) {
-            if (msg.message != c.WM_WINHOSTTY_TERMINAL_HANDOFF or msg.lParam == 0) continue;
-            const pending: *win32_terminal_handoff.PendingSession =
-                @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
-            pending.deinit();
-            self.core_app.alloc.destroy(pending);
-        }
     }
 
     fn stopUndoPruneTimer(self: *App) void {
@@ -8036,16 +8020,32 @@ fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckComple
     }
 }
 
+/// Read a handoff session identifier out of a message parameter. The value is
+/// attacker-controlled, so it is only ever used as a lookup key.
+fn terminalHandoffId(lparam: LPARAM) win32_terminal_handoff.PendingId {
+    return @bitCast(lparam);
+}
+
 fn queueTerminalHandoff(ctx: *anyopaque, pending: *win32_terminal_handoff.PendingSession) bool {
     const self: *App = @ptrCast(@alignCast(ctx));
     const ui_thread_id = @atomicLoad(DWORD, &self.ui_thread_id, .acquire);
     if (ui_thread_id == 0) return false;
-    return sys.PostThreadMessageW(
+    const server = self.terminal_handoff_server orelse return false;
+
+    // The session stays in process-owned state; the message carries only the
+    // identifier that stands for it.
+    const id = server.queuePending(pending) catch return false;
+    if (sys.PostThreadMessageW(
         ui_thread_id,
         c.WM_WINHOSTTY_TERMINAL_HANDOFF,
         0,
-        @as(LPARAM, @bitCast(@as(usize, @intFromPtr(pending)))),
-    ) != 0;
+        @as(LPARAM, @bitCast(id)),
+    ) != 0) return true;
+
+    // Nothing will ever claim the identifier, so hand ownership back to the
+    // caller rather than leaking the session into the table.
+    _ = server.takePending(id);
+    return false;
 }
 
 fn winrtToastActivationCallback(ctx: *anyopaque, launch: []const u8) void {
