@@ -22,6 +22,7 @@ pub const Event = union(enum) {
         running_version: []const u8,
         target_version: []const u8,
         confirmation_token_matches: bool,
+        installed_payload_matches: bool,
     },
     child_failed,
     interrupted,
@@ -53,7 +54,8 @@ pub fn decide(kind: ?StagedKind, phase: Phase, event: Event) !Decision {
             else => error.InvalidPortableApplyTransition,
         },
         .swapped => switch (event) {
-            .startup => |startup| if (startup.confirmation_token_matches and
+            .startup => |startup| if ((startup.confirmation_token_matches or
+                startup.installed_payload_matches) and
                 std.mem.eql(u8, startup.running_version, startup.target_version))
                 .continue_for_confirmation
             else
@@ -80,11 +82,13 @@ pub fn confirmationDecision(
     running_version: []const u8,
     target_version: []const u8,
     confirmation_token_matches: bool,
+    installed_payload_matches: bool,
 ) !Decision {
     const startup = try decide(kind, phase, .{ .startup = .{
         .running_version = running_version,
         .target_version = target_version,
         .confirmation_token_matches = confirmation_token_matches,
+        .installed_payload_matches = installed_payload_matches,
     } });
     return if (startup == .continue_for_confirmation) .confirm else startup;
 }
@@ -563,6 +567,7 @@ test "portable update decision pending swapped confirm rollback interrupted" {
         "1.3.200",
         "1.3.200",
         true,
+        false,
     ));
     try testing.expectEqual(Decision.rollback, try confirmationDecision(
         .portable,
@@ -570,6 +575,7 @@ test "portable update decision pending swapped confirm rollback interrupted" {
         "1.3.199",
         "1.3.200",
         true,
+        false,
     ));
     try testing.expectEqual(Decision.rollback, try confirmationDecision(
         .portable,
@@ -577,6 +583,26 @@ test "portable update decision pending swapped confirm rollback interrupted" {
         "1.3.200",
         "1.3.200",
         false,
+        false,
+    ));
+
+    // A concurrent launch does not inherit the helper's confirmation token.
+    // Content identity still proves that the target build completed its swap.
+    try testing.expectEqual(Decision.confirm, try confirmationDecision(
+        .portable,
+        .swapped,
+        "1.3.200",
+        "1.3.200",
+        false,
+        true,
+    ));
+    try testing.expectEqual(Decision.rollback, try confirmationDecision(
+        .portable,
+        .swapped,
+        "1.3.199",
+        "1.3.200",
+        false,
+        true,
     ));
 }
 

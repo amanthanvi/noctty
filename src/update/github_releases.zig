@@ -1153,13 +1153,30 @@ pub fn preflightPortableUpdateStartup(
         if (env_token) |actual| std.mem.eql(u8, expected, actual) else false
     else
         false;
+    const installed_payload_matches = matches: {
+        if (phase != .swapped or !std.mem.eql(u8, running_version, target_version)) {
+            break :matches false;
+        }
+        var layout = try portableStageLayout(alloc, state_path, &state);
+        defer layout.deinit(alloc);
+        break :matches installedPortablePayloadMatches(
+            alloc,
+            portable_root,
+            layout.manifest_path,
+        );
+    };
     const watcher_active = portableStateWatcherIsActive(&state);
     if (phase == .pending and state.portable_watcher_pid != 0 and !watcher_active) {
         _ = abandonPendingPortableApply(alloc, state_path, portable_root) catch false;
         setPortableFailureEnvironment(alloc, error.PortableUpdateHelperFailed) catch {};
         return false;
     }
-    if (watcher_active and !(phase == .swapped and token_matches)) {
+    if (shouldDeferPortableStartupToWatcher(
+        phase,
+        watcher_active,
+        token_matches,
+        installed_payload_matches,
+    )) {
         // The helper still owns the bounded failure window. Concurrent starts
         // must not clean or roll back its backup while it is watching.
         return true;
@@ -1171,6 +1188,7 @@ pub fn preflightPortableUpdateStartup(
             .running_version = running_version,
             .target_version = target_version,
             .confirmation_token_matches = token_matches,
+            .installed_payload_matches = installed_payload_matches,
         } }),
         .confirmed => try portable_apply.decide(.portable, phase, .next_launch),
         .rollback => try portable_apply.decide(.portable, phase, .next_launch),
@@ -1191,6 +1209,17 @@ pub fn preflightPortableUpdateStartup(
         },
         else => error.InvalidPortableApplyTransition,
     };
+}
+
+fn shouldDeferPortableStartupToWatcher(
+    phase: portable_apply.Phase,
+    watcher_active: bool,
+    confirmation_token_matches: bool,
+    installed_payload_matches: bool,
+) bool {
+    return watcher_active and
+        !(phase == .swapped and
+            (confirmation_token_matches or installed_payload_matches));
 }
 
 pub fn takePortableUpdateFailure(alloc: Allocator) !?[]u8 {
@@ -1224,29 +1253,45 @@ pub fn confirmPortableUpdateStartup(
 ) !void {
     if (builtin.os.tag != .windows) return;
     const portable_root = try internal_os.xdg.portableRoot(alloc) orelse return;
-    alloc.free(portable_root);
+    defer alloc.free(portable_root);
     const state_path = try defaultStatePath(alloc);
     defer alloc.free(state_path);
-    const state_lock = try openStateLock(state_path);
-    defer state_lock.close();
-    var state = try loadState(alloc, state_path);
-    defer state.deinit(alloc);
-    if (state.portable_apply_phase != .swapped) return;
-    const target_version = state.staged_version orelse return error.NoStagedPortableInstall;
-    const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch return;
-    defer alloc.free(env_token);
-    const expected_token = state.portable_confirmation_token orelse return;
+    var baseline = try loadState(alloc, state_path);
+    defer baseline.deinit(alloc);
+    if (baseline.portable_apply_phase != .swapped) return;
+    const target_version = baseline.staged_version orelse return error.NoStagedPortableInstall;
+    var layout = try portableStageLayout(alloc, state_path, &baseline);
+    defer layout.deinit(alloc);
+    const installed_payload_matches = if (std.mem.eql(u8, running_version, target_version))
+        installedPortablePayloadMatches(alloc, portable_root, layout.manifest_path)
+    else
+        false;
+    const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch null;
+    defer if (env_token) |value| alloc.free(value);
+    const token_matches = if (baseline.portable_confirmation_token) |expected|
+        if (env_token) |actual| std.mem.eql(u8, actual, expected) else false
+    else
+        false;
     const decision = try portable_apply.confirmationDecision(
-        state.staged_kind,
+        baseline.staged_kind,
         .swapped,
         running_version,
         target_version,
-        std.mem.eql(u8, env_token, expected_token),
+        token_matches,
+        installed_payload_matches,
     );
     if (decision != .confirm) return error.PortableUpdateConfirmationFailed;
 
-    state.portable_apply_phase = .confirmed;
-    try saveState(state_path, &state);
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var fresh = try loadState(alloc, state_path);
+    defer fresh.deinit(alloc);
+    if (fresh.portable_apply_phase != .swapped) return;
+    if (!stagedTransactionEqual(&baseline, &fresh)) {
+        return error.PortableUpdateConfirmationFailed;
+    }
+    fresh.portable_apply_phase = .confirmed;
+    try saveState(state_path, &fresh);
 }
 
 const PortableHelperMode = enum { swap, rollback };
@@ -2264,18 +2309,101 @@ fn verifyPortablePayloadAgainstManifest(
         const relative = try portableRelativePathAlloc(alloc, entry.path);
         defer alloc.free(relative);
         if (!portable_apply.isManagedRelativePath(relative)) return error.InvalidPortablePayload;
-        const path = try std.fs.path.join(alloc, &.{ payload_root, entry.path });
-        defer alloc.free(path);
-        const expected = parseExpectedSha256(manifest, relative) catch |err| switch (err) {
-            error.InstallerChecksumMissing => return error.PortablePayloadManifestEntryMissing,
-            error.InstallerChecksumDuplicate => return error.PortablePayloadManifestEntryDuplicate,
-            else => return err,
-        };
-        const actual = try sha256File(path);
-        if (!std.mem.eql(u8, &expected, &actual)) return error.PortablePayloadManifestMismatch;
+        try verifyPortableManifestFile(alloc, payload_root, entry.path, relative, manifest);
         payload_file_count += 1;
     }
     if (payload_file_count != manifest_file_count) return error.PortablePayloadManifestFileSetMismatch;
+}
+
+fn verifyInstalledPortablePayloadAgainstManifest(
+    alloc: Allocator,
+    install_root: []const u8,
+    manifest: []const u8,
+) !void {
+    var manifest_file_count: usize = 0;
+    var manifest_lines = std.mem.splitScalar(u8, manifest, '\n');
+    while (manifest_lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        const checksum = checksumLine(line) orelse continue;
+        _ = parseSha256Hex(checksum.hex) catch continue;
+        if (!portable_apply.isManagedRelativePath(checksum.filename)) {
+            return error.InvalidPortablePayloadManifest;
+        }
+        manifest_file_count += 1;
+    }
+
+    var installed_file_count: usize = 0;
+    for (portable_apply.managed_entries) |managed_entry| {
+        const managed_path = try std.fs.path.join(alloc, &.{ install_root, managed_entry });
+        defer alloc.free(managed_path);
+        if (!std.mem.eql(u8, managed_entry, "share")) {
+            try verifyPortableManifestFile(
+                alloc,
+                install_root,
+                managed_entry,
+                managed_entry,
+                manifest,
+            );
+            installed_file_count += 1;
+            continue;
+        }
+
+        var managed_dir = try std.fs.openDirAbsolute(managed_path, .{ .iterate = true });
+        defer managed_dir.close();
+        var walker = try managed_dir.walk(alloc);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
+            if (entry.kind == .directory) continue;
+            if (entry.kind != .file) return error.InvalidPortablePayload;
+            const native_relative = try std.fs.path.join(
+                alloc,
+                &.{ managed_entry, entry.path },
+            );
+            defer alloc.free(native_relative);
+            const portable_relative = try portableRelativePathAlloc(alloc, native_relative);
+            defer alloc.free(portable_relative);
+            try verifyPortableManifestFile(
+                alloc,
+                install_root,
+                native_relative,
+                portable_relative,
+                manifest,
+            );
+            installed_file_count += 1;
+        }
+    }
+    if (installed_file_count != manifest_file_count) {
+        return error.PortablePayloadManifestFileSetMismatch;
+    }
+}
+
+fn verifyPortableManifestFile(
+    alloc: Allocator,
+    root: []const u8,
+    native_relative: []const u8,
+    portable_relative: []const u8,
+    manifest: []const u8,
+) !void {
+    const path = try std.fs.path.join(alloc, &.{ root, native_relative });
+    defer alloc.free(path);
+    const expected = parseExpectedSha256(manifest, portable_relative) catch |err| switch (err) {
+        error.InstallerChecksumMissing => return error.PortablePayloadManifestEntryMissing,
+        error.InstallerChecksumDuplicate => return error.PortablePayloadManifestEntryDuplicate,
+        else => return err,
+    };
+    const actual = try sha256File(path);
+    if (!std.mem.eql(u8, &expected, &actual)) return error.PortablePayloadManifestMismatch;
+}
+
+fn installedPortablePayloadMatches(
+    alloc: Allocator,
+    install_root: []const u8,
+    manifest_path: []const u8,
+) bool {
+    const manifest = verifiedPortablePayloadManifestAlloc(alloc, manifest_path) catch return false;
+    defer alloc.free(manifest);
+    verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest) catch return false;
+    return true;
 }
 
 fn verifyPortablePayloadBinaries(alloc: Allocator, payload_root: []const u8) !void {
@@ -3753,6 +3881,77 @@ test "authenticated portable manifest rejects mismatched non-PE resource" {
             "0000000000000000000000000000000000000000000000000000000000000000 *share/shell-integration/powershell/integration.ps1\n",
         ),
     );
+}
+
+test "portable concurrent launch content identity verifies the installed managed file set" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("install/share/shell-integration/powershell");
+
+    var manifest: std.ArrayList(u8) = .empty;
+    defer manifest.deinit(alloc);
+    for (portable_apply.managed_entries) |managed_entry| {
+        if (std.mem.eql(u8, managed_entry, "share")) continue;
+        const sub_path = try std.fs.path.join(alloc, &.{ "install", managed_entry });
+        defer alloc.free(sub_path);
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = managed_entry });
+        var digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(managed_entry, &digest, .{});
+        try manifest.writer(alloc).print("{s} *{s}\n", .{
+            std.fmt.bytesToHex(digest, .lower),
+            managed_entry,
+        });
+    }
+    const integration_path = "share/shell-integration/powershell/integration.ps1";
+    const integration_contents = "new integration content";
+    try tmp.dir.writeFile(.{
+        .sub_path = "install/share/shell-integration/powershell/integration.ps1",
+        .data = integration_contents,
+    });
+    var integration_digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(integration_contents, &integration_digest, .{});
+    try manifest.writer(alloc).print("{s} *{s}\n", .{
+        std.fmt.bytesToHex(integration_digest, .lower),
+        integration_path,
+    });
+
+    // User-owned top-level data is outside the managed payload identity.
+    try tmp.dir.writeFile(.{ .sub_path = "install/config.ghostty", .data = "user config" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
+    const install_root = try tmp.dir.realpathAlloc(alloc, "install");
+    defer alloc.free(install_root);
+    try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
+
+    // A file present only in the new share tree makes the installed set differ.
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "extra" });
+    try std.testing.expectError(
+        error.PortablePayloadManifestEntryMissing,
+        verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+    try tmp.dir.deleteFile("install/share/new-only.ps1");
+
+    // Equal paths with different bytes are not content identity.
+    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "tampered" });
+    try std.testing.expectError(
+        error.PortablePayloadManifestMismatch,
+        verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+}
+
+test "portable concurrent launch inside watcher window uses content identity" {
+    try std.testing.expect(!shouldDeferPortableStartupToWatcher(
+        .swapped,
+        true,
+        false,
+        true,
+    ));
+    try std.testing.expect(shouldDeferPortableStartupToWatcher(
+        .swapped,
+        true,
+        false,
+        false,
+    ));
 }
 
 test "portable update validates PE machine from file bytes" {
