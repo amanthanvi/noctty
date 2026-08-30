@@ -118,6 +118,16 @@ windows_job_object_plan: if (builtin.os.tag == .windows) apprt.win32_job_object.
 windows_job_object_handle: if (builtin.os.tag == .windows) ?windows.HANDLE else void =
     if (builtin.os.tag == .windows) null else {},
 
+/// Set as soon as `CreateProcessW` returns successfully, before any of the
+/// post-creation launch setup (job object attach, exit-code probe, initial
+/// thread resume) that can still fail. Those failures unwind through the
+/// errdefer that terminates the child, so `start` returns an error even
+/// though Windows *did* create a process. Callers need this to tell "the
+/// command never launched" apart from "the command launched and we tore it
+/// down", because the two need different error reports. Inert on non-Windows.
+windows_process_created: if (builtin.os.tag == .windows) bool else void =
+    if (builtin.os.tag == .windows) false else {},
+
 /// The various methods a process may exit.
 pub const Exit = if (builtin.os.tag == .windows) union(enum) {
     Exited: u32,
@@ -385,6 +395,10 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
     );
+    // Past this point a child exists. Everything below can still fail and
+    // unwind through the errdefer below, which terminates it — but the
+    // failure is no longer "no child process was created".
+    self.windows_process_created = true;
     errdefer {
         _ = windows.kernel32.TerminateProcess(process_information.hProcess, 1);
         _ = windows.CloseHandle(process_information.hThread);
@@ -1284,6 +1298,54 @@ test "Command: windows job object plan attaches to local child process" {
     const exit = try cmd.wait(true);
     try testing.expect(exit == .Exited);
     try testing.expectEqual(@as(u32, 0), @as(u32, exit.Exited));
+}
+
+// `windows_process_created` is what lets termio tell "the command never
+// launched" apart from "the command launched and setup failed, so we killed
+// it". Those two produce different reports, so the flag has to be false for
+// every failure before CreateProcessW and true the moment it succeeds.
+test "Command: windows_process_created discriminates pre- and post-creation failures" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Pre-creation failure: CreateProcessW itself fails, no child exists.
+    {
+        const missing = "C:\\Windows\\System32\\noctty-does-not-exist.exe";
+        var cmd: Command = .{
+            .path = missing,
+            .args = &.{missing},
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        defer cmd.closeWindowsJobObject();
+
+        try testing.expect(!cmd.windows_process_created);
+        try testing.expectError(error.FileNotFound, cmd.testingStart());
+        try testing.expect(!cmd.windows_process_created);
+        try testing.expect(cmd.pid == null);
+    }
+
+    // Creation succeeds: the flag is set even though the post-creation setup
+    // steps run afterwards.
+    {
+        var cmd: Command = .{
+            .path = "C:\\Windows\\System32\\cmd.exe",
+            .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "exit", "0" },
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        defer cmd.closeWindowsJobObject();
+
+        try testing.expect(!cmd.windows_process_created);
+        try cmd.testingStart();
+        try testing.expect(cmd.windows_process_created);
+        _ = try cmd.wait(true);
+    }
 }
 
 test "Command: windows job object kill-on-close terminates local child" {

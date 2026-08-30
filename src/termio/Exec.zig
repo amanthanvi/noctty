@@ -177,6 +177,17 @@ pub fn threadEnter(
             else => {
                 self.process_start_error = err;
                 log.warn("failed to start subprocess err={}", .{err});
+
+                // On Windows the launch can fail *after* CreateProcessW has
+                // already produced a child (job object attach, exit-code
+                // probe, initial thread resume). That child is terminated
+                // during unwind, so it is gone by the time we get here — but
+                // "no child process was created" would be a false statement,
+                // so those failures get their own report.
+                if (self.subprocess.windows_process_created) {
+                    return error.ProcessStartedThenFailed;
+                }
+
                 return error.ProcessNotStarted;
             },
         }
@@ -694,6 +705,11 @@ const Subprocess = struct {
     process: ?Process = null,
     adopted_client_process: if (builtin.os.tag == .windows) ?windows.HANDLE else void = if (builtin.os.tag == .windows) null else {},
 
+    /// Whether a failed `start` got far enough that Windows actually created
+    /// a child process. See `Command.windows_process_created`. Always false
+    /// on other platforms, where `start` failing means no child exists.
+    windows_process_created: bool = false,
+
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
     windows_job_object_plan: WindowsJobObjectPlan,
@@ -1200,6 +1216,14 @@ const Subprocess = struct {
         };
 
         cmd.start(alloc) catch |err| {
+            // `cmd` is a stack local that is about to go away, so lift the
+            // "did Windows create a child?" answer onto the Subprocess before
+            // unwinding. Without this the caller cannot distinguish a launch
+            // that never happened from one torn down during setup.
+            if (comptime builtin.os.tag == .windows) {
+                self.windows_process_created = cmd.windows_process_created;
+            }
+
             // We have to do this because start on Windows can't
             // ever return ExecFailedInChild
             const StartError = error{ExecFailedInChild} || @TypeOf(err);
