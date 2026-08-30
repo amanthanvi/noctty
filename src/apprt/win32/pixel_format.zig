@@ -87,6 +87,10 @@ const WGL_FULL_ACCELERATION_EXT = 0x2027;
 
 const WGL_TYPE_RGBA_EXT = 0x202B;
 
+// WGL_ARB_framebuffer_sRGB and WGL_EXT_framebuffer_sRGB define the *same*
+// value for this attribute (0x20A9), and both spec it against the EXT
+// pixel-format entry points. Drivers accept it through the ARB entry points
+// too, which is what every mainstream loader queries.
 const WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB = 0x20A9;
 
 const WGL_SAMPLE_BUFFERS_ARB = 0x2041;
@@ -130,6 +134,7 @@ const WglPixelFormatSelectionSource = enum(u8) {
     classic,
     ext_srgb,
     arb_ext_colorspace_srgb,
+    arb_srgb,
 };
 
 const WglPixelFormatCandidate = struct {
@@ -413,15 +418,20 @@ const WglGetPixelFormatAttribivArbFn = *const fn (
 
 const WglGetExtensionsStringArbFn = *const fn (hdc: HDC) callconv(.winapi) ?[*:0]const u8;
 
+const WglPixelFormatExtFunctions = struct {
+    choose: WglChoosePixelFormatExtFn,
+    get_attributes: WglGetPixelFormatAttribivExtFn,
+};
+
+const WglPixelFormatArbFunctions = struct {
+    choose: WglChoosePixelFormatArbFn,
+    get_attributes: WglGetPixelFormatAttribivArbFn,
+};
+
 const WglPixelFormatFunctions = union(enum) {
-    ext_framebuffer_srgb: struct {
-        choose: WglChoosePixelFormatExtFn,
-        get_attributes: WglGetPixelFormatAttribivExtFn,
-    },
-    arb_ext_colorspace_srgb: struct {
-        choose: WglChoosePixelFormatArbFn,
-        get_attributes: WglGetPixelFormatAttribivArbFn,
-    },
+    ext_framebuffer_srgb: WglPixelFormatExtFunctions,
+    arb_ext_colorspace_srgb: WglPixelFormatArbFunctions,
+    arb_framebuffer_srgb: WglPixelFormatArbFunctions,
 
     fn choose(
         self: WglPixelFormatFunctions,
@@ -440,7 +450,9 @@ const WglPixelFormatFunctions = union(enum) {
                 formats,
                 count,
             ),
-            .arb_ext_colorspace_srgb => |functions| functions.choose(
+            .arb_ext_colorspace_srgb,
+            .arb_framebuffer_srgb,
+            => |functions| functions.choose(
                 hdc,
                 attributes,
                 null,
@@ -468,7 +480,9 @@ const WglPixelFormatFunctions = union(enum) {
                 attributes.ptr,
                 values,
             ),
-            .arb_ext_colorspace_srgb => |functions| functions.get_attributes(
+            .arb_ext_colorspace_srgb,
+            .arb_framebuffer_srgb,
+            => |functions| functions.get_attributes(
                 hdc,
                 pixel_format,
                 0,
@@ -483,12 +497,13 @@ const WglPixelFormatFunctions = union(enum) {
         return switch (self) {
             .ext_framebuffer_srgb => .ext_srgb,
             .arb_ext_colorspace_srgb => .arb_ext_colorspace_srgb,
+            .arb_framebuffer_srgb => .arb_srgb,
         };
     }
 
     fn srgbAttribute(self: WglPixelFormatFunctions) struct { name: i32, value: i32 } {
         return switch (self) {
-            .ext_framebuffer_srgb => .{
+            .ext_framebuffer_srgb, .arb_framebuffer_srgb => .{
                 .name = WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB,
                 .value = 1,
             },
@@ -499,6 +514,97 @@ const WglPixelFormatFunctions = union(enum) {
         };
     }
 };
+
+/// The sRGB-capable pixel-format API pairings we will accept, in the exact
+/// order `WglPixelFormatSelector.init` tries them.
+///
+/// The pairing rules are not interchangeable, so they are spelled out here
+/// rather than inferred:
+///
+///   * `WGL_ARB_framebuffer_sRGB` and `WGL_EXT_framebuffer_sRGB` are both
+///     written against `WGL_EXT_pixel_format` and both declare the 0x20A9
+///     attribute for `wglGetPixelFormatAttribivEXT` /
+///     `wglChoosePixelFormatEXT`. Despite the `_ARB` token suffix, the EXT
+///     entry points are the spec-exact home of that attribute.
+///   * `WGL_EXT_colorspace` is written against `WGL_ARB_pixel_format` and
+///     declares `WGL_COLORSPACE_EXT` for the ARB entry points only.
+///   * In practice every shipping ICD also honors 0x20A9 through
+///     `wglGetPixelFormatAttribivARB`, and that de-facto pairing is what
+///     mainstream loaders query. Without it we would skip the verified-sRGB
+///     path entirely on a driver that advertises `WGL_ARB_pixel_format` and
+///     `WGL_ARB_framebuffer_sRGB` but not `WGL_EXT_pixel_format`. It is tried
+///     last so any driver exposing a spec-exact pairing keeps that path.
+const wgl_srgb_api_family_order = [_]WglSrgbApiFamily{
+    .ext_pixel_format_framebuffer_srgb,
+    .arb_pixel_format_colorspace,
+    .arb_pixel_format_framebuffer_srgb,
+};
+
+const WglSrgbApiFamily = enum {
+    ext_pixel_format_framebuffer_srgb,
+    arb_pixel_format_colorspace,
+    arb_pixel_format_framebuffer_srgb,
+};
+
+fn hasWglFramebufferSrgbExtension(extensions: []const u8) bool {
+    return hasWglExtension(extensions, "WGL_ARB_framebuffer_sRGB") or
+        hasWglExtension(extensions, "WGL_EXT_framebuffer_sRGB");
+}
+
+fn wglSrgbApiFamilyAdvertised(
+    family: WglSrgbApiFamily,
+    extensions: []const u8,
+) bool {
+    return switch (family) {
+        .ext_pixel_format_framebuffer_srgb => hasWglExtension(extensions, "WGL_EXT_pixel_format") and
+            hasWglFramebufferSrgbExtension(extensions),
+        .arb_pixel_format_colorspace => hasWglExtension(extensions, "WGL_ARB_pixel_format") and
+            hasWglExtension(extensions, "WGL_EXT_colorspace"),
+        .arb_pixel_format_framebuffer_srgb => hasWglExtension(extensions, "WGL_ARB_pixel_format") and
+            hasWglFramebufferSrgbExtension(extensions),
+    };
+}
+
+/// First family in `wgl_srgb_api_family_order` that the driver advertises,
+/// or null when no valid pairing is present. `WglPixelFormatSelector.init`
+/// walks the same order with the same predicate, but keeps going when a
+/// family's procedures fail to resolve.
+fn firstAdvertisedWglSrgbApiFamily(extensions: []const u8) ?WglSrgbApiFamily {
+    for (wgl_srgb_api_family_order) |family| {
+        if (wglSrgbApiFamilyAdvertised(family, extensions)) return family;
+    }
+    return null;
+}
+
+/// Resolve the entry points for an advertised family. Returns null when the
+/// driver advertises the extension but does not hand back usable procedures,
+/// so the caller can keep walking the order instead of failing closed early.
+fn loadWglPixelFormatFunctions(family: WglSrgbApiFamily) ?WglPixelFormatFunctions {
+    switch (family) {
+        .ext_pixel_format_framebuffer_srgb => {
+            const choose_raw = wglGetProcAddress("wglChoosePixelFormatEXT");
+            const get_raw = wglGetProcAddress("wglGetPixelFormatAttribivEXT");
+            if (!validWglProcAddress(choose_raw) or !validWglProcAddress(get_raw)) return null;
+            return .{ .ext_framebuffer_srgb = .{
+                .choose = @ptrCast(@alignCast(choose_raw.?)),
+                .get_attributes = @ptrCast(@alignCast(get_raw.?)),
+            } };
+        },
+        .arb_pixel_format_colorspace, .arb_pixel_format_framebuffer_srgb => {
+            const choose_raw = wglGetProcAddress("wglChoosePixelFormatARB");
+            const get_raw = wglGetProcAddress("wglGetPixelFormatAttribivARB");
+            if (!validWglProcAddress(choose_raw) or !validWglProcAddress(get_raw)) return null;
+            const functions: WglPixelFormatArbFunctions = .{
+                .choose = @ptrCast(@alignCast(choose_raw.?)),
+                .get_attributes = @ptrCast(@alignCast(get_raw.?)),
+            };
+            return if (family == .arb_pixel_format_colorspace)
+                .{ .arb_ext_colorspace_srgb = functions }
+            else
+                .{ .arb_framebuffer_srgb = functions };
+        },
+    }
+}
 
 fn validWglProcAddress(raw: ?*const anyopaque) bool {
     const address = @intFromPtr(raw orelse return false);
@@ -520,7 +626,10 @@ fn wglMultisampleQuerySupported(
     return switch (source) {
         .ext_srgb => hasWglExtension(extensions, "WGL_ARB_multisample") or
             hasWglExtension(extensions, "WGL_EXT_multisample"),
-        .arb_ext_colorspace_srgb => hasWglExtension(extensions, "WGL_ARB_multisample"),
+        // WGL_SAMPLE_BUFFERS_ARB / WGL_SAMPLES_ARB are declared by
+        // WGL_ARB_multisample against the ARB entry points, so the ARB
+        // families require the ARB multisample extension exactly.
+        .arb_ext_colorspace_srgb, .arb_srgb => hasWglExtension(extensions, "WGL_ARB_multisample"),
         .classic => false,
     };
 }
@@ -637,35 +746,14 @@ const WglPixelFormatSelector = struct {
                 }
                 break :load error.WglExtensionsUnavailable;
             };
+            // Never mix one family's sRGB attribute with the other family's
+            // entry points; `wgl_srgb_api_family_order` documents each valid
+            // pairing and the order they are tried in.
             const functions: WglPixelFormatFunctions = functions: {
-                // ARB_framebuffer_sRGB is specified in terms of the EXT
-                // pixel-format API. Keep that family exact when available.
-                if (hasWglExtension(extensions, "WGL_EXT_pixel_format") and
-                    hasWglExtension(extensions, "WGL_ARB_framebuffer_sRGB"))
-                {
-                    const choose_raw = wglGetProcAddress("wglChoosePixelFormatEXT");
-                    const get_raw = wglGetProcAddress("wglGetPixelFormatAttribivEXT");
-                    if (validWglProcAddress(choose_raw) and validWglProcAddress(get_raw)) {
-                        break :functions .{ .ext_framebuffer_srgb = .{
-                            .choose = @ptrCast(@alignCast(choose_raw.?)),
-                            .get_attributes = @ptrCast(@alignCast(get_raw.?)),
-                        } };
-                    }
-                }
-
-                // WGL_EXT_colorspace is a separate sRGB surface path written
-                // against WGL_ARB_pixel_format. Do not mix either API with
-                // the other family's sRGB attribute.
-                if (hasWglExtension(extensions, "WGL_ARB_pixel_format") and
-                    hasWglExtension(extensions, "WGL_EXT_colorspace"))
-                {
-                    const choose_raw = wglGetProcAddress("wglChoosePixelFormatARB");
-                    const get_raw = wglGetProcAddress("wglGetPixelFormatAttribivARB");
-                    if (validWglProcAddress(choose_raw) and validWglProcAddress(get_raw)) {
-                        break :functions .{ .arb_ext_colorspace_srgb = .{
-                            .choose = @ptrCast(@alignCast(choose_raw.?)),
-                            .get_attributes = @ptrCast(@alignCast(get_raw.?)),
-                        } };
+                for (wgl_srgb_api_family_order) |family| {
+                    if (!wglSrgbApiFamilyAdvertised(family, extensions)) continue;
+                    if (loadWglPixelFormatFunctions(family)) |resolved| {
+                        break :functions resolved;
                     }
                 }
                 break :load error.WglSrgbPixelFormatUnavailable;
@@ -1363,6 +1451,195 @@ test "win32 WGL bootstrap keeps exact sRGB API families and valid procs" {
     try std.testing.expect(!validWglProcAddress(null));
     try std.testing.expect(!validWglProcAddress(@ptrFromInt(1)));
     try std.testing.expect(validWglProcAddress(@ptrFromInt(0x1000)));
+}
+
+test "win32 WGL sRGB family order covers every pairing exactly once" {
+    const fields = @typeInfo(WglSrgbApiFamily).@"enum".fields;
+    try std.testing.expectEqual(fields.len, wgl_srgb_api_family_order.len);
+    inline for (fields) |field| {
+        const family: WglSrgbApiFamily = @enumFromInt(field.value);
+        var seen: usize = 0;
+        for (wgl_srgb_api_family_order) |candidate| {
+            if (candidate == family) seen += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), seen);
+    }
+}
+
+test "win32 WGL sRGB selection reaches ARB-only drivers without WGL_EXT_pixel_format" {
+    // The regression this guards: a driver advertising the standard
+    // WGL_ARB_pixel_format + WGL_ARB_framebuffer_sRGB pair but no
+    // WGL_EXT_pixel_format and no WGL_EXT_colorspace must still reach the
+    // verified-sRGB direct-framebuffer path instead of silently falling
+    // back to the classic offscreen selection.
+    try std.testing.expectEqual(
+        WglSrgbApiFamily.arb_pixel_format_framebuffer_srgb,
+        firstAdvertisedWglSrgbApiFamily(
+            "WGL_ARB_extensions_string WGL_ARB_pixel_format WGL_ARB_framebuffer_sRGB WGL_ARB_multisample",
+        ).?,
+    );
+
+    // WGL_EXT_framebuffer_sRGB declares the same 0x20A9 attribute, so an
+    // EXT-only spelling is equally usable through either entry-point family.
+    try std.testing.expectEqual(
+        WglSrgbApiFamily.arb_pixel_format_framebuffer_srgb,
+        firstAdvertisedWglSrgbApiFamily(
+            "WGL_ARB_extensions_string WGL_ARB_pixel_format WGL_EXT_framebuffer_sRGB",
+        ).?,
+    );
+    try std.testing.expectEqual(
+        WglSrgbApiFamily.ext_pixel_format_framebuffer_srgb,
+        firstAdvertisedWglSrgbApiFamily(
+            "WGL_EXT_extensions_string WGL_EXT_pixel_format WGL_EXT_framebuffer_sRGB",
+        ).?,
+    );
+}
+
+test "win32 WGL sRGB selection prefers the spec-exact pairings" {
+    // Both framebuffer_sRGB specs are written against WGL_EXT_pixel_format,
+    // so that family wins whenever the driver advertises it.
+    try std.testing.expectEqual(
+        WglSrgbApiFamily.ext_pixel_format_framebuffer_srgb,
+        firstAdvertisedWglSrgbApiFamily(
+            "WGL_EXT_pixel_format WGL_ARB_pixel_format WGL_ARB_framebuffer_sRGB WGL_EXT_colorspace",
+        ).?,
+    );
+
+    // WGL_EXT_colorspace is written against WGL_ARB_pixel_format and keeps
+    // priority over the de-facto ARB framebuffer_sRGB pairing, so drivers
+    // that already selected through it do not change path.
+    try std.testing.expectEqual(
+        WglSrgbApiFamily.arb_pixel_format_colorspace,
+        firstAdvertisedWglSrgbApiFamily(
+            "WGL_ARB_pixel_format WGL_EXT_colorspace WGL_ARB_framebuffer_sRGB",
+        ).?,
+    );
+}
+
+test "win32 WGL sRGB selection refuses unpaired or absent extensions" {
+    // Pixel-format API with no sRGB attribute at all.
+    try std.testing.expectEqual(
+        @as(?WglSrgbApiFamily, null),
+        firstAdvertisedWglSrgbApiFamily("WGL_ARB_pixel_format WGL_ARB_multisample"),
+    );
+    try std.testing.expectEqual(
+        @as(?WglSrgbApiFamily, null),
+        firstAdvertisedWglSrgbApiFamily("WGL_EXT_pixel_format WGL_EXT_swap_control"),
+    );
+    // sRGB attributes with no pixel-format API to query them through.
+    try std.testing.expectEqual(
+        @as(?WglSrgbApiFamily, null),
+        firstAdvertisedWglSrgbApiFamily("WGL_ARB_framebuffer_sRGB WGL_EXT_colorspace"),
+    );
+    // WGL_EXT_colorspace must never be paired with the EXT entry points.
+    try std.testing.expectEqual(
+        @as(?WglSrgbApiFamily, null),
+        firstAdvertisedWglSrgbApiFamily("WGL_EXT_pixel_format WGL_EXT_colorspace"),
+    );
+    try std.testing.expectEqual(
+        @as(?WglSrgbApiFamily, null),
+        firstAdvertisedWglSrgbApiFamily(""),
+    );
+}
+
+test "win32 WGL sRGB attribute stays bound to its own API family" {
+    const stubs = struct {
+        fn chooseArb(
+            _: HDC,
+            _: ?[*]const i32,
+            _: ?[*]const f32,
+            _: UINT,
+            _: [*]i32,
+            _: *UINT,
+        ) callconv(.winapi) BOOL {
+            return 0;
+        }
+        fn getArb(
+            _: HDC,
+            _: i32,
+            _: i32,
+            _: UINT,
+            _: [*]const i32,
+            _: [*]i32,
+        ) callconv(.winapi) BOOL {
+            return 0;
+        }
+        fn chooseExt(
+            _: HDC,
+            _: ?[*]const i32,
+            _: ?[*]const f32,
+            _: UINT,
+            _: [*]i32,
+            _: *UINT,
+        ) callconv(.winapi) BOOL {
+            return 0;
+        }
+        fn getExt(
+            _: HDC,
+            _: i32,
+            _: i32,
+            _: UINT,
+            _: [*]i32,
+            _: [*]i32,
+        ) callconv(.winapi) BOOL {
+            return 0;
+        }
+    };
+    const arb: WglPixelFormatArbFunctions = .{
+        .choose = &stubs.chooseArb,
+        .get_attributes = &stubs.getArb,
+    };
+    const ext: WglPixelFormatExtFunctions = .{
+        .choose = &stubs.chooseExt,
+        .get_attributes = &stubs.getExt,
+    };
+
+    const ext_srgb: WglPixelFormatFunctions = .{ .ext_framebuffer_srgb = ext };
+    try std.testing.expectEqual(WglPixelFormatSelectionSource.ext_srgb, ext_srgb.source());
+    try std.testing.expectEqual(
+        @as(i32, WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB),
+        ext_srgb.srgbAttribute().name,
+    );
+    try std.testing.expectEqual(@as(i32, 1), ext_srgb.srgbAttribute().value);
+
+    const arb_srgb: WglPixelFormatFunctions = .{ .arb_framebuffer_srgb = arb };
+    try std.testing.expectEqual(WglPixelFormatSelectionSource.arb_srgb, arb_srgb.source());
+    try std.testing.expectEqual(
+        @as(i32, WGL_FRAMEBUFFER_SRGB_CAPABLE_ARB),
+        arb_srgb.srgbAttribute().name,
+    );
+    try std.testing.expectEqual(@as(i32, 1), arb_srgb.srgbAttribute().value);
+
+    const colorspace: WglPixelFormatFunctions = .{ .arb_ext_colorspace_srgb = arb };
+    try std.testing.expectEqual(
+        WglPixelFormatSelectionSource.arb_ext_colorspace_srgb,
+        colorspace.source(),
+    );
+    try std.testing.expectEqual(
+        @as(i32, WGL_COLORSPACE_EXT),
+        colorspace.srgbAttribute().name,
+    );
+    try std.testing.expectEqual(
+        @as(i32, WGL_COLORSPACE_SRGB_EXT),
+        colorspace.srgbAttribute().value,
+    );
+}
+
+test "win32 WGL multisample query pairs with each family's own extension" {
+    // WGL_SAMPLE_BUFFERS_ARB / WGL_SAMPLES_ARB come from WGL_ARB_multisample
+    // against the ARB entry points, so the ARB families must not accept the
+    // EXT multisample spelling.
+    try std.testing.expect(wglMultisampleQuerySupported(.arb_srgb, "WGL_ARB_multisample"));
+    try std.testing.expect(!wglMultisampleQuerySupported(.arb_srgb, "WGL_EXT_multisample"));
+    try std.testing.expect(
+        wglMultisampleQuerySupported(.arb_ext_colorspace_srgb, "WGL_ARB_multisample"),
+    );
+    try std.testing.expect(
+        !wglMultisampleQuerySupported(.arb_ext_colorspace_srgb, "WGL_EXT_multisample"),
+    );
+    try std.testing.expect(wglMultisampleQuerySupported(.ext_srgb, "WGL_EXT_multisample"));
+    try std.testing.expect(wglMultisampleQuerySupported(.ext_srgb, "WGL_ARB_multisample"));
+    try std.testing.expect(!wglMultisampleQuerySupported(.classic, "WGL_ARB_multisample"));
 }
 
 test "win32 selected pixel format validation preserves actual attachments" {
