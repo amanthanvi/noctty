@@ -35241,6 +35241,93 @@ test "win32 recovery fallback failure is consumed by next startup" {
     }
 }
 
+// Why the ready-marker retry below exists.
+//
+// Observed: a ledger write fails in one of two shapes, and only one of them
+// leaves anything behind for a later launch.
+//
+//   C2  `ReplaceFileW`/`MoveFileExW` failed and the in-place fallback also
+//       failed. `writeFileAtomicOrInPlace` has already set `atomic_failure`,
+//       so `persistRecoveryRecordAtPath` takes its retention branch, writes a
+//       `.pending-` record, and the next startup folds it back in. Covered by
+//       "win32 recovery fallback failure is consumed by next startup".
+//
+//   C1  The write failed *before* the replacement was ever attempted: the
+//       temp file could not be created, written or synced. `atomic_failure`
+//       is still null, so `if (atomic_failure) |failure|` is skipped, no
+//       `.pending-` record is written, and the ready marker exists nowhere.
+//       That is what this test pins.
+//
+// What follows from it, separately: the `.pending-` fold is a C2 mechanism
+// only, so C1 has no cross-launch recovery at all and the in-session retry is
+// its only mitigation. A retry rebuilds the temp path from a fresh nonce, so a
+// transient hold on the ledger directory — an anti-virus or backup agent,
+// `ERROR_DELETE_PENDING` on a leftover name, a redirected-profile hiccup — can
+// clear before the next attempt runs.
+//
+// Also inference, not observation: C1 is consistent with #149's reported
+// symptom, a ledger holding 16 attempts and zero ready markers with no
+// recorded cause. It was never confirmed to be C1 — the pre-fix schema
+// recorded no error — so treat this as a reason not to remove the mitigation,
+// not as a diagnosis.
+//
+// Two consequences for anyone editing this area:
+//
+//   - Do not delete the retry on the grounds that the `.pending-` fold already
+//     recovers a failed write. It recovers C2. This test is C1.
+//   - Retaining a `.pending-` record unconditionally, rather than only when
+//     `atomic_failure` is set, looks like a cheaper close but is only partial:
+//     in C1 the directory itself is usually what failed, so writing
+//     `.pending-` into that same directory fails too. It would cover only the
+//     narrow case where one temp filename was unusable but another works.
+test "win32 recovery ready-write failure before atomic replace leaves nothing for the pending fold" {
+    // Hermetic: everything lives under a temp dir this test owns, and
+    // `tmp.cleanup()` runs on the failure path too. The real
+    // `%LOCALAPPDATA%\noctty\` is never touched — `persistRecoveryRecordAtPath`
+    // takes its path as a parameter precisely so this is possible.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+
+    // A regular file where the ledger's parent directory should be. That makes
+    // `makeDirAbsolute` report PathAlreadyExists, which is swallowed, and then
+    // makes the temp-file creation fail — a failure strictly before
+    // `replaceFileAtomic`, so `atomic_failure` is never set. This is the only
+    // way found to reach C1 deterministically; a sharing violation on the temp
+    // name cannot be staged, because the name carries a fresh pid+nonce.
+    {
+        var blocker = try tmp.dir.createFile("blocker", .{});
+        blocker.close();
+    }
+    const target = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ root, "blocker", "startup-attempts.json" },
+    );
+    defer std.testing.allocator.free(target);
+
+    var ready = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 150, .phase = .ready },
+    };
+    // The error must escape: it is what drives `resolveRecoveryStartup` to
+    // spend a retry rather than treat the launch as resolved. The identity of
+    // the error is not the contract — which one Windows reports for a path
+    // under a regular file is its business — only that it is not swallowed.
+    if (persistRecoveryRecordAtPath(std.testing.allocator, target, &ready)) {
+        return error.TestExpectedError;
+    } else |_| {}
+
+    // And nothing was left behind for a later startup to fold, which is the
+    // whole point: without the retry this ready marker is simply gone.
+    var dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
+    defer dir.close();
+    var entries = dir.iterate();
+    while (try entries.next()) |entry| {
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, recovery_pending_suffix) == null);
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".tmp-") == null);
+    }
+}
+
 test "win32 recovery ready marker keeps retrying transient write failures" {
     // A failed attempt must not resolve the launch: latching on the first
     // failure is what leaves an unresolved attempt on disk for the whole
