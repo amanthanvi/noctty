@@ -425,11 +425,12 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     // any local user can both enumerate it and create a name in it, so the DACL
     // below protects the object this process created but never reserves the name
     // itself. Destroying and recreating the instance between clients would leave
-    // the name unowned in the gap, letting a different, lower-privileged user
-    // stand up a permissive pipe of the same name; FIRST_PIPE_INSTANCE would then
-    // fail this host closed, but a reconnecting client does not authenticate the
-    // server and would hand its keystrokes to the impostor. Reusing one instance
-    // removes that window entirely.
+    // the name unowned in the gap, letting any local user stand up a permissive
+    // pipe of the same name; FIRST_PIPE_INSTANCE would then fail this host closed,
+    // which protects the host but not a reconnecting client. That client does
+    // authenticate the server (see verifyPipeServer), but only by user, so a
+    // different-user impostor is rejected while a same-user one would still
+    // capture keystrokes. Reusing one instance removes the window for both cases.
     var security_attributes = security.attributes();
     const pipe = windows.kernel32.CreateNamedPipeW(
         pipe_name_w.ptr,
@@ -721,9 +722,15 @@ fn verifyPipeServer(alloc: Allocator, pipe: windows.HANDLE) !void {
     const own_sid = try tokenUserSidAlloc(alloc, windows.GetCurrentProcess());
     defer alloc.free(own_sid);
 
-    // This closes the cross-user path only. A same-user attacker, and a
-    // same-user attacker at a different integrity level, both still pass; those
-    // stay explicit residuals of the spike.
+    // Scope, stated precisely: this authenticates the process currently holding
+    // the PID that NPFS recorded as the instance's creator. It does not bind to
+    // the pipe endpoint. An attacker can create the instance in a short-lived
+    // process, DuplicateHandle the server end into a long-lived one, let the
+    // creator exit, and groom PID reuse so that a victim-user process holds that
+    // PID by the time OpenProcess runs. So this closes the cross-user case only
+    // up to that PID-reuse race. A same-user attacker, and a same-user attacker
+    // at a different integrity level, both still pass outright. There is no
+    // TOCTOU after the check: the handle stays bound to the verified instance.
     if (!std.mem.eql(u8, server_sid, own_sid)) return error.UntrustedPipeServer;
 }
 

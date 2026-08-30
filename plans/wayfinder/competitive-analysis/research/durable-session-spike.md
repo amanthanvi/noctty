@@ -378,17 +378,21 @@ recorded PIDs.
 The latest hardened green run reported:
 
 ```text
-CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":38276,"killed_client_pid":24636,"shell_pid":14080,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2579093,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38449152,"observed_host_private_max_detached_bytes":38449152,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote+persistent-instance+client-verifies-server-sid","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
+CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":588,"killed_client_pid":47372,"shell_pid":39000,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2575370,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38445056,"observed_host_private_max_detached_bytes":38445056,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote+persistent-instance+client-verifies-server-sid","pipe_security_evidence":"mechanism-inventory-not-derived","pipe_security_execution_verified":"current-user-DACL-accept;server-sid-accept;persistent-instance-reuse","pipe_security_by_construction":"first-instance-collision;reject-remote;cross-user-DACL-denial;untrusted-server-rejection","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
 ```
 
 The memory evidence is intentionally precise and observational: total
-process private memory was 38,449,152 bytes before detached overflow, so
+process private memory was 38,445,056 bytes before detached overflow, so
 the whole process was not and cannot be under a 1 MiB ring cap. The
 retained-output allocation never exceeded 1,048,576 bytes, and the
-sampled private-memory growth while draining at least 2,579,093 bytes
-detached was 0 bytes in this one run. The structural guarantee is the
-ring's retained-byte bound; the process-memory figure is not a guarantee
-or a long-duration whole-process memory budget. An
+sampled private-memory growth while draining at least 2,575,370 bytes
+detached was 0 bytes. That figure is not merely observed: the harness
+enforces sampled growth under the ring cap as a hard failure, so a run
+that breached it would fail rather than report. The caveat is narrower
+than "one observation" — sampling every 25 ms can miss a transient peak
+between samples, and neither the check nor the figure is a
+long-duration whole-process memory budget. The structural guarantee
+remains the ring's retained-byte bound. An
 attached client also causes a transient, capacity-sized replay snapshot;
 the snapshot is copied under the ring mutex and sent after unlocking so a
 slow replay cannot stop the continuously running ConPTY drain thread.
@@ -449,6 +453,29 @@ stays 1, preserving one client at a time. Clients also connect with
 `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so no server can
 capture an impersonation token from a client that reaches it.
 
+This reuse is not only a design change; it is execution-verified. Every
+green run drives four successive reattaches (clients 2 through 5,
+including one after a hard PID kill) through the
+`DisconnectNamedPipe` → `ConnectNamedPipe` path on the same handle, so
+the reused instance is exercised on the normal path of every run rather
+than reasoned about.
+
+One caveat about the evidence itself, so the verdict line is not read
+for more than it says: `pipe_security` is a hard-coded constant in the
+harness. It is a fair inventory of mechanisms that all exist in the
+code, but it is not derived — deleting `verifyPipeServer` from the
+client would not change the emitted string, and the harness's only
+related assertion regexes the host's own `security=current-user`
+self-report. Of the listed tokens, only the current-user DACL accept
+path, the server-SID accept path and the persistent-instance reuse are
+execution-verified. First-instance collision, reject-remote, cross-user
+DACL denial and the `UntrustedPipeServer` rejection branch hold by
+construction and code review only. The run now emits
+`pipe_security_evidence`, `pipe_security_execution_verified` and
+`pipe_security_by_construction` so this distinction travels with the
+result. If any of this graduates to product, the field must be derived
+from probes rather than asserted.
+
 A second correction is needed, because the revision that introduced the
 persistent instance then claimed the remaining cases were "fail closed,
 no disclosure". That was also wrong. `FILE_FLAG_FIRST_PIPE_INSTANCE`
@@ -470,14 +497,18 @@ confirm — including an `OpenProcess` that fails because the server
 belongs to another user. The green run below exercised the accepting
 path across all five clients.
 
-What remains is now stated exactly: this closes the *cross-user* case.
-A same-user impostor still passes the SID comparison, as does a
-same-user impostor at a different integrity level. Those are real and
-unclosed, and integrity-level separation stays on the residual list
-above. The honest summary is that a different local user can no longer
-capture terminal input in any of these windows, and a same-user attacker
-still can — which is consistent with the spike's stated threat model
-rather than an unexamined assumption about it. Synchronous `ConnectNamedPipe`
+What remains is now stated exactly. This closes the cross-user case up
+to a PID-reuse race between the pipe's recorded server PID and
+`OpenProcess`: the check authenticates the process currently holding
+that PID, not the pipe endpoint itself. An attacker can create the
+instance in a short-lived process, `DuplicateHandle` the server end into
+a long-lived one, let the creator exit, and groom PID reuse so a
+victim-user process holds that PID when `OpenProcess` runs. That is
+esoteric and race-dependent, but it is why the claim is bounded rather
+than absolute. There is no TOCTOU *after* the check — the handle stays
+bound to the verified instance. A same-user impostor still passes
+outright, as does a same-user impostor at a different integrity level;
+integrity-level separation stays on the residual list above. Synchronous `ConnectNamedPipe`
 also has no timeout, so the host can remain blocked if the shell exits
 while no client is attached. No application integration was attempted.
 

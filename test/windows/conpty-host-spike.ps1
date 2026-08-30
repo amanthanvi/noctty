@@ -413,7 +413,16 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
         observed_host_private_max_detached_bytes = $maxPrivate
         observed_host_private_growth_bytes = $privateGrowth
         observed_private_growth_within_ring_cap = $true
+        # Mechanism inventory, NOT a derived test result. This string is a
+        # constant: deleting verifyPipeServer from the client, or the
+        # reject-remote flag from the host, would not change what is emitted
+        # here. Every token does correspond to real code, but only the tokens
+        # in pipe_security_execution_verified are exercised by this run. If any
+        # of this graduates to product, the field must be derived from probes.
         pipe_security = 'current-user-DACL+first-instance+reject-remote+persistent-instance+client-verifies-server-sid'
+        pipe_security_evidence = 'mechanism-inventory-not-derived'
+        pipe_security_execution_verified = 'current-user-DACL-accept;server-sid-accept;persistent-instance-reuse'
+        pipe_security_by_construction = 'first-instance-collision;reject-remote;cross-user-DACL-denial;untrusted-server-rejection'
         detach_frame = $true
         ceiling = 'same-logon-session-only;never-logoff-or-reboot'
     }
