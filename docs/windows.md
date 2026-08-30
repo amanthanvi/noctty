@@ -101,10 +101,17 @@ negated patterns and aliases that are not plain printable ASCII are skipped.
 Every other keyword — `HostName`, `User`, `Port`, `ProxyCommand`, and the rest
 — is ignored here and left to `ssh`, which reads the same file. `Match` blocks
 are ignored, including their `Include` lines. `Include` files are read one
-level deep, up to 16 files: relative paths start at the `.ssh` directory,
-absolute and `~/` paths are accepted, and globbed, UNC (`\\server\share`), and
-device (`\\?\`, `\\.\`) paths are skipped so a refresh cannot block on a
-network timeout.
+level deep, up to 16 files: relative paths start at the `.ssh` directory, and
+absolute and `~/` paths are accepted. A leading `"` groups one path containing
+spaces, matching OpenSSH; a backslash is a path separator here, not an escape.
+
+Because that read is synchronous on the UI thread, an include is skipped
+rather than opened when it is globbed, UNC (`\\server\share`), a device path
+(`\\?\`, `\\.\`), or a mapped network drive letter — the last is checked with
+`GetDriveTypeW`, which answers from the local mount table without contacting
+the server. A refresh therefore cannot block on a network timeout. A directory
+junction or a `subst` alias whose target is remote is not detected, since both
+report the drive type of the letter rather than of the target.
 
 Activating an entry runs `ssh <alias>`, so whatever that alias resolves to in
 your own SSH configuration takes effect — including any `ProxyCommand` or

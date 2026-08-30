@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const win = @import("../os/windows.zig");
 const log = std.log.scoped(.windows_ssh_hosts);
@@ -98,14 +99,16 @@ const LoadContext = struct {
     fn parseIncludes(self: *LoadContext, value: []const u8, depth: u8) Allocator.Error!void {
         if (depth >= 1) return;
 
-        var paths = std.mem.tokenizeAny(u8, value, " \t");
+        var paths: IncludeArgIterator = .{ .value = value };
         while (paths.next()) |raw_path| {
+            if (raw_path.len == 0) continue;
             if (hasGlobMetacharacter(raw_path)) continue;
             // This read is synchronous on the UI thread and runs on every
-            // profile refresh — app startup and every picker open. A remote or
-            // device path could block on an SMB/TCP timeout, and an uncapped
-            // include count would multiply that.
-            if (isRemoteOrDevicePath(raw_path)) {
+            // profile refresh — app startup, every picker open, and the first
+            // pane of every restored session window. A remote or device path
+            // could block on an SMB/TCP timeout, and an uncapped include count
+            // would multiply that.
+            if (isUnsupportedIncludePath(raw_path)) {
                 warnReadOnce(raw_path, error.UnsupportedIncludePath);
                 continue;
             }
@@ -130,6 +133,48 @@ const LoadContext = struct {
 const Directive = struct {
     keyword: []const u8,
     value: []const u8,
+};
+
+/// `Include` arguments are whitespace separated, except that a leading `"`
+/// groups one path containing spaces (OpenSSH `strdelim`). A plain whitespace
+/// split would shred `Include "C:\Users\Jane Doe\.ssh\work hosts"` into
+/// nonexistent paths and silently drop every host in that file.
+///
+/// Deliberately NOT `AliasIterator`, which exists to find the boundaries of
+/// `Host` patterns: it leaves the quote bytes in the token (harmless there,
+/// since `isConnectableAlias` rejects quotes outright) and treats `\` as an
+/// escape, which would corrupt every Windows path separator here. `'` is not
+/// a grouping quote for the same reason -- OpenSSH does not treat it as one,
+/// and stripping it would break a literal path such as `C:\Bob's\config`.
+const IncludeArgIterator = struct {
+    value: []const u8,
+    index: usize = 0,
+
+    fn next(self: *IncludeArgIterator) ?[]const u8 {
+        while (self.index < self.value.len and
+            (self.value[self.index] == ' ' or self.value[self.index] == '\t')) : (self.index += 1)
+        {}
+        if (self.index >= self.value.len) return null;
+
+        if (self.value[self.index] == '"') {
+            const start = self.index + 1;
+            const end = std.mem.indexOfScalarPos(u8, self.value, start, '"') orelse {
+                // Unterminated quote. OpenSSH rejects the whole line, so
+                // consume the remainder rather than guess at a path.
+                self.index = self.value.len;
+                return null;
+            };
+            self.index = end + 1;
+            return self.value[start..end];
+        }
+
+        const start = self.index;
+        while (self.index < self.value.len and
+            self.value[self.index] != ' ' and
+            self.value[self.index] != '\t') : (self.index += 1)
+        {}
+        return self.value[start..self.index];
+    }
 };
 
 const AliasIterator = struct {
@@ -266,6 +311,15 @@ fn isConnectableAlias(alias: []const u8) bool {
     return true;
 }
 
+const DRIVE_REMOTE: u32 = 4;
+
+extern "kernel32" fn GetDriveTypeW(root_path: ?[*:0]const u16) callconv(.winapi) u32;
+
+/// Every include path we refuse to open from the UI thread.
+fn isUnsupportedIncludePath(path: []const u8) bool {
+    return isRemoteOrDevicePath(path) or isRemoteDriveLetter(path);
+}
+
 /// UNC (`\\server\share`) and device (`\\?\`, `\\.\`) namespaces, in either
 /// slash spelling.
 fn isRemoteOrDevicePath(path: []const u8) bool {
@@ -273,6 +327,36 @@ fn isRemoteOrDevicePath(path: []const u8) bool {
     const a = path[0];
     const b = path[1];
     return (a == '\\' or a == '/') and (b == '\\' or b == '/');
+}
+
+/// The `X` of an `X:\` or `X:/` absolute path, uppercased. Null for anything
+/// else, including a bare `X:` relative-to-current-directory spelling, which
+/// `std.fs.path.isAbsolute` also rejects.
+fn driveLetter(path: []const u8) ?u8 {
+    if (path.len < 3) return null;
+    if (!std.ascii.isAlphabetic(path[0])) return null;
+    if (path[1] != ':') return null;
+    if (path[2] != '\\' and path[2] != '/') return null;
+    return std.ascii.toUpper(path[0]);
+}
+
+/// A mapped network drive (`Z:\ssh\hosts.conf`) is syntactically a plain local
+/// absolute path, so `isRemoteOrDevicePath` cannot see it. Opening one whose
+/// SMB server is gone blocks the UI thread for a full network timeout.
+///
+/// `GetDriveTypeW` answers from the process's local mount table and does not
+/// contact the server, so it cannot itself block on a dead mapping.
+///
+/// This does NOT cover a directory junction or a `subst` alias whose target is
+/// remote: those report the drive type of the letter, not of the target.
+fn isRemoteDriveLetter(path: []const u8) bool {
+    if (comptime builtin.os.tag != .windows) {
+        return false;
+    } else {
+        const letter = driveLetter(path) orelse return false;
+        const root = [_]u16{ letter, ':', '\\', 0 };
+        return GetDriveTypeW(root[0..3 :0]) == DRIVE_REMOTE;
+    }
 }
 
 fn hasGlobMetacharacter(path: []const u8) bool {
@@ -452,6 +536,72 @@ test "ssh config loads one include level and resolves supported paths" {
     try testing.expectEqualStrings("tilde", hosts[1].alias);
     try testing.expectEqualStrings("absolute", hosts[2].alias);
     try testing.expectEqualStrings("root", hosts[3].alias);
+}
+
+test "ssh config include tokenizer keeps quoted paths whole" {
+    const testing = std.testing;
+
+    var quoted: IncludeArgIterator = .{ .value = "\"C:\\Users\\Jane Doe\\.ssh\\work hosts\" plain.conf" };
+    try testing.expectEqualStrings("C:\\Users\\Jane Doe\\.ssh\\work hosts", quoted.next().?);
+    try testing.expectEqualStrings("plain.conf", quoted.next().?);
+    try testing.expect(quoted.next() == null);
+
+    // Backslashes stay verbatim: they are path separators, not escapes.
+    var backslashes: IncludeArgIterator = .{ .value = "C:\\Bob's\\config  ~/.ssh/x.conf" };
+    try testing.expectEqualStrings("C:\\Bob's\\config", backslashes.next().?);
+    try testing.expectEqualStrings("~/.ssh/x.conf", backslashes.next().?);
+    try testing.expect(backslashes.next() == null);
+
+    var unterminated: IncludeArgIterator = .{ .value = "\"C:\\never closed" };
+    try testing.expect(unterminated.next() == null);
+
+    var empty: IncludeArgIterator = .{ .value = "   \t " };
+    try testing.expect(empty.next() == null);
+}
+
+test "ssh config loads a quoted include whose filename contains spaces" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".ssh");
+    try tmp.dir.writeFile(.{ .sub_path = ".ssh/work hosts.conf", .data = "Host spaced\n" });
+    try tmp.dir.writeFile(.{ .sub_path = ".ssh/plain.conf", .data = "Host plain\n" });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".ssh/config",
+        .data = "Include \"work hosts.conf\" plain.conf\nHost root\n",
+    });
+
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+    const hosts = try loadFromHome(alloc, home);
+    defer deinitHosts(alloc, hosts);
+
+    try testing.expectEqual(@as(usize, 3), hosts.len);
+    try testing.expectEqualStrings("spaced", hosts[0].alias);
+    try testing.expectEqualStrings("plain", hosts[1].alias);
+    try testing.expectEqualStrings("root", hosts[2].alias);
+}
+
+test "ssh config recognizes drive-letter roots for the remote-drive check" {
+    const testing = std.testing;
+
+    try testing.expectEqual(@as(?u8, 'Z'), driveLetter("Z:\\ssh\\hosts.conf"));
+    try testing.expectEqual(@as(?u8, 'Z'), driveLetter("z:/ssh/hosts.conf"));
+    try testing.expectEqual(@as(?u8, 'C'), driveLetter("C:\\"));
+    // Not drive-letter roots: relative, UNC, and the `X:name` spelling that
+    // resolves against the drive's current directory.
+    try testing.expectEqual(@as(?u8, null), driveLetter("hosts.conf"));
+    try testing.expectEqual(@as(?u8, null), driveLetter("Z:hosts.conf"));
+    try testing.expectEqual(@as(?u8, null), driveLetter("\\\\server\\share\\x"));
+    try testing.expectEqual(@as(?u8, null), driveLetter("~/.ssh/x.conf"));
+
+    // The local system drive must never be misread as remote, or every
+    // ordinary absolute include would be dropped.
+    try testing.expect(!isRemoteDriveLetter("C:\\Users\\me\\.ssh\\hosts.conf"));
+    try testing.expect(!isRemoteDriveLetter("hosts.conf"));
+    try testing.expect(!isUnsupportedIncludePath("C:\\Users\\me\\.ssh\\hosts.conf"));
+    try testing.expect(isUnsupportedIncludePath("\\\\10.0.0.1\\share\\hosts.conf"));
 }
 
 test "ssh config skips remote and device include paths without opening them" {
