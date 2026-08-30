@@ -3212,6 +3212,7 @@ fn maybeHandleBinding(
             // invalid sequence handling to ignore it.
             if (self.catchAllIsIgnore()) {
                 self.endKeySequence(.drop, .retain);
+                self.keyboard.last_trigger = event.bindingHash();
                 return .ignored;
             }
 
@@ -3352,6 +3353,14 @@ fn maybeHandleBinding(
         for (actions) |action| if (action == .ignore) {
             // If we're in a sequence, clear it.
             self.endKeySequence(.drop, .retain);
+
+            // Swallow the matching release too. Without this the press is
+            // dropped but `last_trigger` stays null, so the release falls
+            // through to normal encoding and a client using the Kitty
+            // protocol with `report_events` sees a release for a key it
+            // never saw pressed. That breaks copy mode's isolation
+            // contract, where `catch_all = ignore` is the whole mechanism.
+            self.keyboard.last_trigger = event.bindingHash();
 
             return .ignored;
         };
@@ -3595,14 +3604,31 @@ fn toggleCopyMode(self: *Surface) anyerror!bool {
         copyModePopCount(self.keyboard.table_stack.items, table)
     else
         0;
+
+    // The unwind must finish even if one step fails. `deactivate_key_table`
+    // pops the table and only then runs `finishCopyMode`, whose `queueRender`
+    // can fail; propagating there would abort the loop with tables still
+    // stacked, recreating the exact wedge this unwind exists to prevent. Hold
+    // the first error and report it once the stack is clean.
+    var unwind_err: ?anyerror = null;
     while (pops > 0) : (pops -= 1) {
-        if (!try self.performBindingAction(.deactivate_key_table)) break;
+        const popped = self.performBindingAction(.deactivate_key_table) catch |err| {
+            if (unwind_err == null) unwind_err = err;
+            continue;
+        };
+        if (!popped) break;
     }
 
     // `deactivate_key_table` clears copy mode from its own branch when it pops
     // the copy-mode table. This covers the case where the table was already
     // gone from the stack (e.g. cleared out from under us).
-    if (self.copy_mode_active) try self.finishCopyMode();
+    if (self.copy_mode_active) {
+        self.finishCopyMode() catch |err| {
+            if (unwind_err == null) unwind_err = err;
+        };
+    }
+
+    if (unwind_err) |err| return err;
     return true;
 }
 
