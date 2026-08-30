@@ -164,7 +164,7 @@ pub fn validateBackup(alloc: Allocator, backup_root: []const u8) !void {
     if (try pathIsWindowsReparsePointChecked(alloc, backup_root)) {
         return error.IncompletePortableUpdateBackup;
     }
-    try verifyBackupManifest(alloc, backup_root, null);
+    try verifyBackupManifest(alloc, backup_root, null, false);
 }
 
 pub fn swapPayload(
@@ -198,9 +198,39 @@ pub fn rollback(
     alloc: Allocator,
     install_root: []const u8,
     backup_root: []const u8,
+    displaced_root: []const u8,
 ) !void {
     try validateBackup(alloc, backup_root);
-    try verifyBackupManifest(alloc, backup_root, install_root);
+
+    const install_share = try std.fs.path.join(alloc, &.{ install_root, "share" });
+    defer alloc.free(install_share);
+    const displaced_share = try std.fs.path.join(alloc, &.{ displaced_root, "share" });
+    defer alloc.free(displaced_share);
+    const backup_share = try std.fs.path.join(alloc, &.{ backup_root, "share" });
+    defer alloc.free(backup_share);
+
+    removePathIfExists(install_share) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    const displaced_share_kind = pathKind(displaced_share) catch null;
+    const restored_share_by_rename = restored: {
+        if (displaced_share_kind != .directory) break :restored false;
+        std.fs.renameAbsolute(displaced_share, install_share) catch break :restored false;
+        break :restored true;
+    };
+    if (!restored_share_by_rename) {
+        removePathIfExists(install_share) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        copyPath(alloc, backup_share, install_share) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
+    try verifyBackupManifest(alloc, backup_root, install_root, true);
 }
 
 pub fn cleanupBackup(backup_root: []const u8) !void {
@@ -354,6 +384,7 @@ fn verifyBackupManifest(
     alloc: Allocator,
     backup_root: []const u8,
     restore_root: ?[]const u8,
+    share_already_restored: bool,
 ) !void {
     const marker_path = try std.fs.path.join(alloc, &.{ backup_root, backup_complete_name });
     defer alloc.free(marker_path);
@@ -401,20 +432,79 @@ fn verifyBackupManifest(
         if (restore_root) |root| {
             const target = try joinPortableRelativePath(alloc, root, name);
             defer alloc.free(target);
-            const restore_temp = try std.fmt.allocPrint(alloc, "{s}.restore", .{target});
-            defer alloc.free(restore_temp);
-            removePathIfExists(restore_temp) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => return err,
-            };
-            try copyPath(alloc, backup_path, restore_temp);
-            try replaceFileAtomic(alloc, restore_temp, target);
+            if (!share_already_restored or
+                !(std.mem.eql(u8, name, "share") or std.mem.startsWith(u8, name, "share/")))
+            {
+                const restore_temp = try std.fmt.allocPrint(alloc, "{s}.restore", .{target});
+                defer alloc.free(restore_temp);
+                removePathIfExists(restore_temp) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => return err,
+                };
+                try copyPath(alloc, backup_path, restore_temp);
+                try replaceFileAtomic(alloc, restore_temp, target);
+            }
             const restored = try sha256File(target);
             if (!std.mem.eql(u8, &expected, &restored)) return error.IncompletePortableUpdateRollback;
         }
         file_count += 1;
     }
     if (file_count == 0) return error.IncompletePortableUpdateBackup;
+
+    if (restore_root) |root| {
+        for (managed_entries) |managed_entry| {
+            if (std.mem.eql(u8, managed_entry, "share") or
+                std.mem.eql(u8, managed_entry, "noctty.exe")) continue;
+            const key = try std.ascii.allocLowerString(alloc, managed_entry);
+            defer alloc.free(key);
+            if (seen.contains(key)) continue;
+            const managed_path = try std.fs.path.join(alloc, &.{ root, managed_entry });
+            defer alloc.free(managed_path);
+            removePathIfExists(managed_path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
+
+        var restored_file_count: usize = 0;
+        for (managed_entries) |managed_entry| {
+            const managed_path = try std.fs.path.join(alloc, &.{ root, managed_entry });
+            defer alloc.free(managed_path);
+            const kind = pathKind(managed_path) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            if (!std.mem.eql(u8, managed_entry, "share")) {
+                if (kind != .file) return error.IncompletePortableUpdateRollback;
+                const key = try std.ascii.allocLowerString(alloc, managed_entry);
+                defer alloc.free(key);
+                if (!seen.contains(key)) return error.IncompletePortableUpdateRollback;
+                restored_file_count += 1;
+                continue;
+            }
+            if (kind != .directory) return error.IncompletePortableUpdateRollback;
+            var managed_dir = try std.fs.openDirAbsolute(managed_path, .{ .iterate = true });
+            defer managed_dir.close();
+            var walker = try managed_dir.walk(alloc);
+            defer walker.deinit();
+            while (try walker.next()) |entry| {
+                if (entry.kind == .directory) continue;
+                if (entry.kind != .file) return error.IncompletePortableUpdateRollback;
+                const native_relative = try std.fs.path.join(
+                    alloc,
+                    &.{ managed_entry, entry.path },
+                );
+                defer alloc.free(native_relative);
+                const relative = try portableRelativePathAlloc(alloc, native_relative);
+                defer alloc.free(relative);
+                const key = try std.ascii.allocLowerString(alloc, relative);
+                defer alloc.free(key);
+                if (!seen.contains(key)) return error.IncompletePortableUpdateRollback;
+                restored_file_count += 1;
+            }
+        }
+        if (restored_file_count != file_count) return error.IncompletePortableUpdateRollback;
+    }
 }
 
 fn portableRelativePathAlloc(alloc: Allocator, path: []const u8) ![]u8 {
@@ -641,7 +731,7 @@ test "portable update preserves complete backup across interrupted retry" {
     try std.testing.expectEqualStrings("old", backed_up);
 }
 
-test "portable rollback restores manifest files without deleting user data" {
+test "portable rollback removes new-only managed files without deleting user data" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -656,12 +746,15 @@ test "portable rollback restores manifest files without deleting user data" {
     defer alloc.free(install_root);
     const backup_root = try std.fs.path.join(alloc, &.{ root, "backup" });
     defer alloc.free(backup_root);
+    const displaced_root = try std.fs.path.join(alloc, &.{ root, "displaced" });
+    defer alloc.free(displaced_root);
     try prepareBackup(alloc, install_root, backup_root);
     try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "new" });
     try tmp.dir.writeFile(.{ .sub_path = "install/share/resource theme.txt", .data = "new-resource" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "new-only share" });
     try tmp.dir.writeFile(.{ .sub_path = "install/LICENSE", .data = "new-only" });
 
-    try rollback(alloc, install_root, backup_root);
+    try rollback(alloc, install_root, backup_root, displaced_root);
     const restored = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 16);
     defer alloc.free(restored);
     try std.testing.expectEqualStrings("old", restored);
@@ -671,9 +764,52 @@ test "portable rollback restores manifest files without deleting user data" {
     const sentinel = try tmp.dir.readFileAlloc(alloc, "install/user-data.txt", 16);
     defer alloc.free(sentinel);
     try std.testing.expectEqualStrings("keep", sentinel);
-    const absent_backup = try tmp.dir.readFileAlloc(alloc, "install/LICENSE", 16);
-    defer alloc.free(absent_backup);
-    try std.testing.expectEqualStrings("new-only", absent_backup);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/share/new-only.ps1", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/LICENSE", .{}));
+}
+
+test "portable rollback renames displaced share tree back exactly" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("install/share/shell-integration");
+    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "old executable" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/old-only.ps1", .data = "old only" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/shared.ps1", .data = "old shared" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
+
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const install_root = try std.fs.path.join(alloc, &.{ root, "install" });
+    defer alloc.free(install_root);
+    const backup_root = try std.fs.path.join(alloc, &.{ root, "backup" });
+    defer alloc.free(backup_root);
+    const displaced_root = try std.fs.path.join(alloc, &.{ root, "displaced" });
+    defer alloc.free(displaced_root);
+    try prepareBackup(alloc, install_root, backup_root);
+
+    try tmp.dir.makePath("displaced");
+    try tmp.dir.rename("install/share", "displaced/share");
+    try tmp.dir.makePath("install/share");
+    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "new executable" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/shared.ps1", .data = "new shared" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "new only" });
+
+    try rollback(alloc, install_root, backup_root, displaced_root);
+    const restored_executable = try tmp.dir.readFileAlloc(alloc, "install/noctty.com", 32);
+    defer alloc.free(restored_executable);
+    try std.testing.expectEqualStrings("old executable", restored_executable);
+    const restored_old_only = try tmp.dir.readFileAlloc(alloc, "install/share/old-only.ps1", 32);
+    defer alloc.free(restored_old_only);
+    try std.testing.expectEqualStrings("old only", restored_old_only);
+    const restored_shared = try tmp.dir.readFileAlloc(alloc, "install/share/shared.ps1", 32);
+    defer alloc.free(restored_shared);
+    try std.testing.expectEqualStrings("old shared", restored_shared);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("install/share/new-only.ps1", .{}));
+    const user_data = try tmp.dir.readFileAlloc(alloc, "install/user-data.txt", 16);
+    defer alloc.free(user_data);
+    try std.testing.expectEqualStrings("keep", user_data);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("displaced/share", .{}));
 }
 
 test "portable update rejects unsafe ZIP entry paths" {
