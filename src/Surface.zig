@@ -2277,6 +2277,19 @@ fn resolvePathForOpening(
     path: []const u8,
 ) Allocator.Error!?[]const u8 {
     if (!std.fs.path.isAbsolute(path)) {
+        // A URL-like string must never reach path resolution on Windows.
+        // Resolving e.g. "https://example.com" against the terminal pwd
+        // yields "C:\Users\me\https:\example.com", and a ':' inside a path
+        // component makes NT return OBJECT_NAME_INVALID, which
+        // `std.posix.faccessatW` maps to `unreachable`. That is a safety
+        // panic the `catch` below cannot recover from.
+        //
+        // Windows only uses ':' as a drive separator, and drive-absolute
+        // paths already returned above, so handing anything else that
+        // contains ':' to the URL opener is safe here.
+        if (builtin.os.tag == .windows and
+            std.mem.indexOfScalar(u8, path, ':') != null) return null;
+
         const terminal_pwd = self.io.terminal.getPwd() orelse {
             return null;
         };
