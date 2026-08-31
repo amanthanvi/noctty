@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const apprt = @import("../apprt.zig");
 const sys = @import("win32/sys.zig");
+const win32_layouts = @import("win32_layouts.zig");
 
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
@@ -24,11 +25,14 @@ pub const max_action_text_len: u32 = 16 * 1024;
 pub const max_new_window_argc: u32 = 4096;
 pub const max_new_window_arg_len: u32 = 32 * 1024;
 pub const max_new_window_args_bytes: u32 = 256 * 1024;
+pub const max_layout_name_len: u32 = @intCast(win32_layouts.max_name_bytes);
 
 pub const RequestKind = enum(u8) {
     new_window = 1,
     list_windows = 2,
     perform_action = 3,
+    // Values 4-7 are owned by PR #196 (issue #144).
+    launch_layout = 8,
 };
 
 pub const PerformActionPayload = struct {
@@ -132,6 +136,23 @@ pub fn encodePerformActionRequest(
     return try encoded.toOwnedSlice(alloc);
 }
 
+pub fn encodeLaunchLayoutRequest(
+    alloc: Allocator,
+    name: []const u8,
+) ![]u8 {
+    try validateLaunchLayoutName(name);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(alloc);
+
+    try appendU32(&encoded, alloc, wire_version);
+    try encoded.append(alloc, @intFromEnum(RequestKind.launch_layout));
+    try appendU32(&encoded, alloc, @intCast(name.len));
+    try encoded.appendSlice(alloc, name);
+
+    return try encoded.toOwnedSlice(alloc);
+}
+
 pub fn decodeRequestKind(pipe: windows.HANDLE) !RequestKind {
     var header: [5]u8 = undefined;
     try readExactUntil(pipe, &header, deadline());
@@ -205,6 +226,35 @@ pub fn decodePerformActionPayload(
         .target = target,
         .action_text = action_text,
     };
+}
+
+pub fn decodeLaunchLayoutPayload(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) ![]u8 {
+    const deadline_ms = deadline();
+    var len_buf: [4]u8 = undefined;
+    try readExactUntil(pipe, &len_buf, deadline_ms);
+
+    const len = readU32(&len_buf);
+    if (len == 0 or len > max_layout_name_len) {
+        return error.InvalidAutomationAction;
+    }
+
+    const name = try alloc.alloc(u8, len);
+    errdefer alloc.free(name);
+    try readExactUntil(pipe, name, deadline_ms);
+    try validateLaunchLayoutName(name);
+    return name;
+}
+
+fn validateLaunchLayoutName(name: []const u8) !void {
+    if (name.len == 0 or name.len > @as(usize, max_layout_name_len)) {
+        return error.InvalidAutomationAction;
+    }
+    if (!std.unicode.utf8ValidateSlice(name)) return error.InvalidAutomationAction;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidAutomationAction;
+    win32_layouts.validateName(name) catch return error.InvalidAutomationAction;
 }
 
 pub fn writeAck(pipe: windows.HANDLE, success: bool) !void {
@@ -431,6 +481,124 @@ test "win32 IPC pending pipe states remain retryable" {
     try std.testing.expect(pipeIoPending(.NO_DATA));
     try std.testing.expect(pipeIoPending(.PIPE_NOT_CONNECTED));
     try std.testing.expect(!pipeIoPending(.BROKEN_PIPE));
+}
+
+test "win32 IPC request kind values remain stable" {
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(RequestKind.new_window));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(RequestKind.list_windows));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(RequestKind.perform_action));
+    try std.testing.expectEqual(@as(u8, 8), @intFromEnum(RequestKind.launch_layout));
+}
+
+test "win32 launch-layout IPC encode decode round trip" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const request = try encodeLaunchLayoutRequest(std.testing.allocator, "Project Alpha");
+    defer std.testing.allocator.free(request);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("launch-layout-round-trip.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    try file.writeAll(request);
+    try file.seekTo(0);
+
+    try std.testing.expectEqual(RequestKind.launch_layout, try decodeRequestKind(file.handle));
+    const decoded = try decodeLaunchLayoutPayload(std.testing.allocator, file.handle);
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings("Project Alpha", decoded);
+}
+
+test "win32 launch-layout IPC encoder rejects invalid names" {
+    const invalid_utf8 = [_]u8{0xff};
+    const oversized = try std.testing.allocator.alloc(u8, max_layout_name_len + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+
+    const invalid_names = [_][]const u8{
+        "",
+        oversized,
+        &invalid_utf8,
+        "bad\x00name",
+        "..",
+        "/",
+        "\\",
+        "CON",
+    };
+    for (invalid_names) |name| try std.testing.expectError(
+        error.InvalidAutomationAction,
+        encodeLaunchLayoutRequest(std.testing.allocator, name),
+    );
+}
+
+test "win32 launch-layout IPC decoder rejects invalid names without leaks" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const invalid_utf8 = [_]u8{0xff};
+    const oversized = try std.testing.allocator.alloc(u8, max_layout_name_len + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 'x');
+
+    const invalid_names = [_][]const u8{
+        "",
+        oversized,
+        &invalid_utf8,
+        "bad\x00name",
+        "..",
+        "/",
+        "\\",
+        "CON",
+    };
+    for (invalid_names, 0..) |name, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const file_name = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "launch-layout-invalid-{d}.bin",
+            .{index},
+        );
+        defer std.testing.allocator.free(file_name);
+        var file = try tmp.dir.createFile(file_name, .{
+            .read = true,
+            .truncate = true,
+        });
+        defer file.close();
+
+        var len_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len_buf, @intCast(name.len), .little);
+        try file.writeAll(&len_buf);
+        try file.writeAll(name);
+        try file.seekTo(0);
+        try std.testing.expectError(
+            error.InvalidAutomationAction,
+            decodeLaunchLayoutPayload(std.testing.allocator, file.handle),
+        );
+    }
+}
+
+test "win32 launch-layout IPC decoder cleans up on partial EOF" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("launch-layout-partial-eof.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, 4, .little);
+    try file.writeAll(&len_buf);
+    try file.writeAll("ab");
+    try file.seekTo(0);
+    try std.testing.expectError(
+        error.EndOfStream,
+        decodeLaunchLayoutPayload(std.testing.allocator, file.handle),
+    );
 }
 
 test "win32 encodeListWindowsRequest preserves legacy zero-argc trailer" {

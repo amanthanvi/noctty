@@ -328,22 +328,26 @@ appear in the command palette as `Launch layout: <name>`. From the command
 line, `noctty +new-window --launch-layout=<name>` forwards the request to a
 running instance or launches it cold when no instance is running.
 
-> **Known limitation once IPC argv hardening lands.** The forwarded
-> (warm-instance) half of that command is refused by the deny-by-default
-> forwarded-argv allowlist: `launch-layout` names a layout file that selects
-> profiles, and profiles carry commands, which is the code-selecting class the
-> allowlist exists to refuse. It is not being added to the allowlist. Until
-> named layouts get their own IPC request kind, `--launch-layout` is honoured
-> only on a **cold start** (no instance running); against a running instance
-> the flag is dropped and an ordinary new window opens, with
-> `not forwarding launch-layout to the running instance` logged. The keybind
-> and the command palette are unaffected — they do not go over IPC.
+The warm (running-instance) half of that command does **not** travel as a
+forwarded configuration argument. It uses a dedicated IPC request kind whose
+whole payload is the layout name, revalidated on the receiving side against the
+same character, length, traversal and reserved-device rules the CLI applies, and
+resolved server-side against `%LOCALAPPDATA%\noctty\layouts\`. Because of that,
+`--launch-layout` cannot be combined with other `+new-window` arguments; mixing
+them is refused rather than partly honoured.
+
+`launch-layout` is deliberately **not** on the forwarded-argv allowlist and will
+not be added: a layout names a file that selects profiles, and profiles carry
+commands, which is the code-selecting class that allowlist exists to refuse. The
+keybind and the command palette do not go over IPC at all.
+
 `--launch-layout` is a command-line-only, one-shot option: setting
 `launch-layout` in `config.ghostty` is ignored with a warning, because a
 configuration file is read on every start and the layout would otherwise
-replay on each launch instead of when you ask for it. The layout
-module also exposes name enumeration and launch arguments for future Windows
-jump-list integration; noctty does not currently add jump-list layout entries.
+replay on each launch instead of when you ask for it. The layout module also
+exposes name enumeration and the `+new-window --launch-layout=<name>` argv
+builder for future Windows jump-list integration; noctty does not currently add
+jump-list layout entries.
 
 ## Updates
 
@@ -539,8 +543,8 @@ window. That drop is a convenience on your own command line, not a
 security control — the running instance re-checks every argument.
 
 `launch_layout:<name>` and `save_layout:<name>` are allowlisted. Launching a
-layout is equivalent to the already-supported `+new-window` with forwarded
-arguments. Saving is the one automation action that writes a file: it is
+layout selects the same named-layout action as the dedicated warm-instance IPC
+request. Saving is the one automation action that writes a file: it is
 limited to a validated layout name under `%LOCALAPPDATA%\noctty\layouts\`,
 writes atomically, and **replaces an existing layout of the same name without
 prompting**. It only accepts the focused target, so `--surface-id` is rejected.

@@ -350,6 +350,9 @@ pub const Action = union(Key) {
     /// Save the target surface's focused window as a named layout.
     save_layout: SaveLayout,
 
+    /// Launch a saved named layout in a new window.
+    launch_layout: LaunchLayout,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -419,6 +422,7 @@ pub const Action = union(Key) {
         readonly,
         copy_title_to_clipboard,
         save_layout,
+        launch_layout,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -700,6 +704,24 @@ pub const InitialSize = extern struct {
 pub const CellSize = extern struct {
     width: u32,
     height: u32,
+};
+
+pub const LaunchLayout = struct {
+    /// Layout name, validated by the apprt before it reaches the filesystem.
+    name: []const u8,
+
+    // Sync with: ghostty_action_launch_layout_s
+    pub const C = extern struct {
+        name: [*]const u8,
+        len: usize,
+    };
+
+    pub fn cval(self: LaunchLayout) C {
+        return .{
+            .name = self.name.ptr,
+            .len = self.name.len,
+        };
+    }
 };
 
 pub const SaveLayout = struct {

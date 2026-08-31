@@ -238,6 +238,7 @@ pub fn focusedSurface(self: *const App) ?*Surface {
 
 test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(isSafeAutomationAction(.new_tab));
+    try std.testing.expect(isSafeAutomationAction(.{ .launch_layout = "demo" }));
     try std.testing.expect(isSafeAutomationAction(.toggle_fullscreen));
     try std.testing.expect(isSafeAutomationAction(.quit));
     try std.testing.expect(!isSafeAutomationAction(.unbind));
@@ -583,13 +584,6 @@ pub fn colorSchemeEvent(
     );
 }
 
-/// Build the `+new-window` argument that materializes a saved named layout.
-/// Both the app-scoped and surface-scoped `launch_layout` handlers use this so
-/// the flag spelling has a single definition. Caller owns the result.
-pub fn launchLayoutArgument(alloc: Allocator, name: []const u8) ![:0]u8 {
-    return std.fmt.allocPrintSentinel(alloc, "--launch-layout={s}", .{name}, 0);
-}
-
 /// Perform a binding action. This only accepts actions that are scoped
 /// to the app. Callers can use performAllAction to perform any action
 /// and any non-app-scoped actions will be performed on all surfaces.
@@ -603,12 +597,11 @@ pub fn performAction(
         .ignore => {},
         .quit => _ = try rt_app.performAction(.app, .quit, {}),
         .new_window => _ = try self.newWindow(rt_app, .{ .parent = null }),
-        .launch_layout => |name| {
-            const argument = try launchLayoutArgument(self.alloc, name);
-            defer self.alloc.free(argument);
-            const arguments = [_][:0]const u8{argument};
-            try self.newWindow(rt_app, .{ .parent = null, .arguments = &arguments });
-        },
+        .launch_layout => |name| _ = try rt_app.performAction(
+            .app,
+            .launch_layout,
+            .{ .name = name },
+        ),
         .open_config => _ = try rt_app.performAction(.app, .open_config, {}),
         .reload_config => _ = try rt_app.performAction(.app, .reload_config, .{}),
         .close_all_windows => _ = try rt_app.performAction(.app, .close_all_windows, {}),

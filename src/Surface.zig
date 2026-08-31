@@ -5306,15 +5306,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .{ .parent = self },
             ),
 
-            .launch_layout => |name| {
-                const argument = try App.launchLayoutArgument(self.alloc, name);
-                defer self.alloc.free(argument);
-                const arguments = [_][:0]const u8{argument};
-                try self.app.newWindow(
-                    self.rt_app,
-                    .{ .parent = self, .arguments = &arguments },
-                );
-            },
+            .launch_layout => |name| return try self.rt_app.performAction(
+                .app,
+                .launch_layout,
+                .{ .name = name },
+            ),
 
             // Undo and redo both support both surface and app targeting.
             // If we are triggering on a surface then we perform the

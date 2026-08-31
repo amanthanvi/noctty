@@ -1372,6 +1372,49 @@ fn logForwardedArgvRejection(rejection: ForwardedArgvRejection) void {
     }
 }
 
+fn sendLaunchLayoutIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    name: []const u8,
+) !bool {
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound, error.PipeUnreachable => return false,
+        error.PipeBusy => return error.IPCFailed,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+
+    const request = try win32_ipc.encodeLaunchLayoutRequest(alloc, name);
+    defer alloc.free(request);
+
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+}
+
+const LaunchLayoutIpcArgument = union(enum) {
+    none,
+    name: []const u8,
+};
+
+fn scanLaunchLayoutIpcArgument(
+    arguments: ?[]const [:0]const u8,
+) !LaunchLayoutIpcArgument {
+    const argv = arguments orelse return .none;
+    const prefix = "--launch-layout=";
+    var name: ?[]const u8 = null;
+    for (argv) |arg| {
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        if (name != null) return error.MixedLaunchLayoutArguments;
+        name = arg[prefix.len..];
+    }
+
+    if (name) |value| {
+        if (argv.len != 1) return error.MixedLaunchLayoutArguments;
+        return .{ .name = value };
+    }
+    return .none;
+}
+
 /// Apply a forwarded `new_window` argv to `config`.
 ///
 /// Returns `error.ForbiddenForwardedArgument` for the whole request if any
@@ -1809,6 +1852,10 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 automation action IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
+        .launch_layout => handleLaunchLayoutIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
     }
     return kind;
 }
@@ -1866,6 +1913,36 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     defer app.core_app.alloc.free(payload.action_text);
 
     requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
+        const status: u8 = switch (err) {
+            error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
+            error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
+            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
+            error.NoAutomationTarget => win32_ipc.ack_no_automation_target,
+            else => return err,
+        };
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    const name = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe) catch |err| {
+        log.warn("invalid win32 launch-layout IPC request err={}", .{err});
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
+        return;
+    };
+    defer app.core_app.alloc.free(name);
+
+    // Name validation restricts this to an unambiguous action payload.
+    const action_text = try std.fmt.allocPrint(
+        app.core_app.alloc,
+        "launch_layout:{s}",
+        .{name},
+    );
+    defer app.core_app.alloc.free(action_text);
+
+    requestAutomationAction(app, .focused, action_text) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -4325,6 +4402,12 @@ pub const App = struct {
                 return true;
             },
 
+            .launch_layout => {
+                const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                _ = self.launchNamedLayout(value.name, banner_host);
+                return true;
+            },
+
             .save_layout => {
                 _ = self.saveNamedLayout(target, value.name);
                 return true;
@@ -5052,10 +5135,18 @@ pub const App = struct {
     ) !bool {
         switch (action) {
             .new_window => {
+                const launch_layout = scanLaunchLayoutIpcArgument(value.arguments) catch |err| {
+                    log.err("--launch-layout must be the only +new-window argument", .{});
+                    return err;
+                };
+
                 const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
                 defer alloc.free(pipe_name);
-
-                if (try sendNewWindowIpc(alloc, pipe_name, value.arguments)) return true;
+                const forwarded = switch (launch_layout) {
+                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments),
+                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name),
+                };
+                if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
             },
         }
@@ -29889,6 +29980,22 @@ test "automation-action win32 ipc encodes focused action request" {
     try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[6..14], .little));
     try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[14..18], .little));
     try std.testing.expectEqualStrings("new_tab", request[18..]);
+}
+
+test "win32 launch-layout IPC argument scan isolates the layout name" {
+    const launch = try scanLaunchLayoutIpcArgument(&.{"--launch-layout=Project Alpha"});
+    try std.testing.expectEqualStrings("Project Alpha", launch.name);
+
+    try std.testing.expectError(
+        error.MixedLaunchLayoutArguments,
+        scanLaunchLayoutIpcArgument(&.{
+            "--launch-layout=Project Alpha",
+            "--title=other",
+        }),
+    );
+
+    const ordinary = try scanLaunchLayoutIpcArgument(&.{"--title=ordinary"});
+    try std.testing.expect(ordinary == .none);
 }
 
 test "automation-action win32 ipc encodes surface action request" {
