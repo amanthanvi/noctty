@@ -35,6 +35,7 @@ const REG_SZ: DWORD = 1;
 const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;
 const ERROR_FILE_NOT_FOUND: i32 = consts.ERROR_FILE_NOT_FOUND;
 const ERROR_PATH_NOT_FOUND: i32 = 3;
+const REG_CREATED_NEW_KEY: DWORD = 1;
 
 pub const display_name = "Open noctty here";
 
@@ -92,6 +93,11 @@ pub const DeleteResult = union(enum) {
     failed: i32,
 };
 
+const WriteResult = struct {
+    created: bool,
+    failure: ?RegistryFailure = null,
+};
+
 /// Resolve the GUI executable next to the current launcher. This intentionally
 /// avoids registering `noctty.com` when the action was reached through PATH.
 pub fn executablePathAlloc(alloc: Allocator, self_path: []const u8) ![]u8 {
@@ -120,11 +126,22 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
     const command_value = try commandValueAlloc(alloc, exe_path);
     defer alloc.free(command_value);
 
-    inline for (verb_key_paths, command_key_paths) |verb_path, command_path| {
-        if (try writeVerbKey(alloc, verb_path, exe_path)) |failure| {
+    var created = [_]bool{false} ** register_key_paths.len;
+    errdefer rollbackCreatedKeys(alloc, &created);
+    inline for (verb_key_paths, command_key_paths, 0..) |verb_path, command_path, pair_index| {
+        const verb_index = pair_index * 2;
+        const verb = try writeVerbKey(alloc, verb_path, exe_path);
+        created[verb_index] = verb.created;
+        if (verb.failure) |failure| {
+            rollbackCreatedKeys(alloc, &created);
             return .{ .failure = failure };
         }
-        if (try writeDefaultValue(alloc, command_path, command_value)) |failure| {
+
+        const command_index = verb_index + 1;
+        const command = try writeDefaultValue(alloc, command_path, command_value);
+        created[command_index] = command.created;
+        if (command.failure) |failure| {
+            rollbackCreatedKeys(alloc, &created);
             return .{ .failure = failure };
         }
     }
@@ -158,11 +175,12 @@ fn writeVerbKey(
     alloc: Allocator,
     key_path: []const u8,
     exe_path: []const u8,
-) !?RegistryFailure {
+) !WriteResult {
     const key_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path);
     defer alloc.free(key_path_wide);
 
     var key: HKEY = undefined;
+    var disposition: DWORD = 0;
     const create_status = RegCreateKeyExW(
         HKEY_CURRENT_USER,
         key_path_wide,
@@ -172,23 +190,25 @@ fn writeVerbKey(
         KEY_WRITE,
         null,
         &key,
-        null,
+        &disposition,
     );
-    if (create_status != ERROR_SUCCESS) return .{
+    if (create_status != ERROR_SUCCESS) return .{ .created = false, .failure = .{
         .operation = .create_key,
         .key_path = key_path,
         .status = create_status,
-    };
+    } };
+    const created = disposition == REG_CREATED_NEW_KEY;
+    errdefer if (created) deleteKeyBestEffort(alloc, key_path);
     defer _ = RegCloseKey(key);
 
     const display_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, display_name);
     defer alloc.free(display_wide);
     const display_status = writeRegSz(key, null, display_wide);
-    if (display_status != ERROR_SUCCESS) return .{
+    if (display_status != ERROR_SUCCESS) return .{ .created = created, .failure = .{
         .operation = .set_value,
         .key_path = key_path,
         .status = display_status,
-    };
+    } };
 
     const exe_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, exe_path);
     defer alloc.free(exe_path_wide);
@@ -197,24 +217,25 @@ fn writeVerbKey(
         std.unicode.utf8ToUtf16LeStringLiteral("Icon"),
         exe_path_wide,
     );
-    if (icon_status != ERROR_SUCCESS) return .{
+    if (icon_status != ERROR_SUCCESS) return .{ .created = created, .failure = .{
         .operation = .set_value,
         .key_path = key_path,
         .status = icon_status,
-    };
+    } };
 
-    return null;
+    return .{ .created = created };
 }
 
 fn writeDefaultValue(
     alloc: Allocator,
     key_path: []const u8,
     value: []const u8,
-) !?RegistryFailure {
+) !WriteResult {
     const key_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path);
     defer alloc.free(key_path_wide);
 
     var key: HKEY = undefined;
+    var disposition: DWORD = 0;
     const create_status = RegCreateKeyExW(
         HKEY_CURRENT_USER,
         key_path_wide,
@@ -224,25 +245,63 @@ fn writeDefaultValue(
         KEY_WRITE,
         null,
         &key,
-        null,
+        &disposition,
     );
-    if (create_status != ERROR_SUCCESS) return .{
+    if (create_status != ERROR_SUCCESS) return .{ .created = false, .failure = .{
         .operation = .create_key,
         .key_path = key_path,
         .status = create_status,
-    };
+    } };
+    const created = disposition == REG_CREATED_NEW_KEY;
+    errdefer if (created) deleteKeyBestEffort(alloc, key_path);
     defer _ = RegCloseKey(key);
 
     const value_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
     defer alloc.free(value_wide);
     const set_status = writeRegSz(key, null, value_wide);
-    if (set_status != ERROR_SUCCESS) return .{
+    if (set_status != ERROR_SUCCESS) return .{ .created = created, .failure = .{
         .operation = .set_value,
         .key_path = key_path,
         .status = set_status,
-    };
+    } };
 
+    return .{ .created = created };
+}
+
+fn previousCreatedPath(created: []const bool, before: *usize) ?[]const u8 {
+    while (before.* > 0) {
+        before.* -= 1;
+        if (created[before.*]) return register_key_paths[before.*];
+    }
     return null;
+}
+
+fn rollbackCreatedKeys(alloc: Allocator, created: []const bool) void {
+    var before = created.len;
+    while (previousCreatedPath(created, &before)) |path| {
+        deleteKeyBestEffort(alloc, path);
+    }
+}
+
+fn deleteKeyBestEffort(alloc: Allocator, path: []const u8) void {
+    const path_wide = std.unicode.utf8ToUtf16LeAllocZ(alloc, path) catch |err| {
+        std.log.scoped(.win32_shell_menu).warn(
+            "shell-menu registration rollback path allocation failed path={s} err={}",
+            .{ path, err },
+        );
+        return;
+    };
+    defer alloc.free(path_wide);
+    const status = RegDeleteKeyExW(HKEY_CURRENT_USER, path_wide, 0, 0);
+    if (status != ERROR_SUCCESS and
+        status != ERROR_FILE_NOT_FOUND and
+        status != ERROR_PATH_NOT_FOUND)
+    {
+        std.log.scoped(.win32_shell_menu).warn(
+            "shell-menu registration rollback failed path={s} status={d}",
+            .{ path, status },
+        );
+    }
 }
 
 fn writeRegSz(hkey: HKEY, value_name: ?LPCWSTR, value: [:0]const u16) i32 {
@@ -399,6 +458,22 @@ test "shell-menu unregister key list is exact and leaf first" {
     for (expected, unregister_key_paths) |want, actual| {
         try testing.expectEqualStrings(want, actual);
     }
+}
+
+test "shell-menu registration rollback visits only newly created keys leaf first" {
+    const testing = std.testing;
+    const created = [_]bool{ true, true, false, true, false, false };
+    const expected = [_][]const u8{
+        command_key_paths[1],
+        command_key_paths[0],
+        verb_key_paths[0],
+    };
+
+    var before = created.len;
+    for (expected) |path| {
+        try testing.expectEqualStrings(path, previousCreatedPath(&created, &before).?);
+    }
+    try testing.expect(previousCreatedPath(&created, &before) == null);
 }
 
 test "shell-menu executable path targets the GUI binary" {

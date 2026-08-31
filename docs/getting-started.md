@@ -71,7 +71,7 @@ Keep the whole extracted folder together: `noctty.exe` needs the
 `share` folder next to it for themes, terminfo, and shell integration.
 
 Portable users can opt into Explorer's `Open noctty here` verb with
-`.\noctty.exe +register-shell-menu`.
+`.\noctty.com +register-shell-menu`.
 
 Neither the installer nor the portable ZIP adds `noctty` to your
 PATH. The `noctty +...` commands below assume you've either added
@@ -242,7 +242,9 @@ is documented in [automation.md](automation.md).
 
 - Installer builds: _Settings → Apps → Installed apps → noctty →
   Uninstall_.
-- Portable builds: delete the folder you extracted to.
+- Portable builds: if you enabled `Open noctty here`, run
+  `.\noctty.com +unregister-shell-menu` first, then delete the folder you
+  extracted to.
 
 Your config and any crash logs live under `%LOCALAPPDATA%\noctty\`
 and are not removed by either path. Delete that folder manually for a
