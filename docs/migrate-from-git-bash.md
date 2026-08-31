@@ -18,8 +18,8 @@ scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
-For a direct installer or portable ZIP, run the checksum, provenance, and
-signature checks on the
+For a direct installer or portable ZIP, run the checksum and signature checks
+on the
 [Why Noctty and verification page](https://noctty.com/why-noctty.html#verify).
 
 ## 2. Launch the detected Git Bash profile

@@ -331,6 +331,10 @@ test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /verify-published-release\.ps1/);
   assert.match(
     trustHtml,
+    /v1\.3\.123 uses the legacy\s+<code>winghostty-\*<\/code> asset layout/i,
+  );
+  assert.match(
+    trustHtml,
     /671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a/,
   );
 });
@@ -425,6 +429,7 @@ test("trust page links to repository files that exist", (t) => {
 for (const relativePath of MIGRATION_GUIDES) {
   test(`${relativePath} has no broken local Markdown links`, (t) => {
     const markdown = readFileSync(join(repoDir, relativePath), "utf8");
+    assert.doesNotMatch(markdown, /\bprovenance\b/i);
     for (const match of markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
       const target = match[1];
       if (/^(?:https?:|#)/.test(target)) continue;

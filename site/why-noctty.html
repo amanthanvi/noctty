@@ -129,8 +129,8 @@
             The current project has one maintainer. What separates it from a
             personal build uploaded as a release is checkable rather than
             asserted: release history that is not rewritten or force-pushed,
-            public build and release workflows, a verifier script you can run
-            against any published release, and the standing boundaries below.
+            public build and release workflows, an exact verifier contract for
+            current Noctty release assets, and the standing boundaries below.
           </p>
           <p>
             Source history, CI, packaging scripts, release notes, and issue
@@ -279,7 +279,11 @@
           <div>
             <h3>Run the checksum and signature checks at once</h3>
             <p>
-              The repository verifier downloads the complete release, checks
+              The repository verifier accepts only the current Noctty asset
+              contract. No published stable release matches that contract yet:
+              v1.3.123 uses the legacy <code>winghostty-*</code> asset layout,
+              so use the two manual checks above for that release. For a
+              matching release, the verifier downloads every asset, checks
               every GitHub digest and checksum entry, validates every embedded
               PE signature, and requires a single signer whose SPKI matches the
               key pinned into the updater. Releases do not currently publish
@@ -293,7 +297,7 @@
 Set-Location .\noctty
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 `
-  -Version &lt;version&gt;</code></pre>
+  -Version &lt;compatible-noctty-version&gt;</code></pre>
         </li>
       </ol>
 

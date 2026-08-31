@@ -27,7 +27,7 @@ scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
-For a direct download, run the checksum, provenance, and signature checks on the
+For a direct download, run the checksum and signature checks on the
 [Why Noctty and verification page](https://noctty.com/why-noctty.html#verify).
 The release signing certificate is self-signed, so SmartScreen warns even when
 every check passes.
