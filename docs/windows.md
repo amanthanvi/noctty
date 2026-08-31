@@ -374,10 +374,13 @@ The pipe *name* is derived from `--class` alone, so it is predictable and
 lives in the machine-wide named-pipe namespace: any local account can
 create it before noctty does. noctty therefore authenticates the **server**
 as well as the client. Before writing anything to a pipe it did not create,
-a client resolves the serving process with `GetNamedPipeServerProcessId` and
-requires that process's token user SID to match its own; a mismatch is
-treated as "no instance we can reach", and the launch starts its own local
-instance instead.
+a client reads the owner SID and mandatory-integrity label from the security
+descriptor attached to that connected pipe object. The owner must match the
+client's user SID and the pipe's integrity must be at least the client's; a
+mismatch is treated as "no instance we can reach", and the launch starts its
+own local instance instead. Authentication is object-bound rather than based
+on a numeric server PID that could be recycled after a duplicated pipe handle
+outlives its creating process.
 
 Clients also open the pipe with `SECURITY_SQOS_PRESENT |
 SECURITY_IDENTIFICATION`. A named-pipe server impersonates at

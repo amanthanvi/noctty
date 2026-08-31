@@ -469,14 +469,6 @@ pub extern "advapi32" fn OpenProcessToken(
     TokenHandle: *HANDLE,
 ) callconv(.winapi) BOOL;
 
-/// Identify the process that created the named-pipe server end this handle
-/// is connected to. Used to authenticate the server before a client writes
-/// anything to it.
-pub extern "kernel32" fn GetNamedPipeServerProcessId(
-    Pipe: HANDLE,
-    ServerProcessId: *DWORD,
-) callconv(.winapi) BOOL;
-
 pub extern "advapi32" fn EqualSid(
     pSid1: *anyopaque,
     pSid2: *anyopaque,

@@ -434,6 +434,7 @@ pub const SDDL_REVISION_1 = 1;
 /// the SACL without needing `SeSecurityPrivilege`.
 pub const DACL_SECURITY_INFORMATION = 0x00000004;
 pub const LABEL_SECURITY_INFORMATION = 0x00000010;
+pub const OWNER_SECURITY_INFORMATION = 0x00000001;
 
 /// `SE_OBJECT_TYPE.SE_KERNEL_OBJECT`, for reading a named pipe's descriptor
 /// back off the live handle with `GetSecurityInfo`.

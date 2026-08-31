@@ -862,7 +862,7 @@ fn tokenIntegrityRid(token: windows.HANDLE) ?u32 {
     return integrityRidFromSidString(std.mem.span(sid));
 }
 
-/// Is the process serving this pipe running as the same user we are?
+/// Is this connected pipe object owned and labelled for our trust level?
 ///
 /// The single-instance pipe name is derived only from `--class`, so it is
 /// PREDICTABLE and lives in the machine-wide named-pipe namespace. Any local
@@ -881,30 +881,31 @@ fn tokenIntegrityRid(token: windows.HANDLE) ?u32 {
 /// `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, which caps the server
 /// at an identification-only token whatever the timing.
 ///
-/// Fails CLOSED: any error answers "not ours".
-fn ipcPipeServerIsSameUser(pipe: windows.HANDLE) bool {
-    var server_pid: u32 = 0;
-    if (sys.GetNamedPipeServerProcessId(pipe, &server_pid) == 0) return false;
-
-    const process = sys.OpenProcess(
-        c.PROCESS_QUERY_LIMITED_INFORMATION,
-        windows.FALSE,
-        server_pid,
-    ) orelse return false;
-    defer _ = windows.CloseHandle(process);
-
-    var server_token: windows.HANDLE = undefined;
-    if (sys.OpenProcessToken(process, c.TOKEN_QUERY, &server_token) == 0) return false;
-    defer _ = windows.CloseHandle(server_token);
-
-    var server_buf: SidBuffer align(sid_buffer_align) = undefined;
-    const server_sid = tokenUserSidBytes(server_token, &server_buf) catch return false;
+/// Authentication is read from the descriptor attached to THIS pipe object.
+/// A PID lookup is not sufficient: a duplicated server handle can outlive
+/// its creating process, and the numeric PID can then be recycled.
+///
+/// Fails CLOSED: any query or parse error answers "not ours".
+fn ipcPipeServerIsTrusted(pipe: windows.HANDLE) bool {
+    const information = c.OWNER_SECURITY_INFORMATION | c.LABEL_SECURITY_INFORMATION;
+    var owner: ?*anyopaque = null;
+    var descriptor: ?*anyopaque = null;
+    if (sys.GetSecurityInfo(
+        pipe,
+        c.SE_KERNEL_OBJECT,
+        information,
+        &owner,
+        null,
+        null,
+        null,
+        &descriptor,
+    ) != 0) return false;
+    const attached = descriptor orelse return false;
+    defer _ = sys.LocalFree(attached);
 
     var own_buf: SidBuffer align(sid_buffer_align) = undefined;
     const own_sid = currentUserSidBytes(&own_buf) catch return false;
-
-    if (server_sid.len != own_sid.len) return false;
-    if (sys.EqualSid(@ptrCast(server_sid.ptr), @ptrCast(own_sid.ptr)) == 0) return false;
+    if (owner == null or sys.EqualSid(owner.?, @ptrCast(own_sid.ptr)) == 0) return false;
 
     // The user SID is NOT sufficient on its own. Under the ordinary split
     // UAC token, an elevated process and a medium-integrity process of the
@@ -928,8 +929,39 @@ fn ipcPipeServerIsSameUser(pipe: windows.HANDLE) bool {
     defer _ = windows.CloseHandle(own_token);
 
     const own_rid = tokenIntegrityRid(own_token) orelse return false;
-    const server_rid = tokenIntegrityRid(server_token) orelse return false;
+    const server_rid = descriptorIntegrityRid(attached) catch return false;
     return server_rid >= own_rid;
+}
+
+fn descriptorIntegrityRid(descriptor: *anyopaque) error{InvalidSecurityDescriptor}!u32 {
+    var text: ?[*:0]u16 = null;
+    if (sys.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        c.SDDL_REVISION_1,
+        c.LABEL_SECURITY_INFORMATION,
+        &text,
+        null,
+    ) == 0) return error.InvalidSecurityDescriptor;
+    const text_ptr = text orelse return error.InvalidSecurityDescriptor;
+    defer _ = sys.LocalFree(@ptrCast(text_ptr));
+
+    const sddl = std.mem.span(text_ptr);
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-");
+    const start = std.mem.indexOf(u16, sddl, prefix) orelse {
+        // Unlabelled kernel objects evaluate at medium integrity.
+        return c.SECURITY_MANDATORY_MEDIUM_RID;
+    };
+
+    var rid: u32 = 0;
+    var digits: usize = 0;
+    for (sddl[start + prefix.len ..]) |ch| {
+        if (ch < '0' or ch > '9') break;
+        rid = std.math.mul(u32, rid, 10) catch return error.InvalidSecurityDescriptor;
+        rid = std.math.add(u32, rid, ch - '0') catch return error.InvalidSecurityDescriptor;
+        digits += 1;
+    }
+    if (digits == 0) return error.InvalidSecurityDescriptor;
+    return rid;
 }
 
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
@@ -949,11 +981,11 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
             null,
         );
         if (handle != windows.INVALID_HANDLE_VALUE) {
-            if (!ipcPipeServerIsSameUser(handle)) {
+            if (!ipcPipeServerIsTrusted(handle)) {
                 _ = windows.CloseHandle(handle);
                 log.warn(
-                    "single-instance pipe is served by a process belonging to " ++
-                        "another user; refusing to forward anything to it",
+                    "single-instance pipe owner or integrity label is not trusted; " ++
+                        "refusing to forward anything to it",
                     .{},
                 );
                 return error.PipeUnreachable;
@@ -1352,6 +1384,13 @@ fn normalizeForwardedStartupArg(
         return null;
     }
 
+    // Action Center launches carry the target as a positional URI. Preserve
+    // only a URI that the same parser used by the receiver accepts; malformed
+    // lookalikes still fall through to the non-flag rejection below.
+    if (win32_toast_activation.parseLaunchArg(arg)) |_| {
+        return try alloc.dupeZ(u8, arg);
+    } else |_| {}
+
     // Drop anything the running instance would refuse, so an ordinary launch
     // still gets a window instead of having the whole request rejected. This
     // is a usability measure on OUR OWN argv, not a security control -- the
@@ -1503,6 +1542,8 @@ fn buildIpcPipeSddl(
         }
     };
 
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("O:"));
+    try Appender.append(buf, &len, user_sid);
     try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("D:P(A;;GA;;;"));
     try Appender.append(buf, &len, user_sid);
     try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
@@ -1623,14 +1664,9 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
         _ = sys.LocalFree(@ptrCast(v));
     };
 
-    // NOTE: there is no `O:` term, so the object owner defaults to the
-    // token's default owner. For an elevated token that is the
-    // Administrators group, and an owner always retains implicit
-    // READ_CONTROL/WRITE_DAC. A local administrator can therefore rewrite
-    // this DACL; that is inherent to running as an administrator and is not
-    // a boundary this descriptor claims to hold. What the descriptor does
-    // hold is that no ACE grants access to other interactive users,
-    // NETWORK, or ANONYMOUS.
+    // Pin the owner to the token user as well as granting that SID access.
+    // The client authenticates the owner and mandatory label directly from
+    // the connected pipe object, avoiding a recyclable process-ID lookup.
     var sddl_buf: [320]u16 = undefined;
     const sddl = try buildIpcPipeSddl(
         &sddl_buf,
@@ -28005,6 +28041,18 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
     const other = (try normalizeForwardedStartupArg(std.testing.allocator, "--title=Inbox")).?;
     defer std.testing.allocator.free(other);
     try std.testing.expectEqualStrings("--title=Inbox", other);
+
+    const activation = (try normalizeForwardedStartupArg(
+        std.testing.allocator,
+        "wgh://activate?surface=42&tab=7",
+    )).?;
+    defer std.testing.allocator.free(activation);
+    try std.testing.expectEqualStrings("wgh://activate?surface=42&tab=7", activation);
+
+    try std.testing.expect(try normalizeForwardedStartupArg(
+        std.testing.allocator,
+        "wgh://activate?surface=abc",
+    ) == null);
 }
 
 test "win32 decorationsVisibleForConfig only hides none" {
@@ -28508,7 +28556,8 @@ test "win32 IPC pipe SDDL renders the exact DACL and mandatory label" {
         var utf8: [320]u8 = undefined;
         const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
         try std.testing.expectEqualStrings(
-            "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)",
+            "O:S-1-5-21-1111-2222-3333-1001" ++
+                "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)",
             utf8[0..len],
         );
     }
@@ -28522,7 +28571,9 @@ test "win32 IPC pipe SDDL renders the exact DACL and mandatory label" {
         var utf8: [320]u8 = undefined;
         const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
         try std.testing.expectEqualStrings(
-            "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)S:(ML;;NW;;;S-1-16-12288)",
+            "O:S-1-5-21-1111-2222-3333-1001" ++
+                "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)" ++
+                "S:(ML;;NW;;;S-1-16-12288)",
             utf8[0..len],
         );
     }
@@ -28688,7 +28739,7 @@ test "win32 SDDL auto-inherit normalization keeps every access-bearing field" {
     }
 }
 
-test "win32 IPC pipe descriptor attaches the expected DACL and label" {
+test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
@@ -28733,7 +28784,9 @@ test "win32 IPC pipe descriptor attaches the expected DACL and label" {
     // DACL *and* label. Requesting the DACL alone would assert nothing about
     // the label, and would pass even if a label were wrongly emitted at medium
     // integrity. LABEL_SECURITY_INFORMATION needs no SeSecurityPrivilege.
-    const information = c.DACL_SECURITY_INFORMATION | c.LABEL_SECURITY_INFORMATION;
+    const information = c.OWNER_SECURITY_INFORMATION |
+        c.DACL_SECURITY_INFORMATION |
+        c.LABEL_SECURITY_INFORMATION;
 
     var attached: ?*anyopaque = null;
     const status = sys.GetSecurityInfo(
@@ -28826,10 +28879,14 @@ test "win32 IPC pipe descriptor attaches the expected DACL and label" {
 
     // (3) Pin the SHAPE independently, so a future change to the SDDL we
     // request cannot quietly widen access while still matching (1) and (2).
+    const dacl_idx = std.mem.indexOf(u8, actual, "D:") orelse
+        return error.TestUnexpectedResult;
     const sacl_idx = std.mem.indexOf(u8, actual, "S:");
-    const dacl_text = if (sacl_idx) |idx| actual[0..idx] else actual;
+    const owner_text = actual[0..dacl_idx];
+    const dacl_text = if (sacl_idx) |idx| actual[dacl_idx..idx] else actual[dacl_idx..];
     const sacl_text = if (sacl_idx) |idx| actual[idx..] else "";
 
+    try std.testing.expect(std.mem.startsWith(u8, owner_text, "O:S-1-5-21-"));
     try std.testing.expect(std.mem.startsWith(u8, dacl_text, "D:P"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "(A;"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "("));
@@ -29228,7 +29285,7 @@ test "win32 title sanitizing strips control bytes from IPC and OSC titles" {
     }
 }
 
-test "win32 IPC client authenticates the pipe server as the same user" {
+test "win32 IPC client authenticates the connected pipe descriptor" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
@@ -29268,7 +29325,7 @@ test "win32 IPC client authenticates the pipe server as the same user" {
 
     // And directly, so a future refactor that drops the call site still
     // fails a test rather than silently disabling the check.
-    try std.testing.expect(ipcPipeServerIsSameUser(client));
+    try std.testing.expect(ipcPipeServerIsTrusted(client));
 
     // The comparison operates on a real, well-formed SID rather than an
     // empty slice that would trivially compare equal.
@@ -29296,7 +29353,7 @@ test "win32 IPC client authenticates the pipe server as the same user" {
     // server needs a second local account, and a lower-integrity server
     // needs a medium process while this suite runs elevated; neither is
     // creatable from a test. Both are argued from the fail-closed structure
-    // of `ipcPipeServerIsSameUser` (every error path returns false, and the
+    // of `ipcPipeServerIsTrusted` (every error path returns false, and the
     // final comparison is `server_rid >= own_rid`), not observed.
 }
 
