@@ -111,7 +111,11 @@ last_present_request_ms: u64 = 0,
 /// and are paused when the terminal is not focused.
 draw_h: xev.Timer,
 draw_c: xev.Completion = .{},
+draw_reset_c: xev.Completion = .{},
 draw_active: bool = false,
+/// Absolute Win32 tick when the active draw timer should fire. This lets a
+/// focus or power-policy change shorten an already-queued slow interval.
+draw_timer_due_ms: u64 = 0,
 
 /// This async is used to force a draw immediately. This does not
 /// coalesce like the wakeup does.
@@ -388,14 +392,30 @@ fn syncDrawTimer(self: *Thread) void {
     // even checking the active state in case we have a pending shutdown.
     self.draw_active = true;
 
-    // If our draw timer is already active, then we don't have to do anything.
-    if (self.draw_c.state() == .active) return;
-
-    // Start the timer which loops
     const delay_ms = self.nextPresentTimerDelayMs() orelse {
         self.draw_active = false;
         return;
     };
+
+    if (self.draw_c.state() == .active) {
+        if (apprt.runtime != apprt.win32) return;
+
+        const now_ms = win32_power.tickCountMs();
+        if (!drawTimerNeedsReset(now_ms, self.draw_timer_due_ms, delay_ms)) return;
+        self.draw_h.reset(
+            &self.loop,
+            &self.draw_c,
+            &self.draw_reset_c,
+            delay_ms,
+            Thread,
+            self,
+            drawCallback,
+        );
+        self.draw_timer_due_ms = now_ms +| delay_ms;
+        return;
+    }
+
+    // Start the timer which loops.
     self.draw_h.run(
         &self.loop,
         &self.draw_c,
@@ -404,6 +424,14 @@ fn syncDrawTimer(self: *Thread) void {
         self,
         drawCallback,
     );
+    if (apprt.runtime == apprt.win32) {
+        self.draw_timer_due_ms = win32_power.tickCountMs() +| delay_ms;
+    }
+}
+
+fn drawTimerNeedsReset(now_ms: u64, due_ms: u64, next_delay_ms: u64) bool {
+    if (due_ms == 0) return true;
+    return next_delay_ms < due_ms -| now_ms;
 }
 
 /// Enqueue a message and wake the renderer to process it.
@@ -820,6 +848,7 @@ fn drawCallback(
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
+    t.draw_timer_due_ms = 0;
 
     // Draw
     t.drawFrame(false);
@@ -828,12 +857,22 @@ fn drawCallback(
     if (t.draw_active) {
         if (t.nextPresentTimerDelayMs()) |delay_ms| {
             t.draw_h.run(&t.loop, &t.draw_c, delay_ms, Thread, t, drawCallback);
+            if (apprt.runtime == apprt.win32) {
+                t.draw_timer_due_ms = win32_power.tickCountMs() +| delay_ms;
+            }
         } else {
             t.draw_active = false;
         }
     }
 
     return .disarm;
+}
+
+test "draw timer shortens an active slow interval" {
+    try std.testing.expect(drawTimerNeedsReset(100, 1100, 8));
+    try std.testing.expect(!drawTimerNeedsReset(1095, 1100, 8));
+    try std.testing.expect(!drawTimerNeedsReset(100, 108, 8));
+    try std.testing.expect(drawTimerNeedsReset(100, 0, 8));
 }
 
 fn renderCallback(
