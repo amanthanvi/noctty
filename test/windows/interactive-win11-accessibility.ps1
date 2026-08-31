@@ -1379,6 +1379,11 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             return $script:inactiveAllTerminals.Count -eq 2 -and
                 $script:inactiveVisibleTerminals.Count -eq 1 -and
                 $script:inactiveVisibleTerminals[0] -ne $TabAHwnd
+        } -Diagnostic {
+            "Expected exactly 2 terminal children with 1 visible and the visible one not tab A ($TabAHwnd). " +
+            (Get-AccessibilityWindowShape -Hwnd $Process.MainWindowHandle) +
+            ". A count above 2 usually means a saved session was restored on launch; " +
+            'this harness writes window-save-state = never into its sandbox config to prevent that.'
         }
         $inactiveTabHwnd = @(
             $script:inactiveAllTerminals | Where-Object { $_ -ne $TabAHwnd }
@@ -1470,6 +1475,10 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
                 $script:inactiveTabAVisible[0] -eq $TabAHwnd -and
                 [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
                     $TabAHwnd
+        } -Diagnostic {
+            "Expected exactly 1 visible terminal child equal to tab A ($TabAHwnd) and focused. " +
+            (Get-AccessibilityWindowShape -Hwnd $Process.MainWindowHandle) +
+            "; focused=$([NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle))."
         }
         [NocttyAccessibilityNative]::ResetNotificationCount()
         $inactivePostSwitchTextPatternReads = 0
@@ -1550,6 +1559,10 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
                 $script:inactiveTabBVisible[0] -eq $inactiveTabHwnd -and
                 [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
                     $inactiveTabHwnd
+        } -Diagnostic {
+            "Expected exactly 1 visible terminal child equal to tab B ($inactiveTabHwnd) and focused. " +
+            (Get-AccessibilityWindowShape -Hwnd $Process.MainWindowHandle) +
+            "; focused=$([NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle))."
         }
         $inactiveFirstReadCount = 1
         $inactiveFirstText = $inactiveTabTextPattern.DocumentRange.GetText(-1)
@@ -1596,6 +1609,11 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
                 $script:inactiveRestoredVisible[0] -eq $TabAHwnd -and
                 [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
                     $TabAHwnd
+        } -Diagnostic {
+            "Expected exactly 1 terminal child, visible, equal to tab A ($TabAHwnd) and focused, " +
+            'after closing tab B. ' +
+            (Get-AccessibilityWindowShape -Hwnd $Process.MainWindowHandle) +
+            "; focused=$([NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle))."
         }
     }
     finally {
@@ -1745,18 +1763,105 @@ function Wait-AccessibilityTerminalCommandEcho(
     throw "Timed out waiting for $Description full command echo. Diagnostic=$($diagnostic | ConvertTo-Json -Compress)"
 }
 
-function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadline, [string] $Description) {
+function Wait-AccessibilityCondition(
+    [scriptblock] $Condition,
+    [DateTime] $Deadline,
+    [string] $Description,
+    [scriptblock] $Diagnostic
+) {
     $effectiveDeadline = $Deadline
     if ($null -ne $script:accessibilityOverallDeadline -and $script:accessibilityOverallDeadline -lt $effectiveDeadline) {
         $effectiveDeadline = $script:accessibilityOverallDeadline
     }
-    Wait-InteractiveWin11Until `
-        -Condition $Condition `
-        -Description $Description `
-        -Deadline $effectiveDeadline `
-        -PollMilliseconds $script:ACCESSIBILITY_POLL_MS `
-        -ConditionFirst `
-        -TimeoutMessage "Timed out waiting for $Description."
+    $timeoutMessage = "Timed out waiting for $Description."
+    try {
+        Wait-InteractiveWin11Until `
+            -Condition $Condition `
+            -Description $Description `
+            -Deadline $effectiveDeadline `
+            -PollMilliseconds $script:ACCESSIBILITY_POLL_MS `
+            -ConditionFirst `
+            -TimeoutMessage $timeoutMessage
+    }
+    catch {
+        # Only a genuine timeout gets the diagnostic suffix. A condition that
+        # threw, or a process that exited, already carries its own cause and
+        # must not be rewritten into a timeout.
+        if ($null -eq $Diagnostic -or $_.Exception.Message -ne $timeoutMessage) { throw }
+        $detail = try { & $Diagnostic } catch { "diagnostic unavailable: $($_.Exception.Message)" }
+        if ([string]::IsNullOrWhiteSpace([string]$detail)) { throw }
+        throw "$timeoutMessage $([string]$detail)"
+    }
+}
+
+# One-line description of what the harness actually saw, for a timeout whose
+# cause is the shape of the window rather than the timing of an event.
+function Get-AccessibilityWindowShape([IntPtr] $Hwnd) {
+    try {
+        $allTerminals = @([NocttyAccessibilityNative]::TerminalChildren($Hwnd))
+        $visibleTerminals = @([NocttyAccessibilityNative]::VisibleTerminalChildren($Hwnd))
+        $hidden = @($allTerminals | Where-Object { $visibleTerminals -notcontains $_ })
+        return ("observed shape: {0} terminal children ({1} visible, {2} hidden); " +
+            "all=[{3}]; visible=[{4}]") -f
+            $allTerminals.Count,
+            $visibleTerminals.Count,
+            $hidden.Count,
+            ($allTerminals -join ', '),
+            ($visibleTerminals -join ', ')
+    }
+    catch {
+        return "observed shape: unavailable ($($_.Exception.Message))"
+    }
+}
+
+# Resolve one uniquely named docked-search action Button and prove it is a
+# real, on-screen, invokable control owned by the terminal process. The
+# published matrix carries a row per button, so each is asserted rather than
+# inferred from the toggles beside it.
+function Get-AccessibilitySearchActionButton(
+    [Parameter(Mandatory)][System.Windows.Automation.AutomationElement] $Root,
+    [Parameter(Mandatory)][int] $OwnerProcessId,
+    [Parameter(Mandatory)][string] $Name
+) {
+    $candidates = @($Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            $Name
+        )
+    ) | Where-Object {
+        $_.Current.ProcessId -eq $OwnerProcessId -and
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
+    })
+    if ($candidates.Count -ne 1) {
+        throw "Docked search exposes $($candidates.Count) '$Name' Button elements; expected exactly one."
+    }
+    $element = $candidates[0]
+    $invokePattern = $null
+    if (-not $element.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$invokePattern
+    )) {
+        throw "Docked search '$Name' Button does not expose InvokePattern."
+    }
+    $nativeHwnd = [IntPtr]$element.Current.NativeWindowHandle
+    [uint32]$nativeOwner = 0
+    if ($nativeHwnd -eq [IntPtr]::Zero -or
+        [NocttyAccessibilityNative]::GetWindowThreadProcessId($nativeHwnd, [ref]$nativeOwner) -eq 0 -or
+        $nativeOwner -ne [uint32]$OwnerProcessId -or
+        -not [NocttyAccessibilityNative]::IsWindowVisible($nativeHwnd)) {
+        throw "Docked search '$Name' Button has invalid native HWND $nativeHwnd (owner=$nativeOwner)."
+    }
+    $bounds = $element.Current.BoundingRectangle
+    if ($bounds.Width -le 0 -or $bounds.Height -le 0 -or $element.Current.IsOffscreen) {
+        throw "Docked search '$Name' Button is not visible with positive UIA bounds."
+    }
+    return [pscustomobject]@{
+        Element = $element
+        Invoke  = $invokePattern
+        Hwnd    = $nativeHwnd
+        Type    = $element.Current.ControlType.ProgrammaticName
+    }
 }
 
 function Test-AccessibilityForegroundPrecondition {
@@ -3195,18 +3300,31 @@ $themePreviewConfigText = if (Test-Path -LiteralPath $themePreviewConfigPath) {
 else {
     ''
 }
-$themePreviewConfigText = [regex]::Replace(
-    $themePreviewConfigText,
-    '(?m)^[ \t]*window-theme[ \t]*=.*(?:\r?\n|$)',
-    ''
-)
+foreach ($harnessOwnedConfigKey in @('window-theme', 'window-save-state')) {
+    $themePreviewConfigText = [regex]::Replace(
+        $themePreviewConfigText,
+        ('(?m)^[ \t]*{0}[ \t]*=.*(?:\r?\n|$)' -f [regex]::Escape($harnessOwnedConfigKey)),
+        ''
+    )
+}
 if ($themePreviewConfigText.Length -ne 0 -and -not $themePreviewConfigText.EndsWith("`n")) {
     $themePreviewConfigText += "`r`n"
 }
-$themePreviewConfigText += "window-theme = system`r`n"
+# Every window-shape assertion below counts the panes this run created. The
+# splits phase leaves a three-pane layout behind, so without this the next
+# launch in the same sandbox restores it and those counts are measured
+# against a window the harness never built. `never` gates restore as well as
+# save, which is what makes a reused sandbox behave like a fresh one.
+$themePreviewConfigText += "window-theme = system`r`nwindow-save-state = never`r`n"
 $themePreviewUtf8 = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($themePreviewConfigPath, $themePreviewConfigText, $themePreviewUtf8)
 [byte[]]$themePreviewConfigBaselineBytes = [System.IO.File]::ReadAllBytes($themePreviewConfigPath)
+# A sandbox written before that config line existed can still hold the file.
+# Drop it so this run's window shape is decided by this run alone.
+$staleSessionStatePath = Join-Path $layout.LocalAppData 'noctty\session-state.json'
+if (Test-Path -LiteralPath $staleSessionStatePath -PathType Leaf) {
+    Remove-Item -LiteralPath $staleSessionStatePath -Force
+}
 $document = $null
 $textChangedHandler = $null
 $textChangedRegistered = $false
@@ -3262,6 +3380,8 @@ $paletteActionAbortedNotificationKind = ''
 $paletteActionAbortedNotificationDisplayString = ''
 $paletteEditEvidence = $null
 $searchEditEvidence = $null
+$searchActionEvidence = $null
+$searchInvokeEvidence = $null
 $paletteUnavailableQuery = "zzzznocttynomatch$([Guid]::NewGuid().ToString('N'))"
 $settingsLifecycle = $null
 $settingsOwnerLifecycle = $null
@@ -3958,11 +4078,15 @@ try {
     $splitBaselineHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
     $splitBaseline = $splitBaselineHwnds.Count
     if ($splitBaseline -ne 1) {
-        throw "Split validation requires one clean terminal pane; found $splitBaseline. Rerun with -ResetState."
+        throw ("Split validation requires one clean terminal pane; expected 1, found $splitBaseline. " +
+            (Get-AccessibilityWindowShape -Hwnd $process.MainWindowHandle) + '.')
     }
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0xDC) -Description 'Ctrl+Shift+Backslash split right' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Ctrl+Shift+Backslash visible split' -Condition {
         return [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 1)
+    } -Diagnostic {
+        "Expected $($splitBaseline + 1) visible terminal children. " +
+        (Get-AccessibilityWindowShape -Hwnd $process.MainWindowHandle) + '.'
     }
     $splitAfterRightHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
     $splitAfterRight = $splitAfterRightHwnds.Count
@@ -3973,6 +4097,9 @@ try {
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x45) -Description 'Ctrl+Shift+E split down' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Ctrl+Shift+E visible split' -Condition {
         return [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 2)
+    } -Diagnostic {
+        "Expected $($splitBaseline + 2) visible terminal children. " +
+        (Get-AccessibilityWindowShape -Hwnd $process.MainWindowHandle) + '.'
     }
     $splitAfterDownHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
     $splitAfterDown = $splitAfterDownHwnds.Count
@@ -4620,6 +4747,18 @@ try {
         }
         $searchToggleEvidence[$toggleName] = $togglePattern.Current.ToggleState.ToString()
     }
+    $searchActionEvidence = [ordered]@{}
+    foreach ($searchActionName in @('Previous match', 'Next match', 'Close search')) {
+        $searchAction = Get-AccessibilitySearchActionButton `
+            -Root $root `
+            -OwnerProcessId $process.Id `
+            -Name $searchActionName
+        $searchActionEvidence[$searchActionName] = [ordered]@{
+            control_type = $searchAction.Type
+            invokable = $true
+            native_hwnd = $searchAction.Hwnd.ToString()
+        }
+    }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search query UIA focus' -Condition {
         if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
             $searchNativeFocusBeforeRecovery = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
@@ -4749,6 +4888,187 @@ try {
         -not $hiddenSearchElement.Current.IsOffscreen) {
         throw 'Hidden docked search Edit did not remain an offscreen UIA Edit after dismissal.'
     }
+
+    # Previous / Next / Close have no keyboard focus path, so nothing above
+    # reaches them. Reopen the docked search and drive all three through UIA
+    # Invoke — the only route a screen-reader user has to these buttons.
+    Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x46) -Description 'Ctrl+Shift+F reopen docked search for button invokes' -Process $process
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'docked search reopen for button invokes' -Condition {
+        return [NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)
+    } -Diagnostic {
+        "Expected the docked search Edit ($searchNativeHwnd) to become visible again after Ctrl+Shift+F; " +
+        "IsWindowVisible=$([NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd))."
+    }
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'reopened docked search query Edit' `
+        -Condition {
+            $script:searchReopenEdit =
+                [System.Windows.Automation.AutomationElement]::FromHandle($searchNativeHwnd)
+            return $null -ne $script:searchReopenEdit -and
+                -not $script:searchReopenEdit.Current.IsOffscreen
+        } -Diagnostic {
+            "Expected the reopened docked search Edit ($searchNativeHwnd) to be an on-screen UIA element."
+        }
+    $searchReopenEdit = $script:searchReopenEdit
+    $searchReopenValuePattern = $null
+    if (-not $searchReopenEdit.TryGetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern,
+        [ref]$searchReopenValuePattern
+    )) {
+        throw 'Reopened docked search query Edit does not expose ValuePattern.'
+    }
+    # Navigating matches only proves anything when matches exist, so take the
+    # query from what the focused pane is currently showing rather than a
+    # literal the terminal may never have printed. The Escape dismissal above
+    # left focus on that pane.
+    $searchNavPaneElement =
+        [System.Windows.Automation.AutomationElement]::FromHandle($script:searchDismissFocusedHwnd)
+    $searchNavPaneTextPattern = $null
+    if ($null -eq $searchNavPaneElement -or -not $searchNavPaneElement.TryGetCurrentPattern(
+        [System.Windows.Automation.TextPattern]::Pattern,
+        [ref]$searchNavPaneTextPattern
+    )) {
+        throw "Focused terminal pane $($script:searchDismissFocusedHwnd) exposes no TextPattern to seed docked search navigation."
+    }
+    $searchNavToken = ([regex]::Matches(
+        $searchNavPaneTextPattern.DocumentRange.GetText(-1),
+        '[A-Za-z0-9]{6,}'
+    ) | Select-Object -Last 1).Value
+    if ([string]::IsNullOrEmpty($searchNavToken)) {
+        throw 'Focused terminal pane exposes no token long enough to seed docked search navigation.'
+    }
+    $searchReopenValuePattern.SetValue($searchNavToken)
+    # A query on its own reports the total with no selection; only navigation
+    # establishes one. That is what makes the transition below an assertion
+    # about the buttons rather than about the search.
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(10)) -Description 'docked search navigation seed match count' -Condition {
+        $script:searchNavResultElement =
+            [System.Windows.Automation.AutomationElement]::FromHandle($searchResultsHwnd)
+        return $null -ne $script:searchNavResultElement -and
+            $script:searchNavResultElement.Current.ProcessId -eq $process.Id -and
+            $script:searchNavResultElement.Current.Name -match '^[1-9]\d*$'
+    } -Diagnostic {
+        $observedSeedName = if ($null -ne $script:searchNavResultElement) {
+            $script:searchNavResultElement.Current.Name
+        }
+        else {
+            '<unavailable>'
+        }
+        "Expected a nonzero match total for seed query '$searchNavToken'; result_name='$observedSeedName'."
+    }
+    $searchNavSeedTotal = [int]$script:searchNavResultElement.Current.Name
+    $searchInvokeEvidence = [ordered]@{
+        seed_query = $searchNavToken
+        seed_total = $searchNavSeedTotal
+    }
+    $searchNavNextAction = Get-AccessibilitySearchActionButton `
+        -Root $root `
+        -OwnerProcessId $process.Id `
+        -Name 'Next match'
+    # Chrome Invoke posts WM_COMMAND, so the effect is asynchronous.
+    $searchNavNextAction.Invoke.Invoke()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "docked search 'Next match' invoke" -Condition {
+        if (-not [NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) { return $false }
+        $script:searchNavResultElement =
+            [System.Windows.Automation.AutomationElement]::FromHandle($searchResultsHwnd)
+        if ($null -eq $script:searchNavResultElement -or
+            $script:searchNavResultElement.Current.ProcessId -ne $process.Id) {
+            return $false
+        }
+        $script:searchNavNextMatch = [regex]::Match(
+            $script:searchNavResultElement.Current.Name,
+            '^(\d+)/(\d+)$'
+        )
+        return $script:searchNavNextMatch.Success -and
+            [int]$script:searchNavNextMatch.Groups[2].Value -eq $searchNavSeedTotal -and
+            [int]$script:searchNavNextMatch.Groups[1].Value -ge 1 -and
+            [int]$script:searchNavNextMatch.Groups[1].Value -le $searchNavSeedTotal
+    } -Diagnostic {
+        $observedNextName = if ($null -ne $script:searchNavResultElement) {
+            $script:searchNavResultElement.Current.Name
+        }
+        else {
+            '<unavailable>'
+        }
+        "Expected 'Next match' Invoke to select one of $searchNavSeedTotal matches for seed query " +
+        "'$searchNavToken' and report n/$searchNavSeedTotal; " +
+        "search_visible=$([NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) " +
+        "result_name='$observedNextName'."
+    }
+    $searchNavAfterNext = $script:searchNavResultElement.Current.Name
+    $searchNavSelectedAfterNext = [int]$script:searchNavNextMatch.Groups[1].Value
+    $searchInvokeEvidence['Next match'] = $searchNavAfterNext
+    $searchNavPrevAction = Get-AccessibilitySearchActionButton `
+        -Root $root `
+        -OwnerProcessId $process.Id `
+        -Name 'Previous match'
+    $searchNavPrevAction.Invoke.Invoke()
+    # Wrap is on and the Win32 UI never exposes a way to turn it off, so with
+    # more than one match Previous must land somewhere else. A total of one
+    # can only stay put.
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "docked search 'Previous match' invoke" -Condition {
+        if (-not [NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) { return $false }
+        $script:searchNavResultElement =
+            [System.Windows.Automation.AutomationElement]::FromHandle($searchResultsHwnd)
+        if ($null -eq $script:searchNavResultElement -or
+            $script:searchNavResultElement.Current.ProcessId -ne $process.Id) {
+            return $false
+        }
+        $script:searchNavPrevMatch = [regex]::Match(
+            $script:searchNavResultElement.Current.Name,
+            '^(\d+)/(\d+)$'
+        )
+        if (-not $script:searchNavPrevMatch.Success -or
+            [int]$script:searchNavPrevMatch.Groups[2].Value -ne $searchNavSeedTotal) {
+            return $false
+        }
+        $prevSelected = [int]$script:searchNavPrevMatch.Groups[1].Value
+        if ($prevSelected -lt 1 -or $prevSelected -gt $searchNavSeedTotal) { return $false }
+        if ($searchNavSeedTotal -ge 2) {
+            return $prevSelected -ne $searchNavSelectedAfterNext
+        }
+        return $prevSelected -eq $searchNavSelectedAfterNext
+    } -Diagnostic {
+        $observedPrevName = if ($null -ne $script:searchNavResultElement) {
+            $script:searchNavResultElement.Current.Name
+        }
+        else {
+            '<unavailable>'
+        }
+        $expectedPrev = if ($searchNavSeedTotal -ge 2) {
+            "a selection other than $searchNavSelectedAfterNext"
+        }
+        else {
+            "the only selection, $searchNavSelectedAfterNext"
+        }
+        "Expected 'Previous match' Invoke to move from '$searchNavAfterNext' to $expectedPrev " +
+        "of $searchNavSeedTotal for seed query '$searchNavToken'; " +
+        "search_visible=$([NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) " +
+        "result_name='$observedPrevName'."
+    }
+    $searchInvokeEvidence['Previous match'] = $script:searchNavResultElement.Current.Name
+    $searchCloseAction = Get-AccessibilitySearchActionButton `
+        -Root $root `
+        -OwnerProcessId $process.Id `
+        -Name 'Close search'
+    $searchCloseAction.Invoke.Invoke()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "docked search 'Close search' invoke hide and terminal focus restoration" -Condition {
+        $script:searchCloseFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $script:searchCloseFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $script:searchCloseTerminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        return -not [NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd) -and
+            $null -ne $script:searchCloseFocused -and
+            $script:searchCloseFocused.Current.ProcessId -eq $process.Id -and
+            $script:searchCloseFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and
+            $script:searchCloseTerminalHwnds -contains $script:searchCloseFocusedHwnd
+    } -Diagnostic {
+        "Expected 'Close search' Invoke to hide the search bar and return focus to a visible terminal child; " +
+        "search_visible=$([NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) " +
+        "focused=$($script:searchCloseFocusedHwnd). " +
+        (Get-AccessibilityWindowShape -Hwnd $process.MainWindowHandle) + '.'
+    }
+    $searchInvokeEvidence['Close search'] = 'hidden; terminal focus restored'
 
     $settingsCycles = @()
     $themePreviewEvidence = $null
@@ -6381,6 +6701,8 @@ try {
         docked_search = [ordered]@{
             edit = $searchEditEvidence
             toggles = $searchToggleEvidence
+            actions = $searchActionEvidence
+            action_invokes = $searchInvokeEvidence
             result_live_name = $searchResultElement.Current.Name
             result_live_setting = 'Polite'
             result_live_setting_value = [NocttyAccessibilityNative]::GetCurrentIntProperty(

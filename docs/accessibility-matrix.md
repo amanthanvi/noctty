@@ -18,12 +18,15 @@ so a stale claim cannot outlive the record.
 
 ## Current record
 
-- Release: unreleased, branch `issues/145-accessibility-uia` @ `7540fe0d`
+- Release: unreleased, branch `issues/145-accessibility-uia`
 - Windows build: 10.0.26200.9168 (Windows 11 25H2)
-- Automated UIA harness: **executed and passing** against this commit
+- Automated UIA harness: **executed and passing** — two consecutive runs
+  against a reused sandbox; the commit they ran against is pinned below
 - Narrator: **not yet measured**
 - NVDA: **measured** — NVDA 2026.1.1, portable copy, 150% scale, High
-  Contrast off, Debug build. Mixed results; see the NVDA column.
+  Contrast off, Debug build, measured at `7540fe0d`. Mixed results; see
+  the NVDA column. No product code has changed since that commit; the
+  work after it is confined to this harness and these docs.
 - JAWS: **not yet measured** (commercial licence; not installed)
 
 The "UIA assertion" column reflects
@@ -32,19 +35,27 @@ UIA tree on a real interactive Windows 11 desktop and asserts control
 types, names, patterns, and events.
 
 **Those assertions have now been executed against a live build**, on an
-interactive Windows 11 desktop at commit `7540fe0d`, and they pass. Two
-things about that run belong in the record:
+interactive Windows 11 desktop, and they pass. The first live run exposed
+two defects in the harness itself. Both are now fixed, and the record of
+them belongs here:
 
-- The harness is **not idempotent**. It leaves a saved three-pane session
-  behind in its sandbox and every subsequent run without `-ResetState`
-  fails at `inactive-output tab B creation`, because session restore makes
-  the terminal-child count four where the assertion requires two. Runs 2
-  and 3 failed this way; runs 1 (fresh sandbox) and 4 (`-ResetState`)
-  passed. Unlike `test/windows/cli-automation.ps1`, this harness never
-  writes `window-save-state = never` into its sandbox config.
-- The harness does **not** cover the docked search's Previous / Next /
-  Close buttons, although the rows below claim it asserts them. It asserts
-  the query edit, the three flag toggles and the result live region only.
+- The harness was **not idempotent**. It left a saved three-pane session
+  behind in its sandbox, so every subsequent run without `-ResetState`
+  failed at `inactive-output tab B creation`: session restore made the
+  terminal-child count four where the assertion required two. The product
+  was doing the right thing — the harness was counting a window it had not
+  built. It now writes `window-save-state = never` into its own sandbox
+  config, which gates restore as well as save, and deletes any
+  `session-state.json` an older revision left behind. Two consecutive runs
+  against a sandbox still holding the old three-pane state both pass.
+- The harness did **not** cover the docked search's Previous / Next /
+  Close buttons, although the rows below claimed it asserted them. It now
+  drives all three through UIA Invoke; see those rows for what each one
+  proves.
+
+Timeouts that turn on the shape of the window now name the expected and
+observed terminal-child counts and list the pane HWNDs, instead of only
+naming the condition that timed out.
 
 Even though it now runs, it stays a machine-readable proxy for the reader
 columns, not a replacement: it cannot prove that a reader speaks a name,
@@ -79,10 +90,10 @@ all — while the UIA tree correctly reports `TabItem` + `SelectionItem`,
 | Terminal selection | Selected text, correct active end | Executed, passes — SupportedTextSelection Single; a degenerate range at the caret when nothing is selected | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row. A selection whose endpoints fall on blank cells is reported as the caret range instead |
 | Terminal scrollbar | "Terminal scrollbar", position | Executed, passes — ControlType ScrollBar, RangeValue | not yet measured | pass — `Terminal scrollbar`, `scroll bar`, `5095` | not yet measured | Read-only through UIA; scroll with the keyboard or wheel. The element exists only once a scrollback range exists — an object-navigation sweep taken before any sustained output does not list it at all |
 | Docked search query | Edit, current query, caret and selection | Executed, passes — Text, Value, selection, focus events | not yet measured | **fail** — announced as `edit`, `blank` with **no name**; the UIA name `Search query` is never spoken. Typed characters and the value are read back correctly | not yet measured | The `Edit`-class HWND has empty window text, so the MSAA fallback yields no name |
-| Search previous / next | "Previous match" / "Next match", invokable | **Not asserted** — the harness never touches these buttons | not yet measured | **partial** — reachable, role `button` correct, spoken as `Prev match` / `Next match` (window text) rather than the UIA names `Previous match` / `Next match` | not yet measured | Reachable only by object navigation; there is no keyboard focus path |
+| Search previous / next | "Previous match" / "Next match", invokable | Executed, passes — ControlType Button, Invoke; invoking Next selects one of the n matches and invoking Previous moves off it, both reported as `n/m` | not yet measured | **partial** — reachable, role `button` correct, spoken as `Prev match` / `Next match` (window text) rather than the UIA names `Previous match` / `Next match` | not yet measured | Reachable only by object navigation; there is no keyboard focus path |
 | Search regex / case / whole word | Name plus pressed state | Executed, passes — Button, Toggle, ToggleState tracks the flag | not yet measured | **fail** — spoken as `Regex` / `Case sensitive` / `Whole word`, `button`, with **no pressed or not-pressed state**. NVDA does speak toggle state where it is exposed — it said `Start, toggle button, not pressed` for the Windows taskbar in the same session | not yet measured | `Regex` is the window text; the UIA name is `Regular expression` |
 | Search result count | "n of m" when it changes | Executed, passes — live region, polite | not yet measured | pass — announced without focus moving: `Searching`, then `2`, then `2/2` on Enter | not yet measured | Spoken as `2/2`, not the documented "n of m". Timing was prompt and did not talk over the typed characters |
-| Search close | "Close search", invokable | **Not asserted** — the harness never touches this button | not yet measured | pass — `Close search`, `button` | not yet measured | |
+| Search close | "Close search", invokable | Executed, passes — ControlType Button, Invoke; invoking it hides the docked search and returns focus to the terminal | not yet measured | pass — `Close search`, `button` | not yet measured | |
 | Command palette query | Edit, current query | Executed, passes — Text, Value, selection, focus events | not yet measured | **partial** — `Command`, `edit`, `blank`; not the documented `Command palette query` | not yet measured | Typed characters are echoed correctly |
 | Command palette list | List identity, one selected row | Executed, passes — List, Selection, SelectionItem, selected-event sender | not yet measured | **fail** — moving the selection speaks only the row label (`Accessibility`); no list role, no selected state and no position, although the UIA name of the selected row is `2 of 256: ...` | not yet measured | |
 | Host banner | Banner text when it appears or changes | Executed, passes — live region | not yet measured | pass — invoking Undo on a fresh instance spoke `Nothing to undo.` immediately, as a live region rather than a focus change | not yet measured | The banner element persists in the tree afterwards and is reachable by object navigation |
@@ -121,15 +132,15 @@ terminal with the keyboard alone.
 Automated. Intended to run on every pull request and release candidate:
 
 ```powershell
-pwsh -NoProfile -File .\test\windows\interactive-win11-accessibility.ps1 -ResetState
+pwsh -NoProfile -File .\test\windows\interactive-win11-accessibility.ps1
 ```
 
 It needs a real interactive desktop session — it drives the live UIA
 tree, so it cannot run on a headless or service-session runner.
 
-Pass `-ResetState` until the sandbox session-state defect described in
-"Current record" is fixed; without it, only the first run after a clean
-sandbox can pass.
+`-ResetState` wipes the sandbox before the run. It is no longer required —
+the harness pins `window-save-state = never` in its own sandbox config —
+but it remains the quickest way to rule the sandbox out when a run fails.
 
 Manual, per release, for each of Narrator, NVDA, and JAWS:
 
