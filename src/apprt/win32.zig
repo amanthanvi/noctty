@@ -736,6 +736,10 @@ fn applySplitWorkingDirectoryFromSource(
     return try applySplitWorkingDirectoryPath(config, candidate);
 }
 
+fn shouldInheritSplitWorkingDirectory(source_launched_ssh: bool) bool {
+    return !source_launched_ssh;
+}
+
 fn defaultIpcNamespace() []const u8 {
     return if (builtin.mode == .Debug)
         "io.github.amanthanvi.noctty-debug"
@@ -2469,7 +2473,7 @@ pub const App = struct {
             nodes[i] = switch (node) {
                 .leaf => |surface| .{
                     .pane = .{
-                        .cwd = surface.pwd,
+                        .cwd = if (surface.launched_ssh) null else surface.pwd,
                         // Never persist an SSH launch: restore would relaunch
                         // it unattended. The alias tab title goes with it, or
                         // it would stick to the local shell that replaces the
@@ -3311,7 +3315,9 @@ pub const App = struct {
                 const source = self.findSurfaceForTarget(target) orelse return false;
                 const tab_info = self.findTabForSurface(source) orelse return false;
                 const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
-                _ = try applySplitWorkingDirectoryFromSource(&config, source, self.startup_cwd);
+                if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
+                    _ = try applySplitWorkingDirectoryFromSource(&config, source, self.startup_cwd);
+                }
                 const split_direction = splitDirectionFromAction(value);
                 const surface = try self.createWindowSurface(&config, default_title, .{
                     .host_id = source.host_id,
@@ -17585,6 +17591,20 @@ fn sshProfileAlias(profile: *const windows_shell.Profile) ?[]const u8 {
     return if (alias.len > 0) alias else null;
 }
 
+fn sshAliasFromLaunchKey(launched_ssh: bool, key: ?[]const u8) ?[]const u8 {
+    if (!launched_ssh) return null;
+    const value = key orelse return null;
+    if (!std.ascii.startsWithIgnoreCase(value, "ssh:")) return null;
+    const alias = value["ssh:".len..];
+    return if (alias.len > 0) alias else null;
+}
+
+fn isAutomaticSshCommandTitle(title: []const u8) bool {
+    const base = std.fs.path.basename(title);
+    return std.ascii.eqlIgnoreCase(base, "ssh.exe") or
+        std.ascii.eqlIgnoreCase(base, "ssh");
+}
+
 const profileStatusBadgeTextLen = labels.profileStatusBadgeTextLen;
 /// Build a label for the profile dropdown menu: "Profile Name\tCtrl+Shift+N"
 const buildDropdownProfileLabel = labels.buildDropdownProfileLabel;
@@ -21340,26 +21360,11 @@ pub const Surface = struct {
         // Direct commands initially report argv[0] as their title. Keep an
         // SSH alias over that automatic value, then release it as soon as the
         // remote terminal supplies a different title.
-        if (self.launch_profile_key) |key| {
-            if (self.host) |host| {
-                if (host.profiles) |profiles| {
-                    if (profileIndexByKey(profiles, key)) |index| {
-                        const profile = &profiles[index];
-                        if (sshProfileAlias(profile)) |alias| {
-                            if (self.tab_title_override) |override| {
-                                if (std.mem.eql(u8, override, alias)) {
-                                    const command_title = switch (profile.command) {
-                                        .direct => |argv| argv.len > 0 and std.ascii.eqlIgnoreCase(title, argv[0]),
-                                        .shell => false,
-                                    };
-                                    if (!command_title) {
-                                        try appendOwnedString(alloc, &self.tab_title_override, null);
-                                        changed = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
+        if (sshAliasFromLaunchKey(self.launched_ssh, self.launch_profile_key)) |alias| {
+            if (self.tab_title_override) |override| {
+                if (std.mem.eql(u8, override, alias) and !isAutomaticSshCommandTitle(title)) {
+                    try appendOwnedString(alloc, &self.tab_title_override, null);
+                    changed = true;
                 }
             }
         }
@@ -28131,6 +28136,40 @@ test "win32 ssh hardening also holds on the split launch path" {
     try std.testing.expect(clone.@"working-directory".? == .path);
     try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
     try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
+}
+
+test "win32 ssh split and session state drop remote cwd" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(!shouldInheritSplitWorkingDirectory(true));
+    try std.testing.expect(shouldInheritSplitWorkingDirectory(false));
+
+    var surface: Surface = undefined;
+    surface.pwd = "C:\\remote-controlled";
+    surface.launched_ssh = true;
+    surface.launch_profile_key = null;
+    surface.title_override = null;
+    surface.tab_title_override = null;
+    var tab = try Tab.init(std.testing.allocator, 1, &surface);
+    defer tab.deinit();
+
+    const layout = try App.buildSessionLayout(std.testing.allocator, &tab);
+    defer std.testing.allocator.free(layout.nodes);
+    try std.testing.expect(layout.nodes[0].pane.cwd == null);
+}
+
+test "win32 ssh title identity survives profile refresh" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "production",
+        sshAliasFromLaunchKey(true, "ssh:production").?,
+    );
+    try std.testing.expect(sshAliasFromLaunchKey(false, "ssh:production") == null);
+    try std.testing.expect(sshAliasFromLaunchKey(true, "cmd.exe") == null);
+    try std.testing.expect(isAutomaticSshCommandTitle("C:\\Windows\\System32\\OpenSSH\\ssh.exe"));
+    try std.testing.expect(isAutomaticSshCommandTitle("ssh"));
+    try std.testing.expect(!isAutomaticSshCommandTitle("prod.example.com"));
 }
 
 test "win32 session restore refuses ssh profiles regardless of key case" {

@@ -99,8 +99,9 @@ const LoadContext = struct {
     fn parseIncludes(self: *LoadContext, value: []const u8, depth: u8) Allocator.Error!void {
         if (depth >= 1) return;
 
-        var paths: IncludeArgIterator = .{ .value = value };
-        while (paths.next()) |raw_path| {
+        var paths: SshArgIterator = .{ .value = value };
+        while (try paths.next(self.alloc)) |raw_path| {
+            defer self.alloc.free(raw_path);
             if (raw_path.len == 0) continue;
             if (hasGlobMetacharacter(raw_path)) continue;
             // This read is synchronous on the UI thread and runs on every
@@ -135,79 +136,42 @@ const Directive = struct {
     value: []const u8,
 };
 
-/// `Include` arguments are whitespace separated, except that a leading `"`
-/// groups one path containing spaces (OpenSSH `strdelim`). A plain whitespace
-/// split would shred `Include "C:\Users\Jane Doe\.ssh\work hosts"` into
-/// nonexistent paths and silently drop every host in that file.
-///
-/// Deliberately NOT `AliasIterator`, which exists to find the boundaries of
-/// `Host` patterns: it leaves the quote bytes in the token (harmless there,
-/// since `isConnectableAlias` rejects quotes outright) and treats `\` as an
-/// escape, which would corrupt every Windows path separator here. `'` is not
-/// a grouping quote for the same reason -- OpenSSH does not treat it as one,
-/// and stripping it would break a literal path such as `C:\Bob's\config`.
-const IncludeArgIterator = struct {
+/// Tokenizes the argument portion of an OpenSSH configuration directive.
+/// Double quotes may begin anywhere in an argument, are removed, and group
+/// whitespace until the matching quote. An unterminated quote consumes the
+/// remainder, matching OpenSSH's `strdelim` behavior. Backslashes and single
+/// quotes remain literal so Windows paths are not corrupted.
+const SshArgIterator = struct {
     value: []const u8,
     index: usize = 0,
+    backslash_escape: bool = false,
 
-    fn next(self: *IncludeArgIterator) ?[]const u8 {
+    fn next(self: *SshArgIterator, alloc: Allocator) Allocator.Error!?[]u8 {
         while (self.index < self.value.len and
             (self.value[self.index] == ' ' or self.value[self.index] == '\t')) : (self.index += 1)
         {}
         if (self.index >= self.value.len) return null;
 
-        if (self.value[self.index] == '"') {
-            const start = self.index + 1;
-            const end = std.mem.indexOfScalarPos(u8, self.value, start, '"') orelse {
-                // Unterminated quote. OpenSSH rejects the whole line, so
-                // consume the remainder rather than guess at a path.
-                self.index = self.value.len;
-                return null;
-            };
-            self.index = end + 1;
-            return self.value[start..end];
-        }
-
-        const start = self.index;
-        while (self.index < self.value.len and
-            self.value[self.index] != ' ' and
-            self.value[self.index] != '\t') : (self.index += 1)
-        {}
-        return self.value[start..self.index];
-    }
-};
-
-const AliasIterator = struct {
-    value: []const u8,
-    index: usize = 0,
-
-    fn next(self: *AliasIterator) ?[]const u8 {
-        while (self.index < self.value.len and
-            (self.value[self.index] == ' ' or self.value[self.index] == '\t')) : (self.index += 1)
-        {}
-        if (self.index >= self.value.len) return null;
-
-        const start = self.index;
-        var quote: ?u8 = null;
+        var token: std.ArrayList(u8) = .empty;
+        errdefer token.deinit(alloc);
+        var quoted = false;
         while (self.index < self.value.len) {
             const c = self.value[self.index];
-            if (c == '\\' and self.index + 1 < self.value.len) {
+            if (self.backslash_escape and c == '\\' and self.index + 1 < self.value.len) {
+                try token.append(alloc, self.value[self.index + 1]);
                 self.index += 2;
                 continue;
             }
-            if (c == '\'' or c == '"') {
-                if (quote == null) {
-                    quote = c;
-                } else if (quote.? == c) {
-                    quote = null;
-                }
+            if (c == '"') {
+                quoted = !quoted;
                 self.index += 1;
                 continue;
             }
-            if (quote == null and (c == ' ' or c == '\t')) break;
+            if (!quoted and (c == ' ' or c == '\t')) break;
+            try token.append(alloc, c);
             self.index += 1;
         }
-        return self.value[start..self.index];
+        return try token.toOwnedSlice(alloc);
     }
 };
 
@@ -241,8 +205,9 @@ fn parseInto(
         if (!std.ascii.eqlIgnoreCase(directive.keyword, "host")) continue;
 
         in_match = false;
-        var aliases: AliasIterator = .{ .value = directive.value };
-        while (aliases.next()) |alias| {
+        var aliases: SshArgIterator = .{ .value = directive.value, .backslash_escape = true };
+        while (try aliases.next(alloc)) |alias| {
+            defer alloc.free(alias);
             if (hosts.items.len >= max_hosts) break;
             if (!isConnectableAlias(alias)) continue;
             // Repeated stanzas for one alias are legal ssh_config, but a
@@ -258,7 +223,7 @@ fn parseInto(
 fn parseDirective(raw_line: []const u8) ?Directive {
     var line = std.mem.trim(u8, raw_line, " \t\r");
     if (line.len == 0 or line[0] == '#') return null;
-    if (std.mem.indexOfScalar(u8, line, '#')) |comment_start| {
+    if (sshCommentStart(line)) |comment_start| {
         line = std.mem.trimRight(u8, line[0..comment_start], " \t\r");
     }
     if (line.len == 0) return null;
@@ -284,6 +249,22 @@ fn parseDirective(raw_line: []const u8) ?Directive {
         .keyword = line[0..keyword_end],
         .value = std.mem.trimRight(u8, line[value_start..], " \t\r"),
     };
+}
+
+fn sshCommentStart(line: []const u8) ?usize {
+    var quoted = false;
+    for (line, 0..) |c, i| {
+        if (c == '"') {
+            quoted = !quoted;
+            continue;
+        }
+        if (c == '#' and !quoted and
+            (i == 0 or line[i - 1] == ' ' or line[i - 1] == '\t'))
+        {
+            return i;
+        }
+    }
+    return null;
 }
 
 fn containsAlias(hosts: []const Host, alias: []const u8) bool {
@@ -404,12 +385,13 @@ test "ssh config parses concrete aliases and ignores non-Host directives" {
     );
     defer deinitHosts(alloc, hosts);
 
-    try testing.expectEqual(@as(usize, 5), hosts.len);
+    try testing.expectEqual(@as(usize, 6), hosts.len);
     try testing.expectEqualStrings("alpha", hosts[0].alias);
     try testing.expectEqualStrings("beta", hosts[1].alias);
-    try testing.expectEqualStrings("gamma", hosts[2].alias);
-    try testing.expectEqualStrings("delta", hosts[3].alias);
-    try testing.expectEqualStrings("epsilon", hosts[4].alias);
+    try testing.expectEqualStrings("quoted", hosts[2].alias);
+    try testing.expectEqualStrings("gamma", hosts[3].alias);
+    try testing.expectEqualStrings("delta", hosts[4].alias);
+    try testing.expectEqualStrings("epsilon", hosts[5].alias);
 }
 
 test "ssh config rejects non-ascii aliases that would reach a UTF-16 conversion" {
@@ -538,25 +520,55 @@ test "ssh config loads one include level and resolves supported paths" {
     try testing.expectEqualStrings("root", hosts[3].alias);
 }
 
-test "ssh config include tokenizer keeps quoted paths whole" {
+test "ssh config argument tokenizer follows OpenSSH quote boundaries" {
     const testing = std.testing;
+    const alloc = testing.allocator;
 
-    var quoted: IncludeArgIterator = .{ .value = "\"C:\\Users\\Jane Doe\\.ssh\\work hosts\" plain.conf" };
-    try testing.expectEqualStrings("C:\\Users\\Jane Doe\\.ssh\\work hosts", quoted.next().?);
-    try testing.expectEqualStrings("plain.conf", quoted.next().?);
-    try testing.expect(quoted.next() == null);
+    var quoted: SshArgIterator = .{ .value = "\"C:\\Users\\Jane Doe\\.ssh\\work hosts\" plain.conf" };
+    const quoted_path = (try quoted.next(alloc)).?;
+    defer alloc.free(quoted_path);
+    try testing.expectEqualStrings("C:\\Users\\Jane Doe\\.ssh\\work hosts", quoted_path);
+    const plain_path = (try quoted.next(alloc)).?;
+    defer alloc.free(plain_path);
+    try testing.expectEqualStrings("plain.conf", plain_path);
+    try testing.expect((try quoted.next(alloc)) == null);
 
     // Backslashes stay verbatim: they are path separators, not escapes.
-    var backslashes: IncludeArgIterator = .{ .value = "C:\\Bob's\\config  ~/.ssh/x.conf" };
-    try testing.expectEqualStrings("C:\\Bob's\\config", backslashes.next().?);
-    try testing.expectEqualStrings("~/.ssh/x.conf", backslashes.next().?);
-    try testing.expect(backslashes.next() == null);
+    var backslashes: SshArgIterator = .{ .value = "C:\\Bob's\\config  ~/.ssh/x.conf" };
+    const first_backslash = (try backslashes.next(alloc)).?;
+    defer alloc.free(first_backslash);
+    try testing.expectEqualStrings("C:\\Bob's\\config", first_backslash);
+    const second_backslash = (try backslashes.next(alloc)).?;
+    defer alloc.free(second_backslash);
+    try testing.expectEqualStrings("~/.ssh/x.conf", second_backslash);
+    try testing.expect((try backslashes.next(alloc)) == null);
 
-    var unterminated: IncludeArgIterator = .{ .value = "\"C:\\never closed" };
-    try testing.expect(unterminated.next() == null);
+    var embedded: SshArgIterator = .{ .value = "C:\\base\" dir\\hosts.conf\"" };
+    const embedded_path = (try embedded.next(alloc)).?;
+    defer alloc.free(embedded_path);
+    try testing.expectEqualStrings("C:\\base dir\\hosts.conf", embedded_path);
 
-    var empty: IncludeArgIterator = .{ .value = "   \t " };
-    try testing.expect(empty.next() == null);
+    var unterminated: SshArgIterator = .{ .value = "\"C:\\never closed" };
+    const unterminated_path = (try unterminated.next(alloc)).?;
+    defer alloc.free(unterminated_path);
+    try testing.expectEqualStrings("C:\\never closed", unterminated_path);
+
+    var empty: SshArgIterator = .{ .value = "   \t " };
+    try testing.expect((try empty.next(alloc)) == null);
+}
+
+test "ssh config preserves hashes and unquotes host aliases" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const hosts = try parse(
+        alloc,
+        "Host prod#bastion \"production\" # trailing comment\n",
+    );
+    defer deinitHosts(alloc, hosts);
+
+    try testing.expectEqual(@as(usize, 2), hosts.len);
+    try testing.expectEqualStrings("prod#bastion", hosts[0].alias);
+    try testing.expectEqualStrings("production", hosts[1].alias);
 }
 
 test "ssh config loads a quoted include whose filename contains spaces" {
@@ -581,6 +593,28 @@ test "ssh config loads a quoted include whose filename contains spaces" {
     try testing.expectEqualStrings("spaced", hosts[0].alias);
     try testing.expectEqualStrings("plain", hosts[1].alias);
     try testing.expectEqualStrings("root", hosts[2].alias);
+}
+
+test "ssh config loads a quoted include whose filename contains a hash" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".ssh");
+    try tmp.dir.writeFile(.{ .sub_path = ".ssh/work#hosts.conf", .data = "Host hashed\n" });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".ssh/config",
+        .data = "Include \"work#hosts.conf\" # trailing comment\nHost root\n",
+    });
+
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+    const hosts = try loadFromHome(alloc, home);
+    defer deinitHosts(alloc, hosts);
+
+    try testing.expectEqual(@as(usize, 2), hosts.len);
+    try testing.expectEqualStrings("hashed", hosts[0].alias);
+    try testing.expectEqualStrings("root", hosts[1].alias);
 }
 
 test "ssh config recognizes drive-letter roots for the remote-drive check" {

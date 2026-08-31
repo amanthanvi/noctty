@@ -1525,7 +1525,9 @@ class: ?[:0]const u8 = null,
 @"working-directory": ?WorkingDirectory = null,
 
 /// Read `%USERPROFILE%\.ssh\config` read-only and list only its host aliases;
-/// no keys or secrets are read, and no other keyword in the file is used.
+/// no keys or secrets are read. Up to 16 concrete, non-network `Include`
+/// files one level deep are also scanned for host aliases; every other
+/// keyword is ignored.
 ///
 /// Activating an entry runs `ssh <alias>`, which applies that alias's own
 /// configuration — including any `ProxyCommand` it specifies. Set this to
