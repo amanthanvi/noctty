@@ -2898,13 +2898,18 @@ pub const App = struct {
                         // `initial-window=false` starts without a primary
                         // surface. The request stays pending until one exists.
                         if (self.hosts.items.len > 0 and
-                            jump_list.takeStartupProfileDiscovery())
+                            jump_list.startupProfileDiscoveryPending())
                         {
                             const host = self.hosts.items[0];
                             if (host.profiles == null) {
-                                _ = host.ensureProfiles() catch |err| {
+                                _ = host.ensureProfiles() catch |err| retry: {
                                     log.warn("jump list deferred profile discovery failed err={}", .{err});
+                                    jump_list.scheduleIfStartupPending();
+                                    break :retry false;
                                 };
+                            }
+                            if (host.profiles != null) {
+                                jump_list.completeStartupProfileDiscovery();
                             }
                         }
                         continue;
