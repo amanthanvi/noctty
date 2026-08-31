@@ -295,8 +295,8 @@
             <h3>Run every check at once</h3>
             <p>
               The repository verifier downloads the complete release, checks
-              every GitHub digest and checksum entry, validates eight embedded
-              PE signatures, and requires a single signer whose SPKI matches the
+              every GitHub digest and checksum entry, validates every embedded
+              PE signature, and requires a single signer whose SPKI matches the
               key pinned into the updater. The environment variable is what
               makes it accept today's self-signed certificate; without it, the
               script fails closed.
