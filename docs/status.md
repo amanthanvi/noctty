@@ -85,7 +85,7 @@ Win32-validated VT protocol coverage is tracked in
   frame, frame time, memory per pane, idle CPU/GPU, and ConPTY round
   trip. CI gates the headless throughput floor; interactive thresholds
   are provisional and inactive.
-- The measured same-machine baseline, methodology, proxies, and the
+- The quarantined historical same-machine baseline, methodology, proxies, and the
   camera/photodiode procedure for physical key-to-pixel latency are in
   [windows-benchmark-methodology.md](windows-benchmark-methodology.md).
   Cross-terminal comparisons are not published: competitor adapters

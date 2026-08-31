@@ -67,6 +67,8 @@ if ($Gate -and $ProfileThroughput) {
     throw '-ProfileThroughput is diagnostic-only and cannot be combined with -Gate'
 }
 
+$script:BenchWindowsReadBufferKib = 64
+
 $harness = Initialize-InteractiveWin11Sandbox `
     -RepoRoot $repoRoot `
     -SandboxName "bench-$Target" `
@@ -1065,13 +1067,13 @@ function Get-BenchMemoryStageSamples {
                     (Test-BenchIntegralNumber -Value $record.wgl_aux_buffers) -and
                     [uint64] $record.wgl_aux_buffers -le 255 -and
                     $record.wgl_selection_source -is [string] -and
-                    $record.wgl_selection_source -cin @('classic', 'ext_srgb', 'arb_ext_colorspace_srgb') -and
+                    $record.wgl_selection_source -cin @('classic', 'ext_srgb', 'arb_ext_colorspace_srgb', 'arb_srgb') -and
                     $record.wgl_srgb_capable -is [System.Boolean] -and
                     $record.wgl_multisample_query_supported -is [System.Boolean]
                 if (-not $validPixelFormat) {
                     throw "surface $surfaceId memory snapshot '$stage' has invalid selected WGL pixel format provenance"
                 }
-                if ($record.wgl_selection_source -cin @('ext_srgb', 'arb_ext_colorspace_srgb')) {
+                if ($record.wgl_selection_source -cin @('ext_srgb', 'arb_ext_colorspace_srgb', 'arb_srgb')) {
                     $validExtendedProvenance =
                         $record.wgl_srgb_capable -and
                         (Test-BenchIntegralNumber -Value $record.wgl_total_format_count) -and
@@ -1791,13 +1793,13 @@ if ($script:adapter.Installed) {
                         finally { Stop-BenchTarget -Run $run }
                     }
                 }
-                $throughputDetails = [ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }) }
+                $throughputDetails = [ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }) }
                 if ($ProfileThroughput) { $throughputDetails.diagnostic_profiles = $diagnosticProfiles.ToArray() }
                 $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Samples $samples.ToArray() -Details $throughputDetails))
             }
             catch {
                 $measurementErrors.Add("$($workload.Metric): $($_.Exception.Message)")
-                $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Status error -Details ([ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }); error = $_.Exception.Message })))
+                $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Status error -Details ([ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }); error = $_.Exception.Message })))
             }
         }
         if ($frameTimeSamples.Count -gt 0) {

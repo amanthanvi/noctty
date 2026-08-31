@@ -33,6 +33,9 @@ foreach ($threshold in $thresholds) {
     if ($threshold.active) {
         throw "Benchmark threshold '$name' is active; no interactive budget has been reviewed yet."
     }
+    if (-not $threshold.provisional) {
+        throw "Benchmark threshold '$name' must be provisional."
+    }
 }
 
 Invoke-ContractTable -Contracts @(

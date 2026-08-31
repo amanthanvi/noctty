@@ -23519,11 +23519,6 @@ pub const Surface = struct {
         try self.core_surface.draw();
     }
 
-    fn noteRendererDrawRequest(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.renderer_draw_request_count.fetchAdd(1, .acq_rel);
-    }
-
     pub fn noteRendererWakeupCallback(self: *Surface) void {
         self.render_trace.noteRendererWakeupCallback();
     }
@@ -23532,30 +23527,20 @@ pub const Surface = struct {
         self.render_trace.noteRendererFollowupCallback();
     }
 
-    fn noteRendererUpdateFrame(
-        self: *RenderTrace,
-        process_output_generation: u64,
-        process_output_bytes: u64,
-        process_output_tick_ms: u64,
-        benchmark_end_marker_generation: u64,
-        benchmark_end_marker_output_bytes: u64,
+    pub fn noteRendererUpdateFrame(
+        self: *Surface,
+        state: *rendererpkg.State,
         cursor_blinking: bool,
     ) void {
-        if (!self.enabled()) return;
-        self.renderer_process_output_generation.store(process_output_generation, .release);
-        self.renderer_process_output_bytes.store(process_output_bytes, .release);
-        self.renderer_process_output_tick_ms.store(process_output_tick_ms, .release);
-        self.renderer_benchmark_end_marker_generation.store(benchmark_end_marker_generation, .release);
-        self.renderer_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
-        self.renderer_cursor_blinking.store(cursor_blinking, .release);
-        _ = self.noteTimedCounter(
-            &self.renderer_update_frame_count,
-            &self.last_renderer_update_tick_ms,
-            &self.max_renderer_update_gap_ms,
-            &self.max_renderer_update_gap_ended_at_ms,
-            &self.first_renderer_update_at_ms,
-            null,
-            sys.GetTickCount64(),
+        state.mutex.lock();
+        defer state.mutex.unlock();
+        self.render_trace.noteRendererUpdateFrame(
+            state.process_output_generation,
+            state.process_output_bytes,
+            state.last_process_output_tick_ms,
+            state.benchmark_end_marker_generation,
+            state.benchmark_end_marker_output_bytes,
+            cursor_blinking,
         );
     }
 
@@ -26060,9 +26045,10 @@ pub const Surface = struct {
         // the last thing before the Surface is freed, and in particular
         // after `destroyGL` emits its teardown stages.
         //
-        // The `Surface` allocation itself is unavoidably still live at this
-        // point: the snapshot cannot outlive the trace that records it. That
-        // one allocation is the whole remaining gap in the boundary.
+        // The Surface and memory-stage trace path are both still live here
+        // and are freed immediately below. Both predate `surface_begin`, so
+        // stage deltas cancel them; the external pane-memory metric still
+        // includes one trace-path allocation per traced surface.
         self.noteBenchmarkMemoryStage(.surface_destroy_complete, null);
         self.memory_stage_trace.deinit(alloc);
         alloc.destroy(self);

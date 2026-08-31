@@ -675,7 +675,7 @@
         },
         "windows_read_buffer_kib": {
           "type": "integer",
-          "enum": [16, 64]
+          "const": 64
         },
         "diagnostic_profiles": {
           "type": "array",
@@ -1209,7 +1209,7 @@
         },
         "wgl_selection_source": {
           "type": ["string", "null"],
-          "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", null]
+          "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb", null]
         },
         "wgl_srgb_capable": { "type": ["boolean", "null"] },
         "wgl_multisample_query_supported": { "type": ["boolean", "null"] },
@@ -1294,7 +1294,7 @@
               },
               "wgl_selection_source": {
                 "type": "string",
-                "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb"]
+                "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb"]
               },
               "wgl_srgb_capable": { "type": "boolean" },
               "wgl_multisample_query_supported": { "type": "boolean" }
@@ -1333,7 +1333,7 @@
           "if": {
             "properties": {
               "wgl_selection_source": {
-                "enum": ["ext_srgb", "arb_ext_colorspace_srgb"]
+                "enum": ["ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb"]
               }
             },
             "required": ["wgl_selection_source"]

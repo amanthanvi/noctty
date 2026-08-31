@@ -278,6 +278,7 @@ fn parseArgs(raw: []const []const u8) !Args {
             std.log.warn("bench:palette-match: unknown arg '{s}' — ignoring", .{arg});
         }
     }
+    if (out.keystrokes == 0) return error.InvalidArgument;
     return out;
 }
 
@@ -290,10 +291,21 @@ fn printHelp() !void {
         \\
         \\Flags:
         \\  --entries=N        Synthetic snapshot size; padded from a seed catalogue (default 500).
-        \\  --keystrokes=N     Queries timed (default 1000).
+        \\  --keystrokes=N     Queries timed (default 1000). Must be at least 1.
         \\  --budget-us=N      p99 budget in microseconds (default 1000). Exits non-zero on regression.
         \\  -h, --help         Print this help.
         \\
     );
     try stdout.flush();
+}
+
+test "palette match rejects a zero keystroke count" {
+    try std.testing.expectError(
+        error.InvalidArgument,
+        parseArgs(&.{ "bench-palette-match", "--keystrokes=0" }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try parseArgs(&.{ "bench-palette-match", "--keystrokes=1" })).keystrokes,
+    );
 }

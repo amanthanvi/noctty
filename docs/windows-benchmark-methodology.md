@@ -9,7 +9,8 @@ build mode, run count, seed, endpoint, and observer disclosures match.
 
 Recorded 2026-08-29 with Zig 0.15.2, `ReleaseFast`, Windows build 26200, an AMD
 Ryzen 9 9900X (12 physical / 24 logical cores), 4,194,304-byte payloads, seed
-121, 45 rows, 140 columns, and seven runs per workload. These
+121, 45 rows, and 140 columns. The dev figures use three runs per workload;
+the runner figures and CI gate use five. These
 parser/terminal-state results do not exercise ConPTY, the renderer, OpenGL,
 DWM, or the display.
 
@@ -181,10 +182,13 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   referencing it, deinitializes the owning tab and its split tree when this
   was the tab's last pane, and reconciles pending shell state. Sampling
   before it would draw the private-memory boundary in the wrong place and
-  misattribute those still-held bytes to allocator or driver behaviour. The
-  `Surface` allocation itself is necessarily still live at that point, since
-  the snapshot cannot outlive the trace recording it; that single allocation
-  is the whole remaining gap in the boundary.
+  misattribute those still-held bytes to allocator or driver behaviour. Two
+  per-surface allocations are still live at that point and are freed
+  immediately afterward: the `Surface` itself, since the snapshot cannot
+  outlive the object recording it, and the absolutized trace path owned by
+  `MemoryStageTrace`. Both predate `surface_begin`, so stage deltas cancel
+  them. The external headline pane-memory metric still includes the trace
+  path allocation, which its observer-scope disclosure calls out.
   The stage list is exactly the set of boundaries the runtime actually
   emits: `surface_begin`, `child_hwnd_created`, `gl_context_created`,
   `opengl_functions_loaded`, `renderer_initialized`, `terminal_initialized`,

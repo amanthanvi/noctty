@@ -852,6 +852,11 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         update.cursor_blinking
     else
         self.cursorShouldBlink();
+    if (frame_update != null) {
+        if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
+            self.surface.noteRendererUpdateFrame(self.state, cursor_blinking);
+        }
+    }
     if (!cursor_blinking) self.flags.cursor_blink_visible = true;
     if (self.flags.focused and cursor_blinking) {
         self.armCursorTimerIfDead(cursorBlinkInterval());

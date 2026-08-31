@@ -2106,5 +2106,5 @@ test "addGhosttyBinToPath prepends existing windows entry when not first" {
 }
 
 test "Windows PTY read batches amortize high-volume output" {
-    try std.testing.expect(WINDOWS_READ_BUF_SIZE >= 64 * 1024);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), WINDOWS_READ_BUF_SIZE);
 }
