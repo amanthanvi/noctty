@@ -18,12 +18,12 @@ so a stale claim cannot outlive the record.
 
 ## Current record
 
-- Release: unreleased (`main`)
-- Windows build: not yet recorded
-- Automated UIA harness: **not yet executed** with the current assertions
+- Release: unreleased, branch `issues/145-accessibility-uia` @ `7540fe0d`
+- Windows build: 10.0.26200.9168 (Windows 11 25H2)
+- Automated UIA harness: **executed and passing** against this commit
 - Narrator: **not yet measured**
-- NVDA: **not yet measured** (not installed on any noctty development or
-  CI machine)
+- NVDA: **measured** — NVDA 2026.1.1, portable copy, 150% scale, High
+  Contrast off, Debug build. Mixed results; see the NVDA column.
 - JAWS: **not yet measured** (commercial licence; not installed)
 
 The "UIA assertion" column reflects
@@ -31,37 +31,75 @@ The "UIA assertion" column reflects
 UIA tree on a real interactive Windows 11 desktop and asserts control
 types, names, patterns, and events.
 
-**Those assertions have never been executed against a live build.** They
-were written alongside the providers and are checked into the harness,
-but the interactive lane has not been run since, so the column records
-what is asserted, not what has been observed. Treat every row as
-unverified until the first run lands and this paragraph is replaced.
+**Those assertions have now been executed against a live build**, on an
+interactive Windows 11 desktop at commit `7540fe0d`, and they pass. Two
+things about that run belong in the record:
 
-Even once it does run, it stays a machine-readable proxy for the reader
+- The harness is **not idempotent**. It leaves a saved three-pane session
+  behind in its sandbox and every subsequent run without `-ResetState`
+  fails at `inactive-output tab B creation`, because session restore makes
+  the terminal-child count four where the assertion requires two. Runs 2
+  and 3 failed this way; runs 1 (fresh sandbox) and 4 (`-ResetState`)
+  passed. Unlike `test/windows/cli-automation.ps1`, this harness never
+  writes `window-save-state = never` into its sandbox config.
+- The harness does **not** cover the docked search's Previous / Next /
+  Close buttons, although the rows below claim it asserts them. It asserts
+  the query edit, the three flag toggles and the result live region only.
+
+Even though it now runs, it stays a machine-readable proxy for the reader
 columns, not a replacement: it cannot prove that a reader speaks a name,
 speaks it once, speaks it in a useful order, or does not talk over
-itself.
+itself. The NVDA pass below demonstrates exactly that gap — the UIA tree
+is correct for the tab items and chrome buttons and NVDA still does not
+speak it.
+
+### What the NVDA pass found, in one paragraph
+
+NVDA speaks noctty's UIA providers for the **custom** window classes
+(`noctty.win32`, `noctty.win32.scrollbar`, `noctty.win32.palette_list`)
+and for `Static`, and ignores them for the standard Win32 **`Button`** and
+**`Edit`** classes, where it falls back to the MSAA/window-text
+implementation. Every wrong announcement measured is on a `Button` or
+`Edit` HWND; every correct one is on a custom class or `Static`. So the
+tab items announce as `button` with the selected tab distinguished only by
+a literal `*` in the label, the new-tab and overflow buttons announce as
+their painted glyphs `+` and a chevron, the three search flags lose their
+pressed state, and the docked search query edit announces with no name at
+all — while the UIA tree correctly reports `TabItem` + `SelectionItem`,
+`New tab`, `More tabs`, `Regular expression` and `Search query`.
 
 | Widget | Expected announcement | UIA assertion | Narrator | NVDA | JAWS | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Host window | Window, current title | Asserted, not yet executed — ControlType Window | not yet measured | not yet measured | not yet measured | Name follows live title changes |
-| Tab strip | "Tabs", Selection container | Asserted, not yet executed — ControlType Tab, Selection | not yet measured | not yet measured | not yet measured | Invisible sibling element spanning the strip rect; the tab buttons are not its HWND children |
-| Tab | Tab label, "selected" for the active tab | Asserted, not yet executed — ControlType TabItem, SelectionItem, exactly one selected | not yet measured | not yet measured | not yet measured | Selection and name changes raise property events |
-| New tab button | "New tab", invokable | Asserted, not yet executed — ControlType Button, Invoke | not yet measured | not yet measured | not yet measured | Painted glyph stays "+" |
-| Tab overflow button | "More tabs", invokable | Asserted, not yet executed — ControlType Button, Invoke | not yet measured | not yet measured | not yet measured | Painted glyph stays a chevron |
-| Terminal pane | Terminal text, current line, caret position | Asserted, not yet executed — TextPattern, TextPattern2, FindText, line units, bounding rectangles | not yet measured | not yet measured | not yet measured | Bounded to 500 history rows plus one viewport. The window follows the viewport, so scrolling farther back than the budget drops the active screen from the snapshot and reports the caret at the document end |
-| Terminal selection | Selected text, correct active end | Asserted, not yet executed — SupportedTextSelection Single; a degenerate range at the caret when nothing is selected | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row. A selection whose endpoints fall on blank cells is reported as the caret range instead |
-| Terminal scrollbar | "Terminal scrollbar", position | Asserted, not yet executed — ControlType ScrollBar, RangeValue | not yet measured | not yet measured | not yet measured | Read-only through UIA; scroll with the keyboard or wheel |
-| Docked search query | Edit, current query, caret and selection | Asserted, not yet executed — Text, Value, selection, focus events | not yet measured | not yet measured | not yet measured | |
-| Search previous / next | "Previous match" / "Next match", invokable | Asserted, not yet executed — Button, Invoke | not yet measured | not yet measured | not yet measured | |
-| Search regex / case / whole word | Name plus pressed state | Asserted, not yet executed — Button, Toggle, ToggleState tracks the flag | not yet measured | not yet measured | not yet measured | |
-| Search result count | "n of m" when it changes | Asserted, not yet executed — live region, polite | not yet measured | not yet measured | not yet measured | Announcement timing is a reader behaviour and needs measurement |
-| Search close | "Close search", invokable | Asserted, not yet executed — Button, Invoke | not yet measured | not yet measured | not yet measured | |
-| Command palette query | Edit, current query | Asserted, not yet executed — Text, Value, selection, focus events | not yet measured | not yet measured | not yet measured | |
-| Command palette list | List identity, one selected row | Asserted, not yet executed — List, Selection, SelectionItem, selected-event sender | not yet measured | not yet measured | not yet measured | |
-| Host banner | Banner text when it appears or changes | Asserted, not yet executed — live region | not yet measured | not yet measured | not yet measured | |
-| Settings sections | Section name, selected state | Asserted, not yet executed — RadioButton, SelectionItem, Selection | not yet measured | not yet measured | not yet measured | |
-| Settings controls | Name, role, value | Partial, not yet executed — one Value edit, several Invoke buttons, visible name and control-type inventory | not yet measured | not yet measured | not yet measured | Generic Toggle and ExpandCollapse coverage is not asserted yet |
+| Host window | Window, current title | Executed, passes — ControlType Window | not yet measured | pass — `[2/2] C:\WINDOWS\system32\cmd.exe`, `window` | not yet measured | Name follows live title changes. Tab position reaches the user only through this title |
+| Tab strip | "Tabs", Selection container | Executed, passes — ControlType Tab, Selection | not yet measured | pass — `Tabs`, `tab control` | not yet measured | Invisible sibling element spanning the strip rect; the tab buttons are not its HWND children |
+| Tab | Tab label, "selected" for the active tab | Executed, passes — ControlType TabItem, SelectionItem, exactly one selected | not yet measured | **fail** — spoken as `1: C:\WINDOWS\system32\c...`, **`button`**, never `tab`; the active tab is distinguished only by a literal `*` in the label, not by a spoken selected state | not yet measured | The UIA tree is correct (TabItem + SelectionItem). NVDA reads the underlying `Button`-class HWND instead. Ctrl+PageUp / Ctrl+PageDown announce only the terminal — no tab, no selection, no "n of m" |
+| New tab button | "New tab", invokable | Executed, passes — ControlType Button, Invoke | not yet measured | **partial** — role `button` correct, name spoken as the painted glyph `+` instead of `New tab` | not yet measured | UIA name is `New tab`; the `Button` HWND's window text is `+`, and that is what NVDA speaks |
+| Tab overflow button | "More tabs", invokable | Executed, passes — ControlType Button, Invoke | not yet measured | **partial** — role `button` correct, name spoken as the painted chevron glyph (unreadable) instead of `More tabs` | not yet measured | Same window-text cause as the new tab button |
+| Terminal pane | Terminal text, current line, caret position | Executed, passes — TextPattern, TextPattern2, FindText, line units, bounding rectangles | not yet measured | **partial** — `Terminal: <title>`, `text`, `focused`, `Read-only terminal text`; text and command output are read as they arrive and the caret line stays truthful while scrolled back, but output and the following prompt are spoken as one run-together utterance and the review cursor does not follow the scrolled-back viewport | not yet measured | Bounded to 500 history rows plus one viewport. The window follows the viewport, so scrolling farther back than the budget drops the active screen from the snapshot and reports the caret at the document end. Bulk output collapses into one utterance plus repeated `terminal output omitted` throttle messages |
+| Terminal selection | Selected text, correct active end | Executed, passes — SupportedTextSelection Single; a degenerate range at the caret when nothing is selected | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row. A selection whose endpoints fall on blank cells is reported as the caret range instead |
+| Terminal scrollbar | "Terminal scrollbar", position | Executed, passes — ControlType ScrollBar, RangeValue | not yet measured | pass — `Terminal scrollbar`, `scroll bar`, `5095` | not yet measured | Read-only through UIA; scroll with the keyboard or wheel. The element exists only once a scrollback range exists — an object-navigation sweep taken before any sustained output does not list it at all |
+| Docked search query | Edit, current query, caret and selection | Executed, passes — Text, Value, selection, focus events | not yet measured | **fail** — announced as `edit`, `blank` with **no name**; the UIA name `Search query` is never spoken. Typed characters and the value are read back correctly | not yet measured | The `Edit`-class HWND has empty window text, so the MSAA fallback yields no name |
+| Search previous / next | "Previous match" / "Next match", invokable | **Not asserted** — the harness never touches these buttons | not yet measured | **partial** — reachable, role `button` correct, spoken as `Prev match` / `Next match` (window text) rather than the UIA names `Previous match` / `Next match` | not yet measured | Reachable only by object navigation; there is no keyboard focus path |
+| Search regex / case / whole word | Name plus pressed state | Executed, passes — Button, Toggle, ToggleState tracks the flag | not yet measured | **fail** — spoken as `Regex` / `Case sensitive` / `Whole word`, `button`, with **no pressed or not-pressed state**. NVDA does speak toggle state where it is exposed — it said `Start, toggle button, not pressed` for the Windows taskbar in the same session | not yet measured | `Regex` is the window text; the UIA name is `Regular expression` |
+| Search result count | "n of m" when it changes | Executed, passes — live region, polite | not yet measured | pass — announced without focus moving: `Searching`, then `2`, then `2/2` on Enter | not yet measured | Spoken as `2/2`, not the documented "n of m". Timing was prompt and did not talk over the typed characters |
+| Search close | "Close search", invokable | **Not asserted** — the harness never touches this button | not yet measured | pass — `Close search`, `button` | not yet measured | |
+| Command palette query | Edit, current query | Executed, passes — Text, Value, selection, focus events | not yet measured | **partial** — `Command`, `edit`, `blank`; not the documented `Command palette query` | not yet measured | Typed characters are echoed correctly |
+| Command palette list | List identity, one selected row | Executed, passes — List, Selection, SelectionItem, selected-event sender | not yet measured | **fail** — moving the selection speaks only the row label (`Accessibility`); no list role, no selected state and no position, although the UIA name of the selected row is `2 of 256: ...` | not yet measured | |
+| Host banner | Banner text when it appears or changes | Executed, passes — live region | not yet measured | pass — invoking Undo on a fresh instance spoke `Nothing to undo.` immediately, as a live region rather than a focus change | not yet measured | The banner element persists in the tree afterwards and is reachable by object navigation |
+| Settings sections | Section name, selected state | Executed, passes — RadioButton, SelectionItem, Selection | not yet measured | not yet measured | not yet measured | |
+| Settings controls | Name, role, value | Partial, executed — one Value edit, several Invoke buttons, visible name and control-type inventory | not yet measured | not yet measured | not yet measured | Generic Toggle and ExpandCollapse coverage is not asserted yet |
+
+Two measured behaviours that do not belong to a single row:
+
+- **Viewport motion produces no spurious announcements.** Twelve
+  Shift+PageUp / Shift+PageDown moves with no new output, across two
+  passes, produced zero NVDA utterances, as did a 30-second focused idle
+  window. This matches the harness's idle-soak assertion of zero
+  TextChanged events.
+- **Dismissing a transient overlay re-reads the whole terminal.** Closing
+  the docked search with Escape, and completing a command-palette action,
+  both made NVDA read the entire terminal document back rather than
+  announcing only the restored focus. Observed twice.
 
 ## Not covered by any provider yet
 
@@ -80,15 +118,18 @@ terminal with the keyboard alone.
 
 ## How we test
 
-Automated. Intended to run on every pull request and release candidate;
-as of this record it has not yet been executed with the assertions above:
+Automated. Intended to run on every pull request and release candidate:
 
 ```powershell
-pwsh -NoProfile -File .\test\windows\interactive-win11-accessibility.ps1
+pwsh -NoProfile -File .\test\windows\interactive-win11-accessibility.ps1 -ResetState
 ```
 
 It needs a real interactive desktop session — it drives the live UIA
 tree, so it cannot run on a headless or service-session runner.
+
+Pass `-ResetState` until the sandbox session-state defect described in
+"Current record" is fixed; without it, only the first run after a clean
+sandbox can pass.
 
 Manual, per release, for each of Narrator, NVDA, and JAWS:
 
@@ -114,6 +155,26 @@ procedure above on a machine that has them, those columns stay
 `not yet measured`. That is the honest state, and it is preferable to
 inferring speech from the UIA tree.
 
+The NVDA column in the current record was produced that way, with the
+machine owner's explicit authorisation, using a **portable** NVDA copy
+that was deleted afterwards:
+
+```powershell
+# Create a portable copy; no installer, no service, no registry writes.
+.\nvda_<version>.exe --portable-path=<dir> --create-portable-silent
+# Mute it: pick the `silence` synthesizer in <dir>\userConfig\nvda.ini,
+# and capture speech from NVDA's own log instead of the Speech Viewer.
+.\nvda.exe --minimal --disable-addons --log-level=12 --log-file=<log>
+```
+
+Log level 12 is NVDA's `IO` level, which records every utterance as an
+`IO - speech.speech.speak` entry containing the verbatim string. That is
+a diffable transcript, so a later release can be compared against this
+one rather than re-described. Deviations from the procedure above in the
+recorded pass — a Debug rather than release build, 150% scale only, High
+Contrast off only, Narrator and JAWS not run — are stated in the current
+record and must not be quietly upgraded to `pass`.
+
 ## Per-release update rule
 
 Every release updates this file:
@@ -128,12 +189,33 @@ Every release updates this file:
 
 Optional signed evidence for a release can be recorded as
 `docs/accessibility-evidence/v<version>.json` and validated with
-`scripts/check-accessibility-evidence.ps1`. That schema currently
-requires a `pass` in all twelve Narrator and NVDA cells, so it can only
-be produced once NVDA is available on the test machine.
+`scripts/check-accessibility-evidence.ps1`. That schema requires a `pass`
+in all twelve Narrator and NVDA cells.
+
+**No evidence JSON was written for the NVDA pass recorded above, and that
+is correct.** Three independent reasons, any one of which is sufficient:
+
+1. Several NVDA cells genuinely fail — the tab items, the search flag
+   toggles, the docked search query edit and the command palette list.
+   The schema's `status` is `{ "const": "pass" }`, so writing the file
+   would mean asserting results that were not observed.
+2. Narrator was not run at all, and the schema requires six Narrator
+   cells.
+3. Only the 150% / High-Contrast-off configuration was measured; the
+   schema requires 100%, 200% and 300% with High Contrast off and on.
+
+Independently of the matrix, the checker also requires a successful
+`Test` workflow run on the default branch whose head SHA equals
+`tested_commit`, with a passing `Windows 11 Interactive Composite` job and
+a matching runner-provenance artifact. A feature branch cannot satisfy
+that, so the file is unproducible here even if every cell had passed.
 
 ## History
 
 | Release | Narrator | NVDA | JAWS | Evidence |
 | --- | --- | --- | --- | --- |
 | (none yet) | | | | |
+
+The current record is a pre-release branch measurement, not a release, so
+it does not belong in this table yet. It moves here, unchanged, when the
+commit it names ships.

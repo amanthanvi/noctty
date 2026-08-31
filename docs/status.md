@@ -133,10 +133,13 @@ tab-overview overlay rows, context menus, toasts, and quick-terminal
 chrome. There is also no keyboard focus-region cycle, so chrome cannot
 be reached from the terminal without a mouse.
 
-No screen reader has been measured against a release yet. The per-widget
-expectations, what the automated UIA harness proves, and the empty
-Narrator/NVDA/JAWS columns are published in
-[accessibility-matrix.md](accessibility-matrix.md).
+No screen reader has been measured against a release yet. NVDA has been
+measured against a pre-release branch build, with mixed results: the
+terminal text, scrollbar, live regions and banners read correctly, while
+tab items, the search flag toggles and the docked search query edit do
+not announce their role, state or name. The per-widget expectations,
+what the automated UIA harness proves, and the per-reader results are
+published in [accessibility-matrix.md](accessibility-matrix.md).
 
 ### Win32 runtime extraction
 
@@ -179,9 +182,11 @@ and lands incrementally.
 
 No formal roadmap. Likely next areas:
 
-- Measured Narrator/NVDA/JAWS results for the
-  [screen-reader matrix](accessibility-matrix.md), plus UI Automation
-  for caption buttons, overlay rows, and menus.
+- Narrator and JAWS results for the
+  [screen-reader matrix](accessibility-matrix.md), NVDA at 100/200/300%
+  scaling and with High Contrast on, and the fixes for the NVDA failures
+  already recorded there, plus UI Automation for caption buttons,
+  overlay rows, and menus.
 - A keyboard focus-region cycle so window chrome is reachable without a
   mouse.
 - Continuing the `src/apprt/win32.zig` extraction.

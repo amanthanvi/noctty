@@ -50,8 +50,9 @@ TextPattern2 caret range plus its ABI and semantics.
 
 The harness proves UIA structure, not speech. What each widget should
 announce and which readers have actually been heard are recorded in
-[accessibility-matrix.md](accessibility-matrix.md); at present no
-reader has been measured.
+[accessibility-matrix.md](accessibility-matrix.md); at present only
+NVDA has been measured, on a pre-release branch build, with mixed
+results.
 
 Stable release preflight does not require a manual matrix attestation;
 `-RequireAccessibilityEvidence` is opt-in. Optional reports live at
