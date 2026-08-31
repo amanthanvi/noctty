@@ -20,8 +20,9 @@ so a stale claim cannot outlive the record.
 
 - Release: unreleased, branch `issues/145-accessibility-uia`
 - Windows build: 10.0.26200.9168 (Windows 11 25H2)
-- Automated UIA harness: **executed and passing** — two consecutive runs
-  against a reused sandbox; the commit they ran against is pinned below
+- Automated UIA harness: **executed and passing** at `4cb829ad` — two
+  consecutive runs against a reused sandbox that still held the old
+  three-pane session state
 - Narrator: **not yet measured**
 - NVDA: **measured** — NVDA 2026.1.1, portable copy, 150% scale, High
   Contrast off, Debug build, measured at `7540fe0d`. Mixed results; see
