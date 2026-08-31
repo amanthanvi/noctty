@@ -446,7 +446,8 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
 
     // Setup our backend.
     var backend = opts.backend;
-    backend.initTerminal(&term);
+    errdefer backend.deinit();
+    try backend.initTerminal(&term);
 
     // Create our stream handler. This points to memory in self so it
     // isn't safe to use until self.* is set.

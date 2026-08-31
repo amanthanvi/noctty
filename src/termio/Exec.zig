@@ -120,7 +120,7 @@ pub fn deinit(self: *Exec) void {
 /// This is called before any termio begins. This should not be called
 /// after termio begins because it may put the internal terminal state
 /// into a bad state.
-pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
+pub fn initTerminal(self: *Exec, term: *terminal.Terminal) !void {
     // If we have an initial pwd requested by the subprocess, then we
     // set that on the terminal now. This allows rapidly initializing
     // new surfaces to use the proper pwd.
@@ -129,14 +129,15 @@ pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
     };
 
     // Setup our initial grid/screen size from the terminal. This
-    // can't fail because the pty should not exist at this point.
-    self.resize(.{
+    // A normally spawned pty does not exist yet, but an adopted handoff pty is
+    // already open and its signal pipe can disappear before this first resize.
+    try self.resize(.{
         .columns = term.cols,
         .rows = term.rows,
     }, .{
         .width = term.width_px,
         .height = term.height_px,
-    }) catch unreachable;
+    });
 }
 
 pub fn threadEnter(
@@ -1661,6 +1662,10 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
     var exit_code: windows.DWORD = 0;
     try std.testing.expect(windows.kernel32.GetExitCodeProcess(subprocess.adopted_client_process.?, &exit_code) != 0);
     try std.testing.expectEqual(windows.exp.STILL_ACTIVE, exit_code);
+    try std.testing.expectError(error.ResizeFailed, subprocess.resize(
+        .{ .columns = 80, .rows = 24 },
+        .{ .width = 640, .height = 480 },
+    ));
 }
 
 /// Builds the argv array for the process we should exec for the

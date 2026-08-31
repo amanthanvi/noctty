@@ -76,11 +76,6 @@ Win32-validated VT protocol coverage is tracked in
 - Universal palette: actions, tabs, panes, profiles, named layouts, themes, native
   settings, help, and recent commands in one fuzzy-searched,
   keyboard-driven list.
-- Per-user default-terminal registration through
-  `+register-default-terminal`, using Windows Terminal 1.24 or newer
-  OpenConsole for console delegation; `+unregister-default-terminal`
-  restores the saved selection. Details in
-  [windows.md](windows.md#default-terminal).
 
 ### Renderer
 
@@ -119,6 +114,15 @@ Win32-validated VT protocol coverage is tracked in
   environment, and config values by default.
 
 ## Experimental / partial
+
+### Default-terminal handoff
+
+Per-user registration and exact selection restore are implemented through
+`+register-default-terminal` and `+unregister-default-terminal`, using Windows
+Terminal 1.24 or newer OpenConsole for console delegation. The runtime handoff
+is not functional yet: live validation reaches noctty, but the adopted session
+closes before a visible window appears. Do not select noctty as the normal
+default terminal yet. Details in [windows.md](windows.md#default-terminal).
 
 ### Windows UI Automation (accessibility)
 

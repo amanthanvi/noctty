@@ -149,6 +149,12 @@ before assuming the build is broken.
 
 ## Default terminal
 
+> [!WARNING]
+> Default-terminal registration is experimental and not ready for normal use.
+> Live validation of this revision reaches the handoff server, but the adopted
+> session closes before a visible noctty window appears. Register only on a
+> disposable test account or machine, and immediately unregister after testing.
+
 Register and select noctty as the current user's default terminal with:
 
 ```powershell
@@ -180,9 +186,9 @@ by Windows Terminal 1.24 or newer; older OpenConsole versions that request v1
 or v2 are not supported and Windows falls back to a normal console window.
 
 Because noctty is an unpackaged application, it does not appear in the Windows
-Settings default-terminal picker. Use the registration command above to select
-it. Console applications launched without an existing console, such as
-`cmd.exe` from the Run dialog, then open in a noctty window.
+Settings default-terminal picker. The registration command above selects it by
+writing the per-user registry values directly, but delegated applications do
+not yet survive adoption into a visible noctty window.
 
 For a one-run handoff failure trace, set `NOCTTY_HANDOFF_TRACE=1` before
 launching the delegated console application. Noctty appends the rejection
@@ -202,16 +208,18 @@ example a window titled `Administrator: Windows PowerShell`. No privilege
 boundary is crossed: a process that can do this already runs as the user and
 could impersonate a terminal in other ways.
 
-Two properties bound the exposure and should be preserved:
+The integrity check below bounds the exposure and should be preserved:
 
-- The handoff is gated on the per-user `Interface\{IID}\ProxyStubClsid32`
-  mappings that only `+register-default-terminal` writes. A machine where no
-  user has registered noctty is not exposed, even though the installer
-  registers the machine-wide local-server class.
 - The handoff rejects callers whose integrity level does not match noctty's
   own. That rejection is correct by design, not a bug to be relaxed later: it
   is what stops an elevated console session from being rendered inside a
   medium-integrity terminal the user's other processes can drive.
+
+The per-user `Interface\{IID}\ProxyStubClsid32` mappings are required for
+normal console-delegation clients, but they are configuration, not an access
+control boundary. A same-user medium-integrity process can create an equivalent
+HKCU mapping to the installer-published proxy class and activate the handoff
+class directly even before the registration command has been run.
 
 The handoff class is registered in a single-threaded apartment, and that is
 load-bearing. `EstablishPtyHandoff` returns raw pty-side handles and the UI

@@ -30,9 +30,9 @@ pub const Backend = union(Kind) {
         }
     }
 
-    pub fn initTerminal(self: *Backend, t: *terminal.Terminal) void {
+    pub fn initTerminal(self: *Backend, t: *terminal.Terminal) !void {
         switch (self.*) {
-            .exec => |*exec| exec.initTerminal(t),
+            .exec => |*exec| try exec.initTerminal(t),
         }
     }
 

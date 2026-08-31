@@ -326,6 +326,8 @@ pub const Server = struct {
     queue_ctx: *anyopaque,
     queue_session: QueueSessionFn,
     factory: ClassFactory,
+    factory_initialized: bool = false,
+    factory_registration_refs: std.atomic.Value(u32) = .init(0),
     cookie: ?DWORD = null,
     lock_count: std.atomic.Value(u32) = .init(0),
     live_objects: std.atomic.Value(u32) = .init(0),
@@ -341,7 +343,11 @@ pub const Server = struct {
     }
 
     pub fn register(self: *Server) !void {
-        self.factory = ClassFactory.init(self);
+        if (!self.factory_initialized) {
+            self.factory = ClassFactory.init(self);
+            self.factory_initialized = true;
+        }
+        const refs_before = self.factory.refcount.load(.acquire);
         var cookie: DWORD = 0;
         const hr = CoRegisterClassObject(
             &CLSID_NOCTTY_TERMINAL,
@@ -355,6 +361,8 @@ pub const Server = struct {
             return error.ComRegistrationFailed;
         }
         self.cookie = cookie;
+        const refs_after = self.factory.refcount.load(.acquire);
+        self.factory_registration_refs.store(refs_after - refs_before, .release);
     }
 
     pub fn revoke(self: *Server) void {
@@ -362,6 +370,7 @@ pub const Server = struct {
         self.cookie = null;
         const hr = CoRevokeClassObject(cookie);
         if (hr < 0) log.warn("CoRevokeClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
+        self.factory_registration_refs.store(0, .release);
     }
 
     /// Takes ownership of `session` and returns the identifier the UI thread
@@ -384,7 +393,10 @@ pub const Server = struct {
 
     /// True while the class object must stay registered.
     ///
-    /// Three things keep it alive. A client can hold it through
+    /// Four things keep it alive. A client can hold an IClassFactory pointer
+    /// without calling LockServer; references beyond the server's own and
+    /// COM's registration references keep that pointer valid. A client can
+    /// also hold it through
     /// IClassFactory::LockServer, which is where an activation slower than the
     /// idle timeout sits between CoGetClassObject and CreateInstance. A client
     /// can also hold an ITerminalHandoff3 instance it created: LockServer is
@@ -393,7 +405,13 @@ pub const Server = struct {
     /// out-of-process server must outlive the objects it handed out. Finally a
     /// completed handoff may still be waiting for the UI thread to adopt it.
     pub fn isBusy(self: *Server) bool {
-        return self.lock_count.load(.acquire) > 0 or
+        const external_factory_ref = if (self.factory_initialized)
+            self.factory.refcount.load(.acquire) >
+                1 + self.factory_registration_refs.load(.acquire)
+        else
+            false;
+        return external_factory_ref or
+            self.lock_count.load(.acquire) > 0 or
             self.live_objects.load(.acquire) > 0 or
             !self.pending.isEmpty();
     }
@@ -1027,7 +1045,18 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     for (interface_proxy_registrations) |registration| {
         try writeRegistrySz(alloc, registration.key_utf8, null, proxy_clsid_text);
     }
-    return .{ .selection_changed = try selectTerminal(alloc) };
+    const selection_changed = selectTerminal(alloc) catch |err| {
+        // The terminal selection is the commit point. If its final console
+        // check fails, restore every shared proxy mapping and remove the class
+        // keys written above so a failed registration is observationally
+        // equivalent to no registration.
+        _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
+            log.err("default-terminal registration rollback failed err={}", .{rollback_err});
+            return rollback_err;
+        };
+        return err;
+    };
+    return .{ .selection_changed = selection_changed };
 }
 
 pub fn unregisterDefaultTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!UnregisterResult {
@@ -1568,6 +1597,26 @@ test "handoff server stays alive for objects that never called LockServer" {
     try std.testing.expect(server.isBusy());
 
     try std.testing.expectEqual(@as(u32, 0), handoff.base.vtbl.Release(&handoff.base));
+    try std.testing.expect(!server.isBusy());
+}
+
+test "handoff server stays alive for outstanding class factory references" {
+    const Queue = struct {
+        fn call(_: *anyopaque, _: *PendingSession) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    var server = Server.init(std.testing.allocator, &context, Queue.call);
+    server.factory = ClassFactory.init(&server);
+    server.factory_initialized = true;
+    try std.testing.expect(!server.isBusy());
+
+    // CoGetClassObject may hand this pointer to a client without the client
+    // ever calling LockServer. That reference alone must block idle exit.
+    try std.testing.expectEqual(@as(u32, 2), server.factory.base.vtbl.AddRef(&server.factory.base));
+    try std.testing.expect(server.isBusy());
+    try std.testing.expectEqual(@as(u32, 1), server.factory.base.vtbl.Release(&server.factory.base));
     try std.testing.expect(!server.isBusy());
 }
 
