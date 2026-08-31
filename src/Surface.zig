@@ -2277,24 +2277,23 @@ fn resolvePathForOpening(
     path: []const u8,
 ) Allocator.Error!?[]const u8 {
     if (!std.fs.path.isAbsolute(path)) {
-        // A URL-like string must never reach path resolution on Windows.
-        // Resolving e.g. "https://example.com" against the terminal pwd
-        // yields "C:\Users\me\https:\example.com", and a ':' inside a path
-        // component makes NT return OBJECT_NAME_INVALID, which
-        // `std.posix.faccessatW` maps to `unreachable`. That is a safety
-        // panic the `catch` below cannot recover from.
-        //
-        // Windows only uses ':' as a drive separator, and drive-absolute
-        // paths already returned above, so handing anything else that
-        // contains ':' to the URL opener is safe here.
-        if (builtin.os.tag == .windows and
-            std.mem.indexOfScalar(u8, path, ':') != null) return null;
-
         const terminal_pwd = self.io.terminal.getPwd() orelse {
             return null;
         };
 
         const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
+
+        // Link text is arbitrary, so resolution can produce a string Windows
+        // cannot represent as a path: "https://example.com" becomes
+        // "C:\Users\me\https:\example.com". `accessAbsolute` does not merely
+        // fail on such a path -- NT returns STATUS_OBJECT_NAME_INVALID and
+        // `std.posix.faccessatW` maps that status to `unreachable`, so the
+        // process aborts and the `catch` below cannot recover. Screen the
+        // result before handing it to the filesystem.
+        if (builtin.os.tag == .windows and !windowsPathIsRepresentable(resolved)) {
+            self.alloc.free(resolved);
+            return null;
+        }
 
         std.fs.accessAbsolute(resolved, .{}) catch {
             self.alloc.free(resolved);
@@ -2305,6 +2304,42 @@ fn resolvePathForOpening(
     }
 
     return null;
+}
+
+/// Whether Windows can address `path`, which must be the output of
+/// `std.fs.path.resolve`.
+///
+/// `<>"|?*` are never legal in a Windows path. `:` is legal only in a leading
+/// drive prefix and as the alternate-data-stream separator in the final
+/// component; anywhere else it names a directory Windows cannot address.
+fn windowsPathIsRepresentable(path: []const u8) bool {
+    if (std.mem.indexOfAny(u8, path, "<>\"|?*") != null) return false;
+
+    var rest = path;
+    if (rest.len >= 2 and rest[1] == ':' and std.ascii.isAlphabetic(rest[0])) {
+        rest = rest[2..];
+    }
+    const last_sep = std.mem.lastIndexOfAny(u8, rest, "/\\") orelse return true;
+    return std.mem.indexOfScalar(u8, rest[0..last_sep], ':') == null;
+}
+
+test "windowsPathIsRepresentable" {
+    const testing = std.testing;
+
+    // Ordinary paths resolve as before.
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\Documents"));
+    try testing.expect(windowsPathIsRepresentable("\\\\server\\share\\file"));
+    // Drive-relative input ("C:foo") resolves to a plain path.
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\foo"));
+    // ':' in the final component is an alternate data stream.
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\file.txt:stream"));
+
+    // A URL resolved against the pwd puts ':' in a directory component.
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\https:\\example.com"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\foo\\bar:baz\\qux"));
+    // Wildcards are never legal, wherever they appear.
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\a*b"));
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
