@@ -2078,20 +2078,42 @@ pub const ChromeControlProvider = struct {
         );
     }
 
-    pub fn raiseRangeValueChanged(self: *ChromeControlProvider, old: f64, new: f64) void {
+    fn raiseRangePropertyChanged(
+        self: *ChromeControlProvider,
+        property_id: i32,
+        old: f64,
+        new: f64,
+    ) void {
         if (!self.available() or old == new) return;
         events.raisePropertyChanged(
             &self.base,
-            constants.UIA_RangeValueValuePropertyId,
+            property_id,
             com.VARIANT.fromR8(old),
             com.VARIANT.fromR8(new),
         );
+    }
+
+    pub fn raiseRangeChanged(
+        self: *ChromeControlProvider,
+        old: ChromeRangeValue,
+        new: ChromeRangeValue,
+    ) void {
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueValuePropertyId, old.value, new.value);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueMinimumPropertyId, old.minimum, new.minimum);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueMaximumPropertyId, old.maximum, new.maximum);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueLargeChangePropertyId, old.large_change, new.large_change);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueSmallChangePropertyId, old.small_change, new.small_change);
     }
 
     pub fn raiseLiveRegionChanged(self: *ChromeControlProvider) void {
         if (!self.available()) return;
         events.raiseNameChanged(&self.base);
         events.raiseLiveRegionChanged(&self.base);
+    }
+
+    pub fn raiseFocusChanged(self: *ChromeControlProvider) void {
+        if (!self.available()) return;
+        events.raiseFocusChanged(&self.base);
     }
 
     fn available(self: *const ChromeControlProvider) bool {
@@ -2124,7 +2146,6 @@ pub const ChromeControlProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         out.* = null;
-        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) {
             out.* = @ptrCast(&self.base);
         } else if ((self.state.role == .button) and iidEqual(iid, &com.IID_IInvokeProvider)) {
@@ -2416,7 +2437,11 @@ pub const ChromeControlProvider = struct {
     fn Select(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
         const self = fromSelectionItem(p);
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        return sendButtonClicked(self.hwnd);
+        const result = sendButtonClicked(self.hwnd);
+        if (result != com.S_OK) return result;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = self.state.selected orelse return com.E_NOTIMPL;
+        return if (selected(self.state.ctx, self.state.tag)) com.S_OK else com.UIA_E_INVALIDOPERATION;
     }
     /// The tab container reports `CanSelectMultiple = false`, so UIA defines
     /// `AddToSelection` on an item that is not already selected as an invalid
@@ -2937,7 +2962,7 @@ pub const TerminalProvider = struct {
         const self = fromText(self_text);
         out.* = com.SupportedTextSelection_None;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.state.role == .edit or self.state.role == .terminal) {
+        if (self.state.role == .edit) {
             out.* = com.SupportedTextSelection_Single;
         }
         return com.S_OK;
@@ -4793,7 +4818,7 @@ test "TerminalProvider GetSelection reports the caret range and real selections"
     var selection: i32 = -1;
     const hr = TerminalProvider.get_SupportedTextSelection(&p.text_iface, &selection);
     try std.testing.expectEqual(com.S_OK, hr);
-    try std.testing.expectEqual(com.SupportedTextSelection_Single, selection);
+    try std.testing.expectEqual(com.SupportedTextSelection_None, selection);
 
     // No user selection: the documented contract is a degenerate range at
     // the insertion point, not an empty array. The terminal always has one.
@@ -6402,6 +6427,13 @@ test "uia ChromeControlProvider exposes live chrome patterns and detaches safely
     const calls_before_detach = context.name_calls;
     item.detach();
     item.detach();
+    var detached_unknown: ?*anyopaque = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.QueryInterface(&item.base, &com.IID_IUnknown, &detached_unknown),
+    );
+    try std.testing.expect(detached_unknown == @as(?*anyopaque, @ptrCast(&item.base)));
+    _ = ChromeControlProvider.Release(@ptrCast(@alignCast(detached_unknown.?)));
     value = com.VARIANT.empty();
     try std.testing.expectEqual(
         com.UIA_E_ELEMENTNOTAVAILABLE,

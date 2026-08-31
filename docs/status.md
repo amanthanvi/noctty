@@ -124,9 +124,10 @@ docked-search toggles expose Toggle state, the search result count and
 host banners are live regions, and the terminal scrollbar exposes
 RangeValue. Terminal text is exposed through TextPattern/TextPattern2
 with bounded ranges (500 history rows plus the live viewport), visible
-geometry, a caret that stays truthful while scrolled back, and real
-selections. The command palette and settings sections expose list and
-selection semantics.
+geometry, a truthful caret while the live screen remains inside that bounded
+snapshot, and real selections. In deeper scrollback the viewport remains
+available but the off-window live caret is reported at the document end. The
+command palette and settings sections expose list and selection semantics.
 
 Not yet covered: custom-painted caption buttons, the profile picker and
 tab-overview overlay rows, context menus, toasts, and quick-terminal

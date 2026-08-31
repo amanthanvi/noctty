@@ -6201,7 +6201,12 @@ pub const App = struct {
         const host = surface.host orelse return;
         const tab_info = self.findTabForSurface(surface) orelse return;
         const previous_surface = host.activeSurface();
+        const previous_tab_id = if (host.active_tab < host.tabs.items.len)
+            host.tabs.items[host.active_tab].id
+        else
+            null;
         host.active_tab = tab_info.index;
+        host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         surface.syncSharedHostWindowState(previous_surface);
         host.prepareActiveTabVisibility(tab_info.index);
         var active_it = tab_info.tab.tree.iterator();
@@ -6362,6 +6367,10 @@ pub const App = struct {
     fn noteSurfaceFocused(self: *App, surface: *Surface) bool {
         const found = self.findTabForSurface(surface) orelse return false;
         const handle = found.tab.findHandle(surface) orelse return false;
+        const previous_tab_id = if (found.host.active_tab < found.host.tabs.items.len)
+            found.host.tabs.items[found.host.active_tab].id
+        else
+            null;
         const changed = surfaceFocusStateChanged(
             found.host.active_tab,
             found.tab.focused,
@@ -6369,6 +6378,7 @@ pub const App = struct {
             handle,
         );
         found.host.active_tab = found.index;
+        found.host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         found.tab.focused = handle;
         self.commitShellSurfaceFocus(surface);
         return changed;
@@ -6403,6 +6413,10 @@ pub const App = struct {
         self.removeWindow(surface);
         if (surface.host) |host| {
             if (self.session_restore_rollback_host == host) return;
+            const previous_tab_id = if (host.active_tab < host.tabs.items.len)
+                host.tabs.items[host.active_tab].id
+            else
+                null;
             surface.invalidateStructuralHistoryForDestroy();
             host.discardStructuralEntriesReferencing(surface);
 
@@ -6446,6 +6460,7 @@ pub const App = struct {
                     break;
                 }
             }
+            host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
 
             if (surface.pending_close_tree) |*unused_tree| {
                 unused_tree.deinit();
@@ -8806,6 +8821,10 @@ const Host = struct {
         // so hidden surfaces cannot live past `undo-timeout`.
         if (index >= self.tabs.items.len) return null;
 
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         var removed = self.tabs.orderedRemove(index);
         const tab_id = removed.id;
         self.destroyTabButton(&removed);
@@ -8824,6 +8843,7 @@ const Host = struct {
             self.tabs.items.len - 1
         else
             index;
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
 
         return .{
             .kind = .close_tab,
@@ -8850,6 +8870,10 @@ const Host = struct {
 
     fn restoreClosedTabEntry(self: *Host, value: *CloseTabUndo) !bool {
         const insert_index = clampTabInsertIndex(value.index, self.tabs.items.len);
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
             const shell_id = value.shell_id orelse return error.ShellStateOutOfSync;
@@ -8864,6 +8888,7 @@ const Host = struct {
             value.tab = self.tabs.orderedRemove(insert_index);
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("tab-restore");
         return self.activeSurface() != null;
     }
@@ -8871,6 +8896,10 @@ const Host = struct {
     fn redoClosedTabEntry(self: *Host, value: *CloseTabUndo) !bool {
         if (value.tab != null) return false;
         const index = self.findTabIndexById(value.tab_id) orelse return false;
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
             const shell_id = value.shell_id orelse return error.ShellStateOutOfSync;
@@ -8904,6 +8933,7 @@ const Host = struct {
             while (restored_it.next()) |entry| entry.view.host_active = true;
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("tab-redetach");
         return true;
     }
@@ -8920,6 +8950,10 @@ const Host = struct {
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         const next_tree = try found.tab.tree.remove(self.app.core_app.alloc, created_handle);
         found.tab.tree.deinit();
         found.tab.tree = next_tree;
@@ -8935,6 +8969,7 @@ const Host = struct {
             log.err("split-create undo shell commit failed err={}", .{err});
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         value.created_surface.shell_id = null;
         value.created_surface.shell_committed = false;
         self.app.auditShellNativeMapping("split-create-undo");
@@ -8961,6 +8996,10 @@ const Host = struct {
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         const source_handle = found.tab.findHandle(value.source_surface) orelse return false;
         const inserted = try SplitTreeSurface.init(self.app.core_app.alloc, value.created_surface);
         defer {
@@ -8988,6 +9027,7 @@ const Host = struct {
             value.created_surface.shell_id = prepared.created.pane;
             value.created_surface.shell_committed = true;
         }
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("split-create-redo");
         return true;
     }
@@ -9007,6 +9047,10 @@ const Host = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const old_active = self.active_tab;
+        const previous_tab_id = if (old_active < self.tabs.items.len)
+            self.tabs.items[old_active].id
+        else
+            null;
         std.mem.swap(SplitTreeSurface, &self.tabs.items[target_index].tree, &value.alternate_tree);
         std.mem.swap(SplitTreeSurface.Node.Handle, &self.tabs.items[target_index].focused, &value.alternate_focus);
         const insert_index = clampTabInsertIndex(value.source_index, self.tabs.items.len);
@@ -9027,6 +9071,7 @@ const Host = struct {
             self.active_tab = old_active;
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         // The moved pane stayed visible throughout the drag, so the normal
         // activation fast path cannot infer that the restored target tab must
         // be hidden. Re-establish tab visibility and recreate the detached
@@ -9052,6 +9097,10 @@ const Host = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const old_active = self.active_tab;
+        const previous_tab_id = if (old_active < self.tabs.items.len)
+            self.tabs.items[old_active].id
+        else
+            null;
         var removed = self.tabs.orderedRemove(source_index);
         self.destroyTabButton(&removed);
         removed.button_placement = .{};
@@ -9076,6 +9125,7 @@ const Host = struct {
             self.active_tab = old_active;
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.prepareActiveTabVisibility(self.active_tab);
         self.layout() catch |err| log.warn("tab split transfer redo layout sync failed err={}", .{err});
         self.refreshChrome() catch |err| log.warn("tab split transfer redo chrome sync failed err={}", .{err});
@@ -11117,6 +11167,7 @@ const Host = struct {
             .none, .new_tab => return false,
         };
         if (source_index >= self.tabs.items.len or source_index == self.active_tab) return false;
+        const previous_tab_id = self.tabs.items[self.active_tab].id;
         const source_tab_shell = self.tabs.items[source_index].shell_id orelse return false;
         const source_model = self.app.shell_runtime.state.tabConst(source_tab_shell) orelse return false;
         const source_root = source_model.root;
@@ -11206,6 +11257,7 @@ const Host = struct {
         if (committed_entry.payload.tab_subtree_transfer.source_tab) |*source_tab| {
             source_tab.clearRedoHistory();
         }
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.tabs.items[self.active_tab].clearRedoHistory();
         while (self.structural_undo_entries.items.len > win32_undo.max_entries) {
             win32_structural_history.evictOldest(
@@ -11226,6 +11278,10 @@ const Host = struct {
     fn activateTabIndex(self: *Host, index: usize) bool {
         if (index >= self.tabs.items.len) return false;
         const previous_index = self.active_tab;
+        const previous_tab_id = if (previous_index < self.tabs.items.len)
+            self.tabs.items[previous_index].id
+        else
+            null;
         if (self.active_tab != index) {
             // Hide inactive tab HWNDs/search controls before the active
             // index changes so rapid Ctrl+Tab repeats don't leave previous
@@ -11233,17 +11289,7 @@ const Host = struct {
             self.prepareActiveTabVisibility(index);
         }
         self.active_tab = index;
-        if (previous_index != index) {
-            if (previous_index < self.tabs.items.len) {
-                if (self.tabs.items[previous_index].uia_provider) |provider| {
-                    provider.raiseSelected(true, false);
-                }
-            }
-            if (self.tabs.items[index].uia_provider) |provider| provider.raiseSelected(false, true);
-            if (self.tab_container_uia_provider) |provider| {
-                win32_uia.events.raiseSelectionInvalidated(&provider.base);
-            }
-        }
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         // The underline retarget happens in `layoutTabStrip` —
         // `active_tab` is read there and fed to `retargetTabUnderline`
         // with precomputed coords. Invoking layout after the index
@@ -11257,6 +11303,25 @@ const Host = struct {
         }
         self.forceHostCompositionPaint();
         return false;
+    }
+
+    fn notifyActiveTabUiaSelectionChanged(self: *Host, previous_tab_id: ?u32) void {
+        const current = self.activeTab();
+        const current_tab_id: ?u32 = if (current) |tab| tab.id else null;
+        if (previous_tab_id == current_tab_id) return;
+        if (previous_tab_id) |id| {
+            if (self.findTabIndexById(id)) |index| {
+                if (self.tabs.items[index].uia_provider) |provider| {
+                    provider.raiseSelected(true, false);
+                }
+            }
+        }
+        if (current) |tab| {
+            if (tab.uia_provider) |provider| provider.raiseSelected(false, true);
+        }
+        if (self.tab_container_uia_provider) |provider| {
+            win32_uia.events.raiseSelectionInvalidated(&provider.base);
+        }
     }
 
     fn activateTabByDirection(self: *Host, goto: apprt.action.GotoTab) bool {
@@ -14053,10 +14118,7 @@ const Host = struct {
                     try self.setBanner(.err, message);
                     return false;
                 }
-                self.active_tab = requested - 1;
-                if (self.tabs.items[self.active_tab].focusedSurface()) |next_surface| {
-                    self.app.activateSurface(next_surface);
-                }
+                _ = self.activateTabIndex(requested - 1);
             },
             .confirm => {
                 // Enter maps to Accept.
@@ -19741,6 +19803,9 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 if (v.searchControlSurface(hwnd)) |surface| {
                     v.app.activateSurfaceNoFocus(surface);
                 }
+                if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
+                    provider.raiseFocusChanged();
+                }
             },
             c.WM_KILLFOCUS => {
                 v.setFocusedQuickSlot(null);
@@ -19794,6 +19859,11 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                 }
             }
             switch (msg) {
+                c.WM_SETFOCUS => {
+                    if (v.tabs.items[index].uia_provider) |provider| {
+                        provider.raiseFocusChanged();
+                    }
+                },
                 c.WM_LBUTTONDOWN => {
                     const down_x = signedLowWord(lParamBits(lParam));
                     var btn_rect: RECT = undefined;
@@ -20723,8 +20793,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 for (v.tabs.items, 0..) |*tab, i| {
                     if (child_hwnd) |child| {
                         if (tab.button_hwnd == child) {
-                            v.active_tab = i;
-                            if (tab.focusedSurface()) |surface| v.app.activateSurface(surface);
+                            _ = v.activateTabIndex(i);
                             return 0;
                         }
                     }
@@ -22002,16 +22071,20 @@ pub const Surface = struct {
         return "Terminal scrollbar";
     }
 
-    fn scrollbarUiaRange(ctx: *anyopaque) win32_uia.ChromeRangeValue {
-        const self: *Surface = @ptrCast(@alignCast(ctx));
-        const maximum = self.scrollbar.total -| self.scrollbar.len;
+    fn scrollbarUiaRangeValue(value: terminal.Scrollbar) win32_uia.ChromeRangeValue {
+        const maximum = value.total -| value.len;
         return .{
-            .value = @floatFromInt(@min(self.scrollbar.offset, maximum)),
+            .value = @floatFromInt(@min(value.offset, maximum)),
             .minimum = 0,
             .maximum = @floatFromInt(maximum),
-            .large_change = @floatFromInt(self.scrollbar.len),
+            .large_change = @floatFromInt(value.len),
             .small_change = 1,
         };
+    }
+
+    fn scrollbarUiaRange(ctx: *anyopaque) win32_uia.ChromeRangeValue {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        return scrollbarUiaRangeValue(self.scrollbar);
     }
 
     fn createChromeUiaProvider(
@@ -25777,9 +25850,9 @@ pub const Surface = struct {
         const status_changed = scrollStatusTextChanged(old, value);
         self.scrollbar = value;
         if (self.scrollbar_uia_provider) |provider| {
-            provider.raiseRangeValueChanged(
-                @floatFromInt(old.offset),
-                @floatFromInt(value.offset),
+            provider.raiseRangeChanged(
+                scrollbarUiaRangeValue(old),
+                scrollbarUiaRangeValue(value),
             );
         }
         if (old.total != value.total or old.len != value.len) {
@@ -26376,6 +26449,18 @@ test "win32 undo history ordering uses sequence when timestamps tie" {
     try std.testing.expect(win32_structural_history.sortsAfter(10, 2, 10, 1));
     try std.testing.expect(!win32_structural_history.sortsAfter(10, 1, 10, 2));
     try std.testing.expect(win32_structural_history.sortsAfter(11, 1, 10, 99));
+}
+
+test "win32 scrollbar UIA range clamps value and exposes viewport bounds" {
+    const range = Surface.scrollbarUiaRangeValue(.{
+        .total = 100,
+        .offset = 99,
+        .len = 20,
+    });
+    try std.testing.expectEqual(@as(f64, 80), range.value);
+    try std.testing.expectEqual(@as(f64, 80), range.maximum);
+    try std.testing.expectEqual(@as(f64, 20), range.large_change);
+    try std.testing.expectEqual(@as(f64, 1), range.small_change);
 }
 
 test "win32 undo prune expires local and structural histories" {
