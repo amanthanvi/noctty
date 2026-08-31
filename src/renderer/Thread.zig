@@ -842,7 +842,13 @@ fn drawCallback(
     _: *xev.Completion,
     r: xev.Timer.RunError!void,
 ) xev.CallbackAction {
-    _ = r catch unreachable;
+    _ = r catch |err| switch (err) {
+        // `Timer.reset` cancels the previous completion before rearming it.
+        // The replacement timer is already scheduled; this callback belongs
+        // only to the canceled run.
+        error.Canceled => return .disarm,
+        else => unreachable,
+    };
     const t: *Thread = self_ orelse {
         // This shouldn't happen so we log it.
         log.warn("render callback fired without data set", .{});
