@@ -587,8 +587,12 @@ fn readExactUntil(
     deadline_ms: u64,
 ) !void {
     var offset: usize = 0;
+    var attempted = false;
     while (offset < dst.len) {
-        if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+        // A zero timeout is a nonblocking poll, not an automatic failure.
+        // Always attempt one ReadFile so an already-buffered response wins.
+        if (attempted and sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+        attempted = true;
         var read_len: u32 = 0;
         if (windows.kernel32.ReadFile(
             pipe,
@@ -600,6 +604,7 @@ fn readExactUntil(
             const err = windows.kernel32.GetLastError();
             if (err == .BROKEN_PIPE) return error.EndOfStream;
             if (pipeIoPending(err)) {
+                if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
                 std.Thread.sleep(poll_interval_ns);
                 continue;
             }
@@ -860,6 +865,10 @@ test "win32 IPC silent client read is bounded" {
         error.IpcTimeout,
         readExactWithTimeout(server, &byte, 10),
     );
+
+    try writeAll(client, "x");
+    try readExactWithTimeout(server, &byte, 0);
+    try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
 }
 
 test "win32 IPC pending pipe states remain retryable" {

@@ -6032,12 +6032,14 @@ pub const App = struct {
     ) !*Surface {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
         defer config.deinit();
+        var inherited_profile_key: ?[]const u8 = null;
 
         if (explicit_window_target) {
             // `newConfig(.tab)` consults the globally focused surface. Reset
             // and inherit from the explicitly requested host instead.
             config.@"working-directory" = self.config.@"working-directory";
             if (source) |surface| {
+                inherited_profile_key = try applyProfileConfigFromSource(&config, surface);
                 const split_inherit = config.@"split-inherit-working-directory";
                 {
                     defer config.@"split-inherit-working-directory" = split_inherit;
@@ -6056,6 +6058,11 @@ pub const App = struct {
                 null else null,
             .clone_state_from = source,
         });
+        if (inherited_profile_key) |key| try appendOwnedString(
+            self.core_app.alloc,
+            &surface.launch_profile_key,
+            key,
+        );
         if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
         self.activateSurface(surface);
         return surface;
@@ -6071,7 +6078,7 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
-        const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
+        const inherited_profile_key = try applyProfileConfigFromSource(&config, source);
         _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
@@ -6103,7 +6110,7 @@ pub const App = struct {
         return surface;
     }
 
-    fn applySplitProfileConfigFromSource(
+    fn applyProfileConfigFromSource(
         config: *configpkg.Config,
         source: *Surface,
     ) !?[]const u8 {
@@ -32365,6 +32372,33 @@ test "win32 session restore refuses ssh profiles regardless of key case" {
     defer clone.deinit();
     try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "CMD.EXE"));
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
+}
+
+test "win32 automation tab profile inheritance applies the source command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    var profiles = [_]windows_shell.Profile{.{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &command },
+    }};
+    var host: Host = undefined;
+    host.profiles = &profiles;
+    var source: Surface = undefined;
+    source.host = &host;
+    source.launch_profile_key = "pwsh";
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    const inherited = try App.applyProfileConfigFromSource(&config, &source);
+
+    try std.testing.expectEqualStrings("pwsh", inherited.?);
+    const direct = config.command.?.direct;
+    try std.testing.expectEqual(@as(usize, 2), direct.len);
+    try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
+    try std.testing.expectEqualStrings("-NoLogo", direct[1]);
 }
 
 test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {

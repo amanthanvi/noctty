@@ -89,25 +89,42 @@ fn runArgsWithSend(
     const arena = opts._arena.?.allocator();
 
     var text: ?[]const u8 = null;
+    var literal = false;
     while (iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            return actionpkg.help_error;
-        }
-
-        if (lib.cutPrefix(u8, arg, "--class=")) |value| {
-            opts.class = try arena.dupeZ(u8, std.mem.trim(u8, value, &std.ascii.whitespace));
-        } else if (lib.cutPrefix(u8, arg, "--surface-id=")) |value| {
-            if (opts.@"surface-id" != null) {
+        if (!literal) {
+            if (std.mem.eql(u8, arg, "--")) {
+                literal = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+                return actionpkg.help_error;
+            }
+            if (lib.cutPrefix(u8, arg, "--class=")) |value| {
+                opts.class = try arena.dupeZ(u8, std.mem.trim(u8, value, &std.ascii.whitespace));
+                continue;
+            }
+            if (lib.cutPrefix(u8, arg, "--surface-id=")) |value| {
+                if (opts.@"surface-id" != null) {
+                    return report(stderr, 1, "Invalid +send-text arguments.\n");
+                }
+                opts.@"surface-id" = std.fmt.parseInt(u64, value, 10) catch
+                    return report(stderr, 1, "Invalid --surface-id.\n");
+                continue;
+            }
+            if (lib.cutPrefix(u8, arg, "--timeout=")) |value| {
+                opts.timeout = std.fmt.parseInt(u64, value, 10) catch
+                    return report(stderr, 1, "Invalid --timeout.\n");
+                continue;
+            }
+            if (std.mem.startsWith(u8, arg, "-")) {
                 return report(stderr, 1, "Invalid +send-text arguments.\n");
             }
-            opts.@"surface-id" = std.fmt.parseInt(u64, value, 10) catch return report(stderr, 1, "Invalid --surface-id.\n");
-        } else if (lib.cutPrefix(u8, arg, "--timeout=")) |value| {
-            opts.timeout = std.fmt.parseInt(u64, value, 10) catch return report(stderr, 1, "Invalid --timeout.\n");
-        } else if (std.mem.startsWith(u8, arg, "-") or text != null) {
-            return report(stderr, 1, "Invalid +send-text arguments.\n");
-        } else {
-            text = arg;
         }
+
+        if (text != null) {
+            return report(stderr, 1, "Invalid +send-text arguments.\n");
+        }
+        text = arg;
     }
 
     const id = opts.@"surface-id" orelse return report(stderr, 1, "+send-text requires --surface-id.\n");
@@ -210,6 +227,19 @@ test "automation send-text cli contract and policy" {
         else
             &.{ "--surface-id=42", value };
         try testing.expectEqual(@as(u8, 0), try test_support.testRun(runArgsWithSend, argv, &Hook.call));
+    }
+
+    for ([_][]const u8{ "-n", "--version", "--help" }) |value| {
+        Hook.expected = value;
+        Hook.outcome = 0;
+        try testing.expectEqual(
+            @as(u8, 0),
+            try test_support.testRun(
+                runArgsWithSend,
+                &.{ "--surface-id=42", "--", value },
+                &Hook.call,
+            ),
+        );
     }
 
     const Invalid = struct {
