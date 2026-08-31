@@ -310,11 +310,10 @@ structurally invalid layout file is quarantined with the same `.corrupt` rules
 as session state; a transient read failure is reported without quarantining the
 file, so a locked or briefly unavailable layout is not moved aside. A layout is
 refused, without quarantine, if it would open more than 16 tabs or 64 panes.
-A *complete* window position, size, and maximized state is ignored on launch
-even if a file contains one, because a layout describes a shape and not a
-placement. A *partial* rect, such as `x` without `y`, or a zero width, is not
-ignored: it is an invalid session document and takes the quarantine path like
-any other malformed layout.
+Window position, size, and maximized state are stripped before layout
+validation and ignored on launch, because a layout describes a shape and not
+a placement. This includes partial or stale geometry such as `x` without `y`
+or a zero width; those fields do not quarantine an otherwise valid shape.
 
 Treat the `layouts\` directory as config-level trust: launching a layout starts
 one shell per pane, using the working directories and profiles that the layout

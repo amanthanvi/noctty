@@ -1377,15 +1377,18 @@ fn sendLaunchLayoutIpc(
     pipe_name: [:0]const u16,
     name: []const u8,
 ) !bool {
+    // Validate before probing the pipe. The caller uses `false` as the cold
+    // start fallback, so connecting first would let an invalid name spawn an
+    // otherwise ordinary window when no instance is listening.
+    const request = try win32_ipc.encodeLaunchLayoutRequest(alloc, name);
+    defer alloc.free(request);
+
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         error.FileNotFound, error.PipeUnreachable => return false,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
-
-    const request = try win32_ipc.encodeLaunchLayoutRequest(alloc, name);
-    defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
     return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
@@ -30014,6 +30017,21 @@ test "win32 launch-layout IPC argument scan isolates the layout name" {
 
     const ordinary = try scanLaunchLayoutIpcArgument(&.{"--title=ordinary"});
     try std.testing.expect(ordinary == .none);
+}
+
+test "win32 launch-layout IPC validates names before cold fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty.test.launch-layout-invalid-name",
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        sendLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+    );
 }
 
 test "automation-action win32 ipc encodes surface action request" {
