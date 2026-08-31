@@ -505,7 +505,8 @@ the surface loses focus.
 `quick-select-patterns` is repeatable and accepts bare regex values or quoted
 Zig string literals. An empty value clears configured patterns; when the
 configured list is empty, the built-in patterns apply. `quick-select-alphabet`
-sets the non-empty, unique ASCII characters used for labels.
+sets the unique printable ASCII characters used for labels and requires at
+least two characters.
 
 ## Quick terminal and global hotkeys
 

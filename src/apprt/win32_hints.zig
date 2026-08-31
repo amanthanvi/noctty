@@ -27,7 +27,7 @@ const max_candidate_count = 4096;
 // — regex cannot tell `C:\Program Files\x` from `C:\a.txt copied ok` without
 // touching the filesystem, and truncating at the first space would break the
 // single most common Windows path shape.
-const path_body = "(?:(?!\\s(?:[A-Za-z]:\\\\|\\\\\\\\))[^\\x00\\r\\n<>:\"|?*])+";
+const path_body = "(?:(?!\\s+(?:[A-Za-z]:\\\\|\\\\\\\\))[^\\x00\\r\\n<>:\"|?*])+";
 const windows_drive_path =
     "(?<![A-Za-z0-9_])[A-Za-z]:\\\\" ++ path_body;
 const windows_unc_path =
@@ -395,7 +395,10 @@ pub fn extractMatches(
 
             // Custom patterns may match an empty string. Always advance so a
             // malformed-but-valid regex cannot hang overlay creation.
-            offset = if (end > offset) end else offset + 1;
+            offset = if (end > offset)
+                end
+            else
+                offset + (std.unicode.utf8ByteSequenceLength(text[offset]) catch 1);
         }
     }
 
@@ -584,6 +587,26 @@ pub const PrefixState = struct {
     }
 
     pub fn input(self: *PrefixState, labels: *const LabelSet, char: u8) InputResult {
+        const exact = self.inputExact(labels, char);
+        switch (exact) {
+            .ignored => {},
+            else => return exact,
+        }
+        if (!std.ascii.isAlphabetic(char)) return exact;
+
+        // Win32 translation honors Shift and Caps Lock. Prefer the exact
+        // configured byte, but fall back to its opposite ASCII case so a
+        // lowercase default label remains usable with either modifier state.
+        // Exact-first preserves distinct behavior for custom alphabets that
+        // intentionally contain both cases.
+        const alternate = if (std.ascii.isUpper(char))
+            std.ascii.toLower(char)
+        else
+            std.ascii.toUpper(char);
+        return self.inputExact(labels, alternate);
+    }
+
+    fn inputExact(self: *PrefixState, labels: *const LabelSet, char: u8) InputResult {
         if (self.len >= labels.max_len or self.len >= self.bytes.len) return .ignored;
 
         self.bytes[self.len] = char;
@@ -763,8 +786,8 @@ test "hints: adjacent paths on one row stay separate" {
         alloc,
         80,
         3,
-        "C:\\one D:\\two\r\n" ++
-            "C:\\Program Files\\app.exe \\\\srv\\share\\b.txt\r\n" ++
+        "C:\\one  D:\\two\r\n" ++
+            "C:\\Program Files\\app.exe  \\\\srv\\share\\b.txt\r\n" ++
             "END",
     );
     defer state.deinit(alloc);
@@ -889,6 +912,45 @@ test "hints: typed prefix narrows ignores no-match and backspaces" {
     try testing.expectEqual(@as(usize, 2), prefix.remainingCount(&labels));
     try testing.expect(prefix.backspace());
     try testing.expect(!prefix.backspace());
+}
+
+test "hints: typed prefix falls back across ASCII letter case" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lower = try generateLabels(alloc, "as", 2);
+    defer lower.deinit(alloc);
+    var lower_prefix: PrefixState = .{};
+    try testing.expectEqual(
+        PrefixState.InputResult{ .complete = 0 },
+        lower_prefix.input(&lower, 'A'),
+    );
+    try testing.expectEqualStrings("a", lower_prefix.typed());
+
+    var mixed = try generateLabels(alloc, "aA", 2);
+    defer mixed.deinit(alloc);
+    var mixed_prefix: PrefixState = .{};
+    try testing.expectEqual(
+        PrefixState.InputResult{ .complete = 1 },
+        mixed_prefix.input(&mixed, 'A'),
+    );
+    try testing.expectEqualStrings("A", mixed_prefix.typed());
+}
+
+test "hints: empty regex matches advance by UTF-8 codepoint" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    const text = "\u{00e9}x";
+    const map = [_]point.Coordinate{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 0, .y = 0 },
+        .{ .x = 1, .y = 0 },
+    };
+    const matches = try extractMatches(alloc, text, &map, &.{"(?=.)"});
+    defer alloc.free(matches);
+    try testing.expectEqual(@as(usize, 0), matches.len);
 }
 
 test "hints: overlap resolution prefers longest then earliest" {

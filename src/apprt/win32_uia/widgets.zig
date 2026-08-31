@@ -164,6 +164,9 @@ pub const PaletteListState = struct {
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
     geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
+    /// Optional screen-space bounds for widgets whose rows are not arranged
+    /// as one contiguous vertical list (for example, terminal hint chips).
+    row_bounds: ?*const fn (ctx: *anyopaque, index: usize) ?PaletteListRowBounds = null,
     use_com_threading: bool = false,
 };
 
@@ -173,6 +176,8 @@ pub const PaletteListGeometry = struct {
     visible_count: usize,
     row_height: f64,
 };
+
+pub const PaletteListRowBounds = com.UiaRect;
 
 pub const TerminalState = struct {
     pub const Role = enum { terminal, edit };
@@ -367,6 +372,13 @@ pub const PaletteListProvider = struct {
     }
 
     fn rowBounds(self: *const PaletteListProvider, index: usize) ?com.UiaRect {
+        if (!self.isAvailable() or index >= self.rowCount()) return null;
+        if (self.state.row_bounds) |callback| {
+            const value = callback(self.state.ctx, index) orelse return null;
+            if (!validPaletteBounds(value)) return null;
+            return value;
+        }
+
         const snapshot = self.geometry() orelse return null;
         if (index < snapshot.first_visible or index >= snapshot.first_visible + snapshot.visible_count) return null;
         const offset: f64 = @floatFromInt(index - snapshot.first_visible);
@@ -379,6 +391,26 @@ pub const PaletteListProvider = struct {
             .width = snapshot.bounds.width,
             .height = @min(snapshot.row_height, remaining),
         };
+    }
+
+    fn listBounds(self: *const PaletteListProvider) ?com.UiaRect {
+        if (self.geometry()) |value| return value.bounds;
+
+        var result: ?com.UiaRect = null;
+        for (0..self.rowCount()) |index| {
+            const row = self.rowBounds(index) orelse continue;
+            if (result) |*bounds| {
+                const right = @max(bounds.left + bounds.width, row.left + row.width);
+                const bottom = @max(bounds.top + bounds.height, row.top + row.height);
+                bounds.left = @min(bounds.left, row.left);
+                bounds.top = @min(bounds.top, row.top);
+                bounds.width = right - bounds.left;
+                bounds.height = bottom - bounds.top;
+            } else {
+                result = row;
+            }
+        }
+        return result;
     }
 
     fn rowEnabled(self: *const PaletteListProvider, index: usize) bool {
@@ -652,7 +684,7 @@ pub const PaletteListProvider = struct {
         const self = fromFragment(self_fragment);
         out.* = .{ .left = 0, .top = 0, .width = 0, .height = 0 };
         if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.geometry()) |value| out.* = value.bounds;
+        if (self.listBounds()) |value| out.* = value;
         return com.S_OK;
     }
 
@@ -688,6 +720,21 @@ pub const PaletteListProvider = struct {
         const self = fromFragmentRoot(self_root);
         if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (!std.math.isFinite(x) or !std.math.isFinite(y)) return com.S_OK;
+        if (self.state.row_bounds != null) {
+            for (0..self.rowCount()) |index| {
+                const bounds = self.rowBounds(index) orelse continue;
+                if (x < bounds.left or x >= bounds.left + bounds.width or
+                    y < bounds.top or y >= bounds.top + bounds.height)
+                {
+                    continue;
+                }
+                const row = self.createRow(index) orelse return com.S_OK;
+                out.* = &row.fragment;
+                return com.S_OK;
+            }
+            return com.S_OK;
+        }
+
         const snapshot = self.geometry() orelse return com.S_OK;
         if (x < snapshot.bounds.left or x >= snapshot.bounds.left + snapshot.bounds.width or
             y < snapshot.bounds.top or y >= snapshot.bounds.top + snapshot.bounds.height)
@@ -711,6 +758,15 @@ pub const PaletteListProvider = struct {
         return if (self.isAvailable()) com.S_OK else com.UIA_E_ELEMENTNOTAVAILABLE;
     }
 };
+
+fn validPaletteBounds(bounds: com.UiaRect) bool {
+    return std.math.isFinite(bounds.left) and
+        std.math.isFinite(bounds.top) and
+        std.math.isFinite(bounds.width) and
+        std.math.isFinite(bounds.height) and
+        bounds.width > 0 and
+        bounds.height > 0;
+}
 
 const PaletteRowProvider = struct {
     base: com.IRawElementProviderSimple,
@@ -4408,6 +4464,7 @@ const TestPaletteState = struct {
     reentrant_provider: ?*PaletteListProvider = null,
     reentrant_queries: u32 = 0,
     list_geometry: ?PaletteListGeometry = null,
+    row_bounds: ?[]const PaletteListRowBounds = null,
     disabled_index: ?usize = null,
 
     fn name(_: *anyopaque, buf: []u8) []const u8 {
@@ -4456,6 +4513,12 @@ const TestPaletteState = struct {
         return self.list_geometry;
     }
 
+    fn rowBounds(ctx: *anyopaque, index: usize) ?PaletteListRowBounds {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        const bounds = self.row_bounds orelse return null;
+        return if (index < bounds.len) bounds[index] else null;
+    }
+
     fn state(self: *TestPaletteState) PaletteListState {
         return .{
             .ctx = self,
@@ -4467,6 +4530,7 @@ const TestPaletteState = struct {
             .row_id = rowId,
             .select_row = selectRow,
             .geometry = geometry,
+            .row_bounds = if (self.row_bounds != null) rowBounds else null,
         };
     }
 };
@@ -4514,6 +4578,49 @@ test "Palette geometry maps scrolled rows and hit testing" {
         &outside,
     ));
     try std.testing.expectEqual(@as(?*com.IRawElementProviderFragment, null), outside);
+}
+
+test "Palette sparse row bounds support geometry and hit testing" {
+    const rows = [_]PaletteListRowBounds{
+        .{ .left = 100, .top = 200, .width = 30, .height = 20 },
+        .{ .left = 300, .top = 400, .width = 40, .height = 25 },
+    };
+    var state_data = TestPaletteState{
+        .count = rows.len,
+        .selected = 0,
+        .row_bounds = &rows,
+    };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    try std.testing.expectEqual(rows[1], provider.rowBounds(1).?);
+
+    var root_bounds: com.UiaRect = undefined;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentGetBoundingRectangle(&provider.fragment, &root_bounds),
+    );
+    try std.testing.expectEqual(@as(f64, 100), root_bounds.left);
+    try std.testing.expectEqual(@as(f64, 200), root_bounds.top);
+    try std.testing.expectEqual(@as(f64, 240), root_bounds.width);
+    try std.testing.expectEqual(@as(f64, 225), root_bounds.height);
+
+    var hit: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentRootElementProviderFromPoint(
+            &provider.fragment_root,
+            310,
+            410,
+            &hit,
+        ),
+    );
+    try std.testing.expect(hit != null);
+    if (hit) |fragment| {
+        const row = PaletteRowProvider.fromFragment(fragment);
+        try std.testing.expectEqual(@as(usize, 1), row.index);
+        _ = PaletteRowProvider.Release(&row.base);
+    }
 }
 
 test "PaletteListProvider exposes one-selection container semantics without fabricated focus" {

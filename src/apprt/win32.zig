@@ -18893,6 +18893,32 @@ fn quickSelectRowIdThunk(_: *anyopaque, index: usize) u64 {
     return index + 1;
 }
 
+fn quickSelectRowBoundsThunk(ctx: *anyopaque, index: usize) ?win32_uia.PaletteListRowBounds {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.quick_select_hwnd orelse return null;
+    const host = surface.host orelse return null;
+    var client: RECT = undefined;
+    if (sys.GetClientRect(hwnd, &client) == 0) return null;
+    const metrics: win32_theme.ThemeMetrics = if (isHighContrastActive())
+        .highContrast()
+    else
+        .{};
+    const bounds = surface.quickSelectLabelRect(
+        index,
+        client,
+        metrics,
+        host.current_dpi,
+    ) orelse return null;
+    var origin: POINT = .{ .x = bounds.left, .y = bounds.top };
+    if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+    return .{
+        .left = @floatFromInt(origin.x),
+        .top = @floatFromInt(origin.y),
+        .width = @floatFromInt(bounds.right - bounds.left),
+        .height = @floatFromInt(bounds.bottom - bounds.top),
+    };
+}
+
 fn quickSelectSelectRowThunk(ctx: *anyopaque, index: usize) void {
     const surface: *Surface = @ptrCast(@alignCast(ctx));
     const session = if (surface.quick_select_session) |*value| value else return;
@@ -24789,7 +24815,43 @@ pub const Surface = struct {
             .row_enabled = &quickSelectRowEnabledThunk,
             .row_id = &quickSelectRowIdThunk,
             .select_row = &quickSelectSelectRowThunk,
+            .row_bounds = &quickSelectRowBoundsThunk,
             .use_com_threading = self.app.com_initialized,
+        };
+    }
+
+    fn quickSelectLabelRect(
+        self: *const Surface,
+        index: usize,
+        client: RECT,
+        metrics: win32_theme.ThemeMetrics,
+        dpi: UINT,
+    ) ?RECT {
+        const session = if (self.quick_select_session) |*value| value else return null;
+        if (index >= session.scan.matches.len or index >= session.labels.count) return null;
+        if (!session.labels.startsWith(index, session.prefix.typed())) return null;
+        const matched = session.scan.matches[index];
+        const placed = win32_hints.labelPlacement(.{
+            .left = matched.first.x,
+            .top = matched.first.y,
+            .right = @as(u32, matched.first.x) + 1,
+            .bottom = matched.first.y + 1,
+        }, session.labels.get(index).len, .{
+            .cell_width = session.cell_width,
+            .cell_height = session.cell_height,
+            .padding_left = session.padding_left,
+            .padding_top = session.padding_top,
+            .viewport_width = client.right,
+            .viewport_height = client.bottom,
+            .dpi = dpi,
+            .logical_padding_x = metrics.space_1,
+            .logical_stroke = metrics.stroke_hairline,
+        });
+        return .{
+            .left = placed.left,
+            .top = placed.top,
+            .right = placed.right,
+            .bottom = placed.bottom,
         };
     }
 
@@ -25120,31 +25182,14 @@ pub const Surface = struct {
             if (previous_font) |font| _ = sys.SelectObject(hdc, font);
         }
 
-        for (session.scan.matches, 0..) |matched, index| {
-            if (!session.labels.startsWith(index, session.prefix.typed())) continue;
+        for (session.scan.matches, 0..) |_, index| {
             const label = session.labels.get(index);
-            const placed = win32_hints.labelPlacement(.{
-                .left = matched.first.x,
-                .top = matched.first.y,
-                .right = @as(u32, matched.first.x) + 1,
-                .bottom = matched.first.y + 1,
-            }, label.len, .{
-                .cell_width = session.cell_width,
-                .cell_height = session.cell_height,
-                .padding_left = session.padding_left,
-                .padding_top = session.padding_top,
-                .viewport_width = client.right,
-                .viewport_height = client.bottom,
-                .dpi = host.current_dpi,
-                .logical_padding_x = metrics.space_1,
-                .logical_stroke = metrics.stroke_hairline,
-            });
-            var chip: RECT = .{
-                .left = placed.left,
-                .top = placed.top,
-                .right = placed.right,
-                .bottom = placed.bottom,
-            };
+            var chip = self.quickSelectLabelRect(
+                index,
+                client,
+                metrics,
+                host.current_dpi,
+            ) orelse continue;
             drawRoundedRect(
                 hdc,
                 chip,
