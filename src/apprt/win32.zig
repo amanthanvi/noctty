@@ -4483,7 +4483,8 @@ pub const App = struct {
         try self.ensureScrollbarClass();
 
         const host = try self.core_app.alloc.create(Host);
-        errdefer self.core_app.alloc.destroy(host);
+        var host_registered = false;
+        errdefer if (!host_registered) self.core_app.alloc.destroy(host);
         host.* = .{
             .app = self,
             .id = self.allocateHostId(),
@@ -4528,6 +4529,8 @@ pub const App = struct {
         self.attachShellCompositorWindow(hwnd);
 
         try self.hosts.append(self.core_app.alloc, host);
+        host_registered = true;
+        errdefer self.removeHost(host);
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
@@ -5112,14 +5115,9 @@ pub const App = struct {
     }
 
     fn removeHost(self: *App, host: *Host) void {
-        for (self.hosts.items, 0..) |item, i| {
-            if (item == host) {
-                _ = self.hosts.swapRemove(i);
-                host.deinit();
-                self.core_app.alloc.destroy(host);
-                break;
-            }
-        }
+        if (!detachHostReference(&self.hosts, host)) return;
+        host.deinit();
+        self.core_app.alloc.destroy(host);
     }
 
     fn windowDestroyed(self: *App, surface: *Surface) void {
@@ -6335,6 +6333,15 @@ pub const App = struct {
         return true;
     }
 };
+
+fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) bool {
+    for (hosts.items, 0..) |item, i| {
+        if (item != host) continue;
+        _ = hosts.swapRemove(i);
+        return true;
+    }
+    return false;
+}
 
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
     const alloc = request.alloc;
@@ -27121,6 +27128,26 @@ test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces"
     try std.testing.expect((effectiveHostWindowStyle(false, false, true) & c.WS_CLIPCHILDREN) != 0);
     try std.testing.expect((effectiveHostWindowStyle(true, true, true) & c.WS_CLIPCHILDREN) != 0);
     try std.testing.expect((effectiveHostWindowStyle(true, false, false) & c.WS_CLIPCHILDREN) == 0);
+}
+
+test "win32 failed cloned-host registration detaches the host reference" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var first: Host = undefined;
+    var failed_clone: Host = undefined;
+    var last: Host = undefined;
+    var hosts: std.ArrayListUnmanaged(*Host) = .empty;
+    defer hosts.deinit(std.testing.allocator);
+    try hosts.append(std.testing.allocator, &first);
+    try hosts.append(std.testing.allocator, &failed_clone);
+    try hosts.append(std.testing.allocator, &last);
+
+    try std.testing.expect(detachHostReference(&hosts, &failed_clone));
+    try std.testing.expectEqual(@as(usize, 2), hosts.items.len);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &failed_clone) == null);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &first) != null);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &last) != null);
+    try std.testing.expect(!detachHostReference(&hosts, &failed_clone));
 }
 
 test "win32 sharesHostWindowState only for same-host clones" {
