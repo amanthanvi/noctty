@@ -598,6 +598,21 @@ fn shouldDeferTextToCharMessage(
     return !isControlCodepoint(translated.unshifted_codepoint);
 }
 
+fn deferTextToCharMessage(
+    result: *Win32KeyMessage,
+    raw_mods: input.Mods,
+    translated: KeyText,
+) void {
+    // Binding lookup happens before composing events are discarded by the
+    // terminal encoder. Preserve the physical AltGr chord here so a deferred
+    // AltGr character cannot match an unrelated plain-key binding.
+    result.event.mods = raw_mods;
+    result.event.utf8 = "";
+    result.event.consumed_mods = .{};
+    result.event.composing = true;
+    result.deferred_utf16_units = translated.deferred_utf16_units;
+}
+
 pub fn shouldAuthorizeDeferredCharMessage(effect: CoreSurface.InputEffect) bool {
     return effect == .ignored;
 }
@@ -817,7 +832,8 @@ pub fn keyEventFromWin32Message(
     const key = keyFromVirtualKey(vk, lParam);
     var keyboard_state_storage: [256]u8 = [_]u8{0} ** 256;
     const keyboard_state = currentKeyboardState(&keyboard_state_storage);
-    const mods = normalizeAltGrMods(currentModsFromKeyboardState(keyboard_state));
+    const raw_mods = currentModsFromKeyboardState(keyboard_state);
+    const mods = normalizeAltGrMods(raw_mods);
 
     var result: Win32KeyMessage = .{
         .event = .{
@@ -842,10 +858,7 @@ pub fn keyEventFromWin32Message(
             // Keep the physical-key event visible to bindings/modifier state
             // but defer text emission to WM_CHAR so plain typing doesn't rely
             // on ToUnicode/GetKeyboardState timing.
-            result.event.utf8 = "";
-            result.event.consumed_mods = .{};
-            result.event.composing = true;
-            result.deferred_utf16_units = translated.deferred_utf16_units;
+            deferTextToCharMessage(&result, raw_mods, translated);
         }
     }
 
@@ -1219,6 +1232,25 @@ test "win32 deferred char authorization respects key handling effect" {
     try std.testing.expect(shouldAuthorizeDeferredCharMessage(.ignored));
     try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.consumed));
     try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.closed));
+}
+
+test "win32 deferred AltGr text preserves binding modifiers" {
+    const raw_alt_gr: input.Mods = .{
+        .ctrl = true,
+        .alt = true,
+        .sides = .{ .ctrl = .left, .alt = .right },
+    };
+    var message: Win32KeyMessage = .{ .event = .{
+        .key = .key_a,
+        .mods = withoutSyntheticAltGr(raw_alt_gr),
+    } };
+
+    deferTextToCharMessage(&message, raw_alt_gr, .{ .deferred_utf16_units = 1 });
+
+    try std.testing.expect(std.meta.eql(raw_alt_gr, message.event.mods));
+    try std.testing.expect(message.event.composing);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
 }
 
 test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
