@@ -2263,7 +2263,16 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
 const SessionRestoreTransaction = struct {
     app: ?*App = null,
     host: ?*Host = null,
+    core_first: *bool,
+    core_first_before: bool,
     committed: bool = false,
+
+    fn init(app: *App) SessionRestoreTransaction {
+        return .{
+            .core_first = &app.core_app.first,
+            .core_first_before = app.core_app.first,
+        };
+    }
 
     fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
         if (self.host == null) {
@@ -2278,9 +2287,13 @@ const SessionRestoreTransaction = struct {
 
     fn rollback(self: *SessionRestoreTransaction) void {
         if (self.committed) return;
-        const app = self.app orelse return;
-        const host = self.host orelse return;
-        app.rollbackSessionRestoreHost(host);
+        if (self.app) |app| if (self.host) |host| {
+            app.rollbackSessionRestoreHost(host);
+            // A failed DestroyWindow deliberately retains the partial host.
+            // Do not make that live surface look like a fresh first surface.
+            if (std.mem.indexOfScalar(*Host, app.hosts.items, host) != null) return;
+        };
+        self.core_first.* = self.core_first_before;
     }
 };
 
@@ -3252,7 +3265,7 @@ pub const App = struct {
         self: *App,
         window: win32_session_state.Window,
     ) !*Surface {
-        var transaction: SessionRestoreTransaction = .{};
+        var transaction = SessionRestoreTransaction.init(self);
         defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
@@ -30728,6 +30741,24 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
+}
+
+test "win32 session restore transaction preserves first surface state" {
+    var core_app: CoreApp = undefined;
+    core_app.first = true;
+    var app: App = undefined;
+    app.core_app = &core_app;
+
+    var rolled_back = SessionRestoreTransaction.init(&app);
+    core_app.first = false;
+    rolled_back.rollback();
+    try std.testing.expect(core_app.first);
+
+    var committed = SessionRestoreTransaction.init(&app);
+    core_app.first = false;
+    committed.commit();
+    committed.rollback();
+    try std.testing.expect(!core_app.first);
 }
 
 test "win32 session state window rect requires complete geometry" {

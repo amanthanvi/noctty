@@ -30,6 +30,25 @@ const VersionHeader = struct {
     schema_version: u32,
 };
 
+/// Named layouts share the session schema but treat window placement as
+/// opaque input. Decode those fields as arbitrary JSON so stale state names
+/// or mistyped geometry cannot reject an otherwise valid layout shape, while
+/// keeping every non-placement field strict.
+const LayoutState = struct {
+    schema_version: u32 = current_schema_version,
+    windows: []const LayoutWindow = &.{},
+};
+
+const LayoutWindow = struct {
+    x: std.json.Value = .null,
+    y: std.json.Value = .null,
+    width: std.json.Value = .null,
+    height: std.json.Value = .null,
+    state: std.json.Value = .null,
+    selected_tab: usize,
+    tabs: []const Tab = &.{},
+};
+
 const VisitFrame = struct {
     index: usize,
     expanded: bool,
@@ -128,21 +147,37 @@ fn parseAllocMode(
         return error.UnsupportedVersion;
     }
 
+    if (strip_placement) {
+        var layout = try std.json.parseFromSlice(LayoutState, alloc, raw, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = false,
+        });
+        errdefer layout.deinit();
+
+        const windows = try layout.arena.allocator().alloc(Window, layout.value.windows.len);
+        for (layout.value.windows, windows) |source, *window| {
+            window.* = .{
+                .selected_tab = source.selected_tab,
+                .tabs = source.tabs,
+            };
+        }
+
+        const parsed: std.json.Parsed(SessionState) = .{
+            .arena = layout.arena,
+            .value = .{
+                .schema_version = layout.value.schema_version,
+                .windows = windows,
+            },
+        };
+        try validateAlloc(alloc, parsed.value);
+        return parsed;
+    }
+
     var parsed = try std.json.parseFromSlice(SessionState, alloc, raw, .{
         .allocate = .alloc_always,
         .ignore_unknown_fields = false,
     });
     errdefer parsed.deinit();
-
-    if (strip_placement) {
-        for (@constCast(parsed.value.windows)) |*window| {
-            window.x = null;
-            window.y = null;
-            window.width = null;
-            window.height = null;
-            window.state = null;
-        }
-    }
 
     try validateAlloc(alloc, parsed.value);
     return parsed;
@@ -458,6 +493,8 @@ test "win32 named layout parsing strips placement before validation" {
         ,
         \\{"schema_version":1,"windows":[{"x":10,"y":20,"width":0,"height":720,"state":"maximized","selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
         ,
+        \\{"schema_version":1,"windows":[{"x":"stale","y":{"monitor":2},"width":[],"height":false,"state":"minimized","selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+        ,
     };
 
     for (cases) |raw| {
@@ -470,6 +507,17 @@ test "win32 named layout parsing strips placement before validation" {
         try std.testing.expect(window.height == null);
         try std.testing.expect(window.state == null);
     }
+}
+
+test "win32 named layout parsing stays strict outside placement" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"future_placement":true,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+    ;
+
+    try std.testing.expectError(
+        error.UnknownField,
+        parseLayoutAlloc(std.testing.allocator, raw),
+    );
 }
 
 test "win32 session state parse rejects unsupported schema version" {
