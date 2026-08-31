@@ -77,7 +77,13 @@ coalesce_data: Coalesce = .{},
 /// the terminal doesn't freeze with a bad actor.
 sync_reset: xev.Timer,
 sync_reset_c: xev.Completion = .{},
-sync_reset_cancel_c: xev.Completion = .{},
+/// The most recent request to restart the synchronized-output watchdog. We
+/// keep this as logical state instead of resetting the xev completion: on
+/// IOCP a completed timer remains `.active` until its callback is popped, so
+/// reusing it from another callback can corrupt libxev's intrusive completion
+/// queue and lose the timer entirely. Mirrors `cursor_blink_reset_at` in
+/// src/renderer/Thread.zig.
+sync_reset_at: ?std.time.Instant = null,
 
 flags: packed struct {
     /// This is set to true only when an abnormal exit is detected. It
@@ -369,11 +375,24 @@ fn drainMailbox(
 }
 
 fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
-    self.sync_reset.reset(
+    // Record the deadline and let the timer's own callback honor it. Calling
+    // `reset()` here would re-initialize a completion that libxev may still
+    // own, which on IOCP loses the watchdog: synchronized output is then
+    // never released and the terminal stops presenting for good.
+    self.sync_reset_at = std.time.Instant.now() catch null;
+    self.armSyncResetTimerIfDead(cb, sync_reset_ms);
+}
+
+/// Arm the synchronized-output watchdog only when libxev no longer owns the
+/// completion. `.active` can mean "already completed but still queued for its
+/// callback" on IOCP, so callers must never reset or reinitialize an active
+/// completion; the pending callback re-arms from the logical deadline instead.
+fn armSyncResetTimerIfDead(self: *Thread, cb: *CallbackData, delay_ms: u64) void {
+    if (self.sync_reset_c.state() != .dead) return;
+    self.sync_reset.run(
         &self.loop,
         &self.sync_reset_c,
-        &self.sync_reset_cancel_c,
-        sync_reset_ms,
+        delay_ms,
         CallbackData,
         cb,
         syncResetCallback,
@@ -414,6 +433,20 @@ fn syncResetCallback(
     };
 
     const cb = cb_ orelse return .disarm;
+
+    // A newer `2026h` may have arrived while this completion was queued.
+    // Honor the remaining logical delay here, from the timer's own callback,
+    // rather than resetting the queued object.
+    if (cb.self.sync_reset_at) |reset_at| honor: {
+        const now = std.time.Instant.now() catch break :honor;
+        const elapsed_ms = now.since(reset_at) / std.time.ns_per_ms;
+        if (elapsed_ms < sync_reset_ms) {
+            cb.self.armSyncResetTimerIfDead(cb, sync_reset_ms - elapsed_ms);
+            return .disarm;
+        }
+    }
+
+    cb.self.sync_reset_at = null;
     cb.io.resetSynchronizedOutput();
     return .disarm;
 }
