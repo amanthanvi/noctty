@@ -7948,12 +7948,12 @@ foreach ($consumer in @(
     [pscustomobject]@{
         Context = $publishedReleaseVerifier
         Content = $publishedReleaseVerifierText
-        Pattern = '(?m)^\.\s+\(Join-Path \$PSScriptRoot ''portable-manifest-verification\.ps1''\)$'
+        Pattern = '(?m)^\.\s+\(Join-Path \$PSScriptRoot ''portable-manifest-verification\.ps1''\)\r?$'
     },
     [pscustomobject]@{
         Context = "$releaseWorkflow :: Verify signed release artifacts"
         Content = $signedArtifactStep
-        Pattern = '(?m)^\s*\.\s+\(Join-Path \$PWD "scripts/portable-manifest-verification\.ps1"\)$'
+        Pattern = '(?m)^\s*\.\s+\(Join-Path \$PWD "scripts/portable-manifest-verification\.ps1"\)\r?$'
     }
 )) {
     Assert-TextContract `
