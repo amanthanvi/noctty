@@ -104,6 +104,21 @@ pub fn encodeAlloc(alloc: Allocator, state: SessionState) ![]u8 {
 }
 
 pub fn parseAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(SessionState) {
+    return parseAllocMode(alloc, raw, false);
+}
+
+/// Parse a named layout. Layouts intentionally carry only window shape, so
+/// discard placement before validation; incomplete or stale geometry must not
+/// quarantine an otherwise valid hand-authored or synced layout.
+pub fn parseLayoutAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(SessionState) {
+    return parseAllocMode(alloc, raw, true);
+}
+
+fn parseAllocMode(
+    alloc: Allocator,
+    raw: []const u8,
+    comptime strip_placement: bool,
+) !std.json.Parsed(SessionState) {
     var header = try std.json.parseFromSlice(VersionHeader, alloc, raw, .{
         .ignore_unknown_fields = true,
     });
@@ -118,6 +133,16 @@ pub fn parseAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(SessionSta
         .ignore_unknown_fields = false,
     });
     errdefer parsed.deinit();
+
+    if (strip_placement) {
+        for (@constCast(parsed.value.windows)) |*window| {
+            window.x = null;
+            window.y = null;
+            window.width = null;
+            window.height = null;
+            window.state = null;
+        }
+    }
 
     try validateAlloc(alloc, parsed.value);
     return parsed;
@@ -425,6 +450,26 @@ test "win32 session state rejects non-positive window geometry" {
     ;
 
     try std.testing.expectError(error.InvalidWindowRect, parseAlloc(std.testing.allocator, raw));
+}
+
+test "win32 named layout parsing strips placement before validation" {
+    const cases = [_][]const u8{
+        \\{"schema_version":1,"windows":[{"x":10,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+        ,
+        \\{"schema_version":1,"windows":[{"x":10,"y":20,"width":0,"height":720,"state":"maximized","selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+        ,
+    };
+
+    for (cases) |raw| {
+        var parsed = try parseLayoutAlloc(std.testing.allocator, raw);
+        defer parsed.deinit();
+        const window = parsed.value.windows[0];
+        try std.testing.expect(window.x == null);
+        try std.testing.expect(window.y == null);
+        try std.testing.expect(window.width == null);
+        try std.testing.expect(window.height == null);
+        try std.testing.expect(window.state == null);
+    }
 }
 
 test "win32 session state parse rejects unsupported schema version" {

@@ -23,6 +23,19 @@ pub const LoadResult = union(enum) {
 };
 
 pub fn loadAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) LoadResult {
+    return loadWithParser(alloc, absolute_path, max_bytes, schema.parseAlloc);
+}
+
+pub fn loadLayoutAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) LoadResult {
+    return loadWithParser(alloc, absolute_path, max_bytes, schema.parseLayoutAlloc);
+}
+
+fn loadWithParser(
+    alloc: Allocator,
+    absolute_path: []const u8,
+    max_bytes: usize,
+    comptime parse: fn (Allocator, []const u8) anyerror!std.json.Parsed(schema.SessionState),
+) LoadResult {
     const raw = readFileBoundedAlloc(alloc, absolute_path, max_bytes) catch |err| return switch (err) {
         error.FileNotFound => .missing,
         error.FileTooBig => .oversized,
@@ -32,7 +45,7 @@ pub fn loadAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) 
 
     // `parseAlloc` parses with `.allocate = .alloc_always`, so the document
     // owns every string and survives the `raw` free above.
-    const parsed = schema.parseAlloc(alloc, raw) catch |err| return switch (err) {
+    const parsed = parse(alloc, raw) catch |err| return switch (err) {
         error.OutOfMemory => .{ .transient = err },
         else => .{ .corrupt = err },
     };

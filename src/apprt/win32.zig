@@ -3002,7 +3002,7 @@ pub const App = struct {
         };
         defer self.core_app.alloc.free(path);
 
-        var loaded = win32_session_persistence.loadAlloc(
+        var loaded = win32_session_persistence.loadLayoutAlloc(
             self.core_app.alloc,
             path,
             win32_session_persistence.default_max_state_bytes,
@@ -3144,6 +3144,14 @@ pub const App = struct {
             return false;
         };
         defer self.core_app.alloc.free(encoded);
+        if (!namedLayoutEncodingFitsReadLimit(encoded.len)) {
+            log.warn(
+                "named layout save rejected oversized encoding name={s} bytes={d}",
+                .{ name, encoded.len },
+            );
+            host.setBanner(.err, "Layout data is too large.") catch {};
+            return false;
+        }
         writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
             log.warn("named layout save write failed name={s} path={s} err={}", .{ name, path, err });
             host.setBanner(.err, "Layout could not be saved.") catch {};
@@ -3151,6 +3159,10 @@ pub const App = struct {
         };
         host.setBanner(.info, "Layout saved.") catch {};
         return true;
+    }
+
+    fn namedLayoutEncodingFitsReadLimit(bytes: usize) bool {
+        return bytes <= win32_session_persistence.default_max_state_bytes;
     }
 
     fn restoreSessionState(self: *App) !bool {
@@ -28503,6 +28515,12 @@ test "win32 allocIpcPipeName prefixes sanitized namespace" {
     defer std.testing.allocator.free(pipe_name_utf8);
 
     try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class", pipe_name_utf8);
+}
+
+test "win32 named layout encoding uses the persistence read limit" {
+    const limit = win32_session_persistence.default_max_state_bytes;
+    try std.testing.expect(App.namedLayoutEncodingFitsReadLimit(limit));
+    try std.testing.expect(!App.namedLayoutEncodingFitsReadLimit(limit + 1));
 }
 
 test "win32 normalizeForwardedStartupArg drops class and normalizes working directory" {
