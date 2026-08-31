@@ -314,12 +314,21 @@ pub fn validatePixelFormatSetTransition(before: i32, selected: i32, after: i32) 
 
 fn isWglPixelFormatHardError(err: anyerror) bool {
     return switch (err) {
-        error.WglBootstrapMakeCurrentFailed,
         error.WglBootstrapRestoreCurrentFailed,
         error.WglBootstrapClearCurrentFailed,
         => true,
         else => false,
     };
+}
+
+test "win32 WGL bootstrap make-current failure keeps classic fallback available" {
+    // A failed wglMakeCurrent leaves the caller's previous current pair in
+    // place, and neither bootstrap path has touched the real child DC yet.
+    // Restoration/clear failures remain hard because the dummy context may
+    // still be current when its cleanup runs.
+    try std.testing.expect(!isWglPixelFormatHardError(error.WglBootstrapMakeCurrentFailed));
+    try std.testing.expect(isWglPixelFormatHardError(error.WglBootstrapRestoreCurrentFailed));
+    try std.testing.expect(isWglPixelFormatHardError(error.WglBootstrapClearCurrentFailed));
 }
 
 const PixelFormatBaseCompatibilityFailure = enum {
