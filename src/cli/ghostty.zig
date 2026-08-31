@@ -206,6 +206,20 @@ test "parse action plus" {
     }
 }
 
+test "parse send-text action ignores literal action-like payloads" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_][]const u8{
+        "+send-text --surface-id=42 -- --version",
+        "+send-text --surface-id=42 -- +focus",
+    }) |args_text| {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, args_text);
+        defer iter.deinit();
+        try testing.expectEqual(Action.@"send-text", (try actionpkg.detectIter(Action, &iter)).?);
+    }
+}
+
 test "parse action plus ignores -e" {
     const testing = std.testing;
     const alloc = testing.allocator;

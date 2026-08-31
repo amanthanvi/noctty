@@ -6038,8 +6038,13 @@ pub const App = struct {
             // `newConfig(.tab)` consults the globally focused surface. Reset
             // and inherit from the explicitly requested host instead.
             config.@"working-directory" = self.config.@"working-directory";
-            if (source) |surface| {
-                inherited_profile_key = try applyProfileConfigFromSource(&config, surface);
+        }
+        if (source) |surface| {
+            // newConfig inherits only the focused surface's working directory;
+            // profile command selection is app-runtime state and must be
+            // applied for both focused and explicit-window automation.
+            inherited_profile_key = try applyProfileConfigFromSource(&config, surface);
+            if (explicit_window_target) {
                 const split_inherit = config.@"split-inherit-working-directory";
                 {
                     defer config.@"split-inherit-working-directory" = split_inherit;
@@ -27605,12 +27610,33 @@ test "automation in-app new_tab action does not query source pwd" {
         .app = &app,
         .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
         .surfaces = &.{
-            .{ .storage = &source, .host = &host, .register = true },
-            .{ .storage = &created, .host = &host, .window_visible = false, .host_active = false },
+            .{
+                .storage = &source,
+                .host = &host,
+                .register = true,
+                .free_launch_profile_key_on_deinit = true,
+            },
+            .{
+                .storage = &created,
+                .host = &host,
+                .window_visible = false,
+                .host_active = false,
+                .free_launch_profile_key_on_deinit = true,
+            },
         },
         .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
     });
     defer session.deinit();
+
+    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    var profiles = [_]windows_shell.Profile{.{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &command },
+    }};
+    host.profiles = &profiles;
+    source.launch_profile_key = try core_app.alloc.dupeZ(u8, "pwsh");
 
     const Hook = struct {
         var host_ref: *Host = undefined;
@@ -27624,10 +27650,14 @@ test "automation in-app new_tab action does not query source pwd" {
 
         fn createSurface(
             hook_app: *App,
-            _: *const configpkg.Config,
+            config: *const configpkg.Config,
             _: LPCWSTR,
             opts: SurfaceInitOptions,
         ) anyerror!*Surface {
+            const direct = config.command.?.direct;
+            try std.testing.expectEqual(@as(usize, 2), direct.len);
+            try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
+            try std.testing.expectEqualStrings("-NoLogo", direct[1]);
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
@@ -27649,6 +27679,7 @@ test "automation in-app new_tab action does not query source pwd" {
 
     try std.testing.expect(try app.performAction(.app, .new_tab, {}));
     try std.testing.expectEqual(@as(usize, 0), Hook.pwd_calls);
+    try std.testing.expectEqualStrings("pwsh", created.launch_profile_key.?);
 }
 
 test "automation explicit-window new_tab reanchors inactive host cwd and override wins" {
