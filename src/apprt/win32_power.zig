@@ -118,8 +118,9 @@ const energy_saver_bit: u8 = 1 << 2;
 
 var snapshot_bits = std.atomic.Value(u8).init(0);
 var last_poll_tick_ms = std.atomic.Value(u64).init(0);
-/// Bumped by every notification-driven update so a slower poll can detect
-/// that it raced a push and is therefore stale.
+/// Notification publication sequence. Even values are stable; odd values mean
+/// a notification has claimed publication but has not finished updating the
+/// snapshot yet. Pollers may publish only against an unchanged even value.
 var push_generation = std.atomic.Value(u32).init(0);
 
 /// Process-wide power state. This is packed into one atomic byte so renderer
@@ -443,6 +444,10 @@ fn pollIfStaleWith(now: u64, read: PowerStatusReader) void {
     // stampeding the syscall, but a failed query should not cost us the
     // next 30 seconds of fallback, so hand the slot back on failure.
     const generation = push_generation.load(.acquire);
+    if (generation & 1 != 0) {
+        last_poll_tick_ms.store(previous, .release);
+        return;
+    }
     var raw: SYSTEM_POWER_STATUS = undefined;
     if (!read(&raw)) {
         last_poll_tick_ms.store(previous, .release);
@@ -591,17 +596,17 @@ fn unpackSnapshot(bits: u8) Snapshot {
 }
 
 /// Publish a polled snapshot only if no notification landed since the caller
-/// sampled `generation`.
+/// sampled a stable `generation`.
 ///
 /// A plain store guarded by a preceding generation load is NOT enough: a push
 /// can bump the generation and complete its own update in the window between
 /// that load and the store, and the full-byte store would then erase it. The
-/// compare-exchange closes that window. `publishSetting` bumps the generation
-/// BEFORE it mutates the byte, so any push whose write could land after ours
-/// has already made the generation check below fail, and any push that lands
-/// between our load and our exchange makes the exchange itself fail and sends
-/// us back through that check.
+/// compare-exchange closes that window. `publishSetting` makes the generation
+/// odd BEFORE it mutates the byte and even again only after the mutation. A
+/// poll therefore rejects both an update that completed while it was reading
+/// and one whose publication is still in flight.
 fn publishPolledSnapshot(value: Snapshot, generation: u32) void {
+    if (generation & 1 != 0) return;
     const next = packSnapshot(value);
     var current = snapshot_bits.load(.acquire);
     while (true) {
@@ -611,12 +616,29 @@ fn publishPolledSnapshot(value: Snapshot, generation: u32) void {
     }
 }
 
-fn publishSetting(update: SettingUpdate) void {
-    // Bump before the store so a poll that started earlier and is about to
-    // publish observes the change and backs off. Bumping after would leave a
-    // window where the poll sees the old generation and clobbers this update.
-    _ = push_generation.fetchAdd(1, .acq_rel);
+fn beginPushPublication() void {
+    var generation = push_generation.load(.acquire);
+    while (true) {
+        if (generation & 1 != 0) {
+            std.atomic.spinLoopHint();
+            generation = push_generation.load(.acquire);
+            continue;
+        }
+        generation = push_generation.cmpxchgWeak(
+            generation,
+            generation +% 1,
+            .acq_rel,
+            .acquire,
+        ) orelse return;
+    }
+}
 
+fn endPushPublication() void {
+    const previous = push_generation.fetchAdd(1, .release);
+    std.debug.assert(previous & 1 != 0);
+}
+
+fn applySetting(update: SettingUpdate) void {
     var current = snapshot_bits.load(.acquire);
     while (true) {
         var next = current;
@@ -635,6 +657,14 @@ fn publishSetting(update: SettingUpdate) void {
         }
         current = snapshot_bits.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return;
     }
+}
+
+fn publishSetting(update: SettingUpdate) void {
+    // Claim an odd sequence before touching the snapshot. A poll that samples
+    // us in this window must not mistake the old byte for the new generation.
+    beginPushPublication();
+    defer endPushPublication();
+    applySetting(update);
 }
 
 fn settingPayload(guid: GUID, value: DWORD) [@sizeOf(POWERBROADCAST_SETTING)]u8 {
@@ -983,6 +1013,27 @@ test "power poll publication yields to a notification that raced it" {
         Snapshot{ .on_battery = true, .battery_saver = false, .energy_saver = true },
         snapshot(),
     );
+}
+
+test "power poll rejects an in-flight notification generation" {
+    resetPowerGlobalsForTest();
+    defer resetPowerGlobalsForTest();
+
+    // Reproduce the publication window deterministically: the notification
+    // has claimed the next (odd) generation but has not changed the byte yet.
+    beginPushPublication();
+    const in_flight = push_generation.load(.acquire);
+    try std.testing.expect(in_flight & 1 != 0);
+
+    publishPolledSnapshot(.{ .on_battery = true }, in_flight);
+    try std.testing.expectEqual(Snapshot{}, snapshot());
+
+    // Finish the notification. The stale poll must remain unable to replace
+    // it, even if publication completed without another generation change.
+    applySetting(.{ .battery_saver = true });
+    endPushPublication();
+    publishPolledSnapshot(.{ .on_battery = true }, in_flight);
+    try std.testing.expectEqual(Snapshot{ .battery_saver = true }, snapshot());
 }
 
 test "power cloak resolution recovers from a failed query on uncloak" {

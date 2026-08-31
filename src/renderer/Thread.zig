@@ -103,7 +103,10 @@ stop_c: xev.Completion = .{},
 /// The timer used for rendering
 render_h: xev.Timer,
 render_c: xev.Completion = .{},
+render_reset_c: xev.Completion = .{},
 render_followup_pending: bool = false,
+/// Absolute Win32 tick when the active render follow-up should fire.
+render_timer_due_ms: u64 = 0,
 last_present_request_ms: u64 = 0,
 
 /// The timer used for draw calls. Draw calls don't update from the
@@ -401,7 +404,7 @@ fn syncDrawTimer(self: *Thread) void {
         if (apprt.runtime != apprt.win32) return;
 
         const now_ms = win32_power.tickCountMs();
-        if (!drawTimerNeedsReset(now_ms, self.draw_timer_due_ms, delay_ms)) return;
+        if (!timerNeedsEarlierDeadline(now_ms, self.draw_timer_due_ms, delay_ms)) return;
         self.draw_h.reset(
             &self.loop,
             &self.draw_c,
@@ -429,7 +432,7 @@ fn syncDrawTimer(self: *Thread) void {
     }
 }
 
-fn drawTimerNeedsReset(now_ms: u64, due_ms: u64, next_delay_ms: u64) bool {
+fn timerNeedsEarlierDeadline(now_ms: u64, due_ms: u64, next_delay_ms: u64) bool {
     if (due_ms == 0) return true;
     return next_delay_ms < due_ms -| now_ms;
 }
@@ -711,8 +714,26 @@ fn drawFrame(self: *Thread, now: bool) void {
 }
 
 fn scheduleRenderFollowup(self: *Thread) void {
-    if (self.render_followup_pending) return;
     const delay_ms = self.nextPresentTimerDelayMs() orelse return;
+
+    if (self.render_followup_pending) {
+        if (apprt.runtime != apprt.win32) return;
+
+        const now_ms = win32_power.tickCountMs();
+        if (!timerNeedsEarlierDeadline(now_ms, self.render_timer_due_ms, delay_ms)) return;
+        self.render_h.reset(
+            &self.loop,
+            &self.render_c,
+            &self.render_reset_c,
+            delay_ms,
+            Thread,
+            self,
+            renderCallback,
+        );
+        self.render_timer_due_ms = now_ms +| delay_ms;
+        return;
+    }
+
     self.render_followup_pending = true;
     self.render_h.run(
         &self.loop,
@@ -722,6 +743,9 @@ fn scheduleRenderFollowup(self: *Thread) void {
         self,
         renderCallback,
     );
+    if (apprt.runtime == apprt.win32) {
+        self.render_timer_due_ms = win32_power.tickCountMs() +| delay_ms;
+    }
 }
 
 /// Arm the cursor's one-shot timer only when libxev no longer owns the
@@ -875,10 +899,19 @@ fn drawCallback(
 }
 
 test "draw timer shortens an active slow interval" {
-    try std.testing.expect(drawTimerNeedsReset(100, 1100, 8));
-    try std.testing.expect(!drawTimerNeedsReset(1095, 1100, 8));
-    try std.testing.expect(!drawTimerNeedsReset(100, 108, 8));
-    try std.testing.expect(drawTimerNeedsReset(100, 0, 8));
+    try std.testing.expect(timerNeedsEarlierDeadline(100, 1100, 8));
+    try std.testing.expect(!timerNeedsEarlierDeadline(1095, 1100, 8));
+    try std.testing.expect(!timerNeedsEarlierDeadline(100, 108, 8));
+    try std.testing.expect(timerNeedsEarlierDeadline(100, 0, 8));
+}
+
+test "render follow-up timer shortens an active slow interval" {
+    // A focus/config change from 1 fps to focused cadence must replace the
+    // pending one-second follow-up with an 8 ms deadline.
+    try std.testing.expect(timerNeedsEarlierDeadline(200, 1200, DRAW_INTERVAL));
+    // Never postpone an already-earlier follow-up or reset an equal deadline.
+    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, 1000));
+    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, DRAW_INTERVAL));
 }
 
 fn renderCallback(
@@ -887,13 +920,19 @@ fn renderCallback(
     _: *xev.Completion,
     r: xev.Timer.RunError!void,
 ) xev.CallbackAction {
-    _ = r catch unreachable;
+    _ = r catch |err| switch (err) {
+        // A reset has already armed the replacement follow-up. Leave its
+        // pending flag and deadline intact when the canceled run reports back.
+        error.Canceled => return .disarm,
+        else => unreachable,
+    };
     const t: *Thread = self_ orelse {
         // This shouldn't happen so we log it.
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
     t.render_followup_pending = false;
+    t.render_timer_due_ms = 0;
     if (comptime @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
         t.surface.noteRendererFollowupCallback();
     }
