@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repository = 'amanthanvi/noctty'
 $firstAttestedVersion = [version]'1.3.124'
+$firstPortableManifestVersion = [version]'1.3.124'
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
 . (Join-Path $PSScriptRoot 'portable-manifest-verification.ps1')
@@ -115,7 +116,9 @@ $release = $releaseJson | ConvertFrom-Json
 if ($release.tagName -ne $tag -or $release.isDraft -or $release.isPrerelease) {
     throw "Published release $tag must exist as a stable, non-draft release."
 }
-$requiresAttestation = ([version]$Version -ge $firstAttestedVersion)
+$releaseVersion = [version]$Version
+$requiresAttestation = ($releaseVersion -ge $firstAttestedVersion)
+$requiresPortableManifests = ($releaseVersion -ge $firstPortableManifestVersion)
 $verifyAttestations = if ($requiresAttestation) {
     Test-GhAttestationAvailable
 } else {
@@ -127,13 +130,16 @@ $expectedNames = [System.Collections.Generic.List[string]]::new()
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup))
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable))
-    $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest))
+    if ($requiresPortableManifests) {
+        $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest))
+    }
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
 }
 $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
 $expectedNames.Add('noctty-icon.svg')
-if ($expectedNames.Count -ne 10) {
-    throw "Published release contract must require exactly ten assets; generated $($expectedNames.Count)."
+$expectedAssetCount = if ($requiresPortableManifests) { 10 } else { 8 }
+if ($expectedNames.Count -ne $expectedAssetCount) {
+    throw "Published release contract must require exactly $expectedAssetCount assets; generated $($expectedNames.Count)."
 }
 
 $assets = @($release.assets)
@@ -224,18 +230,22 @@ try {
             -Label "Setup $architecture" `
             -AllowedPins $allowedPins `
             -TrustSelfSigned $trustSelfSigned))
-        $signatureEvidence.Add((Assert-PublishedSignature `
-            -Path (Join-Path $DownloadDirectory $manifestName) `
-            -Label "Portable manifest $architecture" `
-            -AllowedPins $allowedPins `
-            -TrustSelfSigned $trustSelfSigned))
+        if ($requiresPortableManifests) {
+            $signatureEvidence.Add((Assert-PublishedSignature `
+                -Path (Join-Path $DownloadDirectory $manifestName) `
+                -Label "Portable manifest $architecture" `
+                -AllowedPins $allowedPins `
+                -TrustSelfSigned $trustSelfSigned))
+        }
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
-        Assert-PortableManifestMatchesPayload `
-            -ManifestPath (Join-Path $DownloadDirectory $manifestName) `
-            -PayloadRoot (Join-Path $extractDirectory 'noctty') `
-            -Label "Portable manifest $architecture"
+        if ($requiresPortableManifests) {
+            Assert-PortableManifestMatchesPayload `
+                -ManifestPath (Join-Path $DownloadDirectory $manifestName) `
+                -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+                -Label "Portable manifest $architecture"
+        }
         foreach ($relativePath in @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')) {
             $binaryPath = Join-Path $extractDirectory $relativePath
             if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
@@ -249,8 +259,9 @@ try {
         }
     }
 
-    if ($signatureEvidence.Count -ne 10) {
-        throw "Published release must contain exactly ten verified Authenticode signatures; found $($signatureEvidence.Count)."
+    $expectedSignatureCount = if ($requiresPortableManifests) { 10 } else { 8 }
+    if ($signatureEvidence.Count -ne $expectedSignatureCount) {
+        throw "Published release must contain exactly $expectedSignatureCount verified Authenticode signatures; found $($signatureEvidence.Count)."
     }
 
     $thumbprints = @($signatureEvidence | ForEach-Object { $_.Thumbprint } | Sort-Object -Unique)
