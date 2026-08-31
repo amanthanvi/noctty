@@ -68,7 +68,9 @@ binaries inside it. GitHub CLI 2.49.0 or later provides `gh attestation`:
 
 ```powershell
 foreach ($path in @($artifact, $checksums)) {
-    gh attestation verify $path --repo amanthanvi/noctty
+    gh attestation verify $path `
+        --repo amanthanvi/noctty `
+        --signer-workflow amanthanvi/noctty/.github/workflows/release.yml
     if ($LASTEXITCODE -ne 0) { throw "Missing or invalid build provenance for $path." }
 }
 ```
@@ -120,7 +122,6 @@ and rotation policy:
 > The current release track pins the SPKI for the self-signed
 > `CN=winghostty Local Dev Signing` certificate used from v1.3.117 onward:
 > `671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a`.
-
 > Certificate renewal with the same key needs no application change. Key
 > rotation requires an overlap release that trusts both the current and next
 > public keys before release signing moves to the next key; a later release may
@@ -157,10 +158,10 @@ that folder.
 
 Every release on the current release track is Authenticode-signed with the same
 certificate. The certificate is self-signed, so Windows cannot chain it to a
-publicly trusted publisher and SmartScreen warnings are expected. The portable
-ZIP and every other published release asset also carry GitHub build-provenance
-attestations starting with v1.3.124; provenance complements Authenticode but does
-not make a self-signed certificate publicly trusted.
+publicly trusted publisher and SmartScreen warnings are expected. Starting with
+v1.3.124, the nine release assets other than the static icon carry
+GitHub build-provenance attestations; provenance complements Authenticode but
+does not make a self-signed certificate publicly trusted.
 
 SmartScreen reputation accrues per file hash. Re-signing changes that hash, so
 the re-signed binary starts building file-hash reputation again. Extended

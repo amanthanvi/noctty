@@ -86,8 +86,6 @@ folder:
 | [`noctty-1.3.123-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-setup.exe)       | ARM64 installer |
 | [`noctty-1.3.123-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-x64-portable.zip)     | x64 portable    |
 | [`noctty-1.3.123-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-portable.zip) | ARM64 portable  |
-| [`noctty-1.3.123-windows-x64-portable.manifest.ps1`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-x64-portable.manifest.ps1) | x64 payload manifest |
-| [`noctty-1.3.123-windows-arm64-portable.manifest.ps1`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-portable.manifest.ps1) | ARM64 payload manifest |
 | [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS-windows-x64.txt)                                       | x64 checksums   |
 | [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS-windows-arm64.txt)                                   | ARM64 checksums |
 

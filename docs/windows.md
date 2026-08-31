@@ -30,9 +30,9 @@ Each release publishes signed Windows artifacts for x64 and ARM64:
 Chocolatey installs are available with `choco install noctty`.
 
 The installer and the binaries inside the portable ZIP are
-Authenticode-signed with a self-signed certificate; the ZIP container
-and every published release asset carry GitHub build-provenance attestations
-starting with v1.3.124.
+Authenticode-signed with a self-signed certificate. Starting with v1.3.124, the
+nine release assets other than the static icon carry GitHub
+build-provenance attestations.
 The legacy `SHA256SUMS.txt` file remains an x64 auto-update compatibility
 alias.
 
@@ -323,7 +323,7 @@ SmartScreen warns on release downloads because the current signing
 certificate is self-signed and so carries no publisher reputation. What
 the warning means, and how to verify a download against its checksum
 file first, is covered in
-[getting-started.md](getting-started.md#about-the-smartscreen-warning).
+[getting-started.md](getting-started.md#code-signing-policy-and-the-smartscreen-warning).
 
 ### Focus Assist and toasts
 

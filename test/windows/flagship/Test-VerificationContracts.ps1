@@ -2604,6 +2604,7 @@ $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smo
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
+$portableManifestVerifier = Join-Path $repoRoot 'scripts\portable-manifest-verification.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $windowsArchitecture = Join-Path $repoRoot 'scripts\windows-architecture.ps1'
 $windowsBuildCapabilities = Join-Path $repoRoot 'scripts\windows-build-capabilities.ps1'
@@ -2626,6 +2627,7 @@ $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
+$portableManifestVerifierText = Get-Content -LiteralPath $portableManifestVerifier -Raw
 $windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
 $windowsArchitectureText = Get-Content -LiteralPath $windowsArchitecture -Raw
 $signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
@@ -6706,7 +6708,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '31e92f3f4fef47a277185a0caae6a46dae2f5cb212b3df432d8340de27eaec75'
+    '75cd18ddeadb9e53c1480430a81cac43e1e20e8e3f55496056c92592181fdd05'
 $readinessWorkflowSha256 =
     '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7835,10 +7837,10 @@ Assert-TextContract `
     -Description 'release readiness propagates release-copy failures' `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
-    -Content $releaseWorkflowText `
-    -Pattern '(?ms)^permissions:\s+contents: write\s+actions: read\s+id-token: write\s+attestations: write\s+(?:\r?\n|$)' `
-    -Description 'release grants only the existing permissions plus OIDC and attestation writes' `
-    -Context $releaseWorkflow
+    -Content (Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow) `
+    -Pattern '(?m)^    permissions:\r?\n      contents: write\r?\n      actions: read\r?\n      id-token: write\r?\n      attestations: write$' `
+    -Description 'release scopes repository, OIDC, and attestation writes to the publishing job' `
+    -Context "$releaseWorkflow :: windows-release"
 $attestationGuardStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Prepare build provenance attestation' `
@@ -7934,9 +7936,32 @@ if ($windowsPackagerText -match '\[System\.IO\.Path\]::GetRelativePath') {
 }
 Assert-TextContract `
     -Content $signedArtifactStep `
-    -Pattern '(?ms)ReadAllLines\(\$ManifestPath\).*?\[0-9a-fA-F\]\{64\}.*?GetRelativePath.*?Get-FileHash -Algorithm SHA256.*?file set mismatch.*?hash mismatch.*?-Kind manifest.*?Missing required release asset.*?Assert-ReleaseSignature -Path \$manifest.*?Assert-PortableManifestMatchesPayload' `
+    -Pattern '(?ms)portable-manifest-verification\.ps1.*?-Kind manifest.*?Missing required release asset.*?Assert-ReleaseSignature -Path \$manifest.*?Assert-PortableManifestMatchesPayload' `
     -Description 'release workflow verifies manifest presence, Authenticode pin, exact payload set, and payload hashes before publication' `
     -Context "$releaseWorkflow :: Verify signed release artifacts"
+Assert-TextContract `
+    -Content $portableManifestVerifierText `
+    -Pattern '(?s)function Assert-PortableManifestMatchesPayload.*?ReadAllLines\(\$ManifestPath\).*?ContainsKey\(\$name\).*?GetRelativePath.*?Get-FileHash -Algorithm SHA256.*?file set mismatch.*?hash mismatch' `
+    -Description 'shared portable manifest verifier requires the exact extracted file set and hashes' `
+    -Context $portableManifestVerifier
+foreach ($consumer in @(
+    [pscustomobject]@{
+        Context = $publishedReleaseVerifier
+        Content = $publishedReleaseVerifierText
+        Pattern = '(?m)^\.\s+\(Join-Path \$PSScriptRoot ''portable-manifest-verification\.ps1''\)$'
+    },
+    [pscustomobject]@{
+        Context = "$releaseWorkflow :: Verify signed release artifacts"
+        Content = $signedArtifactStep
+        Pattern = '(?m)^\s*\.\s+\(Join-Path \$PWD "scripts/portable-manifest-verification\.ps1"\)$'
+    }
+)) {
+    Assert-TextContract `
+        -Content $consumer.Content `
+        -Pattern $consumer.Pattern `
+        -Description 'portable manifest consumers import the shared verifier' `
+        -Context $consumer.Context
+}
 $signingTrustConsumers = @(
     [pscustomobject]@{
         Context = $publishedReleaseVerifier
@@ -8101,14 +8126,13 @@ foreach ($contract in @(
     @{ Pattern = "\`$firstAttestedVersion = \[version\]'1\.3\.124'"; Description = 'published verifier preserves the first attested release boundary' },
     @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?installed GitHub CLI does not provide the gh attestation verify subcommand.*?Write-Warning .*?return \$false'; Description = 'published verifier degrades visibly when the local gh attestation subcommand is unavailable' },
     @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?\$env:GITHUB_ACTIONS -eq .true.*?throw "Cannot verify build provenance attestations.*?Write-Warning'; Description = 'published verifier fails rather than warns when CI cannot verify provenance at all' },
-    @{ Pattern = '(?s)function Assert-PublishedAttestation.*?gh attestation verify \$Path --repo \$Repository.*?\$LASTEXITCODE -ne 0.*?attestation is missing or invalid'; Description = 'published verifier fails closed on missing or invalid provenance' },
+    @{ Pattern = '(?s)function Assert-PublishedAttestation.*?gh attestation verify \$Path.*?--repo \$Repository.*?--signer-workflow "\$Repository/\.github/workflows/release\.yml".*?\$LASTEXITCODE -ne 0.*?attestation is missing or invalid'; Description = 'published verifier pins release-workflow provenance and fails closed' },
     @{ Pattern = '(?s)foreach \(\$asset in \$assets\).*?\$actualHash -ne \$digest\.Substring.*?if \(\$verifyAttestations -and \[string\]\$asset\.name -ne ''noctty-icon\.svg''\).*?Assert-PublishedAttestation.*?-Repository \$repository'; Description = 'published verifier checks provenance for every attested asset after its GitHub digest while excluding the static icon' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
     @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 10'; Description = 'published verifier validates exactly ten downloaded Authenticode signatures including both manifests' },
     @{ Pattern = '(?s)Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin.*?\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1'; Description = 'published verifier binds every downloaded signer to one updater SPKI' },
     @{ Pattern = "noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
-    @{ Pattern = '(?s)function Assert-PortableManifestMatchesPayload.*?ReadAllLines\(\$ManifestPath\).*?ContainsKey\(\$name\).*?GetRelativePath.*?Get-FileHash -Algorithm SHA256.*?file set mismatch.*?hash mismatch'; Description = 'published verifier requires each manifest to match the extracted portable file set and hashes' }
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Assert-TextContract `
@@ -8380,6 +8404,10 @@ Assert-WorkflowContract `
     -Path $releaseCopyChecker `
     -Pattern '\$global:LASTEXITCODE\s*=\s*0\s*$' `
     -Description 'release-copy success explicitly clears native exit state'
+Assert-WorkflowContract `
+    -Path $releaseCopyChecker `
+    -Pattern '(?ms)\$firstPortableManifestVersion = \[version\]"1\.3\.124".*?\$latestArtifactKinds = @\("setup", "portable", "checksums"\).*?\[version\]\$latestVersion -ge \$firstPortableManifestVersion.*?\$latestArtifactKinds \+= "manifest"' `
+    -Description 'release-copy checks require manifests only from the first manifest-bearing release'
 Assert-WorkflowContract `
     -Path $releasePreflight `
     -Pattern '\$minimumValidityDays -lt 180(?!\d)' `

@@ -162,6 +162,7 @@ foreach ($rule in $forbiddenRules) {
 
 $architectures = Get-WindowsPackageArchitectures
 $placeholderVersion = "<version>"
+$firstPortableManifestVersion = [version]"1.3.124"
 
 foreach ($arch in $architectures) {
     foreach ($kind in @("setup", "portable", "manifest", "checksums")) {
@@ -181,6 +182,7 @@ foreach ($docsPath in @("docs/getting-started.md", "docs/windows.md")) {
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\bx64\b" -Reason "Install docs should name the supported release architectures."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\barm64\b" -Reason "Install docs should name the supported release architectures."
 }
+Require-Contains -RelativePath "docs/getting-started.md" -Needle "--signer-workflow amanthanvi/noctty/.github/workflows/release.yml" -Reason "Provenance guidance must bind attestations to the canonical release workflow."
 
 Require-Contains -RelativePath "docs/status.md" -Needle "x64 and ARM64" -Reason "Status docs should match the supported public release architectures."
 Require-Contains -RelativePath "docs/status.md" -Needle "checksum metadata" -Reason "Updater docs should mention checksum-gated release metadata."
@@ -196,8 +198,12 @@ if ($latestVersion) {
     if ($ExpectedVersion -and $latestVersion -ne $ExpectedVersion) {
         Add-Failure "README.md: latest stable release is $latestVersion; expected $ExpectedVersion."
     }
+    $latestArtifactKinds = @("setup", "portable", "checksums")
+    if ([version]$latestVersion -ge $firstPortableManifestVersion) {
+        $latestArtifactKinds += "manifest"
+    }
     foreach ($arch in $architectures) {
-        foreach ($kind in @("setup", "portable", "manifest", "checksums")) {
+        foreach ($kind in $latestArtifactKinds) {
             $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
             Require-Contains -RelativePath "README.md" -Needle $artifactName -Reason "README latest-release table should list every current public artifact."
         }
@@ -249,7 +255,7 @@ if ($CheckRemoteLatest) {
 
                 $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
                 foreach ($arch in $architectures) {
-                    foreach ($kind in @("setup", "portable", "manifest", "checksums")) {
+                    foreach ($kind in $latestArtifactKinds) {
                         $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
                         if ($assetNames -notcontains $artifactName) {
                             Add-Failure "GitHub latest release $expectedTag is missing expected asset $artifactName."

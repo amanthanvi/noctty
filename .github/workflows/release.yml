@@ -16,12 +16,6 @@ on:
         default: true
         type: boolean
 
-permissions:
-  contents: write
-  actions: read
-  id-token: write
-  attestations: write
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -31,6 +25,11 @@ jobs:
     name: Windows Release
     runs-on: windows-latest
     environment: release
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
@@ -278,6 +277,7 @@ jobs:
         run: |
           . (Join-Path $PWD "scripts/windows-architecture.ps1")
           . (Join-Path $PWD "scripts/signing-trust.ps1")
+          . (Join-Path $PWD "scripts/portable-manifest-verification.ps1")
           $version = "${{ steps.meta.outputs.version }}"
           $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
           $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PWD "src/update/github_releases.zig"))
@@ -306,55 +306,6 @@ jobs:
             $pin = Get-CertificateSpkiSha256 -Certificate $sig.SignerCertificate
             if ($allowedPins -notcontains $pin) {
               throw "$Label signer SPKI SHA-256 is not allowed: $pin"
-            }
-          }
-
-          function Assert-PortableManifestMatchesPayload {
-            param(
-              [string]$ManifestPath,
-              [string]$PayloadRoot,
-              [string]$Label
-            )
-
-            $managedRootFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-            foreach ($name in @("noctty.com", "noctty.exe", "ghostty-vt.dll", "LICENSE", "config-template.ghostty", "README.md", "noctty.ico", "share")) {
-              [void]$managedRootFiles.Add($name)
-            }
-            $entries = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
-            foreach ($rawLine in [System.IO.File]::ReadAllLines($ManifestPath)) {
-              $line = $rawLine.Trim([char[]]" `t`r")
-              $match = [regex]::Match($line, '^(?<hash>[0-9a-fA-F]{64})[ \t]+\*?(?<name>.+)$')
-              if (-not $match.Success) { continue }
-              $name = $match.Groups['name'].Value
-              if (-not $managedRootFiles.Contains($name) -and
-                  -not $name.StartsWith("share/", [System.StringComparison]::Ordinal)) {
-                throw "$Label contains an unmanaged payload path: $name"
-              }
-              if ($entries.ContainsKey($name)) {
-                throw "$Label contains duplicate payload path: $name"
-              }
-              $entries.Add($name, $match.Groups['hash'].Value.ToLowerInvariant())
-            }
-
-            $payloadFiles = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
-            foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File)) {
-              $name = [System.IO.Path]::GetRelativePath($PayloadRoot, $file.FullName).Replace("\", "/")
-              if (-not $managedRootFiles.Contains($name) -and
-                  -not $name.StartsWith("share/", [System.StringComparison]::Ordinal)) {
-                throw "$Label payload contains an unmanaged file: $name"
-              }
-              $payloadFiles.Add($name, (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant())
-            }
-
-            $missing = @($payloadFiles.Keys | Where-Object { -not $entries.ContainsKey($_) })
-            $unexpected = @($entries.Keys | Where-Object { -not $payloadFiles.ContainsKey($_) })
-            if ($entries.Count -ne $payloadFiles.Count -or $missing.Count -gt 0 -or $unexpected.Count -gt 0) {
-              throw "$Label file set mismatch. Missing: $($missing -join ', '); unexpected: $($unexpected -join ', ')."
-            }
-            foreach ($name in $payloadFiles.Keys) {
-              if ($entries[$name] -ne $payloadFiles[$name]) {
-                throw "$Label hash mismatch for $name."
-              }
             }
           }
 

@@ -129,8 +129,9 @@ and lands incrementally.
 ## Known caveats
 
 - Installers and the Windows binaries inside the portable ZIP are
-  Authenticode-signed. Starting with v1.3.124, the ZIP container and every
-  other published release asset carry a GitHub build-provenance attestation.
+  Authenticode-signed. Starting with v1.3.124, the nine release assets other
+  than the static icon carry GitHub build-provenance
+  attestations.
   The Authenticode certificate remains self-signed, so SmartScreen warnings
   are still expected; see the
   [code signing policy](getting-started.md#code-signing-policy-and-the-smartscreen-warning).
