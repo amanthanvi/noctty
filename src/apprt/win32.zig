@@ -945,23 +945,45 @@ fn descriptorIntegrityRid(descriptor: *anyopaque) error{InvalidSecurityDescripto
     const text_ptr = text orelse return error.InvalidSecurityDescriptor;
     defer _ = sys.LocalFree(@ptrCast(text_ptr));
 
-    const sddl = std.mem.span(text_ptr);
-    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-");
-    const start = std.mem.indexOf(u16, sddl, prefix) orelse {
-        // Unlabelled kernel objects evaluate at medium integrity.
-        return c.SECURITY_MANDATORY_MEDIUM_RID;
-    };
+    return descriptorIntegrityRidFromSddl(std.mem.span(text_ptr));
+}
 
-    var rid: u32 = 0;
-    var digits: usize = 0;
-    for (sddl[start + prefix.len ..]) |ch| {
-        if (ch < '0' or ch > '9') break;
-        rid = std.math.mul(u32, rid, 10) catch return error.InvalidSecurityDescriptor;
-        rid = std.math.add(u32, rid, ch - '0') catch return error.InvalidSecurityDescriptor;
-        digits += 1;
+fn descriptorIntegrityRidFromSddl(sddl: []const u16) error{InvalidSecurityDescriptor}!u32 {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-");
+    if (std.mem.indexOf(u16, sddl, prefix)) |start| {
+        var rid: u32 = 0;
+        var digits: usize = 0;
+        for (sddl[start + prefix.len ..]) |ch| {
+            if (ch < '0' or ch > '9') break;
+            rid = std.math.mul(u32, rid, 10) catch return error.InvalidSecurityDescriptor;
+            rid = std.math.add(u32, rid, ch - '0') catch return error.InvalidSecurityDescriptor;
+            digits += 1;
+        }
+        if (digits == 0) return error.InvalidSecurityDescriptor;
+        return rid;
     }
-    if (digits == 0) return error.InvalidSecurityDescriptor;
-    return rid;
+
+    // Windows renders well-known mandatory-label SIDs using SDDL aliases.
+    // The label-only descriptor contains no unrelated ACEs, so matching the
+    // trustee suffix is unambiguous.
+    const aliases = [_]struct { suffix: []const u16, rid: u32 }{
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;UN)"), .rid = 0x0000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;LW)"), .rid = 0x1000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;ME)"), .rid = 0x2000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;MP)"), .rid = 0x2100 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;HI)"), .rid = 0x3000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;SI)"), .rid = 0x4000 },
+    };
+    for (aliases) |alias| {
+        if (std.mem.indexOf(u16, sddl, alias.suffix) != null) return alias.rid;
+    }
+
+    // An absent mandatory-label ACE evaluates as medium. A present but
+    // unknown label is malformed and must fail closed.
+    if (std.mem.indexOf(u16, sddl, std.unicode.utf8ToUtf16LeStringLiteral("(ML;")) != null) {
+        return error.InvalidSecurityDescriptor;
+    }
+    return c.SECURITY_MANDATORY_MEDIUM_RID;
 }
 
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
@@ -28610,6 +28632,30 @@ test "win32 integrity SID parsing accepts only mandatory label SIDs" {
     try expect(integrityRidFromSidString(L("S-1-16-12a88")) == null);
     try expect(integrityRidFromSidString(L("")) == null);
     try expect(integrityRidFromSidString(L("S-1-16-99999999999")) == null);
+}
+
+test "win32 pipe descriptor integrity parsing accepts SDDL aliases" {
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expectEqual(
+        @as(u32, 0x3000),
+        try descriptorIntegrityRidFromSddl(L("S:AI(ML;;NW;;;HI)")),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x4000),
+        try descriptorIntegrityRidFromSddl(L("S:(ML;;NWNR;;;SI)")),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x3000),
+        try descriptorIntegrityRidFromSddl(L("S:(ML;;NW;;;S-1-16-12288)")),
+    );
+    try std.testing.expectEqual(
+        @as(u32, c.SECURITY_MANDATORY_MEDIUM_RID),
+        try descriptorIntegrityRidFromSddl(L("")),
+    );
+    try std.testing.expectError(
+        error.InvalidSecurityDescriptor,
+        descriptorIntegrityRidFromSddl(L("S:(ML;;NW;;;ZZ)")),
+    );
 }
 
 /// Render a security descriptor to SDDL text.
