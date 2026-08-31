@@ -1,18 +1,18 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-08-30T14:58:00.0000000Z",
-  "git_commit": "3bf5c04d58f0331eccd4dc642d5c2862045a8420",
+  "captured_at": "2026-08-31T23:43:00.0000000Z",
+  "git_commit": "6c0e698587d92b9f3c3db3d02f466bb313833d3a",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the single changed hunk. The only change to the session artifact is the parse-site .allocate = .alloc_always string-ownership fix, written byte-identically to the same fix on the #158 and #163 branches so a later merge yields one copy instead of a duplicate struct field initializer. The on-disk schema is unchanged at v1. Hashes reflect checkout normalization. This git_commit exists only on the PR branch: after a squash-merge it becomes unreachable and Test-VerificationContracts.ps1 skips the git-diff cross-check while the sha256 check still runs, so re-point it at the merge commit on main (see RECONCILE-SESSION-STATE.md)."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the session parser changes. The parser keeps the reviewed .allocate = .alloc_always ownership fix and adds a layout-only parse path that strips window placement before validation; the on-disk schema remains unchanged at v1. Hashes reflect checkout normalization. This git_commit exists only on the PR branch: after a squash-merge it becomes unreachable and Test-VerificationContracts.ps1 skips the git-diff cross-check while the sha256 check still runs, so re-point it at the merge commit on main (see RECONCILE-SESSION-STATE.md)."
   },
   "artifacts": [
     {
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "17dbd73dfb0274ba58025893312fe6e9838f49e9ba23a368392cdd99903b6a6b",
+      "sha256": "799a284fd4f6b383c3595604e2742c8da30b1eac969beff83dd5fdd6e56dc1cb",
       "scenario_id": null
     },
     {
