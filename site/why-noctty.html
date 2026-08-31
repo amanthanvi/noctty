@@ -263,26 +263,11 @@
         </li>
         <li>
           <div>
-            <h3>Verify build provenance</h3>
-            <p>
-              Answers: was this file produced by this repository's release
-              workflow? From v1.3.124, every published asset carries a GitHub
-              build-provenance attestation, including the ZIP container itself.
-              Needs GitHub CLI 2.49.0 or later. Earlier releases predate
-              attestation and have only the other two checks.
-            </p>
-          </div>
-          <pre class="nc-proof-code" tabindex="0"><code>gh attestation verify `
-  .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe `
-  --repo amanthanvi/noctty</code></pre>
-        </li>
-        <li>
-          <div>
             <h3>Inspect the embedded signature</h3>
             <p>
               Answers: which key signed the executable code? The installer and
               the PE files inside the portable ZIP are Authenticode-signed. The
-              ZIP container is not; before v1.3.124 it is covered only by its
+              ZIP container is not, so the container is covered only by its
               checksum.
             </p>
           </div>
@@ -292,14 +277,16 @@
         </li>
         <li>
           <div>
-            <h3>Run every check at once</h3>
+            <h3>Run the checksum and signature checks at once</h3>
             <p>
               The repository verifier downloads the complete release, checks
               every GitHub digest and checksum entry, validates every embedded
               PE signature, and requires a single signer whose SPKI matches the
-              key pinned into the updater. The environment variable is what
-              makes it accept today's self-signed certificate; without it, the
-              script fails closed.
+              key pinned into the updater. Releases do not currently publish
+              build-provenance attestations, so this verifier does not claim to
+              check one. The environment variable is what makes it accept
+              today's self-signed certificate; without it, the script fails
+              closed.
             </p>
           </div>
           <pre class="nc-proof-code" tabindex="0"><code>git clone https://github.com/amanthanvi/noctty.git
@@ -345,9 +332,9 @@ pwsh .\scripts\verify-published-release.ps1 `
           Moving to a publicly trusted signer means either an accepted
           application to a free open-source signing program or a purchased
           certificate. Neither has happened. Until one does, the honest summary
-          is that provenance and the key pin tell you where a release came from,
-          while Windows itself will keep telling you it does not recognize the
-          publisher.
+          is that the published checksums, embedded signatures, and key pin
+          constrain a release to this repository's publisher key, while Windows
+          itself will keep telling you it does not recognize the publisher.
         </p>
       </div>
     </section>

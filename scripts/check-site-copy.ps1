@@ -70,7 +70,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "gh attestation verify"; Reason = "The trust page should include the build-provenance check." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "do not currently publish"; Reason = "The trust page must not imply unavailable build-provenance attestations." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "miss a budget stated in PRODUCT.md"; Reason = "The trust page must keep the missed performance budgets visible." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }

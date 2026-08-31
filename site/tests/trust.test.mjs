@@ -51,10 +51,9 @@ const PERFORMANCE_FIGURE_PATTERNS = [
   // reaching for an abbreviation.
   /\b\d[\d,]*(?:\.\d+)?\s*(?:fps|Hz|kHz|MHz|GHz)\b/i,
   /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera)?hertz\b/i,
-  // Any quantity stated as a rate over a unit of time or work, whatever the
-  // unit is written as: frames, keystrokes, cells, bytes, mebibytes, glyphs.
-  // Bounded to three words so it cannot straddle two unrelated clauses.
-  /\b\d[\d,]*(?:\.\d+)?\s*(?:[\w-]+[\s-]+){0,3}per\s+(?:second|minute|hour|frame|millisecond|microsecond|nanosecond)\b/i,
+  // Benchmark work rates. Keep the work unit explicit so operational facts
+  // such as "1 API request per hour" are not mistaken for performance data.
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:(?:rendered|painted|processed)\s+)?(?:frames?|renders?|paints?|updates?|cells?|glyphs?|lines?|bytes?|bits?|keystrokes?)\s+per\s+(?:second|minute|hour|frame|millisecond|microsecond|nanosecond)\b/i,
   // Byte sizes and throughput, decimal or binary, abbreviated or spelled out.
   /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B(?:\s*\/\s*s(?:ec)?)?\b/,
   /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?(?:\s+per\s+second)?\b/i,
@@ -86,7 +85,7 @@ const COMPARATIVE_VERB =
   "trail(?:s|ed|ing)?|(?:lag|fall|fell|falls)(?:s|ged|ging|ing)?\\s+behind|" +
   "(?:pull|pulls|pulled|come|comes|came)\\s+(?:out\\s+)?ahead|ahead\\s+of|" +
   "stack(?:s|ed)?\\s+up\\s+(?:well\\s+)?against|" +
-  "fast(?:er|est)|slow(?:er|est)|quicker|lower|higher|leaner|lighter";
+  "fast(?:er|est)|slow(?:er|est)|quicker";
 
 // The page positions the fork without ranking it against anybody. No
 // cross-terminal speed claim of any kind is permitted, so the guard has to
@@ -94,7 +93,7 @@ const COMPARATIVE_VERB =
 const CROSS_TERMINAL_CLAIM_PATTERNS = [
   /\bfast(?:er|est)\b/i,
   /\bslow(?:er|est)\b/i,
-  /\b(?:quick|snapp|smooth|responsiv|light|lean)(?:er|est)\b/i,
+  /\b(?:quick|snapp|smooth|responsiv)(?:er|est)\b/i,
   /\bblazing(?:ly)?\b/i,
   new RegExp(`\\b(?:${RANKING_VERB})`, "i"),
   /\b(?:best[-\s]performing|most\s+performant|leading\s+terminal)\b/i,
@@ -122,6 +121,28 @@ const CROSS_TERMINAL_CLAIM_PATTERNS = [
   ),
 ];
 
+function visibleHtmlText(html) {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(x[\da-f]+|\d+);/gi, (_, value) => {
+      const radix = value[0].toLowerCase() === "x" ? 16 : 10;
+      const digits = radix === 16 ? value.slice(1) : value;
+      const codePoint = Number.parseInt(digits, radix);
+      return Number.isNaN(codePoint) ? " " : String.fromCodePoint(codePoint);
+    })
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&micro;/gi, "µ");
+}
+
+const trustText = visibleHtmlText(trustHtml);
+
 function findClaimViolations(text, patterns) {
   return patterns
     .map((pattern) => text.match(pattern))
@@ -146,7 +167,7 @@ function git(...args) {
 // The integration branch, however this checkout happens to name it. A
 // single-branch or shallow clone may have neither, in which case the
 // main-side signals below are unavailable and say so.
-const mainRef = ["main", "origin/main", "refs/remotes/origin/main"].find(
+const mainRefs = ["main", "origin/main", "refs/remotes/origin/main"].filter(
   (ref) => git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`) !== null,
 );
 
@@ -169,11 +190,12 @@ const trackedPaths = (git("ls-files", "-co", "--exclude-standard") ?? "")
   .split("\n")
   .filter(Boolean);
 
-const mainPaths = mainRef
-  ? (git("ls-tree", "-r", "--name-only", mainRef) ?? "")
-      .split("\n")
-      .filter(Boolean)
-  : [];
+const mainTrees = mainRefs.map((ref) => ({
+  ref,
+  paths: (git("ls-tree", "-r", "--name-only", ref) ?? "")
+    .split("\n")
+    .filter(Boolean),
+}));
 
 // A skip that outlives its reason is a hole. Waiting for one exact path to
 // reappear is not enough: if the dependency lands the document somewhere else,
@@ -186,7 +208,7 @@ const mainPaths = mainRef
 // dependency that both renames the document past recognition and lands with a
 // commit subject that omits its PR number.
 test("no pending-document exemption outlives the dependency it waits on", (t) => {
-  if (!mainRef) {
+  if (mainRefs.length === 0) {
     t.diagnostic(
       "no main ref in this checkout; only worktree signals are available",
     );
@@ -201,13 +223,13 @@ test("no pending-document exemption outlives the dependency it waits on", (t) =>
     if (renamedHere.length > 0) {
       reasons.push(`this branch carries ${renamedHere.join(", ")}`);
     }
-    if (mainRef) {
-      if (mainPaths.includes(relativePath)) {
-        reasons.push(`${mainRef} carries it`);
+    for (const mainTree of mainTrees) {
+      if (mainTree.paths.includes(relativePath)) {
+        reasons.push(`${mainTree.ref} carries it`);
       }
-      const renamedOnMain = pathsNamedLike(mainPaths, relativePath);
+      const renamedOnMain = pathsNamedLike(mainTree.paths, relativePath);
       if (renamedOnMain.length > 0) {
-        reasons.push(`${mainRef} carries ${renamedOnMain.join(", ")}`);
+        reasons.push(`${mainTree.ref} carries ${renamedOnMain.join(", ")}`);
       }
       const merged = git(
         "log",
@@ -215,10 +237,12 @@ test("no pending-document exemption outlives the dependency it waits on", (t) =>
         "--format=%h %s",
         "--fixed-strings",
         `--grep=(${pending.pr})`,
-        mainRef,
+        mainTree.ref,
       );
       if (merged && merged.trim()) {
-        reasons.push(`PR ${pending.pr} is on ${mainRef}: ${merged.trim()}`);
+        reasons.push(
+          `PR ${pending.pr} is on ${mainTree.ref}: ${merged.trim()}`,
+        );
       }
     }
     if (reasons.length > 0) {
@@ -265,9 +289,44 @@ test("trust page publishes exactly eleven standing non-goals", () => {
   );
 });
 
-test("trust page carries every release verification layer", () => {
+test("claims guards read rendered text without blocking operational rates", () => {
+  assert.deepEqual(
+    findClaimViolations(
+      visibleHtmlText("Throughput: <strong>&#54;0</strong> frames per second"),
+      PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    ["60 frames per second"],
+  );
+  assert.deepEqual(
+    findClaimViolations(
+      "The updater makes 1 API request per hour",
+      PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    findClaimViolations(
+      "Windows Terminal places this setting higher in settings.json",
+      CROSS_TERMINAL_CLAIM_PATTERNS,
+    ),
+    [],
+  );
+  assert.notDeepEqual(
+    findClaimViolations(
+      "Windows Terminal has higher rendering throughput",
+      CROSS_TERMINAL_CLAIM_PATTERNS,
+    ),
+    [],
+  );
+});
+
+test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /Get-FileHash/);
-  assert.match(trustHtml, /gh attestation verify/);
+  assert.doesNotMatch(
+    trustHtml,
+    /gh attestation verify|every published asset carries\s+a GitHub\s+build-provenance attestation/i,
+  );
+  assert.match(trustHtml, /do not currently publish\s+build-provenance attestations/i);
   assert.match(trustHtml, /Get-AuthenticodeSignature/);
   assert.match(trustHtml, /verify-published-release\.ps1/);
   assert.match(
@@ -297,7 +356,7 @@ test("trust page hardcodes no performance figure", () => {
   // Benchmark numbers move with the machine state and the build they were
   // taken against. The page cites the methodology doc so a re-measurement
   // never leaves an unreproducible figure published here.
-  const figures = findClaimViolations(trustHtml, PERFORMANCE_FIGURE_PATTERNS);
+  const figures = findClaimViolations(trustText, PERFORMANCE_FIGURE_PATTERNS);
   assert.deepEqual(
     figures,
     [],
@@ -306,7 +365,7 @@ test("trust page hardcodes no performance figure", () => {
 });
 
 test("trust page makes no cross-terminal performance claim", () => {
-  const claims = findClaimViolations(trustHtml, CROSS_TERMINAL_CLAIM_PATTERNS);
+  const claims = findClaimViolations(trustText, CROSS_TERMINAL_CLAIM_PATTERNS);
   assert.deepEqual(
     claims,
     [],
