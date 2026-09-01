@@ -14,6 +14,11 @@ $termioThread = Join-Path $repoRoot 'src\termio\Thread.zig'
 $termioThreadText = Get-Content -LiteralPath $termioThread -Raw
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
+$memoryTrace = Join-Path $repoRoot 'src\apprt\win32\bench_trace.zig'
+$memoryTraceText = Get-Content -LiteralPath $memoryTrace -Raw
+$rendererGeneric = Join-Path $repoRoot 'src\renderer\generic.zig'
+$rendererGenericText = Get-Content -LiteralPath $rendererGeneric -Raw
+$benchmarkSchemaText = Get-Content -LiteralPath $benchmarkSchema -Raw
 
 # ConvertFrom-Json throws on malformed input, which the caller records as a
 # contract failure for this fragment.
@@ -81,6 +86,13 @@ Invoke-ContractTable -Contracts @(
         Description = 'every interactive throughput workload uses a committed visible-marker endpoint'
     }
     @{
+        File = $benchmarkSchema
+        Content = { $benchmarkSchemaText }
+        Pattern = '(?s)"metric": \{ "enum": \["throughput_mb_s", "scroll_mb_s"\] \}.*?"terminal_visible_marker_observer_included": \{\s*"const": true'
+        Kind = 'Text'
+        Description = 'stream and scroll evidence accepts the visible-marker observer used by every workload'
+    }
+    @{
         File = $termioThread
         Content = { $termioThreadText }
         Pattern = '(?s)noteBenchmarkIoThreadStarted\(\);.*?try io\.threadEnter'
@@ -93,6 +105,27 @@ Invoke-ContractTable -Contracts @(
         Pattern = '(?s)WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT.*?render_trace\.requestSnapshot\(\).*?WM_WINHOSTTY_RENDER_TRACE_TARGET.*?render_trace\.setTargetOutputBytes'
         Kind = 'Text'
         Description = 'surface window procedure handles live render-trace control messages'
+    }
+    @{
+        File = $memoryTrace
+        Content = { $memoryTraceText }
+        Pattern = '(?s)claimFirstSwapObservation.*?io_reader_recorded\.load\(\.acquire\).*?first_swap_recorded\.cmpxchgStrong'
+        Kind = 'Text'
+        Description = 'the startup swap boundary cannot precede IO reader startup'
+    }
+    @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
+        Pattern = '(?s)\$previousStageSequence\s*=\s*\[uint64\] 0.*?\$stageSequence -le \$previousStageSequence.*?out of lifecycle order'
+        Kind = 'Text'
+        Description = 'memory evidence rejects lifecycle stages whose trace sequence contradicts the declared order'
+    }
+    @{
+        File = $rendererGeneric
+        Content = { $rendererGenericText }
+        Pattern = '(?s)rebuildCells\(.*?catch \|err\|.*?output_progress\s*=\s*null.*?\.output_progress\s*=\s*output_progress'
+        Kind = 'Text'
+        Description = 'a frozen GPU-cell fallback cannot publish output progress that was not drawn'
     }
     @{
         File = $benchmarkHarness

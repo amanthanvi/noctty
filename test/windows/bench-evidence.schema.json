@@ -283,7 +283,7 @@
               "details": {
                 "properties": {
                   "terminal_visible_marker_observer_included": {
-                    "const": false
+                    "const": true
                   }
                 }
               }

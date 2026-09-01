@@ -334,6 +334,11 @@ pub const MemoryStageTrace = struct {
     }
 
     pub fn claimFirstSwapObservation(self: *MemoryStageTrace) bool {
+        // The renderer can present before the IO worker publishes its reader
+        // boundary. Do not label that swap as the completed startup frame;
+        // the first swap after reader startup is the first one the lifecycle
+        // consumer can place causally after all thread-start stages.
+        if (!self.io_reader_recorded.load(.acquire)) return false;
         return self.first_swap_recorded.cmpxchgStrong(
             false,
             true,
@@ -378,8 +383,11 @@ pub fn queryPerformanceFrequency() u64 {
     return @intCast(value);
 }
 
-test "win32 memory stage trace claims exactly one first swap observation" {
+test "win32 memory stage trace claims first swap after reader startup exactly once" {
     var trace: MemoryStageTrace = .{};
+
+    try std.testing.expect(!trace.claimFirstSwapObservation());
+    trace.io_reader_recorded.store(true, .release);
     try std.testing.expect(trace.claimFirstSwapObservation());
     try std.testing.expect(!trace.claimFirstSwapObservation());
 }

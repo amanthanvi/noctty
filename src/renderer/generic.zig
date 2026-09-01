@@ -1447,6 +1447,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             };
 
+            var output_progress: ?renderer.State.OutputProgress = critical.output_progress;
+
             // Acquire the draw mutex for all remaining state updates.
             {
                 self.draw_mutex.lock();
@@ -1468,6 +1470,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // our old buffer (frozen contents) and log it.
                     comptime assert(@TypeOf(err) == error{OutOfMemory});
                     log.warn("error rebuilding GPU cells err={}", .{err});
+                    // The retained cell buffer does not contain the progress
+                    // captured from terminal state for this update. Suppress
+                    // it so a subsequent swap cannot satisfy a benchmark
+                    // target with output that was never drawn.
+                    output_progress = null;
                 };
 
                 // The scrollbar is only emitted during draws so we also
@@ -1505,7 +1512,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.font_shaper.endFrame();
             return .{
                 .cursor_blinking = critical.cursor_blinking,
-                .output_progress = critical.output_progress,
+                .output_progress = output_progress,
             };
         }
 

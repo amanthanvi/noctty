@@ -1037,6 +1037,16 @@ function Get-BenchMemoryStageSamples {
             throw "surface $surfaceId memory snapshots contain duplicate trace_sequence values"
         }
 
+        $previousStageSequence = [uint64] 0
+        foreach ($stage in $requiredStages) {
+            $record = @($surfaceRecords | Where-Object { [string] $_.stage -ceq $stage })[0]
+            $stageSequence = [uint64] $record.trace_sequence
+            if ($stageSequence -le $previousStageSequence) {
+                throw "surface $surfaceId memory snapshot '$stage' is out of lifecycle order"
+            }
+            $previousStageSequence = $stageSequence
+        }
+
         $begin = @($surfaceRecords | Where-Object { [string] $_.stage -ceq 'surface_begin' })[0]
         $beginPrivateBytes = [uint64] $begin.private_bytes
         foreach ($stage in $requiredStages) {
