@@ -2714,7 +2714,12 @@ fn copySelectionToClipboards(
     }
 
     if (copied and self.config.app_notifications.@"clipboard-copy") {
-        try self.showAppNotification("noctty", "Copied selection to clipboard");
+        self.showAppNotification("noctty", "Copied selection to clipboard") catch |err| {
+            // Clipboard delivery is the requested action; a secondary desktop
+            // notification failure must not turn a successful copy into a
+            // failure or strand copy mode after the clipboard was updated.
+            log.warn("failed to show clipboard copy notification err={}", .{err});
+        };
     }
     return copied;
 }
