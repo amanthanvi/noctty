@@ -15,6 +15,9 @@ pub const Options = struct {
     /// Tracks an explicitly supplied empty working-directory value.
     _working_directory_seen: bool = false,
 
+    /// Tracks an explicitly supplied empty window target.
+    _window_id_seen: bool = false,
+
     /// Select a custom single-instance namespace.
     class: ?[:0]const u8 = null,
 
@@ -31,6 +34,9 @@ pub const Options = struct {
     pub fn parseManuallyHook(self: *Options, _: Allocator, arg: []const u8, _: anytype) !bool {
         if (std.mem.startsWith(u8, arg, "--working-directory=")) {
             self._working_directory_seen = true;
+        }
+        if (std.mem.startsWith(u8, arg, "--window-id=")) {
+            self._window_id_seen = true;
         }
         return true;
     }
@@ -96,6 +102,7 @@ fn runArgsWithNewTab(
     };
 
     if (opts.timeout > 10_000 or (opts.@"window-id" orelse 1) == 0 or
+        (opts._window_id_seen and opts.@"window-id" == null) or
         (opts._working_directory_seen and opts.@"working-directory" == null))
     {
         return fail(stderr, 1);
@@ -207,6 +214,7 @@ test "automation new-tab cli contract" {
 
     for ([_][]const []const u8{
         &.{"--window-id=0"},
+        &.{"--window-id="},
         &.{"--window-id=4294967296"},
         &.{"--timeout=10001"},
         &.{"--timeout=18446744073709551616"},
