@@ -128,6 +128,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pub const API = GraphicsAPI;
         pub const FrameUpdate = struct {
             cursor_blinking: bool,
+            output_progress: ?renderer.State.OutputProgress = null,
         };
 
         const Target = GraphicsAPI.Target;
@@ -1223,6 +1224,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
                 cursor_blinking: bool,
+                output_progress: renderer.State.OutputProgress,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1365,6 +1367,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
                     .cursor_blinking = cursor_blinking,
+                    .output_progress = state.outputProgress(),
                 };
             };
 
@@ -1500,7 +1503,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Notify our shaper we're done for the frame. For some shapers,
             // such as CoreText, this triggers off-thread cleanup logic.
             self.font_shaper.endFrame();
-            return .{ .cursor_blinking = critical.cursor_blinking };
+            return .{
+                .cursor_blinking = critical.cursor_blinking,
+                .output_progress = critical.output_progress,
+            };
         }
 
         /// Draw the frame to the screen.

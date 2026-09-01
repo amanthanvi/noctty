@@ -848,9 +848,11 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         update.cursor_blinking
     else
         self.cursorShouldBlink();
-    if (frame_update != null) {
-        if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
-            self.surface.noteRendererUpdateFrame(self.state, cursor_blinking);
+    if (frame_update) |update| {
+        if (update.output_progress) |progress| {
+            if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
+                self.surface.noteRendererUpdateFrame(progress, cursor_blinking);
+            }
         }
     }
     if (!cursor_blinking) self.flags.cursor_blink_visible = true;

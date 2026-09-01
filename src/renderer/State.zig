@@ -46,6 +46,14 @@ last_process_output_tick_ms: u64 = 0,
 benchmark_end_marker_generation: u64 = 0,
 benchmark_end_marker_output_bytes: u64 = 0,
 
+pub const OutputProgress = struct {
+    generation: u64,
+    bytes: u64,
+    tick_ms: u64,
+    benchmark_end_marker_generation: u64,
+    benchmark_end_marker_output_bytes: u64,
+};
+
 pub const Mouse = struct {
     /// The point on the viewport where the mouse currently is. We use
     /// viewport points to avoid the complexity of mapping the mouse to
@@ -86,6 +94,17 @@ pub fn noteBenchmarkEndMarker(self: *@This()) void {
     self.benchmark_end_marker_output_bytes = self.process_output_bytes;
 }
 
+/// Caller must hold `mutex`.
+pub fn outputProgress(self: *const @This()) OutputProgress {
+    return .{
+        .generation = self.process_output_generation,
+        .bytes = self.process_output_bytes,
+        .tick_ms = self.last_process_output_tick_ms,
+        .benchmark_end_marker_generation = self.benchmark_end_marker_generation,
+        .benchmark_end_marker_output_bytes = self.benchmark_end_marker_output_bytes,
+    };
+}
+
 test "renderer state records PTY output progress" {
     var mutex: std.Thread.Mutex = .{};
     var state: @This() = .{
@@ -97,11 +116,13 @@ test "renderer state records PTY output progress" {
     state.noteProcessOutput(5, 125);
     state.noteBenchmarkEndMarker();
 
-    try std.testing.expectEqual(@as(u64, 2), state.process_output_generation);
-    try std.testing.expectEqual(@as(u64, 22), state.process_output_bytes);
-    try std.testing.expectEqual(@as(u64, 125), state.last_process_output_tick_ms);
-    try std.testing.expectEqual(@as(u64, 2), state.benchmark_end_marker_generation);
-    try std.testing.expectEqual(@as(u64, 22), state.benchmark_end_marker_output_bytes);
+    const progress = state.outputProgress();
+
+    try std.testing.expectEqual(@as(u64, 2), progress.generation);
+    try std.testing.expectEqual(@as(u64, 22), progress.bytes);
+    try std.testing.expectEqual(@as(u64, 125), progress.tick_ms);
+    try std.testing.expectEqual(@as(u64, 2), progress.benchmark_end_marker_generation);
+    try std.testing.expectEqual(@as(u64, 22), progress.benchmark_end_marker_output_bytes);
 }
 
 /// The pre-edit state. See Surface.preeditCallback for more information.

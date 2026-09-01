@@ -23533,17 +23533,15 @@ pub const Surface = struct {
 
     pub fn noteRendererUpdateFrame(
         self: *Surface,
-        state: *rendererpkg.State,
+        progress: rendererpkg.State.OutputProgress,
         cursor_blinking: bool,
     ) void {
-        state.mutex.lock();
-        defer state.mutex.unlock();
         self.render_trace.noteRendererUpdateFrame(
-            state.process_output_generation,
-            state.process_output_bytes,
-            state.last_process_output_tick_ms,
-            state.benchmark_end_marker_generation,
-            state.benchmark_end_marker_output_bytes,
+            progress.generation,
+            progress.bytes,
+            progress.tick_ms,
+            progress.benchmark_end_marker_generation,
+            progress.benchmark_end_marker_output_bytes,
             cursor_blinking,
         );
     }
