@@ -137,18 +137,26 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
 
     var created = [_]bool{false} ** register_key_paths.len;
     errdefer rollbackCreatedKeys(alloc, &created);
-    inline for (verb_key_paths, command_key_paths, 0..) |verb_path, command_path, pair_index| {
-        const verb_index = pair_index * 2;
+    // Prove all six keys are writable before overwriting any existing values.
+    // Newly created empty keys are tracked and rolled back if preflight or a
+    // later value write fails.
+    for (register_key_paths, 0..) |path, index| {
+        const preflight = try ensureWritableKey(alloc, path);
+        created[index] = preflight.created;
+        if (preflight.failure) |failure| {
+            rollbackCreatedKeys(alloc, &created);
+            return .{ .failure = failure };
+        }
+    }
+
+    inline for (verb_key_paths, command_key_paths) |verb_path, command_path| {
         const verb = try writeVerbKey(alloc, verb_path, exe_path);
-        created[verb_index] = verb.created;
         if (verb.failure) |failure| {
             rollbackCreatedKeys(alloc, &created);
             return .{ .failure = failure };
         }
 
-        const command_index = verb_index + 1;
         const command = try writeDefaultValue(alloc, command_path, command_value);
-        created[command_index] = command.created;
         if (command.failure) |failure| {
             rollbackCreatedKeys(alloc, &created);
             return .{ .failure = failure };
@@ -157,6 +165,32 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
 
     notifyExplorerAssociationsChanged();
     return .success;
+}
+
+fn ensureWritableKey(alloc: Allocator, key_path: []const u8) !WriteResult {
+    const key_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path);
+    defer alloc.free(key_path_wide);
+
+    var key: HKEY = undefined;
+    var disposition: DWORD = 0;
+    const status = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        key_path_wide,
+        0,
+        null,
+        REG_OPTION_NON_VOLATILE,
+        KEY_WRITE,
+        null,
+        &key,
+        &disposition,
+    );
+    if (status != ERROR_SUCCESS) return .{ .created = false, .failure = .{
+        .operation = .create_key,
+        .key_path = key_path,
+        .status = status,
+    } };
+    defer _ = RegCloseKey(key);
+    return .{ .created = disposition == REG_CREATED_NEW_KEY };
 }
 
 /// Remove only the six keys owned by `register`, in leaf-first order.
