@@ -12,6 +12,8 @@ $benchmarkHarness = Join-Path $repoRoot 'test\windows\bench-windows.ps1'
 $benchmarkHarnessText = Get-Content -LiteralPath $benchmarkHarness -Raw
 $termioThread = Join-Path $repoRoot 'src\termio\Thread.zig'
 $termioThreadText = Get-Content -LiteralPath $termioThread -Raw
+$win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
+$win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
 
 # ConvertFrom-Json throws on malformed input, which the caller records as a
 # contract failure for this fragment.
@@ -84,6 +86,13 @@ Invoke-ContractTable -Contracts @(
         Pattern = '(?s)noteBenchmarkIoThreadStarted\(\);.*?try io\.threadEnter'
         Kind = 'Text'
         Description = 'IO worker publishes its startup before backend reader-thread creation'
+    }
+    @{
+        File = $win32Runtime
+        Content = { $win32RuntimeText }
+        Pattern = '(?s)WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT.*?render_trace\.requestSnapshot\(\).*?WM_WINHOSTTY_RENDER_TRACE_TARGET.*?render_trace\.setTargetOutputBytes'
+        Kind = 'Text'
+        Description = 'surface window procedure handles live render-trace control messages'
     }
     @{
         File = $benchmarkHarness

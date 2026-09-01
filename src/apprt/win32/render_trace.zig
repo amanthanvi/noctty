@@ -96,6 +96,7 @@ pub const RenderTrace = struct {
     first_target_swap_benchmark_end_marker_generation: std.atomic.Value(u64) = .init(0),
     first_target_swap_benchmark_end_marker_output_bytes: std.atomic.Value(u64) = .init(0),
     first_target_swap_qpc_ticks: std.atomic.Value(u64) = .init(0),
+    target_mutex: std.Thread.Mutex = .{},
     target_swap_interval_qpc_ticks: ?[]u64 = null,
     target_swap_interval_count: usize = 0,
     target_swap_interval_overflow_count: u64 = 0,
@@ -342,24 +343,28 @@ pub const RenderTrace = struct {
         self.last_swap_benchmark_end_marker_generation.store(benchmark_end_marker_generation, .release);
         self.last_swap_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
         self.last_swap_qpc_ticks.store(qpc_ticks, .release);
-        const target_active = self.target_active.load(.acquire);
-        self.noteTargetSwapInterval(qpc_ticks);
-        const target_bytes = self.target_process_output_bytes.load(.acquire);
-        const captured_qpc_ticks = self.first_target_swap_qpc_ticks.load(.acquire);
-        if (shouldCaptureTargetSwap(
-            target_active,
-            target_bytes,
-            process_output_bytes,
-            benchmark_end_marker_generation,
-            captured_qpc_ticks,
-        )) {
-            self.first_target_swap_process_output_generation.store(process_output_generation, .release);
-            self.first_target_swap_process_output_bytes.store(process_output_bytes, .release);
-            self.first_target_swap_process_output_tick_ms.store(process_output_tick_ms, .release);
-            self.first_target_swap_benchmark_end_marker_generation.store(benchmark_end_marker_generation, .release);
-            self.first_target_swap_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
-            self.first_target_swap_qpc_ticks.store(qpc_ticks, .release);
-            self.target_active.store(false, .release);
+        {
+            self.target_mutex.lock();
+            defer self.target_mutex.unlock();
+            const target_active = self.target_active.load(.acquire);
+            self.noteTargetSwapIntervalLocked(qpc_ticks);
+            const target_bytes = self.target_process_output_bytes.load(.acquire);
+            const captured_qpc_ticks = self.first_target_swap_qpc_ticks.load(.acquire);
+            if (shouldCaptureTargetSwap(
+                target_active,
+                target_bytes,
+                process_output_bytes,
+                benchmark_end_marker_generation,
+                captured_qpc_ticks,
+            )) {
+                self.first_target_swap_process_output_generation.store(process_output_generation, .release);
+                self.first_target_swap_process_output_bytes.store(process_output_bytes, .release);
+                self.first_target_swap_process_output_tick_ms.store(process_output_tick_ms, .release);
+                self.first_target_swap_benchmark_end_marker_generation.store(benchmark_end_marker_generation, .release);
+                self.first_target_swap_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
+                self.first_target_swap_qpc_ticks.store(qpc_ticks, .release);
+                self.target_active.store(false, .release);
+            }
         }
         const first_swap = self.noteTimedCounter(
             &self.swap_buffers_count,
@@ -446,6 +451,12 @@ pub const RenderTrace = struct {
     }
 
     pub fn noteTargetSwapInterval(self: *RenderTrace, qpc_ticks: u64) void {
+        self.target_mutex.lock();
+        defer self.target_mutex.unlock();
+        self.noteTargetSwapIntervalLocked(qpc_ticks);
+    }
+
+    fn noteTargetSwapIntervalLocked(self: *RenderTrace, qpc_ticks: u64) void {
         if (!self.target_active.load(.acquire) or qpc_ticks == 0) return;
         const previous = self.target_swap_interval_last_qpc_ticks;
         self.target_swap_interval_last_qpc_ticks = qpc_ticks;
@@ -462,6 +473,8 @@ pub const RenderTrace = struct {
 
     pub fn setTargetOutputBytes(self: *RenderTrace, target_bytes: u64) void {
         if (!self.live_snapshot) return;
+        self.target_mutex.lock();
+        defer self.target_mutex.unlock();
         self.target_active.store(false, .release);
         self.target_process_output_bytes.store(0, .release);
         self.first_target_swap_process_output_generation.store(0, .release);
@@ -484,6 +497,8 @@ pub const RenderTrace = struct {
 
     pub fn writeSnapshot(self: *RenderTrace) void {
         const trace_path = self.path orelse return;
+        self.target_mutex.lock();
+        defer self.target_mutex.unlock();
         const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
             log.warn("render trace snapshot open failed path={s} err={}", .{ trace_path, err });
             return;
@@ -703,4 +718,26 @@ test "win32 render trace scopes successful swap intervals to the armed target" {
     trace.target_active.store(false, .release);
     trace.noteTargetSwapInterval(200);
     try std.testing.expectEqual(@as(usize, 2), trace.target_swap_interval_count);
+}
+
+test "win32 render trace rearm resets target evidence as one critical section" {
+    var storage: [4]u64 = undefined;
+    var trace: RenderTrace = .{
+        .live_snapshot = true,
+        .target_swap_interval_qpc_ticks = &storage,
+    };
+
+    trace.setTargetOutputBytes(100);
+    trace.noteTargetSwapInterval(10);
+    trace.noteTargetSwapInterval(20);
+    trace.first_target_swap_process_output_bytes.store(100, .release);
+    trace.first_target_swap_qpc_ticks.store(20, .release);
+
+    trace.setTargetOutputBytes(200);
+    try std.testing.expect(trace.target_active.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 200), trace.target_process_output_bytes.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), trace.first_target_swap_process_output_bytes.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), trace.first_target_swap_qpc_ticks.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), trace.target_swap_interval_count);
+    try std.testing.expectEqual(@as(u64, 0), trace.target_swap_interval_last_qpc_ticks);
 }

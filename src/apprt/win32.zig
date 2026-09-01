@@ -21711,6 +21711,16 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
     switch (msg) {
         c.WM_WINHOSTTY_WAKE => return 0,
 
+        c.WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT => {
+            if (surface) |v| v.render_trace.requestSnapshot();
+            return 0;
+        },
+
+        c.WM_WINHOSTTY_RENDER_TRACE_TARGET => {
+            if (surface) |v| v.render_trace.setTargetOutputBytes(@intCast(wParam));
+            return 0;
+        },
+
         c.WM_WINHOSTTY_UIA_QUERY_REFRESH => {
             if (surface) |v| {
                 v.drainTerminalAccessibilityOutput();
