@@ -220,25 +220,26 @@ fn parseInto(
         raw_contents[3..]
     else
         raw_contents;
-    var in_match = false;
+    var in_conditional_block = false;
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw_line| {
         const directive = parseDirective(raw_line) orelse continue;
         if (std.ascii.eqlIgnoreCase(directive.keyword, "match")) {
-            in_match = true;
+            in_conditional_block = true;
             continue;
         }
         if (std.ascii.eqlIgnoreCase(directive.keyword, "include")) {
-            // A Match block's includes are conditional on runtime state we do
-            // not evaluate, so they are skipped rather than guessed at.
-            if (!in_match) {
+            // Includes inside Host or Match blocks are conditional on runtime
+            // state we do not evaluate, so they are skipped rather than
+            // exposing aliases that `ssh <alias>` may not actually resolve.
+            if (!in_conditional_block) {
                 if (load_context) |context| try context.parseIncludes(directive.value, depth);
             }
             continue;
         }
         if (!std.ascii.eqlIgnoreCase(directive.keyword, "host")) continue;
 
-        in_match = false;
+        in_conditional_block = true;
         var aliases: SshArgIterator = .{ .value = directive.value, .backslash_escape = true };
         while (try aliases.next(alloc)) |alias| {
             defer alloc.free(alias);
@@ -630,6 +631,7 @@ test "ssh config loads one include level and resolves supported paths" {
     try tmp.dir.writeFile(.{ .sub_path = ".ssh/absolute.conf", .data = "Host absolute\n" });
     try tmp.dir.writeFile(.{ .sub_path = ".ssh/globbed.conf", .data = "Host globbed\n" });
     try tmp.dir.writeFile(.{ .sub_path = ".ssh/matched.conf", .data = "Host matched\n" });
+    try tmp.dir.writeFile(.{ .sub_path = ".ssh/host-scoped.conf", .data = "Host leaked\n" });
 
     const home = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(home);
@@ -637,7 +639,7 @@ test "ssh config loads one include level and resolves supported paths" {
     defer alloc.free(absolute);
     const root = try std.fmt.allocPrint(
         alloc,
-        "Include relative.conf\nInclude ~/.ssh/tilde.conf\nInclude {s}\nInclude *.conf\nMatch all\nInclude matched.conf\nHost root\n",
+        "Include relative.conf\nInclude ~/.ssh/tilde.conf\nInclude {s}\nInclude *.conf\nHost scoped\nInclude host-scoped.conf\nMatch all\nInclude matched.conf\nHost root\n",
         .{absolute},
     );
     defer alloc.free(root);
@@ -645,11 +647,12 @@ test "ssh config loads one include level and resolves supported paths" {
 
     const hosts = try loadFromHome(alloc, home);
     defer deinitHosts(alloc, hosts);
-    try testing.expectEqual(@as(usize, 4), hosts.len);
+    try testing.expectEqual(@as(usize, 5), hosts.len);
     try testing.expectEqualStrings("relative", hosts[0].alias);
     try testing.expectEqualStrings("tilde", hosts[1].alias);
     try testing.expectEqualStrings("absolute", hosts[2].alias);
-    try testing.expectEqualStrings("root", hosts[3].alias);
+    try testing.expectEqualStrings("scoped", hosts[3].alias);
+    try testing.expectEqualStrings("root", hosts[4].alias);
 }
 
 test "ssh config argument tokenizer follows OpenSSH quote boundaries" {
