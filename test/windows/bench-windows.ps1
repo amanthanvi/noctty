@@ -1398,13 +1398,15 @@ function Invoke-BenchEchoRun {
             $baselineOutputGeneration = [uint64] $foregroundTrace.last_swap_process_output_generation
             $baselineOutputBytes = [uint64] $foregroundTrace.last_swap_process_output_bytes
             $expectedEchoBytes = $baselineOutputBytes + [uint64] [Text.Encoding]::UTF8.GetByteCount($nonce)
-            $inputTickMs = [NocttyBenchNative]::GetTickCount64()
-            $inputQpcTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        }
+
+        Set-BenchRenderTraceTarget -Hwnd $surfaceHwnd -OutputBytes $expectedEchoBytes
+        $inputTickMs = [NocttyBenchNative]::GetTickCount64()
+        $inputQpcTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+        if ($NeedProxy) {
             [NocttyBenchNative]::SendUnicodeText('x')
         }
         else {
-            $inputTickMs = [NocttyBenchNative]::GetTickCount64()
-            $inputQpcTicks = [Diagnostics.Stopwatch]::GetTimestamp()
             Send-BenchVirtualKeyMessage -Hwnd $surfaceHwnd -VirtualKey 0x58 -CharCode 0x78 -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Process $run.Process
         }
         Wait-BenchFile -Path $resultPath -Run $run -Description 'benchmark echo child result'
@@ -1415,15 +1417,16 @@ function Invoke-BenchEchoRun {
             $liveTrace = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence $traceSequence -Deadline $deadline
             $traceSequence = [uint64] $liveTrace.snapshot_sequence
             if ([uint64] $liveTrace.swap_buffers_count -gt $baselineSwapCount -and
-                [uint64] $liveTrace.last_swap_process_output_generation -gt $baselineOutputGeneration -and
-                [uint64] $liveTrace.last_swap_process_output_bytes -ge $expectedEchoBytes) {
-                $outputTickMs = [uint64] $liveTrace.last_swap_process_output_tick_ms
+                [uint64] $liveTrace.target_process_output_bytes -eq $expectedEchoBytes -and
+                [uint64] $liveTrace.first_target_swap_process_output_generation -gt $baselineOutputGeneration -and
+                [uint64] $liveTrace.first_target_swap_process_output_bytes -ge $expectedEchoBytes) {
+                $outputTickMs = [uint64] $liveTrace.first_target_swap_process_output_tick_ms
                 if ($outputTickMs -lt $inputTickMs) { throw 'causal output generation predates the benchmark input timestamp' }
                 $conptyRttMs = [double] ($outputTickMs - $inputTickMs)
                 if ($NeedProxy) {
                     $frequency = [uint64] $liveTrace.qpc_frequency
                     if ($frequency -ne [uint64] [Diagnostics.Stopwatch]::Frequency) { throw 'render trace QPC frequency differs from System.Diagnostics.Stopwatch' }
-                    $swapQpcTicks = [uint64] $liveTrace.last_swap_qpc_ticks
+                    $swapQpcTicks = [uint64] $liveTrace.first_target_swap_qpc_ticks
                     if ($swapQpcTicks -lt $inputQpcTicks) { throw 'causal swap predates the benchmark input timestamp' }
                     $proxyElapsedMs = (($swapQpcTicks - $inputQpcTicks) * 1000.0) / $frequency
                 }
@@ -1677,6 +1680,7 @@ if ($script:adapter.Installed) {
     else {
     if (Test-BenchMetricRequested -Name 'throughput') {
         $frameTimeSamples = [Collections.Generic.List[double]]::new()
+        $streamWorkloadComplete = $false
         $workloads = @(
             [pscustomobject]@{ Workload = 'stream'; Metric = 'throughput_mb_s' },
             [pscustomobject]@{ Workload = 'alt-screen'; Metric = 'throughput_alt_screen_mb_s' },
@@ -1796,17 +1800,19 @@ if ($script:adapter.Installed) {
                 $throughputDetails = [ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }) }
                 if ($ProfileThroughput) { $throughputDetails.diagnostic_profiles = $diagnosticProfiles.ToArray() }
                 $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Samples $samples.ToArray() -Details $throughputDetails))
+                if ($workload.Workload -eq 'stream') { $streamWorkloadComplete = $true }
             }
             catch {
                 $measurementErrors.Add("$($workload.Metric): $($_.Exception.Message)")
                 $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Status error -Details ([ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }); error = $_.Exception.Message })))
             }
         }
-        if ($frameTimeSamples.Count -gt 0) {
+        if ($streamWorkloadComplete -and $frameTimeSamples.Count -gt 0) {
             $metrics.Add((New-BenchMetricRecord -Name 'frame_time_p95_ms' -Unit 'ms' -Samples $frameTimeSamples.ToArray() -Details ([ordered]@{ workload = 'stream'; endpoint = 'interval between consecutive successful SwapBuffers after target arm and through the first full-consumption swap'; clock = 'QueryPerformanceCounter'; aggregation = 'nearest-rank p95 over pooled workload-window intervals'; software_observation = $true; compositor_scanout_included = $false; photon_measurement = $false; render_trace_snapshot_request_observer_included = $false })))
         }
         else {
-            $metrics.Add((New-BenchMetricRecord -Name 'frame_time_p95_ms' -Unit 'ms' -Status error -Details ([ordered]@{ workload = 'stream'; endpoint = 'interval between consecutive successful SwapBuffers after target arm and through the first full-consumption swap'; clock = 'QueryPerformanceCounter'; aggregation = 'nearest-rank p95 over pooled workload-window intervals'; software_observation = $true; compositor_scanout_included = $false; photon_measurement = $false; render_trace_snapshot_request_observer_included = $false; error = 'stream workload did not produce frame interval samples' })))
+            $frameTimeError = if (-not $streamWorkloadComplete) { 'stream workload did not complete all requested runs' } else { 'stream workload did not produce frame interval samples' }
+            $metrics.Add((New-BenchMetricRecord -Name 'frame_time_p95_ms' -Unit 'ms' -Status error -Details ([ordered]@{ workload = 'stream'; endpoint = 'interval between consecutive successful SwapBuffers after target arm and through the first full-consumption swap'; clock = 'QueryPerformanceCounter'; aggregation = 'nearest-rank p95 over pooled workload-window intervals'; software_observation = $true; compositor_scanout_included = $false; photon_measurement = $false; render_trace_snapshot_request_observer_included = $false; error = $frameTimeError })))
         }
     }
 
@@ -2165,11 +2171,11 @@ if ($script:adapter.Installed) {
                 $samples.Add($result.ProxyMs)
                 $lastTracePath = $result.TracePath
             }
-            $metrics.Add((New-BenchMetricRecord -Name 'key_to_first_swap_ms_proxy' -Unit 'ms' -Samples $samples.ToArray() -Details ([ordered]@{ proxy_kind = 'software SendInput-to-successful-SwapBuffers proxy; accepted swap must consume the controlled echo output generation'; clock = 'cross-process QueryPerformanceCounter'; excludes_post_swap_trace_observation_delay = $true; render_trace_snapshot_request_observer_included = $true; photon_measurement = $false; render_trace_path = $lastTracePath })))
+            $metrics.Add((New-BenchMetricRecord -Name 'key_to_first_swap_ms_proxy' -Unit 'ms' -Samples $samples.ToArray() -Details ([ordered]@{ proxy_kind = 'software SendInput-to-successful-SwapBuffers proxy; accepted swap must consume the controlled echo output generation'; clock = 'cross-process QueryPerformanceCounter'; excludes_post_swap_trace_observation_delay = $true; render_trace_snapshot_request_observer_included = $true; render_trace_target_observer_included = $true; photon_measurement = $false; render_trace_path = $lastTracePath })))
         }
         catch {
             $measurementErrors.Add("key-to-pixel-proxy: $($_.Exception.Message)")
-            $metrics.Add((New-BenchMetricRecord -Name 'key_to_first_swap_ms_proxy' -Unit 'ms' -Status error -Details ([ordered]@{ proxy_kind = 'software SendInput-to-successful-SwapBuffers proxy; accepted swap must consume the controlled echo output generation'; clock = 'cross-process QueryPerformanceCounter'; excludes_post_swap_trace_observation_delay = $true; render_trace_snapshot_request_observer_included = $true; photon_measurement = $false; render_trace_path = $lastTracePath; error = $_.Exception.Message })))
+            $metrics.Add((New-BenchMetricRecord -Name 'key_to_first_swap_ms_proxy' -Unit 'ms' -Status error -Details ([ordered]@{ proxy_kind = 'software SendInput-to-successful-SwapBuffers proxy; accepted swap must consume the controlled echo output generation'; clock = 'cross-process QueryPerformanceCounter'; excludes_post_swap_trace_observation_delay = $true; render_trace_snapshot_request_observer_included = $true; render_trace_target_observer_included = $true; photon_measurement = $false; render_trace_path = $lastTracePath; error = $_.Exception.Message })))
         }
     }
     }
@@ -2217,12 +2223,13 @@ foreach ($threshold in $thresholds) {
 }
 foreach ($record in $metrics) {
     if ($record.status -ne 'pass' -and $record.status -ne 'fail') { continue }
-    if ($null -eq $record.median) { continue }
+    $measurementField = if ($record.metric -eq 'frame_time_p95_ms') { 'p95' } else { 'median' }
+    if ($null -eq $record.$measurementField) { continue }
     if (-not $thresholdByMetric.ContainsKey([string] $record.metric)) {
         throw "Threshold file has no entry for measured metric '$($record.metric)'"
     }
     $threshold = $thresholdByMetric[[string] $record.metric]
-    $measured = [double] $record.median
+    $measured = [double] $record.$measurementField
     $value = [double] $threshold.value
     $active = $threshold.active
     if ($active) { $activeThresholdCount++ }
@@ -2248,7 +2255,7 @@ foreach ($record in $metrics) {
     # Enforcement is the one thing -Gate owns.
     if ($Gate -and $active -and -not $passed) {
         $record.status = 'fail'
-        $thresholdBreaches.Add("$($record.metric) median $measured $($record.unit) breached $($threshold.direction) threshold $value $($record.unit)")
+        $thresholdBreaches.Add("$($record.metric) $measurementField $measured $($record.unit) breached $($threshold.direction) threshold $value $($record.unit)")
     }
 }
 

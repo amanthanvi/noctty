@@ -62,4 +62,25 @@ Invoke-ContractTable -Contracts @(
         Kind = 'Text'
         Description = 'gating refuses adapter-required results instead of passing them through'
     }
+    @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
+        Pattern = '(?s)Set-BenchRenderTraceTarget.*?SendUnicodeText.*?first_target_swap_process_output_bytes.*?first_target_swap_qpc_ticks'
+        Kind = 'Text'
+        Description = 'key-response latency consumes the armed first qualifying swap latch'
+    }
+    @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
+        Pattern = '(?s)\$streamWorkloadComplete\s*=\s*\$false.*?if \(\$streamWorkloadComplete -and \$frameTimeSamples\.Count -gt 0\)'
+        Kind = 'Text'
+        Description = 'frame-time evidence fails closed unless every stream run completes'
+    }
+    @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
+        Pattern = '(?s)\$measurementField\s*=\s*if \(\$record\.metric -eq ''frame_time_p95_ms''\) \{ ''p95'' \} else \{ ''median'' \}.*?\$measured\s*=\s*\[double\] \$record\.\$measurementField'
+        Kind = 'Text'
+        Description = 'the frame-time p95 threshold compares the p95 statistic rather than the median'
+    }
 )

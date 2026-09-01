@@ -499,7 +499,11 @@
             "required": ["details"],
             "properties": {
               "details": {
-                "required": ["proxy_kind", "render_trace_path"]
+                "required": [
+                  "proxy_kind",
+                  "render_trace_path",
+                  "render_trace_target_observer_included"
+                ]
               }
             }
           }
