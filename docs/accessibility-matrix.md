@@ -26,10 +26,11 @@ so a stale claim cannot outlive the record.
 - Narrator: **not yet measured**
 - NVDA: **measured** — NVDA 2026.1.1, portable copy, 150% scale, High
   Contrast off, Debug build, measured at `7540fe0d`. Mixed results; see
-  the NVDA column. Two subsequent product changes remain unmeasured through
-  NVDA: `4cc0a560` updated chrome focus, range, and selection events, and
-  `070ab80f` updated terminal selection ranges. The NVDA column records only
-  what was heard at `7540fe0d` until the current product code is rerun.
+  the NVDA column. Later product changes remain unmeasured through NVDA:
+  `4cc0a560` updated chrome focus, range, and selection events; `070ab80f`
+  updated terminal selection ranges; `3334be40` bounded selection endpoint
+  expansion; and `d0ef51e7` updated provider lifetimes. The NVDA column records
+  only what was heard at `7540fe0d` until the current product code is rerun.
 - JAWS: **not yet measured** (commercial licence; not installed)
 
 The "UIA assertion" column reflects
