@@ -31924,7 +31924,12 @@ test "win32 launch-layout IPC validates names before cold fallback" {
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        sendLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+        sendLaunchLayoutIpc(
+            std.testing.allocator,
+            pipe_name,
+            "CON",
+            win32_ipc.automation_response_timeout_ms,
+        ),
     );
 }
 
