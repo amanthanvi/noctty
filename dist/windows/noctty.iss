@@ -45,7 +45,7 @@ ArchitecturesInstallIn64BitMode=arm64
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #endif
-ChangesAssociations=no
+ChangesAssociations=yes
 CloseApplications=yes
 RestartApplications=yes
 UninstallDisplayIcon={app}\noctty.exe

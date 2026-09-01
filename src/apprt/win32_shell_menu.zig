@@ -28,6 +28,13 @@ extern "advapi32" fn RegDeleteKeyExW(
     Reserved: DWORD,
 ) callconv(.winapi) i32;
 
+extern "shell32" fn SHChangeNotify(
+    wEventId: i32,
+    uFlags: u32,
+    dwItem1: ?*const anyopaque,
+    dwItem2: ?*const anyopaque,
+) callconv(.winapi) void;
+
 const HKEY_CURRENT_USER: HKEY = @ptrFromInt(consts.HKEY_CURRENT_USER);
 const KEY_WRITE: REGSAM = 0x20006;
 const REG_OPTION_NON_VOLATILE: DWORD = 0;
@@ -36,6 +43,8 @@ const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;
 const ERROR_FILE_NOT_FOUND: i32 = consts.ERROR_FILE_NOT_FOUND;
 const ERROR_PATH_NOT_FOUND: i32 = 3;
 const REG_CREATED_NEW_KEY: DWORD = 1;
+const SHCNE_ASSOCCHANGED: i32 = 0x08000000;
+const SHCNF_IDLIST: u32 = 0;
 
 pub const display_name = "Open noctty here";
 
@@ -146,6 +155,7 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
         }
     }
 
+    notifyExplorerAssociationsChanged();
     return .success;
 }
 
@@ -153,6 +163,7 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
 /// Missing keys are successful no-ops.
 pub fn unregister(alloc: Allocator) ![unregister_key_paths.len]DeleteResult {
     var results: [unregister_key_paths.len]DeleteResult = undefined;
+    var removed_any = false;
     for (unregister_key_paths, 0..) |path, i| {
         const path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
         defer alloc.free(path_wide);
@@ -163,12 +174,20 @@ pub fn unregister(alloc: Allocator) ![unregister_key_paths.len]DeleteResult {
             0,
             0,
         )) {
-            ERROR_SUCCESS => .removed,
+            ERROR_SUCCESS => removed: {
+                removed_any = true;
+                break :removed .removed;
+            },
             ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND => .absent,
             else => |status| .{ .failed = status },
         };
     }
+    if (removed_any) notifyExplorerAssociationsChanged();
     return results;
+}
+
+fn notifyExplorerAssociationsChanged() void {
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, null, null);
 }
 
 fn writeVerbKey(
