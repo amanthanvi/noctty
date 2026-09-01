@@ -2663,6 +2663,7 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     // Update our cell size within our size struct
     self.size.cell = size;
     self.balancePaddingIfNeeded();
+    self.syncBenchmarkMemoryGeometry();
 
     // Notify the terminal
     self.queueIo(.{ .resize = self.size }, .unlocked);
@@ -2769,6 +2770,7 @@ fn resizeWithIoMode(self: *Surface, size: rendererpkg.ScreenSize, io_mode: Resiz
     // Save our screen size
     self.size.screen = size;
     self.balancePaddingIfNeeded();
+    self.syncBenchmarkMemoryGeometry();
 
     // Recalculate our grid size. Because Ghostty supports fluid resizing,
     // its possible the grid doesn't change at all even if the screen size changes.
