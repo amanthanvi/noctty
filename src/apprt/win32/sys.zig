@@ -218,6 +218,8 @@ pub extern "user32" fn RegisterClipboardFormatW(lpszFormat: [*:0]const u16) call
 
 pub extern "user32" fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) callconv(.winapi) ATOM;
 
+pub extern "user32" fn UnregisterClassW(lpClassName: LPCWSTR, hInstance: HINSTANCE) callconv(.winapi) BOOL;
+
 pub extern "user32" fn CreateWindowExW(
     dwExStyle: u32,
     lpClassName: LPCWSTR,
@@ -468,6 +470,10 @@ pub extern "kernel32" fn GlobalLock(hMem: ?*anyopaque) callconv(.winapi) ?*anyop
 pub extern "kernel32" fn GlobalUnlock(hMem: ?*anyopaque) callconv(.winapi) BOOL;
 
 pub extern "gdi32" fn ChoosePixelFormat(hdc: HDC, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
+
+pub extern "gdi32" fn DescribePixelFormat(hdc: HDC, format: i32, size: UINT, ppfd: *PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
+
+pub extern "gdi32" fn GetPixelFormat(hdc: HDC) callconv(.winapi) i32;
 
 pub extern "gdi32" fn CreateSolidBrush(color: COLORREF) callconv(.winapi) HBRUSH;
 

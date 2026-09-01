@@ -103,6 +103,49 @@ pub const ResourcesDir = resourcesdir.ResourcesDir;
 pub const ShellEscapeWriter = shell.ShellEscapeWriter;
 pub const getKernelInfo = kernel_info.getKernelInfo;
 
+/// Per-surface terminal threads are numerous on Windows, where Zig's default
+/// 16 MiB stack is committed by CreateThread. Keep process-global and
+/// short-lived worker threads on the standard library default.
+pub fn surfaceThreadSpawnConfig() std.Thread.SpawnConfig {
+    return if (builtin.os.tag == .windows)
+        .{ .stack_size = 1024 * 1024 }
+    else
+        .{};
+}
+
+test "Windows surface threads use a bounded stack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const config = surfaceThreadSpawnConfig();
+    try std.testing.expectEqual(@as(usize, 1024 * 1024), config.stack_size);
+    try std.testing.expect(config.stack_size < std.Thread.SpawnConfig.default_stack_size);
+}
+
+fn surfaceThreadStackProbe(result: *std.atomic.Value(u64)) void {
+    // Match the largest fixed local on the Windows PTY reader and exercise
+    // the configured stack through a real CreateThread/join lifecycle.
+    var read_buf: [64 * 1024]u8 = undefined;
+    for (&read_buf, 0..) |*byte, i| byte.* = @truncate(i);
+
+    var sum: u64 = 0;
+    for (read_buf) |byte| sum += byte;
+    result.store(sum, .release);
+}
+
+test "Windows surface thread stack carries a 64 KiB read batch and joins" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var result = std.atomic.Value(u64).init(0);
+    const thread = try std.Thread.spawn(
+        surfaceThreadSpawnConfig(),
+        surfaceThreadStackProbe,
+        .{&result},
+    );
+    thread.join();
+
+    try std.testing.expectEqual(@as(u64, 8_355_840), result.load(.acquire));
+}
+
 test {
     _ = i18n;
     _ = path;

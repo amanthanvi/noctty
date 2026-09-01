@@ -200,8 +200,9 @@ test "RenderPass attachmentSize uses target dimensions" {
     const attachment: Options.Attachment = .{
         .target = .{
             .target = .{
-                .framebuffer = undefined,
-                .renderbuffer = undefined,
+                .storage = .default_framebuffer,
+                .framebuffer = .{ .id = 0 },
+                .renderbuffer = null,
                 .width = 320,
                 .height = 240,
             },

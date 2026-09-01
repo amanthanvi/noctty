@@ -802,7 +802,7 @@ pub fn init(
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         rendererpkg.Thread.threadMain,
         .{&self.renderer_thread},
     );
@@ -810,7 +810,7 @@ pub fn init(
 
     // Start our IO thread
     self.io_thr = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         termio.Thread.threadMain,
         .{ &self.io_thread, &self.io },
     );
@@ -854,6 +854,8 @@ pub fn deinit(self: *Surface) void {
         self.io_thr.join();
     }
 
+    var renderer_deinit_safe = true;
+
     // Stop rendering thread
     {
         self.renderer_thread.stop.notify() catch |err|
@@ -862,12 +864,28 @@ pub fn deinit(self: *Surface) void {
 
         // We need to become the active rendering thread again
         self.renderer.threadEnter(self.rt_surface) catch unreachable;
+        // Renderer resources belong to this runtime surface's graphics
+        // context. Teardown is back on the app thread now, so restore that
+        // context before deleting any graphics objects.
+        self.renderer.prepareSurfaceDeinit(self.rt_surface) catch |err| {
+            log.err("error preparing renderer surface deinit err={}", .{err});
+            // Deleting GL resources with no current context (or another
+            // pane's context) is unsafe. Keep the rest of Surface teardown
+            // running, but deliberately abandon the renderer-owned resources
+            // in this exceptional path; destroying the WGL context later is
+            // safer than issuing deletes against the wrong share group.
+            renderer_deinit_safe = false;
+        };
     }
 
     // We need to deinit AFTER everything is stopped, since there are
     // shared values between the two threads.
     self.renderer_thread.deinit();
-    self.renderer.deinit();
+    if (renderer_deinit_safe) {
+        self.renderer.deinit();
+    } else {
+        log.err("abandoning renderer resources after surface context rebind failure", .{});
+    }
     self.io_thread.deinit();
     self.io.deinit();
 

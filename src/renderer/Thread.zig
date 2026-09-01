@@ -315,15 +315,11 @@ fn threadMain_(self: *Thread) !void {
     // Send an initial wakeup message so that we render right away.
     try self.wakeup.notify();
 
-    // Start blinking the cursor.
-    self.cursor_h.run(
-        &self.loop,
-        &self.cursor_c,
-        cursorBlinkInterval(),
-        Thread,
-        self,
-        cursorTimerCallback,
-    );
+    // Start blinking only when the terminal's cursor mode requests it.
+    // Steady cursors must not keep a 500 ms renderer wake loop alive.
+    if (self.cursorShouldBlink()) {
+        self.armCursorTimerIfDead(cursorBlinkInterval());
+    }
 
     // Start the draw timer
     self.syncDrawTimer();
@@ -537,13 +533,15 @@ fn drainMailbox(self: *Thread) !bool {
                     // active, its callback owns the eventual rearm.
                     self.flags.cursor_blink_visible = true;
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(cursorBlinkInterval());
+                    if (self.cursorShouldBlink()) {
+                        self.armCursorTimerIfDead(cursorBlinkInterval());
+                    }
                 }
             },
 
             .reset_cursor_blink => {
                 self.flags.cursor_blink_visible = true;
-                if (self.flags.focused) {
+                if (self.flags.focused and self.cursorShouldBlink()) {
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
                     self.armCursorTimerIfDead(cursorBlinkInterval());
                 }
@@ -672,6 +670,22 @@ fn notePresentRequest(self: *Thread, interval_ms: u64) void {
 /// Trigger a draw. This will not update frame data or anything, it will
 /// just trigger a draw/paint.
 fn drawFrame(self: *Thread, now: bool) void {
+    self.drawFrameWithReservation(now, false);
+}
+
+fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) void {
+    // A caller-held reservation must be released on every path that does not
+    // hand it to a paint. Leaking one leaves renderer_repaint_requested set
+    // forever, after which every later repaint coalesces into a request that
+    // is never finished and the pane stops updating until a resize-settle or
+    // health recovery cancels it.
+    var reservation_held = repaint_reserved;
+    defer if (reservation_held) {
+        if (comptime @hasDecl(apprt.Surface, "cancelRendererRepaintRequest")) {
+            self.surface.cancelRendererRepaintRequest();
+        }
+    };
+
     const interval_ms = self.minimumPresentIntervalMs() orelse return;
 
     // `now` is the forced, vsync-bypassing path (`drawNowCallback`): a
@@ -691,8 +705,12 @@ fn drawFrame(self: *Thread, now: bool) void {
             self.surface.noteRendererDrawRequest();
         }
         if (comptime @hasDecl(apprt.Surface, "beginRendererRepaintRequest")) {
-            if (!self.surface.beginRendererRepaintRequest()) return;
+            if (!repaint_reserved and !self.surface.beginRendererRepaintRequest()) return;
         }
+
+        // From here the reservation belongs to the queued paint: either the
+        // paint completes it, or the failed push below cancels it.
+        reservation_held = false;
 
         if (self.app_mailbox.push(
             .{ .redraw_surface = self.surface },
@@ -705,6 +723,8 @@ fn drawFrame(self: *Thread, now: bool) void {
             self.notePresentRequest(interval_ms);
         }
     } else {
+        // Nothing will complete a reservation on this path, so the deferred
+        // cancel above releases it once the synchronous draw returns.
         self.renderer.drawFrame(false) catch |err| {
             log.warn("error drawing err={}", .{err});
             return;
@@ -764,6 +784,12 @@ fn armCursorTimerIfDead(self: *Thread, delay_ms: u64) void {
     );
 }
 
+fn cursorShouldBlink(self: *Thread) bool {
+    self.state.mutex.lock();
+    defer self.state.mutex.unlock();
+    return self.state.terminal.modes.get(.cursor_blinking);
+}
+
 fn refreshRenderFollowupDeadline(self: *Thread) void {
     if (apprt.runtime != apprt.win32 or !self.flags.visible) return;
     self.state.noteRenderWakeupNotify();
@@ -797,18 +823,42 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
     const interval_ms = self.minimumPresentIntervalMs() orelse return false;
     if (self.presentWaitMs(interval_ms) > 0) return true;
 
-    // Update our frame data.
+    var repaint_reserved = false;
+    if (must_draw_from_app_thread and self.flags.visible and !self.renderer.hasVsync()) {
+        if (comptime @hasDecl(apprt.Surface, "beginRendererFrameUpdate")) {
+            if (!self.surface.beginRendererFrameUpdate()) {
+                const keep_due_to_dirty = self.shouldContinueRenderFollowup();
+                if (from_wakeup and keep_due_to_dirty) self.refreshRenderFollowupDeadline();
+                return keep_due_to_dirty or self.renderFollowupWindowActive();
+            }
+            repaint_reserved = true;
+        }
+    }
+
     if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
         self.surface.noteRendererUpdateFrame();
     }
-    self.renderer.updateFrame(
+
+    // updateFrame returns the cursor mode from the same locked terminal
+    // snapshot used to rebuild this frame.
+    const frame_update: ?rendererpkg.Renderer.FrameUpdate = self.renderer.updateFrame(
         self.state,
         self.flags.cursor_blink_visible,
-    ) catch |err|
+    ) catch |err| frame_update: {
         log.warn("error rendering err={}", .{err});
+        break :frame_update null;
+    };
+    const cursor_blinking = if (frame_update) |update|
+        update.cursor_blinking
+    else
+        self.cursorShouldBlink();
+    if (!cursor_blinking) self.flags.cursor_blink_visible = true;
+    if (self.flags.focused and cursor_blinking) {
+        self.armCursorTimerIfDead(cursorBlinkInterval());
+    }
 
     // Draw.
-    self.drawFrame(false);
+    self.drawFrameWithReservation(false, repaint_reserved);
 
     // On Win32, xev async wakes can coalesce while a render pass is still
     // in flight. If terminal dirtiness reappeared during the pass, keep a
@@ -834,7 +884,6 @@ fn wakeupCallback(
     if (comptime @hasDecl(apprt.Surface, "noteRendererWakeupCallback")) {
         t.surface.noteRendererWakeupCallback();
     }
-
     if (t.renderOnce(true)) {
         t.scheduleRenderFollowup();
     }
@@ -936,12 +985,24 @@ fn renderCallback(
     if (comptime @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
         t.surface.noteRendererFollowupCallback();
     }
-
-    if (t.renderOnce(false)) {
-        t.scheduleRenderFollowup();
+    switch (renderFollowupDecision(
+        t.shouldContinueRenderFollowup(),
+        t.renderFollowupWindowActive(),
+    )) {
+        .render => if (t.renderOnce(false)) t.scheduleRenderFollowup(),
+        .poll => t.scheduleRenderFollowup(),
+        .stop => {},
     }
 
     return .disarm;
+}
+
+const RenderFollowupDecision = enum { stop, poll, render };
+
+fn renderFollowupDecision(dirty: bool, window_active: bool) RenderFollowupDecision {
+    if (dirty) return .render;
+    if (window_active) return .poll;
+    return .stop;
 }
 
 fn cursorTimerCallback(
@@ -978,14 +1039,19 @@ fn cursorTimerCallback(
         null;
     switch (cursorBlinkTimerDecision(
         t.flags.focused,
+        t.cursorShouldBlink(),
         cursorBlinkInterval(),
         reset_elapsed_ns,
     )) {
         .disarm => {
             // An unfocused surface needs no recurring cursor timer. Focus
             // regain will arm a new one once this callback has been popped.
+            const was_visible = t.flags.cursor_blink_visible;
             t.flags.cursor_blink_visible = true;
             t.cursor_blink_reset_at = null;
+            if (!was_visible) {
+                t.wakeup.notify() catch {};
+            }
             return .disarm;
         },
         .rearm_after => |delay_ms| {
@@ -1051,10 +1117,11 @@ const CursorBlinkTimerDecision = union(enum) {
 
 fn cursorBlinkTimerDecision(
     focused: bool,
+    blinking: bool,
     interval_ms: u64,
     reset_elapsed_ns: ?u64,
 ) CursorBlinkTimerDecision {
-    if (!focused) return .disarm;
+    if (!focused or !blinking) return .disarm;
     if (reset_elapsed_ns) |elapsed_ns| {
         const remaining_ms = cursorBlinkRemainingMs(interval_ms, elapsed_ns);
         if (remaining_ms > 0) return .{ .rearm_after = remaining_ms };
@@ -1086,20 +1153,37 @@ test "cursor blink timer decision preserves focus and reset state" {
 
     try testing.expectEqual(
         CursorBlinkTimerDecision.disarm,
-        cursorBlinkTimerDecision(false, 500, 1),
+        cursorBlinkTimerDecision(false, true, 500, 1),
     );
     try testing.expectEqual(
         CursorBlinkTimerDecision.toggle,
-        cursorBlinkTimerDecision(true, 500, null),
+        cursorBlinkTimerDecision(true, true, 500, null),
     );
     try testing.expectEqual(
         CursorBlinkTimerDecision{ .rearm_after = 500 },
-        cursorBlinkTimerDecision(true, 500, 1),
+        cursorBlinkTimerDecision(true, true, 500, 1),
     );
     try testing.expectEqual(
         CursorBlinkTimerDecision.toggle,
-        cursorBlinkTimerDecision(true, 500, 500 * std.time.ns_per_ms),
+        cursorBlinkTimerDecision(true, true, 500, 500 * std.time.ns_per_ms),
     );
+}
+
+test "cursor blink timer disarms for a steady cursor" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.disarm,
+        cursorBlinkTimerDecision(true, false, 500, null),
+    );
+}
+
+test "render followup does not redraw a clean terminal" {
+    const testing = std.testing;
+
+    try testing.expectEqual(RenderFollowupDecision.poll, renderFollowupDecision(false, true));
+    try testing.expectEqual(RenderFollowupDecision.render, renderFollowupDecision(true, true));
+    try testing.expectEqual(RenderFollowupDecision.stop, renderFollowupDecision(false, false));
 }
 
 test "renderer follow-up check tracks visible terminal dirtiness" {

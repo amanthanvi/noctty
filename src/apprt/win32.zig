@@ -62,6 +62,7 @@ const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
+const pixel_format = @import("win32/pixel_format.zig");
 const labels = @import("win32/labels.zig");
 const win32_input = @import("win32/input.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
@@ -72,6 +73,7 @@ const sys = @import("win32/sys.zig");
 test {
     _ = @import("win32/render_trace.zig");
     _ = @import("win32/gl_startup.zig");
+    _ = @import("win32/pixel_format.zig");
     _ = @import("win32/labels.zig");
     _ = @import("win32/input.zig");
     _ = @import("win32/chrome_layout.zig");
@@ -5888,37 +5890,6 @@ pub const App = struct {
         return try client_size_fn(ctx, live_hwnd);
     }
 
-    fn defaultPixelFormatDescriptor() PIXELFORMATDESCRIPTOR {
-        return .{
-            .nSize = @sizeOf(PIXELFORMATDESCRIPTOR),
-            .nVersion = 1,
-            .dwFlags = c.PFD_DRAW_TO_WINDOW | c.PFD_SUPPORT_OPENGL | c.PFD_DOUBLEBUFFER,
-            .iPixelType = c.PFD_TYPE_RGBA,
-            .cColorBits = 32,
-            .cRedBits = 0,
-            .cRedShift = 0,
-            .cGreenBits = 0,
-            .cGreenShift = 0,
-            .cBlueBits = 0,
-            .cBlueShift = 0,
-            .cAlphaBits = 8,
-            .cAlphaShift = 0,
-            .cAccumBits = 0,
-            .cAccumRedBits = 0,
-            .cAccumGreenBits = 0,
-            .cAccumBlueBits = 0,
-            .cAccumAlphaBits = 0,
-            .cDepthBits = 24,
-            .cStencilBits = 8,
-            .cAuxBuffers = 0,
-            .iLayerType = c.PFD_MAIN_PLANE,
-            .bReserved = 0,
-            .dwLayerMask = 0,
-            .dwVisibleMask = 0,
-            .dwDamageMask = 0,
-        };
-    }
-
     fn createGLContext(self: *App, hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
         if (self.core_app.first) beginOpenGLStartupDiagnostics();
 
@@ -5928,19 +5899,37 @@ pub const App = struct {
         };
         errdefer _ = sys.ReleaseDC(hwnd, hdc);
 
-        const pfd = defaultPixelFormatDescriptor();
-        const pixel_format = sys.ChoosePixelFormat(hdc, &pfd);
-        if (pixel_format == 0) {
-            const err = windows.kernel32.GetLastError();
-            recordOpenGLStartupWin32Failure(.choose_pixel_format, err);
-            return windows.unexpectedError(err);
+        const format_before = sys.GetPixelFormat(hdc);
+        if (format_before != 0) {
+            recordOpenGLStartupError(.set_pixel_format, error.PixelFormatAlreadySet);
+            return error.PixelFormatAlreadySet;
         }
 
-        if (sys.SetPixelFormat(hdc, pixel_format, &pfd) == 0) {
+        var selection = try pixel_format.chooseRealPixelFormat(self.hinstance, hwnd, hdc);
+        log.debug(
+            "selected WGL pixel format index={} source={s} srgb_capable={} depth_bits={} stencil_bits={}",
+            .{
+                selection.provenance.index,
+                @tagName(selection.provenance.selection_source),
+                selection.provenance.srgb_capable,
+                selection.provenance.depth_bits,
+                selection.provenance.stencil_bits,
+            },
+        );
+
+        if (sys.SetPixelFormat(hdc, selection.pixel_format, &selection.descriptor) == 0) {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.set_pixel_format, err);
             return windows.unexpectedError(err);
         }
+        pixel_format.validatePixelFormatSetTransition(
+            format_before,
+            selection.pixel_format,
+            sys.GetPixelFormat(hdc),
+        ) catch |err| {
+            recordOpenGLStartupError(.set_pixel_format, err);
+            return err;
+        };
 
         const hglrc = sys.wglCreateContext(hdc) orelse {
             const err = windows.kernel32.GetLastError();
@@ -21153,13 +21142,45 @@ pub const Surface = struct {
         };
     }
 
+    /// Reserve the repaint slot for a renderer frame before the expensive
+    /// `updateFrame` work, so a paint that completes during that work cannot
+    /// be lost.
+    pub fn beginRendererFrameUpdate(self: *Surface) bool {
+        return self.beginRendererRepaintRequest();
+    }
+
+    /// Close the interleaving where paint completion clears the reservation
+    /// and checks retry_pending after the renderer observed the old pending
+    /// reservation but before it publishes retry_pending. Either the paint
+    /// completion consumes the retry and sends a wake, or this requester
+    /// reacquires the now-idle reservation and continues immediately.
+    fn completeRendererRepaintCoalesce(self: *Surface) bool {
+        if (self.renderer_repaint_requested.load(.acquire)) return false;
+        if (!self.renderer_repaint_retry_pending.swap(false, .acq_rel)) return false;
+        if (self.renderer_repaint_requested.cmpxchgStrong(
+            false,
+            true,
+            .acq_rel,
+            .acquire,
+        ) == null) return true;
+
+        // Another renderer request acquired the reservation between the
+        // idle observation and CAS. Its paint must retain our retry.
+        self.renderer_repaint_retry_pending.store(true, .release);
+        return false;
+    }
+
     pub fn beginRendererRepaintRequest(self: *Surface) bool {
         if (!self.renderer_repaint_requested.swap(true, .acq_rel)) {
             self.render_trace.noteRendererRepaintAccepted();
             return true;
         }
-        self.render_trace.noteRendererRepaintCoalesced();
         self.renderer_repaint_retry_pending.store(true, .release);
+        if (self.completeRendererRepaintCoalesce()) {
+            self.render_trace.noteRendererRepaintAccepted();
+            return true;
+        }
+        self.render_trace.noteRendererRepaintCoalesced();
         return false;
     }
 
