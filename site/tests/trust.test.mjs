@@ -335,6 +335,7 @@ test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /Expand-Archive/);
   assert.match(trustHtml, /winghostty\\winghostty\.com/);
   assert.match(trustHtml, /winghostty\\winghostty\.exe/);
+  assert.match(trustHtml, /winghostty\\ghostty-vt\.dll/);
   assert.match(trustHtml, /-AllowedPins @\(\$expectedSpki\)/);
   assert.match(trustHtml, /-TrustSelfSigned \$true/);
   assert.match(trustHtml, /verify-published-release\.ps1/);

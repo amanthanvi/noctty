@@ -268,8 +268,8 @@ Get-FileHash $asset -Algorithm SHA256</code></pre>
               the PE files inside the portable ZIP are Authenticode-signed. The
               ZIP container is not, so the container is covered only by its
               checksum. The example accepts either legacy v1.3.123 package,
-              extracts both signed binaries when given the portable ZIP, and
-              stops unless every embedded signature is valid and its
+              extracts all three signed PE files when given the portable ZIP,
+              and stops unless every embedded signature is valid and its
               SubjectPublicKeyInfo hash matches the updater's published pin.
             </p>
           </div>
@@ -281,6 +281,7 @@ if (Test-Path -LiteralPath $portable) {
   Expand-Archive -LiteralPath $portable -DestinationPath .\winghostty-portable -Force
   $targets.Add((Resolve-Path -LiteralPath .\winghostty-portable\winghostty\winghostty.com).Path)
   $targets.Add((Resolve-Path -LiteralPath .\winghostty-portable\winghostty\winghostty.exe).Path)
+  $targets.Add((Resolve-Path -LiteralPath .\winghostty-portable\winghostty\ghostty-vt.dll).Path)
 }
 if ($targets.Count -eq 0) { throw "Download an installer or portable ZIP first." }
 git clone --no-checkout https://github.com/amanthanvi/noctty.git .\noctty-verifier

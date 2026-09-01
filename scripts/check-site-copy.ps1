@@ -71,6 +71,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10"; Reason = "The manual v1.3.123 path should use a content-pinned verifier implementation that defines the signature helper." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.com"; Reason = "The manual legacy-release path should verify the console shim extracted from the portable ZIP." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.exe"; Reason = "The manual legacy-release path should verify the application binary extracted from the portable ZIP." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\ghostty-vt.dll"; Reason = "The manual legacy-release path should verify the library extracted from the portable ZIP." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = '-AllowedPins @($expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
