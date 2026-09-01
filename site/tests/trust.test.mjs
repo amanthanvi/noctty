@@ -17,12 +17,7 @@ const publishedVerifier = readFileSync(
 // pull request. Each entry names the dependency it waits on so the exemption
 // can retire itself: waiting for one exact path to appear would keep skipping a
 // genuinely broken link forever if that PR lands the document somewhere else.
-const PENDING_DOCS = new Map([
-  [
-    "docs/windows-benchmark-methodology.md",
-    { issue: "#121", pr: "#191", label: "#121 / PR #191" },
-  ],
-]);
+const PENDING_DOCS = new Map();
 
 const MIGRATION_GUIDES = [
   "docs/migrate-from-windows-terminal.md",
@@ -473,7 +468,15 @@ test("trust page states its limits without hedging", () => {
   );
   assert.match(trustHtml, /SmartScreen will\s+warn/);
   assert.match(trustHtml, /Two results miss a budget stated in PRODUCT\.md/);
-  assert.match(trustHtml, /Key-to-pixel\s+latency is not measured at all/);
+  assert.match(
+    trustHtml,
+    /came\s+from\s+an\s+older\s+binary\s+and\s+have\s+not\s+been\s+re-measured\s+on\s+the\s+current\s+code/i,
+  );
+  assert.doesNotMatch(trustHtml, /They were taken under parallel build load/i);
+  assert.match(
+    trustHtml,
+    /Key-to-pixel\s+latency\s+is\s+not\s+measured\s+at\s+all/,
+  );
   assert.match(
     trustHtml,
     /No screen reader has been run against a release build/,
