@@ -161,8 +161,11 @@ pub fn threadEnter(
     errdefer self.subprocess.stop();
 
     // Watcher to detect subprocess exit
-    const adopted_client_process = self.subprocess.adopted_client_process;
-    var process: ?xev.Process = if (adopted_client_process != null)
+    const is_adopted = if (comptime builtin.os.tag == .windows)
+        self.subprocess.adopted_client_process != null
+    else
+        false;
+    var process: ?xev.Process = if (is_adopted)
         null
     else if (self.subprocess.process) |v| switch (v) {
         .fork_exec => |cmd| try xev.Process.init(cmd.pid orelse return error.ProcessNoPid),
@@ -199,7 +202,7 @@ pub fn threadEnter(
         try std.Thread.spawn(
             internal_os.surfaceThreadSpawnConfig(),
             ReadThread.threadMainWindows,
-            .{ pty_fds.read, io, pipe[0], adopted_client_process, process_start },
+            .{ pty_fds.read, io, pipe[0], self.subprocess.adopted_client_process, process_start },
         )
     else
         try std.Thread.spawn(
@@ -233,7 +236,7 @@ pub fn threadEnter(
         termio.Termio.ThreadData,
         td,
         processExit,
-    ) else if (adopted_client_process == null and comptime flatpak_support) flatpak: {
+    ) else if (!is_adopted and comptime flatpak_support) flatpak: {
         switch (self.subprocess.process orelse break :flatpak) {
             // If we're in flatpak and we have a flatpak command
             // then we can run the special flatpak logic for watching.

@@ -535,9 +535,13 @@ const WindowsPty = struct {
     pub fn closeAdoptedSignal(self: *Pty) void {
         switch (self.control) {
             .pseudo_console => {},
-            .handoff => |*handoff| if (handoff.signal) |handle| {
-                _ = windows.CloseHandle(handle);
-                handoff.signal = null;
+            .handoff => |*handoff| {
+                handoff.signal_write_mutex.lock();
+                defer handoff.signal_write_mutex.unlock();
+                if (handoff.signal) |handle| {
+                    _ = windows.CloseHandle(handle);
+                    handoff.signal = null;
+                }
             },
         }
     }
@@ -592,10 +596,10 @@ const WindowsPty = struct {
                 if (result != windows.S_OK) return error.ResizeFailed;
             },
             .handoff => |*handoff| {
-                const signal = handoff.signal orelse return error.ResizeFailed;
-                const packet = encodeHandoffResize(size.ws_col, size.ws_row);
                 handoff.signal_write_mutex.lock();
                 defer handoff.signal_write_mutex.unlock();
+                const signal = handoff.signal orelse return error.ResizeFailed;
+                const packet = encodeHandoffResize(size.ws_col, size.ws_row);
                 var written: windows.DWORD = 0;
                 if (windows.kernel32.WriteFile(signal, &packet, packet.len, &written, null) == 0 or
                     written != packet.len)

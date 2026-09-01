@@ -909,6 +909,67 @@ const SavedRegistryValue = struct {
     }
 };
 
+const RegistryValueSnapshot = struct {
+    key: []const u8,
+    name: ?[]const u8,
+    value: ?RawRegistryValue,
+
+    fn deinit(self: RegistryValueSnapshot, alloc: Allocator) void {
+        if (self.value) |value| value.deinit(alloc);
+    }
+};
+
+const RegistrationRefreshSnapshot = struct {
+    values: std.ArrayListUnmanaged(RegistryValueSnapshot) = .empty,
+
+    fn capture(alloc: Allocator) (Allocator.Error || RegistrationError)!RegistrationRefreshSnapshot {
+        var self: RegistrationRefreshSnapshot = .{};
+        errdefer self.deinit(alloc);
+
+        try self.captureValue(alloc, class_key_utf8, null);
+        try self.captureValue(alloc, local_server_key_utf8, null);
+        try self.captureValue(alloc, proxy_class_key_utf8, null);
+        try self.captureValue(alloc, proxy_inproc_server_key_utf8, null);
+        try self.captureValue(alloc, proxy_inproc_server_key_utf8, "ThreadingModel");
+        for (interface_proxy_registrations) |registration| {
+            try self.captureValue(alloc, registration.key_utf8, null);
+            try self.captureValue(alloc, registration.saved_key_utf8, "Present");
+            try self.captureValue(alloc, registration.saved_key_utf8, "Type");
+            try self.captureValue(alloc, registration.saved_key_utf8, "Data");
+        }
+        return self;
+    }
+
+    fn captureValue(
+        self: *RegistrationRefreshSnapshot,
+        alloc: Allocator,
+        key: []const u8,
+        name: ?[]const u8,
+    ) (Allocator.Error || RegistrationError)!void {
+        const value = try queryValueAlloc(alloc, key, name);
+        errdefer if (value) |raw| raw.deinit(alloc);
+        try self.values.append(alloc, .{ .key = key, .name = name, .value = value });
+    }
+
+    fn restore(self: RegistrationRefreshSnapshot, alloc: Allocator) (Allocator.Error || RegistrationError)!void {
+        var index = self.values.items.len;
+        while (index > 0) {
+            index -= 1;
+            const snapshot = self.values.items[index];
+            if (snapshot.value) |value| {
+                try writeRegistryRaw(alloc, snapshot.key, snapshot.name, value);
+            } else {
+                try deleteRegistryValue(alloc, snapshot.key, snapshot.name);
+            }
+        }
+    }
+
+    fn deinit(self: *RegistrationRefreshSnapshot, alloc: Allocator) void {
+        for (self.values.items) |snapshot| snapshot.deinit(alloc);
+        self.values.deinit(alloc);
+    }
+};
+
 pub const RegisterResult = struct {
     selection_changed: bool,
 };
@@ -973,8 +1034,8 @@ const SelectionCommit = enum { already_selected, commit };
 /// fail fast, but the check that matters is this one, immediately before the
 /// commit: a stale check would let us publish a pair whose console half is the
 /// inbox console or a stranger's CLSID and still report success. Rejecting
-/// here is enough because nothing has been written yet, so the user keeps the
-/// terminal they already had - no rollback to get wrong.
+/// here prevents changing the selected terminal; the registration wrapper
+/// rolls back any class or proxy values written before this final check.
 fn decideSelectionCommit(
     terminal_is_ours: bool,
     console_half: ?[]const u8,
@@ -1030,19 +1091,26 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
 
     const command = try localServerCommand(alloc, exe_path);
     defer alloc.free(command);
+    var refresh_snapshot: ?RegistrationRefreshSnapshot = if (terminal_is_noctty)
+        try RegistrationRefreshSnapshot.capture(alloc)
+    else
+        null;
+    defer if (refresh_snapshot) |*snapshot| snapshot.deinit(alloc);
     // Ordering is load-bearing: every shared Interface value is snapshotted
     // before anything is written, and the user's terminal selection is
     // switched last, so a failure part way through leaves the previous
     // terminal selected with its restore state intact.
-    for (interface_proxy_registrations) |registration| {
-        try savePreviousInterfaceProxy(alloc, registration);
-    }
-    const selection_changed = writeRegistrationAndSelect(alloc, command, proxy_path) catch |err| {
+    const selection_changed = writeRegistration(alloc, command, proxy_path) catch |err| {
         // The terminal selection is the commit point. If its final console
         // check or any earlier registry mutation fails, restore every shared
         // proxy mapping and remove the class keys written above so a failed
         // registration is observationally equivalent to no registration.
-        _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
+        if (refresh_snapshot) |snapshot| {
+            snapshot.restore(alloc) catch |rollback_err| {
+                log.err("default-terminal refresh rollback failed err={}", .{rollback_err});
+                return rollback_err;
+            };
+        } else _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
             log.err("default-terminal registration rollback failed err={}", .{rollback_err});
             return rollback_err;
         };
@@ -1051,11 +1119,14 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     return .{ .selection_changed = selection_changed };
 }
 
-fn writeRegistrationAndSelect(
+fn writeRegistration(
     alloc: Allocator,
     command: []const u8,
     proxy_path: []const u8,
 ) (Allocator.Error || RegistrationError)!bool {
+    for (interface_proxy_registrations) |registration| {
+        try savePreviousInterfaceProxy(alloc, registration);
+    }
     try writeRegistrySz(alloc, class_key_utf8, null, "noctty Terminal Handoff");
     try writeRegistrySz(alloc, local_server_key_utf8, null, command);
     try writeRegistrySz(alloc, proxy_class_key_utf8, null, "noctty Terminal Handoff Proxy/Stub");
