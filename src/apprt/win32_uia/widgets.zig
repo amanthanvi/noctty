@@ -321,6 +321,14 @@ pub const PaletteListProvider = struct {
         events.raiseSelectionItemSelected(&row.base);
     }
 
+    /// Publish removal while the provider and its row fragments are still
+    /// queryable, before the owner detaches and destroys the widget HWND.
+    pub fn raiseTeardown(self: *PaletteListProvider) void {
+        if (!self.isAvailable()) return;
+        events.raiseSelectionInvalidated(&self.base);
+        events.raiseStructureChanged(&self.base, .children_bulk_removed, null);
+    }
+
     fn fromBase(p: *com.IRawElementProviderSimple) *PaletteListProvider {
         return @fieldParentPtr("base", p);
     }

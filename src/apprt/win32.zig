@@ -23181,6 +23181,7 @@ const QuickSelectSession = struct {
     prefix: win32_hints.PrefixState = .{},
     pending_action: ?PendingAction = null,
     awaiting_composed_char: bool = false,
+    suppress_until_opening_keys_released: bool = false,
     cell_width: i32,
     cell_height: i32,
     padding_left: i32,
@@ -23267,6 +23268,16 @@ test "quick select label placement stops at its comparison budget" {
 
 fn quickSelectLabelDisplayUnit(byte: u8) u16 {
     return if (byte == ' ') 0x2423 else byte;
+}
+
+/// Opening a modal overlay transfers focus while its shortcut is still held.
+/// Snapshotting this as a boolean is sufficient because the overlay ignores
+/// every label input until a key-up observes that no virtual key remains down.
+fn anyVirtualKeyPressed() bool {
+    for (0..256) |vk| {
+        if (win32_input.keyPressed(@intCast(vk))) return true;
+    }
+    return false;
 }
 
 test "quick select label renders spaces visibly" {
@@ -25175,6 +25186,7 @@ pub const Surface = struct {
             .padding_top = @intCast(renderer_size.padding.top),
             .placed_rects = placed_rects,
             .placed_slots = placed_slots,
+            .suppress_until_opening_keys_released = anyVirtualKeyPressed(),
         };
 
         self.refreshQuickSelectPlacement();
@@ -25276,6 +25288,7 @@ pub const Surface = struct {
 
         if (self.quick_select_uia_provider) |provider| {
             self.quick_select_uia_provider = null;
+            provider.raiseTeardown();
             provider.detach();
             scheduleDeferredUiaDisconnect(
                 self.app,
@@ -25315,6 +25328,7 @@ pub const Surface = struct {
 
     fn handleQuickSelectKey(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
         const session = if (self.quick_select_session) |*value| value else return;
+        if (session.suppress_until_opening_keys_released) return;
         if (wParam == c.VK_ESCAPE) {
             session.pending_action = .{
                 .trigger_vk = c.VK_ESCAPE,
@@ -25341,6 +25355,7 @@ pub const Surface = struct {
 
     fn handleQuickSelectChar(self: *Surface, wParam: WPARAM) void {
         const session = if (self.quick_select_session) |*value| value else return;
+        if (session.suppress_until_opening_keys_released) return;
         if (!session.awaiting_composed_char or session.pending_action != null) return;
         session.awaiting_composed_char = false;
         if (wParam < 0x20 or wParam >= 0x7F) return;
@@ -25368,6 +25383,10 @@ pub const Surface = struct {
 
     fn handleQuickSelectKeyUp(self: *Surface) void {
         const session = if (self.quick_select_session) |*value| value else return;
+        if (session.suppress_until_opening_keys_released) {
+            session.suppress_until_opening_keys_released = anyVirtualKeyPressed();
+            return;
+        }
         const pending = session.pending_action orelse return;
         if ((pending.trigger_vk != 0 and win32_input.keyPressed(@intCast(pending.trigger_vk))) or
             win32_input.keyPressed(c.VK_SHIFT) or
