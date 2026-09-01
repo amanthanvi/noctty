@@ -327,11 +327,13 @@ test("trust page carries every implemented release verification layer", () => {
     /gh attestation verify|every published asset carries\s+a GitHub\s+build-provenance attestation/i,
   );
   assert.match(trustHtml, /do not currently publish\s+build-provenance attestations/i);
-  assert.match(trustHtml, /Get-AuthenticodeSignature/);
-  assert.match(trustHtml, /ExportSubjectPublicKeyInfo/);
-  assert.match(trustHtml, /SHA256\]::HashData/);
-  assert.match(trustHtml, /if \(\$actualSpki -ne \$expectedSpki\)/);
-  assert.match(trustHtml, /throw "Unexpected signer SPKI SHA-256: \$actualSpki"/);
+  assert.match(trustHtml, /Assert-ReleaseSignature/);
+  assert.match(
+    trustHtml,
+    /checkout --detach 07f24e204f226872020087e4dd9b96b6014516e8/,
+  );
+  assert.match(trustHtml, /-AllowedPins @\(\$expectedSpki\)/);
+  assert.match(trustHtml, /-TrustSelfSigned \$true/);
   assert.match(trustHtml, /verify-published-release\.ps1/);
   assert.match(
     trustHtml,

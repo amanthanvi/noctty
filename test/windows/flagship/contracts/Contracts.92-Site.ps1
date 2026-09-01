@@ -741,7 +741,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicPayloadOnce(?=\s|\{)')
         }
-        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?\$entry\.Path -ceq ''_headers''.*?\$StaticOnly -and\s*\$entry\.Path -cin @\(''index\.html'', ''404\.html'', ''why-noctty\.html''\).*?continue.*?New-PublicAssetUri'
+        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?\$entry\.Path -ceq ''_headers''.*?\$StaticOnly -and\s*\[IO\.Path\]::GetExtension\(\[string\]\$entry\.Path\) -cin @\(''\.html'', ''\.htm''\).*?continue.*?New-PublicAssetUri'
         Kind = 'Text'
         Description = 'static-only payload verification excludes only Pages control and HTML documents before hashing remaining assets'
     }

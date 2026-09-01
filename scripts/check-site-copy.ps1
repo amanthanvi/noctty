@@ -67,8 +67,9 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-noctty.html"; Reason = "The landing page should expose the identity and trust page." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "ExportSubjectPublicKeyInfo"; Reason = "The manual legacy-release path should compute the signer SPKI before comparing the publisher-key pin." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = 'if ($actualSpki -ne $expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "checkout --detach 07f24e204f226872020087e4dd9b96b6014516e8"; Reason = "The manual v1.3.123 path should use the verifier implementation from that release's immutable commit." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = '-AllowedPins @($expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }

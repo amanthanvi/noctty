@@ -273,24 +273,16 @@
               updater's published pin.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>$artifact = ".\winghostty-1.3.123-windows-&lt;arch&gt;-setup.exe"
-$signature = Get-AuthenticodeSignature $artifact
+          <pre class="nc-proof-code" tabindex="0"><code>$artifact = Resolve-Path ".\winghostty-1.3.123-windows-&lt;arch&gt;-setup.exe"
+git clone --no-checkout https://github.com/amanthanvi/noctty.git .\noctty-verifier
+git -C .\noctty-verifier checkout --detach 07f24e204f226872020087e4dd9b96b6014516e8
+. .\noctty-verifier\scripts\signing-trust.ps1
 $expectedSpki = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"
-$key = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey(
-  $signature.SignerCertificate
-)
-try {
-  $actualSpki = [Convert]::ToHexString(
-    [Security.Cryptography.SHA256]::HashData($key.ExportSubjectPublicKeyInfo())
-  ).ToLowerInvariant()
-} finally {
-  $key.Dispose()
-}
-if ($actualSpki -ne $expectedSpki) {
-  throw "Unexpected signer SPKI SHA-256: $actualSpki"
-}
-$signature | Format-List Status,StatusMessage,SignerCertificate
-"Signer SPKI SHA-256: $actualSpki"</code></pre>
+Assert-ReleaseSignature `
+  -Path $artifact `
+  -Label "v1.3.123 installer" `
+  -AllowedPins @($expectedSpki) `
+  -TrustSelfSigned $true | Format-List</code></pre>
         </li>
         <li>
           <div>

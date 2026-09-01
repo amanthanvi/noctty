@@ -369,7 +369,7 @@ function Test-PublicPayloadOnce {
             continue
         }
         if ($StaticOnly -and
-            $entry.Path -cin @('index.html', '404.html', 'why-noctty.html')) {
+            [IO.Path]::GetExtension([string]$entry.Path) -cin @('.html', '.htm')) {
             # A custom-domain challenge can replace HTML. The immutable Pages
             # deployment remains the authoritative full-payload verification.
             continue
