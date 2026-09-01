@@ -263,17 +263,34 @@
         </li>
         <li>
           <div>
-            <h3>Inspect the embedded signature</h3>
+            <h3>Inspect the embedded signature and match its key</h3>
             <p>
               Answers: which key signed the executable code? The installer and
               the PE files inside the portable ZIP are Authenticode-signed. The
               ZIP container is not, so the container is covered only by its
-              checksum.
+              checksum. The example uses the legacy v1.3.123 installer name and
+              stops unless the signer's SubjectPublicKeyInfo hash matches the
+              updater's published pin.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>Get-AuthenticodeSignature `
-  .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe | `
-  Format-List Status,StatusMessage,SignerCertificate</code></pre>
+          <pre class="nc-proof-code" tabindex="0"><code>$artifact = ".\winghostty-1.3.123-windows-&lt;arch&gt;-setup.exe"
+$signature = Get-AuthenticodeSignature $artifact
+$expectedSpki = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"
+$key = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey(
+  $signature.SignerCertificate
+)
+try {
+  $actualSpki = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData($key.ExportSubjectPublicKeyInfo())
+  ).ToLowerInvariant()
+} finally {
+  $key.Dispose()
+}
+if ($actualSpki -ne $expectedSpki) {
+  throw "Unexpected signer SPKI SHA-256: $actualSpki"
+}
+$signature | Format-List Status,StatusMessage,SignerCertificate
+"Signer SPKI SHA-256: $actualSpki"</code></pre>
         </li>
         <li>
           <div>

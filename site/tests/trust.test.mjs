@@ -328,6 +328,10 @@ test("trust page carries every implemented release verification layer", () => {
   );
   assert.match(trustHtml, /do not currently publish\s+build-provenance attestations/i);
   assert.match(trustHtml, /Get-AuthenticodeSignature/);
+  assert.match(trustHtml, /ExportSubjectPublicKeyInfo/);
+  assert.match(trustHtml, /SHA256\]::HashData/);
+  assert.match(trustHtml, /if \(\$actualSpki -ne \$expectedSpki\)/);
+  assert.match(trustHtml, /throw "Unexpected signer SPKI SHA-256: \$actualSpki"/);
   assert.match(trustHtml, /verify-published-release\.ps1/);
   assert.match(
     trustHtml,
