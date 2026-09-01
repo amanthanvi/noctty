@@ -135,20 +135,21 @@ Defaults are Ctrl-based chords, mostly shared with Ghostty's non-macOS
 defaults (pane focus on `Alt+Arrow` is a Windows-specific touch). The
 ones you'll use daily:
 
-| Action                   | Binding                         |
-| ------------------------ | ------------------------------- |
-| Copy                     | `Ctrl+Shift+C`                  |
-| Paste                    | `Ctrl+Shift+V`                  |
-| New tab                  | `Ctrl+Shift+T`                  |
-| Close tab                | `Ctrl+Shift+W`                  |
-| Next / previous tab      | `Ctrl+Tab` / `Ctrl+Shift+Tab`   |
-| Split pane right         | `Ctrl+Shift+\`                  |
-| Split pane down          | `Ctrl+Shift+E`                  |
-| Move between panes       | `Alt+Arrow`                     |
-| Command palette          | `Ctrl+Shift+P`                  |
-| Start search             | `Ctrl+Shift+F`                  |
-| Increase / decrease font | `Ctrl+=` / `Ctrl+-`             |
-| Reload config            | `Ctrl+Shift+,`                  |
+| Action                   | Binding                       |
+| ------------------------ | ----------------------------- |
+| Copy                     | `Ctrl+Shift+C`                |
+| Paste                    | `Ctrl+Shift+V`                |
+| New tab                  | `Ctrl+Shift+T`                |
+| Close tab                | `Ctrl+Shift+W`                |
+| Next / previous tab      | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Split pane right         | `Ctrl+Shift+\`                |
+| Split pane down          | `Ctrl+Shift+E`                |
+| Move between panes       | `Alt+Arrow`                   |
+| Command palette          | `Ctrl+Shift+P`                |
+| Quick select             | `Ctrl+Shift+Space`            |
+| Start search             | `Ctrl+Shift+F`                |
+| Increase / decrease font | `Ctrl+=` / `Ctrl+-`           |
+| Reload config            | `Ctrl+Shift+,`                |
 
 Full list:
 

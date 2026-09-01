@@ -353,6 +353,9 @@ pub const Action = union(Key) {
     /// Launch a saved named layout in a new window.
     launch_layout: LaunchLayout,
 
+    /// Toggle quick select for the target terminal surface.
+    toggle_quick_select,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -423,6 +426,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         save_layout,
         launch_layout,
+        toggle_quick_select,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

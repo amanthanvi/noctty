@@ -808,6 +808,7 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .toggle_secure_input,
         .toggle_mouse_reporting,
         .toggle_command_palette,
+        .toggle_quick_select,
         .toggle_quick_terminal,
         .toggle_visibility,
         .toggle_background_opacity,

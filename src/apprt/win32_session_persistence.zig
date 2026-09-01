@@ -107,7 +107,7 @@ pub fn writeFileAtomic(absolute_path: []const u8, temporary_path: []const u8, by
     temporary_created = false;
 }
 
-fn readFileBoundedAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) ![]u8 {
+pub fn readFileBoundedAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) ![]u8 {
     var file = try std.fs.openFileAbsolute(absolute_path, .{});
     defer file.close();
     const stat = try file.stat();

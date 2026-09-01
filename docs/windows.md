@@ -240,6 +240,18 @@ registration time only when noctty is still selected, then removes noctty's
 per-user COM registration. It does not overwrite a default-terminal choice
 made after noctty was registered. Both commands are idempotent.
 
+## Taskbar jump list
+
+The taskbar jump list has two categories:
+
+- **Recent** lists up to 10 absolute local working directories reported by
+  shell pwd/OSC integration, newest first. Selecting an entry launches noctty
+  in that directory. Entries persist in
+  `%LOCALAPPDATA%\noctty\jump-list-recents.json`; to clear them, close noctty,
+  delete that file, and start noctty once so Windows receives the empty list.
+- **Profiles** lists the detected shell profiles. Selecting an entry launches
+  noctty with that profile's command.
+
 ## Notifications and progress
 
 Desktop notifications use WinRT toasts when available and fall back to
@@ -474,6 +486,40 @@ auto-apply is not implemented yet.
 
 The updater is also the only outbound network call the app makes; there
 is no telemetry and no analytics.
+
+## Quick select
+
+`Ctrl+Shift+Space` runs `toggle_quick_select` for the focused terminal
+surface. Quick select scans the visible viewport once when it opens and
+labels matching URLs, paths, git SHAs, IP addresses, and UUIDs. Type a label
+to select its target. Backspace removes one typed label character, and Esc
+cancels and returns keyboard focus to the terminal.
+
+Completing a label copies its matched text to the clipboard. Hold Ctrl while
+completing the label to open a target that begins with an allowed URL scheme;
+other targets are copied. Hold Alt to paste through the normal protected-paste
+path.
+
+Opening is deliberately narrower than matching. `file:` URLs are labeled and
+can be copied, but Ctrl will not open them, because the system handler would
+run `file:///C:/...exe` straight from terminal output. Anything without an
+allowed scheme is copied instead of opened. Alt-paste additionally runs the
+same classifier the drag-and-drop path uses, so a match carrying shell
+metacharacters, environment-variable expansion, or control bytes raises the
+paste confirmation.
+
+Targets are re-checked against the live screen at the moment you act. If the
+program running in the terminal rewrote a labeled region while the overlay was
+up, that target is ignored rather than acted on, so what you act on is always
+what was on screen. Quick select also closes on resize, on a click, and when
+the surface loses focus.
+
+`quick-select-patterns` is repeatable and accepts bare regex values or quoted
+Zig string literals. An empty value clears configured patterns; when the
+configured list is empty, the built-in patterns apply. `quick-select-alphabet`
+sets the unique printable ASCII characters used for labels, requires at least
+two characters, and treats ASCII letters that differ only by case as duplicates.
+Use Zig string literal syntax to preserve leading or trailing spaces.
 
 ## Quick terminal and global hotkeys
 
