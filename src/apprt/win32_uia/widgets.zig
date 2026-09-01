@@ -6236,8 +6236,8 @@ test "terminal provider exposes an active read-only selection" {
         .visible_value_text = "hello world",
         .visible_range = .{ .start = 0, .end = 11 },
         .caret_offset = 11,
-        .selection_range = .{ .start = 0, .end = 5 },
-        .has_selection = true,
+        .terminal_selection_range = .{ .start = 0, .end = 5 },
+        .terminal_selection_active_offset = 5,
     };
     var provider = try TerminalProvider.create(
         std.testing.allocator,
