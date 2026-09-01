@@ -352,10 +352,13 @@ fn scalarRangeForPin(
     var index: usize = 0;
     while (index < text.len) {
         const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
-        if (pin_map[index].eql(target)) return .{
-            .start = index,
-            .end = index + scalar_len,
-        };
+        if (pin_map[index].eql(target)) {
+            var end = index + scalar_len;
+            while (end < text.len and pin_map[end].eql(target)) {
+                end += std.unicode.utf8ByteSequenceLength(text[end]) catch return null;
+            }
+            return .{ .start = index, .end = end };
+        }
         index += scalar_len;
     }
     return null;
@@ -726,6 +729,27 @@ test "accessible snapshot exposes ordered terminal selection and active end" {
     defer reverse.deinit();
     try std.testing.expectEqual(forward_range, reverse.selection_range.?);
     try std.testing.expectEqual(reverse.selection_range.?.start, reverse.selection_active_offset.?);
+}
+
+test "accessible selection includes every scalar in the endpoint grapheme" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("Ae\u{301}B");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const grapheme = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, grapheme, false));
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    const range = snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("Ae\u{301}", snapshot.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
 }
 
 test "rectangular terminal selection exposes only its active row" {
