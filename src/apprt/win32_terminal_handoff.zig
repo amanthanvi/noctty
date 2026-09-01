@@ -1037,6 +1037,25 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     for (interface_proxy_registrations) |registration| {
         try savePreviousInterfaceProxy(alloc, registration);
     }
+    const selection_changed = writeRegistrationAndSelect(alloc, command, proxy_path) catch |err| {
+        // The terminal selection is the commit point. If its final console
+        // check or any earlier registry mutation fails, restore every shared
+        // proxy mapping and remove the class keys written above so a failed
+        // registration is observationally equivalent to no registration.
+        _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
+            log.err("default-terminal registration rollback failed err={}", .{rollback_err});
+            return rollback_err;
+        };
+        return err;
+    };
+    return .{ .selection_changed = selection_changed };
+}
+
+fn writeRegistrationAndSelect(
+    alloc: Allocator,
+    command: []const u8,
+    proxy_path: []const u8,
+) (Allocator.Error || RegistrationError)!bool {
     try writeRegistrySz(alloc, class_key_utf8, null, "noctty Terminal Handoff");
     try writeRegistrySz(alloc, local_server_key_utf8, null, command);
     try writeRegistrySz(alloc, proxy_class_key_utf8, null, "noctty Terminal Handoff Proxy/Stub");
@@ -1045,18 +1064,7 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     for (interface_proxy_registrations) |registration| {
         try writeRegistrySz(alloc, registration.key_utf8, null, proxy_clsid_text);
     }
-    const selection_changed = selectTerminal(alloc) catch |err| {
-        // The terminal selection is the commit point. If its final console
-        // check fails, restore every shared proxy mapping and remove the class
-        // keys written above so a failed registration is observationally
-        // equivalent to no registration.
-        _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
-            log.err("default-terminal registration rollback failed err={}", .{rollback_err});
-            return rollback_err;
-        };
-        return err;
-    };
-    return .{ .selection_changed = selection_changed };
+    return selectTerminal(alloc);
 }
 
 pub fn unregisterDefaultTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!UnregisterResult {

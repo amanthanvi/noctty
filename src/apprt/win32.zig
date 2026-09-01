@@ -2837,8 +2837,12 @@ pub const App = struct {
                 self.createAdoptedWindow(pending) catch |err| {
                     log.err("terminal handoff surface creation failed err={}", .{err});
                     if (self.embedding_mode and self.windows.items.len == 0) {
-                        self.running = false;
-                        sys.PostQuitMessage(1);
+                        if (self.exitEmbeddingServerIfIdle()) {
+                            self.running = false;
+                            sys.PostQuitMessage(1);
+                        } else {
+                            self.startTerminalHandoffIdleTimer();
+                        }
                     }
                 };
                 try self.core_app.tick(self);
