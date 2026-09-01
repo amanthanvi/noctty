@@ -80,6 +80,13 @@ fn loadFromHome(alloc: Allocator, home_dir: []const u8) ![]Host {
 }
 
 const LoadContext = struct {
+    const ReadResult = union(enum) {
+        contents: []u8,
+        missing,
+        skipped,
+        budget_exhausted,
+    };
+
     alloc: Allocator,
     home_dir: []const u8,
     ssh_dir: []const u8,
@@ -88,31 +95,35 @@ const LoadContext = struct {
     ssh_config_read_started_ns: i128,
 
     fn parseFile(self: *LoadContext, path: []const u8, depth: u8) Allocator.Error!void {
-        const contents = (try self.readFileWithinBudget(path)) orelse return;
+        const contents = switch (try self.readFileWithinBudget(path)) {
+            .contents => |value| value,
+            .missing, .skipped, .budget_exhausted => return,
+        };
         defer self.alloc.free(contents);
         try parseInto(self.alloc, self.hosts, contents, self, depth);
     }
 
-    fn readFileWithinBudget(self: *LoadContext, path: []const u8) Allocator.Error!?[]u8 {
+    fn readFileWithinBudget(self: *LoadContext, path: []const u8) Allocator.Error!ReadResult {
         const elapsed_ns = @max(std.time.nanoTimestamp() - self.ssh_config_read_started_ns, 0);
-        if (elapsed_ns >= ssh_config_read_budget_ns) return null;
+        if (elapsed_ns >= ssh_config_read_budget_ns) return .budget_exhausted;
         const remaining_ns: u64 = @intCast(ssh_config_read_budget_ns - elapsed_ns);
-        return readSshConfigFileBounded(
+        const contents = readSshConfigFileBounded(
             self.alloc,
             path,
             remaining_ns,
             readFile,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.FileNotFound => return null,
+            error.FileNotFound => return .missing,
             else => {
                 warnReadOnce(path, err);
-                return null;
+                return .skipped;
             },
         } orelse {
             warnReadOnce(path, error.SshConfigReadTimedOut);
-            return null;
+            return .budget_exhausted;
         };
+        return .{ .contents = contents };
     }
 
     fn parseIncludes(self: *LoadContext, value: []const u8, depth: u8) Allocator.Error!void {
@@ -123,11 +134,9 @@ const LoadContext = struct {
             defer self.alloc.free(raw_path);
             if (raw_path.len == 0) continue;
             if (hasGlobMetacharacter(raw_path)) continue;
-            // This read is synchronous on the UI thread and runs on every
-            // profile refresh — app startup, every picker open, and the first
-            // pane of every restored session window. A remote or device path
-            // could block on an SMB/TCP timeout, and an uncapped include count
-            // would multiply that.
+            // Reject known remote/device paths before the bounded worker opens
+            // them. An uncapped include count would still multiply worker and
+            // filesystem overhead on every profile refresh.
             if (isUnsupportedIncludePath(raw_path)) {
                 warnReadOnce(raw_path, error.UnsupportedIncludePath);
                 continue;
@@ -144,7 +153,11 @@ const LoadContext = struct {
                 try std.fs.path.join(self.alloc, &.{ self.ssh_dir, raw_path });
             defer self.alloc.free(path);
 
-            const contents = (try self.readFileWithinBudget(path)) orelse return;
+            const contents = switch (try self.readFileWithinBudget(path)) {
+                .contents => |contents| contents,
+                .missing, .skipped => continue,
+                .budget_exhausted => return,
+            };
             defer self.alloc.free(contents);
             try parseInto(self.alloc, self.hosts, contents, self, depth + 1);
             if (self.hosts.items.len >= max_hosts) return;
@@ -712,6 +725,28 @@ test "ssh config loads a quoted include whose filename contains spaces" {
     try testing.expectEqualStrings("spaced", hosts[0].alias);
     try testing.expectEqualStrings("plain", hosts[1].alias);
     try testing.expectEqualStrings("root", hosts[2].alias);
+}
+
+test "ssh config continues after a missing include argument" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".ssh");
+    try tmp.dir.writeFile(.{ .sub_path = ".ssh/valid.conf", .data = "Host valid\n" });
+    try tmp.dir.writeFile(.{
+        .sub_path = ".ssh/config",
+        .data = "Include missing.conf valid.conf\nHost root\n",
+    });
+
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+    const hosts = try loadFromHome(alloc, home);
+    defer deinitHosts(alloc, hosts);
+
+    try testing.expectEqual(@as(usize, 2), hosts.len);
+    try testing.expectEqualStrings("valid", hosts[0].alias);
+    try testing.expectEqualStrings("root", hosts[1].alias);
 }
 
 test "ssh config loads a quoted include whose filename contains a hash" {
