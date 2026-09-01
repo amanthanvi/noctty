@@ -231,11 +231,10 @@ const mainTrees = mainRefs.map((ref) => ({
 // the exemption keeps skipping a genuinely broken link while the suite stays
 // green. So the exemption retires on any of these, whichever arrives first:
 // the file is here, a document with the same name is here under another path,
-// the file or a same-named one is on main, or main carries the merge of the PR
-// this entry waits on. What it cannot see: a checkout with no main ref (the
-// main-side signals are then skipped, and the diagnostic says so), or a
-// dependency that both renames the document past recognition and lands with a
-// commit subject that omits its PR number.
+// the file or a same-named one is on main. Commit subjects are deliberately not
+// evidence: an unrelated follow-up or revert can mention the same PR number.
+// What it cannot see is a checkout with no main ref; the main-side signals are
+// then skipped, and the diagnostic says so.
 test("no pending-document exemption outlives the dependency it waits on", (t) => {
   if (mainRefs.length === 0) {
     t.diagnostic(
@@ -243,7 +242,7 @@ test("no pending-document exemption outlives the dependency it waits on", (t) =>
     );
   }
   const stale = [];
-  for (const [relativePath, pending] of PENDING_DOCS) {
+  for (const relativePath of PENDING_DOCS.keys()) {
     const reasons = [];
     if (existsSync(join(repoDir, relativePath))) {
       reasons.push("it is on this branch");
@@ -259,19 +258,6 @@ test("no pending-document exemption outlives the dependency it waits on", (t) =>
       const renamedOnMain = pathsNamedLike(mainTree.paths, relativePath);
       if (renamedOnMain.length > 0) {
         reasons.push(`${mainTree.ref} carries ${renamedOnMain.join(", ")}`);
-      }
-      const merged = git(
-        "log",
-        "--max-count=1",
-        "--format=%h %s",
-        "--fixed-strings",
-        `--grep=(${pending.pr})`,
-        mainTree.ref,
-      );
-      if (merged && merged.trim()) {
-        reasons.push(
-          `PR ${pending.pr} is on ${mainTree.ref}: ${merged.trim()}`,
-        );
       }
     }
     if (reasons.length > 0) {

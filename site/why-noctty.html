@@ -268,7 +268,8 @@ Get-FileHash $asset -Algorithm SHA256</code></pre>
               Answers: which key signed the executable code? The installer and
               the PE files inside the portable ZIP are Authenticode-signed. The
               ZIP container is not, so the container is covered only by its
-              checksum. The example accepts either legacy v1.3.123 package,
+              checksum. The example accepts the legacy v1.3.123 installer or
+              portable ZIP,
               requires exactly the three expected PE files when given the
               portable ZIP, rejects any additional embedded PE, and stops
               unless every embedded signature is valid and its
