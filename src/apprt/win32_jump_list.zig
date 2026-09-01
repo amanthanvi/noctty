@@ -286,6 +286,7 @@ const RecentEvent = struct {
     path: []const u8,
     kind: RecentEventKind,
     changed_ns: i64,
+    order_seq: u64 = 0,
 };
 
 const ProfileEventKind = enum {
@@ -297,7 +298,18 @@ const ProfileEvent = struct {
     key: []const u8,
     kind: ProfileEventKind,
     changed_ns: i64,
+    order_seq: u64 = 0,
 };
+
+fn eventOrderAfter(
+    changed_ns: i64,
+    order_seq: u64,
+    other_changed_ns: i64,
+    other_order_seq: u64,
+) bool {
+    return changed_ns > other_changed_ns or
+        (changed_ns == other_changed_ns and order_seq > other_order_seq);
+}
 
 const VersionHeader = struct {
     schema_version: u32,
@@ -459,13 +471,24 @@ const RecentEventList = struct {
         kind: RecentEventKind,
         changed_ns: i64,
     ) !void {
+        return self.upsertOrdered(alloc, path, kind, changed_ns, 0);
+    }
+
+    fn upsertOrdered(
+        self: *RecentEventList,
+        alloc: Allocator,
+        path: []const u8,
+        kind: RecentEventKind,
+        changed_ns: i64,
+        order_seq: u64,
+    ) !void {
         if (!isRecentLocalPath(path)) return;
         const normalized = try normalizeRecentPathAlloc(alloc, path);
         var normalized_owned = true;
         defer if (normalized_owned) alloc.free(normalized);
         for (self.items.items, 0..) |item, index| {
             if (!try pathsEqualIgnoreCase(alloc, item.path, normalized)) continue;
-            if (item.changed_ns > changed_ns) return;
+            if (eventOrderAfter(item.changed_ns, item.order_seq, changed_ns, order_seq)) return;
             alloc.free(item.path);
             _ = self.items.orderedRemove(index);
             break;
@@ -475,12 +498,16 @@ const RecentEventList = struct {
             .path = normalized,
             .kind = kind,
             .changed_ns = changed_ns,
+            .order_seq = order_seq,
         });
         normalized_owned = false;
         if (self.items.items.len > max_recents * 2) {
             var oldest: usize = 0;
             for (self.items.items[1..], 1..) |item, index| {
-                if (item.changed_ns < self.items.items[oldest].changed_ns) oldest = index;
+                const current = self.items.items[oldest];
+                if (eventOrderAfter(current.changed_ns, current.order_seq, item.changed_ns, item.order_seq)) {
+                    oldest = index;
+                }
             }
             alloc.free(self.items.orderedRemove(oldest).path);
         }
@@ -510,9 +537,20 @@ const ProfileEventList = struct {
         kind: ProfileEventKind,
         changed_ns: i64,
     ) !void {
+        return self.upsertOrdered(alloc, key, kind, changed_ns, 0);
+    }
+
+    fn upsertOrdered(
+        self: *ProfileEventList,
+        alloc: Allocator,
+        key: []const u8,
+        kind: ProfileEventKind,
+        changed_ns: i64,
+        order_seq: u64,
+    ) !void {
         for (self.items.items, 0..) |item, index| {
             if (!std.mem.eql(u8, item.key, key)) continue;
-            if (item.changed_ns > changed_ns) return;
+            if (eventOrderAfter(item.changed_ns, item.order_seq, changed_ns, order_seq)) return;
             alloc.free(item.key);
             _ = self.items.orderedRemove(index);
             break;
@@ -524,11 +562,15 @@ const ProfileEventList = struct {
             .key = owned,
             .kind = kind,
             .changed_ns = changed_ns,
+            .order_seq = order_seq,
         });
         if (self.items.items.len > max_profile_events) {
             var oldest: usize = 0;
             for (self.items.items[1..], 1..) |item, index| {
-                if (item.changed_ns < self.items.items[oldest].changed_ns) oldest = index;
+                const current = self.items.items[oldest];
+                if (eventOrderAfter(current.changed_ns, current.order_seq, item.changed_ns, item.order_seq)) {
+                    oldest = index;
+                }
             }
             alloc.free(self.items.orderedRemove(oldest).key);
         }
@@ -616,10 +658,22 @@ fn decodeStateAlloc(alloc: Allocator, raw: []const u8) !LoadedState {
     for (parsed.value.removed_directories) |directory| try result.removed_recents.appendLoaded(alloc, directory);
     for (parsed.value.hidden_profiles) |key| _ = try result.hidden_profiles.insert(alloc, key);
     for (parsed.value.recent_events) |event| {
-        try result.recent_events.upsert(alloc, event.path, event.kind, event.changed_ns);
+        try result.recent_events.upsertOrdered(
+            alloc,
+            event.path,
+            event.kind,
+            event.changed_ns,
+            event.order_seq,
+        );
     }
     for (parsed.value.profile_events) |event| {
-        try result.profile_events.upsert(alloc, event.key, event.kind, event.changed_ns);
+        try result.profile_events.upsertOrdered(
+            alloc,
+            event.key,
+            event.kind,
+            event.changed_ns,
+            event.order_seq,
+        );
     }
     return result;
 }
@@ -1205,6 +1259,10 @@ pub const JumpList = struct {
             return false;
         };
         defer merged.deinit(self.alloc);
+        self.assignPendingEventSequences(&merged) catch |err| {
+            log.warn("jump list event ordering failed err={}", .{err});
+            return false;
+        };
         self.applyPendingState(&merged) catch |err| {
             log.warn("jump list state merge failed err={}", .{err});
             return false;
@@ -1274,7 +1332,12 @@ pub const JumpList = struct {
     fn applyPendingState(self: *const JumpList, merged: *LoadedState) !void {
         for (self.pending_recent_events.items.items) |event| {
             if (try merged.recent_events.latest(self.alloc, event.path)) |latest| {
-                if (latest.changed_ns > event.changed_ns) continue;
+                if (eventOrderAfter(
+                    latest.changed_ns,
+                    latest.order_seq,
+                    event.changed_ns,
+                    event.order_seq,
+                )) continue;
             }
             switch (event.kind) {
                 .used => {
@@ -1285,28 +1348,51 @@ pub const JumpList = struct {
                     _ = try merged.removed_recents.insert(self.alloc, event.path);
                 },
             }
-            try merged.recent_events.upsert(
+            try merged.recent_events.upsertOrdered(
                 self.alloc,
                 event.path,
                 event.kind,
                 event.changed_ns,
+                event.order_seq,
             );
         }
         try self.rebuildMergedRecents(merged);
         for (self.pending_profile_events.items.items) |event| {
             if (merged.profile_events.latest(event.key)) |latest| {
-                if (latest.changed_ns > event.changed_ns) continue;
+                if (eventOrderAfter(
+                    latest.changed_ns,
+                    latest.order_seq,
+                    event.changed_ns,
+                    event.order_seq,
+                )) continue;
             }
             switch (event.kind) {
                 .hidden => _ = try merged.hidden_profiles.insert(self.alloc, event.key),
                 .used => _ = merged.hidden_profiles.remove(self.alloc, event.key),
             }
-            try merged.profile_events.upsert(
+            try merged.profile_events.upsertOrdered(
                 self.alloc,
                 event.key,
                 event.kind,
                 event.changed_ns,
+                event.order_seq,
             );
+        }
+    }
+
+    fn assignPendingEventSequences(self: *JumpList, merged: *const LoadedState) !void {
+        var sequence: u64 = 0;
+        for (merged.recent_events.items.items) |event| sequence = @max(sequence, event.order_seq);
+        for (merged.profile_events.items.items) |event| sequence = @max(sequence, event.order_seq);
+        for (self.pending_recent_events.items.items) |*event| {
+            if (sequence == std.math.maxInt(u64)) return error.EventSequenceExhausted;
+            sequence += 1;
+            event.order_seq = sequence;
+        }
+        for (self.pending_profile_events.items.items) |*event| {
+            if (sequence == std.math.maxInt(u64)) return error.EventSequenceExhausted;
+            sequence += 1;
+            event.order_seq = sequence;
         }
     }
 
@@ -1325,7 +1411,12 @@ pub const JumpList = struct {
                     chosen = index;
                     continue;
                 };
-                if (event.changed_ns >= current.changed_ns) chosen = index;
+                if (!eventOrderAfter(
+                    current.changed_ns,
+                    current.order_seq,
+                    event.changed_ns,
+                    event.order_seq,
+                )) chosen = index;
             }
             const index = chosen orelse break;
             try next.appendLoaded(self.alloc, merged.recent_events.items.items[index].path);
@@ -1576,20 +1667,31 @@ pub const JumpList = struct {
                 link.asRaw(),
                 arguments_buffer.ptr,
                 @intCast(arguments_buffer.len),
-            ) >= 0) {
-                const description_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse continue;
-                const description = std.unicode.utf16LeToUtf8Alloc(
-                    self.alloc,
-                    arguments_buffer[0..description_len],
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return err,
-                    else => continue,
-                };
-                defer self.alloc.free(description);
-                if (std.mem.startsWith(u8, description, profile_description_prefix)) {
-                    const key = description[profile_description_prefix.len..];
-                    _ = try result.profile_keys.insert(self.alloc, key);
-                }
+            ) < 0) {
+                log.debug("jump list removed link description unavailable index={d}", .{index});
+                result.complete = false;
+                continue;
+            }
+            const description_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse {
+                log.debug("jump list removed link description too long index={d}", .{index});
+                result.complete = false;
+                continue;
+            };
+            const description = std.unicode.utf16LeToUtf8Alloc(
+                self.alloc,
+                arguments_buffer[0..description_len],
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    log.debug("jump list removed link description invalid index={d} err={}", .{ index, err });
+                    result.complete = false;
+                    continue;
+                },
+            };
+            defer self.alloc.free(description);
+            if (std.mem.startsWith(u8, description, profile_description_prefix)) {
+                const key = description[profile_description_prefix.len..];
+                _ = try result.profile_keys.insert(self.alloc, key);
             }
         }
         return result;
@@ -1742,11 +1844,13 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
         .path = "E:\\removed",
         .kind = .removed,
         .changed_ns = 42,
+        .order_seq = 7,
     }};
     const profile_events = [_]ProfileEvent{.{
         .key = "wsl:Ubuntu",
         .kind = .hidden,
         .changed_ns = 43,
+        .order_seq = 8,
     }};
     const encoded = try encodeRecentStateAlloc(
         std.testing.allocator,
@@ -1766,9 +1870,11 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     try std.testing.expectEqualStrings(recent_events[0].path, parsed.value.recent_events[0].path);
     try std.testing.expectEqual(recent_events[0].kind, parsed.value.recent_events[0].kind);
     try std.testing.expectEqual(recent_events[0].changed_ns, parsed.value.recent_events[0].changed_ns);
+    try std.testing.expectEqual(recent_events[0].order_seq, parsed.value.recent_events[0].order_seq);
     try std.testing.expectEqualStrings(profile_events[0].key, parsed.value.profile_events[0].key);
     try std.testing.expectEqual(profile_events[0].kind, parsed.value.profile_events[0].kind);
     try std.testing.expectEqual(profile_events[0].changed_ns, parsed.value.profile_events[0].changed_ns);
+    try std.testing.expectEqual(profile_events[0].order_seq, parsed.value.profile_events[0].order_seq);
     try std.testing.expectError(
         error.SyntaxError,
         parseRecentStateAlloc(std.testing.allocator, "{not json"),
@@ -2056,6 +2162,43 @@ test "jump_list later cross-process use outranks an observed removal" {
     const latest_profile = merged.profile_events.latest("wsl:Ubuntu").?;
     try std.testing.expectEqual(ProfileEventKind.used, latest_profile.kind);
     try std.testing.expectEqual(@as(i64, 400), latest_profile.changed_ns);
+}
+
+test "jump_list equal timestamps use locked persistence sequence" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+
+    try jump.pending_recent_events.upsert(alloc, "C:\\equal", .used, 100);
+    try jump.pending_profile_events.upsert(alloc, "wsl:Equal", .used, 200);
+
+    var merged: LoadedState = .{};
+    defer merged.deinit(alloc);
+    try merged.removed_recents.appendLoaded(alloc, "C:\\equal");
+    try merged.recent_events.upsertOrdered(alloc, "C:\\equal", .removed, 100, 5);
+    try std.testing.expect(try merged.hidden_profiles.insert(alloc, "wsl:Equal"));
+    try merged.profile_events.upsertOrdered(alloc, "wsl:Equal", .hidden, 200, 6);
+
+    try jump.assignPendingEventSequences(&merged);
+    try jump.applyPendingState(&merged);
+    try std.testing.expect(try merged.recents.contains(alloc, "C:\\equal"));
+    try std.testing.expect(!try merged.removed_recents.contains(alloc, "C:\\equal"));
+    try std.testing.expect(!merged.hidden_profiles.contains("wsl:Equal"));
+    try std.testing.expectEqual(
+        @as(u64, 7),
+        (try merged.recent_events.latest(alloc, "C:\\equal")).?.order_seq,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        merged.profile_events.latest("wsl:Equal").?.order_seq,
+    );
 }
 
 test "jump_list persistence orders recent destinations across paths" {
