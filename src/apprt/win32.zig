@@ -30528,7 +30528,7 @@ test "win32 ssh split and session state drop remote cwd" {
     var tab = try Tab.init(std.testing.allocator, 1, &surface);
     defer tab.deinit();
 
-    const layout = try App.buildSessionLayout(std.testing.allocator, &tab);
+    const layout = try App.buildSessionLayout(std.testing.allocator, &tab, .session);
     defer std.testing.allocator.free(layout.nodes);
     try std.testing.expect(layout.nodes[0].pane.cwd == null);
 }
