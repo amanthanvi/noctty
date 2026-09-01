@@ -14,7 +14,7 @@ right thing.
 | Tab strip | Selection container named "Tabs" | noctty chrome provider on an invisible, hit-transparent child spanning the strip rect. The tab buttons are siblings, not its HWND children; they link back through SelectionContainer |
 | Tab | Tab label, selected state, selection and name events | noctty chrome provider per tab button (TabItem + SelectionItem) |
 | New tab / tab overflow | "New tab" / "More tabs", invokable | noctty chrome providers (Button + Invoke); the painted glyphs are unchanged |
-| Terminal pane | Bounded document text and ranges, visible geometry, a caret that stays truthful while scrolled back, real selections with an ordered active end, and text/caret/selection/focus changes | noctty TextPattern/TextPattern2 provider |
+| Terminal pane | Bounded document text and ranges, visible geometry, a truthful caret while the live screen remains inside the snapshot (otherwise the off-window caret is reported at the document end), real selections with an ordered active end, and text/caret/selection/focus changes | noctty TextPattern/TextPattern2 provider |
 | Terminal scrollbar | "Terminal scrollbar" plus position over the scrollback extent | noctty chrome provider (ScrollBar + RangeValue, read-only) |
 | Docked search | Query edit with Text/Text2/Value; named previous/next/close buttons; regex, case, and whole-word toggles carrying their pressed state; result count as a polite live region | custom Text/Text2/Value provider on the query Edit plus noctty chrome providers on the buttons and the count |
 | Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | noctty selection/list-item fragments plus a custom Text/Text2/Value provider on the native query Edit |
