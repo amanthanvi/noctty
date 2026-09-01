@@ -130,18 +130,14 @@ desktop with `ReleaseFast`, Consolas 16 pt, 45 rows, 140 columns, seed 121, and
 at least five runs. The evidence schema records the executable hash, commit,
 machine/display fingerprint, endpoint, observers, and threshold provenance.
 
-- Stream and scroll throughput start after a ready/go barrier and end at the
-  first successful `SwapBuffers` whose renderer snapshot has consumed the
-  armed absolute ConPTY byte target. Producer blocking and downstream
-  backpressure are included.
-- Alternate-screen throughput cannot assume ConPTY preserves the producer's
-  original byte count. The child leaves the alternate screen active, emits a
-  unique visible marker after the payload, and the benchmark-only terminal
+- Interactive throughput starts after a ready/go barrier. No workload assumes
+  ConPTY preserves the producer's original byte count. The child emits a
+  unique visible marker after every payload, and the benchmark-only terminal
   observer confirms that token in the reconstructed visible grid before
   latching its committed output generation/count. The endpoint is the first
-  successful swap at or after that generation; `1049l` is sent only after
-  evidence release. Evidence discloses this observer, whose bounded top-row
-  scan is included in the alternate-screen measurement.
+  successful swap at or after that generation. For alternate-screen runs,
+  `1049l` is sent only after evidence release. Producer blocking, downstream
+  backpressure, and the observer's bounded top-row scan are included.
 - `frame_time_p95_ms` pools QPC intervals between consecutive successful swaps
   after the stream target is armed and through its first full-consumption swap.
   It is a software renderer-present cadence metric. It excludes DWM composition,

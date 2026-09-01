@@ -72,6 +72,13 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $benchmarkHarness
         Content = { $benchmarkHarnessText }
+        Pattern = '(?s)\$endMarker\s*=\s*"NB.*?\$childScriptArguments \+= @\(''-EndMarker'', \$endMarker\).*?first_target_swap_benchmark_end_marker_generation'
+        Kind = 'Text'
+        Description = 'every interactive throughput workload uses a committed visible-marker endpoint'
+    }
+    @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
         Pattern = '(?s)\$streamWorkloadComplete\s*=\s*\$false.*?if \(\$streamWorkloadComplete -and \$frameTimeSamples\.Count -gt 0\)'
         Kind = 'Text'
         Description = 'frame-time evidence fails closed unless every stream run completes'

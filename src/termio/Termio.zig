@@ -342,7 +342,7 @@ last_cursor_reset: ?std.time.Instant = null,
 output_trace: OutputTrace = .{},
 
 /// Optional benchmark-only marker used to acknowledge transformed ConPTY
-/// alt-screen output by terminal generation instead of original input bytes.
+/// output by terminal generation instead of original input bytes.
 benchmark_end_marker: BenchmarkEndMarker = .{},
 
 /// State we have for thread enter. This may be null if we don't need

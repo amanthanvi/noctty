@@ -587,7 +587,7 @@ function Start-BenchTarget {
         [string] $TracePath,
         [string] $TermioTracePath,
         [string] $MemoryTracePath,
-        [string] $AltEndMarker,
+        [string] $EndMarker,
         [switch] $LiveTrace,
         [switch] $EnableAutomation
     )
@@ -607,7 +607,7 @@ function Start-BenchTarget {
     $savedTraceLive = $env:NOCTTY_RENDER_TRACE_LIVE
     $savedTermioTracePath = $env:NOCTTY_TERMIO_TRACE_FILE
     $savedMemoryTracePath = $env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE
-    $savedAltEndMarker = $env:NOCTTY_BENCH_ALT_END_MARKER
+    $savedEndMarker = $env:NOCTTY_BENCH_END_MARKER
     if ($Target -eq 'noctty' -and -not [string]::IsNullOrWhiteSpace($TracePath)) {
         $env:NOCTTY_RENDER_TRACE_FILE = $TracePath
         if ($LiveTrace) { $env:NOCTTY_RENDER_TRACE_LIVE = '1' }
@@ -618,10 +618,10 @@ function Start-BenchTarget {
         Remove-Item Env:NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
     }
     if ($Target -eq 'noctty') {
-        if (-not [string]::IsNullOrWhiteSpace($AltEndMarker)) {
-            $env:NOCTTY_BENCH_ALT_END_MARKER = $AltEndMarker
+        if (-not [string]::IsNullOrWhiteSpace($EndMarker)) {
+            $env:NOCTTY_BENCH_END_MARKER = $EndMarker
         }
-        else { Remove-Item Env:NOCTTY_BENCH_ALT_END_MARKER -ErrorAction SilentlyContinue }
+        else { Remove-Item Env:NOCTTY_BENCH_END_MARKER -ErrorAction SilentlyContinue }
         if (-not [string]::IsNullOrWhiteSpace($TermioTracePath)) {
             $env:NOCTTY_TERMIO_TRACE_FILE = $TermioTracePath
         }
@@ -634,7 +634,7 @@ function Start-BenchTarget {
     else {
         Remove-Item Env:NOCTTY_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue
         Remove-Item Env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue
-        Remove-Item Env:NOCTTY_BENCH_ALT_END_MARKER -ErrorAction SilentlyContinue
+        Remove-Item Env:NOCTTY_BENCH_END_MARKER -ErrorAction SilentlyContinue
     }
 
     $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -655,8 +655,9 @@ function Start-BenchTarget {
         if ($null -eq $savedTermioTracePath) { Remove-Item Env:NOCTTY_TERMIO_TRACE_FILE -ErrorAction SilentlyContinue }
         else { $env:NOCTTY_TERMIO_TRACE_FILE = $savedTermioTracePath }
         if ($null -eq $savedMemoryTracePath) { Remove-Item Env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE = $savedMemoryTracePath }        if ($null -eq $savedAltEndMarker) { Remove-Item Env:NOCTTY_BENCH_ALT_END_MARKER -ErrorAction SilentlyContinue }
-        else { $env:NOCTTY_BENCH_ALT_END_MARKER = $savedAltEndMarker }
+        else { $env:NOCTTY_BENCH_MEMORY_STAGE_TRACE_FILE = $savedMemoryTracePath }
+        if ($null -eq $savedEndMarker) { Remove-Item Env:NOCTTY_BENCH_END_MARKER -ErrorAction SilentlyContinue }
+        else { $env:NOCTTY_BENCH_END_MARKER = $savedEndMarker }
     }
     $startedAt = [DateTime]::UtcNow
     try { $startedAt = $process.StartTime.ToUniversalTime() } catch {}
@@ -1688,9 +1689,9 @@ if ($script:adapter.Installed) {
         )
         foreach ($workload in $workloads) {
             $isTransformedAltScreen = $workload.Workload -eq 'alt-screen'
-            $completionSignal = if ($isTransformedAltScreen) { 'unique final visible marker parsed and committed by the terminal' } else { 'absolute ConPTY output byte count at baseline plus payload size' }
-            $endpoint = if ($isTransformedAltScreen) { 'atomically latched first successful SwapBuffers whose renderer snapshot includes the committed final-marker generation' } else { 'atomically latched first successful SwapBuffers at or above an armed baseline-plus-payload output-byte target' }
-            $presentationTarget = if ($isTransformedAltScreen) { 'committed visible end marker' } else { 'full payload byte target' }
+            $completionSignal = 'unique final visible marker parsed and committed by the terminal'
+            $endpoint = 'atomically latched first successful SwapBuffers whose renderer snapshot includes the committed final-marker generation'
+            $presentationTarget = 'committed visible end marker'
             $payloadPath = Join-Path $layout.Temp "bench-$($workload.Workload)-$Bytes-$Seed.bin"
             [NocttyBenchNative]::WritePayload($payloadPath, $Bytes, $Seed, $workload.Workload, $Rows, $Cols)
             $samples = [Collections.Generic.List[double]]::new()
@@ -1705,12 +1706,12 @@ if ($script:adapter.Installed) {
                     $releasePath = Join-Path $layout.Temp "$name-release.txt"
                     $tracePath = Join-Path $layout.Temp "$name-render-trace.json"
                     $termioTracePath = if ($ProfileThroughput) { Join-Path $layout.Temp "$name-termio-trace.json" } else { $null }
-                    $endMarker = if ($isTransformedAltScreen) { "NB$([Guid]::NewGuid().ToString('N').Substring(0, 16))" } else { '' }
+                    $endMarker = "NB$([Guid]::NewGuid().ToString('N').Substring(0, 16))"
                     Remove-Item -LiteralPath $resultPath, $readyPath, $goPath, $releasePath, $tracePath -ErrorAction SilentlyContinue
                     if ($null -ne $termioTracePath) { Remove-Item -LiteralPath $termioTracePath -ErrorAction SilentlyContinue }
                     $childScriptArguments = @('-PayloadPath', $payloadPath, '-ResultPath', $resultPath, '-ReadyPath', $readyPath, '-GoPath', $goPath, '-ReleasePath', $releasePath, '-Workload', $workload.Workload)
-                    if ($isTransformedAltScreen) { $childScriptArguments += @('-EndMarker', $endMarker) }
-                    $run = Start-BenchTarget -RunName $name -ChildScript $script:throughputScriptPath -ChildScriptArguments $childScriptArguments -TracePath $tracePath -TermioTracePath $termioTracePath -AltEndMarker $endMarker -LiveTrace
+                    $childScriptArguments += @('-EndMarker', $endMarker)
+                    $run = Start-BenchTarget -RunName $name -ChildScript $script:throughputScriptPath -ChildScriptArguments $childScriptArguments -TracePath $tracePath -TermioTracePath $termioTracePath -EndMarker $endMarker -LiveTrace
                     try {
                         Wait-BenchFile -Path $readyPath -Run $run -Description "$($workload.Workload) throughput child readiness"
                         $hostHwnd = Wait-BenchNocttyWindow -Run $run
@@ -1719,8 +1720,7 @@ if ($script:adapter.Installed) {
                         $firstTrace = Get-BenchJsonFile -Path $tracePath -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
                         $initialTrace = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence ([uint64] $firstTrace.snapshot_sequence) -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
                         $traceSequence = [uint64] $initialTrace.snapshot_sequence
-                        $baselineOutputBytes = [uint64] $initialTrace.last_swap_process_output_bytes
-                        $expectedOutputBytes = if ($isTransformedAltScreen) { [uint64] 0 } else { $baselineOutputBytes + [uint64] $Bytes }
+                        $expectedOutputBytes = [uint64] 0
                         Set-BenchRenderTraceTarget -Hwnd $surfaceHwnd -OutputBytes $expectedOutputBytes
                         [IO.File]::WriteAllText($goPath, 'go', [Text.Encoding]::ASCII)
                         Wait-BenchFile -Path $resultPath -Run $run -Description "$($workload.Workload) throughput end marker"
@@ -1731,15 +1731,9 @@ if ($script:adapter.Installed) {
                         while ([DateTime]::UtcNow -lt $deadline) {
                             $candidate = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence $traceSequence -Deadline $deadline
                             $traceSequence = [uint64] $candidate.snapshot_sequence
-                            $targetPresented = if ($isTransformedAltScreen) {
-                                [uint64] $candidate.target_process_output_bytes -eq 0 -and
+                            $targetPresented = [uint64] $candidate.target_process_output_bytes -eq 0 -and
                                 [uint64] $candidate.first_target_swap_benchmark_end_marker_generation -gt 0 -and
                                 [uint64] $candidate.first_target_swap_benchmark_end_marker_output_bytes -gt 0
-                            }
-                            else {
-                                [uint64] $candidate.target_process_output_bytes -eq $expectedOutputBytes -and
-                                [uint64] $candidate.first_target_swap_process_output_bytes -ge $expectedOutputBytes
-                            }
                             if ($targetPresented -and [uint64] $candidate.first_target_swap_qpc_ticks -gt 0) {
                                 $presentedTrace = $candidate
                                 break
@@ -1797,14 +1791,14 @@ if ($script:adapter.Installed) {
                         finally { Stop-BenchTarget -Run $run }
                     }
                 }
-                $throughputDetails = [ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }) }
+                $throughputDetails = [ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = $false; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = $true; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }) }
                 if ($ProfileThroughput) { $throughputDetails.diagnostic_profiles = $diagnosticProfiles.ToArray() }
                 $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Samples $samples.ToArray() -Details $throughputDetails))
                 if ($workload.Workload -eq 'stream') { $streamWorkloadComplete = $true }
             }
             catch {
                 $measurementErrors.Add("$($workload.Metric): $($_.Exception.Message)")
-                $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Status error -Details ([ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = -not $isTransformedAltScreen; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = [bool] $isTransformedAltScreen; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }); error = $_.Exception.Message })))
+                $metrics.Add((New-BenchMetricRecord -Name $workload.Metric -Unit 'MB/s' -Status error -Details ([ordered]@{ workload = $workload.Workload; bytes = $Bytes; producer = 'PowerShell FileStream.CopyTo(Console.OpenStandardOutput)'; process_startup_included = $false; endpoint = $endpoint; completion_signal = $completionSignal; conpty_original_input_bytes_expected_to_be_preserved = $false; downstream_backpressure_included = $true; render_trace_snapshot_request_observer_included = $false; render_trace_target_observer_included = $true; terminal_visible_marker_observer_included = $true; termio_trace_observer_included = [bool] $ProfileThroughput; windows_read_buffer_kib = $script:BenchWindowsReadBufferKib; diagnostic_profile_scope = $(if ($ProfileThroughput) { 'process lifetime; ReadFile duration includes blocking before the producer go marker' } else { $null }); error = $_.Exception.Message })))
             }
         }
         if ($streamWorkloadComplete -and $frameTimeSamples.Count -gt 0) {

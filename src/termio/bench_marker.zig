@@ -1,9 +1,9 @@
 //! Benchmark-only PTY end-marker observation.
 //!
 //! Nothing here is a product path. It exists so
-//! `test/windows/bench-windows.ps1` can time alternate-screen throughput to a
-//! causal endpoint: ConPTY does not preserve the producer's byte count across
-//! an alternate-screen payload, so the benchmark child emits a unique visible
+//! `test/windows/bench-windows.ps1` can time interactive throughput to a causal
+//! endpoint: ConPTY does not promise to preserve the producer's byte count, so
+//! the benchmark child emits a unique visible
 //! token after its payload and the harness needs to know the exact parsed
 //! chunk at which that token became visible.
 //!
@@ -12,7 +12,7 @@
 //! exists after `processOutputLocked` has run under the renderer lock. There
 //! is no other observation point that produces the same measurement, so this
 //! is the one benchmark control that stays wired into `Termio`. It is inert
-//! by default: without `NOCTTY_BENCH_ALT_END_MARKER` in the environment,
+//! by default: without `NOCTTY_BENCH_END_MARKER` in the environment,
 //! `bytes` is null and `observeVisible` is a single null check that returns
 //! before touching terminal state.
 
@@ -29,7 +29,7 @@ pub const BenchmarkEndMarker = struct {
     pub fn init(alloc: Allocator) BenchmarkEndMarker {
         const raw = std.process.getEnvVarOwned(
             alloc,
-            "NOCTTY_BENCH_ALT_END_MARKER",
+            "NOCTTY_BENCH_END_MARKER",
         ) catch return .{};
 
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
