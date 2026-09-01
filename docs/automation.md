@@ -184,5 +184,7 @@ Terminal grid text, scrollback, selection, clipboard contents, and pending
 shell input are never included in the JSON payload. noctty intentionally
 exposes this metadata over a local, current-user automation channel.
 
-Wire request kind 8 is reserved for the planned `launch_layout` work in issue
-#133. There is no `+launch-layout` verb today.
+Wire request kind 8 carries `launch_layout` for
+`+new-window --launch-layout=<name>`. There is intentionally no standalone
+`+launch-layout` verb, and layout launch remains outside the generic forwarded
+argument allowlist.

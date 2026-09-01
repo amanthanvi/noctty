@@ -383,29 +383,35 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 try self.newWindow(rt_app, msg);
             },
             .automation_window_list => |request| {
-                request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
-                    request.err = err;
-                    break :blk null;
-                };
-                request.completed.store(true, .release);
+                if (request.lifecycle.claim()) {
+                    request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
+                        request.err = err;
+                        break :blk null;
+                    };
+                    request.lifecycle.complete();
+                }
                 request.release();
             },
             .automation_action => |request| {
-                self.performAutomationAction(
-                    rt_app,
-                    request.target,
-                    request.action_text,
-                ) catch |err| {
-                    request.err = err;
-                };
-                request.completed.store(true, .release);
+                if (request.lifecycle.claim()) {
+                    self.performAutomationAction(
+                        rt_app,
+                        request.target,
+                        request.action_text,
+                    ) catch |err| {
+                        request.err = err;
+                    };
+                    request.lifecycle.complete();
+                }
                 request.release();
             },
             .automation_command => |request| {
-                rt_app.performAutomationCommand(request.command) catch |err| {
-                    request.err = err;
-                };
-                request.completed.store(true, .release);
+                if (request.lifecycle.claim()) {
+                    rt_app.performAutomationCommand(request.command) catch |err| {
+                        request.err = err;
+                    };
+                    request.lifecycle.complete();
+                }
                 request.release();
             },
             .close => |surface| self.closeSurface(surface),
@@ -918,10 +924,48 @@ pub const Message = union(enum) {
         }
     }
 
+    pub const AutomationRequestLifecycle = struct {
+        pub const State = enum(u8) {
+            pending,
+            claimed,
+            completed,
+            cancelled,
+        };
+
+        state: std.atomic.Value(u8) = .init(@intFromEnum(State.pending)),
+
+        pub fn load(self: *const @This()) State {
+            return @enumFromInt(self.state.load(.acquire));
+        }
+
+        pub fn claim(self: *@This()) bool {
+            return self.state.cmpxchgStrong(
+                @intFromEnum(State.pending),
+                @intFromEnum(State.claimed),
+                .acq_rel,
+                .acquire,
+            ) == null;
+        }
+
+        pub fn cancel(self: *@This()) bool {
+            return self.state.cmpxchgStrong(
+                @intFromEnum(State.pending),
+                @intFromEnum(State.cancelled),
+                .acq_rel,
+                .acquire,
+            ) == null;
+        }
+
+        pub fn complete(self: *@This()) void {
+            std.debug.assert(self.load() == .claimed);
+            self.state.store(@intFromEnum(State.completed), .release);
+        }
+    };
+
     pub const AutomationWindowListRequest = struct {
         alloc: Allocator,
         refs: std.atomic.Value(u32) = .init(1),
-        completed: std.atomic.Value(bool) = .init(false),
+        lifecycle: AutomationRequestLifecycle = .{},
         result: ?[]u8 = null,
         err: ?anyerror = null,
 
@@ -953,7 +997,7 @@ pub const Message = union(enum) {
         refs: std.atomic.Value(u32) = .init(1),
         target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
-        completed: std.atomic.Value(bool) = .init(false),
+        lifecycle: AutomationRequestLifecycle = .{},
         err: ?anyerror = null,
 
         pub fn create(
@@ -986,7 +1030,7 @@ pub const Message = union(enum) {
         alloc: Allocator,
         refs: std.atomic.Value(u32) = .init(1),
         command: apprt.ipc.AutomationCommand,
-        completed: std.atomic.Value(bool) = .init(false),
+        lifecycle: AutomationRequestLifecycle = .{},
         err: ?anyerror = null,
 
         pub fn create(alloc: Allocator, command: apprt.ipc.AutomationCommand) !*@This() {
@@ -1074,6 +1118,31 @@ test "queued automation messages release consumer ownership during teardown" {
     text_request.retain();
     text_request.release();
     (Message{ .automation_command = text_request }).deinit(std.testing.allocator);
+}
+
+test "automation request cancellation prevents late consumer execution" {
+    var lifecycle: Message.AutomationRequestLifecycle = .{};
+    try std.testing.expect(lifecycle.cancel());
+    try std.testing.expect(!lifecycle.claim());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.cancelled,
+        lifecycle.load(),
+    );
+}
+
+test "claimed automation request cannot report an ambiguous timeout" {
+    var lifecycle: Message.AutomationRequestLifecycle = .{};
+    try std.testing.expect(lifecycle.claim());
+    try std.testing.expect(!lifecycle.cancel());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.claimed,
+        lifecycle.load(),
+    );
+    lifecycle.complete();
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.completed,
+        lifecycle.load(),
+    );
 }
 
 /// Mailbox is the way that other threads send the app thread messages.

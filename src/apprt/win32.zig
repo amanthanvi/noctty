@@ -2249,7 +2249,7 @@ fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
     return request.takeResult() orelse error.IPCFailed;
 }
@@ -2279,7 +2279,7 @@ fn requestAutomationAction(
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
 }
 
@@ -2296,15 +2296,31 @@ fn requestAutomationCommand(app: *App, command: apprt.ipc.AutomationCommand) !vo
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
 }
 
-fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
+fn waitForAutomationCompletion(
+    app: *const App,
+    lifecycle: *CoreApp.Message.AutomationRequestLifecycle,
+) !void {
     const deadline_ms = sys.GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
-    while (!completed.load(.acquire)) {
-        if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
-        if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+    while (true) {
+        switch (lifecycle.load()) {
+            .completed => return,
+            .cancelled => return error.IPCFailed,
+            .pending => {
+                if (app.ipc_stop_requested.load(.acquire)) {
+                    if (lifecycle.cancel()) return error.IPCFailed;
+                } else if (sys.GetTickCount64() >= deadline_ms) {
+                    if (lifecycle.cancel()) return error.IpcTimeout;
+                }
+            },
+            // Once the app thread has claimed a mutating request, the client
+            // waits for its actual outcome instead of reporting a timeout that
+            // could encourage a duplicate retry.
+            .claimed => {},
+        }
         std.Thread.sleep(std.time.ns_per_ms);
     }
 }
@@ -30850,16 +30866,17 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     try std.testing.expect(pane.get("working_directory").? == .null);
 }
 
-test "win32 timed out automation request remains owned until consumption" {
+test "win32 timed out automation request stays owned and cannot be claimed" {
     const request = try CoreApp.Message.AutomationActionRequest.create(
         std.testing.allocator,
         .focused,
         "new_tab",
     );
     request.retain();
+    try std.testing.expect(request.lifecycle.cancel());
     request.release(); // Producer times out and drops its ownership.
     try std.testing.expectEqualStrings("new_tab", request.action_text);
-    request.completed.store(true, .release);
+    try std.testing.expect(!request.lifecycle.claim());
     request.release(); // Delayed mailbox consumer owns the final reference.
 }
 
