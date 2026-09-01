@@ -174,6 +174,9 @@ pub fn executablePathAlloc(alloc: Allocator, self_path: []const u8) ![]u8 {
 /// an escaped quote and hands us `--working-directory=C:"`. Appending `\.`
 /// keeps the last character before the quote non-backslash for every target,
 /// and `C:\\.` / `C:\dir\.` both resolve to the intended directory.
+/// `--single-instance=false` keeps the selected path in this new process rather
+/// than sending it through the IPC working-directory allowlist. That preserves
+/// an intentional Explorer launch from a UNC folder without weakening IPC.
 pub fn commandValueAlloc(alloc: Allocator, exe_path: []const u8) ![]u8 {
     // The Shell command template treats `%%` as one literal percent. Escape
     // the executable path before adding our one intentional `%V` target.
@@ -181,7 +184,7 @@ pub fn commandValueAlloc(alloc: Allocator, exe_path: []const u8) ![]u8 {
     defer alloc.free(escaped_exe_path);
     return try std.fmt.allocPrint(
         alloc,
-        "\"{s}\" --working-directory=\"%V\\.\"",
+        "\"{s}\" --single-instance=false --working-directory=\"%V\\.\"",
         .{escaped_exe_path},
     );
 }
@@ -580,7 +583,7 @@ test "shell-menu command quotes an executable path containing spaces" {
     defer testing.allocator.free(value);
 
     try testing.expectEqualStrings(
-        "\"C:\\Program Files\\noctty\\noctty.exe\" --working-directory=\"%V\\.\"",
+        "\"C:\\Program Files\\noctty\\noctty.exe\" --single-instance=false --working-directory=\"%V\\.\"",
         value,
     );
 }
@@ -635,7 +638,7 @@ fn freeParsedForTest(alloc: Allocator, argv: []const []const u8) void {
     alloc.free(argv);
 }
 
-test "shell-menu command survives Windows argv parsing for folders and drive roots" {
+test "shell-menu command survives Windows argv parsing for local and UNC folders" {
     const testing = std.testing;
     const exe = "C:\\Program Files\\noctty\\noctty.exe";
     const value = try commandValueAlloc(testing.allocator, exe);
@@ -646,9 +649,10 @@ test "shell-menu command survives Windows argv parsing for folders and drive roo
     {
         const argv = try expandAndParseForTest(testing.allocator, value, "C:\\");
         defer freeParsedForTest(testing.allocator, argv);
-        try testing.expectEqual(@as(usize, 2), argv.len);
+        try testing.expectEqual(@as(usize, 3), argv.len);
         try testing.expectEqualStrings(exe, argv[0]);
-        try testing.expectEqualStrings("--working-directory=C:\\\\.", argv[1]);
+        try testing.expectEqualStrings("--single-instance=false", argv[1]);
+        try testing.expectEqualStrings("--working-directory=C:\\\\.", argv[2]);
     }
 
     // A normal folder, including one whose name contains a space.
@@ -659,9 +663,10 @@ test "shell-menu command survives Windows argv parsing for folders and drive roo
             "D:\\My Projects\\noctty",
         );
         defer freeParsedForTest(testing.allocator, argv);
-        try testing.expectEqual(@as(usize, 2), argv.len);
+        try testing.expectEqual(@as(usize, 3), argv.len);
         try testing.expectEqualStrings(exe, argv[0]);
-        try testing.expectEqualStrings("--working-directory=D:\\My Projects\\noctty\\.", argv[1]);
+        try testing.expectEqualStrings("--single-instance=false", argv[1]);
+        try testing.expectEqualStrings("--working-directory=D:\\My Projects\\noctty\\.", argv[2]);
     }
 
     // Non-ASCII folder names survive the UTF-8 -> UTF-16 -> argv round trip.
@@ -674,11 +679,30 @@ test "shell-menu command survives Windows argv parsing for folders and drive roo
             "E:\\\u{9805}\u{76EE} \u{1F680}\\\u{5F00}\u{53D1}",
         );
         defer freeParsedForTest(testing.allocator, argv);
-        try testing.expectEqual(@as(usize, 2), argv.len);
+        try testing.expectEqual(@as(usize, 3), argv.len);
         try testing.expectEqualStrings(exe, argv[0]);
+        try testing.expectEqualStrings("--single-instance=false", argv[1]);
         try testing.expectEqualStrings(
             "--working-directory=E:\\\u{9805}\u{76EE} \u{1F680}\\\u{5F00}\u{53D1}\\.",
-            argv[1],
+            argv[2],
+        );
+    }
+
+    // UNC targets stay in this new process instead of crossing the IPC
+    // working-directory boundary, which deliberately rejects UNC syntax.
+    {
+        const argv = try expandAndParseForTest(
+            testing.allocator,
+            value,
+            "\\\\server\\share\\project",
+        );
+        defer freeParsedForTest(testing.allocator, argv);
+        try testing.expectEqual(@as(usize, 3), argv.len);
+        try testing.expectEqualStrings(exe, argv[0]);
+        try testing.expectEqualStrings("--single-instance=false", argv[1]);
+        try testing.expectEqualStrings(
+            "--working-directory=\\\\server\\share\\project\\.",
+            argv[2],
         );
     }
 }
@@ -689,15 +713,16 @@ test "shell-menu command preserves percent placeholders in the executable path" 
     const value = try commandValueAlloc(testing.allocator, exe);
     defer testing.allocator.free(value);
     try testing.expectEqualStrings(
-        "\"C:\\Apps\\100%%Valid\\noctty.exe\" --working-directory=\"%V\\.\"",
+        "\"C:\\Apps\\100%%Valid\\noctty.exe\" --single-instance=false --working-directory=\"%V\\.\"",
         value,
     );
 
     const argv = try expandAndParseForTest(testing.allocator, value, "D:\\Work");
     defer freeParsedForTest(testing.allocator, argv);
-    try testing.expectEqual(@as(usize, 2), argv.len);
+    try testing.expectEqual(@as(usize, 3), argv.len);
     try testing.expectEqualStrings(exe, argv[0]);
-    try testing.expectEqualStrings("--working-directory=D:\\Work\\.", argv[1]);
+    try testing.expectEqualStrings("--single-instance=false", argv[1]);
+    try testing.expectEqualStrings("--working-directory=D:\\Work\\.", argv[2]);
 }
 
 test "shell-menu display name is stable" {

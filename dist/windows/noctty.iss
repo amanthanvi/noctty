@@ -143,5 +143,5 @@ var
 begin
   ExePath := ExpandConstant('{app}\noctty.exe');
   StringChangeEx(ExePath, '%', '%%', True);
-  Result := AddQuotes(ExePath) + ' --working-directory="%V\."';
+  Result := AddQuotes(ExePath) + ' --single-instance=false --working-directory="%V\."';
 end;

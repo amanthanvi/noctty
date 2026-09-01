@@ -261,7 +261,10 @@ The taskbar jump list has two categories:
 | Drive             | `Drive\shell\noctty`                |
 
 Each verb is named `Open noctty here` and launches `noctty.exe` with
-`--working-directory="%V\."`. The trailing `\.` is required: Explorer
+`--single-instance=false --working-directory="%V\."`. The explicit new
+instance keeps the selected path in the launched process, so UNC folders do
+not cross the single-instance IPC boundary that deliberately rejects UNC
+working directories. The trailing `\.` is required: Explorer
 expands `%V` for a drive root as `C:\`, and a backslash immediately before
 the closing quote would be read as an escaped quote when Windows splits the
 command line. The installer writes the verbs under
