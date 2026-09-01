@@ -2313,9 +2313,17 @@ fn resolvePathForOpening(
 /// drive prefix and as the alternate-data-stream separator in the final
 /// component; anywhere else it names a directory Windows cannot address.
 fn windowsPathIsRepresentable(path: []const u8) bool {
-    if (std.mem.indexOfAny(u8, path, "<>\"|?*") != null) return false;
-
     var rest = path;
+
+    // The extended-length prefix is legal and `std.fs.path.resolve` preserves
+    // it, so step over it before screening. Its own `?` is not a wildcard.
+    if (std.mem.startsWith(u8, rest, "\\\\?\\")) {
+        rest = rest[4..];
+        if (std.ascii.startsWithIgnoreCase(rest, "UNC\\")) rest = rest[4..];
+    }
+
+    if (std.mem.indexOfAny(u8, rest, "<>\"|?*") != null) return false;
+
     if (rest.len >= 2 and rest[1] == ':' and std.ascii.isAlphabetic(rest[0])) {
         rest = rest[2..];
     }
@@ -2340,6 +2348,13 @@ test "windowsPathIsRepresentable" {
     // Wildcards are never legal, wherever they appear.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn"));
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\a*b"));
+
+    // The extended-length prefix survives resolution and its `?` is not a
+    // wildcard, but the rest of such a path is screened as usual.
+    try testing.expect(windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\Documents"));
+    try testing.expect(windowsPathIsRepresentable("\\\\?\\UNC\\server\\share\\file"));
+    try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\https:\\example.com"));
+    try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\a*b"));
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
