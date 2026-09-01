@@ -2934,15 +2934,17 @@ pub const App = struct {
                             jump_list.startupProfileDiscoveryPending())
                         {
                             const host = self.hosts.items[0];
-                            if (host.profiles == null) {
-                                _ = host.ensureProfiles() catch |err| retry: {
+                            if (host.profiles == null or !host.profiles_complete) {
+                                _ = host.reloadProfiles() catch |err| {
                                     log.warn("jump list deferred profile discovery failed err={}", .{err});
                                     jump_list.retryStartupProfileDiscovery();
-                                    break :retry false;
+                                    continue;
                                 };
                             }
-                            if (host.profiles != null) {
+                            if (host.profiles != null and host.profiles_complete) {
                                 jump_list.completeStartupProfileDiscovery();
+                            } else {
+                                jump_list.retryStartupProfileDiscovery();
                             }
                         }
                         continue;
@@ -8590,6 +8592,7 @@ const Host = struct {
     overlay_completion_value: ?[:0]const u8 = null,
     overlay_completion_result_id: ?PaletteStableId = null,
     profiles: ?[]windows_shell.Profile = null,
+    profiles_complete: bool = false,
     selected_profile: usize = 0,
     selected_profile_key: ?[:0]const u8 = null,
     chrome_brush: HBRUSH = null,
@@ -11687,16 +11690,18 @@ const Host = struct {
 
     fn reloadProfiles(self: *Host) !bool {
         const replacing = self.profiles != null;
-        const next_profiles = try windows_shell.listProfiles(
+        const discovery = try windows_shell.discoverProfiles(
             self.app.core_app.alloc,
             self.app.config.@"ssh-config-hosts",
         );
+        const next_profiles = discovery.profiles;
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
+        self.profiles_complete = discovery.complete;
         if (self.app.jump_list) |*jump_list| {
             // A later user-initiated load recovers startup discovery after its
             // bounded transient-failure retry budget has been exhausted.
-            jump_list.completeStartupProfileDiscovery();
+            if (discovery.complete) jump_list.completeStartupProfileDiscovery();
             jump_list.updateProfiles(next_profiles);
         }
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
@@ -11727,6 +11732,7 @@ const Host = struct {
             windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
             self.profiles = null;
         }
+        self.profiles_complete = false;
     }
 
     fn reapplyLauncherProfilePreferences(self: *Host) !void {

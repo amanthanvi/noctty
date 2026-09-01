@@ -12,6 +12,7 @@ const wsl_probe_timeout_ms: windows.DWORD = 1500;
 const wsl_list_timeout_ms: windows.DWORD = 1500;
 var wsl_probe_mutex: std.Thread.Mutex = .{};
 var wsl_probe_cache: ?bool = null;
+var wsl_profile_probe_cache: ?bool = null;
 var ssh_missing_mutex: std.Thread.Mutex = .{};
 var ssh_missing_logged = false;
 const wsl_shell_integration_next_step =
@@ -54,6 +55,11 @@ pub const Profile = struct {
     }
 };
 
+pub const ProfileDiscovery = struct {
+    profiles: []Profile,
+    complete: bool,
+};
+
 /// Determine the default shell order for Windows:
 /// WSL -> pwsh -> powershell -> cmd.
 pub fn defaultShell(alloc: Allocator) !DefaultShell {
@@ -90,7 +96,35 @@ pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
         probeWslExecutableCached,
         listWslDistros,
         order_hint,
+        null,
     );
+    return try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts);
+}
+
+pub fn discoverProfiles(alloc: Allocator, include_ssh_hosts: bool) !ProfileDiscovery {
+    const order_hint = detectProfileOrderHint(alloc);
+    defer if (order_hint) |value| alloc.free(value);
+
+    var complete = true;
+    const shell_profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(
+        alloc,
+        lookupExecutable,
+        probeWslExecutableForProfiles,
+        listWslDistros,
+        order_hint,
+        &complete,
+    );
+    return .{
+        .profiles = try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts),
+        .complete = complete,
+    };
+}
+
+fn appendConfiguredSshProfiles(
+    alloc: Allocator,
+    shell_profiles: []Profile,
+    include_ssh_hosts: bool,
+) ![]Profile {
     if (!include_ssh_hosts) return shell_profiles;
 
     // SSH discovery is additive. Any failure below degrades to the detected
@@ -450,6 +484,7 @@ fn listProfilesWithLookupAndProbeAndWslList(
         probe,
         list_wsl,
         null,
+        null,
     );
 }
 
@@ -459,6 +494,7 @@ fn listProfilesWithLookupAndProbeAndWslListAndOrder(
     probe: anytype,
     list_wsl: anytype,
     order_hint: ?[]const u8,
+    complete: ?*bool,
 ) ![]Profile {
     var profiles: std.ArrayList(Profile) = .empty;
     errdefer {
@@ -469,7 +505,10 @@ fn listProfilesWithLookupAndProbeAndWslListAndOrder(
     if (try lookup(alloc, "wsl.exe")) |path| {
         defer alloc.free(path);
 
-        if (try probe(alloc, path)) {
+        const wsl_ready = try probe(alloc, path);
+        if (!wsl_ready) {
+            if (complete) |value| value.* = false;
+        } else {
             try appendProfile(
                 alloc,
                 &profiles,
@@ -734,6 +773,21 @@ fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
 
     const result = try probeWslExecutable(alloc, exe_path);
     wsl_probe_cache = result;
+    return result;
+}
+
+fn probeWslExecutableForProfiles(alloc: Allocator, exe_path: []const u8) !bool {
+    if (builtin.os.tag != .windows) return true;
+
+    wsl_probe_mutex.lock();
+    defer wsl_probe_mutex.unlock();
+
+    if ((wsl_profile_probe_cache orelse false) or (wsl_probe_cache orelse false)) return true;
+
+    const result = try probeWslExecutable(alloc, exe_path);
+    // Profile discovery keeps transient negative results retryable while a
+    // successful probe remains stable for later palette/jump-list refreshes.
+    if (result) wsl_profile_probe_cache = true;
     return result;
 }
 
@@ -1309,6 +1363,54 @@ test "listProfilesWithLookupAndProbeAndWslList enumerates windows profiles" {
     try testing.expectEqual(ProfileKind.cmd, profiles[6].kind);
 }
 
+test "profile discovery reports a retryable WSL probe failure" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var complete = true;
+    const profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return false;
+        }
+    }.probe, struct {
+        fn list(_: Allocator, _: []const u8) ![][]u8 {
+            return error.UnexpectedWslList;
+        }
+    }.list, null, &complete);
+    defer deinitProfiles(alloc, profiles);
+
+    try testing.expect(!complete);
+    try testing.expectEqual(@as(usize, 1), profiles.len);
+    try testing.expectEqual(ProfileKind.cmd, profiles[0].kind);
+
+    complete = true;
+    const recovered = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    }.probe, struct {
+        fn list(a: Allocator, _: []const u8) ![][]u8 {
+            return try a.alloc([]u8, 0);
+        }
+    }.list, null, &complete);
+    defer deinitProfiles(alloc, recovered);
+    try testing.expect(complete);
+    try testing.expectEqual(@as(usize, 2), recovered.len);
+    try testing.expectEqual(ProfileKind.wsl_default, recovered[0].kind);
+}
+
 test "ssh profiles append after shells with alias-only argv" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -1457,7 +1559,7 @@ test "listProfilesWithLookupAndProbeAndWslListAndOrder reorders windows profiles
             try values.append(alloc_, try alloc_.dupe(u8, "Debian"));
             return try values.toOwnedSlice(alloc_);
         }
-    }.list, "git,pwsh,Ubuntu,cmd");
+    }.list, "git,pwsh,Ubuntu,cmd", null);
     defer deinitProfiles(alloc, profiles);
 
     try testing.expectEqual(@as(usize, 7), profiles.len);

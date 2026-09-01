@@ -350,6 +350,106 @@ fn encodeRecentStateAlloc(
     return try out.toOwnedSlice();
 }
 
+const BoundedStateEncoding = struct {
+    bytes: []u8,
+    pruned_records: usize,
+};
+
+fn encodeRecentStateBoundedAlloc(
+    alloc: Allocator,
+    state: *LoadedState,
+) !BoundedStateEncoding {
+    var pruned_records: usize = 0;
+    while (true) {
+        const bytes = encodeRecentStateAlloc(
+            alloc,
+            state.recents.items.items,
+            state.removed_recents.items.items,
+            state.hidden_profiles.items.items,
+            state.recent_events.items.items,
+            state.profile_events.items.items,
+        ) catch |err| switch (err) {
+            error.StateTooLarge => {
+                if (!try pruneOldestPersistedRecord(alloc, state)) return err;
+                pruned_records += 1;
+                continue;
+            },
+            else => return err,
+        };
+        return .{ .bytes = bytes, .pruned_records = pruned_records };
+    }
+}
+
+fn pruneOldestPersistedRecord(alloc: Allocator, state: *LoadedState) !bool {
+    const Record = union(enum) {
+        recent: usize,
+        profile: usize,
+    };
+    var oldest: ?Record = null;
+    var oldest_changed_ns: i64 = 0;
+    var oldest_order_seq: u64 = 0;
+
+    for (state.recent_events.items.items, 0..) |event, index| {
+        if (oldest == null or eventOrderAfter(
+            oldest_changed_ns,
+            oldest_order_seq,
+            event.changed_ns,
+            event.order_seq,
+        )) {
+            oldest = .{ .recent = index };
+            oldest_changed_ns = event.changed_ns;
+            oldest_order_seq = event.order_seq;
+        }
+    }
+    for (state.profile_events.items.items, 0..) |event, index| {
+        if (oldest == null or eventOrderAfter(
+            oldest_changed_ns,
+            oldest_order_seq,
+            event.changed_ns,
+            event.order_seq,
+        )) {
+            oldest = .{ .profile = index };
+            oldest_changed_ns = event.changed_ns;
+            oldest_order_seq = event.order_seq;
+        }
+    }
+
+    if (oldest) |record| switch (record) {
+        .recent => |index| {
+            const event = state.recent_events.items.orderedRemove(index);
+            defer alloc.free(event.path);
+            switch (event.kind) {
+                .used => _ = try state.recents.removePath(alloc, event.path),
+                .removed => _ = try state.removed_recents.removePath(alloc, event.path),
+            }
+            return true;
+        },
+        .profile => |index| {
+            const event = state.profile_events.items.orderedRemove(index);
+            if (event.kind == .hidden) _ = state.hidden_profiles.remove(alloc, event.key);
+            alloc.free(event.key);
+            return true;
+        },
+    };
+
+    // Schema-v1 snapshots can contain model entries without event records.
+    // Drop their oldest retained entries only after all ordered history is
+    // exhausted so any newer cross-process ordering evidence wins first.
+    if (state.hidden_profiles.items.items.len > 0) {
+        alloc.free(state.hidden_profiles.items.orderedRemove(0));
+        return true;
+    }
+    if (state.removed_recents.items.items.len > 0) {
+        alloc.free(state.removed_recents.items.pop().?);
+        return true;
+    }
+    if (state.recents.items.items.len > 0) {
+        alloc.free(state.recents.items.pop().?);
+        return true;
+    }
+    return false;
+}
+
 const RecentList = struct {
     items: std.ArrayListUnmanaged([]u8) = .empty,
 
@@ -1275,21 +1375,19 @@ pub const JumpList = struct {
             return false;
         };
 
-        const model_changed = !recentListsEqual(&self.recents, &merged.recents) or
-            !recentListsEqual(&self.removed_recents, &merged.removed_recents) or
-            !profileTombstonesEqual(&self.hidden_profiles, &merged.hidden_profiles);
-        const encoded = encodeRecentStateAlloc(
-            self.alloc,
-            merged.recents.items.items,
-            merged.removed_recents.items.items,
-            merged.hidden_profiles.items.items,
-            merged.recent_events.items.items,
-            merged.profile_events.items.items,
-        ) catch |err| {
+        const bounded = encodeRecentStateBoundedAlloc(self.alloc, &merged) catch |err| {
             log.warn("jump list recent encode failed err={}", .{err});
             return false;
         };
-        defer self.alloc.free(encoded);
+        defer self.alloc.free(bounded.bytes);
+        if (bounded.pruned_records > 0) {
+            log.warn("jump list state pruned to persistence budget records={}", .{bounded.pruned_records});
+        }
+        // The bounded encoder can prune visible model entries. Compare after
+        // pruning so a committed Shell list cannot remain stale.
+        const model_changed = !recentListsEqual(&self.recents, &merged.recents) or
+            !recentListsEqual(&self.removed_recents, &merged.removed_recents) or
+            !profileTombstonesEqual(&self.hidden_profiles, &merged.hidden_profiles);
 
         const temporary_path = std.fmt.allocPrint(
             self.alloc,
@@ -1301,7 +1399,7 @@ pub const JumpList = struct {
         };
         defer self.alloc.free(temporary_path);
 
-        persistence.writeFileAtomic(self.state_path, temporary_path, encoded) catch |err| {
+        persistence.writeFileAtomic(self.state_path, temporary_path, bounded.bytes) catch |err| {
             log.warn("jump list recent write failed path={s} err={}", .{ self.state_path, err });
             return false;
         };
@@ -1938,6 +2036,99 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
         error.StateTooLarge,
         encodeRecentStateAlloc(std.testing.allocator, &.{}, &.{}, &.{oversized_key}, &.{}, &.{}),
     );
+}
+
+test "jump_list bounded state encoding prunes oldest records" {
+    const alloc = std.testing.allocator;
+    var state: LoadedState = .{};
+    defer state.deinit(alloc);
+
+    var oldest_key: ?[]u8 = null;
+    defer if (oldest_key) |key| alloc.free(key);
+    var newest_key: ?[]u8 = null;
+    defer if (newest_key) |key| alloc.free(key);
+    for (0..max_profile_tombstones) |index| {
+        var key: [windows_ssh_hosts.max_alias_len + 4]u8 = undefined;
+        @memset(&key, 'x');
+        _ = try std.fmt.bufPrint(key[0..12], "ssh:{d:0>3}:", .{index});
+        if (index == 0) oldest_key = try alloc.dupe(u8, &key);
+        if (index == max_profile_tombstones - 1) newest_key = try alloc.dupe(u8, &key);
+        try std.testing.expect(try state.hidden_profiles.insert(alloc, &key));
+        try state.profile_events.upsert(alloc, &key, .hidden, @intCast(index + 1));
+    }
+
+    const bounded = try encodeRecentStateBoundedAlloc(alloc, &state);
+    defer alloc.free(bounded.bytes);
+    try std.testing.expect(bounded.pruned_records > 0);
+    try std.testing.expect(bounded.bytes.len <= max_state_bytes);
+    try std.testing.expect(!state.hidden_profiles.contains(oldest_key.?));
+    try std.testing.expect(state.hidden_profiles.contains(newest_key.?));
+
+    var decoded = try decodeStateAlloc(alloc, bounded.bytes);
+    defer decoded.deinit(alloc);
+    try std.testing.expect(!decoded.hidden_profiles.contains(oldest_key.?));
+    try std.testing.expect(decoded.hidden_profiles.contains(newest_key.?));
+
+    var oversized: LoadedState = .{};
+    defer oversized.deinit(alloc);
+    const key = try alloc.alloc(u8, max_state_bytes + 1);
+    defer alloc.free(key);
+    @memset(key, 'x');
+    try std.testing.expect(try oversized.hidden_profiles.insert(alloc, key));
+    const empty = try encodeRecentStateBoundedAlloc(alloc, &oversized);
+    defer alloc.free(empty.bytes);
+    try std.testing.expectEqual(@as(usize, 1), empty.pruned_records);
+    try std.testing.expect(empty.bytes.len <= max_state_bytes);
+    try std.testing.expectEqual(@as(usize, 0), oversized.hidden_profiles.items.items.len);
+}
+
+test "jump_list persistence recovers from an oversized valid model" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(directory);
+    const state_path = try std.fs.path.join(alloc, &.{ directory, state_filename });
+    defer alloc.free(state_path);
+
+    var jump = try JumpList.init(alloc, state_path);
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    jump.rebuild_dirty = false;
+
+    var oldest_key: ?[]u8 = null;
+    defer if (oldest_key) |key| alloc.free(key);
+    var newest_key: ?[]u8 = null;
+    defer if (newest_key) |key| alloc.free(key);
+    for (0..max_profile_tombstones) |index| {
+        var key: [windows_ssh_hosts.max_alias_len + 4]u8 = undefined;
+        @memset(&key, 'x');
+        _ = try std.fmt.bufPrint(key[0..12], "ssh:{d:0>3}:", .{index});
+        if (index == 0) oldest_key = try alloc.dupe(u8, &key);
+        if (index == max_profile_tombstones - 1) newest_key = try alloc.dupe(u8, &key);
+        try jump.pending_profile_events.upsert(alloc, &key, .hidden, @intCast(index + 1));
+    }
+    jump.persist_dirty = true;
+
+    try std.testing.expect(jump.persist());
+    try std.testing.expect(!jump.persist_dirty);
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_profile_events.items.items.len);
+    try std.testing.expect(jump.rebuild_dirty);
+    try std.testing.expect(!jump.hidden_profiles.contains(oldest_key.?));
+    try std.testing.expect(jump.hidden_profiles.contains(newest_key.?));
+
+    const raw = try persistence.readFileBoundedAlloc(alloc, state_path, max_state_bytes);
+    defer alloc.free(raw);
+    try std.testing.expect(raw.len <= max_state_bytes);
+
+    jump.noteRecent("C:\\after-prune");
+    try std.testing.expect(jump.persist());
+    var reloaded = try loadStateForMergeAlloc(alloc, state_path);
+    defer reloaded.deinit(alloc);
+    try std.testing.expect(try reloaded.recents.contains(alloc, "C:\\after-prune"));
+    try std.testing.expect(reloaded.hidden_profiles.contains(newest_key.?));
 }
 
 test "jump_list titles drop bidi controls and keep everything else" {
