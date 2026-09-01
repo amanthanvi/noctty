@@ -1040,8 +1040,8 @@ fn decideSelectionCommit(
     terminal_is_ours: bool,
     console_half: ?[]const u8,
 ) RegistrationError!SelectionCommit {
-    if (terminal_is_ours) return .already_selected;
     try requireCompatibleConsoleHalf(console_half);
+    if (terminal_is_ours) return .already_selected;
     return .commit;
 }
 
@@ -1718,10 +1718,15 @@ test "handoff selection commit rechecks the console half before writing" {
         error.InvalidConsoleHandoff,
         decideSelectionCommit(false, "not-a-guid"),
     );
-    // Already selected writes nothing, so there is no pair to mismatch.
+    // A refresh still rewrites class and proxy values, so it must not report
+    // success after Settings changes the console half underneath it.
+    try std.testing.expectError(
+        error.CompatibleConsoleHandoffMissing,
+        decideSelectionCommit(true, inbox_console_sentinel),
+    );
     try std.testing.expectEqual(
         SelectionCommit.already_selected,
-        try decideSelectionCommit(true, inbox_console_sentinel),
+        try decideSelectionCommit(true, "{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}"),
     );
 }
 
