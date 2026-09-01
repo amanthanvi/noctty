@@ -65,7 +65,8 @@ If it does not match, stop; delete the artifact and download it again.
 
 For v1.3.124 and later, verify GitHub build provenance for both the artifact and
 the checksum file. This covers the portable ZIP container itself, not only the
-binaries inside it. GitHub CLI 2.49.0 or later provides `gh attestation`:
+binaries inside it. GitHub CLI 2.93.0 or later provides safe `gh attestation`
+verification:
 
 ```powershell
 foreach ($path in @($artifact, $checksums)) {

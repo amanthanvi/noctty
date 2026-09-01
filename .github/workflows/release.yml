@@ -438,12 +438,15 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           if ($env:ATTEST_REPOSITORY -ne "amanthanvi/noctty" -or
-              $env:ATTEST_SERVER_URL -ne "https://github.com" -or
-              -not $env:ACTIONS_ID_TOKEN_REQUEST_URL -or
-              -not $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
-            Write-Host "Skipping build provenance attestation: the canonical GitHub repository and OIDC context are required."
+              $env:ATTEST_SERVER_URL -ne "https://github.com") {
+            Write-Host "Skipping build provenance attestation outside the canonical GitHub repository."
             "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
             return
+          }
+
+          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL -or
+              -not $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
+            throw "Cannot attest the canonical GitHub release without an OIDC request URL and token."
           }
 
           . (Join-Path $PWD "scripts/windows-architecture.ps1")

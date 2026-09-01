@@ -12,6 +12,7 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repository = 'amanthanvi/noctty'
 $firstAttestedVersion = [version]'1.3.124'
 $firstPortableManifestVersion = [version]'1.3.124'
+$minimumGhAttestationVersion = [version]'2.93.0'
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
 . (Join-Path $PSScriptRoot 'portable-manifest-verification.ps1')
@@ -71,6 +72,18 @@ function Get-ChecksumEntries {
 }
 
 function Test-GhAttestationAvailable {
+    $versionOutput = @(& gh --version 2>&1)
+    if ($LASTEXITCODE -ne 0 -or
+        $versionOutput.Count -eq 0 -or
+        [string]$versionOutput[0] -notmatch '^gh version (?<version>\d+\.\d+\.\d+)(?:\s|$)') {
+        throw 'Cannot determine the installed GitHub CLI version required for safe attestation verification.'
+    }
+
+    $ghVersion = [version]$Matches['version']
+    if ($ghVersion -lt $minimumGhAttestationVersion) {
+        throw "GitHub CLI $ghVersion is unsafe for attestation verification. Upgrade to $minimumGhAttestationVersion or later."
+    }
+
     & gh attestation verify --help *> $null
     if ($LASTEXITCODE -eq 0) { return $true }
 

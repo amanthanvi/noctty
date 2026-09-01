@@ -6708,7 +6708,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '75cd18ddeadb9e53c1480430a81cac43e1e20e8e3f55496056c92592181fdd05'
+    '4a784ba722784b3e766a7717ca715a2f4cfec1a15aef3e12940c4aa3d3a9a535'
 $readinessWorkflowSha256 =
     '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7847,8 +7847,8 @@ $attestationGuardStep = Get-YamlStepBlock `
     -Source $releaseWorkflow
 Assert-TextContract `
     -Content $attestationGuardStep `
-    -Pattern '(?ms)id: attestation_guard.*?ATTEST_REPOSITORY: \$\{\{ github\.repository \}\}.*?ATTEST_SERVER_URL: \$\{\{ github\.server_url \}\}.*?amanthanvi/noctty.*?https://github\.com.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?Write-Host "Skipping build provenance attestation:.*?enabled=false.*?New-WindowsPackageArtifactName.*?-Kind checksums.*?New-WindowsPackageArtifactName.*?-Kind legacy-checksums.*?Copy-Item .*?enabled=true' `
-    -Description 'attestation guard skips unsupported contexts visibly and stages the legacy checksum alias before provenance' `
+    -Pattern '(?ms)id: attestation_guard.*?ATTEST_REPOSITORY: \$\{\{ github\.repository \}\}.*?ATTEST_SERVER_URL: \$\{\{ github\.server_url \}\}.*?amanthanvi/noctty.*?https://github\.com.*?Write-Host "Skipping build provenance attestation outside the canonical GitHub repository\.".*?enabled=false.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?throw "Cannot attest the canonical GitHub release without an OIDC request URL and token\.".*?New-WindowsPackageArtifactName.*?-Kind checksums.*?New-WindowsPackageArtifactName.*?-Kind legacy-checksums.*?Copy-Item .*?enabled=true' `
+    -Description 'attestation guard skips unsupported repositories, fails closed on missing canonical OIDC, and stages the legacy checksum alias before provenance' `
     -Context "$releaseWorkflow :: Prepare build provenance attestation"
 $attestationStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
@@ -8125,6 +8125,7 @@ foreach ($contract in @(
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
     @{ Pattern = '(?s)\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
     @{ Pattern = "\`$firstAttestedVersion = \[version\]'1\.3\.124'"; Description = 'published verifier preserves the first attested release boundary' },
+    @{ Pattern = '(?s)\$minimumGhAttestationVersion = \[version\]''2\.93\.0''.*?gh --version.*?\$ghVersion -lt \$minimumGhAttestationVersion.*?throw "GitHub CLI \$ghVersion is unsafe for attestation verification\..*?gh attestation verify --help'; Description = 'published verifier rejects GitHub CLI versions vulnerable during attestation verification' },
     @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?installed GitHub CLI does not provide the gh attestation verify subcommand.*?Write-Warning .*?return \$false'; Description = 'published verifier degrades visibly when the local gh attestation subcommand is unavailable' },
     @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?\$env:GITHUB_ACTIONS -eq .true.*?throw "Cannot verify build provenance attestations.*?Write-Warning'; Description = 'published verifier fails rather than warns when CI cannot verify provenance at all' },
     @{ Pattern = '(?s)function Assert-PublishedAttestation.*?gh attestation verify \$Path.*?--repo \$Repository.*?--signer-workflow "\$Repository/\.github/workflows/release\.yml".*?\$LASTEXITCODE -ne 0.*?attestation is missing or invalid'; Description = 'published verifier pins release-workflow provenance and fails closed' },
