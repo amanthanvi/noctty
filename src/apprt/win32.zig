@@ -16160,6 +16160,16 @@ fn appendOwnedString(
     target.* = next;
 }
 
+fn appendSanitizedTitle(
+    alloc: Allocator,
+    target: *?[:0]const u8,
+    title: ?[]const u8,
+) !void {
+    const sanitized = if (title) |value| try sanitizeTitleAlloc(alloc, value) else null;
+    defer if (sanitized) |value| alloc.free(value);
+    try appendOwnedString(alloc, target, if (sanitized) |value| value else title);
+}
+
 const ownedStringEquals = labels.ownedStringEquals;
 
 fn ownedBytesEquals(current: ?[]const u8, value: []const u8) bool {
@@ -21718,7 +21728,10 @@ pub const Surface = struct {
             );
         }
 
-        appendOwnedString(alloc, &self.title, restored.title) catch |err| {
+        // Undo snapshots are serialized terminal state and may predate the
+        // normal title setters. Keep the title-report cache on the same
+        // control-byte policy as live OSC and automation title updates.
+        appendSanitizedTitle(alloc, &self.title, restored.title) catch |err| {
             log.warn("undo snapshot title cache sync failed err={}", .{err});
         };
         appendOwnedString(alloc, &self.pwd, restored.pwd) catch |err| {
@@ -29379,6 +29392,15 @@ test "win32 title sanitizing strips control bytes from IPC and OSC titles" {
         defer alloc.free(out);
         try std.testing.expectEqualStrings("", out);
     }
+}
+
+test "win32 undo title cache sanitizes bytes before title reporting" {
+    const alloc = std.testing.allocator;
+    var title: ?[:0]const u8 = null;
+    defer if (title) |value| alloc.free(value);
+
+    try appendSanitizedTitle(alloc, &title, "safe\x1b]0;injected\x07title");
+    try std.testing.expectEqualStrings("safe]0;injectedtitle", title.?);
 }
 
 test "win32 IPC client authenticates the connected pipe descriptor" {
