@@ -297,13 +297,14 @@ certified. The separate
 headless CI regression gates below use their documented workload-specific
 baseline and tolerance rather than this interactive threshold file.
 
-The current interactive threshold evaluator compares each metric's median.
-That statistic is not yet approved for the literal `PRODUCT.md` cold-start
-wording, "under 300 ms": a median below 300 ms can still leave a material tail
-above the budget. The corrected N=5 baseline measured a 297 ms median and a
-313 ms p95. Cold start therefore remains inactive; activation must explicitly
-review the percentile (preferably p95 or stricter), its sample count, and a
-same-machine tolerance before the harness can claim the product budget.
+The current interactive threshold evaluator compares `frame_time_p95_ms` at
+p95 and every other metric at its median. The median statistic used for cold
+start is not yet approved for the literal `PRODUCT.md` wording, "under 300 ms":
+a median below 300 ms can still leave a material tail above the budget. The
+corrected N=5 baseline measured a 297 ms median and a 313 ms p95. Cold start
+therefore remains inactive; activation must explicitly review the percentile
+(preferably p95 or stricter), its sample count, and a same-machine tolerance
+before the harness can claim the product budget.
 
 ## Competitor comparability
 

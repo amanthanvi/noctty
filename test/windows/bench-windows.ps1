@@ -273,6 +273,8 @@ public static class NocttyBenchNative {
         byte[] buffer = new byte[65536];
         long written = 0;
         int column = 0;
+        byte[] pendingAltScreenSequence = null;
+        int pendingAltScreenOffset = 0;
         using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, buffer.Length, FileOptions.SequentialScan)) {
             while (written < length) {
                 int count = (int)Math.Min(buffer.Length, length - written);
@@ -280,11 +282,25 @@ public static class NocttyBenchNative {
                 while (offset < count) {
                     uint random = Next(ref state);
                     if (workload == "alt-screen") {
-                        string sequence = String.Format("\x1b[{0};{1}H{2}", 1 + random % (uint)rows, 1 + (random >> 8) % (uint)cols, (char)(33 + (random >> 16) % 94));
-                        byte[] bytes = Encoding.ASCII.GetBytes(sequence);
-                        int available = Math.Min(bytes.Length, count - offset);
-                        Array.Copy(bytes, 0, buffer, offset, available);
+                        if (pendingAltScreenSequence == null) {
+                            string sequence = String.Format("\x1b[{0};{1}H{2}", 1 + random % (uint)rows, 1 + (random >> 8) % (uint)cols, (char)(33 + (random >> 16) % 94));
+                            byte[] bytes = Encoding.ASCII.GetBytes(sequence);
+                            long remainingPayload = length - (written + offset);
+                            if (bytes.LongLength > remainingPayload) {
+                                while (offset < count) buffer[offset++] = (byte)' ';
+                                continue;
+                            }
+                            pendingAltScreenSequence = bytes;
+                            pendingAltScreenOffset = 0;
+                        }
+                        int available = Math.Min(pendingAltScreenSequence.Length - pendingAltScreenOffset, count - offset);
+                        Array.Copy(pendingAltScreenSequence, pendingAltScreenOffset, buffer, offset, available);
                         offset += available;
+                        pendingAltScreenOffset += available;
+                        if (pendingAltScreenOffset == pendingAltScreenSequence.Length) {
+                            pendingAltScreenSequence = null;
+                            pendingAltScreenOffset = 0;
+                        }
                     }
                     else if (workload == "scroll" && column >= cols - 1) {
                         buffer[offset++] = 10;

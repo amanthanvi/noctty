@@ -88,6 +88,13 @@ Invoke-ContractTable -Contracts @(
         Description = 'every interactive throughput workload uses a committed visible-marker endpoint'
     }
     @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
+        Pattern = '(?s)pendingAltScreenSequence\s*=\s*null.*?remainingPayload.*?bytes\.LongLength > remainingPayload.*?pendingAltScreenSequence\s*=\s*bytes.*?pendingAltScreenOffset.*?Array\.Copy\(pendingAltScreenSequence, pendingAltScreenOffset.*?pendingAltScreenOffset == pendingAltScreenSequence\.Length'
+        Kind = 'Text'
+        Description = 'alternate-screen payload generation carries complete CSI sequences across stream buffers'
+    }
+    @{
         File = $benchmarkSchema
         Content = { $benchmarkSchemaText }
         Pattern = '(?s)"metric": \{ "enum": \["throughput_mb_s", "scroll_mb_s"\] \}.*?"terminal_visible_marker_observer_included": \{\s*"const": true'
