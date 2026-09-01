@@ -789,7 +789,7 @@ fn scaled(logical: i32, dpi: u32) i32 {
 
 /// Place a label at the first cell in `cells`, clamping it inside the visible
 /// pixel viewport when its chip would otherwise extend beyond the right edge.
-pub fn labelPlacement(cells: CellRect, label_len: usize, metrics: PlacementMetrics) PixelRect {
+pub fn labelPlacement(cells: CellRect, label_len: usize, metrics: PlacementMetrics) ?PixelRect {
     const cell_width = @max(1, metrics.cell_width);
     const cell_height = @max(1, metrics.cell_height);
     const inset = scaled(metrics.logical_padding_x, metrics.dpi) +
@@ -797,6 +797,7 @@ pub fn labelPlacement(cells: CellRect, label_len: usize, metrics: PlacementMetri
     const label_cells: i32 = @intCast(@max(@as(usize, 1), label_len));
     const width = label_cells * cell_width + 2 * inset;
     const height = cell_height;
+    if (width > metrics.viewport_width or height > metrics.viewport_height) return null;
     const raw_left = metrics.padding_left + @as(i32, @intCast(cells.left)) * cell_width;
     const raw_top = metrics.padding_top + @as(i32, @intCast(cells.top)) * cell_height;
     const max_left = @max(0, metrics.viewport_width - width);
@@ -1149,7 +1150,7 @@ test "hints: label placement clamps right edge and scales DPI metrics" {
         .viewport_height = 80,
         .logical_padding_x = 2,
         .logical_stroke = 1,
-    });
+    }) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(PixelRect{ .left = 74, .top = 23, .right = 100, .bottom = 43 }, clamped);
 
     const dpi_cases = [_]struct { dpi: u32, right: i32 }{
@@ -1173,12 +1174,28 @@ test "hints: label placement clamps right edge and scales DPI metrics" {
             .dpi = dpi_case.dpi,
             .logical_padding_x = 2,
             .logical_stroke = 1,
-        });
+        }) orelse return error.TestUnexpectedResult;
         try testing.expectEqual(
             PixelRect{ .left = 30, .top = 28, .right = dpi_case.right, .bottom = 52 },
             scaled_rect,
         );
     }
+
+    try testing.expect(labelPlacement(.{
+        .left = 0,
+        .top = 0,
+        .right = 1,
+        .bottom = 1,
+    }, 2, .{
+        .cell_width = 10,
+        .cell_height = 20,
+        .padding_left = 0,
+        .padding_top = 0,
+        .viewport_width = 10,
+        .viewport_height = 20,
+        .logical_padding_x = 0,
+        .logical_stroke = 0,
+    }) == null);
 }
 
 test "hints: pathological custom pattern stays within the scan work budget" {

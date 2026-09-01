@@ -23291,6 +23291,16 @@ test "quick select label renders spaces visibly" {
     try std.testing.expectEqual(@as(u16, 'a'), quickSelectLabelDisplayUnit('a'));
 }
 
+fn quickSelectCanActivate(window_visible: bool, hwnd_visible: bool) bool {
+    return window_visible and hwnd_visible;
+}
+
+test "quick select activates only for a visible surface" {
+    try std.testing.expect(quickSelectCanActivate(true, true));
+    try std.testing.expect(!quickSelectCanActivate(false, true));
+    try std.testing.expect(!quickSelectCanActivate(true, false));
+}
+
 pub const Surface = struct {
     app: *App,
     shell_id: ?win32_shell.model.PaneId = null,
@@ -25055,7 +25065,11 @@ pub const Surface = struct {
         session.placement_dpi = dpi;
         var comparisons_remaining: usize = quick_select_placement_comparison_budget;
         for (session.scan.matches, 0..) |_, index| {
-            const raw = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse continue;
+            if (!session.labels.startsWith(index, session.prefix.typed())) continue;
+            const raw = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse {
+                session.placement_complete = false;
+                continue;
+            };
             const positioned = quickSelectPositionLabel(
                 raw,
                 client,
@@ -25099,7 +25113,7 @@ pub const Surface = struct {
             .dpi = dpi,
             .logical_padding_x = metrics.space_1,
             .logical_stroke = metrics.stroke_hairline,
-        });
+        }) orelse return null;
         return .{
             .left = placed.left,
             .top = placed.top,
@@ -25143,6 +25157,11 @@ pub const Surface = struct {
             self.closeQuickSelect(true);
             return true;
         }
+        const surface_hwnd = self.hwnd orelse return false;
+        if (!quickSelectCanActivate(
+            self.window_visible,
+            sys.IsWindowVisible(surface_hwnd) != 0,
+        )) return false;
         if (!self.core_initialized) return false;
 
         const alloc = self.app.core_app.alloc;
