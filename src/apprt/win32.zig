@@ -28932,7 +28932,11 @@ test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
     const dacl_text = if (sacl_idx) |idx| actual[dacl_idx..idx] else actual[dacl_idx..];
     const sacl_text = if (sacl_idx) |idx| actual[idx..] else "";
 
-    try std.testing.expect(std.mem.startsWith(u8, owner_text, "O:S-1-5-21-"));
+    // The exact token-user owner was proved above. Its rendered SID shape is
+    // environment-dependent (domain user, virtual account, or well-known
+    // service alias), so only pin the owner field itself here.
+    try std.testing.expect(owner_text.len > 2);
+    try std.testing.expect(std.mem.startsWith(u8, owner_text, "O:"));
     try std.testing.expect(std.mem.startsWith(u8, dacl_text, "D:P"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "(A;"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "("));
@@ -29346,6 +29350,14 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name_utf8);
     defer alloc.free(pipe_name);
 
+    const descriptor = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(descriptor);
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = windows.FALSE,
+    };
+
     const server = sys.CreateNamedPipeW(
         pipe_name.ptr,
         c.PIPE_ACCESS_DUPLEX,
@@ -29357,7 +29369,7 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
         1024,
         1024,
         0,
-        null,
+        &security_attributes,
     );
     try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(server);
