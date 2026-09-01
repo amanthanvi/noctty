@@ -2309,10 +2309,16 @@ fn resolvePathForOpening(
 /// Whether Windows can address `path`, which must be the output of
 /// `std.fs.path.resolve`.
 ///
-/// `<>"|?*` are never legal in a Windows path. `:` is legal only in a leading
-/// drive prefix and as the alternate-data-stream separator in the final
-/// component; anywhere else it names a directory Windows cannot address.
+/// `<>"|?*` and the C0 control characters are never legal in a Windows path.
+/// `:` is legal only in a leading drive prefix and as the alternate-data-stream
+/// separator in the final component; anywhere else it names a directory Windows
+/// cannot address.
 fn windowsPathIsRepresentable(path: []const u8) bool {
+    // C0 is rejected everywhere, including inside the extended-length prefix
+    // region, so screen for it before stepping over anything. DEL is not
+    // rejected: NT accepts it in a name, so it resolves like any other byte.
+    for (path) |c| if (c < 0x20) return false;
+
     var rest = path;
 
     // The extended-length prefix is legal and `std.fs.path.resolve` preserves
@@ -2355,6 +2361,13 @@ test "windowsPathIsRepresentable" {
     try testing.expect(windowsPathIsRepresentable("\\\\?\\UNC\\server\\share\\file"));
     try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\https:\\example.com"));
     try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\a*b"));
+
+    // C0 aborts in `faccessatW` exactly like a stray ':', wherever it appears.
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\bad\x01name\\leaf"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\leaf\x1f"));
+    try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\bad\x01name\\leaf"));
+    // DEL is legal in a Windows name, so it must keep resolving.
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\leaf\x7f"));
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
