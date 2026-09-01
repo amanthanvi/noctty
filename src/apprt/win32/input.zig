@@ -285,9 +285,40 @@ fn layoutHasAltGrMappings() bool {
 }
 
 fn altGrProbeProducesText(vk: UINT, state: *const [256]u8) bool {
+    return probeAltGrShiftStates(vk, state, altGrProbeProducesTextForState);
+}
+
+fn probeAltGrShiftStates(
+    vk: UINT,
+    state: *const [256]u8,
+    comptime probe: anytype,
+) bool {
+    if (probe(vk, state)) return true;
+
+    var shifted = state.*;
+    shifted[c.VK_SHIFT] = 0x80;
+    shifted[c.VK_LSHIFT] = 0x80;
+    return probe(vk, &shifted);
+}
+
+fn altGrProbeProducesTextForState(vk: UINT, state: *const [256]u8) bool {
     var utf16: [4]u16 = [_]u16{0} ** 4;
     const scan_code = sys.MapVirtualKeyW(vk, c.MAPVK_VK_TO_VSC);
     return translateKeyTextToUnicode(vk, scan_code, state, &utf16) != 0;
+}
+
+fn testingShiftOnlyAltGrProbe(_: UINT, state: *const [256]u8) bool {
+    return state[c.VK_SHIFT] & 0x80 != 0 and
+        state[c.VK_LSHIFT] & 0x80 != 0;
+}
+
+test "win32 AltGr layout probe checks shifted mappings" {
+    const state: [256]u8 = [_]u8{0} ** 256;
+    try std.testing.expect(probeAltGrShiftStates(
+        c.VK_A,
+        &state,
+        testingShiftOnlyAltGrProbe,
+    ));
 }
 
 /// Drop the Ctrl+Alt that Windows synthesizes for AltGr. Reporting it verbatim
