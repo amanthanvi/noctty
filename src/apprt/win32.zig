@@ -5711,7 +5711,7 @@ pub const App = struct {
             },
             .focus => |target| {
                 const surface = switch (target) {
-                    .surface_id => |id| self.findSurfaceById(id),
+                    .surface_id => |id| self.findLiveSurfaceById(id),
                     .window_id => |id| self.activeSurfaceForHost(id),
                     .focused => return error.InvalidAutomationTarget,
                 } orelse return error.AutomationTargetNotFound;
@@ -5719,7 +5719,7 @@ pub const App = struct {
             },
             .send_text => |value| {
                 const surface = switch (value.target) {
-                    .surface_id => |id| self.findSurfaceById(id),
+                    .surface_id => |id| self.findLiveSurfaceById(id),
                     .focused, .window_id => return error.InvalidAutomationTarget,
                 } orelse return error.AutomationTargetNotFound;
                 if (!automationTextAllowed(value.text)) return error.AutomationPolicyRefused;
@@ -6663,6 +6663,12 @@ pub const App = struct {
         }
 
         return null;
+    }
+
+    fn findLiveSurfaceById(self: *App, surface_id: u64) ?*Surface {
+        const surface = self.findSurfaceById(surface_id) orelse return null;
+        _ = self.findTabForSurface(surface) orelse return null;
+        return surface;
     }
 
     fn inheritHostWindowState(_: *App, destination: *Host, source: *Host) !void {
@@ -31636,6 +31642,7 @@ test "automation focus selects exact targets without fallback" {
     var surface_a: Surface = undefined;
     var surface_b: Surface = undefined;
     var surface_c: Surface = undefined;
+    var detached_surface: Surface = undefined;
     var session: TestSession = .{};
     try session.init(.{
         .core_app = &core_app,
@@ -31648,6 +31655,7 @@ test "automation focus selects exact targets without fallback" {
             .{ .storage = &surface_a, .host = &host_a },
             .{ .storage = &surface_b, .host = &host_a },
             .{ .storage = &surface_c, .host = &host_b },
+            .{ .storage = &detached_surface, .host = &host_a, .register = true },
         },
         .tabs = &.{
             .{ .host = &host_a, .surface = &surface_a, .id = 1 },
@@ -31659,6 +31667,10 @@ test "automation focus selects exact targets without fallback" {
     surface_a.core_surface.id = 101;
     surface_b.core_surface.id = 102;
     surface_c.core_surface.id = 103;
+    detached_surface.core_surface.id = 104;
+
+    try std.testing.expectEqual(@as(?*Surface, &surface_a), app.findLiveSurfaceById(101));
+    try std.testing.expect(app.findLiveSurfaceById(104) == null);
 
     try app.performAutomationCommand(.{ .focus = .{ .surface_id = 102 } });
     try std.testing.expectEqual(@as(usize, 1), host_a.active_tab);
@@ -31667,6 +31679,10 @@ test "automation focus selects exact targets without fallback" {
     try std.testing.expectError(
         error.AutomationTargetNotFound,
         app.performAutomationCommand(.{ .focus = .{ .surface_id = 999 } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .focus = .{ .surface_id = 104 } }),
     );
     try std.testing.expectError(
         error.InvalidAutomationTarget,
