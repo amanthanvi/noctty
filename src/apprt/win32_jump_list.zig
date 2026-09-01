@@ -12,6 +12,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const windows_shell = @import("../config/windows_shell.zig");
+const windows_ssh_hosts = @import("../config/windows_ssh_hosts.zig");
 const Command = @import("../config/command.zig").Command;
 const win32_aumid = @import("win32_aumid.zig");
 const persistence = @import("win32_session_persistence.zig");
@@ -755,6 +756,26 @@ pub fn buildWorkingDirectoryArgumentsAlloc(alloc: Allocator, path: []const u8) !
 }
 
 pub fn buildProfileArgumentsAlloc(alloc: Allocator, command: Command) ![]u8 {
+    return buildProfileArgumentsWithLaunchConfigAlloc(alloc, command, "home", false);
+}
+
+fn buildProfileArgumentsForProfileAlloc(
+    alloc: Allocator,
+    profile: *const windows_shell.Profile,
+) ![]u8 {
+    if (profile.kind != .ssh) return buildProfileArgumentsAlloc(alloc, profile.command);
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse
+        return error.UnsupportedProfileCommand;
+    return buildProfileArgumentsWithLaunchConfigAlloc(alloc, profile.command, home, true);
+}
+
+fn buildProfileArgumentsWithLaunchConfigAlloc(
+    alloc: Allocator,
+    command: Command,
+    working_directory: []const u8,
+    disable_shell_integration: bool,
+) ![]u8 {
     const argv = switch (command) {
         .direct => |value| value,
         .shell => return error.UnsupportedProfileCommand,
@@ -779,7 +800,17 @@ pub fn buildProfileArgumentsAlloc(alloc: Allocator, command: Command) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     // Match in-app profile launches: start at home instead of inheriting the caller's cwd.
-    try out.writer.writeAll("--working-directory=home ");
+    const working_directory_option = try std.fmt.allocPrint(
+        alloc,
+        "--working-directory={s}",
+        .{working_directory},
+    );
+    defer alloc.free(working_directory_option);
+    try Command.writeDirectArg(&out.writer, working_directory_option);
+    try out.writer.writeByte(' ');
+    if (disable_shell_integration) {
+        try out.writer.writeAll("--shell-integration=none ");
+    }
     try Command.writeDirectArg(&out.writer, command_option);
     try out.writer.writeByte(' ');
     const initial_command_option = try std.fmt.allocPrint(
@@ -956,7 +987,7 @@ pub const JumpList = struct {
                 self.alloc.free(title);
                 return err;
             };
-            const arguments = buildProfileArgumentsAlloc(self.alloc, profile.command) catch |err| switch (err) {
+            const arguments = buildProfileArgumentsForProfileAlloc(self.alloc, &profile) catch |err| switch (err) {
                 error.UnsupportedProfileCommand => {
                     self.alloc.free(key);
                     self.alloc.free(title);
@@ -1831,6 +1862,22 @@ test "jump_list argument builders preserve Windows argv boundaries" {
         initial_command_option["--initial-command=".len..],
     );
     try std.testing.expectEqualDeep(parsed_command, parsed_initial_command);
+
+    const ssh_profile = try buildProfileArgumentsWithLaunchConfigAlloc(
+        std.testing.allocator,
+        .{ .direct = &.{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" } },
+        "C:\\Users\\Aman Thanvi",
+        true,
+    );
+    defer std.testing.allocator.free(ssh_profile);
+    var ssh_argv = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, ssh_profile);
+    defer ssh_argv.deinit();
+    try std.testing.expectEqualStrings("--working-directory=C:\\Users\\Aman Thanvi", ssh_argv.next().?);
+    try std.testing.expectEqualStrings("--shell-integration=none", ssh_argv.next().?);
+    try std.testing.expect(std.mem.startsWith(u8, ssh_argv.next().?, "--command="));
+    try std.testing.expect(std.mem.startsWith(u8, ssh_argv.next().?, "--initial-command="));
+    try std.testing.expect(ssh_argv.next() == null);
+
     try std.testing.expectError(
         error.UnsupportedProfileCommand,
         buildProfileArgumentsAlloc(std.testing.allocator, .{ .shell = "pwsh.exe" }),

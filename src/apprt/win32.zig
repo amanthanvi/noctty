@@ -4803,14 +4803,17 @@ pub const App = struct {
                         self.config = config;
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
+                        var jump_list_profiles_pending = ssh_config_hosts_changed and self.jump_list != null;
+                        if (jump_list_profiles_pending) self.jump_list.?.updateProfiles(&.{});
                         for (self.hosts.items) |host| {
                             if (ssh_config_hosts_changed) {
                                 host.invalidateProfiles();
-                                if (host.overlay_mode == .profile) {
-                                    _ = host.reloadProfiles() catch |err| blk: {
+                                if (host.overlay_mode == .profile or jump_list_profiles_pending) {
+                                    const reloaded = host.reloadProfiles() catch |err| blk: {
                                         log.warn("SSH profile reload after config change failed err={}", .{err});
                                         break :blk false;
                                     };
+                                    if (reloaded or host.profiles != null) jump_list_profiles_pending = false;
                                 }
                             }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();

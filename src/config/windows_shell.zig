@@ -9,6 +9,7 @@ const log = std.log.scoped(.windows_shell);
 const windows = std.os.windows;
 
 const wsl_probe_timeout_ms: windows.DWORD = 1500;
+const wsl_list_timeout_ms: windows.DWORD = 1500;
 var wsl_probe_mutex: std.Thread.Mutex = .{};
 var wsl_probe_cache: ?bool = null;
 var ssh_missing_mutex: std.Thread.Mutex = .{};
@@ -911,8 +912,9 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     child.create_no_window = true;
 
     try child.spawn();
+    var child_running = true;
     errdefer {
-        _ = child.kill() catch {};
+        if (child_running) _ = child.kill() catch {};
     }
 
     const stdout = child.stdout orelse {
@@ -920,10 +922,30 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
         return error.Unexpected;
     };
 
+    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| switch (err) {
+        error.WaitTimeOut => {
+            log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
+                exe_path,
+                wsl_list_timeout_ms,
+            });
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            child_running = false;
+            return error.WslListTimeout;
+        },
+        else => {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            child_running = false;
+            return err;
+        },
+    };
+
     const raw_bytes = try stdout.readToEndAlloc(alloc, 64 * 1024);
     defer alloc.free(raw_bytes);
 
     _ = try child.wait();
+    child_running = false;
 
     // wsl.exe outputs UTF-16LE. Convert to UTF-8 before parsing.
     // bytesAsSlice returns align(1) u16, but utf16LeToUtf8Alloc needs align(2).
