@@ -1337,6 +1337,11 @@ pub fn ArgsIterator(comptime Iterator: type) type {
         /// values yet.
         index: usize = 0,
 
+        /// Once the conventional literal delimiter is observed, arguments
+        /// belong to the selected action and must no longer be filtered as
+        /// top-level +actions.
+        literal: bool = false,
+
         pub fn deinit(self: *Self) void {
             if (@hasDecl(Iterator, "deinit")) {
                 self.iterator.deinit();
@@ -1347,10 +1352,15 @@ pub fn ArgsIterator(comptime Iterator: type) type {
             const value = self.iterator.next() orelse return null;
             self.index += 1;
 
+            if (std.mem.eql(u8, value, "--")) {
+                self.literal = true;
+                return value;
+            }
+
             // We ignore any argument that starts with "+". This is used
             // to indicate actions and are expected to be parsed out before
             // this iterator is created.
-            if (value.len > 0 and value[0] == '+') return self.next();
+            if (!self.literal and value.len > 0 and value[0] == '+') return self.next();
 
             return value;
         }
@@ -1384,6 +1394,23 @@ test "ArgsIterator" {
     try testing.expectEqualStrings("--what", iter.next().?);
     try testing.expectEqualStrings("--a=42", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
+    try testing.expectEqual(@as(?[]const u8, null), iter.next());
+}
+
+test "ArgsIterator preserves plus-prefixed values after literal delimiter" {
+    const testing = std.testing;
+
+    const child = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "+send-text --surface-id=42 -- +focus",
+    );
+    const Iter = ArgsIterator(@TypeOf(child));
+    var iter: Iter = .{ .iterator = child };
+    defer iter.deinit();
+
+    try testing.expectEqualStrings("--surface-id=42", iter.next().?);
+    try testing.expectEqualStrings("--", iter.next().?);
+    try testing.expectEqualStrings("+focus", iter.next().?);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
 }
 
