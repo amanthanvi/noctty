@@ -108,7 +108,8 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     foreach ($relativePath in @(
         'noctty/noctty.com',
         'noctty/noctty.exe',
-        'noctty/ghostty-vt.dll'
+        'noctty/ghostty-vt.dll',
+        'noctty/noctty-terminal-handoff-proxy.dll'
     )) {
         [void](Assert-ReleaseSignature `
             -Path (Join-Path $extractDirectory $relativePath) `

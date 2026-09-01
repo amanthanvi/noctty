@@ -4,7 +4,7 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-12, against current fork HEAD.
+Last updated: 2026-08-21, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -114,6 +114,15 @@ Win32-validated VT protocol coverage is tracked in
   environment, and config values by default.
 
 ## Experimental / partial
+
+### Default-terminal handoff
+
+Per-user registration and exact selection restore are implemented through
+`+register-default-terminal` and `+unregister-default-terminal`, using Windows
+Terminal 1.24 or newer OpenConsole for console delegation. The runtime handoff
+is not functional yet: live validation reaches noctty, but the adopted session
+closes before a visible window appears. Do not select noctty as the normal
+default terminal yet. Details in [windows.md](windows.md#default-terminal).
 
 ### Windows UI Automation (accessibility)
 

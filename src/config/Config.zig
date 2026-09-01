@@ -4396,6 +4396,12 @@ pub fn parseManuallyHook(
     arg: []const u8,
     iter: anytype,
 ) !bool {
+    if (builtin.os.tag == .windows and std.ascii.eqlIgnoreCase(arg, "-Embedding")) {
+        // COM's SCM appends this switch for local-server activation. It is a
+        // process-mode marker, not a user configuration field.
+        return false;
+    }
+
     if (std.mem.eql(u8, arg, "-e")) {
         // Add the special -e marker. This prevents:
         // (1) config-file from adding args to the end (see #2908)
@@ -4449,6 +4455,17 @@ pub fn parseManuallyHook(
 
     // If we didn't find a special case, continue parsing normally
     return true;
+}
+
+test "handoff embedding switch is consumed by Windows config parsing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var cfg = try Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, "-Embedding");
+    defer iter.deinit();
+    try cli.args.parse(Config, std.testing.allocator, &cfg, &iter);
+    try std.testing.expect(cfg._diagnostics.empty());
+    try std.testing.expectEqual(@as(usize, 0), cfg._replay_steps.items.len);
 }
 
 fn compatGtkTabsLocation(

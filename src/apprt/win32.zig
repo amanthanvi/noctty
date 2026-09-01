@@ -17,6 +17,7 @@ const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
+const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
@@ -61,6 +62,7 @@ const win32_compositor = @import("win32_compositor.zig");
 const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
+const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
@@ -356,6 +358,19 @@ fn windowData(comptime T: type, hwnd: HWND) ?*T {
 }
 
 const RTL_OSVERSIONINFOW = sys.RTL_OSVERSIONINFOW;
+
+/// True when the calling thread is in a single-threaded apartment.
+///
+/// The terminal handoff depends on this: the STA stub marshals the returned
+/// system handles to the caller before returning to the message pump, which is
+/// what makes it safe to close noctty's copies when the queued handoff message
+/// is later dispatched on this same thread.
+fn currentApartmentIsSta() bool {
+    var apartment: sys.APTTYPE = sys.APTTYPE_CURRENT;
+    var qualifier: sys.APTTYPEQUALIFIER = 0;
+    if (sys.CoGetApartmentType(&apartment, &qualifier) < 0) return false;
+    return apartment == sys.APTTYPE_STA or apartment == sys.APTTYPE_MAINSTA;
+}
 
 /// Probe the Windows build number once; cache on `App.os_build`. Build
 /// 22000+ is Win11 (integrated titlebar / Snap Layouts); 22621+ supports
@@ -2373,6 +2388,8 @@ pub const App = struct {
     global_hotkeys_dirty: bool = false,
     ui_thread_id: DWORD = 0,
     quit_timer_id: ?UINT_PTR = null,
+    terminal_handoff_idle_timer_id: ?UINT_PTR = null,
+    terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
@@ -2466,6 +2483,10 @@ pub const App = struct {
     pending_toast_activation: ?win32_toast_activation.ActivationTarget = null,
     /// Ephemeral recovery launch: default config, no saved workspace restore.
     safe_mode: bool = false,
+    /// COM SCM activation for the Windows default-terminal handoff server.
+    /// This process owns adopted sessions directly; raw HANDLE values are
+    /// never forwarded through the serialized single-instance IPC channel.
+    embedding_mode: bool = false,
     recovery_startup: RecoveryStartup = .{},
     /// Top-level shell composition only. Terminal child HWNDs retain their
     /// existing WGL/SwapBuffers ownership regardless of this backend state.
@@ -2480,7 +2501,8 @@ pub const App = struct {
         core_app: *CoreApp,
         opts: struct { safe_mode: bool = false },
     ) !void {
-        const recovery_startup = beginRecoveryStartup(core_app.alloc);
+        const embedding_mode = win32_terminal_handoff.isEmbeddingProcess(core_app.alloc);
+        const recovery_startup = if (embedding_mode) RecoveryStartup{} else beginRecoveryStartup(core_app.alloc);
         const safe_mode = opts.safe_mode or recovery_startup.decision == .safe_mode;
         self.* = .{
             .core_app = core_app,
@@ -2491,6 +2513,7 @@ pub const App = struct {
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),
             .safe_mode = safe_mode,
+            .embedding_mode = embedding_mode,
             .recovery_startup = recovery_startup,
             .hinstance = sys.GetModuleHandleW(null),
             .launcher_profile_hint = detectDefaultProfileHint(core_app.alloc),
@@ -2646,7 +2669,7 @@ pub const App = struct {
 
         try self.ensureWindowClass();
 
-        if (!self.safe_mode and try self.tryForwardStartupToExistingInstance()) {
+        if (!self.embedding_mode and !self.safe_mode and try self.tryForwardStartupToExistingInstance()) {
             // Forwarding is a successful startup outcome for this process.
             // Mark it ready so repeated new-window launches cannot accumulate
             // false crash-loop evidence and trigger automatic safe mode.
@@ -2661,16 +2684,39 @@ pub const App = struct {
         defer {
             self.stopUndoPruneTimer();
             self.stopQuitTimer();
+            self.stopTerminalHandoffIdleTimer();
             drainDeferredUiaDisconnects(ui_thread_id);
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             self.running = false;
         }
 
+        var terminal_handoff_server: ?win32_terminal_handoff.Server = null;
+        defer if (terminal_handoff_server) |*server| {
+            self.terminal_handoff_server = null;
+            _ = server.revoke();
+            server.drainPending();
+        };
+        if (self.embedding_mode) {
+            if (!self.com_initialized) return error.ComApartmentUnavailable;
+            terminal_handoff_server = win32_terminal_handoff.Server.init(
+                self.core_app.alloc,
+                self,
+                queueTerminalHandoff,
+            );
+            // Publish before registering: once the class object is live a
+            // client can activate it, and the session queue has to be
+            // reachable from the very first handoff.
+            self.terminal_handoff_server = &terminal_handoff_server.?;
+            try terminal_handoff_server.?.register();
+            self.startTerminalHandoffIdleTimer();
+        }
+
         // Safe mode is an isolated recovery process. It neither forwards into
         // the normal instance nor competes for that instance's IPC endpoint.
-        if (!self.safe_mode) try self.startIpcServer();
+        if (!self.embedding_mode and !self.safe_mode) try self.startIpcServer();
 
-        if (self.config.@"launch-layout") |name| {
+        if (!self.embedding_mode and self.config.@"launch-layout" != null) {
+            const name = self.config.@"launch-layout".?;
             // An explicit CLI layout request is honored even when
             // `initial-window` is disabled, because the user asked for this
             // exact window. It is also one-shot: later ordinary new-window
@@ -2689,7 +2735,7 @@ pub const App = struct {
                     host.setBanner(.err, "Layout could not be opened.") catch {};
                 };
             }
-        } else if (self.config.@"initial-window") {
+        } else if (!self.embedding_mode and self.config.@"initial-window") {
             const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
@@ -2697,18 +2743,18 @@ pub const App = struct {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
             }
-        } else {
+        } else if (!self.embedding_mode) {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
-        self.scheduleGlobalHotkeySync();
-        if (self.global_hotkeys_dirty and self.windows.items.len == 0) {
+        if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
+        if (!self.embedding_mode and self.global_hotkeys_dirty and self.windows.items.len == 0) {
             self.global_hotkeys_dirty = false;
             self.syncGlobalHotkeys() catch |err| {
                 log.err("failed to sync win32 global hotkeys err={}", .{err});
             };
         }
-        if (self.windows.items.len == 0) self.startQuitTimer();
+        if (!self.embedding_mode and self.windows.items.len == 0) self.startQuitTimer();
 
         self.markRecoveryReady();
 
@@ -2754,6 +2800,56 @@ pub const App = struct {
                 continue;
             }
 
+            if (msg.message == c.WM_WINHOSTTY_TERMINAL_HANDOFF) {
+                // The message carries an opaque identifier, never a pointer.
+                // Any process on this desktop at our integrity level can post
+                // into this loop, and a pointer taken from the message would be
+                // an address of the sender's choosing that we dereference,
+                // deinitialize and free. Identifiers are resolved against the
+                // server's own table and anything unrecognized is dropped.
+                const server = self.terminal_handoff_server orelse {
+                    log.warn("terminal handoff message arrived without a handoff server", .{});
+                    continue;
+                };
+                const pending = server.takePending(terminalHandoffId(msg.lParam)) orelse {
+                    log.warn("ignoring terminal handoff message with an unknown session id", .{});
+                    continue;
+                };
+                defer {
+                    pending.deinit();
+                    self.core_app.alloc.destroy(pending);
+                }
+                self.stopTerminalHandoffIdleTimer();
+                // This same-STA message runs only after the COM stub has
+                // marshaled the returned system handles into OpenConsole.
+                //
+                // That ordering is the entire reason closing here is safe, and
+                // it holds only while the handoff class lives in an STA. Under
+                // an MTA the stub can still be marshaling when this runs, and
+                // closing would break every console launch in a way that looks
+                // like an unrelated pipe bug. Refuse to close rather than
+                // silently corrupt the handoff.
+                if (currentApartmentIsSta()) {
+                    pending.closeMarshaledPipeCopies();
+                } else {
+                    log.err("terminal handoff dispatched outside an STA; leaving marshaled pipe copies open", .{});
+                }
+                self.createAdoptedWindow(pending) catch |err| {
+                    log.err("terminal handoff surface creation failed err={}", .{err});
+                    if (self.embedding_mode and self.windows.items.len == 0) {
+                        if (self.exitEmbeddingServerIfIdle()) {
+                            self.running = false;
+                            sys.PostQuitMessage(1);
+                        } else {
+                            self.startTerminalHandoffIdleTimer();
+                        }
+                    }
+                };
+                try self.core_app.tick(self);
+                if (!self.running and self.windows.items.len == 0) break;
+                continue;
+            }
+
             if (msg.message == c.WM_WINHOSTTY_UIA_DISCONNECT) {
                 if (msg.lParam == 0) {
                     log.warn("win32 UIA deferred disconnect message had no context", .{});
@@ -2765,6 +2861,21 @@ pub const App = struct {
             }
 
             if (msg.message == c.WM_TIMER) {
+                if (self.terminal_handoff_idle_timer_id) |timer_id| {
+                    if (msg.wParam == timer_id) {
+                        self.stopTerminalHandoffIdleTimer();
+                        if (self.embedding_mode and self.windows.items.len == 0) {
+                            if (self.exitEmbeddingServerIfIdle()) {
+                                log.info("terminal handoff server idle timeout", .{});
+                                self.running = false;
+                                sys.PostQuitMessage(0);
+                            } else {
+                                self.startTerminalHandoffIdleTimer();
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
                         self.stopQuitTimer();
@@ -2819,6 +2930,7 @@ pub const App = struct {
     pub fn terminate(self: *App) void {
         self.stopUndoPruneTimer();
         self.stopQuitTimer();
+        self.stopTerminalHandoffIdleTimer();
         self.update_check_running.store(false, .release);
         if (self.update_notice) |*notice| {
             notice.deinit(self.core_app.alloc);
@@ -2922,6 +3034,7 @@ pub const App = struct {
     }
 
     fn sessionRestoreEligible(self: *const App) bool {
+        if (self.embedding_mode) return false;
         return sessionRestorePolicyAllows(
             self.safe_mode,
             self.config.@"window-save-state",
@@ -4272,6 +4385,53 @@ pub const App = struct {
         }
     }
 
+    fn startTerminalHandoffIdleTimer(self: *App) void {
+        self.stopTerminalHandoffIdleTimer();
+        const timer_id = sys.SetTimer(null, 0, 5000, null);
+        if (timer_id == 0) {
+            log.err("failed to start terminal handoff idle timer err={}", .{windows.kernel32.GetLastError()});
+            return;
+        }
+        self.terminal_handoff_idle_timer_id = timer_id;
+    }
+
+    fn stopTerminalHandoffIdleTimer(self: *App) void {
+        if (self.terminal_handoff_idle_timer_id) |timer_id| {
+            _ = sys.KillTimer(null, timer_id);
+            self.terminal_handoff_idle_timer_id = null;
+        }
+    }
+
+    /// Decide whether the embedding-mode server may exit, and close the race
+    /// against an in-flight activation while deciding.
+    ///
+    /// Returning true means the class object has been revoked and no client
+    /// can still be mid-activation, so the caller may quit. Returning false
+    /// means a client holds the class object or a handoff is already queued;
+    /// the class object is left registered (or re-registered) and the caller
+    /// must keep running.
+    fn exitEmbeddingServerIfIdle(self: *App) bool {
+        const server = self.terminal_handoff_server orelse return true;
+
+        // A client between CoGetClassObject and CreateInstance holds a
+        // LockServer reference, and a client that created an ITerminalHandoff3
+        // without locking still owns a live object. Exiting under either one
+        // would fail its activation.
+        if (server.isBusy()) return false;
+
+        // Revoke first, then re-check. After the revoke no new activation can
+        // arrive, so anything observed now is everything that can exist.
+        if (!server.revoke()) return false;
+        if (!server.isBusy()) return true;
+
+        // Something landed in the gap between the check and the revoke. Take
+        // the class object back and keep serving.
+        server.register() catch |err| {
+            log.err("failed to re-register terminal handoff class object err={}", .{err});
+        };
+        return false;
+    }
+
     fn stopUndoPruneTimer(self: *App) void {
         if (self.undo_prune_timer_id) |timer_id| {
             _ = sys.KillTimer(null, timer_id);
@@ -5533,6 +5693,19 @@ pub const App = struct {
         _ = try self.createWindowSurface(&self.config, title, .{});
     }
 
+    fn createAdoptedWindow(
+        self: *App,
+        pending: *win32_terminal_handoff.PendingSession,
+    ) !void {
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .window);
+        defer config.deinit();
+        const alloc = config._arena.?.allocator();
+        config.title = try alloc.dupeZ(u8, pending.title);
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, pending.title);
+        defer self.core_app.alloc.free(title_w);
+        _ = try self.createWindowSurface(&config, title_w.ptr, .{ .adopted_session = pending });
+    }
+
     fn refreshSystemWheelSettings(self: *App) void {
         self.wheel_settings = .{
             .lines = readSystemWheelSetting(c.SPI_GETWHEELSCROLLLINES, self.wheel_settings.lines),
@@ -6506,7 +6679,18 @@ pub const App = struct {
             }
         }
 
-        if (self.windows.items.len == 0 and self.running) self.startQuitTimer();
+        if (self.windows.items.len == 0 and self.running) {
+            if (self.embedding_mode) {
+                if (self.exitEmbeddingServerIfIdle()) {
+                    self.running = false;
+                    sys.PostQuitMessage(0);
+                } else {
+                    self.startTerminalHandoffIdleTimer();
+                }
+            } else {
+                self.startQuitTimer();
+            }
+        }
     }
 
     fn gotoWindow(self: *App, target: apprt.Target, direction: apprt.action.GotoWindow) !bool {
@@ -7838,6 +8022,34 @@ fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckComple
         completion.deinit();
         completion.alloc.destroy(completion);
     }
+}
+
+/// Read a handoff session identifier out of a message parameter. The value is
+/// attacker-controlled, so it is only ever used as a lookup key.
+fn terminalHandoffId(lparam: LPARAM) win32_terminal_handoff.PendingId {
+    return @bitCast(lparam);
+}
+
+fn queueTerminalHandoff(ctx: *anyopaque, pending: *win32_terminal_handoff.PendingSession) bool {
+    const self: *App = @ptrCast(@alignCast(ctx));
+    const ui_thread_id = @atomicLoad(DWORD, &self.ui_thread_id, .acquire);
+    if (ui_thread_id == 0) return false;
+    const server = self.terminal_handoff_server orelse return false;
+
+    // The session stays in process-owned state; the message carries only the
+    // identifier that stands for it.
+    const id = server.queuePending(pending) catch return false;
+    if (sys.PostThreadMessageW(
+        ui_thread_id,
+        c.WM_WINHOSTTY_TERMINAL_HANDOFF,
+        0,
+        @as(LPARAM, @bitCast(id)),
+    ) != 0) return true;
+
+    // Nothing will ever claim the identifier, so hand ownership back to the
+    // caller rather than leaking the session into the table.
+    _ = server.takePending(id);
+    return false;
 }
 
 fn winrtToastActivationCallback(ctx: *anyopaque, launch: []const u8) void {
@@ -16638,6 +16850,7 @@ const SurfaceInitOptions = struct {
     /// (`quick-terminal-keyboard-interactivity = none`) on first
     /// toggle-on.
     passive_show: bool = false,
+    adopted_session: ?*win32_terminal_handoff.PendingSession = null,
 };
 
 const SplitSurfaceAttachRollback = struct {
@@ -20372,7 +20585,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
         // animation is active; stops as soon as the scheduler empties.
         // Separate from the App-level quit timer, which uses
-        // `SetTimer(null, …)` on the thread queue.
+        // `sys.SetTimer(null, …)` on the thread queue.
         c.WM_TIMER => {
             if (wParam == c.TWEEN_TIMER_ID) {
                 if (host) |v| v.tickTweens();
@@ -21905,6 +22118,7 @@ pub const Surface = struct {
     hglrc: HGLRC = null,
     core_surface: CoreSurface = undefined,
     core_initialized: bool = false,
+    adopted_session: ?ptypkg.AdoptedSession = null,
     destroy_on_wm_destroy: bool = false,
     content_scale: apprt.ContentScale = .{ .x = 1, .y = 1 },
     size: apprt.SurfaceSize = .{ .width = 800, .height = 600 },
@@ -22219,6 +22433,7 @@ pub const Surface = struct {
         self.* = .{
             .app = app,
             .host = host,
+            .adopted_session = if (opts.adopted_session) |pending| pending.takeAdopted() else null,
             .quick_terminal = opts.quick_terminal,
             .host_id = host.id,
             .host_active = true,
@@ -22233,6 +22448,11 @@ pub const Surface = struct {
                 undefined, // surface_ctx — fixed up below after the address stabilises
                 &surfaceDropPayloadCallback,
             ),
+        };
+        errdefer if (self.adopted_session) |*session| {
+            session.pty.deinit();
+            _ = windows.CloseHandle(session.client_process);
+            self.adopted_session = null;
         };
         // The DropTarget's surface_ctx must be `self`, but we can't
         // initialise it until `self.*` has been fully assigned above
@@ -22438,6 +22658,12 @@ pub const Surface = struct {
 
     pub fn core(self: *Surface) *CoreSurface {
         return &self.core_surface;
+    }
+
+    pub fn takeAdoptedSession(self: *Surface) ?ptypkg.AdoptedSession {
+        const result = self.adopted_session;
+        self.adopted_session = null;
+        return result;
     }
 
     pub fn ref(self: *Surface, alloc: Allocator) !*Surface {

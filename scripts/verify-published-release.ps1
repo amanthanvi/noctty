@@ -127,7 +127,12 @@ try {
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
-        foreach ($relativePath in @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')) {
+        foreach ($relativePath in @(
+            'noctty/noctty.com',
+            'noctty/noctty.exe',
+            'noctty/ghostty-vt.dll',
+            'noctty/noctty-terminal-handoff-proxy.dll'
+        )) {
             $binaryPath = Join-Path $extractDirectory $relativePath
             if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
                 throw "$portableName is missing signed binary $relativePath."
@@ -140,8 +145,8 @@ try {
         }
     }
 
-    if ($signatureEvidence.Count -ne 8) {
-        throw "Published release must contain exactly eight verified PE signatures; found $($signatureEvidence.Count)."
+    if ($signatureEvidence.Count -ne 10) {
+        throw "Published release must contain exactly ten verified PE signatures; found $($signatureEvidence.Count)."
     }
 
     $thumbprints = @($signatureEvidence | ForEach-Object { $_.Thumbprint } | Sort-Object -Unique)
