@@ -1405,7 +1405,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseDefenderScanner
         Content = $releaseDefenderScannerText
         ExpectedSha256 =
-            '779a23fb4419a096a1bb46224954097fbf8585ead368e3f1e49ce5c736262404'
+            'bf322937fcadd765ed7f32358bb496c38edc6f081a87da97fdbfb4e2e0e2b3e8'
         CriticalStatement = '& $scanner -SignatureUpdate'
     }
     [pscustomobject] @{
@@ -1838,7 +1838,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseDefenderScanner
         Content = { $releaseDefenderScannerText }
-        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
+        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Text'
         Description = 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed'
     }
