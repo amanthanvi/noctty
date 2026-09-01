@@ -21,22 +21,6 @@ if (-not (Test-Path $exePath)) {
     throw "Missing built executable: $exePath. Run `zig build -Demit-exe=true` first."
 }
 
-function Find-DetachedCliResourcesDir {
-    $artifactsDir = Join-Path $repoRoot 'dist\artifacts'
-    if (-not (Test-Path $artifactsDir)) {
-        return $null
-    }
-
-    return Get-ChildItem $artifactsDir -Directory |
-        ForEach-Object { Join-Path $_.FullName 'noctty\share\ghostty' } |
-        Where-Object { Test-Path (Join-Path $_ 'themes') } |
-        Select-Object -First 1
-}
-
-if (-not $ResourcesDir -and $Action -eq '+list-themes') {
-    $ResourcesDir = Find-DetachedCliResourcesDir
-}
-
 if (-not ('DetachedCliActionNative' -as [type])) {
     Add-Type @"
 using System;
@@ -70,29 +54,37 @@ function Get-DetachedCliWindowTitle {
     return $builder.ToString()
 }
 
-$oldResourcesDir = $env:GHOSTTY_RESOURCES_DIR
-$hadResourcesDir = $null -ne (Get-Item Env:GHOSTTY_RESOURCES_DIR -ErrorAction SilentlyContinue)
+# The process under test has to be genuinely console-less. CLI actions now
+# attach to the console of the process that launched them, so `Start-Process`
+# from a shell that has a console would hand the action a working console and
+# it would succeed instead of surfacing the dialog this harness exists to check.
+# WMI creates the process from the console-less WMI provider, which is the only
+# reliable way to reproduce an Explorer/scheduled-task style launch from a
+# script that is itself running in a console.
+#
+# What this asserts is that a console-less CLI action surfaces the failure
+# dialog and exits 1 instead of failing silently. That holds for every action,
+# including +list-themes, because the action fails on output long before it
+# needs its resources -- which is why $ResourcesDir is accepted but not used.
+# It is retained only because package-portable-cli.ps1 passes it and that script
+# is pinned by a frozen verification baseline.
+$null = $ResourcesDir
 
-if ($ResourcesDir) {
-    $env:GHOSTTY_RESOURCES_DIR = $ResourcesDir
+$quotedExe = '"' + $exePath + '"'
+$quotedArgs = @($ExtraArgs | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    })
+$commandLine = (@($quotedExe, $Action) + $quotedArgs) -join ' '
+$creation = Invoke-CimMethod `
+    -ClassName Win32_Process `
+    -MethodName Create `
+    -Arguments @{ CommandLine = $commandLine }
+
+if ($creation.ReturnValue -ne 0) {
+    throw "Console-less launch of the CLI action failed (Win32_Process::Create returned $($creation.ReturnValue))."
 }
 
-try {
-    $argumentList = @($Action) + $ExtraArgs
-    $process = Start-Process `
-        -FilePath $exePath `
-        -ArgumentList $argumentList `
-        -WindowStyle Hidden `
-        -PassThru
-}
-finally {
-    if ($hadResourcesDir) {
-        $env:GHOSTTY_RESOURCES_DIR = $oldResourcesDir
-    }
-    else {
-        Remove-Item Env:GHOSTTY_RESOURCES_DIR -ErrorAction SilentlyContinue
-    }
-}
+$process = Get-Process -Id $creation.ProcessId -ErrorAction Stop
 $processHandle = $process.Handle
 
 $dialogHandle = [IntPtr]::Zero

@@ -2805,6 +2805,46 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     try self.queueRender();
 }
 
+fn applyKeyRemaps(
+    remaps: *const input.KeyRemapSet,
+    event_orig: input.KeyEvent,
+) input.KeyEvent {
+    var event = event_orig;
+    event.mods = remaps.apply(event_orig.mods);
+    if (event_orig.binding_mods) |binding_mods| {
+        event.binding_mods = remaps.apply(binding_mods);
+    }
+    return event;
+}
+
+test "key remaps apply to binding-only modifiers" {
+    const testing = std.testing;
+
+    var remaps: input.KeyRemapSet = .empty;
+    defer remaps.deinit(testing.allocator);
+    try remaps.parse(testing.allocator, "right_alt=super");
+    remaps.finalize();
+
+    const raw_alt_gr: input.Mods = .{
+        .ctrl = true,
+        .alt = true,
+        .sides = .{ .ctrl = .left, .alt = .right },
+    };
+    const event = applyKeyRemaps(&remaps, .{
+        .key = .key_a,
+        .mods = .{},
+        .binding_mods = raw_alt_gr,
+        .unshifted_codepoint = 'a',
+    });
+
+    try testing.expect(event.mods.empty());
+    try testing.expectEqual(input.Mods{
+        .ctrl = true,
+        .super = true,
+        .sides = .{ .ctrl = .left, .super = .left },
+    }, event.bindingMods());
+}
+
 /// Returns true if the given key event would trigger a keybinding
 /// if it were to be processed. This is useful for determining if
 /// a key event should be sent to the terminal or not.
@@ -2818,10 +2858,7 @@ pub fn keyEventIsBinding(
     event_orig: input.KeyEvent,
 ) ?input.Binding.Flags {
     // Apply key remappings for consistency with keyCallback
-    var event = event_orig;
-    if (self.config.key_remaps.isRemapped(event_orig.mods)) {
-        event.mods = self.config.key_remaps.apply(event_orig.mods);
-    }
+    const event = applyKeyRemaps(&self.config.key_remaps, event_orig);
 
     switch (event.action) {
         .release => return null,
@@ -2865,10 +2902,7 @@ pub fn keyCallback(
 
     // Apply key remappings to transform modifiers before any processing.
     // This allows users to remap modifier keys at the app level.
-    var event = event_orig;
-    if (self.config.key_remaps.isRemapped(event_orig.mods)) {
-        event.mods = self.config.key_remaps.apply(event_orig.mods);
-    }
+    const event = applyKeyRemaps(&self.config.key_remaps, event_orig);
 
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();

@@ -2624,7 +2624,7 @@ pub const Set = struct {
     ///
     pub fn getEvent(self: *const Set, event: KeyEvent) ?Entry {
         var trigger: Trigger = .{
-            .mods = event.mods.binding(),
+            .mods = event.bindingMods().binding(),
             .key = .{ .physical = event.key },
         };
         if (self.get(trigger)) |v| return v;
@@ -4274,6 +4274,24 @@ test "set: getEvent physical" {
         });
         try testing.expect(action == null);
     }
+}
+
+test "set: getEvent honors binding-only modifiers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "ctrl+alt+a=new_window");
+
+    const entry = s.getEvent(.{
+        .key = .key_a,
+        .mods = .{},
+        .binding_mods = .{ .ctrl = true, .alt = true },
+        .unshifted_codepoint = 'a',
+    }).?.value_ptr.*.leaf;
+    try testing.expect(entry.action == .new_window);
 }
 
 test "set: getEvent codepoint" {

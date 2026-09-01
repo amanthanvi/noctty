@@ -152,6 +152,7 @@ pub const MOD_CONTROL = 0x0002;
 pub const MOD_SHIFT = 0x0004;
 pub const MOD_WIN = 0x0008;
 pub const TO_UNICODE_NO_STATE_CHANGE: UINT = 0x0004;
+pub const MAPVK_VK_TO_VSC: UINT = 0;
 pub const SWP_NOSIZE = 0x0001;
 pub const SWP_NOMOVE = 0x0002;
 pub const SWP_NOZORDER = 0x0004;
@@ -373,6 +374,7 @@ pub const VK_OEM_4 = 0xDB;
 pub const VK_OEM_5 = 0xDC;
 pub const VK_OEM_6 = 0xDD;
 pub const VK_OEM_7 = 0xDE;
+pub const VK_OEM_102 = 0xE2;
 pub const VK_PACKET = 0xE7;
 
 pub const KF_EXTENDED = 1 << 24;

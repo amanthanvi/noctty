@@ -219,6 +219,33 @@ can be derived as
 `(swap_buffers_count - 1) * 1000 / (last_swap_at_ms - first_swap_at_ms)`
 when at least two swaps are present and the time difference is positive.
 
+## Keyboard
+
+Key events are translated with the active Windows keyboard layout, so the
+terminal receives the text a key produces on that layout rather than a
+US-layout approximation. Control chords are encoded from the *unmodified*
+layout text: `ctrl+c` sends `0x03`, and combinations that have no C0 byte
+(`ctrl+,`, `ctrl+.`, `ctrl+m`, `ctrl+i`, `ctrl+[`) send the fixterms
+`CSI <codepoint>;5u` form that editors such as Neovim and Helix understand.
+
+AltGr is treated as a layout shift, not as a Ctrl+Alt chord. Windows
+synthesizes left Ctrl plus right Alt whenever AltGr is pressed, and noctty
+drops that synthetic pair so `AltGr+<key>` produces the layout character (or
+nothing) instead of a Ctrl+Alt terminal sequence.
+
+That collapse only applies on layouts that actually define AltGr mappings,
+which are the only layouts where Windows injects the synthetic Ctrl. On a
+layout without an AltGr — plain US, for example — left Ctrl plus right Alt can
+only be a chord you pressed, and it is passed through as one. On a layout that
+does have an AltGr, the two are not distinguishable from the modifier state
+noctty reads, so left Ctrl plus right Alt is always read as AltGr there; use
+the left Alt key or the right Ctrl key for a deliberate Ctrl+Alt chord.
+
+Console applications reached through ConPTY see these sequences through
+conhost's own decoder, which does not translate every form back into a console
+key record. `[Console]::ReadKey()` therefore reports less than the terminal
+actually sent; applications that read the byte stream directly see everything.
+
 ## Windows, tabs, and splits
 
 noctty uses a native Win32 host window with:
@@ -429,3 +456,8 @@ current `zig-out\bin` binary rather than an older Scoop shim or a
 manually added install directory earlier on `PATH`. On Windows, a
 `noctty.com` executable may be selected before `noctty.exe` for CLI
 invocations, because `.com` ranks before `.exe` in `PATHEXT`.
+
+`noctty.com` is the console launcher and remains the recommended way to run
+CLI actions. Invoking `noctty.exe +<action>` directly also works: the
+Windows-subsystem binary attaches to the console it was launched from before
+running the action, and leaves redirected output alone.
