@@ -228,6 +228,7 @@ fn runArgs(
 
 fn hasLaunchLayoutArgument(arguments: []const [:0]const u8) bool {
     for (arguments) |arg| {
+        if (std.mem.eql(u8, arg, "-e")) break;
         if (std.mem.startsWith(u8, arg, "--launch-layout=")) return true;
     }
     return false;
@@ -240,4 +241,14 @@ test "new-window layout request does not synthesize working directory" {
         "--launch-layout=demo",
     }));
     try std.testing.expect(!hasLaunchLayoutArgument(&.{"--title=demo"}));
+    try std.testing.expect(!hasLaunchLayoutArgument(&.{
+        "-e",
+        "tool.exe",
+        "--launch-layout=child-option",
+    }));
+    try std.testing.expect(hasLaunchLayoutArgument(&.{
+        "--launch-layout=demo",
+        "-e",
+        "tool.exe",
+    }));
 }

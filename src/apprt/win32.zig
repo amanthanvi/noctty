@@ -1406,6 +1406,10 @@ fn scanLaunchLayoutIpcArgument(
     const prefix = "--launch-layout=";
     var name: ?[]const u8 = null;
     for (argv) |arg| {
+        // Config parsing treats everything after -e as command payload.
+        // Match that boundary so a child command may legitimately receive an
+        // argument that looks like a Noctty layout option.
+        if (std.mem.eql(u8, arg, "-e")) break;
         if (!std.mem.startsWith(u8, arg, prefix)) continue;
         if (name != null) return error.MixedLaunchLayoutArguments;
         name = arg[prefix.len..];
@@ -30030,6 +30034,13 @@ test "win32 launch-layout IPC argument scan isolates the layout name" {
 
     const ordinary = try scanLaunchLayoutIpcArgument(&.{"--title=ordinary"});
     try std.testing.expect(ordinary == .none);
+
+    const command = try scanLaunchLayoutIpcArgument(&.{
+        "-e",
+        "tool.exe",
+        "--launch-layout=child-option",
+    });
+    try std.testing.expect(command == .none);
 }
 
 test "win32 launch-layout IPC validates names before cold fallback" {
