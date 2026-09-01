@@ -8,11 +8,11 @@ pub const max_hosts: usize = 256;
 pub const max_file_size: usize = 1024 * 1024;
 pub const max_alias_len: usize = 255;
 pub const max_include_files: usize = 16;
-const include_read_budget_ns: u64 = 50 * std.time.ns_per_ms;
+const ssh_config_read_budget_ns: u64 = 50 * std.time.ns_per_ms;
 
 var read_warning_mutex: std.Thread.Mutex = .{};
 var read_warning_logged = false;
-var include_read_in_progress: std.atomic.Value(bool) = .init(false);
+var ssh_config_read_in_progress: std.atomic.Value(bool) = .init(false);
 
 pub const Host = struct {
     alias: []const u8,
@@ -73,7 +73,7 @@ fn loadFromHome(alloc: Allocator, home_dir: []const u8) ![]Host {
         .home_dir = home_dir,
         .ssh_dir = ssh_dir,
         .hosts = &hosts,
-        .include_read_started_ns = std.time.nanoTimestamp(),
+        .ssh_config_read_started_ns = std.time.nanoTimestamp(),
     };
     try load_context.parseFile(config_path, 0);
     return try hosts.toOwnedSlice(alloc);
@@ -85,19 +85,34 @@ const LoadContext = struct {
     ssh_dir: []const u8,
     hosts: *std.ArrayList(Host),
     includes_read: usize = 0,
-    include_read_started_ns: i128,
+    ssh_config_read_started_ns: i128,
 
     fn parseFile(self: *LoadContext, path: []const u8, depth: u8) Allocator.Error!void {
-        const contents = readFile(self.alloc, path) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.FileNotFound => return,
-            else => {
-                warnReadOnce(path, err);
-                return;
-            },
-        };
+        const contents = (try self.readFileWithinBudget(path)) orelse return;
         defer self.alloc.free(contents);
         try parseInto(self.alloc, self.hosts, contents, self, depth);
+    }
+
+    fn readFileWithinBudget(self: *LoadContext, path: []const u8) Allocator.Error!?[]u8 {
+        const elapsed_ns = @max(std.time.nanoTimestamp() - self.ssh_config_read_started_ns, 0);
+        if (elapsed_ns >= ssh_config_read_budget_ns) return null;
+        const remaining_ns: u64 = @intCast(ssh_config_read_budget_ns - elapsed_ns);
+        return readSshConfigFileBounded(
+            self.alloc,
+            path,
+            remaining_ns,
+            readFile,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.FileNotFound => return null,
+            else => {
+                warnReadOnce(path, err);
+                return null;
+            },
+        } orelse {
+            warnReadOnce(path, error.SshConfigReadTimedOut);
+            return null;
+        };
     }
 
     fn parseIncludes(self: *LoadContext, value: []const u8, depth: u8) Allocator.Error!void {
@@ -129,24 +144,7 @@ const LoadContext = struct {
                 try std.fs.path.join(self.alloc, &.{ self.ssh_dir, raw_path });
             defer self.alloc.free(path);
 
-            const elapsed_ns = @max(std.time.nanoTimestamp() - self.include_read_started_ns, 0);
-            if (elapsed_ns >= include_read_budget_ns) return;
-            const remaining_ns: u64 = @intCast(include_read_budget_ns - elapsed_ns);
-            const contents = (readIncludeFileBounded(
-                self.alloc,
-                path,
-                remaining_ns,
-                readFile,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {
-                    warnReadOnce(path, err);
-                    continue;
-                },
-            }) orelse {
-                warnReadOnce(path, error.IncludeReadTimedOut);
-                return;
-            };
+            const contents = (try self.readFileWithinBudget(path)) orelse return;
             defer self.alloc.free(contents);
             try parseInto(self.alloc, self.hosts, contents, self, depth + 1);
             if (self.hosts.items.len >= max_hosts) return;
@@ -377,7 +375,7 @@ fn readFile(alloc: Allocator, path: []const u8) ![]u8 {
 
 const ReadFileFn = *const fn (Allocator, []const u8) anyerror![]u8;
 
-const AsyncIncludeRead = struct {
+const AsyncSshConfigRead = struct {
     refs: std.atomic.Value(u32) = .init(2),
     mutex: std.Thread.Mutex = .{},
     done_cond: std.Thread.Condition = .{},
@@ -405,7 +403,7 @@ const AsyncIncludeRead = struct {
         } else |err| {
             self.err = err;
         }
-        include_read_in_progress.store(false, .release);
+        ssh_config_read_in_progress.store(false, .release);
         self.done = true;
         self.done_cond.broadcast();
         self.mutex.unlock();
@@ -414,36 +412,36 @@ const AsyncIncludeRead = struct {
     }
 };
 
-/// Runs an Include open away from the caller and waits only for the remaining
-/// per-refresh budget. A timed-out worker owns all of its memory until it
-/// finishes. Only one may exist at a time, so a dead network mapping cannot
+/// Runs an SSH config open away from the caller and waits only for the
+/// remaining per-refresh budget. A timed-out worker owns all of its memory
+/// until it finishes. Only one may exist at a time, so a dead network mapping cannot
 /// create an unbounded thread or allocation leak across picker refreshes.
-fn readIncludeFileBounded(
+fn readSshConfigFileBounded(
     alloc: Allocator,
     path: []const u8,
     timeout_ns: u64,
     read_fn: ReadFileFn,
 ) !?[]u8 {
     if (timeout_ns == 0) return null;
-    if (include_read_in_progress.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+    if (ssh_config_read_in_progress.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
         return null;
     }
 
     const worker_alloc = std.heap.page_allocator;
     const owned_path = worker_alloc.dupe(u8, path) catch |err| {
-        include_read_in_progress.store(false, .release);
+        ssh_config_read_in_progress.store(false, .release);
         return err;
     };
-    const request = worker_alloc.create(AsyncIncludeRead) catch |err| {
+    const request = worker_alloc.create(AsyncSshConfigRead) catch |err| {
         worker_alloc.free(owned_path);
-        include_read_in_progress.store(false, .release);
+        ssh_config_read_in_progress.store(false, .release);
         return err;
     };
     request.* = .{ .path = owned_path, .read_fn = read_fn };
 
-    const thread = std.Thread.spawn(.{}, AsyncIncludeRead.run, .{request}) catch |err| {
+    const thread = std.Thread.spawn(.{}, AsyncSshConfigRead.run, .{request}) catch |err| {
         request.refs.store(1, .monotonic);
-        include_read_in_progress.store(false, .release);
+        ssh_config_read_in_progress.store(false, .release);
         request.release();
         return err;
     };
@@ -818,7 +816,7 @@ test "ssh config caps the number of include files read" {
     try testing.expectEqual(max_include_files, hosts.len);
 }
 
-test "ssh config bounds include opens away from the caller" {
+test "ssh config bounds file opens away from the caller" {
     const testing = std.testing;
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
@@ -827,7 +825,7 @@ test "ssh config bounds include opens away from the caller" {
     const path = try tmp.dir.realpathAlloc(alloc, "include.conf");
     defer alloc.free(path);
 
-    const contents = (try readIncludeFileBounded(
+    const contents = (try readSshConfigFileBounded(
         alloc,
         path,
         std.time.ns_per_s,
@@ -843,7 +841,7 @@ test "ssh config bounds include opens away from the caller" {
             return try worker_alloc.dupe(u8, "late");
         }
     }.run;
-    try testing.expect((try readIncludeFileBounded(
+    try testing.expect((try readSshConfigFileBounded(
         alloc,
         path,
         std.time.ns_per_ms,
@@ -851,7 +849,7 @@ test "ssh config bounds include opens away from the caller" {
     )) == null);
 
     const wait_started = std.time.nanoTimestamp();
-    while (include_read_in_progress.load(.acquire)) {
+    while (ssh_config_read_in_progress.load(.acquire)) {
         if (std.time.nanoTimestamp() - wait_started > std.time.ns_per_s) {
             return error.TestUnexpectedResult;
         }

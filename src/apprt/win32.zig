@@ -3372,6 +3372,8 @@ pub const App = struct {
                 switch (target) {
                     .app => {
                         const config = try value.config.clone(self.core_app.alloc);
+                        const ssh_config_hosts_changed =
+                            self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
                         // config change supersedes that transaction: dismiss
@@ -3388,6 +3390,15 @@ pub const App = struct {
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
                         for (self.hosts.items) |host| {
+                            if (ssh_config_hosts_changed) {
+                                host.invalidateProfiles();
+                                if (host.overlay_mode == .profile) {
+                                    _ = host.reloadProfiles() catch |err| blk: {
+                                        log.warn("SSH profile reload after config change failed err={}", .{err});
+                                        break :blk false;
+                                    };
+                                }
+                            }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
                         }
                         self.scheduleGlobalHotkeySync();
@@ -4409,7 +4420,7 @@ pub const App = struct {
         var duplicate_slot: ?usize = null;
         for (self.launcher_quick_slot_keys, 0..) |existing, index| {
             if (existing) |value| {
-                if (std.ascii.eqlIgnoreCase(value, key)) {
+                if (storedProfileKeyEquals(value, key)) {
                     duplicate_slot = index;
                     break;
                 }
@@ -10038,6 +10049,13 @@ const Host = struct {
         if (self.selected_profile >= profiles.len) self.selected_profile = 0;
         _ = try self.setSelectedProfileIndex(self.selected_profile);
         return true;
+    }
+
+    fn invalidateProfiles(self: *Host) void {
+        if (self.profiles) |profiles| {
+            windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
+            self.profiles = null;
+        }
     }
 
     fn reapplyLauncherProfilePreferences(self: *Host) !void {
@@ -17369,6 +17387,7 @@ const resolveProfileSelection = labels.resolveProfileSelection;
 
 const profileIndexByKey = labels.profileIndexByKey;
 const profileKeyEquals = labels.profileKeyEquals;
+const storedProfileKeyEquals = labels.storedProfileKeyEquals;
 
 fn applyProfileConfigByKey(
     config: *configpkg.Config,

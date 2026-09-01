@@ -127,9 +127,10 @@ pane returns as the default shell rather than dialing out unattended.
 SSH entries always sort after the detected shells and cannot be reordered with
 `NOCTTY_WIN32_PROFILE_ORDER`, which addresses shell profiles only.
 
-Concrete `Include` files are scanned one level deep, up to 16 files. Include
-opens run off the UI thread under one shared 50 ms refresh budget; a slow or
-blocked path is skipped, and a later profile refresh can retry it.
+Concrete `Include` files are scanned one level deep, up to 16 files. The root
+config and Include opens run off the UI thread under one shared 50 ms refresh
+budget; a slow or blocked path is skipped, and a later profile refresh can
+retry it.
 
 Set `ssh-config-hosts = false` to remove these entries. This feature does not
 provide a bundled SSH client, secrets vault, or fleet/connection management.
