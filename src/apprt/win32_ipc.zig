@@ -1025,7 +1025,10 @@ test "win32 IPC silent client read is bounded" {
         null,
     );
     try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
-    defer _ = windows.CloseHandle(server);
+    var server_open = true;
+    defer {
+        if (server_open) _ = windows.CloseHandle(server);
+    }
 
     try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
     try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
@@ -1056,6 +1059,24 @@ test "win32 IPC silent client read is bounded" {
     try writeAll(client, "x");
     try readExactWithTimeout(server, &byte, 0);
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
+
+    const DelayedWriter = struct {
+        fn run(pipe: windows.HANDLE) void {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+            writeAll(pipe, "y") catch unreachable;
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, DelayedWriter.run, .{server});
+    defer writer.join();
+    try readExactWithTimeout(client, &byte, std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(u8, 'y'), byte[0]);
+
+    _ = windows.CloseHandle(server);
+    server_open = false;
+    try std.testing.expectError(
+        error.EndOfStream,
+        readExactWithTimeout(client, &byte, std.math.maxInt(u64)),
+    );
 }
 
 test "win32 IPC pending pipe states remain retryable" {

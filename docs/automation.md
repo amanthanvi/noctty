@@ -21,16 +21,22 @@ when failure handling matters.
 ## Verbs
 
 Every verb accepts `--class=<name>` and `--timeout=<ms>`. The class selects
-an instance namespace. The timeout is only the response timeout, accepts
-`0..10000`, and defaults to `10000` milliseconds; it does not extend the
-server's fixed 10-second wait or change connection and wire I/O limits.
+an instance namespace. The timeout sets how long a request may remain unclaimed
+after connection, accepts `0..10000`, and defaults to `10000` milliseconds; it
+does not extend the server's fixed 10-second bound or change connection and wire
+I/O limits. Claimed work may keep the CLI waiting beyond that timeout so the
+caller receives its actual outcome instead of an ambiguous failure. There is no
+separate post-claim deadline; the final server result or a pipe disconnect ends
+that wait.
 Deadline-capable request kinds 9 through 15 carry that caller deadline as an
 absolute system-uptime tick. The app thread atomically claims only unexpired
 requests; if the deadline wins first, queued work is cancelled and cannot run
 later. Equality permits the documented zero-timeout one-attempt poll. Once
 work is claimed by the deadline, the server waits for and reports its actual
-outcome instead of returning an ambiguous timeout. The original wire-v1 kinds
-2 through 8 remain accepted for older clients under the server's fixed
+outcome instead of returning an ambiguous timeout. After sending a deadline-
+capable request, the client leaves the pipe open for that server-authoritative
+decision rather than independently timing out the response read. The original
+wire-v1 kinds 2 through 8 remain accepted for older clients under the server's fixed
 10-second bound; new clients use the deadline-capable kinds, which older
 servers reject generically rather than misparsing a changed v1 payload.
 
@@ -141,7 +147,7 @@ there is no text format.
 | 2 | No matching running instance. |
 | 3 | Live instance, but the requested target was not found. |
 | 4 | Refused by automation policy. |
-| 5 | IPC transport failure or response timeout; for `+new-window`, also fallback process-launch failure. |
+| 5 | IPC transport failure or automation claim-deadline expiry; for `+new-window`, also response timeout or fallback process-launch failure. |
 
 `+new-window` retains its process-launch fallback and therefore never returns
 2. New verbs used against an older server that does not know their request

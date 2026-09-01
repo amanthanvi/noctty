@@ -1138,7 +1138,7 @@ fn sendListWindowsIpc(
     return try win32_ipc.readDataResponseWithTimeout(
         alloc,
         pipe,
-        response_timeout_ms,
+        std.math.maxInt(u64),
     );
 }
 
@@ -1179,7 +1179,7 @@ fn sendAutomationAckRequest(
         .little,
     );
     try win32_ipc.writeAll(pipe, request);
-    return win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+    return win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
 }
 
 fn sendFocusIpc(
@@ -1550,7 +1550,7 @@ fn sendLaunchLayoutIpc(
         .little,
     );
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+    return try win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
 }
 
 fn trySendStartupLaunchLayoutIpc(
