@@ -74,9 +74,9 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $benchmarkHarness
         Content = { $benchmarkHarnessText }
-        Pattern = '(?s)Set-BenchRenderTraceTarget.*?SendUnicodeText.*?first_target_swap_process_output_bytes.*?first_target_swap_qpc_ticks'
+        Pattern = '(?s)Start-BenchTarget.*?-EndMarker \$nonce.*?Set-BenchRenderTraceTarget -Hwnd \$surfaceHwnd -OutputBytes 0.*?SendUnicodeText.*?first_target_swap_benchmark_end_marker_generation.*?first_target_swap_qpc_ticks'
         Kind = 'Text'
-        Description = 'key-response latency consumes the armed first qualifying swap latch'
+        Description = 'key-response latency consumes the first swap containing its visible nonce marker'
     }
     @{
         File = $benchmarkHarness
@@ -109,9 +109,9 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $memoryTrace
         Content = { $memoryTraceText }
-        Pattern = '(?s)claimFirstSwapObservation.*?io_reader_recorded\.load\(\.acquire\).*?first_swap_recorded\.cmpxchgStrong'
+        Pattern = '(?s)noteIoReaderSpawned.*?noteOnce.*?io_reader_ready\.store\(true, \.release\).*?claimFirstSwapObservation.*?io_reader_ready\.load\(\.acquire\).*?first_swap_recorded\.cmpxchgStrong'
         Kind = 'Text'
-        Description = 'the startup swap boundary cannot precede IO reader startup'
+        Description = 'the startup swap boundary cannot precede serialized IO reader startup evidence'
     }
     @{
         File = $benchmarkHarness
@@ -119,6 +119,13 @@ Invoke-ContractTable -Contracts @(
         Pattern = '(?s)\$previousStageSequence\s*=\s*\[uint64\] 0.*?\$stageSequence -le \$previousStageSequence.*?out of lifecycle order'
         Kind = 'Text'
         Description = 'memory evidence rejects lifecycle stages whose trace sequence contradicts the declared order'
+    }
+    @{
+        File = $benchmarkHarness
+        Content = { $benchmarkHarnessText }
+        Pattern = '(?s)git -C \$repoRoot status --porcelain=v1 --untracked-files=all.*?source worktree is dirty.*?git -C \$repoRoot rev-parse HEAD'
+        Kind = 'Text'
+        Description = 'evidence refuses to attribute dirty-source builds to a clean commit SHA'
     }
     @{
         File = $rendererGeneric

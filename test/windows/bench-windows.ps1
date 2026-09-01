@@ -1388,7 +1388,7 @@ function Invoke-BenchEchoRun {
     $tracePath = Join-Path $layout.Temp "$RunName-render-trace.json"
     Remove-Item -LiteralPath $readyPath, $resultPath, $tracePath -ErrorAction SilentlyContinue
     $nonce = "noctty-bench-$([Guid]::NewGuid().ToString('N'))"
-    $run = Start-BenchTarget -RunName $RunName -ChildScript $script:echoScriptPath -ChildScriptArguments @('-ReadyPath', $readyPath, '-ResultPath', $resultPath, '-Nonce', $nonce) -TracePath $tracePath -LiveTrace
+    $run = Start-BenchTarget -RunName $RunName -ChildScript $script:echoScriptPath -ChildScriptArguments @('-ReadyPath', $readyPath, '-ResultPath', $resultPath, '-Nonce', $nonce) -TracePath $tracePath -EndMarker $nonce -LiveTrace
     try {
         Wait-BenchFile -Path $readyPath -Run $run -Description 'benchmark echo child readiness'
         $hostHwnd = Wait-BenchNocttyWindow -Run $run
@@ -1399,19 +1399,17 @@ function Invoke-BenchEchoRun {
         $traceSequence = [uint64] $firstTrace.snapshot_sequence
         $baselineSwapCount = [uint64] $firstTrace.swap_buffers_count
         $baselineOutputGeneration = [uint64] $firstTrace.last_swap_process_output_generation
-        $baselineOutputBytes = [uint64] $firstTrace.last_swap_process_output_bytes
-        $expectedEchoBytes = $baselineOutputBytes + [uint64] [Text.Encoding]::UTF8.GetByteCount($nonce)
+        $baselineEndMarkerGeneration = [uint64] $firstTrace.last_swap_benchmark_end_marker_generation
         if ($NeedProxy) {
             if (-not [NocttyBenchNative]::ForceForeground($hostHwnd)) { throw 'failed to foreground noctty before SendInput' }
             $foregroundTrace = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence $traceSequence -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds))
             $traceSequence = [uint64] $foregroundTrace.snapshot_sequence
             $baselineSwapCount = [uint64] $foregroundTrace.swap_buffers_count
             $baselineOutputGeneration = [uint64] $foregroundTrace.last_swap_process_output_generation
-            $baselineOutputBytes = [uint64] $foregroundTrace.last_swap_process_output_bytes
-            $expectedEchoBytes = $baselineOutputBytes + [uint64] [Text.Encoding]::UTF8.GetByteCount($nonce)
+            $baselineEndMarkerGeneration = [uint64] $foregroundTrace.last_swap_benchmark_end_marker_generation
         }
 
-        Set-BenchRenderTraceTarget -Hwnd $surfaceHwnd -OutputBytes $expectedEchoBytes
+        Set-BenchRenderTraceTarget -Hwnd $surfaceHwnd -OutputBytes 0
         $inputTickMs = [NocttyBenchNative]::GetTickCount64()
         $inputQpcTicks = [Diagnostics.Stopwatch]::GetTimestamp()
         if ($NeedProxy) {
@@ -1428,9 +1426,10 @@ function Invoke-BenchEchoRun {
             $liveTrace = Request-BenchRenderTraceSnapshot -Hwnd $surfaceHwnd -Path $tracePath -AfterSequence $traceSequence -Deadline $deadline
             $traceSequence = [uint64] $liveTrace.snapshot_sequence
             if ([uint64] $liveTrace.swap_buffers_count -gt $baselineSwapCount -and
-                [uint64] $liveTrace.target_process_output_bytes -eq $expectedEchoBytes -and
+                [uint64] $liveTrace.target_process_output_bytes -eq 0 -and
                 [uint64] $liveTrace.first_target_swap_process_output_generation -gt $baselineOutputGeneration -and
-                [uint64] $liveTrace.first_target_swap_process_output_bytes -ge $expectedEchoBytes) {
+                [uint64] $liveTrace.first_target_swap_benchmark_end_marker_generation -gt $baselineEndMarkerGeneration -and
+                [uint64] $liveTrace.first_target_swap_benchmark_end_marker_output_bytes -gt 0) {
                 $outputTickMs = [uint64] $liveTrace.first_target_swap_process_output_tick_ms
                 if ($outputTickMs -lt $inputTickMs) { throw 'causal output generation predates the benchmark input timestamp' }
                 $conptyRttMs = [double] ($outputTickMs - $inputTickMs)
@@ -1638,7 +1637,8 @@ $echoChild = @'
 param([Parameter(Mandatory)] [string] $ReadyPath, [Parameter(Mandatory)] [string] $ResultPath, [Parameter(Mandatory)] [string] $Nonce)
 'ready' | Set-Content -LiteralPath $ReadyPath -Encoding ASCII
 $key = [Console]::ReadKey($true)
-[Console]::Write($Nonce)
+$esc = [char]27
+[Console]::Write("$esc[0m$esc[1;1H$esc[2K$Nonce")
 [Console]::Out.Flush()
 [ordered]@{ key_char_code = [int][char]$key.KeyChar; nonce = $Nonce } | ConvertTo-Json -Compress | Set-Content -LiteralPath $ResultPath -Encoding ASCII
 Start-Sleep -Seconds 300
@@ -1646,6 +1646,11 @@ Start-Sleep -Seconds 300
 [IO.File]::WriteAllText($script:echoScriptPath, $echoChild, [Text.UTF8Encoding]::new($false))
 
 $machine = Get-BenchFingerprint
+$sourceStatus = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
+if ($LASTEXITCODE -ne 0) { throw 'git status failed while checking benchmark source provenance' }
+if ($sourceStatus.Count -ne 0) {
+    throw "benchmark source worktree is dirty; commit or clean source changes before collecting evidence"
+}
 $commitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commitSha)) { throw 'git rev-parse HEAD failed' }
 

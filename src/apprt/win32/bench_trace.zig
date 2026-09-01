@@ -118,6 +118,7 @@ pub const MemoryStageTrace = struct {
     renderer_thread_recorded: std.atomic.Value(bool) = .init(false),
     io_thread_recorded: std.atomic.Value(bool) = .init(false),
     io_reader_recorded: std.atomic.Value(bool) = .init(false),
+    io_reader_ready: std.atomic.Value(bool) = .init(false),
     first_swap_recorded: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: Allocator) MemoryStageTrace {
@@ -316,21 +317,27 @@ pub const MemoryStageTrace = struct {
         stage: BenchmarkMemoryStage,
         surface_token: u64,
         surface_id: ?u64,
-    ) void {
-        if (recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+    ) bool {
+        if (recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return false;
         self.note(stage, surface_token, surface_id);
+        return true;
     }
 
     pub fn noteRendererThreadSpawned(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
-        self.noteOnce(&self.renderer_thread_recorded, .renderer_thread_spawned, surface_token, surface_id);
+        _ = self.noteOnce(&self.renderer_thread_recorded, .renderer_thread_spawned, surface_token, surface_id);
     }
 
     pub fn noteIoThreadSpawned(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
-        self.noteOnce(&self.io_thread_recorded, .io_thread_spawned, surface_token, surface_id);
+        _ = self.noteOnce(&self.io_thread_recorded, .io_thread_spawned, surface_token, surface_id);
     }
 
     pub fn noteIoReaderSpawned(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
-        self.noteOnce(&self.io_reader_recorded, .io_reader_spawned, surface_token, surface_id);
+        if (self.noteOnce(&self.io_reader_recorded, .io_reader_spawned, surface_token, surface_id)) {
+            // Publish readiness only after the serialized stage write returns.
+            // A swap that observes this flag cannot overtake io_reader_spawned
+            // at the trace writer mutex.
+            self.io_reader_ready.store(true, .release);
+        }
     }
 
     pub fn claimFirstSwapObservation(self: *MemoryStageTrace) bool {
@@ -338,7 +345,7 @@ pub const MemoryStageTrace = struct {
         // boundary. Do not label that swap as the completed startup frame;
         // the first swap after reader startup is the first one the lifecycle
         // consumer can place causally after all thread-start stages.
-        if (!self.io_reader_recorded.load(.acquire)) return false;
+        if (!self.io_reader_ready.load(.acquire)) return false;
         return self.first_swap_recorded.cmpxchgStrong(
             false,
             true,
@@ -387,7 +394,7 @@ test "win32 memory stage trace claims first swap after reader startup exactly on
     var trace: MemoryStageTrace = .{};
 
     try std.testing.expect(!trace.claimFirstSwapObservation());
-    trace.io_reader_recorded.store(true, .release);
+    trace.noteIoReaderSpawned(11, null);
     try std.testing.expect(trace.claimFirstSwapObservation());
     try std.testing.expect(!trace.claimFirstSwapObservation());
 }
