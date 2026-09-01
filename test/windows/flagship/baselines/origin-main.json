@@ -1,11 +1,11 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-08-31T23:55:48.5887325Z",
-  "git_commit": "1b2dbffa57efcffa3b8a5923b1a735e94bd7d362",
+  "captured_at": "2026-09-01T00:18:13.9015870Z",
+  "git_commit": "5220df49e39c96182cf13150c53c4fd71fbc5b10",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the session parser changes. The parser keeps the reviewed .allocate = .alloc_always ownership fix and decodes layout placement as opaque JSON before constructing the strict placement-free shape; the on-disk schema remains unchanged at v1. Hashes reflect checkout normalization. This git_commit exists only on the PR branch: after a squash-merge it becomes unreachable and Test-VerificationContracts.ps1 skips the git-diff cross-check while the sha256 check still runs, so re-point it at the merge commit on main (see RECONCILE-SESSION-STATE.md)."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the session parser changes. The parser keeps the reviewed .allocate = .alloc_always ownership fix and decodes layout placement as opaque JSON before constructing the strict placement-free shape; the on-disk schema remains unchanged at v1. Hashes reflect checkout normalization. The durable git_commit identifies the PR base; Contracts.99-Baselines.ps1 independently pins the reviewed session-schema digest so squash-merging and deleting the PR branch cannot disable fail-closed artifact verification."
   },
   "artifacts": [
     {

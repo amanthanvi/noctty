@@ -1,6 +1,13 @@
 & (Join-Path $root 'Test-WindowsX64Baseline.ps1')
 
 $reviewedArtifactDigests = @{
+    # Reviewed in full for issue #133 named layouts. PR branch commits are
+    # intentionally squashed and deleted, so pin this digest independently of
+    # the manifest's durable base commit rather than disabling verification
+    # when an intermediate source commit becomes unreachable.
+    'src/apprt/win32_session_state.zig' =
+        '69ff5a127d0bfb4eb5b19f2786ff602c611831a4e16c8d07d81f03ecc5b4ecbb'
+
     # Reviewed in full after the Noctty rebrand while retaining the cleanup's
     # redirected-text CLI sibling pinned to the staged portable executable.
     # This combined artifact intentionally differs from origin/main; its exact
