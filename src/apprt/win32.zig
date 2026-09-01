@@ -978,12 +978,13 @@ fn descriptorIntegrityRidFromSddl(sddl: []const u16) error{InvalidSecurityDescri
         if (std.mem.indexOf(u16, sddl, alias.suffix) != null) return alias.rid;
     }
 
-    // An absent mandatory-label ACE evaluates as medium. A present but
-    // unknown label is malformed and must fail closed.
+    // The producer always emits an explicit label. Missing or unknown labels
+    // must fail closed; otherwise a low-integrity same-user squatter can rely
+    // on Windows' implicit-medium interpretation and impersonate our server.
     if (std.mem.indexOf(u16, sddl, std.unicode.utf8ToUtf16LeStringLiteral("(ML;")) != null) {
         return error.InvalidSecurityDescriptor;
     }
-    return c.SECURITY_MANDATORY_MEDIUM_RID;
+    return error.InvalidSecurityDescriptor;
 }
 
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
@@ -1533,9 +1534,9 @@ fn integrityRidFromSidString(sid: []const u16) ?u32 {
 /// Render the SDDL text for the IPC pipe security descriptor into `buf`.
 ///
 /// `D:P` is a protected DACL (no inherited ACEs) holding exactly one ACE:
-/// `GENERIC_ALL` for `user_sid`. When `integrity_sid` is non-null a
-/// mandatory-label ACE with the `NO_WRITE_UP` policy is appended, which is
-/// what keeps a lower-integrity process from opening the pipe for write.
+/// `GENERIC_ALL` for `user_sid`. An explicit mandatory-label ACE with the
+/// `NO_WRITE_UP` policy is always appended, which both prevents write-up and
+/// lets clients reject unlabeled same-user squatters.
 ///
 /// RESIDUAL: `NO_WRITE_UP` does not deny reads, so a medium-integrity
 /// process can open an elevated instance's pipe for `GENERIC_READ` (a bare
@@ -1555,7 +1556,7 @@ fn integrityRidFromSidString(sid: []const u16) ?u32 {
 fn buildIpcPipeSddl(
     buf: []u16,
     user_sid: []const u16,
-    integrity_sid: ?[]const u16,
+    integrity_sid: []const u16,
 ) error{IpcSecurityDescriptorFailed}![:0]u16 {
     var len: usize = 0;
 
@@ -1574,18 +1575,16 @@ fn buildIpcPipeSddl(
     try Appender.append(buf, &len, user_sid);
     try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
 
-    if (integrity_sid) |label| {
-        try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("S:(ML;;NW;;;"));
-        try Appender.append(buf, &len, label);
-        try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
-    }
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("S:(ML;;NW;;;"));
+    try Appender.append(buf, &len, integrity_sid);
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
 
     buf[len] = 0;
     return buf[0..len :0];
 }
 
 /// Resolve the process token's mandatory integrity level as an SDDL SID
-/// string, but only when it sits strictly above medium integrity.
+/// string at every integrity level.
 ///
 /// Windows does not auto-label kernel objects created by a high-integrity
 /// process, and an unlabeled object evaluates as medium. Because the token
@@ -1611,9 +1610,8 @@ fn buildIpcPipeSddl(
 /// and changing the label here would invalidate this PR's live descriptor
 /// readback.
 ///
-/// Returns null at or below medium integrity (where the label would be a
-/// no-op). The returned string is OS-allocated; free it with `sys.LocalFree`.
-fn allocIpcPipeIntegritySid(token: windows.HANDLE) !?[*:0]u16 {
+/// The returned string is OS-allocated; free it with `sys.LocalFree`.
+fn allocIpcPipeIntegritySid(token: windows.HANDLE) ![*:0]u16 {
     var label_buf: [256]u8 align(@alignOf(sys.TOKEN_MANDATORY_LABEL)) = undefined;
     var label_len: u32 = 0;
     if (sys.GetTokenInformation(
@@ -1632,23 +1630,18 @@ fn allocIpcPipeIntegritySid(token: windows.HANDLE) !?[*:0]u16 {
     ) == 0) return error.IpcSecurityDescriptorFailed;
     const sid = sid_string orelse return error.IpcSecurityDescriptorFailed;
 
-    const rid = integrityRidFromSidString(std.mem.span(sid)) orelse {
+    _ = integrityRidFromSidString(std.mem.span(sid)) orelse {
         _ = sys.LocalFree(@ptrCast(sid));
         return error.IpcSecurityDescriptorFailed;
     };
-    if (rid <= c.SECURITY_MANDATORY_MEDIUM_RID) {
-        _ = sys.LocalFree(@ptrCast(sid));
-        return null;
-    }
-
     return sid;
 }
 
 /// Build the security descriptor for the single-instance IPC pipe: a
 /// protected DACL whose only ACE grants full access to the SID that owns
-/// this process, plus a mandatory-label ACE when this process runs above
-/// medium integrity. Without it the pipe gets the default DACL, which is
-/// wider than the same-user contract the IPC verbs assume.
+/// this process, plus an explicit mandatory-label ACE at the process's exact
+/// integrity level. Without it the pipe gets the default DACL, which is wider
+/// than the same-user contract the IPC verbs assume.
 ///
 /// The current user's SID is resolved from the process token rather than
 /// using the `OW` (owner rights) SDDL alias, because an elevated token's
@@ -1686,9 +1679,7 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     defer _ = sys.LocalFree(@ptrCast(sid));
 
     const integrity_sid = try allocIpcPipeIntegritySid(token);
-    defer if (integrity_sid) |v| {
-        _ = sys.LocalFree(@ptrCast(v));
-    };
+    defer _ = sys.LocalFree(@ptrCast(integrity_sid));
 
     // Pin the owner to the token user as well as granting that SID access.
     // The client authenticates the owner and mandatory label directly from
@@ -1697,7 +1688,7 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     const sddl = try buildIpcPipeSddl(
         &sddl_buf,
         std.mem.span(sid),
-        if (integrity_sid) |v| std.mem.span(v) else null,
+        std.mem.span(integrity_sid),
     );
 
     var descriptor: ?*anyopaque = null;
@@ -28626,19 +28617,21 @@ test "win32 timed out automation request remains owned until consumption" {
 
 test "win32 IPC pipe SDDL renders the exact DACL and mandatory label" {
     const user_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1111-2222-3333-1001");
+    const medium_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-8192");
     const high_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-12288");
 
     var buf: [320]u16 = undefined;
 
-    // Medium integrity: no label ACE, because an unlabeled object already
-    // evaluates as medium with NO_WRITE_UP.
+    // Medium integrity is explicit so clients can reject an unlabeled
+    // same-user squatter instead of treating it as implicitly medium.
     {
-        const sddl = try buildIpcPipeSddl(&buf, user_sid, null);
+        const sddl = try buildIpcPipeSddl(&buf, user_sid, medium_sid);
         var utf8: [320]u8 = undefined;
         const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
         try std.testing.expectEqualStrings(
             "O:S-1-5-21-1111-2222-3333-1001" ++
-                "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)",
+                "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)" ++
+                "S:(ML;;NW;;;S-1-16-8192)",
             utf8[0..len],
         );
     }
@@ -28663,7 +28656,7 @@ test "win32 IPC pipe SDDL renders the exact DACL and mandatory label" {
     var tiny: [8]u16 = undefined;
     try std.testing.expectError(
         error.IpcSecurityDescriptorFailed,
-        buildIpcPipeSddl(&tiny, user_sid, null),
+        buildIpcPipeSddl(&tiny, user_sid, medium_sid),
     );
 }
 
@@ -28707,9 +28700,9 @@ test "win32 pipe descriptor integrity parsing accepts SDDL aliases" {
         @as(u32, 0x3000),
         try descriptorIntegrityRidFromSddl(L("S:(ML;;NW;;;S-1-16-12288)")),
     );
-    try std.testing.expectEqual(
-        @as(u32, c.SECURITY_MANDATORY_MEDIUM_RID),
-        try descriptorIntegrityRidFromSddl(L("")),
+    try std.testing.expectError(
+        error.InvalidSecurityDescriptor,
+        descriptorIntegrityRidFromSddl(L("")),
     );
     try std.testing.expectError(
         error.InvalidSecurityDescriptor,
@@ -28956,15 +28949,13 @@ test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
     defer _ = sys.LocalFree(@ptrCast(user_sid.?));
 
     const integrity_sid = try allocIpcPipeIntegritySid(token);
-    defer if (integrity_sid) |v| {
-        _ = sys.LocalFree(@ptrCast(v));
-    };
+    defer _ = sys.LocalFree(@ptrCast(integrity_sid));
 
     var reference_buf: [320]u16 = undefined;
     const reference_sddl = try buildIpcPipeSddl(
         &reference_buf,
         std.mem.span(user_sid.?),
-        if (integrity_sid) |v| std.mem.span(v) else null,
+        std.mem.span(integrity_sid),
     );
 
     var reference: ?*anyopaque = null;
@@ -29002,19 +28993,13 @@ test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
     try std.testing.expect(std.mem.indexOf(u8, dacl_text, ";;;WD)") == null);
     try std.testing.expect(std.mem.indexOf(u8, dacl_text, ";;;AN)") == null);
 
-    if (integrity_sid) |label_sid| {
-        // Above medium: the label must be present, with NO_WRITE_UP.
-        try std.testing.expect(std.mem.startsWith(u8, sacl_text, "S:"));
-        try std.testing.expect(std.mem.indexOf(u8, sacl_text, "(ML;;NW;;;") != null);
-        const rid = integrityRidFromSidString(std.mem.span(label_sid)).?;
-        try std.testing.expect(rid > c.SECURITY_MANDATORY_MEDIUM_RID);
-    } else {
-        // At or below medium an unlabeled object already evaluates as medium
-        // with NO_WRITE_UP, so emitting a label here would be wrong. Asserting
-        // its ABSENCE is the half that catches a label emitted for every
-        // process.
-        try std.testing.expect(std.mem.indexOf(u8, actual, "(ML;") == null);
-    }
+    // Every endpoint must carry its exact label. An absent label is not
+    // equivalent for authentication because Windows would interpret a
+    // low-integrity squatter's unlabeled object as medium.
+    try std.testing.expect(std.mem.startsWith(u8, sacl_text, "S:"));
+    try std.testing.expect(std.mem.indexOf(u8, sacl_text, "(ML;;NW;;;") != null);
+    const rid = integrityRidFromSidString(std.mem.span(integrity_sid)).?;
+    try std.testing.expect(rid >= c.SECURITY_MANDATORY_LOW_RID);
 }
 
 test "win32 IPC pipe DACL still admits a same-user client" {
