@@ -311,9 +311,9 @@ fn selectionOffsets(
 
     if (selection.rectangle) {
         const active = screen.pages.pointFromPin(.screen, selection.end()) orelse return null;
+        const anchor = screen.pages.pointFromPin(.screen, selection.start()) orelse return null;
         var first: ?usize = null;
         var last_end: usize = 0;
-        var active_seen = false;
         var index: usize = 0;
         while (index < text.len) {
             const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
@@ -326,15 +326,13 @@ fn selectionOffsets(
             if (point.screen.y == active.screen.y and selection.contains(screen, pin)) {
                 if (first == null) first = index;
                 last_end = index + scalar_len;
-                active_seen = active_seen or pin.eql(selection.end());
             }
             index += scalar_len;
         }
         const start = first orelse return null;
-        if (!active_seen) return null;
         return .{
             .range = .{ .start = start, .end = last_end },
-            .active_offset = if (selection.end().eql(pin_map[start])) start else last_end,
+            .active_offset = if (active.screen.x <= anchor.screen.x) start else last_end,
         };
     }
 
@@ -343,20 +341,45 @@ fn selectionOffsets(
     if (pin_map.len == 0) return null;
     const first_pin = pin_map[0];
     const last_pin = pin_map[pin_map.len - 1];
-    const start = scalarRangeForPin(text, pin_map, top_left) orelse
-        if (top_left.before(first_pin))
-            OffsetRange{ .start = 0, .end = 0 }
-        else
-            return null;
-    const end = scalarRangeForPin(text, pin_map, bottom_right) orelse
-        if (last_pin.before(bottom_right))
-            OffsetRange{ .start = text.len, .end = text.len }
-        else
-            return null;
+    const start = scalarRangeForPin(text, pin_map, top_left) orelse blk: {
+        if (top_left.before(first_pin)) break :blk OffsetRange{ .start = 0, .end = 0 };
+        if (last_pin.before(top_left)) break :blk OffsetRange{ .start = text.len, .end = text.len };
+        const boundary = scalarBoundaryBeforePin(text, pin_map, top_left) orelse return null;
+        break :blk OffsetRange{ .start = boundary, .end = boundary };
+    };
+    const end = scalarRangeForPin(text, pin_map, bottom_right) orelse blk: {
+        if (bottom_right.before(first_pin)) break :blk OffsetRange{ .start = 0, .end = 0 };
+        if (last_pin.before(bottom_right)) break :blk OffsetRange{ .start = text.len, .end = text.len };
+        const boundary = scalarBoundaryBeforePin(text, pin_map, bottom_right) orelse return null;
+        break :blk OffsetRange{ .start = boundary, .end = boundary };
+    };
+    if (start.start >= end.end) return null;
     return .{
         .range = .{ .start = start.start, .end = end.end },
         .active_offset = if (selection.end().eql(top_left)) start.start else end.end,
     };
+}
+
+/// Return the text insertion boundary immediately before an unmapped terminal
+/// pin. The plain formatter omits trailing blank cells, so a live selection
+/// endpoint can be inside the document window without owning any output byte.
+fn scalarBoundaryBeforePin(
+    text: []const u8,
+    pin_map: []const terminal.Pin,
+    target: terminal.Pin,
+) ?usize {
+    var boundary: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
+        if (text[index] != '\n') {
+            const pin = pin_map[index];
+            if (target.before(pin)) break;
+            if (pin.before(target)) boundary = index + scalar_len;
+        }
+        index += scalar_len;
+    }
+    return boundary;
 }
 
 fn scalarRangeForPin(
@@ -788,6 +811,32 @@ test "accessible selection endpoint excludes the formatter newline" {
     try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
 }
 
+test "accessible selection clamps trimmed trailing-cell endpoints" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("AB\nCD");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const trailing = screen.pages.pin(.{ .screen = .{ .x = 6, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, trailing, false));
+    var forward = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer forward.deinit();
+    const range = forward.selection_range.?;
+    try std.testing.expectEqualStrings("AB", forward.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, forward.selection_active_offset.?);
+
+    try screen.select(terminal.Selection.init(trailing, anchor, false));
+    var reverse = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer reverse.deinit();
+    try std.testing.expectEqual(range, reverse.selection_range.?);
+    try std.testing.expectEqual(range.start, reverse.selection_active_offset.?);
+}
+
 test "accessible selection clamps endpoints outside the document window" {
     var t = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 8,
@@ -845,6 +894,15 @@ test "rectangular terminal selection exposes only its active row" {
     const line_end_range = line_end_snapshot.selection_range.?;
     try std.testing.expectEqualStrings("bcdef", line_end_snapshot.text[line_end_range.start..line_end_range.end]);
     try std.testing.expectEqual(line_end_range.end, line_end_snapshot.selection_active_offset.?);
+
+    const trailing_active = screen.pages.pin(.{ .screen = .{ .x = 7, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, trailing_active, true));
+    var trailing_snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer trailing_snapshot.deinit();
+
+    const trailing_range = trailing_snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("bcdef", trailing_snapshot.text[trailing_range.start..trailing_range.end]);
+    try std.testing.expectEqual(trailing_range.end, trailing_snapshot.selection_active_offset.?);
 }
 
 test "accessible history policy follows scrollback and cell budget" {

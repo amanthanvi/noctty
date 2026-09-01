@@ -21,13 +21,12 @@ right thing.
 | Host banners | Banner text announced when it appears or changes | noctty chrome provider as a live region |
 | Settings window | Section name/role/selection and per-control name, role, and value | `SettingsSectionGroupProvider`, `SettingsSectionProvider`, and `SettingsControlProvider`; native providers compose underneath and are the fallback when STA cannot be confirmed |
 
-Known limitation in terminal selection: offsets are resolved against the
-plain-text formatter's pin map, which has no entry for blank trailing
-cells. A selection whose endpoints land on those cells resolves to
-nothing and is reported as the caret range rather than as a selection,
-silently. `GetSelection` still honours its contract -- a degenerate
-range at the insertion point when there is no selection -- so a caret
-tracker keeps working, but the selected extent is not announced.
+Terminal selection offsets are resolved against the plain-text formatter's
+pin map. Because that formatter omits blank trailing cells, endpoints on
+those cells clamp to the nearest emitted text boundary; the selected text
+remains available without inventing spaces that are absent from the snapshot.
+`GetSelection` returns a degenerate range at the insertion point only when
+there is no text-bearing selected extent.
 
 Surfaces with no provider yet: custom-painted caption buttons, profile
 picker and tab-overview overlay rows, context menus, WinRT toasts, the
@@ -41,12 +40,16 @@ terminal text, all four directional split-focus moves, tab
 container/item selection semantics, named chrome and search controls
 with their patterns, scrollbar range, palette selection/focus
 semantics, non-overlapping native settings controls, settings
-owner-close survival, idle resource bounds, graceful close/reopen, and
+owner-close survival, idle resource bounds, normal-path graceful close/reopen, and
 clean Explorer/WER postflight. Pull requests run the quick interactive
 lane; release candidates run the full default-branch interactive lane.
 Provider unit tests cover the chrome provider patterns, the scrolled-back
 caret, terminal selection with its active end, and the degenerate
-TextPattern2 caret range plus its ABI and semantics.
+TextPattern2 caret range plus its ABI and semantics. Deferred-disconnect tests
+cover successful retry accounting. Failed disconnect fallbacks currently log
+the failure and release the provider's creation reference, so retaining that
+reference after retry exhaustion, allocation failure, or a failed queue post
+is not an accepted or tested lifecycle guarantee.
 
 The harness proves UIA structure, not speech. What each widget should
 announce and which readers have actually been heard are recorded in

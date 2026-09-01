@@ -6206,12 +6206,14 @@ pub const App = struct {
         else
             null;
         host.active_tab = tab_info.index;
-        host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         surface.syncSharedHostWindowState(previous_surface);
         host.prepareActiveTabVisibility(tab_info.index);
         var active_it = tab_info.tab.tree.iterator();
         while (active_it.next()) |entry| entry.view.setVisible(true);
         runUiActionOrLog("tab activation layout failed", host.layout());
+        // Same-host tab creation reaches this path before its first layout.
+        // Raise selection only after the tab button/provider exists.
+        host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         runUiActionOrLog("tab activation chrome refresh failed", host.refreshChrome());
         if (focus) {
             surface.presentWindow();

@@ -4,12 +4,11 @@ What each part of the noctty window is supposed to announce, what the
 automated UI Automation harness proves about it, and what has actually
 been heard through a screen reader.
 
-The three screen-reader columns record measured speech, not intent. A
-cell only says `pass` when someone ran that reader against the release
-build and heard the expected announcement. Everything else is
-`not yet measured`, which means exactly that: the underlying UIA
-semantics may be correct and asserted by the harness, but nobody has
-confirmed how the reader speaks them.
+The three screen-reader columns record measured speech, not intent. `pass`,
+`partial`, and `fail` are measured results for the exact build named in the
+current record; `not yet measured` means no reader measurement exists. A
+release record must use the exact release build, while the current unreleased
+record labels its Debug pre-release evidence explicitly.
 
 `docs/accessibility-inventory.md` describes the provider architecture.
 This file is the per-release record. The trust page cites it as the
@@ -70,12 +69,12 @@ speak it.
 
 ### What the NVDA pass found, in one paragraph
 
-NVDA speaks noctty's UIA providers for the **custom** window classes
-(`noctty.win32`, `noctty.win32.scrollbar`, `noctty.win32.palette_list`)
-and for `Static`, and ignores them for the standard Win32 **`Button`** and
-**`Edit`** classes, where it falls back to the MSAA/window-text
-implementation. Every wrong announcement measured is on a `Button` or
-`Edit` HWND; every correct one is on a custom class or `Static`. So the
+NVDA speaks several noctty UIA providers on **custom** window classes
+(`noctty.win32`, `noctty.win32.scrollbar`) and on `Static`, but ignores them
+for the standard Win32 **`Button`** and **`Edit`** classes, where it falls
+back to the MSAA/window-text implementation. The custom
+`noctty.win32.palette_list` is the exception: NVDA speaks its row label but
+not the list role, selected state, or position. So the
 tab items announce as `button` with the selected tab distinguished only by
 a literal `*` in the label, the new-tab and overflow buttons announce as
 their painted glyphs `+` and a chevron, the three search flags lose their
@@ -91,7 +90,7 @@ all — while the UIA tree correctly reports `TabItem` + `SelectionItem`,
 | New tab button | "New tab", invokable | Executed, passes — ControlType Button, Invoke | not yet measured | **partial** — role `button` correct, name spoken as the painted glyph `+` instead of `New tab` | not yet measured | UIA name is `New tab`; the `Button` HWND's window text is `+`, and that is what NVDA speaks |
 | Tab overflow button | "More tabs", invokable | Executed, passes — ControlType Button, Invoke | not yet measured | **partial** — role `button` correct, name spoken as the painted chevron glyph (unreadable) instead of `More tabs` | not yet measured | Same window-text cause as the new tab button |
 | Terminal pane | Terminal text, current line, caret position | Executed, passes — TextPattern, TextPattern2, FindText, line units, bounding rectangles | not yet measured | **partial** — `Terminal: <title>`, `text`, `focused`, `Read-only terminal text`; text and command output are read as they arrive and the caret line stays truthful while scrolled back, but output and the following prompt are spoken as one run-together utterance and the review cursor does not follow the scrolled-back viewport | not yet measured | Bounded to up to 500 history rows within a 40,000-cell budget, plus one viewport. The window follows the viewport, so scrolling farther back than the budget drops the active screen from the snapshot and reports the caret at the document end. Bulk output collapses into one utterance plus repeated `terminal output omitted` throttle messages |
-| Terminal selection | Selected text, correct active end | Executed, passes — GetSelection returns the real selection or a degenerate caret range; SupportedTextSelection is None because UIA cannot mutate the PTY-owned selection | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row. A selection whose endpoints fall on blank cells is reported as the caret range instead |
+| Terminal selection | Selected text, correct active end | Executed, passes — GetSelection returns the real selection or a degenerate caret range; SupportedTextSelection is None because UIA cannot mutate the PTY-owned selection | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row. Endpoints on formatter-omitted trailing blank cells clamp to the nearest emitted text boundary |
 | Terminal scrollbar | "Terminal scrollbar", position | Executed, passes — ControlType ScrollBar, RangeValue | not yet measured | pass — `Terminal scrollbar`, `scroll bar`, `5095` | not yet measured | Read-only through UIA; scroll with the keyboard or wheel. The element exists only once a scrollback range exists — an object-navigation sweep taken before any sustained output does not list it at all |
 | Docked search query | Edit, current query, caret and selection | Executed, passes — Text, Value, selection, focus events | not yet measured | **fail** — announced as `edit`, `blank` with **no name**; the UIA name `Search query` is never spoken. Typed characters and the value are read back correctly | not yet measured | The `Edit`-class HWND has empty window text, so the MSAA fallback yields no name |
 | Search previous / next | "Previous match" / "Next match", invokable | Executed, passes — ControlType Button, Invoke; invoking Next selects one of the n matches and invoking Previous moves off it, both reported as `n/m` | not yet measured | **partial** — reachable, role `button` correct, spoken as `Prev match` / `Next match` (window text) rather than the UIA names `Previous match` / `Next match` | not yet measured | Reachable only by object navigation; there is no keyboard focus path |
