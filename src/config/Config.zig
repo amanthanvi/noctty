@@ -8726,7 +8726,10 @@ pub const QuickSelectAlphabet = struct {
     }
 
     pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
-        try formatter.formatEntry([]const u8, self.value);
+        const alloc = allocpkg.default(null);
+        const value = try std.fmt.allocPrint(alloc, "\"{f}\"", .{std.zig.fmtString(self.value)});
+        defer alloc.free(value);
+        try formatter.formatEntry([]const u8, value);
     }
 
     test "hints: quick select alphabet validates non-empty unique ASCII" {

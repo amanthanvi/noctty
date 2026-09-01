@@ -23240,6 +23240,15 @@ test "quick select label placement reports an exhausted viewport" {
     ) == null);
 }
 
+fn quickSelectLabelDisplayUnit(byte: u8) u16 {
+    return if (byte == ' ') 0x2423 else byte;
+}
+
+test "quick select label renders spaces visibly" {
+    try std.testing.expectEqual(@as(u16, 0x2423), quickSelectLabelDisplayUnit(' '));
+    try std.testing.expectEqual(@as(u16, 'a'), quickSelectLabelDisplayUnit('a'));
+}
+
 pub const Surface = struct {
     app: *App,
     shell_id: ?win32_shell.model.PaneId = null,
@@ -25472,7 +25481,7 @@ pub const Surface = struct {
             );
 
             var utf16: [win32_hints.PrefixState.max_len]u16 = undefined;
-            for (label, 0..) |byte, i| utf16[i] = byte;
+            for (label, 0..) |byte, i| utf16[i] = quickSelectLabelDisplayUnit(byte);
             _ = sys.DrawTextW(
                 hdc,
                 @ptrCast(&utf16),
