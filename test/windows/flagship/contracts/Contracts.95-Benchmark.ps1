@@ -14,6 +14,8 @@ $termioThread = Join-Path $repoRoot 'src\termio\Thread.zig'
 $termioThreadText = Get-Content -LiteralPath $termioThread -Raw
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
+$win32Constants = Join-Path $repoRoot 'src\apprt\win32\consts.zig'
+$win32ConstantsText = Get-Content -LiteralPath $win32Constants -Raw
 $memoryTrace = Join-Path $repoRoot 'src\apprt\win32\bench_trace.zig'
 $memoryTraceText = Get-Content -LiteralPath $memoryTrace -Raw
 $rendererGeneric = Join-Path $repoRoot 'src\renderer\generic.zig'
@@ -105,6 +107,13 @@ Invoke-ContractTable -Contracts @(
         Pattern = '(?s)WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT.*?render_trace\.requestSnapshot\(\).*?WM_WINHOSTTY_RENDER_TRACE_TARGET.*?render_trace\.setTargetOutputBytes'
         Kind = 'Text'
         Description = 'surface window procedure handles live render-trace control messages'
+    }
+    @{
+        File = "$win32Constants + $benchmarkHarness :: render-trace message IDs"
+        Content = { $win32ConstantsText + "`n" + $benchmarkHarnessText }
+        Pattern = '(?s)WM_WINHOSTTY_TERMINAL_HANDOFF\s*=\s*WM_APP \+ 7.*?WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT\s*=\s*WM_APP \+ 8.*?WM_WINHOSTTY_RENDER_TRACE_TARGET\s*=\s*WM_APP \+ 9.*?WmWinhosttyRenderTraceSnapshot\s*=\s*\[uint32\] \(0x8000 \+ 8\).*?WmWinhosttyRenderTraceTarget\s*=\s*\[uint32\] \(0x8000 \+ 9\).*?\$message\s*=\s*\$script:WmWinhosttyRenderTraceSnapshot.*?\$message\s*=\s*\$script:WmWinhosttyRenderTraceTarget'
+        Kind = 'Text'
+        Description = 'Zig handlers and the PowerShell live-trace client use the same collision-free message IDs'
     }
     @{
         File = $memoryTrace

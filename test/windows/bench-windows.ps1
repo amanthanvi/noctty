@@ -71,6 +71,10 @@ if ($Gate -and $MemoryCycles -ne 1) {
 }
 
 $script:BenchWindowsReadBufferKib = 64
+# Keep these cross-process message IDs aligned with win32/consts.zig. The
+# benchmark harness cannot import Zig declarations at runtime.
+$script:WmWinhosttyRenderTraceSnapshot = [uint32] (0x8000 + 8)
+$script:WmWinhosttyRenderTraceTarget = [uint32] (0x8000 + 9)
 
 $harness = Initialize-InteractiveWin11Sandbox `
     -RepoRoot $repoRoot `
@@ -1231,7 +1235,7 @@ function Request-BenchRenderTraceSnapshot {
         [Parameter(Mandatory)] [DateTime] $Deadline
     )
 
-    $message = [uint32] (0x8000 + 7)
+    $message = $script:WmWinhosttyRenderTraceSnapshot
     [UIntPtr] $messageResult = [UIntPtr]::Zero
     $sent = [NocttyBenchNative]::SendMessageTimeoutW(
         $Hwnd,
@@ -1347,7 +1351,7 @@ function Set-BenchRenderTraceTarget {
         [Parameter(Mandatory)] [uint64] $OutputBytes
     )
 
-    $message = [uint32] (0x8000 + 8)
+    $message = $script:WmWinhosttyRenderTraceTarget
     [UIntPtr] $messageResult = [UIntPtr]::Zero
     $sent = [NocttyBenchNative]::SendMessageTimeoutW(
         $Hwnd,
