@@ -513,7 +513,7 @@ fn harmonizeModuleOptimizeModeRecursive(
     const entry = try visited.getOrPut(b.allocator, module);
     if (entry.found_existing) return;
 
-    module.optimize = optimize;
+    if (module.optimize == null) module.optimize = optimize;
     var imports = module.import_table.iterator();
     while (imports.next()) |import| try harmonizeModuleOptimizeModeRecursive(
         b,
