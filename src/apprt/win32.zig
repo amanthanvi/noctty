@@ -2264,6 +2264,11 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
     return !safe_mode and policy != .never;
 }
 
+fn layoutActionResult(success: bool) !bool {
+    if (!success) return error.LayoutActionFailed;
+    return true;
+}
+
 const SessionRestoreTransaction = struct {
     app: ?*App = null,
     host: ?*Host = null,
@@ -4436,13 +4441,11 @@ pub const App = struct {
 
             .launch_layout => {
                 const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
-                _ = self.launchNamedLayout(value.name, banner_host);
-                return true;
+                return layoutActionResult(self.launchNamedLayout(value.name, banner_host));
             },
 
             .save_layout => {
-                _ = self.saveNamedLayout(target, value.name);
-                return true;
+                return layoutActionResult(self.saveNamedLayout(target, value.name));
             },
 
             .new_tab => {
@@ -30741,6 +30744,11 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(sessionStatePolicyAllows(false, .default));
     try std.testing.expect(sessionStatePolicyAllows(false, .always));
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
+}
+
+test "win32 layout action result propagates automation failure" {
+    try std.testing.expect(try layoutActionResult(true));
+    try std.testing.expectError(error.LayoutActionFailed, layoutActionResult(false));
 }
 
 test "win32 explicit startup flows bypass session restore" {
