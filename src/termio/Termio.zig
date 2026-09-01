@@ -5,6 +5,7 @@
 pub const Termio = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -21,8 +22,16 @@ const internal_os = @import("../os/main.zig");
 const windows = internal_os.windows;
 const configpkg = @import("../config.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+const BenchmarkEndMarker = @import("bench_marker.zig").BenchmarkEndMarker;
 
 const log = std.log.scoped(.io_exec);
+
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+
+fn processOutputTickMs() u64 {
+    if (comptime builtin.os.tag == .windows) return GetTickCount64();
+    return 0;
+}
 
 var output_trace_file_claimed = std.atomic.Value(bool).init(false);
 
@@ -41,6 +50,21 @@ const OutputTrace = struct {
     max_process_output_gap_ended_at_ms: u64 = 0,
     last_process_output_tick_ms: ?u64 = null,
     first_process_output_at_ms: ?u64 = null,
+    windows_pty_read_buffer_bytes: u64 = 0,
+    windows_pty_read_count: u64 = 0,
+    windows_pty_read_bytes: u64 = 0,
+    windows_pty_read_le_4k_count: u64 = 0,
+    windows_pty_read_le_16k_count: u64 = 0,
+    windows_pty_read_le_64k_count: u64 = 0,
+    windows_pty_read_gt_64k_count: u64 = 0,
+    windows_read_file_total_ns: u64 = 0,
+    windows_read_file_max_ns: u64 = 0,
+    windows_process_output_total_ns: u64 = 0,
+    windows_process_output_max_ns: u64 = 0,
+    renderer_mutex_wait_total_ns: u64 = 0,
+    renderer_mutex_wait_max_ns: u64 = 0,
+    renderer_mutex_hold_total_ns: u64 = 0,
+    renderer_mutex_hold_max_ns: u64 = 0,
 
     fn init(alloc: Allocator) OutputTrace {
         const owned = (internal_os.getEnvVarOwnedTrimmedNotEmpty(
@@ -121,6 +145,44 @@ const OutputTrace = struct {
         self.last_process_output_tick_ms = elapsed_ms;
     }
 
+    fn noteWindowsPtyRead(
+        self: *OutputTrace,
+        byte_count: usize,
+        buffer_size: usize,
+        read_file_ns: u64,
+    ) void {
+        if (!self.enabled()) return;
+
+        self.windows_pty_read_buffer_bytes = @intCast(buffer_size);
+        self.windows_pty_read_count +|= 1;
+        self.windows_pty_read_bytes +|= @intCast(byte_count);
+        if (byte_count <= 4 * 1024) {
+            self.windows_pty_read_le_4k_count +|= 1;
+        } else if (byte_count <= 16 * 1024) {
+            self.windows_pty_read_le_16k_count +|= 1;
+        } else if (byte_count <= 64 * 1024) {
+            self.windows_pty_read_le_64k_count +|= 1;
+        } else {
+            self.windows_pty_read_gt_64k_count +|= 1;
+        }
+        self.windows_read_file_total_ns +|= read_file_ns;
+        self.windows_read_file_max_ns = @max(self.windows_read_file_max_ns, read_file_ns);
+    }
+
+    fn noteWindowsProcessOutput(self: *OutputTrace, duration_ns: u64) void {
+        if (!self.enabled()) return;
+        self.windows_process_output_total_ns +|= duration_ns;
+        self.windows_process_output_max_ns = @max(self.windows_process_output_max_ns, duration_ns);
+    }
+
+    fn noteProcessOutputLock(self: *OutputTrace, wait_ns: u64, hold_ns: u64) void {
+        if (!self.enabled()) return;
+        self.renderer_mutex_wait_total_ns +|= wait_ns;
+        self.renderer_mutex_wait_max_ns = @max(self.renderer_mutex_wait_max_ns, wait_ns);
+        self.renderer_mutex_hold_total_ns +|= hold_ns;
+        self.renderer_mutex_hold_max_ns = @max(self.renderer_mutex_hold_max_ns, hold_ns);
+    }
+
     fn writeSnapshot(self: *const OutputTrace) void {
         const trace_path = self.path orelse return;
         const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
@@ -145,6 +207,21 @@ const OutputTrace = struct {
             .max_process_output_gap_ms = self.max_process_output_gap_ms,
             .max_process_output_gap_ended_at_ms = self.max_process_output_gap_ended_at_ms,
             .first_process_output_at_ms = self.first_process_output_at_ms orelse 0,
+            .windows_pty_read_buffer_bytes = self.windows_pty_read_buffer_bytes,
+            .windows_pty_read_count = self.windows_pty_read_count,
+            .windows_pty_read_bytes = self.windows_pty_read_bytes,
+            .windows_pty_read_le_4k_count = self.windows_pty_read_le_4k_count,
+            .windows_pty_read_le_16k_count = self.windows_pty_read_le_16k_count,
+            .windows_pty_read_le_64k_count = self.windows_pty_read_le_64k_count,
+            .windows_pty_read_gt_64k_count = self.windows_pty_read_gt_64k_count,
+            .windows_read_file_total_ns = self.windows_read_file_total_ns,
+            .windows_read_file_max_ns = self.windows_read_file_max_ns,
+            .windows_process_output_total_ns = self.windows_process_output_total_ns,
+            .windows_process_output_max_ns = self.windows_process_output_max_ns,
+            .renderer_mutex_wait_total_ns = self.renderer_mutex_wait_total_ns,
+            .renderer_mutex_wait_max_ns = self.renderer_mutex_wait_max_ns,
+            .renderer_mutex_hold_total_ns = self.renderer_mutex_hold_total_ns,
+            .renderer_mutex_hold_max_ns = self.renderer_mutex_hold_max_ns,
         }, .{})}) catch |err| {
             log.warn("termio output trace write failed path={s} err={}", .{ trace_path, err });
             return;
@@ -182,6 +259,36 @@ test "termio output trace init rejects and frees a second process owner" {
     const second_trace = OutputTrace.initWithClaimedPath(std.testing.allocator, &claimed, second);
     defer if (second_trace.path) |path| std.testing.allocator.free(path);
     try std.testing.expect(second_trace.path == null);
+}
+
+test "termio output trace aggregates Windows PTY hot-path timings in memory" {
+    var trace: OutputTrace = .{ .path = "unused.json" };
+    trace.noteWindowsPtyRead(4096, 16 * 1024, 11);
+    trace.noteWindowsPtyRead(8192, 16 * 1024, 13);
+    trace.noteWindowsProcessOutput(17);
+    trace.noteWindowsProcessOutput(19);
+    trace.noteProcessOutputLock(23, 29);
+    trace.noteProcessOutputLock(31, 37);
+
+    try std.testing.expectEqual(@as(u64, 2), trace.windows_pty_read_count);
+    try std.testing.expectEqual(@as(u64, 12 * 1024), trace.windows_pty_read_bytes);
+    try std.testing.expectEqual(@as(u64, 1), trace.windows_pty_read_le_4k_count);
+    try std.testing.expectEqual(@as(u64, 1), trace.windows_pty_read_le_16k_count);
+    try std.testing.expectEqual(@as(u64, 24), trace.windows_read_file_total_ns);
+    try std.testing.expectEqual(@as(u64, 13), trace.windows_read_file_max_ns);
+    try std.testing.expectEqual(@as(u64, 36), trace.windows_process_output_total_ns);
+    try std.testing.expectEqual(@as(u64, 19), trace.windows_process_output_max_ns);
+    try std.testing.expectEqual(@as(u64, 54), trace.renderer_mutex_wait_total_ns);
+    try std.testing.expectEqual(@as(u64, 31), trace.renderer_mutex_wait_max_ns);
+    try std.testing.expectEqual(@as(u64, 66), trace.renderer_mutex_hold_total_ns);
+    try std.testing.expectEqual(@as(u64, 37), trace.renderer_mutex_hold_max_ns);
+}
+
+test {
+    // The benchmark end-marker matcher lives in its own module so the
+    // benchmark boundary is visible in the file list, not buried in
+    // Termio. Pull its tests in explicitly.
+    _ = @import("bench_marker.zig");
 }
 
 /// Mutex state argument for queueMessage.
@@ -233,6 +340,10 @@ last_cursor_reset: ?std.time.Instant = null,
 
 /// Optional PTY/output trace for debugging render wake cadence.
 output_trace: OutputTrace = .{},
+
+/// Optional benchmark-only marker used to acknowledge transformed ConPTY
+/// output by terminal generation instead of original input bytes.
+benchmark_end_marker: BenchmarkEndMarker = .{},
 
 /// State we have for thread enter. This may be null if we don't need
 /// to keep track of any state or if its already been freed.
@@ -485,6 +596,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .mailbox = opts.mailbox,
         .terminal_stream = .initAlloc(alloc, handler),
         .output_trace = OutputTrace.init(alloc),
+        .benchmark_end_marker = BenchmarkEndMarker.init(alloc),
         .thread_enter_state = thread_enter_state,
     };
 }
@@ -498,6 +610,7 @@ pub fn deinit(self: *Termio) void {
     // Clear any StreamHandler state
     self.terminal_stream.deinit();
     self.output_trace.deinit(self.alloc);
+    self.benchmark_end_marker.deinit(self.alloc);
 
     // Clear any initial state if we have it
     if (self.thread_enter_state) |v| v.destroy();
@@ -858,15 +971,23 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 /// an exec subprocess.
 pub fn processOutput(self: *Termio, buf: []const u8) void {
     const semantic_output_epoch = self.terminal_output_transport.captureEpoch();
+    const trace_lock = self.output_trace.enabled();
+    const lock_started = if (trace_lock) std.time.Instant.now() catch null else null;
+    var lock_acquired: ?std.time.Instant = null;
     const decision = render: {
         // We are modifying terminal state from here on out and we need
         // the lock to grab our read data.
         self.renderer_state.mutex.lock();
+        if (trace_lock) lock_acquired = std.time.Instant.now() catch null;
         defer self.renderer_state.mutex.unlock();
         const had_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
         const was_synchronized_output = self.terminal.modes.get(.synchronized_output);
         self.terminal_stream.handler.semantic_output.begin(semantic_output_epoch != null);
         const processing = self.processOutputLocked(buf);
+        self.renderer_state.noteProcessOutput(buf.len, processOutputTickMs());
+        if (self.benchmark_end_marker.observeVisible(&self.terminal)) {
+            self.renderer_state.noteBenchmarkEndMarker();
+        }
         const semantic_output = self.terminal_stream.handler.semantic_output.finish();
         const has_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
         const synchronized_output_active = self.terminal.modes.get(.synchronized_output);
@@ -894,6 +1015,18 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
             .semantic_output_epoch = semantic_output_epoch,
         };
     };
+    if (trace_lock) {
+        const lock_released = std.time.Instant.now() catch null;
+        const wait_ns = if (lock_started != null and lock_acquired != null)
+            lock_acquired.?.since(lock_started.?)
+        else
+            0;
+        const hold_ns = if (lock_acquired != null and lock_released != null)
+            lock_released.?.since(lock_acquired.?)
+        else
+            0;
+        self.output_trace.noteProcessOutputLock(wait_ns, hold_ns);
+    }
 
     if (decision.semantic_output_epoch) |epoch| {
         if (decision.semantic_output.len != 0 or
@@ -925,6 +1058,23 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         // terminal mutex while the PTY thread is still mutating state.
         self.terminal_stream.handler.queueRender() catch unreachable;
     }
+}
+
+pub fn outputTraceEnabled(self: *const Termio) bool {
+    return self.output_trace.enabled();
+}
+
+pub fn noteWindowsPtyRead(
+    self: *Termio,
+    byte_count: usize,
+    buffer_size: usize,
+    read_file_ns: u64,
+) void {
+    self.output_trace.noteWindowsPtyRead(byte_count, buffer_size, read_file_ns);
+}
+
+pub fn noteWindowsProcessOutput(self: *Termio, duration_ns: u64) void {
+    self.output_trace.noteWindowsProcessOutput(duration_ns);
 }
 
 /// Process output from readdata but the lock is already held.

@@ -1,0 +1,1526 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noctty.com/schemas/benchmark/windows-evidence.v1.json",
+  "title": "noctty Windows benchmark evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "status",
+    "machine",
+    "configuration",
+    "target",
+    "run_count",
+    "processes",
+    "metrics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "io.github.amanthanvi.noctty.bench-evidence.v1"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": ["pass", "fail", "error", "not-installed", "not-supported"]
+    },
+    "machine": {
+      "$ref": "#/definitions/machine"
+    },
+    "configuration": {
+      "$ref": "#/definitions/configuration"
+    },
+    "target": {
+      "$ref": "#/definitions/target"
+    },
+    "run_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "processes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/process_record"
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/metric"
+      }
+    }
+  },
+  "definitions": {
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os_build",
+        "cpu_model",
+        "physical_cores",
+        "logical_cores",
+        "gpu_name",
+        "gpu_driver_version",
+        "display",
+        "power_state"
+      ],
+      "properties": {
+        "os_build": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cpu_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_cores": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "logical_cores": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gpu_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gpu_driver_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display": {
+          "$ref": "#/definitions/display"
+        },
+        "power_state": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width_px", "height_px", "refresh_hz", "dpi_scale_percent"],
+      "properties": {
+        "width_px": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height_px": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "refresh_hz": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "dpi_scale_percent": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["font_family", "font_size_pt", "rows", "cols"],
+      "properties": {
+        "font_family": {
+          "description": "Resolved installed font face used by the target.",
+          "type": "string",
+          "minLength": 1
+        },
+        "font_size_pt": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cols": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "build_mode": {
+          "description": "Optimization mode certified by the harness for a source-built target, otherwise null.",
+          "enum": ["ReleaseFast", null]
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "exe_path", "exe_sha256", "commit_sha"],
+      "properties": {
+        "name": {
+          "enum": ["noctty", "alacritty", "windows-terminal", "tabby", "wave"]
+        },
+        "version": {
+          "type": ["string", "null"]
+        },
+        "exe_path": {
+          "type": ["string", "null"]
+        },
+        "exe_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "commit_sha": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "process_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_name",
+        "process_id",
+        "started_at",
+        "exe_path",
+        "cleanup_method",
+        "exit_confirmed",
+        "exited_at"
+      ],
+      "properties": {
+        "run_name": { "type": "string", "minLength": 1 },
+        "process_id": { "type": "integer", "minimum": 1 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "exe_path": { "type": "string", "minLength": 1 },
+        "cleanup_method": { "type": "string", "minLength": 1 },
+        "exit_confirmed": { "const": true },
+        "exited_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "status", "unit", "samples", "median", "p95"],
+      "allOf": [
+        {
+          "if": {
+            "required": ["status", "median"],
+            "properties": {
+              "status": { "enum": ["pass", "fail"] },
+              "median": { "type": "number" }
+            }
+          },
+          "then": {
+            "required": ["threshold"]
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "enum": [
+                  "throughput_mb_s",
+                  "throughput_alt_screen_mb_s",
+                  "scroll_mb_s"
+                ]
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": [
+                  "workload",
+                  "bytes",
+                  "producer",
+                  "process_startup_included",
+                  "endpoint",
+                  "completion_signal",
+                  "conpty_original_input_bytes_expected_to_be_preserved",
+                  "downstream_backpressure_included",
+                  "render_trace_snapshot_request_observer_included",
+                  "render_trace_target_observer_included",
+                  "terminal_visible_marker_observer_included",
+                  "termio_trace_observer_included",
+                  "windows_read_buffer_kib",
+                  "diagnostic_profile_scope"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": { "const": "throughput_alt_screen_mb_s" },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "terminal_visible_marker_observer_included": { "const": true }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": { "enum": ["throughput_mb_s", "scroll_mb_s"] },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "properties": {
+                  "terminal_visible_marker_observer_included": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status", "details"],
+            "properties": {
+              "metric": {
+                "enum": [
+                  "throughput_mb_s",
+                  "throughput_alt_screen_mb_s",
+                  "scroll_mb_s"
+                ]
+              },
+              "status": { "const": "pass" },
+              "details": {
+                "required": ["termio_trace_observer_included"],
+                "properties": {
+                  "termio_trace_observer_included": { "const": true }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "required": ["diagnostic_profiles", "diagnostic_profile_scope"],
+                "properties": {
+                  "diagnostic_profile_scope": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "cold_start_harness_ms"
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": ["process_creation_overhead_included"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "cold_start_app_ms"
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": ["app_trace_field"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "memory_bytes_per_additional_pane"
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": [
+                  "shell_child_memory_included",
+                  "additional_panes",
+                  "memory_cycle_count",
+                  "memory_diagnostic_only",
+                  "memory_trace_token_scope"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "memory_bytes_per_additional_pane"
+              },
+              "status": { "enum": ["pass", "fail"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "required": [
+                  "private_memory_scope",
+                  "graphics_context_model",
+                  "memory_stage_observer_included",
+                  "memory_stage_observation_scope",
+                  "pane_close_action",
+                  "destroy_settle_seconds",
+                  "pane_lifecycle_samples"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "enum": [
+                  "idle_cpu_percent",
+                  "idle_gpu_percent",
+                  "idle_swap_count_delta"
+                ]
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": ["idle_interval_seconds"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "enum": [
+                  "idle_cpu_percent",
+                  "idle_gpu_percent",
+                  "idle_swap_count_delta"
+                ]
+              },
+              "status": { "enum": ["pass", "fail"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "required": [
+                  "cursor_blinking",
+                  "idle_quiescence_requirement_ms",
+                  "render_trace_counter_deltas"
+                ],
+                "properties": {
+                  "cursor_blinking": { "const": false },
+                  "idle_quiescence_requirement_ms": { "minimum": 1200 }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "conpty_rtt_ms"
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": ["endpoint", "clock"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "key_to_first_swap_ms_proxy"
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": [
+                  "proxy_kind",
+                  "render_trace_path",
+                  "render_trace_target_observer_included"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["metric", "status"],
+            "properties": {
+              "metric": {
+                "const": "frame_time_p95_ms"
+              },
+              "status": { "enum": ["pass", "fail", "error"] }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": [
+                  "workload",
+                  "endpoint",
+                  "clock",
+                  "aggregation",
+                  "software_observation",
+                  "compositor_scanout_included",
+                  "photon_measurement"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["status"],
+            "properties": {
+              "status": { "const": "not-supported" }
+            }
+          },
+          "then": {
+            "required": ["details"],
+            "properties": {
+              "details": {
+                "required": [
+                  "adapter_requirement",
+                  "comparability_requirement",
+                  "required_tooling"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "metric": {
+          "enum": [
+            "throughput_mb_s",
+            "throughput_alt_screen_mb_s",
+            "scroll_mb_s",
+            "cold_start_harness_ms",
+            "cold_start_app_ms",
+            "memory_bytes_per_additional_pane",
+            "idle_cpu_percent",
+            "idle_gpu_percent",
+            "idle_swap_count_delta",
+            "conpty_rtt_ms",
+            "key_to_first_swap_ms_proxy",
+            "frame_time_p95_ms"
+          ]
+        },
+        "status": {
+          "enum": ["pass", "fail", "error", "skip", "not-supported"]
+        },
+        "unit": {
+          "enum": ["MB/s", "ms", "bytes", "percent", "count"]
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "median": {
+          "type": ["number", "null"]
+        },
+        "p95": {
+          "type": ["number", "null"]
+        },
+        "threshold": {
+          "$ref": "#/definitions/threshold_result"
+        },
+        "details": {
+          "$ref": "#/definitions/metric_details"
+        }
+      }
+    },
+    "threshold_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "direction",
+        "value",
+        "active",
+        "provisional",
+        "source",
+        "baseline",
+        "provenance_matched",
+        "passed"
+      ],
+      "properties": {
+        "direction": {
+          "enum": ["min", "max", "minimum", "maximum", "at-least", "at-most"]
+        },
+        "value": {
+          "type": "number"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "provisional": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseline": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/threshold_baseline" }
+          ]
+        },
+        "provenance_matched": {
+          "type": ["boolean", "null"]
+        },
+        "passed": {
+          "type": ["boolean", "null"]
+        }
+      }
+    },
+    "threshold_baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "os_build",
+        "cpu_model",
+        "physical_cores",
+        "logical_cores",
+        "gpu_name",
+        "gpu_driver_version",
+        "display_width_px",
+        "display_height_px",
+        "display_refresh_hz",
+        "display_dpi_scale_percent",
+        "power_state",
+        "font_family",
+        "font_size_pt",
+        "rows",
+        "cols",
+        "run_count",
+        "bytes",
+        "seed",
+        "idle_seconds"
+      ],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "os_build": { "type": "string", "minLength": 1 },
+        "cpu_model": { "type": "string", "minLength": 1 },
+        "physical_cores": { "type": "integer", "minimum": 1 },
+        "logical_cores": { "type": "integer", "minimum": 1 },
+        "gpu_name": { "type": "string", "minLength": 1 },
+        "gpu_driver_version": { "type": "string", "minLength": 1 },
+        "display_width_px": { "type": "integer", "minimum": 1 },
+        "display_height_px": { "type": "integer", "minimum": 1 },
+        "display_refresh_hz": { "type": "number", "exclusiveMinimum": 0 },
+        "display_dpi_scale_percent": { "type": "number", "exclusiveMinimum": 0 },
+        "power_state": { "type": "string", "minLength": 1 },
+        "font_family": { "type": "string", "minLength": 1 },
+        "font_size_pt": { "type": "number", "exclusiveMinimum": 0 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "cols": { "type": "integer", "minimum": 1 },
+        "run_count": { "type": "integer", "minimum": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "seed": { "type": "integer", "minimum": 1 },
+        "idle_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "metric_details": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workload": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "producer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "process_startup_included": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "completion_signal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conpty_original_input_bytes_expected_to_be_preserved": {
+          "type": "boolean"
+        },
+        "downstream_backpressure_included": {
+          "type": "boolean"
+        },
+        "render_trace_snapshot_request_observer_included": {
+          "type": "boolean"
+        },
+        "render_trace_target_observer_included": {
+          "type": "boolean"
+        },
+        "terminal_visible_marker_observer_included": {
+          "type": "boolean"
+        },
+        "termio_trace_observer_included": {
+          "type": "boolean"
+        },
+        "windows_read_buffer_kib": {
+          "type": "integer",
+          "const": 64
+        },
+        "diagnostic_profiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/termio_diagnostic_profile"
+          }
+        },
+        "diagnostic_profile_scope": {
+          "type": ["string", "null"]
+        },
+        "process_creation_overhead_included": {
+          "type": "boolean"
+        },
+        "trace_file_polling_included": {
+          "type": "boolean"
+        },
+        "app_trace_field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clock_origin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shell_child_memory_included": {
+          "type": "boolean"
+        },
+        "additional_panes": {
+          "const": 3
+        },
+        "memory_cycle_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "memory_diagnostic_only": {
+          "type": "boolean"
+        },
+        "memory_trace_token_scope": {
+          "const": "surface_begin_incarnation"
+        },
+        "private_memory_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "graphics_context_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "memory_stage_observer_included": {
+          "const": true
+        },
+        "memory_stage_observation_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pane_close_action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "destroy_settle_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "pane_lifecycle_samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/pane_lifecycle_sample"
+          }
+        },
+        "idle_interval_seconds": {
+          "type": "number",
+          "minimum": 10
+        },
+        "cursor_blinking": {
+          "type": "boolean"
+        },
+        "idle_quiescence_requirement_ms": {
+          "type": "number",
+          "minimum": 1200
+        },
+        "render_trace_counter_deltas": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/idle_render_trace_counter_delta"
+          }
+        },
+        "proxy_kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clock": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "software_observation": {
+          "type": "boolean"
+        },
+        "compositor_scanout_included": {
+          "type": "boolean"
+        },
+        "adapter_requirement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "comparability_requirement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_tooling": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uia_nonce_validation": {
+          "type": "boolean"
+        },
+        "excludes_post_swap_trace_observation_delay": {
+          "type": "boolean"
+        },
+        "photon_measurement": {
+          "type": "boolean"
+        },
+        "render_trace_path": {
+          "type": ["string", "null"]
+        },
+        "observation_method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error": {
+          "type": ["string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["memory_cycle_count"],
+            "properties": { "memory_cycle_count": { "minimum": 2 } }
+          },
+          "then": {
+            "properties": { "memory_diagnostic_only": { "const": true } }
+          }
+        },
+        {
+          "if": {
+            "required": ["memory_cycle_count"],
+            "properties": { "memory_cycle_count": { "const": 1 } }
+          },
+          "then": {
+            "properties": { "memory_diagnostic_only": { "const": false } }
+          }
+        }
+      ]
+    },
+    "termio_diagnostic_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windows_pty_read_buffer_bytes",
+        "windows_pty_read_count",
+        "windows_pty_read_bytes",
+        "windows_pty_read_le_4k_count",
+        "windows_pty_read_le_16k_count",
+        "windows_pty_read_le_64k_count",
+        "windows_pty_read_gt_64k_count",
+        "windows_read_file_total_ns",
+        "windows_read_file_max_ns",
+        "windows_process_output_total_ns",
+        "windows_process_output_max_ns",
+        "renderer_mutex_wait_total_ns",
+        "renderer_mutex_wait_max_ns",
+        "renderer_mutex_hold_total_ns",
+        "renderer_mutex_hold_max_ns"
+      ],
+      "properties": {
+        "windows_pty_read_buffer_bytes": {
+          "type": "integer",
+          "minimum": 16384
+        },
+        "windows_pty_read_count": { "type": "integer", "minimum": 1 },
+        "windows_pty_read_bytes": { "type": "integer", "minimum": 1 },
+        "windows_pty_read_le_4k_count": { "type": "integer", "minimum": 0 },
+        "windows_pty_read_le_16k_count": { "type": "integer", "minimum": 0 },
+        "windows_pty_read_le_64k_count": { "type": "integer", "minimum": 0 },
+        "windows_pty_read_gt_64k_count": { "type": "integer", "minimum": 0 },
+        "windows_read_file_total_ns": { "type": "integer", "minimum": 0 },
+        "windows_read_file_max_ns": { "type": "integer", "minimum": 0 },
+        "windows_process_output_total_ns": { "type": "integer", "minimum": 0 },
+        "windows_process_output_max_ns": { "type": "integer", "minimum": 0 },
+        "renderer_mutex_wait_total_ns": { "type": "integer", "minimum": 0 },
+        "renderer_mutex_wait_max_ns": { "type": "integer", "minimum": 0 },
+        "renderer_mutex_hold_total_ns": { "type": "integer", "minimum": 0 },
+        "renderer_mutex_hold_max_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "pane_lifecycle_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "cycle",
+        "baseline_private_bytes",
+        "live_private_bytes",
+        "private_bytes_after_each_pane",
+        "marginal_private_bytes",
+        "private_bytes_after_logical_close",
+        "private_bytes_after_destroy_settle",
+        "reclaimed_private_bytes_after_destroy_settle",
+        "retained_private_bytes_above_baseline_after_destroy_settle",
+        "pane_count_at_baseline",
+        "pane_count_after_each_create",
+        "pane_count_after_each_close",
+        "pane_count_after_close",
+        "pane_count_after_destroy_settle",
+        "destroy_settle_seconds",
+        "baseline_surface_ids",
+        "survivor_surface_ids_after_each_close",
+        "survivor_surface_ids_after_destroy_settle",
+        "created_surface_ids",
+        "created_surface_count",
+        "memory_stage_samples"
+      ],
+      "properties": {
+        "run": { "type": "integer", "minimum": 1 },
+        "cycle": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "baseline_private_bytes": { "type": "number", "minimum": 0 },
+        "live_private_bytes": { "type": "number", "minimum": 0 },
+        "private_bytes_after_each_pane": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "number", "minimum": 0 }
+        },
+        "marginal_private_bytes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "number" }
+        },
+        "private_bytes_after_logical_close": { "type": "number", "minimum": 0 },
+        "private_bytes_after_destroy_settle": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reclaimed_private_bytes_after_destroy_settle": { "type": "number" },
+        "retained_private_bytes_above_baseline_after_destroy_settle": {
+          "type": "number"
+        },
+        "pane_count_at_baseline": { "const": 1 },
+        "pane_count_after_each_create": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": 2 }
+        },
+        "pane_count_after_each_close": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "pane_count_after_close": { "const": 1 },
+        "pane_count_after_destroy_settle": { "const": 1 },
+        "destroy_settle_seconds": { "const": 7 },
+        "baseline_surface_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "survivor_surface_ids_after_each_close": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "survivor_surface_ids_after_destroy_settle": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "created_surface_ids": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "created_surface_count": { "const": 3 },
+        "memory_stage_samples": {
+          "type": "array",
+          "minItems": 17,
+          "items": { "$ref": "#/definitions/memory_stage_sample" },
+          "allOf": [
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "surface_begin" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "child_hwnd_created" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "gl_context_created" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": {
+                  "stage": { "const": "opengl_functions_loaded" }
+                }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "renderer_initialized" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "terminal_initialized" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": {
+                  "stage": { "const": "renderer_thread_spawned" }
+                }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "io_thread_spawned" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "threads_started" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "io_reader_spawned" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "destroy_begin" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "core_deinit_complete" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "wgl_context_unbound" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "wgl_context_deleted" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": { "stage": { "const": "dc_released" } }
+              }
+            },
+            {
+              "contains": {
+                "required": ["stage"],
+                "properties": {
+                  "stage": { "const": "surface_destroy_complete" }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "memory_stage_samples": {
+              "contains": {
+                "required": ["stage"],
+                "properties": {
+                  "stage": { "const": "first_successful_swap" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "memory_stage_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "surface_token",
+        "surface_id",
+        "private_bytes",
+        "delta_private_bytes_from_surface_begin",
+        "tick_ms",
+        "trace_sequence",
+        "surface_width_px",
+        "surface_height_px",
+        "cell_width_px",
+        "cell_height_px",
+        "columns",
+        "rows",
+        "wgl_pixel_format_index",
+        "wgl_color_bits",
+        "wgl_alpha_bits",
+        "wgl_depth_bits",
+        "wgl_stencil_bits",
+        "wgl_double_buffer",
+        "wgl_stereo",
+        "wgl_accum_bits",
+        "wgl_aux_buffers",
+        "wgl_selection_source",
+        "wgl_srgb_capable",
+        "wgl_multisample_query_supported",
+        "wgl_sample_buffers",
+        "wgl_samples",
+        "wgl_total_format_count",
+        "wgl_candidate_count"
+      ],
+      "properties": {
+        "stage": {
+          "enum": [
+            "surface_begin",
+            "child_hwnd_created",
+            "gl_context_created",
+            "opengl_functions_loaded",
+            "renderer_initialized",
+            "terminal_initialized",
+            "renderer_thread_spawned",
+            "io_thread_spawned",
+            "threads_started",
+            "io_reader_spawned",
+            "first_successful_swap",
+            "destroy_begin",
+            "core_deinit_complete",
+            "wgl_context_unbound",
+            "wgl_context_deleted",
+            "dc_released",
+            "surface_destroy_complete"
+          ]
+        },
+        "surface_token": { "type": "integer", "minimum": 1 },
+        "surface_id": { "type": ["integer", "null"], "minimum": 1 },
+        "private_bytes": { "type": "integer", "minimum": 0 },
+        "delta_private_bytes_from_surface_begin": { "type": "integer" },
+        "tick_ms": { "type": "integer", "minimum": 0 },
+        "trace_sequence": { "type": "integer", "minimum": 1 },
+        "surface_width_px": { "type": ["integer", "null"], "minimum": 1 },
+        "surface_height_px": { "type": ["integer", "null"], "minimum": 1 },
+        "cell_width_px": { "type": ["integer", "null"], "minimum": 1 },
+        "cell_height_px": { "type": ["integer", "null"], "minimum": 1 },
+        "columns": { "type": ["integer", "null"], "minimum": 1 },
+        "rows": { "type": ["integer", "null"], "minimum": 1 },
+        "wgl_pixel_format_index": { "type": ["integer", "null"], "minimum": 1 },
+        "wgl_color_bits": {
+          "type": ["integer", "null"],
+          "minimum": 32,
+          "maximum": 255
+        },
+        "wgl_alpha_bits": {
+          "type": ["integer", "null"],
+          "minimum": 8,
+          "maximum": 255
+        },
+        "wgl_depth_bits": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "wgl_stencil_bits": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "wgl_double_buffer": { "type": ["boolean", "null"] },
+        "wgl_stereo": { "type": ["boolean", "null"] },
+        "wgl_accum_bits": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "wgl_aux_buffers": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "wgl_selection_source": {
+          "type": ["string", "null"],
+          "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb", null]
+        },
+        "wgl_srgb_capable": { "type": ["boolean", "null"] },
+        "wgl_multisample_query_supported": { "type": ["boolean", "null"] },
+        "wgl_sample_buffers": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 0
+        },
+        "wgl_samples": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 0
+        },
+        "wgl_total_format_count": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "wgl_candidate_count": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "gl_context_created",
+                  "opengl_functions_loaded",
+                  "renderer_initialized",
+                  "terminal_initialized",
+                  "renderer_thread_spawned",
+                  "io_thread_spawned",
+                  "threads_started",
+                  "io_reader_spawned",
+                  "first_successful_swap",
+                  "destroy_begin",
+                  "core_deinit_complete",
+                  "wgl_context_unbound",
+                  "wgl_context_deleted",
+                  "dc_released",
+                  "surface_destroy_complete"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "wgl_pixel_format_index": { "type": "integer", "minimum": 1 },
+              "wgl_color_bits": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 255
+              },
+              "wgl_alpha_bits": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 255
+              },
+              "wgl_depth_bits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "wgl_stencil_bits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "wgl_double_buffer": { "const": true },
+              "wgl_stereo": { "const": false },
+              "wgl_accum_bits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "wgl_aux_buffers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "wgl_selection_source": {
+                "type": "string",
+                "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb"]
+              },
+              "wgl_srgb_capable": { "type": "boolean" },
+              "wgl_multisample_query_supported": { "type": "boolean" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "wgl_multisample_query_supported": { "const": true }
+            },
+            "required": ["wgl_multisample_query_supported"]
+          },
+          "then": {
+            "properties": {
+              "wgl_sample_buffers": { "const": 0 },
+              "wgl_samples": { "const": 0 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "wgl_multisample_query_supported": { "const": false }
+            },
+            "required": ["wgl_multisample_query_supported"]
+          },
+          "then": {
+            "properties": {
+              "wgl_sample_buffers": { "type": "null" },
+              "wgl_samples": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "wgl_selection_source": {
+                "enum": ["ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb"]
+              }
+            },
+            "required": ["wgl_selection_source"]
+          },
+          "then": {
+            "properties": {
+              "wgl_srgb_capable": { "const": true },
+              "wgl_total_format_count": { "type": "integer", "minimum": 1 },
+              "wgl_candidate_count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "wgl_selection_source": { "const": "classic" } },
+            "required": ["wgl_selection_source"]
+          },
+          "then": {
+            "properties": {
+              "wgl_srgb_capable": { "const": false },
+              "wgl_total_format_count": { "type": "null" },
+              "wgl_candidate_count": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "terminal_initialized",
+                  "renderer_thread_spawned",
+                  "io_thread_spawned",
+                  "threads_started",
+                  "io_reader_spawned",
+                  "first_successful_swap",
+                  "destroy_begin",
+                  "core_deinit_complete",
+                  "wgl_context_unbound",
+                  "wgl_context_deleted",
+                  "dc_released",
+                  "surface_destroy_complete"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "surface_id": { "type": "integer", "minimum": 1 },
+              "surface_width_px": { "type": "integer", "minimum": 1 },
+              "surface_height_px": { "type": "integer", "minimum": 1 },
+              "cell_width_px": { "type": "integer", "minimum": 1 },
+              "cell_height_px": { "type": "integer", "minimum": 1 },
+              "columns": { "type": "integer", "minimum": 1 },
+              "rows": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "idle_render_trace_counter_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "settle_duration_ms",
+        "settle_probe_count",
+        "renderer_update_frame_count",
+        "renderer_draw_request_count",
+        "renderer_core_wakeup_notify_count",
+        "surface_focus_change_count",
+        "surface_focused_before",
+        "surface_focused_after",
+        "cursor_timer_wakeup_count",
+        "renderer_repaint_retry_wakeup_count",
+        "resize_settle_wakeup_count",
+        "paint_retry_wakeup_count",
+        "health_recovery_wakeup_count",
+        "paint_pending_wakeup_count",
+        "wakeup_callback_count",
+        "render_callback_count",
+        "renderer_repaint_accept_count",
+        "renderer_repaint_coalesced_count",
+        "queue_paint_count",
+        "queue_paint_update_now_count",
+        "force_paint_now_count",
+        "paint_draw_count",
+        "paint_retry_count",
+        "swap_buffers_count",
+        "process_output_generation_delta",
+        "process_output_bytes_delta"
+      ],
+      "properties": {
+        "run": { "type": "integer", "minimum": 1 },
+        "settle_duration_ms": { "type": "number", "minimum": 1200 },
+        "settle_probe_count": { "type": "integer", "minimum": 2 },
+        "renderer_update_frame_count": { "type": "number", "minimum": 0 },
+        "renderer_draw_request_count": { "type": "number", "minimum": 0 },
+        "renderer_core_wakeup_notify_count": { "type": "number", "minimum": 0 },
+        "surface_focus_change_count": { "type": "number", "minimum": 0 },
+        "surface_focused_before": { "type": "boolean" },
+        "surface_focused_after": { "type": "boolean" },
+        "cursor_timer_wakeup_count": { "type": "number", "minimum": 0 },
+        "renderer_repaint_retry_wakeup_count": {
+          "type": "number",
+          "minimum": 0
+        },
+        "resize_settle_wakeup_count": { "type": "number", "minimum": 0 },
+        "paint_retry_wakeup_count": { "type": "number", "minimum": 0 },
+        "health_recovery_wakeup_count": { "type": "number", "minimum": 0 },
+        "paint_pending_wakeup_count": { "type": "number", "minimum": 0 },
+        "wakeup_callback_count": { "type": "number", "minimum": 0 },
+        "render_callback_count": { "type": "number", "minimum": 0 },
+        "renderer_repaint_accept_count": { "type": "number", "minimum": 0 },
+        "renderer_repaint_coalesced_count": { "type": "number", "minimum": 0 },
+        "queue_paint_count": { "type": "number", "minimum": 0 },
+        "queue_paint_update_now_count": { "type": "number", "minimum": 0 },
+        "force_paint_now_count": { "type": "number", "minimum": 0 },
+        "paint_draw_count": { "type": "number", "minimum": 0 },
+        "paint_retry_count": { "type": "number", "minimum": 0 },
+        "swap_buffers_count": { "type": "number", "minimum": 0 },
+        "process_output_generation_delta": { "type": "number", "minimum": 0 },
+        "process_output_bytes_delta": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

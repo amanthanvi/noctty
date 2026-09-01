@@ -24,7 +24,10 @@ concurrency:
 jobs:
   windows:
     name: Windows Build And Tests
-    runs-on: windows-latest
+    # Pin the runner image for the headless performance regression floor. The
+    # documented baseline remains machine-specific; this is not a cross-host
+    # absolute comparison.
+    runs-on: windows-2025
 
     steps:
       - name: Checkout code
@@ -94,6 +97,22 @@ jobs:
 
       - name: Zig version
         run: zig version
+
+      - name: Headless benchmark regression gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-Content test/windows/bench-evidence.schema.json -Raw | ConvertFrom-Json -Depth 100 | Out-Null
+          zig build bench:vt-throughput -- --workload=ascii --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=50
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build bench:vt-throughput -- --workload=utf8 --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=35
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build bench:vt-throughput -- --workload=osc --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build bench:vt-throughput -- --workload=scroll --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=50
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=1000
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Zig formatting
         shell: pwsh

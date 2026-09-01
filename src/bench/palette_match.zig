@@ -1,11 +1,9 @@
 //! Microbench: command palette fuzzy-match latency.
 //!
-//! Stress-tests the zf-backed ranker used by the live palette. The
-//! ranker logic here is a near-duplicate of `src/apprt/win32_palette.zig`
-//! — kept inline so the bench exe stays free of cross-module imports
-//! (Zig compiles each target as its own module root, and the live
-//! palette's helpers reach into the input catalogue + Win32 types that
-//! aren't part of a clean bench graph).
+//! Stress-tests the production `Catalog.rank` path used by the live Win32
+//! palette. The synthetic catalog is built before timing; each sample covers
+//! the same allocation-free full-catalog scan, scoring, bounded top-K, and
+//! stable sort that runs for a palette query in the application.
 //!
 //! Reports min / mean / p50 / p99 / max in microseconds and exits
 //! non-zero when p99 exceeds the budget. Intended as a CI regression
@@ -16,7 +14,13 @@
 //!       --entries=500 --keystrokes=1000 --budget-us=1000
 
 const std = @import("std");
-const zf = @import("zf");
+const palette = @import("bench_core").win32_palette;
+const stats = @import("stats.zig");
+
+const Catalog = palette.catalog.Catalog;
+const Item = palette.catalog.Item;
+const Payload = palette.catalog.Payload;
+const Ranked = palette.catalog.Ranked;
 
 const Args = struct {
     entries: usize = 500,
@@ -116,75 +120,11 @@ const queries = [_][]const u8{
     "inspec",
     "reset",
     "quit",
+    ">new",
+    "window decorations",
 };
 
-const max_tokens: usize = 8;
 const max_ranked: usize = 256;
-
-fn tokenize(query: []const u8, buf: *[max_tokens][]const u8) []const []const u8 {
-    var n: usize = 0;
-    var it = std.mem.tokenizeAny(u8, query, " \t");
-    while (it.next()) |tok| {
-        if (n >= buf.len) break;
-        buf[n] = tok;
-        n += 1;
-    }
-    return buf[0..n];
-}
-
-fn rankEntry(entry: Entry, tokens: []const []const u8) ?f64 {
-    const opts: zf.RankOptions = .{ .to_lower = true, .plain = true };
-    const t = zf.rank(entry.title, tokens, opts);
-    const a = zf.rank(entry.action, tokens, opts);
-    if (t) |tr| {
-        if (a) |ar| return @min(tr, ar);
-        return tr;
-    }
-    return a;
-}
-
-const Ranked = struct { index: usize, rank: f64 };
-
-fn rankedForQuery(
-    entries: []const Entry,
-    query: []const u8,
-    buf: *[max_ranked]Ranked,
-) []Ranked {
-    var token_buf: [max_tokens][]const u8 = undefined;
-    const tokens = tokenize(query, &token_buf);
-    if (tokens.len == 0) return buf[0..0];
-
-    // Mirror win32_palette.rankedForQuery: full scan, keep top-K by
-    // replacing the current worst when a better rank arrives. The
-    // first-N-match shortcut would hide later (better) matches when
-    // the palette grows past max_ranked.
-    var count: usize = 0;
-    var worst_i: usize = 0;
-    for (entries, 0..) |e, i| {
-        const r = rankEntry(e, tokens) orelse continue;
-        if (count < buf.len) {
-            buf[count] = .{ .index = i, .rank = r };
-            if (count == 0 or r > buf[worst_i].rank) worst_i = count;
-            count += 1;
-            continue;
-        }
-        if (r >= buf[worst_i].rank) continue;
-        buf[worst_i] = .{ .index = i, .rank = r };
-        worst_i = 0;
-        var j: usize = 1;
-        while (j < buf.len) : (j += 1) {
-            if (buf[j].rank > buf[worst_i].rank) worst_i = j;
-        }
-    }
-    const slice = buf[0..count];
-    std.mem.sort(Ranked, slice, {}, struct {
-        fn lt(_: void, a: Ranked, b: Ranked) bool {
-            if (a.rank != b.rank) return a.rank < b.rank;
-            return a.index < b.index;
-        }
-    }.lt);
-    return slice;
-}
 
 pub fn main() !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -197,35 +137,54 @@ pub fn main() !void {
     const args = try parseArgs(args_raw);
     const n = @max(args.entries, seed_entries.len);
 
-    const entries = try alloc.alloc(Entry, n);
-    for (entries, 0..) |*e, i| e.* = seed_entries[i % seed_entries.len];
+    const item_storage = try alloc.alloc(Item, n);
+    const payload_storage = try alloc.alloc(Payload, n);
+    var catalog = try Catalog.init(item_storage, payload_storage);
+    for (0..n) |i| {
+        const seed = seed_entries[i % seed_entries.len];
+        try catalog.append(.{
+            .item = .{
+                .id = .{ .kind = .action, .value = @intCast(i + 1) },
+                .title = seed.title,
+                .subtitle = seed.action,
+                .keywords = seed.action,
+                .enabled = i % 17 != 0,
+                .disabled_reason = if (i % 17 == 0) "Unavailable in this context" else null,
+                .recency = if (i % 13 == 0)
+                    .{ .mru_rank = @intCast(i % 100), .use_count = @intCast(i % 101) }
+                else
+                    .{},
+            },
+            .payload = .{ .action = .{ .action = seed.action } },
+        });
+    }
 
     const samples = try alloc.alloc(u64, args.keystrokes);
     var buf: [max_ranked]Ranked = undefined;
 
     // Warm-up to stabilise first-call cost.
     for (0..@min(args.keystrokes, 16)) |i| {
-        _ = rankedForQuery(entries, queries[i % queries.len], &buf);
+        _ = catalog.rank(
+            queries[i % queries.len],
+            .{ .max_results = buf.len },
+            &buf,
+        );
     }
 
     var timer = try std.time.Timer.start();
     for (0..args.keystrokes) |i| {
         const q = queries[i % queries.len];
         timer.reset();
-        _ = rankedForQuery(entries, q, &buf);
+        _ = catalog.rank(q, .{ .max_results = buf.len }, &buf);
         samples[i] = timer.read();
     }
 
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
-    const min_ns = samples[0];
-    const p50_ns = samples[samples.len / 2];
-    const p99_ns = samples[samples.len * 99 / 100];
-    const max_ns = samples[samples.len - 1];
-    const mean_ns = blk: {
-        var sum: u64 = 0;
-        for (samples) |s| sum += s;
-        break :blk sum / samples.len;
-    };
+    const min_ns = stats.min(samples).?;
+    const p50_ns = stats.percentile(samples, 50).?;
+    const p99_ns = stats.percentile(samples, 99).?;
+    const max_ns = stats.max(samples).?;
+    const mean_ns: u64 = @intFromFloat(stats.mean(samples).?);
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
@@ -281,6 +240,7 @@ fn parseArgs(raw: []const []const u8) !Args {
             std.log.warn("bench:palette-match: unknown arg '{s}' — ignoring", .{arg});
         }
     }
+    if (out.keystrokes == 0) return error.InvalidArgument;
     return out;
 }
 
@@ -293,10 +253,21 @@ fn printHelp() !void {
         \\
         \\Flags:
         \\  --entries=N        Synthetic snapshot size; padded from a seed catalogue (default 500).
-        \\  --keystrokes=N     Queries timed (default 1000).
+        \\  --keystrokes=N     Queries timed (default 1000). Must be at least 1.
         \\  --budget-us=N      p99 budget in microseconds (default 1000). Exits non-zero on regression.
         \\  -h, --help         Print this help.
         \\
     );
     try stdout.flush();
+}
+
+test "palette match rejects a zero keystroke count" {
+    try std.testing.expectError(
+        error.InvalidArgument,
+        parseArgs(&.{ "bench-palette-match", "--keystrokes=0" }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try parseArgs(&.{ "bench-palette-match", "--keystrokes=1" })).keystrokes,
+    );
 }

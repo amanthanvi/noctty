@@ -30,20 +30,30 @@ compatibility intact.
 
 ## Performance budgets
 
-"Fastest, most fluid" is a measurable contract, not a slogan. Budgets
-(provisional until the benchmark suite's first same-machine baseline
-run fixes them; CI gates against them once measured):
+"Fastest, most fluid" is a measurable contract, not a slogan. These are
+the targets; the measured baseline is in
+[docs/windows-benchmark-methodology.md](docs/windows-benchmark-methodology.md).
+The interactive figures below come from a run that predates the most
+recent code reorganization and are awaiting re-measurement, which that
+document records:
 
-- Cold start to first frame: under 300 ms.
+- Cold start to first frame: under 300 ms. Measured 297 ms median,
+  313 ms p95 — the median meets the target and the tail does not.
 - Key-to-pixel latency: at most one frame at 60 Hz beyond the OS
-  input/compositor floor.
-- Memory: under 20 MB steady-state per additional pane.
-- Idle: effectively 0% GPU/CPU with no timer wake churn. See
+  input/compositor floor. Not yet measured; the suite ships a software
+  proxy and a documented camera/photodiode procedure, neither of which
+  certifies this budget.
+- Memory: under 20 MB steady-state per additional pane. Measured
+  32.14 MB median of whole-process private bytes, which includes
+  OpenGL driver commit and is not apportioned. Target unchanged.
+- Idle: effectively 0% GPU/CPU with no timer wake churn. Measured 0%
+  CPU, 0% GPU, and zero successful swaps over a 10 s idle interval. See
   [Windows power and battery behavior](docs/windows.md#power-and-battery).
 
 The benchmark suite (roadmap C01) defines the measurement methodology,
-workload, baseline machine, and tolerances; CI gates activate once that
-suite lands its first same-machine baseline.
+workload, baseline machine, and tolerances. CI gates the headless
+throughput floor today; the interactive thresholds remain provisional
+and inactive until their percentiles and tolerances are reviewed.
 
 ## Brand personality
 
