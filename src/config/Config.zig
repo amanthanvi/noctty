@@ -8399,25 +8399,12 @@ pub const RepeatableLink = struct {
     links: std.ArrayListUnmanaged(inputpkg.Link) = .{},
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
-        const input = std.mem.trim(
-            u8,
-            input_ orelse return error.ValueRequired,
-            &std.ascii.whitespace,
-        );
-
-        // Empty input clears custom links. The built-in URL matcher is
-        // appended later during surface derived-config construction.
-        if (input.len == 0) {
+        const regex = try parseOptionalRegexEntry(alloc, input_) orelse {
+            // The built-in URL matcher is appended later during surface
+            // derived-config construction.
             self.links.clearRetainingCapacity();
             return;
-        }
-
-        const regex = try parseRegexValue(alloc, input);
-        if (regex.len == 0) {
-            alloc.free(regex);
-            self.links.clearRetainingCapacity();
-            return;
-        }
+        };
         errdefer alloc.free(regex);
         try self.links.append(alloc, .{
             .regex = regex,
@@ -8587,6 +8574,22 @@ pub const RepeatableLink = struct {
     }
 };
 
+/// Parse a bare or quoted regex list entry. A null result clears the caller's
+/// list, including explicitly empty quoted values.
+fn parseOptionalRegexEntry(alloc: Allocator, input_: ?[]const u8) !?[]const u8 {
+    const input = std.mem.trim(
+        u8,
+        input_ orelse return error.ValueRequired,
+        &std.ascii.whitespace,
+    );
+    if (input.len == 0) return null;
+
+    const regex = try RepeatableLink.parseRegexValue(alloc, input);
+    if (regex.len != 0) return regex;
+    alloc.free(regex);
+    return null;
+}
+
 /// See `quick-select-patterns` for documentation.
 pub const QuickSelectPatterns = struct {
     const Self = @This();
@@ -8594,22 +8597,10 @@ pub const QuickSelectPatterns = struct {
     list: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
-        const input = std.mem.trim(
-            u8,
-            input_ orelse return error.ValueRequired,
-            &std.ascii.whitespace,
-        );
-        if (input.len == 0) {
+        const regex = try parseOptionalRegexEntry(alloc, input_) orelse {
             self.list.clearRetainingCapacity();
             return;
-        }
-
-        const regex = try RepeatableLink.parseRegexValue(alloc, input);
-        if (regex.len == 0) {
-            alloc.free(regex);
-            self.list.clearRetainingCapacity();
-            return;
-        }
+        };
         errdefer alloc.free(regex);
         try self.list.append(alloc, regex);
     }

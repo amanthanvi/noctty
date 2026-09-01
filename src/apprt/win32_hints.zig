@@ -245,6 +245,22 @@ pub fn spanTextRange(
 /// Build the stable accessible name for one visible quick-select target.
 /// The label is announced before the matched text so keyboard users hear the
 /// key they can type before potentially long terminal content.
+pub fn accessibleLabelName(buf: []u8, label: []const u8) []const u8 {
+    var len: usize = 0;
+    for (label, 0..) |byte, index| {
+        if (index != 0 and (byte == ' ' or label[index - 1] == ' ')) {
+            if (len == buf.len) break;
+            buf[len] = ' ';
+            len += 1;
+        }
+        const spoken = if (byte == ' ') "Space" else label[index .. index + 1];
+        if (spoken.len > buf.len - len) break;
+        @memcpy(buf[len..][0..spoken.len], spoken);
+        len += spoken.len;
+    }
+    return buf[0..len];
+}
+
 pub fn accessibleTargetName(
     buf: []u8,
     index: usize,
@@ -252,10 +268,12 @@ pub fn accessibleTargetName(
     label: []const u8,
     text: []const u8,
 ) []const u8 {
+    var spoken_label_buf: [PrefixState.max_len * 6]u8 = undefined;
+    const spoken_label = accessibleLabelName(&spoken_label_buf, label);
     const prefix = std.fmt.bufPrint(
         buf,
         "Target {d} of {d}, label {s}, ",
-        .{ index + 1, count, label },
+        .{ index + 1, count, spoken_label },
     ) catch {
         const fallback = "Quick select target";
         const len = @min(fallback.len, buf.len);
@@ -1213,6 +1231,14 @@ test "hints: accessible target names expose label and matched text" {
     try std.testing.expectEqualStrings(
         "Target 1 of 2, label a, https://example.com/a",
         accessibleTargetName(&buf, 0, 2, "a", "https://example.com/a"),
+    );
+}
+
+test "hints: accessible names announce space labels" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Target 1 of 2, label a Space b, text",
+        accessibleTargetName(&buf, 0, 2, "a b", "text"),
     );
 }
 

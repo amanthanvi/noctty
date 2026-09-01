@@ -23197,6 +23197,7 @@ const QuickSelectSession = struct {
 
 test "quick select label placement checks final positioned chips" {
     const client: RECT = .{ .left = 0, .top = 0, .right = 100, .bottom = 100 };
+    var comparisons_remaining: usize = Surface.quick_select_placement_comparison_budget;
     const occupied = [_]RECT{
         .{ .left = 0, .top = 0, .right = 20, .bottom = 10 },
         .{ .left = 10, .top = 10, .right = 30, .bottom = 20 },
@@ -23205,6 +23206,7 @@ test "quick select label placement checks final positioned chips" {
         .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
         client,
         &occupied,
+        &comparisons_remaining,
     ).?;
     try std.testing.expectEqual(@as(i32, 20), placed.top);
     try std.testing.expectEqual(@as(i32, 30), placed.bottom);
@@ -23212,6 +23214,7 @@ test "quick select label placement checks final positioned chips" {
 
 test "quick select label placement uses the free global grid" {
     const client: RECT = .{ .left = 0, .top = 0, .right = 30, .bottom = 20 };
+    var comparisons_remaining: usize = Surface.quick_select_placement_comparison_budget;
     const occupied = [_]RECT{
         .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
         .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
@@ -23220,6 +23223,7 @@ test "quick select label placement uses the free global grid" {
         .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
         client,
         &occupied,
+        &comparisons_remaining,
     ).?;
     try std.testing.expectEqual(@as(i32, 0), placed.left);
     try std.testing.expectEqual(@as(i32, 10), placed.right);
@@ -23227,6 +23231,7 @@ test "quick select label placement uses the free global grid" {
 
 test "quick select label placement reports an exhausted viewport" {
     const client: RECT = .{ .left = 0, .top = 0, .right = 20, .bottom = 20 };
+    var comparisons_remaining: usize = Surface.quick_select_placement_comparison_budget;
     const occupied = [_]RECT{
         .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
         .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
@@ -23237,6 +23242,19 @@ test "quick select label placement reports an exhausted viewport" {
         .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
         client,
         &occupied,
+        &comparisons_remaining,
+    ) == null);
+}
+
+test "quick select label placement stops at its comparison budget" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 20, .bottom = 20 };
+    const occupied = [_]RECT{.{ .left = 0, .top = 0, .right = 10, .bottom = 10 }};
+    var comparisons_remaining: usize = 0;
+    try std.testing.expect(Surface.quickSelectPositionLabel(
+        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
+        client,
+        &occupied,
+        &comparisons_remaining,
     ) == null);
 }
 
@@ -24924,7 +24942,14 @@ pub const Surface = struct {
         return session.placed_rects[slot];
     }
 
-    fn quickSelectPositionLabel(raw: RECT, client: RECT, occupied: []const RECT) ?RECT {
+    const quick_select_placement_comparison_budget = 262_144;
+
+    fn quickSelectPositionLabel(
+        raw: RECT,
+        client: RECT,
+        occupied: []const RECT,
+        comparisons_remaining: *usize,
+    ) ?RECT {
         const height = raw.bottom - raw.top;
         const width = raw.right - raw.left;
         if (height <= 0 or width <= 0) return null;
@@ -24942,6 +24967,8 @@ pub const Surface = struct {
             candidate.bottom += lane * height;
             if (candidate.top < client.top or candidate.bottom > client.bottom) continue;
             for (occupied) |previous| {
+                if (comparisons_remaining.* == 0) return null;
+                comparisons_remaining.* -= 1;
                 if (candidate.left < previous.right and candidate.right > previous.left and
                     candidate.top < previous.bottom and candidate.bottom > previous.top)
                 {
@@ -24964,6 +24991,8 @@ pub const Surface = struct {
                     .bottom = top + height,
                 };
                 for (occupied) |previous| {
+                    if (comparisons_remaining.* == 0) return null;
+                    comparisons_remaining.* -= 1;
                     if (candidate.left < previous.right and candidate.right > previous.left and
                         candidate.top < previous.bottom and candidate.bottom > previous.top)
                     {
@@ -24999,14 +25028,17 @@ pub const Surface = struct {
         session.placement_client = client;
         session.placement_metrics = metrics;
         session.placement_dpi = dpi;
+        var comparisons_remaining: usize = quick_select_placement_comparison_budget;
         for (session.scan.matches, 0..) |_, index| {
             const raw = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse continue;
             const positioned = quickSelectPositionLabel(
                 raw,
                 client,
                 session.placed_rects[0..session.placed_count],
+                &comparisons_remaining,
             ) orelse {
                 session.placement_complete = false;
+                if (comparisons_remaining == 0) break;
                 continue;
             };
             session.placed_rects[session.placed_count] = positioned;
@@ -25072,10 +25104,12 @@ pub const Surface = struct {
                 .{ count, noun },
             ) catch "Quick select";
         }
+        var spoken_typed_buf: [win32_hints.PrefixState.max_len * 6]u8 = undefined;
+        const spoken_typed = win32_hints.accessibleLabelName(&spoken_typed_buf, typed);
         return std.fmt.bufPrint(
             buf,
             "Quick select, {d} {s}, typed {s}",
-            .{ count, noun, typed },
+            .{ count, noun, spoken_typed },
         ) catch "Quick select";
     }
 
