@@ -3977,8 +3977,8 @@ try {
     $liveSetting = 'Polite'
 
     $supportedTextSelection = $textPattern.SupportedTextSelection
-    if ($supportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::Single) {
-        throw "Terminal TextPattern advertises '$supportedTextSelection'; expected Single for its one PTY-owned selection."
+    if ($supportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::None) {
+        throw "Terminal TextPattern advertises '$supportedTextSelection'; expected None because UIA cannot mutate the PTY-owned selection."
     }
     # The terminal exposes an actual user selection when one exists. None has
     # been made in this scenario, so GetSelection must return the documented
