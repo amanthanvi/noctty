@@ -921,21 +921,25 @@ const RegistryValueSnapshot = struct {
 
 const RegistrationRefreshSnapshot = struct {
     values: std.ArrayListUnmanaged(RegistryValueSnapshot) = .empty,
+    had_owned_state: bool = false,
 
     fn capture(alloc: Allocator) (Allocator.Error || RegistrationError)!RegistrationRefreshSnapshot {
         var self: RegistrationRefreshSnapshot = .{};
         errdefer self.deinit(alloc);
 
-        try self.captureValue(alloc, class_key_utf8, null);
-        try self.captureValue(alloc, local_server_key_utf8, null);
-        try self.captureValue(alloc, proxy_class_key_utf8, null);
-        try self.captureValue(alloc, proxy_inproc_server_key_utf8, null);
-        try self.captureValue(alloc, proxy_inproc_server_key_utf8, "ThreadingModel");
+        try self.captureValue(alloc, class_key_utf8, null, true);
+        try self.captureValue(alloc, local_server_key_utf8, null, true);
+        try self.captureValue(alloc, proxy_class_key_utf8, null, true);
+        try self.captureValue(alloc, proxy_inproc_server_key_utf8, null, true);
+        try self.captureValue(alloc, proxy_inproc_server_key_utf8, "ThreadingModel", true);
+        try self.captureValue(alloc, saved_state_key_utf8, "Present", true);
+        try self.captureValue(alloc, saved_state_key_utf8, "Type", true);
+        try self.captureValue(alloc, saved_state_key_utf8, "Data", true);
         for (interface_proxy_registrations) |registration| {
-            try self.captureValue(alloc, registration.key_utf8, null);
-            try self.captureValue(alloc, registration.saved_key_utf8, "Present");
-            try self.captureValue(alloc, registration.saved_key_utf8, "Type");
-            try self.captureValue(alloc, registration.saved_key_utf8, "Data");
+            try self.captureValue(alloc, registration.key_utf8, null, false);
+            try self.captureValue(alloc, registration.saved_key_utf8, "Present", true);
+            try self.captureValue(alloc, registration.saved_key_utf8, "Type", true);
+            try self.captureValue(alloc, registration.saved_key_utf8, "Data", true);
         }
         return self;
     }
@@ -945,9 +949,11 @@ const RegistrationRefreshSnapshot = struct {
         alloc: Allocator,
         key: []const u8,
         name: ?[]const u8,
+        owned_state: bool,
     ) (Allocator.Error || RegistrationError)!void {
         const value = try queryValueAlloc(alloc, key, name);
         errdefer if (value) |raw| raw.deinit(alloc);
+        if (owned_state and value != null) self.had_owned_state = true;
         try self.values.append(alloc, .{ .key = key, .name = name, .value = value });
     }
 
@@ -1025,6 +1031,12 @@ fn consoleHalfTextAlloc(alloc: Allocator) (Allocator.Error || RegistrationError)
 
 const SelectionCommit = enum { already_selected, commit };
 
+const RegistrationRollback = enum { cleanup_new, restore_snapshot };
+
+fn decideRegistrationRollback(terminal_is_ours: bool, had_owned_state: bool) RegistrationRollback {
+    return if (terminal_is_ours or had_owned_state) .restore_snapshot else .cleanup_new;
+}
+
 /// Whether the terminal half may be written, given what the console half looks
 /// like right now.
 ///
@@ -1091,11 +1103,9 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
 
     const command = try localServerCommand(alloc, exe_path);
     defer alloc.free(command);
-    var refresh_snapshot: ?RegistrationRefreshSnapshot = if (terminal_is_noctty)
-        try RegistrationRefreshSnapshot.capture(alloc)
-    else
-        null;
-    defer if (refresh_snapshot) |*snapshot| snapshot.deinit(alloc);
+    var refresh_snapshot = try RegistrationRefreshSnapshot.capture(alloc);
+    defer refresh_snapshot.deinit(alloc);
+    const rollback = decideRegistrationRollback(terminal_is_noctty, refresh_snapshot.had_owned_state);
     // Ordering is load-bearing: every shared Interface value is snapshotted
     // before anything is written, and the user's terminal selection is
     // switched last, so a failure part way through leaves the previous
@@ -1103,17 +1113,18 @@ pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocato
     const selection_changed = writeRegistration(alloc, command, proxy_path) catch |err| {
         // The terminal selection is the commit point. If its final console
         // check or any earlier registry mutation fails, restore every shared
-        // proxy mapping and remove the class keys written above so a failed
-        // registration is observationally equivalent to no registration.
-        if (refresh_snapshot) |snapshot| {
-            snapshot.restore(alloc) catch |rollback_err| {
+        // proxy mapping and either restore the prior dormant registration or
+        // remove class keys created by this attempt.
+        switch (rollback) {
+            .restore_snapshot => refresh_snapshot.restore(alloc) catch |rollback_err| {
                 log.err("default-terminal refresh rollback failed err={}", .{rollback_err});
                 return rollback_err;
-            };
-        } else _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
-            log.err("default-terminal registration rollback failed err={}", .{rollback_err});
-            return rollback_err;
-        };
+            },
+            .cleanup_new => _ = unregisterDefaultTerminal(alloc) catch |rollback_err| {
+                log.err("default-terminal registration rollback failed err={}", .{rollback_err});
+                return rollback_err;
+            },
+        }
         return err;
     };
     return .{ .selection_changed = selection_changed };
@@ -1727,6 +1738,24 @@ test "handoff selection commit rechecks the console half before writing" {
     try std.testing.expectEqual(
         SelectionCommit.already_selected,
         try decideSelectionCommit(true, "{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}"),
+    );
+}
+
+test "handoff registration rollback preserves dormant owned state" {
+    try std.testing.expectEqual(
+        RegistrationRollback.cleanup_new,
+        decideRegistrationRollback(false, false),
+    );
+    try std.testing.expectEqual(
+        RegistrationRollback.restore_snapshot,
+        decideRegistrationRollback(true, false),
+    );
+    // A different terminal may be selected while this installation's class
+    // and saved restore values remain registered. A failed refresh must put
+    // those dormant values back instead of uninstalling them.
+    try std.testing.expectEqual(
+        RegistrationRollback.restore_snapshot,
+        decideRegistrationRollback(false, true),
     );
 }
 
