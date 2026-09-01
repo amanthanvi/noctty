@@ -1816,6 +1816,16 @@ fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
     const arguments = try win32_ipc.decodeNewWindowPayload(app.core_app.alloc, pipe);
     errdefer win32_ipc.freeOwnedArguments(app.core_app.alloc, arguments);
 
+    // Reject policy-invalid requests before the success ACK. The UI-thread
+    // path repeats the same checks as defense in depth, but acknowledging
+    // here first would make +new-window exit successfully without creating a
+    // window.
+    if (!newWindowIpcArgumentsAccepted(arguments)) {
+        try win32_ipc.writeAck(pipe, false);
+        win32_ipc.freeOwnedArguments(app.core_app.alloc, arguments);
+        return;
+    }
+
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
@@ -1827,6 +1837,15 @@ fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
     }
 
     try win32_ipc.writeAck(pipe, true);
+}
+
+fn newWindowIpcArgumentsAccepted(arguments: ?[]const [:0]const u8) bool {
+    const argv = arguments orelse return true;
+    return switch (scanForwardedToastActivation(argv)) {
+        .activation => true,
+        .malformed => false,
+        .none => forwardedArgvRejection(argv) == null,
+    };
 }
 
 fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
@@ -28093,6 +28112,15 @@ test "win32 synthesized forwarded working directory obeys receiver policy" {
     )).?;
     defer std.testing.allocator.free(local);
     try std.testing.expectEqualStrings("--working-directory=C:\\work", local);
+}
+
+test "win32 new-window IPC rejects policy failures before acknowledgement" {
+    try std.testing.expect(newWindowIpcArgumentsAccepted(null));
+    try std.testing.expect(newWindowIpcArgumentsAccepted(&.{"--title=Inbox"}));
+    try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{"--command=calc.exe"}));
+    try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{
+        "--working-directory=\\\\host\\share",
+    }));
 }
 
 test "win32 decorationsVisibleForConfig only hides none" {
