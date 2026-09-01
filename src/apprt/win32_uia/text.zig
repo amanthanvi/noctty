@@ -354,7 +354,7 @@ fn scalarRangeForPin(
         const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
         if (pin_map[index].eql(target)) {
             var end = index + scalar_len;
-            while (end < text.len and pin_map[end].eql(target)) {
+            while (end < text.len and text[end] != '\n' and pin_map[end].eql(target)) {
                 end += std.unicode.utf8ByteSequenceLength(text[end]) catch return null;
             }
             return .{ .start = index, .end = end };
@@ -749,6 +749,27 @@ test "accessible selection includes every scalar in the endpoint grapheme" {
 
     const range = snapshot.selection_range.?;
     try std.testing.expectEqualStrings("Ae\u{301}", snapshot.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+}
+
+test "accessible selection endpoint excludes the formatter newline" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("ABCD\nEFGH");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const row_end = screen.pages.pin(.{ .screen = .{ .x = 3, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, row_end, false));
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    const range = snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("ABCD", snapshot.text[range.start..range.end]);
     try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
 }
 
