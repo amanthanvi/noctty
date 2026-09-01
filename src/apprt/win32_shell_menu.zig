@@ -17,6 +17,7 @@ const REGSAM = u32;
 // Aliased from the shared Win32 surface rather than re-declared, so this
 // module cannot drift from src/apprt/win32/sys.zig.
 const RegCreateKeyExW = sys.RegCreateKeyExW;
+const RegOpenKeyExW = sys.RegOpenKeyExW;
 const RegSetValueExW = sys.RegSetValueExW;
 const RegCloseKey = sys.RegCloseKey;
 
@@ -28,6 +29,20 @@ extern "advapi32" fn RegDeleteKeyExW(
     Reserved: DWORD,
 ) callconv(.winapi) i32;
 
+extern "advapi32" fn RegDeleteValueW(
+    hKey: HKEY,
+    lpValueName: ?LPCWSTR,
+) callconv(.winapi) i32;
+
+extern "advapi32" fn RegQueryValueExW(
+    hKey: HKEY,
+    lpValueName: ?LPCWSTR,
+    lpReserved: ?*DWORD,
+    lpType: ?*DWORD,
+    lpData: ?*u8,
+    lpcbData: ?*DWORD,
+) callconv(.winapi) i32;
+
 extern "shell32" fn SHChangeNotify(
     wEventId: i32,
     uFlags: u32,
@@ -37,6 +52,7 @@ extern "shell32" fn SHChangeNotify(
 
 const HKEY_CURRENT_USER: HKEY = @ptrFromInt(consts.HKEY_CURRENT_USER);
 const KEY_WRITE: REGSAM = 0x20006;
+const KEY_READ: REGSAM = 0x20019;
 const REG_OPTION_NON_VOLATILE: DWORD = 0;
 const REG_SZ: DWORD = 1;
 const ERROR_SUCCESS: i32 = consts.ERROR_SUCCESS;
@@ -82,6 +98,7 @@ pub const unregister_key_paths = [_][]const u8{
 
 pub const RegistryOperation = enum {
     create_key,
+    query_value,
     set_value,
 };
 
@@ -104,7 +121,42 @@ pub const DeleteResult = union(enum) {
 
 const WriteResult = struct {
     created: bool,
+    mutated: bool = false,
     failure: ?RegistryFailure = null,
+};
+
+const ValueName = enum { default, icon };
+
+const ValueSpec = struct {
+    key_index: usize,
+    name: ValueName,
+};
+
+const value_specs = [_]ValueSpec{
+    .{ .key_index = 0, .name = .default },
+    .{ .key_index = 0, .name = .icon },
+    .{ .key_index = 1, .name = .default },
+    .{ .key_index = 2, .name = .default },
+    .{ .key_index = 2, .name = .icon },
+    .{ .key_index = 3, .name = .default },
+    .{ .key_index = 4, .name = .default },
+    .{ .key_index = 4, .name = .icon },
+    .{ .key_index = 5, .name = .default },
+};
+
+const ValueSnapshot = struct {
+    value_type: DWORD = REG_SZ,
+    data: ?[]u8 = null,
+
+    fn deinit(self: *ValueSnapshot, alloc: Allocator) void {
+        if (self.data) |data| alloc.free(data);
+        self.* = .{};
+    }
+};
+
+const SnapshotResult = union(enum) {
+    snapshot: ValueSnapshot,
+    failure: RegistryFailure,
 };
 
 /// Resolve the GUI executable next to the current launcher. This intentionally
@@ -149,16 +201,44 @@ pub fn register(alloc: Allocator, exe_path: []const u8) !RegisterResult {
         }
     }
 
+    var snapshots: [value_specs.len]ValueSnapshot = undefined;
+    var snapshot_count: usize = 0;
+    defer for (snapshots[0..snapshot_count]) |*snapshot| snapshot.deinit(alloc);
+    for (value_specs) |spec| {
+        const captured = try captureValue(alloc, spec);
+        switch (captured) {
+            .snapshot => |snapshot| {
+                snapshots[snapshot_count] = snapshot;
+                snapshot_count += 1;
+            },
+            .failure => |failure| {
+                rollbackCreatedKeys(alloc, &created);
+                return .{ .failure = failure };
+            },
+        }
+    }
+
+    var mutated = false;
+    errdefer {
+        rollbackValues(alloc, &snapshots, &created);
+        if (mutated) notifyExplorerAssociationsChanged();
+    }
     inline for (verb_key_paths, command_key_paths) |verb_path, command_path| {
         const verb = try writeVerbKey(alloc, verb_path, exe_path);
+        mutated = mutated or verb.mutated;
         if (verb.failure) |failure| {
+            rollbackValues(alloc, &snapshots, &created);
             rollbackCreatedKeys(alloc, &created);
+            if (mutated) notifyExplorerAssociationsChanged();
             return .{ .failure = failure };
         }
 
         const command = try writeDefaultValue(alloc, command_path, command_value);
+        mutated = mutated or command.mutated;
         if (command.failure) |failure| {
+            rollbackValues(alloc, &snapshots, &created);
             rollbackCreatedKeys(alloc, &created);
+            if (mutated) notifyExplorerAssociationsChanged();
             return .{ .failure = failure };
         }
     }
@@ -179,7 +259,7 @@ fn ensureWritableKey(alloc: Allocator, key_path: []const u8) !WriteResult {
         0,
         null,
         REG_OPTION_NON_VOLATILE,
-        KEY_WRITE,
+        KEY_READ | KEY_WRITE,
         null,
         &key,
         &disposition,
@@ -191,6 +271,104 @@ fn ensureWritableKey(alloc: Allocator, key_path: []const u8) !WriteResult {
     } };
     defer _ = RegCloseKey(key);
     return .{ .created = disposition == REG_CREATED_NEW_KEY };
+}
+
+fn valueNameWide(name: ValueName) ?LPCWSTR {
+    return switch (name) {
+        .default => null,
+        .icon => std.unicode.utf8ToUtf16LeStringLiteral("Icon"),
+    };
+}
+
+fn captureValue(alloc: Allocator, spec: ValueSpec) !SnapshotResult {
+    const key_path = register_key_paths[spec.key_index];
+    const key_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path);
+    defer alloc.free(key_path_wide);
+    var key: HKEY = undefined;
+    const open_status = RegOpenKeyExW(HKEY_CURRENT_USER, key_path_wide, 0, KEY_READ, &key);
+    if (open_status != ERROR_SUCCESS) return .{ .failure = .{
+        .operation = .query_value,
+        .key_path = key_path,
+        .status = open_status,
+    } };
+    defer _ = RegCloseKey(key);
+
+    var value_type: DWORD = 0;
+    var size: DWORD = 0;
+    const query_status = RegQueryValueExW(
+        key,
+        valueNameWide(spec.name),
+        null,
+        &value_type,
+        null,
+        &size,
+    );
+    if (query_status == ERROR_FILE_NOT_FOUND) return .{ .snapshot = .{} };
+    if (query_status != ERROR_SUCCESS) return .{ .failure = .{
+        .operation = .query_value,
+        .key_path = key_path,
+        .status = query_status,
+    } };
+
+    const data = try alloc.alloc(u8, size);
+    errdefer alloc.free(data);
+    var read_size = size;
+    const read_status = RegQueryValueExW(
+        key,
+        valueNameWide(spec.name),
+        null,
+        &value_type,
+        if (data.len == 0) null else &data[0],
+        &read_size,
+    );
+    if (read_status != ERROR_SUCCESS) return .{ .failure = .{
+        .operation = .query_value,
+        .key_path = key_path,
+        .status = read_status,
+    } };
+    return .{ .snapshot = .{ .value_type = value_type, .data = data } };
+}
+
+fn rollbackValues(
+    alloc: Allocator,
+    snapshots: *const [value_specs.len]ValueSnapshot,
+    created: *const [register_key_paths.len]bool,
+) void {
+    var index = value_specs.len;
+    while (index > 0) {
+        index -= 1;
+        const spec = value_specs[index];
+        if (created[spec.key_index]) continue;
+        restoreValueBestEffort(alloc, spec, snapshots[index]);
+    }
+}
+
+fn restoreValueBestEffort(alloc: Allocator, spec: ValueSpec, snapshot: ValueSnapshot) void {
+    const key_path = register_key_paths[spec.key_index];
+    const key_path_wide = std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path) catch return;
+    defer alloc.free(key_path_wide);
+    var key: HKEY = undefined;
+    const open_status = RegOpenKeyExW(HKEY_CURRENT_USER, key_path_wide, 0, KEY_WRITE, &key);
+    if (open_status != ERROR_SUCCESS) return;
+    defer _ = RegCloseKey(key);
+
+    const status = if (snapshot.data) |data|
+        RegSetValueExW(
+            key,
+            valueNameWide(spec.name),
+            0,
+            snapshot.value_type,
+            data.ptr,
+            @intCast(data.len),
+        )
+    else
+        RegDeleteValueW(key, valueNameWide(spec.name));
+    if (status != ERROR_SUCCESS and status != ERROR_FILE_NOT_FOUND) {
+        std.log.scoped(.win32_shell_menu).warn(
+            "shell-menu value rollback failed path={s} status={d}",
+            .{ key_path, status },
+        );
+    }
 }
 
 /// Remove only the six keys owned by `register`, in leaf-first order.
@@ -231,6 +409,10 @@ fn writeVerbKey(
 ) !WriteResult {
     const key_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path);
     defer alloc.free(key_path_wide);
+    const display_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, display_name);
+    defer alloc.free(display_wide);
+    const exe_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, exe_path);
+    defer alloc.free(exe_path_wide);
 
     var key: HKEY = undefined;
     var disposition: DWORD = 0;
@@ -254,8 +436,6 @@ fn writeVerbKey(
     errdefer if (created) deleteKeyBestEffort(alloc, key_path);
     defer _ = RegCloseKey(key);
 
-    const display_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, display_name);
-    defer alloc.free(display_wide);
     const display_status = writeRegSz(key, null, display_wide);
     if (display_status != ERROR_SUCCESS) return .{ .created = created, .failure = .{
         .operation = .set_value,
@@ -263,20 +443,18 @@ fn writeVerbKey(
         .status = display_status,
     } };
 
-    const exe_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, exe_path);
-    defer alloc.free(exe_path_wide);
     const icon_status = writeRegSz(
         key,
         std.unicode.utf8ToUtf16LeStringLiteral("Icon"),
         exe_path_wide,
     );
-    if (icon_status != ERROR_SUCCESS) return .{ .created = created, .failure = .{
+    if (icon_status != ERROR_SUCCESS) return .{ .created = created, .mutated = true, .failure = .{
         .operation = .set_value,
         .key_path = key_path,
         .status = icon_status,
     } };
 
-    return .{ .created = created };
+    return .{ .created = created, .mutated = true };
 }
 
 fn writeDefaultValue(
@@ -286,6 +464,8 @@ fn writeDefaultValue(
 ) !WriteResult {
     const key_path_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_path);
     defer alloc.free(key_path_wide);
+    const value_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
+    defer alloc.free(value_wide);
 
     var key: HKEY = undefined;
     var disposition: DWORD = 0;
@@ -309,8 +489,6 @@ fn writeDefaultValue(
     errdefer if (created) deleteKeyBestEffort(alloc, key_path);
     defer _ = RegCloseKey(key);
 
-    const value_wide = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
-    defer alloc.free(value_wide);
     const set_status = writeRegSz(key, null, value_wide);
     if (set_status != ERROR_SUCCESS) return .{ .created = created, .failure = .{
         .operation = .set_value,
@@ -318,7 +496,7 @@ fn writeDefaultValue(
         .status = set_status,
     } };
 
-    return .{ .created = created };
+    return .{ .created = created, .mutated = true };
 }
 
 fn previousCreatedPath(created: []const bool, before: *usize) ?[]const u8 {
@@ -383,6 +561,10 @@ test "shell-menu key paths cover folders backgrounds and drives" {
         "Software\\Classes\\Drive\\shell\\noctty",
         verb_key_paths[2],
     );
+    try testing.expectEqual(@as(usize, 9), value_specs.len);
+    var values_per_key = [_]usize{0} ** register_key_paths.len;
+    for (value_specs) |spec| values_per_key[spec.key_index] += 1;
+    try testing.expectEqualSlices(usize, &.{ 2, 1, 2, 1, 2, 1 }, &values_per_key);
 }
 
 test "shell-menu command quotes an executable path containing spaces" {

@@ -100,15 +100,6 @@ Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty"; ValueType: string; Val
 Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"
 Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: """{app}\noctty.exe"" --working-directory=""%V\."""
 
-; Sweep the per-user copies that `noctty +register-shell-menu` writes (portable
-; builds opt in that way). HKCU\Software\Classes OVERRIDES HKLM in the merged HKCR
-; view, so a stale per-user verb would both shadow the installer's verbs and
-; survive uninstall with no `+unregister-shell-menu` left to remove it.
-; `dontcreatekey` means these rows only ever delete.
-Root: HKCU; Subkey: "Software\Classes\Directory\shell\noctty"; Flags: uninsdeletekey dontcreatekey
-Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\noctty"; Flags: uninsdeletekey dontcreatekey
-Root: HKCU; Subkey: "Software\Classes\Drive\shell\noctty"; Flags: uninsdeletekey dontcreatekey
-
 [Run]
 Filename: "{app}\noctty.exe"; Description: "Launch noctty"; Flags: nowait postinstall skipifsilent
 

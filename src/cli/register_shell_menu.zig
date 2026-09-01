@@ -111,10 +111,10 @@ fn writeRegistryFailure(
     stderr: *std.Io.Writer,
     failure: shell_menu.RegistryFailure,
 ) !void {
-    if (failure.operation == .create_key and failure.status == ERROR_ACCESS_DENIED) {
+    if (failure.status == ERROR_ACCESS_DENIED) {
         try stderr.print(
-            "Failed to register Explorer shell menu at HKCU\\{s} during create_key: access denied; per-user registry writes may be blocked by policy or the process may have a restricted token (Win32 status 5).\n",
-            .{failure.key_path},
+            "Failed to register Explorer shell menu at HKCU\\{s} during {s}: access denied; per-user registry writes may be blocked by policy or the process may have a restricted token (Win32 status 5).\n",
+            .{ failure.key_path, @tagName(failure.operation) },
         );
         return;
     }
@@ -144,5 +144,18 @@ test "shell-menu access denied explains per-user policy causes" {
         u8,
         output.written(),
         "restricted token",
+    ) != null);
+
+    output.clearRetainingCapacity();
+    try writeRegistryFailure(&output.writer, .{
+        .operation = .set_value,
+        .key_path = "Software\\Classes\\Drive\\shell\\noctty",
+        .status = ERROR_ACCESS_DENIED,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "during set_value") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.written(),
+        "per-user registry writes may be blocked by policy",
     ) != null);
 }
