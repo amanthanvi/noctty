@@ -608,6 +608,8 @@
         "active",
         "provisional",
         "source",
+        "baseline",
+        "provenance_matched",
         "passed"
       ],
       "properties": {
@@ -627,9 +629,66 @@
           "type": "string",
           "minLength": 1
         },
+        "baseline": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/threshold_baseline" }
+          ]
+        },
+        "provenance_matched": {
+          "type": ["boolean", "null"]
+        },
         "passed": {
           "type": ["boolean", "null"]
         }
+      }
+    },
+    "threshold_baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "os_build",
+        "cpu_model",
+        "physical_cores",
+        "logical_cores",
+        "gpu_name",
+        "gpu_driver_version",
+        "display_width_px",
+        "display_height_px",
+        "display_refresh_hz",
+        "display_dpi_scale_percent",
+        "power_state",
+        "font_family",
+        "font_size_pt",
+        "rows",
+        "cols",
+        "run_count",
+        "bytes",
+        "seed",
+        "idle_seconds"
+      ],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "os_build": { "type": "string", "minLength": 1 },
+        "cpu_model": { "type": "string", "minLength": 1 },
+        "physical_cores": { "type": "integer", "minimum": 1 },
+        "logical_cores": { "type": "integer", "minimum": 1 },
+        "gpu_name": { "type": "string", "minLength": 1 },
+        "gpu_driver_version": { "type": "string", "minLength": 1 },
+        "display_width_px": { "type": "integer", "minimum": 1 },
+        "display_height_px": { "type": "integer", "minimum": 1 },
+        "display_refresh_hz": { "type": "number", "exclusiveMinimum": 0 },
+        "display_dpi_scale_percent": { "type": "number", "exclusiveMinimum": 0 },
+        "power_state": { "type": "string", "minLength": 1 },
+        "font_family": { "type": "string", "minLength": 1 },
+        "font_size_pt": { "type": "number", "exclusiveMinimum": 0 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "cols": { "type": "integer", "minimum": 1 },
+        "run_count": { "type": "integer", "minimum": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "seed": { "type": "integer", "minimum": 1 },
+        "idle_seconds": { "type": "integer", "minimum": 1 }
       }
     },
     "metric_details": {

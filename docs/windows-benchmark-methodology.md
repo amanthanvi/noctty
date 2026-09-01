@@ -281,17 +281,24 @@ budgets: `PRODUCT.md` explicitly leaves them provisional until a same-machine
 baseline and tolerance are reviewed. Inactive thresholds are emitted with
 `passed: null`; they cannot silently fail or pass a gate. Threshold files must
 use actual JSON booleans, and the harness rejects any threshold that is both
-active and provisional.
+active and provisional. Every entry also carries `baseline`; it is `null` while
+the threshold is inactive. Activating a threshold requires a complete exact
+baseline fingerprint covering the target, OS/CPU/GPU/driver, display mode and
+DPI, power state, font and terminal geometry, run count, payload size, seed,
+and idle interval. `-Gate` rejects the threshold before comparison when any of
+those fields differs from the current run.
 
 Threshold provenance is attached to every measured metric whether or not
 `-Gate` was passed, so a baseline record still carries the direction, value,
 `active`, `provisional`, `source` and `passed` that the comparison produced;
-the schema requires a `threshold` object on any metric that reports a median
-with `pass` or `fail` status. `-Gate` decides only whether a breach turns into
-a failing metric status and a nonzero exit, and it fails closed when the
-selected metrics have no applicable active threshold or contain an error,
-skipped, or adapter-required result. Until a reviewed threshold is activated,
-run interactive metrics as baseline collection without `-Gate`; a schema-valid
+the evidence additionally carries the declared `baseline` and the resulting
+`provenance_matched` state. The schema requires a `threshold` object on any
+metric that reports a median with `pass` or `fail` status. `-Gate` decides only
+whether a breach turns into a failing metric status and a nonzero exit, and it
+fails closed when the selected metrics have no applicable active threshold,
+the baseline provenance differs, or results contain an error, skipped, or
+adapter-required status. Until a reviewed threshold is activated, run
+interactive metrics as baseline collection without `-Gate`; a schema-valid
 `pass` record then means collection succeeded, not that a product budget was
 certified. The separate
 headless CI regression gates below use their documented workload-specific

@@ -2216,6 +2216,44 @@ if ($script:adapter.Installed) {
 $thresholdBreaches = [Collections.Generic.List[string]]::new()
 $gateContractFailures = [Collections.Generic.List[string]]::new()
 $inactiveThresholdMetrics = [Collections.Generic.List[string]]::new()
+$thresholdBaselineMatchByMetric = @{}
+$thresholdBaselineExpected = [ordered]@{
+    target = $Target
+    os_build = [string] $machine.os_build
+    cpu_model = [string] $machine.cpu_model
+    physical_cores = [int] $machine.physical_cores
+    logical_cores = [int] $machine.logical_cores
+    gpu_name = [string] $machine.gpu_name
+    gpu_driver_version = [string] $machine.gpu_driver_version
+    display_width_px = [int] $machine.display.width_px
+    display_height_px = [int] $machine.display.height_px
+    display_refresh_hz = [double] $machine.display.refresh_hz
+    display_dpi_scale_percent = [double] $machine.display.dpi_scale_percent
+    power_state = [string] $machine.power_state
+    font_family = $resolvedFont
+    font_size_pt = [double] $FontSize
+    rows = $Rows
+    cols = $Cols
+    run_count = $Runs
+    bytes = $Bytes
+    seed = $Seed
+    idle_seconds = $IdleSeconds
+}
+$thresholdBaselineNumericFields = @(
+    'physical_cores',
+    'logical_cores',
+    'display_width_px',
+    'display_height_px',
+    'display_refresh_hz',
+    'display_dpi_scale_percent',
+    'font_size_pt',
+    'rows',
+    'cols',
+    'run_count',
+    'bytes',
+    'seed',
+    'idle_seconds'
+)
 # Threshold provenance is part of the evidence contract for every measured
 # metric, not just for gated runs: the methodology doc directs baseline
 # collection to run without -Gate and still promises that the evidence
@@ -2228,7 +2266,7 @@ $parsedThresholds = Get-Content -LiteralPath $ThresholdPath -Raw | ConvertFrom-J
 $thresholds = @($parsedThresholds | ForEach-Object { $_ })
 $thresholdByMetric = @{}
 foreach ($threshold in $thresholds) {
-    foreach ($requiredProperty in @('metric', 'direction', 'value', 'active', 'provisional', 'source')) {
+    foreach ($requiredProperty in @('metric', 'direction', 'value', 'active', 'provisional', 'source', 'baseline')) {
         if ($null -eq $threshold.PSObject.Properties[$requiredProperty]) {
             throw "Threshold entry is missing required property '$requiredProperty': $($threshold | ConvertTo-Json -Compress)"
         }
@@ -2251,6 +2289,39 @@ foreach ($threshold in $thresholds) {
     $thresholdValue = [double] $threshold.value
     if ([double]::IsNaN($thresholdValue) -or [double]::IsInfinity($thresholdValue)) { throw "Threshold value for metric '$thresholdMetric' must be finite" }
     if ([string]::IsNullOrWhiteSpace([string] $threshold.source)) { throw "Threshold source for metric '$thresholdMetric' must be nonempty" }
+
+    $baselineMatched = $null
+    if ($null -ne $threshold.baseline) {
+        $baselineProperties = @($threshold.baseline.PSObject.Properties.Name)
+        $missingBaselineProperties = @($thresholdBaselineExpected.Keys | Where-Object { $_ -notin $baselineProperties })
+        $extraBaselineProperties = @($baselineProperties | Where-Object { $_ -notin $thresholdBaselineExpected.Keys })
+        if ($missingBaselineProperties.Count -gt 0 -or $extraBaselineProperties.Count -gt 0) {
+            throw "Threshold baseline for metric '$thresholdMetric' has missing=[$($missingBaselineProperties -join ',')] extra=[$($extraBaselineProperties -join ',')] provenance fields"
+        }
+
+        $baselineMismatches = [Collections.Generic.List[string]]::new()
+        foreach ($field in $thresholdBaselineExpected.Keys) {
+            $expectedValue = $thresholdBaselineExpected[$field]
+            $baselineValue = $threshold.baseline.$field
+            $matches = if ($field -in $thresholdBaselineNumericFields) {
+                [double] $baselineValue -eq [double] $expectedValue
+            }
+            else {
+                [string] $baselineValue -ceq [string] $expectedValue
+            }
+            if (-not $matches) {
+                $baselineMismatches.Add("$field expected='$baselineValue' actual='$expectedValue'")
+            }
+        }
+        $baselineMatched = $baselineMismatches.Count -eq 0
+        if ($threshold.active -and -not $baselineMatched) {
+            throw "Active threshold baseline for metric '$thresholdMetric' does not match this run: $($baselineMismatches -join '; ')"
+        }
+    }
+    elseif ($threshold.active) {
+        throw "Active threshold metric '$thresholdMetric' must declare an exact baseline provenance object"
+    }
+    $thresholdBaselineMatchByMetric[$thresholdMetric] = $baselineMatched
     $thresholdByMetric[$thresholdMetric] = $threshold
 }
 foreach ($record in $metrics) {
@@ -2282,6 +2353,8 @@ foreach ($record in $metrics) {
         active = $active
         provisional = $threshold.provisional
         source = [string] $threshold.source
+        baseline = $threshold.baseline
+        provenance_matched = $thresholdBaselineMatchByMetric[[string] $record.metric]
         passed = $passed
     })
     # Enforcement is the one thing -Gate owns.
