@@ -11,6 +11,10 @@ pub const Options = struct {
     /// This is set by the CLI parser for deinit.
     _arena: ?ArenaAllocator = null,
 
+    /// Tracks explicitly supplied empty target values.
+    _surface_id_seen: bool = false,
+    _window_id_seen: bool = false,
+
     /// Select a custom single-instance namespace.
     class: ?[:0]const u8 = null,
 
@@ -22,6 +26,14 @@ pub const Options = struct {
 
     /// Nonzero window ID from `+list-windows`.
     @"window-id": ?u32 = null,
+
+    /// Records target-flag presence before the generic parser normalizes an
+    /// empty optional value to null.
+    pub fn parseManuallyHook(self: *Options, _: Allocator, arg: []const u8, _: anytype) !bool {
+        if (std.mem.startsWith(u8, arg, "--surface-id=")) self._surface_id_seen = true;
+        if (std.mem.startsWith(u8, arg, "--window-id=")) self._window_id_seen = true;
+        return true;
+    }
 
     /// Releases memory owned by the parsed options.
     pub fn deinit(self: *Options) void {
@@ -84,6 +96,12 @@ fn runArgsWithFocus(
 
     if (opts.timeout > 10_000) {
         return report(stderr, 1, "Invalid --timeout.\n");
+    }
+
+    if ((opts._surface_id_seen and opts.@"surface-id" == null) or
+        (opts._window_id_seen and opts.@"window-id" == null))
+    {
+        return report(stderr, 1, "+focus requires exactly one nonzero target.\n");
     }
 
     const target: apprt.ipc.AutomationTarget = if (opts.@"surface-id") |id| target: {
@@ -183,6 +201,10 @@ test "automation focus cli contract" {
         "",
         "extra",
         "--surface-id=1 --window-id=2",
+        "--surface-id=",
+        "--window-id=",
+        "--surface-id= --window-id=17",
+        "--surface-id=17 --window-id=",
         "--surface-id=0",
         "--surface-id=18446744073709551616",
         "--window-id=0",
