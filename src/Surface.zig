@@ -2309,16 +2309,12 @@ fn resolvePathForOpening(
 /// Whether Windows can address `path`, which must be the output of
 /// `std.fs.path.resolve`.
 ///
-/// `<>"|?*` and the C0 control characters are never legal in a Windows path.
-/// `:` is legal only in a leading drive prefix and as the alternate-data-stream
-/// separator in the final component; anywhere else it names a directory Windows
-/// cannot address.
+/// Deliberately conservative. Anything this lets through that NT considers
+/// malformed does not merely fail: `std.posix.faccessatW` maps
+/// `STATUS_OBJECT_NAME_INVALID` to `unreachable`, so the process aborts and
+/// the caller cannot recover. Shapes we cannot cheaply prove safe are
+/// rejected, which only costs the link its file-path interpretation.
 fn windowsPathIsRepresentable(path: []const u8) bool {
-    // C0 is rejected everywhere, including inside the extended-length prefix
-    // region, so screen for it before stepping over anything. DEL is not
-    // rejected: NT accepts it in a name, so it resolves like any other byte.
-    for (path) |c| if (c < 0x20) return false;
-
     var rest = path;
 
     // The extended-length prefix is legal and `std.fs.path.resolve` preserves
@@ -2327,14 +2323,46 @@ fn windowsPathIsRepresentable(path: []const u8) bool {
         rest = rest[4..];
         if (std.ascii.startsWithIgnoreCase(rest, "UNC\\")) rest = rest[4..];
     }
-
-    if (std.mem.indexOfAny(u8, rest, "<>\"|?*") != null) return false;
-
     if (rest.len >= 2 and rest[1] == ':' and std.ascii.isAlphabetic(rest[0])) {
         rest = rest[2..];
     }
-    const last_sep = std.mem.lastIndexOfAny(u8, rest, "/\\") orelse return true;
-    return std.mem.indexOfScalar(u8, rest[0..last_sep], ':') == null;
+
+    const leaf_start = if (std.mem.lastIndexOfAny(u8, rest, "/\\")) |i| i + 1 else 0;
+    const dirs = rest[0..leaf_start];
+    const leaf = rest[leaf_start..];
+
+    // Outside the leaf a ':' names a directory Windows cannot address, which
+    // is the shape a URL takes once it is resolved against the terminal pwd.
+    if (std.mem.indexOfScalar(u8, dirs, ':') != null) return false;
+    if (!windowsNameIsAddressable(dirs)) return false;
+
+    // The leaf may carry one alternate-data-stream separator. NT accepts any
+    // character in a stream name, control characters included, but both sides
+    // of the ':' must be non-empty, and a second ':' introduces a stream
+    // *type* that NT validates against a fixed set ("$DATA" and friends).
+    // Rather than model that set we admit a single separator only.
+    const ads = std.mem.indexOfScalar(u8, leaf, ':') orelse
+        return windowsNameIsAddressable(leaf);
+    const name = leaf[0..ads];
+    const stream = leaf[ads + 1 ..];
+    if (name.len == 0 or stream.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, stream, ':') != null) return false;
+    // A NUL would truncate in `faccessatW`, so the existence check would run
+    // against a shorter path than the one we hand back to be opened.
+    if (std.mem.indexOfScalar(u8, stream, 0) != null) return false;
+    return windowsNameIsAddressable(name);
+}
+
+/// Whether `name` uses only characters NT accepts in a file name. It may
+/// contain path separators, but no drive prefix and no stream separator.
+///
+/// `<>"|?*` are never legal, and neither are the C0 controls. DEL is legal:
+/// NT treats 0x7f like any other byte, so `std.ascii.isControl` would be too
+/// broad here.
+fn windowsNameIsAddressable(name: []const u8) bool {
+    if (std.mem.indexOfAny(u8, name, "<>\"|?*") != null) return false;
+    for (name) |c| if (c < 0x20) return false;
+    return true;
 }
 
 test "windowsPathIsRepresentable" {
@@ -2345,15 +2373,13 @@ test "windowsPathIsRepresentable" {
     try testing.expect(windowsPathIsRepresentable("\\\\server\\share\\file"));
     // Drive-relative input ("C:foo") resolves to a plain path.
     try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\foo"));
-    // ':' in the final component is an alternate data stream.
-    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\file.txt:stream"));
 
     // A URL resolved against the pwd puts ':' in a directory component.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\https:\\example.com"));
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\foo\\bar:baz\\qux"));
-    // Wildcards are never legal, wherever they appear.
-    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn"));
+    // Wildcards are never legal in a directory or file name.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\a*b"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\dir*x\\leaf"));
 
     // The extended-length prefix survives resolution and its `?` is not a
     // wildcard, but the rest of such a path is screened as usual.
@@ -2362,12 +2388,30 @@ test "windowsPathIsRepresentable" {
     try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\https:\\example.com"));
     try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\a*b"));
 
-    // C0 aborts in `faccessatW` exactly like a stray ':', wherever it appears.
+    // C0 aborts in a directory or file name, wherever it appears.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\bad\x01name\\leaf"));
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\leaf\x1f"));
     try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\bad\x01name\\leaf"));
     // DEL is legal in a Windows name, so it must keep resolving.
     try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\leaf\x7f"));
+
+    // One ':' in the leaf is an alternate data stream. NT accepts anything in
+    // the stream name, so the file-name screens must not reach into it.
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\file.txt:stream"));
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\file.txt:str\x01eam"));
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\file.txt:str?eam"));
+    // A scheme with no path separator after it lands here too, and resolves
+    // safely to a missing stream rather than aborting.
+    try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn"));
+
+    // Both sides of the separator must be non-empty, and a second ':' names a
+    // stream type NT validates against a fixed set.
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\a:"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\:stream"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\a:b:c"));
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn:btih:0000"));
+    // A NUL would truncate the existence check to a shorter path.
+    try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\file.txt:str\x00eam"));
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
