@@ -2215,7 +2215,7 @@ if ($script:adapter.Installed) {
 
 $thresholdBreaches = [Collections.Generic.List[string]]::new()
 $gateContractFailures = [Collections.Generic.List[string]]::new()
-$activeThresholdCount = 0
+$inactiveThresholdMetrics = [Collections.Generic.List[string]]::new()
 # Threshold provenance is part of the evidence contract for every measured
 # metric, not just for gated runs: the methodology doc directs baseline
 # collection to run without -Gate and still promises that the evidence
@@ -2264,7 +2264,7 @@ foreach ($record in $metrics) {
     $measured = [double] $record.$measurementField
     $value = [double] $threshold.value
     $active = $threshold.active
-    if ($active) { $activeThresholdCount++ }
+    if (-not $active) { $inactiveThresholdMetrics.Add([string] $record.metric) }
     # `passed` is the comparison result, independent of -Gate. An inactive
     # threshold is always `null`, so it can never read as a silent pass or
     # a silent failure.
@@ -2298,8 +2298,8 @@ if ($Gate) {
     foreach ($record in @($metrics | Where-Object { $_.status -in @('not-supported', 'error', 'skip') })) {
         $gateContractFailures.Add("metric '$($record.metric)' has status=$($record.status)")
     }
-    if ($activeThresholdCount -eq 0) {
-        $gateContractFailures.Add("selection target=$Target metric=$Metric has no applicable active threshold")
+    foreach ($metricName in $inactiveThresholdMetrics) {
+        $gateContractFailures.Add("measured metric '$metricName' has no active threshold")
     }
 }
 
