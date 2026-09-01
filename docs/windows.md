@@ -343,6 +343,85 @@ on Windows. Global keyboard capture is intentionally not implemented.
 noctty exposes a local Windows automation surface over the same
 single-instance IPC path used by `+new-window`.
 
+The named pipe behind it is restricted to processes running as the same
+user: it is created with `PIPE_REJECT_REMOTE_CLIENTS` and a protected
+DACL whose single ACE grants access to the SID of the token that owns
+the running noctty process. Every pipe is also labeled explicitly with
+the process token's exact integrity level and a `NO_WRITE_UP`
+mandatory-label ACE. Above medium integrity, that label prevents a
+filtered (non-elevated) token of the same account from driving the
+elevated instance; at medium integrity, the explicit label lets clients
+reject an otherwise unlabeled same-user pipe squatter.
+
+That denial is **observed against a real elevated instance**, not
+inferred. From a medium-integrity process, `CreateFileW` on the elevated
+instance's pipe fails with `win32=5` for both
+`GENERIC_READ | GENERIC_WRITE` and `GENERIC_WRITE` alone — the refusal
+happens at `CreateFileW`, not as a timeout or a missing acknowledgement.
+At the command line `+perform-action` and `+list-windows` exit 1 with
+"No matching noctty instance is listening", and `+new-window` exits 0
+having quietly started its **own** local instance rather than driving the
+elevated one. From an elevated shell `+perform-action new_tab` still
+succeeds, so `NO_WRITE_UP` does not lock out the intended client. The
+live descriptor reads back
+`D:P(A;;FA;;;S-1-5-21-...-1001)S:AI(ML;;NW;;;HI)`, confirming the label
+survives object creation; a medium-integrity instance reads back the same
+DACL with `S:AI(ML;;NW;;;ME)`, proving that the endpoint is labeled
+explicitly at every integrity level.
+
+**Known residual — a lower-integrity process can stall the channel.** The
+label sets `NO_WRITE_UP` only, so it does not deny *reads*: a medium
+process can open the elevated instance's pipe for `GENERIC_READ` (a bare
+`READ_CONTROL` is enough — it need not ask for read data access at all).
+`WriteFile` on that handle then fails with `win32=5`, so this is an
+**occupancy problem, not an access break**: the squatter learns nothing
+and can submit nothing. But because the server offers one pipe instance
+at a time, a single such open makes the next legitimate client fail with
+`win32=231 ERROR_PIPE_BUSY` while the server logs
+`failed to process win32 IPC client err=error.IpcTimeout`. The cost is
+availability of the automation channel, bounded by the server's read
+timeout and repeatable.
+
+**This residual is closed by the elevation work, not here.** That change
+labels the elevated endpoint `NWNR` instead of `NW`, and the added
+`NO_READ_UP` denies *every* medium-integrity open — including
+`GENERIC_READ` and `READ_CONTROL` — which has been verified on hardware
+against a live elevated instance. It is deliberately not duplicated in
+this change: the two would collide on the same SDDL term for no net gain
+once both land, and altering the label here would invalidate the
+descriptor readback recorded above. Keeping a spare listening instance
+was also considered and rejected as a speed bump — an attacker simply
+opens one more.
+
+**This is not a privilege boundary.** Any code already running as your
+user is fully trusted with this channel: it can list your windows,
+perform allowlisted actions, and open new windows. Treat the automation
+surface the way you would treat your own shell — it reduces exposure to
+other accounts and to the network, not to malware running as you.
+
+The pipe *name* is derived from `--class` alone, so it is predictable and
+lives in the machine-wide named-pipe namespace: any local account can
+create it before noctty does. noctty therefore authenticates the **server**
+as well as the client. Before writing anything to a pipe it did not create,
+a client reads the owner SID and mandatory-integrity label from the security
+descriptor attached to that connected pipe object. The owner must match the
+client's user SID and the pipe's integrity must be at least the client's; a
+mismatch is treated as "no instance we can reach", and the launch starts its
+own local instance instead. Authentication is object-bound rather than based
+on a numeric server PID that could be recycled after a duplicated pipe handle
+outlives its creating process.
+
+Clients also open the pipe with `SECURITY_SQOS_PRESENT |
+SECURITY_IDENTIFICATION`. A named-pipe server impersonates at
+`SecurityImpersonation` by default, so without that flag a squatting server
+could act *as* the connecting user; with it, the server can determine who
+connected but cannot use the token to open anything.
+
+Together these stop another *account* from harvesting forwarded arguments,
+forging an acknowledgement, or borrowing the connecting user's token. They
+do not — and cannot — stop another process running as **you**, which is the
+same trust boundary as everything else in this section.
+
 List windows, tabs, and panes:
 
 ```powershell
@@ -365,9 +444,47 @@ Actions use the same names as `keybind` values. `--surface-id` is only
 valid for surface-scoped actions; app-scoped actions such as `quit`
 always target the app. The running instance rejects terminal-input and
 arbitrary file helper actions (`text`, `csi`, `esc`,
-`paste_from_clipboard`, `write_screen_file`, and `crash`), and new
-keybinding action variants stay disabled for automation until they are
-reviewed and allowlisted.
+`paste_from_clipboard`, `write_screen_file`, `end_key_sequence`,
+`clear_screen`, and `crash`), and new keybinding action variants stay
+disabled for automation until they are reviewed and allowlisted.
+
+`undo` and `redo` are refused for the same reason. They do not name a
+dangerous action themselves — they *replay* one that was captured earlier,
+and the Win32 undo stack can hold a `clear_screen` entry whose replay
+queues the same write `clear_screen` was delisted for. An action that can
+re-run another action inherits everything that action can do.
+
+`+new-window` forwards command-line arguments to the running instance.
+The running instance applies an **allowlist**: only window-scoped
+presentation settings are honored, and every other key is refused. The
+allowlist covers window geometry and decoration (`--window-width`,
+`--window-height`, `--window-position-*`, `--window-padding-*`,
+`--window-decoration`, `--maximize`, `--fullscreen`, ...), `--title`,
+non-name font settings (`--font-size`, `--font-thicken`, ...), and
+colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
+`--background-opacity`, ...).
+
+Everything else is refused, including anything that would run code
+(`--command`, `--initial-command`, `-e`, `--input`, `--env`), load a
+file (`--background-image`, `--custom-shader`, `--bell-audio-path`),
+change the configuration source (`--config-file`,
+`--config-default-files`, `--theme`), or write to the terminal
+(`--keybind`, `--command-palette-entry`, `--enquiry-response`). A key
+that is not on the allowlist — including one added by a future
+release — is refused by default rather than allowed by omission. The
+whole request is refused rather than the key being dropped.
+
+`--working-directory` is allowed as `home`, `inherit`, `~/...`, or a
+local drive-letter absolute path. UNC *syntax* (`\\host\share`) is
+refused so the running instance is not made to authenticate to a remote
+SMB host. Note this is a check on syntax only: a mapped or `subst`
+drive, or a junction under a local drive, still resolves off-box.
+
+When you launch noctty normally and an instance is already running, any
+argument the running instance would refuse is dropped by the launching
+process before forwarding, with a warning in the log, so you still get a
+window. That drop is a convenience on your own command line, not a
+security control — the running instance re-checks every argument.
 
 ## Crash reports and diagnostics
 

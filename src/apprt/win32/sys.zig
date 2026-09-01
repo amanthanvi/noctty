@@ -453,6 +453,84 @@ pub extern "kernel32" fn ConnectNamedPipe(
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
 
+/// `SID_AND_ATTRIBUTES`/`TOKEN_USER` as returned by `GetTokenInformation`
+/// with `TokenUser`. Only the SID pointer is used; the SID itself lives in
+/// the caller-provided buffer.
+pub const SID_AND_ATTRIBUTES = extern struct {
+    Sid: *anyopaque,
+    Attributes: DWORD,
+};
+
+pub const TOKEN_USER = extern struct {
+    User: SID_AND_ATTRIBUTES,
+};
+
+/// `TOKEN_MANDATORY_LABEL` as returned by `GetTokenInformation` with
+/// `TokenIntegrityLevel`. `Label.Sid` is an `S-1-16-<rid>` integrity SID.
+pub const TOKEN_MANDATORY_LABEL = extern struct {
+    Label: SID_AND_ATTRIBUTES,
+};
+
+pub extern "advapi32" fn OpenProcessToken(
+    ProcessHandle: HANDLE,
+    DesiredAccess: DWORD,
+    TokenHandle: *HANDLE,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn EqualSid(
+    pSid1: *anyopaque,
+    pSid2: *anyopaque,
+) callconv(.winapi) BOOL;
+
+/// Byte length of a well-formed SID. Returns 0 if the SID is malformed.
+pub extern "advapi32" fn GetLengthSid(
+    pSid: *anyopaque,
+) callconv(.winapi) DWORD;
+
+pub extern "advapi32" fn GetTokenInformation(
+    TokenHandle: HANDLE,
+    TokenInformationClass: DWORD,
+    TokenInformation: ?*anyopaque,
+    TokenInformationLength: DWORD,
+    ReturnLength: *DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertSidToStringSidW(
+    Sid: *anyopaque,
+    StringSid: *?[*:0]u16,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    StringSecurityDescriptor: [*:0]const u16,
+    StringSDRevision: DWORD,
+    SecurityDescriptor: *?*anyopaque,
+    SecurityDescriptorSize: ?*u32,
+) callconv(.winapi) BOOL;
+
+/// Read the security descriptor attached to a kernel object. Returns a
+/// Win32 error code (0 == ERROR_SUCCESS), not a BOOL. The out-descriptor is
+/// LocalAlloc'd; free it with `LocalFree`.
+pub extern "advapi32" fn GetSecurityInfo(
+    handle: HANDLE,
+    ObjectType: DWORD,
+    SecurityInfo: DWORD,
+    ppsidOwner: ?*?*anyopaque,
+    ppsidGroup: ?*?*anyopaque,
+    ppDacl: ?*?*anyopaque,
+    ppSacl: ?*?*anyopaque,
+    ppSecurityDescriptor: *?*anyopaque,
+) callconv(.winapi) DWORD;
+
+pub extern "advapi32" fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+    SecurityDescriptor: *anyopaque,
+    RequestedStringSDRevision: DWORD,
+    SecurityInformation: DWORD,
+    StringSecurityDescriptor: *?[*:0]u16,
+    StringSecurityDescriptorLen: ?*u32,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn LocalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+
 pub extern "kernel32" fn GetProcAddress(hModule: HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 
 pub extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) HMODULE;
