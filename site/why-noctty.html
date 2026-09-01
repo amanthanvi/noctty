@@ -271,9 +271,12 @@ Get-FileHash $asset -Algorithm SHA256</code></pre>
               extracts all three signed PE files when given the portable ZIP,
               and stops unless every embedded signature is valid and its
               SubjectPublicKeyInfo hash matches the updater's published pin.
+              Run this block in PowerShell 7 (<code>pwsh</code>); it stops
+              before downloading anything on Windows PowerShell 5.1.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>$setup = ".\winghostty-1.3.123-windows-&lt;arch&gt;-setup.exe"
+          <pre class="nc-proof-code" tabindex="0"><code>if ($PSVersionTable.PSVersion.Major -lt 7) { throw "Run this block in PowerShell 7 (pwsh)." }
+$setup = ".\winghostty-1.3.123-windows-&lt;arch&gt;-setup.exe"
 $portable = ".\winghostty-1.3.123-windows-&lt;arch&gt;-portable.zip"
 $targets = [Collections.Generic.List[string]]::new()
 if (Test-Path -LiteralPath $setup) { $targets.Add((Resolve-Path -LiteralPath $setup).Path) }

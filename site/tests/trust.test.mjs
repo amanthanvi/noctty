@@ -122,7 +122,7 @@ const CROSS_TERMINAL_CLAIM_PATTERNS = [
 ];
 
 function visibleHtmlText(html) {
-  return html
+  const text = html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
@@ -138,7 +138,17 @@ function visibleHtmlText(html) {
     .replace(/&amp;/gi, "&")
     .replace(/&quot;/gi, '"')
     .replace(/&apos;/gi, "'")
-    .replace(/&micro;/gi, "µ");
+    .replace(/&micro;/gi, "µ")
+    .replace(/&(?:ensp|emsp|thinsp|hairsp);/gi, " ");
+
+  const unresolved = text.match(/&[a-z][a-z\d]+;/i);
+  if (unresolved) {
+    throw new Error(
+      `claims scanner cannot decode named HTML entity ${unresolved[0]}; use literal UTF-8 or a numeric reference`,
+    );
+  }
+
+  return text;
 }
 
 const trustText = visibleHtmlText(trustHtml);
@@ -299,6 +309,17 @@ test("claims guards read rendered text without blocking operational rates", () =
   );
   assert.deepEqual(
     findClaimViolations(
+      visibleHtmlText("Throughput: 60&thinsp;fps"),
+      PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    ["60 fps"],
+  );
+  assert.throws(
+    () => visibleHtmlText("Throughput: 60&NoSuchEntity;fps"),
+    /cannot decode named HTML entity &NoSuchEntity;/,
+  );
+  assert.deepEqual(
+    findClaimViolations(
       "The updater makes 1 API request per hour",
       PERFORMANCE_FIGURE_PATTERNS,
     ),
@@ -328,6 +349,10 @@ test("trust page carries every implemented release verification layer", () => {
   );
   assert.match(trustHtml, /do not currently publish\s+build-provenance attestations/i);
   assert.match(trustHtml, /Assert-ReleaseSignature/);
+  assert.match(
+    trustHtml,
+    /\$PSVersionTable\.PSVersion\.Major -lt 7.*?PowerShell 7 \(pwsh\)/,
+  );
   assert.match(
     trustHtml,
     /checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10/,
