@@ -358,6 +358,11 @@ test("trust page carries every implemented release verification layer", () => {
     /checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10/,
   );
   assert.match(trustHtml, /Expand-Archive/);
+  assert.match(trustHtml, /noctty-release-verification-.*?\[Guid\]::NewGuid\(\)/s);
+  assert.match(
+    trustHtml,
+    /finally\s*{.*?\[IO\.Directory\]::Delete\(\$workRoot, \$true\)/s,
+  );
   assert.match(trustHtml, /winghostty\\winghostty\.com/);
   assert.match(trustHtml, /winghostty\\winghostty\.exe/);
   assert.match(trustHtml, /winghostty\\ghostty-vt\.dll/);

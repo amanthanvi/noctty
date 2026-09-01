@@ -70,6 +70,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = '$PSVersionTable.PSVersion.Major -lt 7'; Reason = "The manual signature verifier should fail before side effects when it is pasted into Windows PowerShell 5.1." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10"; Reason = "The manual v1.3.123 path should use a content-pinned verifier implementation that defines the signature helper." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = 'noctty-release-verification-" + [Guid]::NewGuid()'; Reason = "The manual portable verifier should extract into a fresh workspace rather than reuse stale files." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.com"; Reason = "The manual legacy-release path should verify the console shim extracted from the portable ZIP." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.exe"; Reason = "The manual legacy-release path should verify the application binary extracted from the portable ZIP." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\ghostty-vt.dll"; Reason = "The manual legacy-release path should verify the library extracted from the portable ZIP." }
