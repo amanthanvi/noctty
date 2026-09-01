@@ -24,6 +24,10 @@ const list_windows = @import("list_windows.zig");
 const perform_action = @import("perform_action.zig");
 const register_default_terminal = @import("register_default_terminal.zig");
 const unregister_default_terminal = @import("unregister_default_terminal.zig");
+const focus = @import("focus.zig");
+const send_text = @import("send_text.zig");
+const new_tab = @import("new_tab.zig");
+const new_split = @import("new_split.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -77,6 +81,10 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"perform-action" => try perform_action.run(alloc),
         .@"register-default-terminal" => try register_default_terminal.run(alloc),
         .@"unregister-default-terminal" => try unregister_default_terminal.run(alloc),
+        .focus => try focus.run(alloc),
+        .@"send-text" => try send_text.run(alloc),
+        .@"new-tab" => try new_tab.run(alloc),
+        .@"new-split" => try new_split.run(alloc),
     };
 }
 
@@ -107,6 +115,10 @@ pub fn options(comptime self: Action) type {
             .@"perform-action" => perform_action.Options,
             .@"register-default-terminal" => register_default_terminal.Options,
             .@"unregister-default-terminal" => unregister_default_terminal.Options,
+            .focus => focus.Options,
+            .@"send-text" => send_text.Options,
+            .@"new-tab" => new_tab.Options,
+            .@"new-split" => new_split.Options,
         };
     }
 }
@@ -191,6 +203,20 @@ test "parse action plus" {
         defer iter.deinit();
         const action = try actionpkg.detectIter(Action, &iter);
         try testing.expect(action.? == .version);
+    }
+}
+
+test "parse send-text action ignores literal action-like payloads" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_][]const u8{
+        "+send-text --surface-id=42 -- --version",
+        "+send-text --surface-id=42 -- +focus",
+    }) |args_text| {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, args_text);
+        defer iter.deinit();
+        try testing.expectEqual(Action.@"send-text", (try actionpkg.detectIter(Action, &iter)).?);
     }
 }
 

@@ -15,6 +15,9 @@ pub const Options = struct {
     /// If set, open up a new window in a custom instance of noctty.
     class: ?[:0]const u8 = null,
 
+    /// How long to wait for the running instance to respond.
+    timeout: u64 = 10_000,
+
     /// Did the user specify a `--working-directory` argument on the command line?
     _working_directory_seen: bool = false,
 
@@ -53,6 +56,12 @@ pub const Options = struct {
     fn checkArg(self: *Options, alloc: Allocator, arg: []const u8) (error{InvalidValue} || homedir.ExpandError || std.fs.Dir.RealPathAllocError || Allocator.Error)!?[:0]const u8 {
         if (lib.cutPrefix(u8, arg, "--class=")) |rest| {
             self.class = try alloc.dupeZ(u8, std.mem.trim(u8, rest, &std.ascii.whitespace));
+            return null;
+        }
+
+        if (lib.cutPrefix(u8, arg, "--timeout=")) |rest| {
+            self.timeout = std.fmt.parseInt(u64, rest, 10) catch return error.InvalidValue;
+            if (self.timeout > 10_000) return error.InvalidValue;
             return null;
         }
 
@@ -128,6 +137,9 @@ pub const Options = struct {
 ///     noctty. On Win32 this selects the IPC namespace and is also forwarded
 ///     to the fallback process launch path.
 ///
+///   * `--timeout=<ms>`: Response timeout in milliseconds, from 0 through
+///     10000. The default is 10000.
+///
 ///   * `--command`: The command to be executed in the first surface of the new window.
 ///
 ///   * `--working-directory=<directory>`: The working directory to pass to noctty.
@@ -160,6 +172,27 @@ fn runArgs(
     alloc_gpa: Allocator,
     argsIter: anytype,
     stderr: *std.Io.Writer,
+) !u8 {
+    return runArgsWithPerform(
+        alloc_gpa,
+        argsIter,
+        stderr,
+        performNewWindow,
+    );
+}
+
+const PerformNewWindowFn = *const fn (
+    alloc: Allocator,
+    target: apprt.ipc.Target,
+    arguments: ?[][:0]const u8,
+    timeout_ms: u64,
+) anyerror!bool;
+
+fn runArgsWithPerform(
+    alloc_gpa: Allocator,
+    argsIter: anytype,
+    stderr: *std.Io.Writer,
+    performNewWindowFn: PerformNewWindowFn,
 ) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
@@ -203,27 +236,140 @@ fn runArgs(
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    if (apprt.App.performIpc(
+    if (performNewWindowFn(
         alloc,
         if (opts.class) |class| .{ .class = class } else .detect,
-        .new_window,
-        .{
-            .arguments = if (opts._arguments.items.len == 0) null else opts._arguments.items,
-        },
-    ) catch |err| switch (err) {
-        error.IPCFailed => {
-            // The apprt should have printed a more specific error message
-            // already.
-            return 1;
-        },
-        else => {
-            try stderr.print("Sending the IPC failed: {}", .{err});
-            return 1;
-        },
+        if (opts._arguments.items.len == 0) null else opts._arguments.items,
+        opts.timeout,
+    ) catch |err| {
+        try stderr.print("Sending the IPC or fallback launch failed: {}\n", .{err});
+        return 5;
     }) return 0;
 
     try stderr.print("+new-window could not find or start a matching noctty instance.\n", .{});
-    return 1;
+    return 5;
+}
+
+fn performNewWindow(
+    alloc: Allocator,
+    target: apprt.ipc.Target,
+    arguments: ?[][:0]const u8,
+    timeout_ms: u64,
+) !bool {
+    return try apprt.App.performIpc(
+        alloc,
+        target,
+        .new_window,
+        .{ .arguments = arguments },
+        timeout_ms,
+    );
+}
+
+test "automation-new-window cli forwards class timeout and passthrough arguments" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var called = false;
+
+        fn perform(
+            _: Allocator,
+            target: apprt.ipc.Target,
+            arguments: ?[][:0]const u8,
+            timeout_ms: u64,
+        ) !bool {
+            called = true;
+            const class = switch (target) {
+                .class => |value| value,
+                .detect => return error.UnexpectedTarget,
+            };
+            try testing.expectEqualStrings("lane9", class);
+            try testing.expectEqual(@as(u64, 42), timeout_ms);
+            try testing.expect(arguments != null);
+            try testing.expectEqual(@as(usize, 2), arguments.?.len);
+            try testing.expect(std.mem.startsWith(u8, arguments.?[0], "--working-directory="));
+            try testing.expectEqualStrings("--title=kept", arguments.?[1]);
+            return true;
+        }
+    };
+    Hook.called = false;
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "--class=lane9 --timeout=42 --working-directory=. --title=kept",
+    );
+    defer iter.deinit();
+
+    var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stderr_buf.deinit();
+
+    try testing.expectEqual(@as(u8, 0), try runArgsWithPerform(
+        testing.allocator,
+        &iter,
+        &stderr_buf.writer,
+        &Hook.perform,
+    ));
+    try testing.expect(Hook.called);
+    try testing.expectEqualStrings("", stderr_buf.written());
+}
+
+test "automation-new-window cli rejects invalid timeout before ipc" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var called = false;
+
+        fn perform(_: Allocator, _: apprt.ipc.Target, _: ?[][:0]const u8, _: u64) !bool {
+            called = true;
+            return true;
+        }
+    };
+
+    for ([_][]const u8{ "--timeout=10001", "--timeout=18446744073709551616" }) |command_line| {
+        Hook.called = false;
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        defer iter.deinit();
+
+        var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr_buf.deinit();
+
+        try testing.expectEqual(@as(u8, 1), try runArgsWithPerform(
+            testing.allocator,
+            &iter,
+            &stderr_buf.writer,
+            &Hook.perform,
+        ));
+        try testing.expect(!Hook.called);
+    }
+}
+
+test "automation-new-window cli maps fallback and transport failures to five" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var fail_transport = false;
+
+        fn perform(_: Allocator, _: apprt.ipc.Target, _: ?[][:0]const u8, timeout_ms: u64) !bool {
+            try testing.expectEqual(@as(u64, 10_000), timeout_ms);
+            if (fail_transport) return error.IPCFailed;
+            return false;
+        }
+    };
+
+    for ([_]bool{ false, true }) |fail_transport| {
+        Hook.fail_transport = fail_transport;
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, "--working-directory=.");
+        defer iter.deinit();
+
+        var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr_buf.deinit();
+
+        try testing.expectEqual(@as(u8, 5), try runArgsWithPerform(
+            testing.allocator,
+            &iter,
+            &stderr_buf.writer,
+            &Hook.perform,
+        ));
+    }
 }
 
 fn hasLaunchLayoutArgument(arguments: []const [:0]const u8) bool {
