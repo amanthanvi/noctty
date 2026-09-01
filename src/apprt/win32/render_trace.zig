@@ -208,8 +208,10 @@ pub const RenderTrace = struct {
             self.renderer_process_output_generation.store(value.generation, .release);
             self.renderer_process_output_bytes.store(value.bytes, .release);
             self.renderer_process_output_tick_ms.store(value.tick_ms, .release);
-            self.renderer_benchmark_end_marker_generation.store(value.benchmark_end_marker_generation, .release);
             self.renderer_benchmark_end_marker_output_bytes.store(value.benchmark_end_marker_output_bytes, .release);
+            // The generation is the publication barrier read by the swap
+            // thread before it consumes the marker byte count.
+            self.renderer_benchmark_end_marker_generation.store(value.benchmark_end_marker_generation, .release);
         }
         self.renderer_cursor_blinking.store(cursor_blinking, .release);
         _ = self.noteTimedCounter(
