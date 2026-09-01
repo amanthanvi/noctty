@@ -3598,7 +3598,7 @@ fn copyModeStackContains(
 /// buries it. Popping only once in that case removes the wrong table and
 /// strands copy_mode.
 ///
-/// The search runs outward-in, from the bottom of the stack, so a stack that
+/// The search runs outward-in, from the outermost stack entry, so a stack that
 /// contains copy_mode more than once (reachable through a custom
 /// `activate_key_table:copy_mode` binding) is unwound completely.
 /// `copy_mode_active` is a single flag, so exactly one copy mode exists no

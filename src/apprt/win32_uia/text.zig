@@ -256,17 +256,6 @@ pub fn snapshotTerminalAccessiblePlainText(
 
     var visible_start: ?usize = null;
     var visible_end: usize = 0;
-    var selection_start: ?usize = null;
-    var selection_end: usize = 0;
-    const selection_bounds = if (screen.selection) |selection| blk: {
-        const top_left = pages.pointFromPin(.screen, selection.topLeft(screen)) orelse return error.UnknownPoint;
-        const bottom_right = pages.pointFromPin(.screen, selection.bottomRight(screen)) orelse return error.UnknownPoint;
-        break :blk .{
-            .top = top_left.screen,
-            .bottom = bottom_right.screen,
-            .rectangle = selection.rectangle,
-        };
-    } else null;
     for (pin_map.items, 0..) |pin, index| {
         const screen_point = pages.pointFromPin(.screen, pin) orelse return error.UnknownPoint;
         const cell = pin.node.data.getRowAndCell(pin.x, pin.y).cell;
@@ -278,27 +267,6 @@ pub fn snapshotTerminalAccessiblePlainText(
         if (pin.isBetween(viewport_top, viewport_bottom)) {
             if (visible_start == null) visible_start = index;
             visible_end = index + 1;
-        }
-        if (selection_bounds) |bounds| {
-            // ITextProvider currently advertises one selection range. A
-            // rectangular terminal selection is disjoint across rows, so a
-            // single range from its first to last byte would falsely include
-            // every intervening column. Report the caret fallback instead of
-            // exposing text that is visibly unselected.
-            const selected = if (bounds.rectangle)
-                false
-            else if (bounds.top.y == bounds.bottom.y)
-                screen_point.screen.y == bounds.top.y and
-                    screen_point.screen.x >= bounds.top.x and
-                    screen_point.screen.x <= bounds.bottom.x
-            else
-                (screen_point.screen.y == bounds.top.y and screen_point.screen.x >= bounds.top.x) or
-                    (screen_point.screen.y == bounds.bottom.y and screen_point.screen.x <= bounds.bottom.x) or
-                    (screen_point.screen.y > bounds.top.y and screen_point.screen.y < bounds.bottom.y);
-            if (selected) {
-                if (selection_start == null) selection_start = index;
-                selection_end = index + 1;
-            }
         }
     }
 
