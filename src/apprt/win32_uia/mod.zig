@@ -26,6 +26,7 @@ pub const TerminalCellPosition = text.TerminalCellPosition;
 pub const PaletteListProvider = widgets.PaletteListProvider;
 pub const PaletteListState = widgets.PaletteListState;
 pub const PaletteListGeometry = widgets.PaletteListGeometry;
+pub const PaletteListRowBounds = widgets.PaletteListRowBounds;
 pub const SettingsSectionGroupProvider = widgets.SettingsSectionGroupProvider;
 pub const SettingsSectionProvider = widgets.SettingsSectionProvider;
 pub const SettingsControlProvider = widgets.SettingsControlProvider;

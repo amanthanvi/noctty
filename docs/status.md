@@ -81,6 +81,9 @@ Win32-validated VT protocol coverage is tracked in
 - Local CLI automation with versioned JSON state and policy-bounded verbs
   for windows, tabs, splits, focus, actions, and control-free text; see
   [automation.md](automation.md).
+- Quick select (`Ctrl+Shift+Space`) labels URL, path, git SHA, IP address,
+  and UUID matches in the visible viewport for keyboard copy, allowed-scheme
+  open, or protected paste.
 
 ### Renderer
 
