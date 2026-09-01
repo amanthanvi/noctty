@@ -118,9 +118,16 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $memoryTrace
         Content = { $memoryTraceText }
-        Pattern = '(?s)noteIoReaderSpawned.*?noteOnce.*?io_reader_ready\.store\(true, \.release\).*?claimFirstSwapObservation.*?io_reader_ready\.load\(\.acquire\).*?first_swap_recorded\.cmpxchgStrong'
+        Pattern = '(?s)pub fn noteOnce.*?return self\.note\(stage, surface_token, surface_id\).*?pub fn noteIoReaderSpawned.*?if \(self\.noteOnce.*?io_reader_ready\.store\(true, \.release\).*?claimFirstSwapObservation.*?io_reader_ready\.load\(\.acquire\).*?first_swap_recorded\.cmpxchgStrong'
         Kind = 'Text'
-        Description = 'the startup swap boundary cannot precede serialized IO reader startup evidence'
+        Description = 'the startup swap boundary cannot precede successfully serialized IO reader startup evidence'
+    }
+    @{
+        File = "$rendererGeneric + src\renderer\Thread.zig :: renderer frame activity"
+        Content = { $rendererGenericText + "`n" + (Get-Content -LiteralPath (Join-Path $repoRoot 'src\renderer\Thread.zig') -Raw) }
+        Pattern = '(?s)output_progress\s*=\s*null.*?\.output_progress\s*=\s*output_progress.*?noteRendererUpdateFrame\(update\.output_progress, cursor_blinking\)'
+        Kind = 'Text'
+        Description = 'completed frame updates remain observable even when output provenance is intentionally unavailable'
     }
     @{
         File = $benchmarkHarness

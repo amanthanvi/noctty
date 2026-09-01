@@ -24,6 +24,14 @@ fn renderTraceLiveEnabled(alloc: Allocator) bool {
 var render_trace_file_claimed = std.atomic.Value(bool).init(false);
 
 pub const RenderTrace = struct {
+    pub const OutputProgress = struct {
+        generation: u64,
+        bytes: u64,
+        tick_ms: u64,
+        benchmark_end_marker_generation: u64,
+        benchmark_end_marker_output_bytes: u64,
+    };
+
     const startup_window_ms: u64 = 1000;
     const startup_paint_gap_ceiling_ms: u64 = 1500;
     const paint_gap_limit_ms: u64 = 300;
@@ -192,19 +200,17 @@ pub const RenderTrace = struct {
 
     pub fn noteRendererUpdateFrame(
         self: *RenderTrace,
-        process_output_generation: u64,
-        process_output_bytes: u64,
-        process_output_tick_ms: u64,
-        benchmark_end_marker_generation: u64,
-        benchmark_end_marker_output_bytes: u64,
+        progress: ?OutputProgress,
         cursor_blinking: bool,
     ) void {
         if (!self.enabled()) return;
-        self.renderer_process_output_generation.store(process_output_generation, .release);
-        self.renderer_process_output_bytes.store(process_output_bytes, .release);
-        self.renderer_process_output_tick_ms.store(process_output_tick_ms, .release);
-        self.renderer_benchmark_end_marker_generation.store(benchmark_end_marker_generation, .release);
-        self.renderer_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
+        if (progress) |value| {
+            self.renderer_process_output_generation.store(value.generation, .release);
+            self.renderer_process_output_bytes.store(value.bytes, .release);
+            self.renderer_process_output_tick_ms.store(value.tick_ms, .release);
+            self.renderer_benchmark_end_marker_generation.store(value.benchmark_end_marker_generation, .release);
+            self.renderer_benchmark_end_marker_output_bytes.store(value.benchmark_end_marker_output_bytes, .release);
+        }
         self.renderer_cursor_blinking.store(cursor_blinking, .release);
         _ = self.noteTimedCounter(
             &self.renderer_update_frame_count,
@@ -677,8 +683,21 @@ test "win32 transformed alt-screen target waits for a committed end marker" {
 
 test "win32 render trace preserves cursor mode from frame snapshot" {
     var trace: RenderTrace = .{ .path = "unused" };
-    trace.noteRendererUpdateFrame(1, 16, 2, 0, 0, false);
+    trace.noteRendererUpdateFrame(.{
+        .generation = 1,
+        .bytes = 16,
+        .tick_ms = 2,
+        .benchmark_end_marker_generation = 0,
+        .benchmark_end_marker_output_bytes = 0,
+    }, false);
     try std.testing.expect(!trace.renderer_cursor_blinking.load(.acquire));
+}
+
+test "win32 render trace counts frame updates without output progress" {
+    var trace: RenderTrace = .{ .path = "unused" };
+    trace.noteRendererUpdateFrame(null, false);
+    try std.testing.expectEqual(@as(u64, 1), trace.renderer_update_frame_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), trace.renderer_process_output_generation.load(.acquire));
 }
 
 test "win32 render trace attributes every renderer wake source" {

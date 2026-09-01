@@ -4,7 +4,7 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-28, against current fork HEAD.
+Last updated: 2026-08-29, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see

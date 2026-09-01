@@ -23287,7 +23287,7 @@ pub const Surface = struct {
         stage: BenchmarkMemoryStage,
         surface_id: ?u64,
     ) void {
-        self.memory_stage_trace.note(
+        _ = self.memory_stage_trace.note(
             stage,
             @intCast(@intFromPtr(self)),
             surface_id,
@@ -23543,15 +23543,17 @@ pub const Surface = struct {
 
     pub fn noteRendererUpdateFrame(
         self: *Surface,
-        progress: rendererpkg.State.OutputProgress,
+        progress: ?rendererpkg.State.OutputProgress,
         cursor_blinking: bool,
     ) void {
         self.render_trace.noteRendererUpdateFrame(
-            progress.generation,
-            progress.bytes,
-            progress.tick_ms,
-            progress.benchmark_end_marker_generation,
-            progress.benchmark_end_marker_output_bytes,
+            if (progress) |value| .{
+                .generation = value.generation,
+                .bytes = value.bytes,
+                .tick_ms = value.tick_ms,
+                .benchmark_end_marker_generation = value.benchmark_end_marker_generation,
+                .benchmark_end_marker_output_bytes = value.benchmark_end_marker_output_bytes,
+            } else null,
             cursor_blinking,
         );
     }

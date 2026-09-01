@@ -165,13 +165,13 @@ pub const MemoryStageTrace = struct {
         stage: BenchmarkMemoryStage,
         surface_token: u64,
         surface_id: ?u64,
-    ) void {
-        const path = self.path orelse return;
+    ) bool {
+        const path = self.path orelse return false;
         const resolved_surface_id = self.surfaceId(surface_id);
 
         memory_stage_trace_write_mutex.lock();
         defer memory_stage_trace_write_mutex.unlock();
-        const private_bytes = queryProcessPrivateBytes() orelse return;
+        const private_bytes = queryProcessPrivateBytes() orelse return false;
         const trace_sequence = self.trace_sequence.fetchAdd(1, .acq_rel) + 1;
         const surface_width_px = self.surface_width_px.load(.acquire);
         const surface_height_px = self.surface_height_px.load(.acquire);
@@ -183,10 +183,10 @@ pub const MemoryStageTrace = struct {
 
         const file = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch |err| {
             log.warn("memory stage trace open failed path={s} err={}", .{ path, err });
-            return;
+            return false;
         };
         defer file.close();
-        file.seekFromEnd(0) catch return;
+        file.seekFromEnd(0) catch return false;
 
         var buffer: [512]u8 = undefined;
         // This trace is JSONL. The positional writer starts at offset zero
@@ -223,8 +223,9 @@ pub const MemoryStageTrace = struct {
             .wgl_samples = if (wgl_pixel_format) |value| value.samples else null,
             .wgl_total_format_count = if (wgl_pixel_format) |value| value.total_format_count else null,
             .wgl_candidate_count = if (wgl_pixel_format) |value| value.candidate_count else null,
-        }, .{})}) catch return;
-        stream.flush() catch return;
+        }, .{})}) catch return false;
+        stream.flush() catch return false;
+        return true;
     }
 
     pub fn setGeometry(
@@ -319,8 +320,7 @@ pub const MemoryStageTrace = struct {
         surface_id: ?u64,
     ) bool {
         if (recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return false;
-        self.note(stage, surface_token, surface_id);
-        return true;
+        return self.note(stage, surface_token, surface_id);
     }
 
     pub fn noteRendererThreadSpawned(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
@@ -390,12 +390,26 @@ pub fn queryPerformanceFrequency() u64 {
     return @intCast(value);
 }
 
-test "win32 memory stage trace claims first swap after reader startup exactly once" {
-    var trace: MemoryStageTrace = .{};
+test "win32 memory stage trace claims first swap after a written reader stage exactly once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-reader.jsonl", .data = "" });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-reader.jsonl");
+    defer std.testing.allocator.free(path);
+
+    var trace: MemoryStageTrace = .{ .path = path };
 
     try std.testing.expect(!trace.claimFirstSwapObservation());
     trace.noteIoReaderSpawned(11, null);
     try std.testing.expect(trace.claimFirstSwapObservation());
+    try std.testing.expect(!trace.claimFirstSwapObservation());
+}
+
+test "win32 memory stage trace rejects first swap when reader stage was not written" {
+    var trace: MemoryStageTrace = .{};
+    trace.noteIoReaderSpawned(11, null);
     try std.testing.expect(!trace.claimFirstSwapObservation());
 }
 
@@ -417,9 +431,9 @@ test "win32 memory stage trace preserves every surface identity record" {
     defer std.testing.allocator.free(path);
 
     var trace: MemoryStageTrace = .{ .path = path };
-    trace.note(.surface_begin, 11, null);
+    try std.testing.expect(trace.note(.surface_begin, 11, null));
     trace.setGeometry(1400, 900, 10, 20, 140, 45);
-    trace.note(.terminal_initialized, 11, 22);
+    try std.testing.expect(trace.note(.terminal_initialized, 11, 22));
 
     const contents = try tmp.dir.readFileAlloc(
         std.testing.allocator,
@@ -473,7 +487,7 @@ test "win32 memory stage trace retains published identity through teardown" {
 
     var trace: MemoryStageTrace = .{ .path = path };
     trace.publishSurfaceId(22);
-    trace.note(.destroy_begin, 11, null);
+    try std.testing.expect(trace.note(.destroy_begin, 11, null));
 
     const contents = try tmp.dir.readFileAlloc(
         std.testing.allocator,
