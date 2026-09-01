@@ -330,8 +330,11 @@ test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /Assert-ReleaseSignature/);
   assert.match(
     trustHtml,
-    /checkout --detach 07f24e204f226872020087e4dd9b96b6014516e8/,
+    /checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10/,
   );
+  assert.match(trustHtml, /Expand-Archive/);
+  assert.match(trustHtml, /winghostty\\winghostty\.com/);
+  assert.match(trustHtml, /winghostty\\winghostty\.exe/);
   assert.match(trustHtml, /-AllowedPins @\(\$expectedSpki\)/);
   assert.match(trustHtml, /-TrustSelfSigned \$true/);
   assert.match(trustHtml, /verify-published-release\.ps1/);
@@ -451,6 +454,15 @@ for (const relativePath of MIGRATION_GUIDES) {
     }
   });
 }
+
+test("Windows Terminal opacity is converted from percent to fraction", () => {
+  const markdown = readFileSync(
+    join(repoDir, "docs/migrate-from-windows-terminal.md"),
+    "utf8",
+  );
+  assert.match(markdown, /divide the Windows Terminal percentage by 100/i);
+  assert.match(markdown, /50.*0\.5/);
+});
 
 for (const relativePath of MIGRATION_GUIDES) {
   test(`${relativePath} keeps the honest-gap section`, () => {

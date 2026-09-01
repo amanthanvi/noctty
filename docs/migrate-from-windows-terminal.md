@@ -45,7 +45,7 @@ profile inheritance. Copy only the lines you need.
 | `font.face`                  | `font-family`                          |                                                                             |
 | `font.size`                  | `font-size`                            |                                                                             |
 | `colorScheme`                | `theme`                                | Bundled names come from `noctty +list-themes`. A WT scheme is not imported. |
-| `opacity`                    | `background-opacity`                   | `1.0` is opaque, same scale.                                                |
+| `opacity`                    | `background-opacity`                   | Divide the Windows Terminal percentage by 100: `50` becomes `0.5`; `1.0` is opaque. |
 | `useAcrylic`                 | `background-blur`                      | Windows 11 22H2 or later only, and only with `background-opacity` below 1.  |
 | `padding`                    | `window-padding-x`, `window-padding-y` | Noctty splits horizontal and vertical padding.                              |
 | `copyOnSelect`               | `copy-on-select`                       |                                                                             |

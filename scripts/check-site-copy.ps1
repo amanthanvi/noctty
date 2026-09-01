@@ -68,7 +68,9 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "checkout --detach 07f24e204f226872020087e4dd9b96b6014516e8"; Reason = "The manual v1.3.123 path should use the verifier implementation from that release's immutable commit." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10"; Reason = "The manual v1.3.123 path should use a content-pinned verifier implementation that defines the signature helper." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.com"; Reason = "The manual legacy-release path should verify the console shim extracted from the portable ZIP." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.exe"; Reason = "The manual legacy-release path should verify the application binary extracted from the portable ZIP." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = '-AllowedPins @($expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
