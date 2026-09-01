@@ -20135,9 +20135,15 @@ fn quickSelectProc(
         c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => {
             return 0;
         },
+        c.WM_XBUTTONDOWN => return 1,
         c.WM_LBUTTONUP, c.WM_RBUTTONUP, c.WM_MBUTTONUP => {
             if (surface) |value| value.closeQuickSelect(true);
             return 0;
+        },
+        c.WM_XBUTTONUP => {
+            if (surface) |value| value.closeQuickSelect(true);
+            // Windows requires TRUE for handled XButton messages.
+            return 1;
         },
         // Scrolling would invalidate the immutable viewport snapshot behind
         // the visible labels, so the modal overlay owns wheel input too.
