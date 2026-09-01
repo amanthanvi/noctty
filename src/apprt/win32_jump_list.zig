@@ -601,68 +601,51 @@ fn profileTombstonesEqual(lhs: *const ProfileTombstones, rhs: *const ProfileTomb
     return stringSlicesEqual(lhs.items.items, rhs.items.items);
 }
 
-fn loadStateAlloc(alloc: Allocator, path: []const u8) LoadedState {
+fn decodeStateAlloc(alloc: Allocator, raw: []const u8) !LoadedState {
     var result: LoadedState = .{};
+    errdefer result.deinit(alloc);
+    var parsed = try parseRecentStateAlloc(alloc, raw);
+    defer parsed.deinit();
+
+    for (parsed.value.directories) |directory| try result.recents.appendLoaded(alloc, directory);
+    for (parsed.value.removed_directories) |directory| try result.removed_recents.appendLoaded(alloc, directory);
+    for (parsed.value.hidden_profiles) |key| _ = try result.hidden_profiles.insert(alloc, key);
+    for (parsed.value.recent_events) |event| {
+        try result.recent_events.upsert(alloc, event.path, event.kind, event.changed_ns);
+    }
+    for (parsed.value.profile_events) |event| {
+        try result.profile_events.upsert(alloc, event.key, event.kind, event.changed_ns);
+    }
+    return result;
+}
+
+fn loadStateForMergeAlloc(alloc: Allocator, path: []const u8) !LoadedState {
+    const raw = persistence.readFileBoundedAlloc(alloc, path, max_state_bytes) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return err,
+    };
+    defer alloc.free(raw);
+    return try decodeStateAlloc(alloc, raw);
+}
+
+fn loadStateAlloc(alloc: Allocator, path: []const u8) LoadedState {
     const raw = persistence.readFileBoundedAlloc(alloc, path, max_state_bytes) catch |err| {
         switch (err) {
             error.FileNotFound => {},
             error.FileTooBig => log.warn("jump list recent state exceeds size limit path={s}", .{path}),
             else => log.warn("jump list recent state read failed path={s} err={}", .{ path, err }),
         }
-        return result;
+        return .{};
     };
     defer alloc.free(raw);
 
-    var parsed = parseRecentStateAlloc(alloc, raw) catch |err| {
+    return decodeStateAlloc(alloc, raw) catch |err| {
         switch (err) {
             error.OutOfMemory => log.warn("jump list recent state parse allocation failed path={s}", .{path}),
             else => log.warn("jump list recent state ignored path={s} err={}", .{ path, err }),
         }
-        return result;
+        return .{};
     };
-    defer parsed.deinit();
-
-    for (parsed.value.directories) |directory| {
-        result.recents.appendLoaded(alloc, directory) catch |err| {
-            log.warn("jump list recent state entry allocation failed err={}", .{err});
-            break;
-        };
-    }
-    for (parsed.value.removed_directories) |directory| {
-        result.removed_recents.appendLoaded(alloc, directory) catch |err| {
-            log.warn("jump list removed recent state allocation failed err={}", .{err});
-            break;
-        };
-    }
-    for (parsed.value.hidden_profiles) |key| {
-        _ = result.hidden_profiles.insert(alloc, key) catch |err| {
-            log.warn("jump list hidden profile state allocation failed err={}", .{err});
-            break;
-        };
-    }
-    for (parsed.value.recent_events) |event| {
-        result.recent_events.upsert(
-            alloc,
-            event.path,
-            event.kind,
-            event.changed_ns,
-        ) catch |err| {
-            log.warn("jump list recent event state allocation failed err={}", .{err});
-            break;
-        };
-    }
-    for (parsed.value.profile_events) |event| {
-        result.profile_events.upsert(
-            alloc,
-            event.key,
-            event.kind,
-            event.changed_ns,
-        ) catch |err| {
-            log.warn("jump list profile event state allocation failed err={}", .{err});
-            break;
-        };
-    }
-    return result;
 }
 
 pub fn isRecentLocalPath(path: []const u8) bool {
@@ -799,6 +782,10 @@ fn buildProfileArgumentsWithLaunchConfigAlloc(
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
+    // Profile command arguments are intentionally excluded from the
+    // single-instance forwarding allowlist. Keep this shell link in its own
+    // process so the selected command reaches the new surface unchanged.
+    try out.writer.writeAll("--single-instance=false ");
     // Match in-app profile launches: start at home instead of inheriting the caller's cwd.
     const working_directory_option = try std.fmt.allocPrint(
         alloc,
@@ -1185,7 +1172,13 @@ pub const JumpList = struct {
         };
         defer lock_file.close();
 
-        var merged = loadStateAlloc(self.alloc, self.state_path);
+        var merged = loadStateForMergeAlloc(self.alloc, self.state_path) catch |err| {
+            log.warn("jump list state reload failed; preserving prior snapshot path={s} err={}", .{
+                self.state_path,
+                err,
+            });
+            return false;
+        };
         defer merged.deinit(self.alloc);
         self.applyPendingState(&merged) catch |err| {
             log.warn("jump list state merge failed err={}", .{err});
@@ -1767,6 +1760,10 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     defer corrupt.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), corrupt.recents.items.items.len);
     try std.testing.expectEqual(@as(usize, 0), corrupt.hidden_profiles.items.items.len);
+    try std.testing.expectError(
+        error.SyntaxError,
+        loadStateForMergeAlloc(std.testing.allocator, corrupt_path),
+    );
 
     {
         var file = try tmp.dir.createFile("oversized.json", .{});
@@ -1834,12 +1831,13 @@ test "jump_list argument builders preserve Windows argv boundaries" {
     });
     defer std.testing.allocator.free(profile);
     try std.testing.expectEqualStrings(
-        "--working-directory=home \"--command=direct:\\\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\\\" -NoLogo \\\"a b\\\"\" \"--initial-command=direct:\\\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\\\" -NoLogo \\\"a b\\\"\"",
+        "--single-instance=false --working-directory=home \"--command=direct:\\\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\\\" -NoLogo \\\"a b\\\"\" \"--initial-command=direct:\\\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\\\" -NoLogo \\\"a b\\\"\"",
         profile,
     );
 
     var argv = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, profile);
     defer argv.deinit();
+    try std.testing.expectEqualStrings("--single-instance=false", argv.next().?);
     try std.testing.expectEqualStrings("--working-directory=home", argv.next().?);
     const command_option = argv.next().?;
     const initial_command_option = argv.next().?;
@@ -1872,6 +1870,7 @@ test "jump_list argument builders preserve Windows argv boundaries" {
     defer std.testing.allocator.free(ssh_profile);
     var ssh_argv = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, ssh_profile);
     defer ssh_argv.deinit();
+    try std.testing.expectEqualStrings("--single-instance=false", ssh_argv.next().?);
     try std.testing.expectEqualStrings("--working-directory=C:\\Users\\Aman Thanvi", ssh_argv.next().?);
     try std.testing.expectEqualStrings("--shell-integration=none", ssh_argv.next().?);
     try std.testing.expect(std.mem.startsWith(u8, ssh_argv.next().?, "--command="));
