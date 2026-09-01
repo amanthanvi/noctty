@@ -1787,6 +1787,15 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     return descriptor orelse error.IpcSecurityDescriptorFailed;
 }
 
+fn detectExplicitStartupWorkingDirectory(alloc: Allocator) bool {
+    var iter = cli_args.argsIterator(alloc) catch return false;
+    defer iter.deinit();
+    while (iter.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--working-directory=")) return true;
+    }
+    return false;
+}
+
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
 
@@ -2337,11 +2346,13 @@ fn sessionRestorePolicyAllows(
     initial_window: bool,
     has_initial_command: bool,
     startup_profile_picker: bool,
+    explicit_startup_working_directory: bool,
 ) bool {
     return sessionStatePolicyAllows(safe_mode, policy) and
         initial_window and
         !has_initial_command and
-        !startup_profile_picker;
+        !startup_profile_picker and
+        !explicit_startup_working_directory;
 }
 
 pub const App = struct {
@@ -2380,6 +2391,10 @@ pub const App = struct {
     launcher_quick_slot_keys: [3]?[:0]const u8 = .{ null, null, null },
     launcher_profile_target: ProfileOpenTarget = .tab,
     startup_profile_picker: bool = false,
+    /// True when argv explicitly selects a working directory. Such cold-start
+    /// flows must create their requested window rather than restore a saved
+    /// session and discard the CLI destination.
+    explicit_startup_working_directory: bool = false,
     wheel_settings: SystemWheelSettings = .{},
     system_dynamic_scrollbars: bool = true,
     ipc_pipe_name: ?[:0]const u16 = null,
@@ -2524,6 +2539,7 @@ pub const App = struct {
             .launcher_profile_order_hint = windows_shell.profileOrderHint(core_app.alloc),
             .launcher_profile_target = detectDefaultProfileTarget(core_app.alloc),
             .startup_profile_picker = detectStartupProfilePicker(core_app.alloc),
+            .explicit_startup_working_directory = detectExplicitStartupWorkingDirectory(core_app.alloc),
         };
         // Install before any host window exists, so the very first
         // SetWinEventHook registration already has somewhere to deliver.
@@ -2904,7 +2920,7 @@ pub const App = struct {
                             if (host.profiles == null) {
                                 _ = host.ensureProfiles() catch |err| retry: {
                                     log.warn("jump list deferred profile discovery failed err={}", .{err});
-                                    jump_list.scheduleIfStartupPending();
+                                    jump_list.retryStartupProfileDiscovery();
                                     break :retry false;
                                 };
                             }
@@ -3089,6 +3105,7 @@ pub const App = struct {
             self.config.@"initial-window",
             self.config.@"initial-command" != null,
             self.startup_profile_picker,
+            self.explicit_startup_working_directory,
         );
     }
 
@@ -31727,14 +31744,15 @@ test "win32 layout action result propagates automation failure" {
 }
 
 test "win32 explicit startup flows bypass session restore" {
-    try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false));
-    try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, true, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, true));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
+    try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false, false));
+    try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, true, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, false, true));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true, true));
 }
 
 test "win32 session restore transaction preserves first surface state" {

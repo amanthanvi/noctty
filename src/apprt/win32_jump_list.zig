@@ -265,6 +265,18 @@ const RecentState = struct {
     directories: []const []const u8 = &.{},
     removed_directories: []const []const u8 = &.{},
     hidden_profiles: []const []const u8 = &.{},
+    recent_events: []const RecentEvent = &.{},
+};
+
+const RecentEventKind = enum {
+    used,
+    removed,
+};
+
+const RecentEvent = struct {
+    path: []const u8,
+    kind: RecentEventKind,
+    changed_ns: i64,
 };
 
 const VersionHeader = struct {
@@ -288,6 +300,7 @@ fn encodeRecentStateAlloc(
     directories: []const []const u8,
     removed_directories: []const []const u8,
     hidden_profiles: []const []const u8,
+    recent_events: []const RecentEvent,
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -295,6 +308,7 @@ fn encodeRecentStateAlloc(
         .directories = directories,
         .removed_directories = removed_directories,
         .hidden_profiles = hidden_profiles,
+        .recent_events = recent_events,
     }, .{
         .whitespace = .minified,
     }, &out.writer);
@@ -395,6 +409,50 @@ const RecentList = struct {
     }
 };
 
+const RecentEventList = struct {
+    items: std.ArrayListUnmanaged(RecentEvent) = .empty,
+
+    fn deinit(self: *RecentEventList, alloc: Allocator) void {
+        for (self.items.items) |item| alloc.free(item.path);
+        self.items.deinit(alloc);
+        self.* = .{};
+    }
+
+    fn latest(self: *const RecentEventList, alloc: Allocator, path: []const u8) !?RecentEvent {
+        for (self.items.items) |item| {
+            if (try pathsEqualIgnoreCase(alloc, item.path, path)) return item;
+        }
+        return null;
+    }
+
+    fn upsert(
+        self: *RecentEventList,
+        alloc: Allocator,
+        path: []const u8,
+        kind: RecentEventKind,
+        changed_ns: i64,
+    ) !void {
+        for (self.items.items, 0..) |item, index| {
+            if (!try pathsEqualIgnoreCase(alloc, item.path, path)) continue;
+            if (item.changed_ns > changed_ns) return;
+            alloc.free(item.path);
+            _ = self.items.orderedRemove(index);
+            break;
+        }
+
+        const owned = try alloc.dupe(u8, path);
+        errdefer alloc.free(owned);
+        try self.items.append(alloc, .{
+            .path = owned,
+            .kind = kind,
+            .changed_ns = changed_ns,
+        });
+        if (self.items.items.len > max_recents * 2) {
+            alloc.free(self.items.orderedRemove(0).path);
+        }
+    }
+};
+
 const ProfileTombstones = struct {
     items: std.ArrayListUnmanaged([]u8) = .empty,
 
@@ -437,11 +495,13 @@ const LoadedState = struct {
     recents: RecentList = .{},
     removed_recents: RecentList = .{},
     hidden_profiles: ProfileTombstones = .{},
+    recent_events: RecentEventList = .{},
 
     fn deinit(self: *LoadedState, alloc: Allocator) void {
         self.recents.deinit(alloc);
         self.removed_recents.deinit(alloc);
         self.hidden_profiles.deinit(alloc);
+        self.recent_events.deinit(alloc);
         self.* = .{};
     }
 };
@@ -498,6 +558,17 @@ fn loadStateAlloc(alloc: Allocator, path: []const u8) LoadedState {
     for (parsed.value.hidden_profiles) |key| {
         _ = result.hidden_profiles.insert(alloc, key) catch |err| {
             log.warn("jump list hidden profile state allocation failed err={}", .{err});
+            break;
+        };
+    }
+    for (parsed.value.recent_events) |event| {
+        result.recent_events.upsert(
+            alloc,
+            event.path,
+            event.kind,
+            event.changed_ns,
+        ) catch |err| {
+            log.warn("jump list recent event state allocation failed err={}", .{err});
             break;
         };
     }
@@ -669,9 +740,11 @@ pub const JumpList = struct {
     recents: RecentList,
     removed_recents: RecentList,
     hidden_profiles: ProfileTombstones,
+    recent_events: RecentEventList = .{},
     pending_recent_additions: RecentList = .{},
     pending_recent_removals: RecentList = .{},
     pending_recent_uses: RecentList = .{},
+    pending_recent_events: RecentEventList = .{},
     pending_profile_hides: ProfileTombstones = .{},
     pending_profile_uses: ProfileTombstones = .{},
     profiles: std.ArrayListUnmanaged(ProfileItem) = .empty,
@@ -681,6 +754,7 @@ pub const JumpList = struct {
     rebuild_retry_count: u8 = 0,
     com_disabled: bool = false,
     startup_profile_discovery_pending: bool = false,
+    startup_profile_discovery_retry_count: u8 = 0,
 
     pub fn init(alloc: Allocator, state_path: []const u8) !JumpList {
         const owned_state_path = try alloc.dupe(u8, state_path);
@@ -696,6 +770,7 @@ pub const JumpList = struct {
             .recents = loaded.recents,
             .removed_recents = loaded.removed_recents,
             .hidden_profiles = loaded.hidden_profiles,
+            .recent_events = loaded.recent_events,
         };
     }
 
@@ -706,9 +781,11 @@ pub const JumpList = struct {
         self.recents.deinit(self.alloc);
         self.removed_recents.deinit(self.alloc);
         self.hidden_profiles.deinit(self.alloc);
+        self.recent_events.deinit(self.alloc);
         self.pending_recent_additions.deinit(self.alloc);
         self.pending_recent_removals.deinit(self.alloc);
         self.pending_recent_uses.deinit(self.alloc);
+        self.pending_recent_events.deinit(self.alloc);
         self.pending_profile_hides.deinit(self.alloc);
         self.pending_profile_uses.deinit(self.alloc);
         self.clearProfiles();
@@ -722,6 +799,7 @@ pub const JumpList = struct {
         self.stopTimer();
         self.flush();
         self.startup_profile_discovery_pending = true;
+        self.startup_profile_discovery_retry_count = 0;
         self.schedule();
     }
 
@@ -731,6 +809,17 @@ pub const JumpList = struct {
 
     pub fn completeStartupProfileDiscovery(self: *JumpList) void {
         self.startup_profile_discovery_pending = false;
+        self.startup_profile_discovery_retry_count = 0;
+    }
+
+    pub fn retryStartupProfileDiscovery(self: *JumpList) void {
+        if (!self.startup_profile_discovery_pending) return;
+        if (nextRebuildRetryCount(self.startup_profile_discovery_retry_count)) |next| {
+            self.startup_profile_discovery_retry_count = next;
+            self.schedule();
+        } else {
+            log.warn("jump list profile discovery retries exhausted; waiting for a new host", .{});
+        }
     }
 
     pub fn updateProfiles(self: *JumpList, profiles: []const windows_shell.Profile) void {
@@ -801,17 +890,18 @@ pub const JumpList = struct {
     }
 
     pub fn noteRecent(self: *JumpList, path: []const u8) void {
+        const changed_ns: i64 = @intCast(std.time.nanoTimestamp());
         const reinstated = self.removed_recents.removePath(self.alloc, path) catch |err| {
             log.warn("jump list recent reinstatement failed err={}", .{err});
             return;
         };
         if (reinstated) {
             _ = self.pending_recent_removals.removePath(self.alloc, path) catch {};
-            _ = self.pending_recent_uses.insert(self.alloc, path) catch |err| {
-                log.warn("jump list recent-use snapshot failed err={}", .{err});
-                return;
-            };
         }
+        _ = self.pending_recent_uses.insert(self.alloc, path) catch |err| {
+            log.warn("jump list recent-use snapshot failed err={}", .{err});
+            return;
+        };
         const changed = self.recents.insert(self.alloc, path) catch |err| {
             log.warn("jump list recent update failed err={}", .{err});
             return;
@@ -821,6 +911,10 @@ pub const JumpList = struct {
         // written by another process is removed during the next merge.
         const recorded = self.pending_recent_additions.insert(self.alloc, path) catch |err| {
             log.warn("jump list recent persistence snapshot failed err={}", .{err});
+            return;
+        };
+        self.pending_recent_events.upsert(self.alloc, path, .used, changed_ns) catch |err| {
+            log.warn("jump list recent event snapshot failed err={}", .{err});
             return;
         };
         if (!changed and !reinstated and !recorded) return;
@@ -873,7 +967,10 @@ pub const JumpList = struct {
     /// `initial-window=false` launch is not stranded without a Profiles
     /// category until something else happens to dirty the model.
     pub fn scheduleIfStartupPending(self: *JumpList) void {
-        if (self.startup_profile_discovery_pending) self.schedule();
+        if (self.startup_profile_discovery_pending) {
+            self.startup_profile_discovery_retry_count = 0;
+            self.schedule();
+        }
     }
 
     fn schedule(self: *JumpList) void {
@@ -939,6 +1036,7 @@ pub const JumpList = struct {
             merged.recents.items.items,
             merged.removed_recents.items.items,
             merged.hidden_profiles.items.items,
+            merged.recent_events.items.items,
         ) catch |err| {
             log.warn("jump list recent encode failed err={}", .{err});
             return false;
@@ -969,9 +1067,13 @@ pub const JumpList = struct {
         self.hidden_profiles.deinit(self.alloc);
         self.hidden_profiles = merged.hidden_profiles;
         merged.hidden_profiles = .{};
+        self.recent_events.deinit(self.alloc);
+        self.recent_events = merged.recent_events;
+        merged.recent_events = .{};
 
         self.pending_recent_additions.deinit(self.alloc);
         self.pending_recent_removals.deinit(self.alloc);
+        self.pending_recent_events.deinit(self.alloc);
         self.pending_profile_hides.deinit(self.alloc);
         self.persist_dirty = false;
         if (model_changed) {
@@ -983,19 +1085,26 @@ pub const JumpList = struct {
     }
 
     fn applyPendingState(self: *const JumpList, merged: *LoadedState) !void {
-        for (self.pending_recent_removals.items.items) |path| {
-            _ = try merged.recents.removePath(self.alloc, path);
-            _ = try merged.removed_recents.insert(self.alloc, path);
-        }
-        for (self.pending_recent_uses.items.items) |path| {
-            _ = try merged.removed_recents.removePath(self.alloc, path);
-        }
-        var remaining = self.pending_recent_additions.items.items.len;
-        while (remaining > 0) {
-            remaining -= 1;
-            const path = self.pending_recent_additions.items.items[remaining];
-            _ = try merged.removed_recents.removePath(self.alloc, path);
-            _ = try merged.recents.insert(self.alloc, path);
+        for (self.pending_recent_events.items.items) |event| {
+            if (try merged.recent_events.latest(self.alloc, event.path)) |latest| {
+                if (latest.changed_ns > event.changed_ns) continue;
+            }
+            switch (event.kind) {
+                .used => {
+                    _ = try merged.removed_recents.removePath(self.alloc, event.path);
+                    _ = try merged.recents.insert(self.alloc, event.path);
+                },
+                .removed => {
+                    _ = try merged.recents.removePath(self.alloc, event.path);
+                    _ = try merged.removed_recents.insert(self.alloc, event.path);
+                },
+            }
+            try merged.recent_events.upsert(
+                self.alloc,
+                event.path,
+                event.kind,
+                event.changed_ns,
+            );
         }
         for (self.pending_profile_hides.items.items) |key| {
             _ = try merged.hidden_profiles.insert(self.alloc, key);
@@ -1064,6 +1173,12 @@ pub const JumpList = struct {
             for (self.pending_recent_removals.items.items) |path| {
                 _ = try self.removed_recents.insert(self.alloc, path);
                 _ = self.pending_recent_additions.removePath(self.alloc, path) catch false;
+                try self.pending_recent_events.upsert(
+                    self.alloc,
+                    path,
+                    .removed,
+                    @intCast(std.time.nanoTimestamp()),
+                );
             }
             self.persist_dirty = true;
         }
@@ -1342,11 +1457,17 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     const values = [_][]const u8{ "C:\\src\\noctty", "D:\\work" };
     const hidden_profiles = [_][]const u8{"wsl:Ubuntu"};
     const removed_values = [_][]const u8{"E:\\removed"};
+    const recent_events = [_]RecentEvent{.{
+        .path = "E:\\removed",
+        .kind = .removed,
+        .changed_ns = 42,
+    }};
     const encoded = try encodeRecentStateAlloc(
         std.testing.allocator,
         &values,
         &removed_values,
         &hidden_profiles,
+        &recent_events,
     );
     defer std.testing.allocator.free(encoded);
     var parsed = try parseRecentStateAlloc(std.testing.allocator, encoded);
@@ -1355,6 +1476,9 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     try std.testing.expectEqualStrings(values[1], parsed.value.directories[1]);
     try std.testing.expectEqualStrings(removed_values[0], parsed.value.removed_directories[0]);
     try std.testing.expectEqualStrings(hidden_profiles[0], parsed.value.hidden_profiles[0]);
+    try std.testing.expectEqualStrings(recent_events[0].path, parsed.value.recent_events[0].path);
+    try std.testing.expectEqual(recent_events[0].kind, parsed.value.recent_events[0].kind);
+    try std.testing.expectEqual(recent_events[0].changed_ns, parsed.value.recent_events[0].changed_ns);
     try std.testing.expectError(
         error.SyntaxError,
         parseRecentStateAlloc(std.testing.allocator, "{not json"),
@@ -1397,7 +1521,7 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     @memset(oversized_key, 'x');
     try std.testing.expectError(
         error.StateTooLarge,
-        encodeRecentStateAlloc(std.testing.allocator, &.{}, &.{}, &.{oversized_key}),
+        encodeRecentStateAlloc(std.testing.allocator, &.{}, &.{}, &.{oversized_key}, &.{}),
     );
 }
 
@@ -1517,6 +1641,8 @@ test "jump_list persistence merge applies local events to the latest snapshot" {
 
     try std.testing.expect(try jump.pending_recent_additions.insert(alloc, "D:\\local"));
     try std.testing.expect(try jump.pending_recent_removals.insert(alloc, "C:\\removed"));
+    try jump.pending_recent_events.upsert(alloc, "D:\\local", .used, 20);
+    try jump.pending_recent_events.upsert(alloc, "C:\\removed", .removed, 21);
     try std.testing.expect(try jump.pending_profile_hides.insert(alloc, "wsl:new-hidden"));
     try std.testing.expect(try jump.pending_profile_uses.insert(alloc, "wsl:used"));
 
@@ -1533,6 +1659,34 @@ test "jump_list persistence merge applies local events to the latest snapshot" {
     try std.testing.expect(try merged.removed_recents.contains(alloc, "C:\\removed"));
     try std.testing.expect(merged.hidden_profiles.contains("wsl:new-hidden"));
     try std.testing.expect(!merged.hidden_profiles.contains("wsl:used"));
+}
+
+test "jump_list persistence keeps the newer cross-process recent event" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+
+    // Process A observed the directory first, then process B removed it and
+    // persisted that newer event before A acquired the state-file lock.
+    try jump.pending_recent_events.upsert(alloc, "C:\\stale", .used, 10);
+    var merged: LoadedState = .{};
+    defer merged.deinit(alloc);
+    try merged.removed_recents.appendLoaded(alloc, "C:\\stale");
+    try merged.recent_events.upsert(alloc, "C:\\stale", .removed, 20);
+
+    try jump.applyPendingState(&merged);
+    try std.testing.expectEqual(@as(usize, 0), merged.recents.items.items.len);
+    try std.testing.expect(try merged.removed_recents.contains(alloc, "C:\\stale"));
+    const latest = (try merged.recent_events.latest(alloc, "C:\\stale")).?;
+    try std.testing.expectEqual(RecentEventKind.removed, latest.kind);
+    try std.testing.expectEqual(@as(i64, 20), latest.changed_ns);
 }
 
 test "jump_list unchanged recent directory still records a use event" {
@@ -1555,6 +1709,7 @@ test "jump_list unchanged recent directory still records a use event" {
     jump.noteRecent("D:\\same-head");
     try std.testing.expect(jump.persist_dirty);
     try std.testing.expect(try jump.pending_recent_additions.contains(alloc, "D:\\same-head"));
+    try std.testing.expect(try jump.pending_recent_uses.contains(alloc, "D:\\same-head"));
 }
 
 test "jump_list slot budget reserves profiles before recents" {
@@ -1610,6 +1765,10 @@ test "jump_list startup profile discovery stays pending until completion" {
     defer jump.deinit();
 
     try std.testing.expect(jump.startupProfileDiscoveryPending());
+    jump.startup_profile_discovery_retry_count = max_rebuild_retries;
+    jump.retryStartupProfileDiscovery();
+    try std.testing.expect(jump.timer_id == null);
+    try std.testing.expectEqual(max_rebuild_retries, jump.startup_profile_discovery_retry_count);
     // A failed discovery leaves the request untouched; only the caller's
     // explicit success transition consumes it.
     try std.testing.expect(jump.startupProfileDiscoveryPending());
