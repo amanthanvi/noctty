@@ -167,7 +167,10 @@ try {
     }
 }
 finally {
-    if ($null -ne $lease) { $lease.Completion.Wait() }
+    if ($null -ne $lease) {
+        try { $lease.Completion.Wait() }
+        catch { Write-Warning "Exclusive writer probe task faulted: $($_.Exception.Message)" }
+    }
     if ($null -ne $sharedWriter) { $sharedWriter.Dispose() }
     Remove-Item -LiteralPath Function:\Get-HintsInputEvents -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $inputRoot) {

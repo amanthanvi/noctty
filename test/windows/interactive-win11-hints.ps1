@@ -318,6 +318,7 @@ if (-not [NocttyHintsNative]::ClassNamesEqual('Button', 'BUTTON')) {
 function Wait-HintsUntil {
     param(
         [Parameter(Mandatory)][DateTime] $Deadline,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
         [Parameter(Mandatory)][string] $Description,
         [Parameter(Mandatory)][scriptblock] $Condition,
         [System.Diagnostics.Process] $Process
@@ -327,7 +328,8 @@ function Wait-HintsUntil {
     # Otherwise several successful UIA/clipboard phases can exhaust the one
     # original deadline before a later condition is even evaluated.
     $conditionDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Wait-InteractiveWin11Until -Deadline $conditionDeadline -Description $Description -Condition $Condition -Process $Process
+    $scopedDescription = "$Description (scenario deadline $($Deadline.ToString('o')))"
+    Wait-InteractiveWin11Until -Deadline $conditionDeadline -Description $scopedDescription -Condition $Condition -Process $Process
 }
 
 function Send-HintsChord {
@@ -629,7 +631,7 @@ try {
         -PayloadPath $payloadPath -StdoutPath $stdoutPath -StderrPath $stderrPath `
         -ExePath $exePath -Layout $layout
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Wait-HintsUntil -Deadline $deadline -Description 'hints host and payload readiness' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'hints host and payload readiness' -Process $process -Condition {
         $process.Refresh()
         -not $process.HasExited -and
             (Test-Path -LiteralPath $readyPath) -and
@@ -643,7 +645,7 @@ try {
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'open quick select'
     try {
-        Wait-HintsUntil -Deadline $deadline -Description 'quick-select overlay' -Process $process -Condition {
+        Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'quick-select overlay' -Process $process -Condition {
             [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
         }
     }
@@ -684,7 +686,7 @@ try {
 
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $quickHwnd `
         -Keys @([uint16]0x41) -Description 'copy quick-select target'
-    Wait-HintsUntil -Deadline $deadline -Description 'quick-select clipboard result' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'quick-select clipboard result' -Process $process -Condition {
         [NocttyHintsNative]::GetClipboardText() -eq $url -and
             [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -eq [IntPtr]::Zero
     }
@@ -694,7 +696,7 @@ try {
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen quick select'
     try {
-        Wait-HintsUntil -Deadline $deadline -Description 'quick-select overlay for open' -Process $process -Condition {
+        Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'quick-select overlay for open' -Process $process -Condition {
             [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
         }
     }
@@ -710,7 +712,7 @@ try {
     $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $quickHwnd `
         -Keys @([uint16]0x11, [uint16]0x41) -Description 'record quick-select URL open'
-    Wait-HintsUntil -Deadline $deadline -Description 'recorded quick-select URL open' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'recorded quick-select URL open' -Process $process -Condition {
         (Test-Path -LiteralPath $urlTracePath) -and (Get-Content -LiteralPath $urlTracePath -Raw).Trim() -eq $url
     }
     if ([NocttyHintsNative]::GetClipboardText() -ne 'open-sentinel') { throw 'Ctrl-open unexpectedly changed the clipboard.' }
@@ -733,7 +735,27 @@ try {
     $selectionBefore = $selectionBeforeRange.GetText(-1)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x4C) -Description 'move copy-mode selection right'
-    $selectionAfterRange = $textPattern.GetSelection().GetValue(0)
+    $script:selectionAfterRange = $null
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds `
+        -Description 'copy-mode selection movement' -Process $process -Condition {
+        $candidate = $textPattern.GetSelection().GetValue(0)
+        $startChanged = $candidate.CompareEndpoints(
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start,
+            $selectionBeforeRange,
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start
+        ) -ne 0
+        $endChanged = $candidate.CompareEndpoints(
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::End,
+            $selectionBeforeRange,
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::End
+        ) -ne 0
+        if ($startChanged -or $endChanged) {
+            $script:selectionAfterRange = $candidate
+            return $true
+        }
+        return $false
+    }
+    $selectionAfterRange = $script:selectionAfterRange
     $selectionAfter = $selectionAfterRange.GetText(-1)
     $startDelta = $selectionBeforeRange.CompareEndpoints(
         [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start,
@@ -750,12 +772,12 @@ try {
     }
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x59) -Description 'copy and exit copy mode'
-    Wait-HintsUntil -Deadline $deadline -Description 'copy-mode clipboard result' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'copy-mode clipboard result' -Process $process -Condition {
         [NocttyHintsNative]::GetClipboardText() -ne 'copy-mode-sentinel'
     }
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x42) -Description 'prove PTY input after copy-mode exit'
-    Wait-HintsUntil -Deadline $deadline -Description 'PTY input after copy-mode exit' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'PTY input after copy-mode exit' -Process $process -Condition {
         @(Get-HintsInputEvents -Path $inputPath).Count -ge 1
     }
     Remove-Item -LiteralPath $inputPath -ErrorAction SilentlyContinue
@@ -765,7 +787,7 @@ try {
         -Keys @([uint16]0x51) -Description 'cancel copy mode'
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x43) -Description 'prove PTY input after copy-mode cancel'
-    Wait-HintsUntil -Deadline $deadline -Description 'PTY input after copy-mode cancel' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'PTY input after copy-mode cancel' -Process $process -Condition {
         @(Get-HintsInputEvents -Path $inputPath).Count -ge 1
     }
 
@@ -813,7 +835,7 @@ try {
         -PayloadPath $unsafePayloadPath -StdoutPath $unsafeStdoutPath -StderrPath $unsafeStderrPath `
         -ExePath $exePath -Layout $layout
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Wait-HintsUntil -Deadline $deadline -Description 'unsafe-paste host and payload readiness' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste host and payload readiness' -Process $process -Condition {
         $process.Refresh()
         -not $process.HasExited -and
             (Test-Path -LiteralPath $unsafeReadyPath) -and
@@ -823,7 +845,7 @@ try {
     $surfaceHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32', $true)
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'open unsafe-paste quick select'
-    Wait-HintsUntil -Deadline $deadline -Description 'unsafe-paste quick-select overlay' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay' -Process $process -Condition {
         [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
     }
     $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
@@ -831,7 +853,7 @@ try {
         -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste'
     $allow = $null
     try {
-        Wait-HintsUntil -Deadline $deadline -Description 'protected-paste confirmation' -Process $process -Condition {
+        Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation' -Process $process -Condition {
             $allowHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true)
             $script:allow = if ($allowHwnd -ne [IntPtr]::Zero) {
                 [System.Windows.Automation.AutomationElement]::FromHandle($allowHwnd)
@@ -855,7 +877,7 @@ try {
 
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
         -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen unsafe-paste quick select'
-    Wait-HintsUntil -Deadline $deadline -Description 'unsafe-paste quick-select overlay after cancel' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay after cancel' -Process $process -Condition {
         [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
     }
     $quickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
@@ -863,7 +885,7 @@ try {
         -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste again'
     $retryAllow = $null
     try {
-        Wait-HintsUntil -Deadline $deadline -Description 'protected-paste confirmation after retry' -Process $process -Condition {
+        Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation after retry' -Process $process -Condition {
             $retryAllowHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true)
             $script:retryAllow = if ($retryAllowHwnd -ne [IntPtr]::Zero) {
                 [System.Windows.Automation.AutomationElement]::FromHandle($retryAllowHwnd)
@@ -883,7 +905,7 @@ try {
     $retryInvoke = Get-HintsButtonInvokePattern -Element $retryAllow `
         -Description 'Protected-paste Allow control after retry'
     $retryInvoke.Invoke()
-    Wait-HintsUntil -Deadline $deadline -Description 'accepted protected paste at PTY' -Process $process -Condition {
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'accepted protected paste at PTY' -Process $process -Condition {
         $events = @(Get-HintsInputEvents -Path $unsafeInputPath)
         $events.Count -ge 10 -and @($events | Where-Object { $_.char -eq 13 }).Count -ge 1
     }
@@ -910,7 +932,14 @@ catch {
     throw
 }
 finally {
-    if ($null -ne $process) { Stop-InteractiveWin11Process -Process $process -Contained }
+    $stopFailure = $null
+    if ($null -ne $process) {
+        try { Stop-InteractiveWin11Process -Process $process -Contained }
+        catch {
+            $stopFailure = $_
+            Write-Warning "Unable to stop the noctty process: $($_.Exception.Message)"
+        }
+    }
     try {
         if ($clipboardCaptured) {
             try {
@@ -930,4 +959,5 @@ finally {
             $clipboardInitialized = $false
         }
     }
+    if ($null -eq $primaryFailure -and $null -ne $stopFailure) { throw $stopFailure }
 }

@@ -574,8 +574,9 @@ scrollback, and `0`/`$` to jump within a line. `y` or Enter copies and exits;
 
 Mouse selection and reporting keep working normally in copy mode: a left click
 replaces the copy-mode selection, and if the running program has enabled mouse
-reporting it still receives mouse escape sequences. File and text drops are
-ignored while copy mode owns input so they cannot bypass the modal paste gate.
+reporting it still receives mouse escape sequences. Legacy non-OLE file and
+text drop paths are ignored while copy mode owns input. OLE drops remain mouse
+gestures and continue through paste inspection and confirmation.
 
 These bindings live in the `copy_mode` key table, so they can be replaced
 with normal `keybind = copy_mode/...` entries. Note that `copy_mode` is one
