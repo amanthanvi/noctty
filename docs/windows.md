@@ -252,6 +252,50 @@ The taskbar jump list has two categories:
 - **Profiles** lists the detected shell profiles. Selecting an entry launches
   noctty with that profile's command.
 
+### Explorer context menu
+
+| Explorer target   | Classic verb key                    |
+| ----------------- | ----------------------------------- |
+| Selected folder   | `Directory\shell\noctty`            |
+| Folder background | `Directory\Background\shell\noctty` |
+| Drive             | `Drive\shell\noctty`                |
+
+Each verb is named `Open noctty here` and launches `noctty.exe` with
+`--single-instance=false --working-directory="%V\."`. The explicit new
+instance keeps the selected path in the launched process, so UNC folders do
+not cross the single-instance IPC boundary that deliberately rejects UNC
+working directories. The trailing `\.` is required: Explorer
+expands `%V` for a drive root as `C:\`, and a backslash immediately before
+the closing quote would be read as an escaped quote when Windows splits the
+command line. The installer writes the verbs under
+`HKA\Software\Classes`. The current administrative install mode maps `HKA`
+to `HKLM` and `{autopf}` to the common Program Files directory. Inno Setup
+maps `HKA` to `HKCU` and `{autopf}` to the user Program Files directory in
+non-administrative install mode.
+
+Portable users opt in per-user under `HKCU\Software\Classes` with
+`noctty +register-shell-menu` and remove the same six owned keys with
+`noctty +unregister-shell-menu`. The running app does not register these
+verbs automatically and never writes them to `HKLM`.
+
+A per-user verb wins over a per-machine one, because `HKCU\Software\Classes`
+overrides `HKLM` in the merged `HKCR` view. So if you registered the verbs from
+a portable build and later install noctty per-machine, the per-user copy keeps
+pointing at the portable executable until you remove it. Before deleting a
+portable copy, run `.\noctty.com +unregister-shell-menu` as the same user that
+registered the verbs. The installer uninstaller removes only its own
+registration; it does not remove portable per-user registrations.
+
+On Windows 11, these classic verbs appear under **Show more options**.
+`Shift+F10` opens the classic menu directly. A top-level modern command is
+not shipped. Shipping one requires a sparse MSIX manifest with package
+identity, an `IExplorerCommand` COM server, `windows.comServer` plus
+`Windows.FileExplorerContextMenus` (`windows.fileExplorerContextMenus` in
+the manifest) extension registration, and a signed package whose Publisher
+matches the signing certificate. The current self-signed release certificate
+must be trusted explicitly on each machine before Windows accepts that
+package.
+
 ## Notifications and progress
 
 Desktop notifications use WinRT toasts when available and fall back to

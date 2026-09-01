@@ -783,7 +783,8 @@ pub extern "advapi32" fn RegCreateKeyExW(
 
 pub extern "advapi32" fn RegSetValueExW(
     hKey: HKEY,
-    lpValueName: LPCWSTR,
+    // Optional: null names the key's default value.
+    lpValueName: ?LPCWSTR,
     Reserved: DWORD,
     dwType: DWORD,
     lpData: [*]const u8,
