@@ -33,6 +33,7 @@ pub const max_recents: usize = 10;
 pub const max_state_bytes: usize = 64 * 1024;
 pub const debounce_ms: UINT = 500;
 const max_profile_tombstones: usize = 128;
+const max_profile_events: usize = max_profile_tombstones * 2;
 const max_rebuild_retries: u8 = 3;
 const max_shell_link_chars: usize = 32_768;
 
@@ -266,6 +267,7 @@ const RecentState = struct {
     removed_directories: []const []const u8 = &.{},
     hidden_profiles: []const []const u8 = &.{},
     recent_events: []const RecentEvent = &.{},
+    profile_events: []const ProfileEvent = &.{},
 };
 
 const RecentEventKind = enum {
@@ -276,6 +278,17 @@ const RecentEventKind = enum {
 const RecentEvent = struct {
     path: []const u8,
     kind: RecentEventKind,
+    changed_ns: i64,
+};
+
+const ProfileEventKind = enum {
+    hidden,
+    used,
+};
+
+const ProfileEvent = struct {
+    key: []const u8,
+    kind: ProfileEventKind,
     changed_ns: i64,
 };
 
@@ -301,6 +314,7 @@ fn encodeRecentStateAlloc(
     removed_directories: []const []const u8,
     hidden_profiles: []const []const u8,
     recent_events: []const RecentEvent,
+    profile_events: []const ProfileEvent,
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -309,6 +323,7 @@ fn encodeRecentStateAlloc(
         .removed_directories = removed_directories,
         .hidden_profiles = hidden_profiles,
         .recent_events = recent_events,
+        .profile_events = profile_events,
     }, .{
         .whitespace = .minified,
     }, &out.writer);
@@ -448,7 +463,59 @@ const RecentEventList = struct {
             .changed_ns = changed_ns,
         });
         if (self.items.items.len > max_recents * 2) {
-            alloc.free(self.items.orderedRemove(0).path);
+            var oldest: usize = 0;
+            for (self.items.items[1..], 1..) |item, index| {
+                if (item.changed_ns < self.items.items[oldest].changed_ns) oldest = index;
+            }
+            alloc.free(self.items.orderedRemove(oldest).path);
+        }
+    }
+};
+
+const ProfileEventList = struct {
+    items: std.ArrayListUnmanaged(ProfileEvent) = .empty,
+
+    fn deinit(self: *ProfileEventList, alloc: Allocator) void {
+        for (self.items.items) |item| alloc.free(item.key);
+        self.items.deinit(alloc);
+        self.* = .{};
+    }
+
+    fn latest(self: *const ProfileEventList, key: []const u8) ?ProfileEvent {
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item.key, key)) return item;
+        }
+        return null;
+    }
+
+    fn upsert(
+        self: *ProfileEventList,
+        alloc: Allocator,
+        key: []const u8,
+        kind: ProfileEventKind,
+        changed_ns: i64,
+    ) !void {
+        for (self.items.items, 0..) |item, index| {
+            if (!std.mem.eql(u8, item.key, key)) continue;
+            if (item.changed_ns > changed_ns) return;
+            alloc.free(item.key);
+            _ = self.items.orderedRemove(index);
+            break;
+        }
+
+        const owned = try alloc.dupe(u8, key);
+        errdefer alloc.free(owned);
+        try self.items.append(alloc, .{
+            .key = owned,
+            .kind = kind,
+            .changed_ns = changed_ns,
+        });
+        if (self.items.items.len > max_profile_events) {
+            var oldest: usize = 0;
+            for (self.items.items[1..], 1..) |item, index| {
+                if (item.changed_ns < self.items.items[oldest].changed_ns) oldest = index;
+            }
+            alloc.free(self.items.orderedRemove(oldest).key);
         }
     }
 };
@@ -496,12 +563,14 @@ const LoadedState = struct {
     removed_recents: RecentList = .{},
     hidden_profiles: ProfileTombstones = .{},
     recent_events: RecentEventList = .{},
+    profile_events: ProfileEventList = .{},
 
     fn deinit(self: *LoadedState, alloc: Allocator) void {
         self.recents.deinit(alloc);
         self.removed_recents.deinit(alloc);
         self.hidden_profiles.deinit(alloc);
         self.recent_events.deinit(alloc);
+        self.profile_events.deinit(alloc);
         self.* = .{};
     }
 };
@@ -569,6 +638,17 @@ fn loadStateAlloc(alloc: Allocator, path: []const u8) LoadedState {
             event.changed_ns,
         ) catch |err| {
             log.warn("jump list recent event state allocation failed err={}", .{err});
+            break;
+        };
+    }
+    for (parsed.value.profile_events) |event| {
+        result.profile_events.upsert(
+            alloc,
+            event.key,
+            event.kind,
+            event.changed_ns,
+        ) catch |err| {
+            log.warn("jump list profile event state allocation failed err={}", .{err});
             break;
         };
     }
@@ -704,6 +784,10 @@ fn recentSlotCount(slot_budget: UINT, recent_count: usize, profile_count: usize)
     return @min(recent_count, slots - reserved_profiles);
 }
 
+fn profileSlotCount(slot_budget: UINT, recent_count: usize, profile_count: usize) usize {
+    return @min(profile_count, @as(usize, slot_budget) -| recent_count);
+}
+
 fn nextRebuildRetryCount(current: u8) ?u8 {
     if (current >= max_rebuild_retries) return null;
     return current + 1;
@@ -741,10 +825,12 @@ pub const JumpList = struct {
     removed_recents: RecentList,
     hidden_profiles: ProfileTombstones,
     recent_events: RecentEventList = .{},
+    profile_events: ProfileEventList = .{},
     pending_recent_additions: RecentList = .{},
     pending_recent_removals: RecentList = .{},
     pending_recent_uses: RecentList = .{},
     pending_recent_events: RecentEventList = .{},
+    pending_profile_events: ProfileEventList = .{},
     pending_profile_hides: ProfileTombstones = .{},
     pending_profile_uses: ProfileTombstones = .{},
     profiles: std.ArrayListUnmanaged(ProfileItem) = .empty,
@@ -771,6 +857,7 @@ pub const JumpList = struct {
             .removed_recents = loaded.removed_recents,
             .hidden_profiles = loaded.hidden_profiles,
             .recent_events = loaded.recent_events,
+            .profile_events = loaded.profile_events,
         };
     }
 
@@ -782,10 +869,12 @@ pub const JumpList = struct {
         self.removed_recents.deinit(self.alloc);
         self.hidden_profiles.deinit(self.alloc);
         self.recent_events.deinit(self.alloc);
+        self.profile_events.deinit(self.alloc);
         self.pending_recent_additions.deinit(self.alloc);
         self.pending_recent_removals.deinit(self.alloc);
         self.pending_recent_uses.deinit(self.alloc);
         self.pending_recent_events.deinit(self.alloc);
+        self.pending_profile_events.deinit(self.alloc);
         self.pending_profile_hides.deinit(self.alloc);
         self.pending_profile_uses.deinit(self.alloc);
         self.clearProfiles();
@@ -876,13 +965,19 @@ pub const JumpList = struct {
     }
 
     pub fn noteProfileUsed(self: *JumpList, key: []const u8) void {
+        const changed_ns: i64 = @intCast(std.time.nanoTimestamp());
         const removed = self.hidden_profiles.remove(self.alloc, key);
         _ = self.pending_profile_hides.remove(self.alloc, key);
         const recorded = self.pending_profile_uses.insert(self.alloc, key) catch |err| {
             log.warn("jump list profile-use snapshot failed err={}", .{err});
             return;
         };
-        if (!removed and !recorded) return;
+        self.pending_profile_events.upsert(self.alloc, key, .used, changed_ns) catch |err| {
+            log.warn("jump list profile event snapshot failed err={}", .{err});
+            return;
+        };
+        _ = removed;
+        _ = recorded;
         self.persist_dirty = true;
         self.rebuild_retry_count = 0;
         self.rebuild_dirty = true;
@@ -1037,6 +1132,7 @@ pub const JumpList = struct {
             merged.removed_recents.items.items,
             merged.hidden_profiles.items.items,
             merged.recent_events.items.items,
+            merged.profile_events.items.items,
         ) catch |err| {
             log.warn("jump list recent encode failed err={}", .{err});
             return false;
@@ -1070,10 +1166,14 @@ pub const JumpList = struct {
         self.recent_events.deinit(self.alloc);
         self.recent_events = merged.recent_events;
         merged.recent_events = .{};
+        self.profile_events.deinit(self.alloc);
+        self.profile_events = merged.profile_events;
+        merged.profile_events = .{};
 
         self.pending_recent_additions.deinit(self.alloc);
         self.pending_recent_removals.deinit(self.alloc);
         self.pending_recent_events.deinit(self.alloc);
+        self.pending_profile_events.deinit(self.alloc);
         self.pending_profile_hides.deinit(self.alloc);
         self.persist_dirty = false;
         if (model_changed) {
@@ -1092,7 +1192,6 @@ pub const JumpList = struct {
             switch (event.kind) {
                 .used => {
                     _ = try merged.removed_recents.removePath(self.alloc, event.path);
-                    _ = try merged.recents.insert(self.alloc, event.path);
                 },
                 .removed => {
                     _ = try merged.recents.removePath(self.alloc, event.path);
@@ -1106,12 +1205,54 @@ pub const JumpList = struct {
                 event.changed_ns,
             );
         }
-        for (self.pending_profile_hides.items.items) |key| {
-            _ = try merged.hidden_profiles.insert(self.alloc, key);
+        try self.rebuildMergedRecents(merged);
+        for (self.pending_profile_events.items.items) |event| {
+            if (merged.profile_events.latest(event.key)) |latest| {
+                if (latest.changed_ns > event.changed_ns) continue;
+            }
+            switch (event.kind) {
+                .hidden => _ = try merged.hidden_profiles.insert(self.alloc, event.key),
+                .used => _ = merged.hidden_profiles.remove(self.alloc, event.key),
+            }
+            try merged.profile_events.upsert(
+                self.alloc,
+                event.key,
+                event.kind,
+                event.changed_ns,
+            );
         }
-        for (self.pending_profile_uses.items.items) |key| {
-            _ = merged.hidden_profiles.remove(self.alloc, key);
+    }
+
+    fn rebuildMergedRecents(self: *const JumpList, merged: *LoadedState) !void {
+        var next: RecentList = .{};
+        errdefer next.deinit(self.alloc);
+
+        while (next.items.items.len < max_recents) {
+            var chosen: ?usize = null;
+            for (merged.recent_events.items.items, 0..) |event, index| {
+                if (event.kind != .used or
+                    try merged.removed_recents.contains(self.alloc, event.path) or
+                    try next.contains(self.alloc, event.path)) continue;
+                const current = if (chosen) |value| merged.recent_events.items.items[value] else {
+                    chosen = index;
+                    continue;
+                };
+                if (event.changed_ns >= current.changed_ns) chosen = index;
+            }
+            const index = chosen orelse break;
+            try next.appendLoaded(self.alloc, merged.recent_events.items.items[index].path);
         }
+
+        // Preserve legacy schema-v1 entries until they receive a timestamped
+        // use/removal event. They follow all globally ordered event entries.
+        for (merged.recents.items.items) |path| {
+            if (next.items.items.len >= max_recents) break;
+            if (try merged.recent_events.latest(self.alloc, path) != null) continue;
+            try next.appendLoaded(self.alloc, path);
+        }
+
+        merged.recents.deinit(self.alloc);
+        merged.recents = next;
     }
 
     fn clearProfiles(self: *JumpList) void {
@@ -1187,6 +1328,12 @@ pub const JumpList = struct {
             if (self.pending_profile_uses.contains(item.key)) continue;
             if (try self.hidden_profiles.insert(self.alloc, item.key)) {
                 _ = try self.pending_profile_hides.insert(self.alloc, item.key);
+                try self.pending_profile_events.upsert(
+                    self.alloc,
+                    item.key,
+                    .hidden,
+                    @intCast(std.time.nanoTimestamp()),
+                );
                 self.persist_dirty = true;
             }
         }
@@ -1204,8 +1351,9 @@ pub const JumpList = struct {
         if (recent_count > 0) {
             try self.appendRecentCategory(destination, exe_w, recent_count);
         }
-        if (visible_profile_count > 0) {
-            try self.appendProfilesCategory(destination, exe_w);
+        const profile_count = profileSlotCount(slot_budget, recent_count, visible_profile_count);
+        if (profile_count > 0) {
+            try self.appendProfilesCategory(destination, exe_w, profile_count);
         }
         // Named layouts (C17, #133) will add a third category here, built
         // from win32_layouts.listNamesAlloc + launchArgvAlloc rather than
@@ -1244,15 +1392,19 @@ pub const JumpList = struct {
         self: *JumpList,
         destination: *ICustomDestinationList,
         exe_w: [:0]const u16,
+        count: usize,
     ) !void {
         const collection = try createObjectCollection();
         defer collection.release();
 
+        var appended: usize = 0;
         for (self.profiles.items) |item| {
             if (self.hidden_profiles.contains(item.key)) continue;
+            if (appended == count) break;
             const link = try self.createShellLink(exe_w, item.arguments, item.title, null);
             defer link.release();
             if (collection.addObject(link.asRaw()) < 0) return error.AddProfileLinkFailed;
+            appended += 1;
         }
 
         const category = std.unicode.utf8ToUtf16LeStringLiteral("Profiles");
@@ -1462,12 +1614,18 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
         .kind = .removed,
         .changed_ns = 42,
     }};
+    const profile_events = [_]ProfileEvent{.{
+        .key = "wsl:Ubuntu",
+        .kind = .hidden,
+        .changed_ns = 43,
+    }};
     const encoded = try encodeRecentStateAlloc(
         std.testing.allocator,
         &values,
         &removed_values,
         &hidden_profiles,
         &recent_events,
+        &profile_events,
     );
     defer std.testing.allocator.free(encoded);
     var parsed = try parseRecentStateAlloc(std.testing.allocator, encoded);
@@ -1479,6 +1637,9 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     try std.testing.expectEqualStrings(recent_events[0].path, parsed.value.recent_events[0].path);
     try std.testing.expectEqual(recent_events[0].kind, parsed.value.recent_events[0].kind);
     try std.testing.expectEqual(recent_events[0].changed_ns, parsed.value.recent_events[0].changed_ns);
+    try std.testing.expectEqualStrings(profile_events[0].key, parsed.value.profile_events[0].key);
+    try std.testing.expectEqual(profile_events[0].kind, parsed.value.profile_events[0].kind);
+    try std.testing.expectEqual(profile_events[0].changed_ns, parsed.value.profile_events[0].changed_ns);
     try std.testing.expectError(
         error.SyntaxError,
         parseRecentStateAlloc(std.testing.allocator, "{not json"),
@@ -1521,7 +1682,7 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     @memset(oversized_key, 'x');
     try std.testing.expectError(
         error.StateTooLarge,
-        encodeRecentStateAlloc(std.testing.allocator, &.{}, &.{}, &.{oversized_key}, &.{}),
+        encodeRecentStateAlloc(std.testing.allocator, &.{}, &.{}, &.{oversized_key}, &.{}, &.{}),
     );
 }
 
@@ -1645,6 +1806,8 @@ test "jump_list persistence merge applies local events to the latest snapshot" {
     try jump.pending_recent_events.upsert(alloc, "C:\\removed", .removed, 21);
     try std.testing.expect(try jump.pending_profile_hides.insert(alloc, "wsl:new-hidden"));
     try std.testing.expect(try jump.pending_profile_uses.insert(alloc, "wsl:used"));
+    try jump.pending_profile_events.upsert(alloc, "wsl:new-hidden", .hidden, 22);
+    try jump.pending_profile_events.upsert(alloc, "wsl:used", .used, 23);
 
     var merged: LoadedState = .{};
     defer merged.deinit(alloc);
@@ -1689,6 +1852,67 @@ test "jump_list persistence keeps the newer cross-process recent event" {
     try std.testing.expectEqual(@as(i64, 20), latest.changed_ns);
 }
 
+test "jump_list persistence orders recent destinations across paths" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+    try jump.pending_recent_events.upsert(alloc, "D:\\older", .used, 10);
+
+    var merged: LoadedState = .{};
+    defer merged.deinit(alloc);
+    var buffer: [32]u8 = undefined;
+    for (0..max_recents) |index| {
+        const path = try std.fmt.bufPrint(&buffer, "C:\\newer-{d}", .{index});
+        try merged.recents.appendLoaded(alloc, path);
+        try merged.recent_events.upsert(alloc, path, .used, @intCast(20 + index));
+    }
+
+    try jump.applyPendingState(&merged);
+    try std.testing.expectEqual(max_recents, merged.recents.items.items.len);
+    try std.testing.expectEqualStrings("C:\\newer-9", merged.recents.items.items[0]);
+    try std.testing.expect(!try merged.recents.contains(alloc, "D:\\older"));
+}
+
+test "jump_list persistence keeps the newer cross-process profile event" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+    try jump.pending_profile_events.upsert(alloc, "wsl:Ubuntu", .hidden, 10);
+
+    var merged: LoadedState = .{};
+    defer merged.deinit(alloc);
+    try merged.profile_events.upsert(alloc, "wsl:Ubuntu", .used, 20);
+
+    try jump.applyPendingState(&merged);
+    try std.testing.expect(!merged.hidden_profiles.contains("wsl:Ubuntu"));
+    const latest = merged.profile_events.latest("wsl:Ubuntu").?;
+    try std.testing.expectEqual(ProfileEventKind.used, latest.kind);
+    try std.testing.expectEqual(@as(i64, 20), latest.changed_ns);
+
+    // The inverse ordering must also hold: an older delayed use cannot
+    // unhide a profile removed later by another process.
+    try jump.pending_profile_events.upsert(alloc, "wsl:Ubuntu", .used, 30);
+    try merged.profile_events.upsert(alloc, "wsl:Ubuntu", .hidden, 40);
+    try std.testing.expect(try merged.hidden_profiles.insert(alloc, "wsl:Ubuntu"));
+    try jump.applyPendingState(&merged);
+    try std.testing.expect(merged.hidden_profiles.contains("wsl:Ubuntu"));
+    try std.testing.expectEqual(ProfileEventKind.hidden, merged.profile_events.latest("wsl:Ubuntu").?.kind);
+}
+
 test "jump_list unchanged recent directory still records a use event" {
     const alloc = std.testing.allocator;
     var jump: JumpList = .{
@@ -1719,6 +1943,8 @@ test "jump_list slot budget reserves profiles before recents" {
     try std.testing.expectEqual(@as(usize, 0), recentSlotCount(0, 10, 2));
     try std.testing.expectEqual(@as(usize, 1), recentSlotCount(1, 10, 2));
     try std.testing.expectEqual(@as(usize, 2), recentSlotCount(10, 2, 2));
+    try std.testing.expectEqual(@as(usize, 2), profileSlotCount(3, 1, 5));
+    try std.testing.expectEqual(@as(usize, 0), profileSlotCount(3, 3, 5));
 }
 
 test "jump_list removed profile tombstone persists until profile use" {
