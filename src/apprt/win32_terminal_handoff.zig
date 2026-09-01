@@ -917,6 +917,38 @@ const RegistryValueSnapshot = struct {
     fn deinit(self: RegistryValueSnapshot, alloc: Allocator) void {
         if (self.value) |value| value.deinit(alloc);
     }
+
+    fn capture(
+        alloc: Allocator,
+        key: []const u8,
+        name: ?[]const u8,
+    ) (Allocator.Error || RegistrationError)!RegistryValueSnapshot {
+        return .{ .key = key, .name = name, .value = try queryValueAlloc(alloc, key, name) };
+    }
+
+    fn restore(self: RegistryValueSnapshot, alloc: Allocator) (Allocator.Error || RegistrationError)!void {
+        if (self.value) |value| {
+            try writeRegistryRaw(alloc, self.key, self.name, value);
+        } else {
+            try deleteRegistryValue(alloc, self.key, self.name);
+        }
+    }
+};
+
+const UnregistrationSnapshot = struct {
+    selection: RegistryValueSnapshot,
+    registration: RegistrationRefreshSnapshot,
+
+    fn capture(alloc: Allocator) (Allocator.Error || RegistrationError)!UnregistrationSnapshot {
+        const selection = try RegistryValueSnapshot.capture(alloc, startup_key_utf8, delegation_terminal_name);
+        errdefer selection.deinit(alloc);
+        return .{ .selection = selection, .registration = try RegistrationRefreshSnapshot.capture(alloc) };
+    }
+
+    fn deinit(self: *UnregistrationSnapshot, alloc: Allocator) void {
+        self.selection.deinit(alloc);
+        self.registration.deinit(alloc);
+    }
 };
 
 const RegistrationRefreshSnapshot = struct {
@@ -951,10 +983,10 @@ const RegistrationRefreshSnapshot = struct {
         name: ?[]const u8,
         owned_state: bool,
     ) (Allocator.Error || RegistrationError)!void {
-        const value = try queryValueAlloc(alloc, key, name);
-        errdefer if (value) |raw| raw.deinit(alloc);
-        if (owned_state and value != null) self.had_owned_state = true;
-        try self.values.append(alloc, .{ .key = key, .name = name, .value = value });
+        const snapshot = try RegistryValueSnapshot.capture(alloc, key, name);
+        errdefer snapshot.deinit(alloc);
+        if (owned_state and snapshot.value != null) self.had_owned_state = true;
+        try self.values.append(alloc, snapshot);
     }
 
     fn restore(self: RegistrationRefreshSnapshot, alloc: Allocator) (Allocator.Error || RegistrationError)!void {
@@ -962,12 +994,24 @@ const RegistrationRefreshSnapshot = struct {
         while (index > 0) {
             index -= 1;
             const snapshot = self.values.items[index];
-            if (snapshot.value) |value| {
-                try writeRegistryRaw(alloc, snapshot.key, snapshot.name, value);
-            } else {
-                try deleteRegistryValue(alloc, snapshot.key, snapshot.name);
-            }
+            try snapshot.restore(alloc);
         }
+    }
+
+    fn findValue(
+        self: RegistrationRefreshSnapshot,
+        key: []const u8,
+        name: ?[]const u8,
+    ) ?RegistryValueSnapshot {
+        for (self.values.items) |snapshot| {
+            if (!std.mem.eql(u8, snapshot.key, key)) continue;
+            if (snapshot.name == null or name == null) {
+                if (snapshot.name == null and name == null) return snapshot;
+                continue;
+            }
+            if (std.mem.eql(u8, snapshot.name.?, name.?)) return snapshot;
+        }
+        return null;
     }
 
     fn deinit(self: *RegistrationRefreshSnapshot, alloc: Allocator) void {
@@ -1149,6 +1193,162 @@ fn writeRegistration(
     return selectTerminal(alloc);
 }
 
+const UnregistrationJournal = struct {
+    selection_restored: bool = false,
+    interfaces_restored: [interface_proxy_registrations.len]bool = @splat(false),
+    proxy_class_delete_attempted: bool = false,
+    proxy_class_removed: bool = false,
+    main_class_delete_attempted: bool = false,
+};
+
+const UnregisterTransaction = struct {
+    alloc: Allocator,
+    snapshot: *const UnregistrationSnapshot,
+    terminal_restore: ?SavedRegistryValue,
+    interface_restores: *const [interface_proxy_registrations.len]?SavedRegistryValue,
+    journal: UnregistrationJournal = .{},
+
+    fn mutate(self: *@This()) (Allocator.Error || RegistrationError)!UnregisterResult {
+        // Mirror of the registration order: hand the selection back first,
+        // then the shared Interface values, and only then delete noctty's own
+        // classes, so no window of time has the selection pointing at a
+        // removed class.
+        const selection_result = try restoreSelectionIfOwned(self.alloc, self.terminal_restore);
+        self.journal.selection_restored = selection_result.restored;
+        for (interface_proxy_registrations, 0..) |registration, index| {
+            self.journal.interfaces_restored[index] = try restoreInterfaceProxyIfOwned(
+                self.alloc,
+                registration,
+                self.interface_restores[index],
+            );
+        }
+        self.journal.proxy_class_delete_attempted = true;
+        self.journal.proxy_class_removed = try deleteRegistryTree(self.alloc, proxy_class_key_utf8);
+        self.journal.main_class_delete_attempted = true;
+        const class_removed = (try deleteRegistryTree(self.alloc, class_key_utf8)) or self.journal.proxy_class_removed;
+        return .{
+            .selection_restored = selection_result.restored,
+            .newer_selection_preserved = selection_result.newer_selection_preserved,
+            .class_removed = class_removed,
+        };
+    }
+
+    fn rollback(self: *@This()) (Allocator.Error || RegistrationError)!void {
+        var first_error: ?(Allocator.Error || RegistrationError) = null;
+
+        // Rebuild owned class values before reconnecting the shared Interface
+        // and terminal selection values. A failed RegDeleteTreeW may leave a
+        // partially deleted tree, so restore the known schema when its owner
+        // value is absent or still matches this transaction's baseline.
+        if (self.journal.main_class_delete_attempted) {
+            self.restoreOwnedClassBestEffort(
+                class_key_utf8,
+                local_server_key_utf8,
+                &first_error,
+            );
+        }
+        if (self.journal.proxy_class_delete_attempted) {
+            self.restoreOwnedClassBestEffort(
+                proxy_class_key_utf8,
+                proxy_inproc_server_key_utf8,
+                &first_error,
+            );
+        }
+
+        // Undo shared values in reverse order and only if they still equal the
+        // value this unregistration wrote. This preserves a newer Settings or
+        // portable-install choice made while rollback is in progress.
+        var index = interface_proxy_registrations.len;
+        while (index > 0) {
+            index -= 1;
+            if (!self.journal.interfaces_restored[index]) continue;
+            const expected = self.interface_restores[index] orelse unreachable;
+            const snapshot = self.snapshot.registration.findValue(
+                interface_proxy_registrations[index].key_utf8,
+                null,
+            ) orelse unreachable;
+            restoreSnapshotIfCurrentMatches(
+                self.alloc,
+                snapshot,
+                expected.value,
+            ) catch |err| rememberRollbackError(&first_error, err);
+        }
+        if (self.journal.selection_restored) {
+            const expected = self.terminal_restore orelse unreachable;
+            restoreSnapshotIfCurrentMatches(
+                self.alloc,
+                self.snapshot.selection,
+                expected.value,
+            ) catch |err| rememberRollbackError(&first_error, err);
+        }
+
+        if (first_error) |err| return err;
+    }
+
+    fn restoreOwnedClassBestEffort(
+        self: *@This(),
+        class_key: []const u8,
+        owner_value_key: []const u8,
+        first_error: *?(Allocator.Error || RegistrationError),
+    ) void {
+        const owner_snapshot = self.snapshot.registration.findValue(owner_value_key, null) orelse unreachable;
+        const current_owner = queryValueAlloc(self.alloc, owner_value_key, null) catch |err| {
+            rememberRollbackError(first_error, err);
+            return;
+        };
+        defer if (current_owner) |value| value.deinit(self.alloc);
+        if (current_owner != null and !rawRegistryValuesEqual(current_owner, owner_snapshot.value)) return;
+
+        var index = self.snapshot.registration.values.items.len;
+        while (index > 0) {
+            index -= 1;
+            const snapshot = self.snapshot.registration.values.items[index];
+            if (!std.mem.eql(u8, snapshot.key, class_key) and
+                !(std.mem.startsWith(u8, snapshot.key, class_key) and
+                    snapshot.key.len > class_key.len and
+                    snapshot.key[class_key.len] == '\\')) continue;
+            snapshot.restore(self.alloc) catch |err| rememberRollbackError(first_error, err);
+        }
+    }
+};
+
+fn rememberRollbackError(
+    first_error: *?(Allocator.Error || RegistrationError),
+    err: (Allocator.Error || RegistrationError),
+) void {
+    if (first_error.* == null) first_error.* = err;
+}
+
+fn rawRegistryValuesEqual(lhs: ?RawRegistryValue, rhs: ?RawRegistryValue) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return lhs.?.value_type == rhs.?.value_type and std.mem.eql(u8, lhs.?.data, rhs.?.data);
+}
+
+fn restoreSnapshotIfCurrentMatches(
+    alloc: Allocator,
+    snapshot: RegistryValueSnapshot,
+    expected: ?RawRegistryValue,
+) (Allocator.Error || RegistrationError)!void {
+    const current = try queryValueAlloc(alloc, snapshot.key, snapshot.name);
+    defer if (current) |value| value.deinit(alloc);
+    if (!rawRegistryValuesEqual(current, expected)) return;
+    try snapshot.restore(alloc);
+}
+
+fn runUnregisterMutationWithRollback(
+    context: anytype,
+    comptime mutate: anytype,
+    comptime rollback: anytype,
+) (Allocator.Error || RegistrationError)!UnregisterResult {
+    return mutate(context) catch |err| {
+        rollback(context) catch |rollback_err| {
+            log.err("default-terminal unregistration rollback failed err={}", .{rollback_err});
+            return rollback_err;
+        };
+        return err;
+    };
+}
+
 pub fn unregisterDefaultTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!UnregisterResult {
     const terminal_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
     defer if (terminal_raw) |value| value.deinit(alloc);
@@ -1173,20 +1373,21 @@ pub fn unregisterDefaultTerminal(alloc: Allocator) (Allocator.Error || Registrat
         }
     }
 
-    // Mirror of the registration order: hand the selection back first, then
-    // the shared Interface values, and only then delete noctty's own classes,
-    // so no window of time has the selection pointing at a removed class.
-    const selection_result = try restoreSelectionIfOwned(alloc, terminal_restore);
-    for (interface_proxy_registrations, 0..) |registration, index| {
-        try restoreInterfaceProxyIfOwned(alloc, registration, interface_restores[index]);
-    }
-    var class_removed = try deleteRegistryTree(alloc, proxy_class_key_utf8);
-    class_removed = (try deleteRegistryTree(alloc, class_key_utf8)) or class_removed;
-    return .{
-        .selection_restored = selection_result.restored,
-        .newer_selection_preserved = selection_result.newer_selection_preserved,
-        .class_removed = class_removed,
+    // Capture immediately before the first mutation. Failed unregisters use
+    // this snapshot plus the mutation journal to restore the exact baseline.
+    var snapshot = try UnregistrationSnapshot.capture(alloc);
+    defer snapshot.deinit(alloc);
+    var transaction: UnregisterTransaction = .{
+        .alloc = alloc,
+        .snapshot = &snapshot,
+        .terminal_restore = terminal_restore,
+        .interface_restores = &interface_restores,
     };
+    return runUnregisterMutationWithRollback(
+        &transaction,
+        UnregisterTransaction.mutate,
+        UnregisterTransaction.rollback,
+    );
 }
 
 fn savePreviousTerminal(alloc: Allocator, previous: ?RawRegistryValue) (Allocator.Error || RegistrationError)!void {
@@ -1300,16 +1501,17 @@ fn restoreInterfaceProxyIfOwned(
     alloc: Allocator,
     registration: InterfaceProxyRegistration,
     saved: ?SavedRegistryValue,
-) (Allocator.Error || RegistrationError)!void {
+) (Allocator.Error || RegistrationError)!bool {
     const current = try queryValueAlloc(alloc, registration.key_utf8, null);
     defer if (current) |value| value.deinit(alloc);
-    if (!try interfaceProxyIsOursAlloc(alloc, current)) return;
+    if (!try interfaceProxyIsOursAlloc(alloc, current)) return false;
     try restoreSavedRegistryValue(
         alloc,
         registration.key_utf8,
         null,
         saved orelse return error.MissingProxyRestoreState,
     );
+    return true;
 }
 
 fn shouldRestoreInterfaceProxyText(current: ?[]const u8) bool {
@@ -1757,6 +1959,52 @@ test "handoff registration rollback preserves dormant owned state" {
         RegistrationRollback.restore_snapshot,
         decideRegistrationRollback(false, true),
     );
+}
+
+test "handoff unregistration rolls back partial mutations without clobbering newer state" {
+    const State = struct {
+        current: u8 = 1,
+        preserve_newer: bool = false,
+        rollback_count: usize = 0,
+
+        fn mutate(self: *@This()) (Allocator.Error || RegistrationError)!UnregisterResult {
+            self.current = 2;
+            // Model a concurrent Settings change between the failed mutation
+            // and rollback. The inverse must preserve that newer value.
+            if (self.preserve_newer) self.current = 3;
+            return error.RegistryFailure;
+        }
+
+        fn rollback(self: *@This()) (Allocator.Error || RegistrationError)!void {
+            self.rollback_count += 1;
+            if (self.current == 2) self.current = 1;
+        }
+    };
+
+    var partial: State = .{};
+    try std.testing.expectError(
+        error.RegistryFailure,
+        runUnregisterMutationWithRollback(&partial, State.mutate, State.rollback),
+    );
+    try std.testing.expectEqual(@as(u8, 1), partial.current);
+    try std.testing.expectEqual(@as(usize, 1), partial.rollback_count);
+
+    var concurrent: State = .{ .preserve_newer = true };
+    try std.testing.expectError(
+        error.RegistryFailure,
+        runUnregisterMutationWithRollback(&concurrent, State.mutate, State.rollback),
+    );
+    try std.testing.expectEqual(@as(u8, 3), concurrent.current);
+    try std.testing.expectEqual(@as(usize, 1), concurrent.rollback_count);
+
+    var expected_data = [_]u8{ 1, 2, 3 };
+    var newer_data = [_]u8{ 1, 2, 4 };
+    const expected: RawRegistryValue = .{ .value_type = REG_BINARY, .data = &expected_data };
+    const same: RawRegistryValue = .{ .value_type = REG_BINARY, .data = &expected_data };
+    const newer: RawRegistryValue = .{ .value_type = REG_BINARY, .data = &newer_data };
+    try std.testing.expect(rawRegistryValuesEqual(expected, same));
+    try std.testing.expect(!rawRegistryValuesEqual(expected, newer));
+    try std.testing.expect(!rawRegistryValuesEqual(expected, null));
 }
 
 test "handoff failure trace stays within its byte budget" {
