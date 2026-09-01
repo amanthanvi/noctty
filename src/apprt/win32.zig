@@ -20132,6 +20132,9 @@ fn quickSelectProc(
             if (surface) |value| value.closeQuickSelect(true);
             return 0;
         },
+        // Scrolling would invalidate the immutable viewport snapshot behind
+        // the visible labels, so the modal overlay owns wheel input too.
+        c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => return 0,
         c.WM_CAPTURECHANGED => {
             if (surface) |value| value.closeQuickSelect(false);
             return 0;
@@ -25045,6 +25048,11 @@ pub const Surface = struct {
         if (self.quick_select_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
         if (self.quick_select_uia_provider) |provider| {
             win32_uia.events.raiseNameChanged(&provider.base);
+            win32_uia.events.raiseStructureChanged(
+                &provider.base,
+                .children_invalidated,
+                null,
+            );
             if (self.quickSelectFirstRemainingIndex()) |index| provider.raiseSelectionChanged(index);
         }
     }
@@ -25062,7 +25070,7 @@ pub const Surface = struct {
         }
 
         const char = quickSelectAsciiFromKey(wParam, lParam) orelse return;
-        const mods = currentMods();
+        const mods = win32_input.quickSelectActionMods();
         const session = if (self.quick_select_session) |*value| value else return;
         switch (session.prefix.input(&session.labels, char)) {
             .ignored => {},
