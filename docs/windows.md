@@ -572,7 +572,7 @@ Page Up/Page Down to move by a viewport, `g`/`G` or Home/End to jump through
 scrollback, and `0`/`$` to jump within a line. `y` or Enter copies and exits;
 `q` or Esc cancels. Other keys are consumed instead of reaching the PTY.
 
-Mouse selection and reporting keep working normally in copy mode: a click
+Mouse selection and reporting keep working normally in copy mode: a left click
 replaces the copy-mode selection, and if the running program has enabled mouse
 reporting it still receives mouse escape sequences. File and text drops are
 ignored while copy mode owns input so they cannot bypass the modal paste gate.

@@ -95,6 +95,27 @@ const KeyTableEntry = struct {
     once: bool,
 };
 
+/// Stable identity for one physical key across press/release modifier-state
+/// changes. Live modifiers belong to binding lookup, not release pairing.
+const KeyPressIdentity = struct {
+    key: input.Key,
+    unshifted_codepoint: u21,
+
+    fn fromEvent(event: input.KeyEvent) KeyPressIdentity {
+        return .{
+            .key = event.key,
+            .unshifted_codepoint = event.unshifted_codepoint,
+        };
+    }
+
+    fn eql(self: KeyPressIdentity, other: KeyPressIdentity) bool {
+        if (self.key != .unidentified or other.key != .unidentified) {
+            return self.key == other.key;
+        }
+        return self.unshifted_codepoint == other.unshifted_codepoint;
+    }
+};
+
 /// Unique ID used to identify this surface for IPC purposes. It is
 /// exposed to the commands running in surfaces as the environment variable
 /// GHOSTTY_SURFACE_ID. It must not be zero as zero is used to incicate a null
@@ -340,42 +361,32 @@ pub const Keyboard = struct {
     /// This is bounded by `max_active_key_tables`.
     table_stack: std.ArrayListUnmanaged(KeyTableEntry) = .empty,
 
-    /// The last handled binding. This is used to prevent encoding release
-    /// events for handled bindings. We only need to keep track of one because
-    /// at least at the time of writing this, its impossible for two keys of
-    /// a combination to be handled by different bindings before the release
-    /// of the prior (namely since you can't bind modifier-only).
-    last_trigger: ?u64 = null,
+    /// The most recently released handled key. This retains the duplicate-
+    /// release fallback after its entry leaves `consumed_presses`.
+    last_trigger: ?KeyPressIdentity = null,
 
     /// Presses consumed by bindings and therefore requiring their matching
     /// release to be consumed too. Unlike `last_trigger`, this handles
     /// overlapping keys in modal tables without swallowing releases for
     /// presses that were forwarded to the terminal.
-    consumed_press_hashes: [max_consumed_key_presses]u64 = undefined,
+    consumed_presses: [max_consumed_key_presses]KeyPressIdentity = undefined,
     consumed_press_count: usize = 0,
 
-    fn rememberConsumedPress(self: *Keyboard, hash: u64) void {
-        for (self.consumed_press_hashes[0..self.consumed_press_count]) |existing| {
-            if (existing == hash) return;
+    fn rememberConsumedPress(self: *Keyboard, identity: KeyPressIdentity) void {
+        for (self.consumed_presses[0..self.consumed_press_count]) |existing| {
+            if (existing.eql(identity)) return;
         }
-        if (self.consumed_press_count >= self.consumed_press_hashes.len) return;
-        self.consumed_press_hashes[self.consumed_press_count] = hash;
+        if (self.consumed_press_count >= self.consumed_presses.len) return;
+        self.consumed_presses[self.consumed_press_count] = identity;
         self.consumed_press_count += 1;
     }
 
-    fn takeConsumedPress(self: *Keyboard, hash: u64) bool {
-        for (self.consumed_press_hashes[0..self.consumed_press_count], 0..) |existing, index| {
-            if (existing != hash) continue;
+    fn takeConsumedPress(self: *Keyboard, identity: KeyPressIdentity) bool {
+        for (self.consumed_presses[0..self.consumed_press_count], 0..) |existing, index| {
+            if (!existing.eql(identity)) continue;
             self.consumed_press_count -= 1;
-            self.consumed_press_hashes[index] = self.consumed_press_hashes[self.consumed_press_count];
+            self.consumed_presses[index] = self.consumed_presses[self.consumed_press_count];
             return true;
-        }
-        return false;
-    }
-
-    fn hasConsumedPress(self: *const Keyboard, hash: u64) bool {
-        for (self.consumed_press_hashes[0..self.consumed_press_count]) |existing| {
-            if (existing == hash) return true;
         }
         return false;
     }
@@ -383,15 +394,28 @@ pub const Keyboard = struct {
 
 test "keyboard tracks overlapping consumed presses independently" {
     var keyboard: Keyboard = .{};
-    keyboard.rememberConsumedPress(11);
-    keyboard.rememberConsumedPress(22);
-    keyboard.rememberConsumedPress(11);
+    const left: KeyPressIdentity = .{ .key = .arrow_left, .unshifted_codepoint = 0 };
+    const right: KeyPressIdentity = .{ .key = .arrow_right, .unshifted_codepoint = 0 };
+    keyboard.rememberConsumedPress(left);
+    keyboard.rememberConsumedPress(right);
+    keyboard.rememberConsumedPress(left);
     try std.testing.expectEqual(@as(usize, 2), keyboard.consumed_press_count);
-    try std.testing.expect(keyboard.takeConsumedPress(11));
-    try std.testing.expect(!keyboard.takeConsumedPress(11));
-    try std.testing.expect(keyboard.takeConsumedPress(22));
+    try std.testing.expect(keyboard.takeConsumedPress(left));
+    try std.testing.expect(!keyboard.takeConsumedPress(left));
+    try std.testing.expect(keyboard.takeConsumedPress(right));
     try std.testing.expectEqual(@as(usize, 0), keyboard.consumed_press_count);
-    try std.testing.expect(!keyboard.hasConsumedPress(22));
+}
+
+test "consumed press identity ignores changing modifier state" {
+    const pressed = KeyPressIdentity.fromEvent(.{
+        .key = .shift_left,
+        .mods = .{ .shift = true },
+    });
+    const released = KeyPressIdentity.fromEvent(.{
+        .action = .release,
+        .key = .shift_left,
+    });
+    try std.testing.expectEqual(pressed, released);
 }
 
 /// The configuration that a surface has, this is copied from the main
@@ -3225,14 +3249,15 @@ fn maybeHandleBinding(
         // Release events never trigger a binding but we need to check if
         // we consumed the press event so we don't encode the release.
         .release => {
-            if (self.keyboard.takeConsumedPress(event.bindingHash())) {
-                // Retain the most recently released hash for apprts that emit
+            const identity = KeyPressIdentity.fromEvent(event);
+            if (self.keyboard.takeConsumedPress(identity)) {
+                // Retain the most recently released key for apprts that emit
                 // the same release more than once for one physical press.
-                self.keyboard.last_trigger = event.bindingHash();
+                self.keyboard.last_trigger = identity;
                 return .consumed;
             }
             if (self.keyboard.last_trigger) |last| {
-                if (last == event.bindingHash()) {
+                if (last.eql(identity)) {
                     // We don't reset the last trigger on release because
                     // an apprt may send multiple release events for a single
                     // press event.
@@ -3247,11 +3272,10 @@ fn maybeHandleBinding(
         // duplicate-release fallback for that key. Without this, a later
         // unbound or explicitly forwarded press could lose its real release.
         .press => {
-            const hash = event.bindingHash();
-            if (self.keyboard.last_trigger == hash and
-                !self.keyboard.hasConsumedPress(hash))
-            {
-                self.keyboard.last_trigger = null;
+            const identity = KeyPressIdentity.fromEvent(event);
+            _ = self.keyboard.takeConsumedPress(identity);
+            if (self.keyboard.last_trigger) |last| {
+                if (last.eql(identity)) self.keyboard.last_trigger = null;
             }
         },
         .repeat => {},
@@ -3275,9 +3299,10 @@ fn maybeHandleBinding(
             // invalid sequence handling to ignore it.
             if (self.catchAllIsIgnore()) {
                 self.endKeySequence(.drop, .retain);
-                self.keyboard.last_trigger = event.bindingHash();
+                const identity = KeyPressIdentity.fromEvent(event);
+                self.keyboard.last_trigger = identity;
                 if (event.action == .press) {
-                    self.keyboard.rememberConsumedPress(event.bindingHash());
+                    self.keyboard.rememberConsumedPress(identity);
                 }
                 return .ignored;
             }
@@ -3426,9 +3451,10 @@ fn maybeHandleBinding(
             // protocol with `report_events` sees a release for a key it
             // never saw pressed. That breaks copy mode's isolation
             // contract, where `catch_all = ignore` is the whole mechanism.
-            self.keyboard.last_trigger = event.bindingHash();
+            const identity = KeyPressIdentity.fromEvent(event);
+            self.keyboard.last_trigger = identity;
             if (event.action == .press) {
-                self.keyboard.rememberConsumedPress(event.bindingHash());
+                self.keyboard.rememberConsumedPress(identity);
             }
 
             return .ignored;
@@ -3454,9 +3480,10 @@ fn maybeHandleBinding(
         self.endKeySequence(.drop, .retain);
 
         // Store our last trigger so we don't encode the release event
-        self.keyboard.last_trigger = event.bindingHash();
+        const identity = KeyPressIdentity.fromEvent(event);
+        self.keyboard.last_trigger = identity;
         if (event.action == .press) {
-            self.keyboard.rememberConsumedPress(event.bindingHash());
+            self.keyboard.rememberConsumedPress(identity);
         }
 
         if (insp_ev) |ev| {
@@ -4571,17 +4598,30 @@ pub fn mouseButtonCallback(
             // then we do not do a mouse report.
             if (mods.shift and !shift_capture) break :report;
 
-            // In any other mouse button scenario without shift pressed we
-            // clear the selection since the underlying application can handle
-            // that in any way (i.e. "scrolling").
-            try self.setSelection(null);
-
             // We also set the left click count to 0 so that if mouse reporting
             // is disabled in the middle of press (before release) we don't
             // suddenly start selecting text.
             self.mouse.left_click_count = 0;
 
             const pos = try self.rt_surface.getCursorPos();
+
+            if (self.copy_mode_active) {
+                // Mouse reporting still reaches the child in copy mode, but a
+                // left press must also leave the modal selection usable.
+                if (button == .left and action == .press) {
+                    const point = self.posToViewport(pos.x, pos.y);
+                    if (self.io.terminal.screens.active.pages.pin(.{ .viewport = point })) |pin| {
+                        try self.io.terminal.screens.active.select(
+                            terminal.Selection.init(pin, pin, false),
+                        );
+                        try self.queueRender();
+                    }
+                }
+            } else {
+                // Outside copy mode the underlying application owns reported
+                // clicks, so clear terminal selection as before.
+                try self.setSelection(null);
+            }
 
             const report_action: input.MouseAction = switch (action) {
                 .press => .press,
@@ -4683,8 +4723,13 @@ pub fn mouseButtonCallback(
         switch (self.mouse.left_click_count) {
             // Single click
             1 => {
-                // If we have a selection, clear it. This always happens.
-                if (self.io.terminal.screens.active.selection != null) {
+                if (self.copy_mode_active) {
+                    try self.io.terminal.screens.active.select(
+                        terminal.Selection.init(pin.*, pin.*, false),
+                    );
+                    try self.queueRender();
+                } else if (self.io.terminal.screens.active.selection != null) {
+                    // Outside copy mode a single click clears selection.
                     try self.io.terminal.screens.active.select(null);
                     try self.queueRender();
                 }
