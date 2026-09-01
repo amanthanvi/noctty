@@ -86,6 +86,7 @@ pub const min_window_height_cells: u32 = 4;
 /// The maximum number of key tables that can be active at any
 /// given time. `activate_key_table` calls after this are ignored.
 const max_active_key_tables = 8;
+const max_consumed_key_presses = 64;
 const copy_mode_table_name = "copy_mode";
 
 /// One entry on the active key-table stack.
@@ -345,7 +346,53 @@ pub const Keyboard = struct {
     /// a combination to be handled by different bindings before the release
     /// of the prior (namely since you can't bind modifier-only).
     last_trigger: ?u64 = null,
+
+    /// Presses consumed by bindings and therefore requiring their matching
+    /// release to be consumed too. Unlike `last_trigger`, this handles
+    /// overlapping keys in modal tables without swallowing releases for
+    /// presses that were forwarded to the terminal.
+    consumed_press_hashes: [max_consumed_key_presses]u64 = undefined,
+    consumed_press_count: usize = 0,
+
+    fn rememberConsumedPress(self: *Keyboard, hash: u64) void {
+        for (self.consumed_press_hashes[0..self.consumed_press_count]) |existing| {
+            if (existing == hash) return;
+        }
+        if (self.consumed_press_count >= self.consumed_press_hashes.len) return;
+        self.consumed_press_hashes[self.consumed_press_count] = hash;
+        self.consumed_press_count += 1;
+    }
+
+    fn takeConsumedPress(self: *Keyboard, hash: u64) bool {
+        for (self.consumed_press_hashes[0..self.consumed_press_count], 0..) |existing, index| {
+            if (existing != hash) continue;
+            self.consumed_press_count -= 1;
+            self.consumed_press_hashes[index] = self.consumed_press_hashes[self.consumed_press_count];
+            return true;
+        }
+        return false;
+    }
+
+    fn hasConsumedPress(self: *const Keyboard, hash: u64) bool {
+        for (self.consumed_press_hashes[0..self.consumed_press_count]) |existing| {
+            if (existing == hash) return true;
+        }
+        return false;
+    }
 };
+
+test "keyboard tracks overlapping consumed presses independently" {
+    var keyboard: Keyboard = .{};
+    keyboard.rememberConsumedPress(11);
+    keyboard.rememberConsumedPress(22);
+    keyboard.rememberConsumedPress(11);
+    try std.testing.expectEqual(@as(usize, 2), keyboard.consumed_press_count);
+    try std.testing.expect(keyboard.takeConsumedPress(11));
+    try std.testing.expect(!keyboard.takeConsumedPress(11));
+    try std.testing.expect(keyboard.takeConsumedPress(22));
+    try std.testing.expectEqual(@as(usize, 0), keyboard.consumed_press_count);
+    try std.testing.expect(!keyboard.hasConsumedPress(22));
+}
 
 /// The configuration that a surface has, this is copied from the main
 /// Config struct usually to prevent sharing a single value.
@@ -2833,7 +2880,7 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     if (self.renderer_state.preedit != null or
         preedit_ != null)
     {
-        if (self.config.selection_clear_on_typing) {
+        if (self.config.selection_clear_on_typing and !self.copy_mode_active) {
             self.setSelection(null) catch {};
         }
     }
@@ -3178,6 +3225,12 @@ fn maybeHandleBinding(
         // Release events never trigger a binding but we need to check if
         // we consumed the press event so we don't encode the release.
         .release => {
+            if (self.keyboard.takeConsumedPress(event.bindingHash())) {
+                // Retain the most recently released hash for apprts that emit
+                // the same release more than once for one physical press.
+                self.keyboard.last_trigger = event.bindingHash();
+                return .consumed;
+            }
             if (self.keyboard.last_trigger) |last| {
                 if (last == event.bindingHash()) {
                     // We don't reset the last trigger on release because
@@ -3187,21 +3240,21 @@ fn maybeHandleBinding(
                 }
             }
 
-            // A catch-all of `ignore` swallows every press, so it has to
-            // swallow every release too. `last_trigger` remembers only the
-            // most recent press, so with two keys held at once the first
-            // key's release would not match and would fall through to
-            // encoding -- visible to a client using the Kitty protocol with
-            // `report_events`. Copy mode's keyboard isolation is built on
-            // this catch-all, so the guarantee has to hold for overlapping
-            // keys, not just sequential ones.
-            if (self.catchAllIsIgnore()) return .consumed;
-
             return null;
         },
 
-        // Carry on processing.
-        .press, .repeat => {},
+        // Carry on processing. A new physical press supersedes the retained
+        // duplicate-release fallback for that key. Without this, a later
+        // unbound or explicitly forwarded press could lose its real release.
+        .press => {
+            const hash = event.bindingHash();
+            if (self.keyboard.last_trigger == hash and
+                !self.keyboard.hasConsumedPress(hash))
+            {
+                self.keyboard.last_trigger = null;
+            }
+        },
+        .repeat => {},
     }
 
     // Find an entry in the keybind set that matches our event.
@@ -3223,6 +3276,9 @@ fn maybeHandleBinding(
             if (self.catchAllIsIgnore()) {
                 self.endKeySequence(.drop, .retain);
                 self.keyboard.last_trigger = event.bindingHash();
+                if (event.action == .press) {
+                    self.keyboard.rememberConsumedPress(event.bindingHash());
+                }
                 return .ignored;
             }
 
@@ -3371,6 +3427,9 @@ fn maybeHandleBinding(
             // never saw pressed. That breaks copy mode's isolation
             // contract, where `catch_all = ignore` is the whole mechanism.
             self.keyboard.last_trigger = event.bindingHash();
+            if (event.action == .press) {
+                self.keyboard.rememberConsumedPress(event.bindingHash());
+            }
 
             return .ignored;
         };
@@ -3396,6 +3455,9 @@ fn maybeHandleBinding(
 
         // Store our last trigger so we don't encode the release event
         self.keyboard.last_trigger = event.bindingHash();
+        if (event.action == .press) {
+            self.keyboard.rememberConsumedPress(event.bindingHash());
+        }
 
         if (insp_ev) |ev| {
             ev.binding = self.alloc.dupe(
@@ -3457,6 +3519,16 @@ fn copyModeTableIsActive(self: *const Surface) bool {
     const table = self.config.keybind.tables.getPtr(copy_mode_table_name) orelse return false;
     const stack = self.keyboard.table_stack.items;
     return stack.len > 0 and stack[stack.len - 1].set == table;
+}
+
+fn copyModeStackContains(
+    stack: []const KeyTableEntry,
+    table: *const input.Binding.Set,
+) bool {
+    for (stack) |entry| {
+        if (entry.set == table) return true;
+    }
+    return false;
 }
 
 /// How many tables must be popped to remove every copy-mode entry from the
@@ -3550,6 +3622,20 @@ test "copy mode pops every table down to and including copy_mode" {
             .{ .set = copy_mode, .once = false },
         }, copy_mode),
     );
+}
+
+test "copy mode remains active while a duplicate table is still stacked" {
+    var sets: [2]input.Binding.Set = .{ .{}, .{} };
+    const copy_mode = &sets[0];
+    const other = &sets[1];
+    try std.testing.expect(copyModeStackContains(&.{
+        .{ .set = copy_mode, .once = false },
+        .{ .set = other, .once = false },
+        .{ .set = copy_mode, .once = true },
+    }, copy_mode));
+    try std.testing.expect(!copyModeStackContains(&.{
+        .{ .set = other, .once = false },
+    }, copy_mode));
 }
 
 fn finishCopyMode(self: *Surface) !void {
@@ -5780,10 +5866,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .copy_to_clipboard => |format| {
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
+            const copied = copied: {
+                self.renderer_state.mutex.lock();
+                defer self.renderer_state.mutex.unlock();
 
-            if (self.io.terminal.screens.active.selection) |sel| {
+                const sel = self.io.terminal.screens.active.selection orelse break :copied false;
                 try self.copySelectionToClipboards(
                     sel,
                     &.{.standard},
@@ -5801,10 +5888,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                     }
                 }
 
-                return true;
-            }
+                break :copied true;
+            };
+            if (!copied) return false;
 
-            return false;
+            // Copy mode promises copy-and-exit, but only after the clipboard
+            // write above succeeds. Keeping this in the action avoids an
+            // unconditional chained toggle after a clipboard failure.
+            if (self.copy_mode_active) _ = try self.toggleCopyMode();
+            return true;
         },
 
         .copy_url_to_clipboard => {
@@ -6337,7 +6429,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 else => _ = self.keyboard.table_stack.pop(),
             }
 
-            if (leaving_copy_mode) try self.finishCopyMode();
+            const copy_mode_remains = if (self.config.keybind.tables.getPtr(copy_mode_table_name)) |table|
+                copyModeStackContains(self.keyboard.table_stack.items, table)
+            else
+                false;
+            if (leaving_copy_mode and !copy_mode_remains) try self.finishCopyMode();
 
             // Notify the UI.
             _ = self.rt_app.performAction(

@@ -6639,15 +6639,7 @@ pub const Keybinds = struct {
         try copy_mode.put(alloc, .{ .key = .{ .physical = .escape } }, .toggle_copy_mode);
         try copy_mode.put(alloc, .{ .key = .{ .unicode = 'q' } }, .toggle_copy_mode);
         try copy_mode.put(alloc, .{ .key = .{ .unicode = 'y' } }, .{ .copy_to_clipboard = .mixed });
-        copy_mode.appendChain(alloc, .toggle_copy_mode) catch |err| switch (err) {
-            error.NoChainParent => unreachable,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
         try copy_mode.put(alloc, .{ .key = .{ .physical = .enter } }, .{ .copy_to_clipboard = .mixed });
-        copy_mode.appendChain(alloc, .toggle_copy_mode) catch |err| switch (err) {
-            error.NoChainParent => unreachable,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
         try copy_mode.put(alloc, .{ .key = .catch_all }, .ignore);
 
         // Mac-specific keyboard bindings.
@@ -7592,10 +7584,8 @@ pub const Keybinds = struct {
         const copy = copy_mode.get(.{
             .key = .{ .unicode = 'y' },
         }).?.value_ptr.*;
-        try testing.expect(copy == .leaf_chained);
-        try testing.expectEqual(@as(usize, 2), copy.leaf_chained.actions.items.len);
-        try testing.expect(copy.leaf_chained.actions.items[0] == .copy_to_clipboard);
-        try testing.expect(copy.leaf_chained.actions.items[1] == .toggle_copy_mode);
+        try testing.expect(copy == .leaf);
+        try testing.expect(copy.leaf.action == .copy_to_clipboard);
 
         const catch_all = copy_mode.get(.{
             .key = .catch_all,

@@ -280,11 +280,13 @@ pub fn snapshotTerminalAccessiblePlainText(
             visible_end = index + 1;
         }
         if (selection_bounds) |bounds| {
+            // ITextProvider currently advertises one selection range. A
+            // rectangular terminal selection is disjoint across rows, so a
+            // single range from its first to last byte would falsely include
+            // every intervening column. Report the caret fallback instead of
+            // exposing text that is visibly unselected.
             const selected = if (bounds.rectangle)
-                screen_point.screen.y >= bounds.top.y and
-                    screen_point.screen.y <= bounds.bottom.y and
-                    screen_point.screen.x >= bounds.top.x and
-                    screen_point.screen.x <= bounds.bottom.x
+                false
             else if (bounds.top.y == bounds.bottom.y)
                 screen_point.screen.y == bounds.top.y and
                     screen_point.screen.x >= bounds.top.x and

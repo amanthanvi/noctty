@@ -572,12 +572,10 @@ Page Up/Page Down to move by a viewport, `g`/`G` or Home/End to jump through
 scrollback, and `0`/`$` to jump within a line. `y` or Enter copies and exits;
 `q` or Esc cancels. Other keys are consumed instead of reaching the PTY.
 
-Only the keyboard is gated. The mouse keeps working normally in copy mode: a
-click replaces the copy-mode selection, and if the running program has enabled
-mouse reporting it still receives mouse escape sequences. Dragging files or
-text onto the window is a mouse gesture too, so a drop still pastes into the
-running program while copy mode is active — through the usual
-`clipboard-paste-protection` confirmation, not around it.
+Mouse selection and reporting keep working normally in copy mode: a click
+replaces the copy-mode selection, and if the running program has enabled mouse
+reporting it still receives mouse escape sequences. File and text drops are
+ignored while copy mode owns input so they cannot bypass the modal paste gate.
 
 These bindings live in the `copy_mode` key table, so they can be replaced
 with normal `keybind = copy_mode/...` entries. Note that `copy_mode` is one

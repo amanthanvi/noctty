@@ -19433,6 +19433,10 @@ fn surfaceConfirmWriteCancel(userdata: ?*anyopaque) void {
 fn surfaceDropPayloadCallback(ctx: *anyopaque, payload: []const u8) void {
     const surface: *Surface = @ptrCast(@alignCast(ctx));
     if (payload.len == 0) return;
+    if (surface.core_surface.copy_mode_active) {
+        std.log.debug("drop payload ignored while copy mode owns input", .{});
+        return;
+    }
     const alloc = surface.app.core_app.alloc;
     const payload_z = alloc.dupeZ(u8, payload) catch |err| {
         std.log.warn("drop payload dupe failed err={}", .{err});
