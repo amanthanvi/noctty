@@ -319,6 +319,7 @@ pub const SEARCH_CLOSE_ID: usize = 2108;
 pub const MF_POPUP: UINT = 0x00000010;
 pub const MF_CHECKED: UINT = 0x00000008;
 
+pub const VK_LBUTTON = 0x01;
 pub const VK_BACK = 0x08;
 pub const VK_TAB = 0x09;
 pub const VK_RETURN = 0x0D;

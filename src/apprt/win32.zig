@@ -20136,7 +20136,18 @@ fn quickSelectProc(
             return 0;
         },
         c.WM_XBUTTONDOWN => return 1,
-        c.WM_LBUTTONUP, c.WM_RBUTTONUP, c.WM_MBUTTONUP => {
+        c.WM_LBUTTONUP => {
+            if (surface) |value| {
+                if (value.quick_select_session) |*session| {
+                    if (consumeQuickSelectOpeningLeftButtonUp(
+                        &session.suppress_opening_left_button_up,
+                    )) return 0;
+                }
+                value.closeQuickSelect(true);
+            }
+            return 0;
+        },
+        c.WM_RBUTTONUP, c.WM_MBUTTONUP => {
             if (surface) |value| value.closeQuickSelect(true);
             return 0;
         },
@@ -23188,6 +23199,7 @@ const QuickSelectSession = struct {
     pending_action: ?PendingAction = null,
     awaiting_composed_char: bool = false,
     suppress_until_opening_keys_released: bool = false,
+    suppress_opening_left_button_up: bool = false,
     cell_width: i32,
     cell_height: i32,
     padding_left: i32,
@@ -23299,6 +23311,19 @@ test "quick select activates only for a visible surface" {
     try std.testing.expect(quickSelectCanActivate(true, true));
     try std.testing.expect(!quickSelectCanActivate(false, true));
     try std.testing.expect(!quickSelectCanActivate(true, false));
+}
+
+fn consumeQuickSelectOpeningLeftButtonUp(suppress: *bool) bool {
+    if (!suppress.*) return false;
+    suppress.* = false;
+    return true;
+}
+
+test "quick select consumes only the opening left button release" {
+    var suppress = true;
+    try std.testing.expect(consumeQuickSelectOpeningLeftButtonUp(&suppress));
+    try std.testing.expect(!suppress);
+    try std.testing.expect(!consumeQuickSelectOpeningLeftButtonUp(&suppress));
 }
 
 pub const Surface = struct {
@@ -25212,6 +25237,7 @@ pub const Surface = struct {
             .placed_rects = placed_rects,
             .placed_slots = placed_slots,
             .suppress_until_opening_keys_released = anyVirtualKeyPressed(),
+            .suppress_opening_left_button_up = win32_input.keyPressed(c.VK_LBUTTON),
         };
 
         self.refreshQuickSelectPlacement();
