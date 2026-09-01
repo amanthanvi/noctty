@@ -98,7 +98,7 @@ pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
         order_hint,
         null,
     );
-    return try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts);
+    return try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts, null);
 }
 
 pub fn discoverProfiles(alloc: Allocator, include_ssh_hosts: bool) !ProfileDiscovery {
@@ -115,7 +115,7 @@ pub fn discoverProfiles(alloc: Allocator, include_ssh_hosts: bool) !ProfileDisco
         &complete,
     );
     return .{
-        .profiles = try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts),
+        .profiles = try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts, &complete),
         .complete = complete,
     };
 }
@@ -124,6 +124,7 @@ fn appendConfiguredSshProfiles(
     alloc: Allocator,
     shell_profiles: []Profile,
     include_ssh_hosts: bool,
+    complete: ?*bool,
 ) ![]Profile {
     if (!include_ssh_hosts) return shell_profiles;
 
@@ -132,6 +133,7 @@ fn appendConfiguredSshProfiles(
     // "no profiles at all" and would leave the user with no picker.
     const hosts = windows_ssh_hosts.load(alloc) catch |err| {
         warnSshDiscoveryOnce(err);
+        if (complete) |value| value.* = false;
         return shell_profiles;
     };
     defer windows_ssh_hosts.deinitHosts(alloc, hosts);
@@ -139,6 +141,7 @@ fn appendConfiguredSshProfiles(
 
     const ssh_path = resolveSshExecutable(alloc, lookupExecutable, accessAbsolute) catch |err| {
         warnSshDiscoveryOnce(err);
+        if (complete) |value| value.* = false;
         return shell_profiles;
     };
     if (ssh_path == null) {
@@ -1028,15 +1031,16 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
 
     drain_thread.join();
     drain_joined = true;
+    const term = try child.wait();
+    child_running = false;
     if (drain.err) |err| {
-        _ = try child.wait();
-        child_running = false;
         return err;
     }
+    if (!childTermSucceeded(term)) {
+        log.warn("WSL distro enumeration exited unsuccessfully exe={s}", .{exe_path});
+        return error.WslListFailed;
+    }
     const raw_bytes = drain.bytes orelse return error.Unexpected;
-
-    _ = try child.wait();
-    child_running = false;
 
     // wsl.exe outputs UTF-16LE. Convert to UTF-8 before parsing.
     // bytesAsSlice returns align(1) u16, but utf16LeToUtf8Alloc needs align(2).
@@ -1072,6 +1076,13 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     }
 
     return try result.toOwnedSlice(alloc);
+}
+
+fn childTermSucceeded(term: std.process.Child.Term) bool {
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Returns true for WSL distros that are internal service distributions
@@ -1409,6 +1420,12 @@ test "profile discovery reports a retryable WSL probe failure" {
     try testing.expect(complete);
     try testing.expectEqual(@as(usize, 2), recovered.len);
     try testing.expectEqual(ProfileKind.wsl_default, recovered[0].kind);
+}
+
+test "WSL enumeration requires a successful child exit" {
+    try std.testing.expect(childTermSucceeded(.{ .Exited = 0 }));
+    try std.testing.expect(!childTermSucceeded(.{ .Exited = 1 }));
+    try std.testing.expect(!childTermSucceeded(.{ .Unknown = 1 }));
 }
 
 test "ssh profiles append after shells with alias-only argv" {

@@ -4834,11 +4834,13 @@ pub const App = struct {
                             if (ssh_config_hosts_changed) {
                                 host.invalidateProfiles();
                                 if (host.overlay_mode == .profile or jump_list_profiles_pending) {
-                                    const reloaded = host.reloadProfiles() catch |err| blk: {
+                                    _ = host.reloadProfiles() catch |err| blk: {
                                         log.warn("SSH profile reload after config change failed err={}", .{err});
                                         break :blk false;
                                     };
-                                    if (reloaded or host.profiles != null) jump_list_profiles_pending = false;
+                                    if (host.profiles != null and host.profiles_complete) {
+                                        jump_list_profiles_pending = false;
+                                    }
                                 }
                             }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
