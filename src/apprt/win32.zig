@@ -23519,6 +23519,10 @@ pub const Surface = struct {
         try self.core_surface.draw();
     }
 
+    pub fn noteRendererDrawRequest(self: *Surface) void {
+        self.render_trace.noteRendererDrawRequest();
+    }
+
     pub fn noteRendererWakeupCallback(self: *Surface) void {
         self.render_trace.noteRendererWakeupCallback();
     }

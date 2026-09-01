@@ -835,10 +835,6 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         }
     }
 
-    if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
-        self.surface.noteRendererUpdateFrame();
-    }
-
     // updateFrame returns the cursor mode from the same locked terminal
     // snapshot used to rebuild this frame.
     const frame_update: ?rendererpkg.Renderer.FrameUpdate = self.renderer.updateFrame(
