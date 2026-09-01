@@ -879,6 +879,7 @@ pub const JumpList = struct {
     profiles: std.ArrayListUnmanaged(ProfileItem) = .empty,
     timer_id: ?UINT_PTR = null,
     persist_dirty: bool = false,
+    persist_retry_count: u8 = 0,
     rebuild_dirty: bool = true,
     rebuild_retry_count: u8 = 0,
     com_disabled: bool = false,
@@ -1023,6 +1024,7 @@ pub const JumpList = struct {
         _ = removed;
         _ = recorded;
         self.persist_dirty = true;
+        self.persist_retry_count = 0;
         self.rebuild_retry_count = 0;
         self.rebuild_dirty = true;
         self.schedule();
@@ -1064,6 +1066,7 @@ pub const JumpList = struct {
         };
         if (!changed and !reinstated and !recorded) return;
         self.persist_dirty = true;
+        self.persist_retry_count = 0;
         self.rebuild_retry_count = 0;
         self.rebuild_dirty = true;
         self.schedule();
@@ -1100,7 +1103,14 @@ pub const JumpList = struct {
             }
         }
         const persisted = if (self.persist_dirty) self.persist() else true;
-        if (!persisted) self.schedule();
+        if (persisted) {
+            self.persist_retry_count = 0;
+        } else if (nextRebuildRetryCount(self.persist_retry_count)) |next| {
+            self.persist_retry_count = next;
+            self.schedule();
+        } else {
+            log.warn("jump list persistence retries exhausted; waiting for a model change", .{});
+        }
         if (rebuild_committed) self.use_guards_rebuild_committed = true;
         self.finishUseGuards(persisted);
     }
@@ -1385,6 +1395,7 @@ pub const JumpList = struct {
                 );
             }
             self.persist_dirty = true;
+            self.persist_retry_count = 0;
         }
         for (self.profiles.items) |item| {
             if (!removed_arguments.profile_keys.contains(item.key) and
@@ -1399,6 +1410,7 @@ pub const JumpList = struct {
                     @intCast(std.time.nanoTimestamp()),
                 );
                 self.persist_dirty = true;
+                self.persist_retry_count = 0;
             }
         }
         if (!removed_arguments.complete) return error.RemovedDestinationsIncomplete;

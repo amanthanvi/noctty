@@ -904,6 +904,23 @@ fn lookupGitBash(alloc: Allocator, lookup: anytype) !?[]u8 {
     return null;
 }
 
+const WslOutputDrain = struct {
+    stdout: std.fs.File,
+    bytes: ?[]u8 = null,
+    err: ?anyerror = null,
+
+    fn run(self: *WslOutputDrain) void {
+        self.bytes = self.stdout.readToEndAlloc(std.heap.page_allocator, 64 * 1024) catch |err| {
+            self.err = err;
+            return;
+        };
+    }
+
+    fn deinit(self: *WslOutputDrain) void {
+        if (self.bytes) |bytes| std.heap.page_allocator.free(bytes);
+    }
+};
+
 fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     var child = std.process.Child.init(&.{ exe_path, "-l", "-q" }, alloc);
     child.stdin_behavior = .Ignore;
@@ -922,6 +939,16 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
         return error.Unexpected;
     };
 
+    // Drain concurrently so a large distro list cannot fill the anonymous
+    // pipe and prevent wsl.exe from reaching the signaled state below.
+    var drain: WslOutputDrain = .{ .stdout = stdout };
+    const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+    var drain_joined = false;
+    defer {
+        if (!drain_joined) drain_thread.join();
+        drain.deinit();
+    }
+
     windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| switch (err) {
         error.WaitTimeOut => {
             log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
@@ -931,18 +958,24 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
             _ = child.kill() catch {};
             _ = child.wait() catch {};
             child_running = false;
+            drain_thread.join();
+            drain_joined = true;
             return error.WslListTimeout;
         },
         else => {
             _ = child.kill() catch {};
             _ = child.wait() catch {};
             child_running = false;
+            drain_thread.join();
+            drain_joined = true;
             return err;
         },
     };
 
-    const raw_bytes = try stdout.readToEndAlloc(alloc, 64 * 1024);
-    defer alloc.free(raw_bytes);
+    drain_thread.join();
+    drain_joined = true;
+    if (drain.err) |err| return err;
+    const raw_bytes = drain.bytes orelse return error.Unexpected;
 
     _ = try child.wait();
     child_running = false;
