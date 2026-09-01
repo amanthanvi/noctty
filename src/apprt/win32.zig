@@ -1035,6 +1035,10 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
                 );
                 return error.PipeUnreachable;
             }
+            setIpcClientNonblocking(handle) catch |err| {
+                _ = windows.CloseHandle(handle);
+                return err;
+            };
             return handle;
         }
 
@@ -1060,6 +1064,13 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
             },
             else => return windows.unexpectedError(err),
         }
+    }
+}
+
+fn setIpcClientNonblocking(pipe: windows.HANDLE) !void {
+    var mode: u32 = c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait;
+    if (sys.SetNamedPipeHandleState(pipe, &mode, null, null) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
     }
 }
 
@@ -5822,7 +5833,14 @@ pub const App = struct {
         return .{
             .window_id = host.id,
             .title = title,
-            .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
+            // `GetForegroundWindow` returns the top-level host even when the
+            // keyboard focus is in one of its child controls. Surface focus
+            // alone would incorrectly report every host as unfocused then.
+            .focused = automationHostFocused(
+                host.hwnd,
+                sys.GetForegroundWindow(),
+                if (host.activeSurface()) |surface| surface.window_focused else false,
+            ),
             .active_tab_id = active_tab_id,
             .tab_count = @intCast(tabs.len),
             .pane_count = automationPaneCount(tabs),
@@ -8325,6 +8343,15 @@ fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) bool 
         return true;
     }
     return false;
+}
+
+fn automationHostFocused(
+    host_hwnd: ?HWND,
+    foreground_hwnd: ?HWND,
+    surface_focused_fallback: bool,
+) bool {
+    const hwnd = host_hwnd orelse return surface_focused_fallback;
+    return foreground_hwnd == hwnd;
 }
 
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
@@ -27699,17 +27726,16 @@ test "automation in-app new_tab action does not query source pwd" {
             _: LPCWSTR,
             opts: SurfaceInitOptions,
         ) anyerror!*Surface {
-            const direct = config.command.?.direct;
-            try std.testing.expectEqual(@as(usize, 2), direct.len);
-            try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
-            try std.testing.expectEqualStrings("-NoLogo", direct[1]);
+            // Ordinary in-app tabs retain the configured default rather than
+            // inheriting the source profile command used by automation.
+            try std.testing.expect(config.command == null);
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
             try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
-                opts.tab_insert_index.?,
+                opts.tab_insert_index orelse host_ref.tabs.items.len,
                 try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created_ref),
             );
             return created_ref;
@@ -27724,7 +27750,7 @@ test "automation in-app new_tab action does not query source pwd" {
 
     try std.testing.expect(try app.performAction(.app, .new_tab, {}));
     try std.testing.expectEqual(@as(usize, 0), Hook.pwd_calls);
-    try std.testing.expectEqualStrings("pwsh", created.launch_profile_key.?);
+    try std.testing.expect(created.launch_profile_key == null);
 }
 
 test "automation explicit-window new_tab reanchors inactive host cwd and override wins" {
@@ -30595,6 +30621,7 @@ test "automation-window-list win32 json includes host tab and pane ids" {
 
     var host: Host = undefined;
     host.id = 17;
+    host.hwnd = null;
     host.tabs = .empty;
     host.active_tab = 1;
     host.cached_window_title = "host \"quote\"\\slash\t\r\n";
@@ -30710,6 +30737,18 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     for ([_][]const u8{ "grid", "scrollback", "selection", "clipboard", "shell_input" }) |key| {
         try std.testing.expect(std.mem.indexOf(u8, json, key) == null);
     }
+}
+
+test "automation-window-list host focus follows the foreground host" {
+    const host: HWND = @ptrFromInt(1);
+    const other: HWND = @ptrFromInt(2);
+
+    // Child-control focus still presents its top-level host as foreground.
+    try std.testing.expect(automationHostFocused(host, host, false));
+    try std.testing.expect(!automationHostFocused(host, other, true));
+    try std.testing.expect(!automationHostFocused(host, null, true));
+    // HWND-free unit fixtures retain the existing surface-state fallback.
+    try std.testing.expect(automationHostFocused(null, null, true));
 }
 
 test "automation-window-list win32 json skips empty hosts kept alive for undo history" {
@@ -31814,7 +31853,7 @@ test "automation send text enforces receiver policy and protected paste path" {
     );
 }
 
-test "win32 IPC silent client read is bounded" {
+test "win32 IPC silent synchronous client read is bounded" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
@@ -31857,6 +31896,7 @@ test "win32 IPC silent client read is bounded" {
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(client);
+    try setIpcClientNonblocking(client);
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
@@ -31866,7 +31906,7 @@ test "win32 IPC silent client read is bounded" {
     var byte: [1]u8 = undefined;
     try std.testing.expectError(
         error.IpcTimeout,
-        win32_ipc.readExactWithTimeout(server, &byte, 10),
+        win32_ipc.readExactWithTimeout(client, &byte, 10),
     );
 }
 

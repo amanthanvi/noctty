@@ -587,15 +587,34 @@ fn readExactUntil(
     deadline_ms: u64,
 ) !void {
     var offset: usize = 0;
+    var expired_buffered_budget: ?usize = null;
     while (offset < dst.len) {
-        // A zero timeout is a nonblocking poll, not an automatic failure.
-        // Keep consuming immediately available bytes even after partial
-        // progress; enforce the deadline only when the pipe has no data.
+        // A zero timeout is a nonblocking poll, not an automatic failure. At
+        // (or after) the deadline, snapshot the bytes already buffered and
+        // consume at most that snapshot. This permits a buffered multi-read
+        // response without letting a producer extend the deadline forever by
+        // continuously dribbling short reads.
+        if (expired_buffered_budget == null and sys.GetTickCount64() >= deadline_ms) {
+            var available: u32 = 0;
+            if (sys.PeekNamedPipe(pipe, null, 0, null, &available, null) == 0) {
+                const err = windows.kernel32.GetLastError();
+                if (err == .BROKEN_PIPE) return error.EndOfStream;
+                if (pipeIoPending(err)) return error.IpcTimeout;
+                return windows.unexpectedError(err);
+            }
+            if (available == 0) return error.IpcTimeout;
+            expired_buffered_budget = @min(@as(usize, available), dst.len - offset);
+        }
+
+        const read_cap = if (expired_buffered_budget) |budget|
+            @min(budget, dst.len - offset)
+        else
+            dst.len - offset;
         var read_len: u32 = 0;
         if (windows.kernel32.ReadFile(
             pipe,
             dst[offset..].ptr,
-            @intCast(dst.len - offset),
+            @intCast(read_cap),
             &read_len,
             null,
         ) == 0) {
@@ -611,6 +630,10 @@ fn readExactUntil(
 
         if (read_len == 0) return error.EndOfStream;
         offset += read_len;
+        if (expired_buffered_budget) |*budget| {
+            budget.* -= read_len;
+            if (budget.* == 0 and offset < dst.len) return error.IpcTimeout;
+        }
     }
 }
 
