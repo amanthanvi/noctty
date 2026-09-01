@@ -19,6 +19,13 @@ const MainReturn = switch (build_config.artifact) {
 };
 
 pub fn main() !MainReturn {
+    if (comptime builtin.target.os.tag == .windows and
+        build_config.artifact == .exe and
+        build_config.app_runtime == .win32)
+    {
+        apprt.win32.captureProcessOrigin();
+    }
+
     // We first start by initializing our global process state.
     state.init() catch |err| {
         defer posix.exit(1);
@@ -95,6 +102,7 @@ test {
     // Libraries
     _ = @import("tripwire.zig");
     _ = @import("benchmark/main.zig");
+    _ = @import("bench/palette_match.zig");
     _ = @import("crash/main.zig");
     _ = @import("datastruct/main.zig");
     _ = @import("inspector/main.zig");

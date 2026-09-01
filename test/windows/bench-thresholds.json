@@ -1,0 +1,110 @@
+[
+  {
+    "metric": "throughput_mb_s",
+    "direction": "min",
+    "value": 100,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder pending the phase 2 same-machine baseline.",
+    "baseline": null
+  },
+  {
+    "metric": "throughput_alt_screen_mb_s",
+    "direction": "min",
+    "value": 100,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder pending the phase 2 same-machine baseline.",
+    "baseline": null
+  },
+  {
+    "metric": "scroll_mb_s",
+    "direction": "min",
+    "value": 50,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder pending the phase 2 same-machine baseline.",
+    "baseline": null
+  },
+  {
+    "metric": "cold_start_harness_ms",
+    "direction": "max",
+    "value": 300,
+    "active": false,
+    "provisional": true,
+    "source": "PRODUCT.md cold-start budget; this harness-side measurement also includes process-creation overhead.",
+    "baseline": null
+  },
+  {
+    "metric": "cold_start_app_ms",
+    "direction": "max",
+    "value": 300,
+    "active": false,
+    "provisional": true,
+    "source": "Provisional PRODUCT.md cold start to first frame budget; inactive until a same-machine percentile and tolerance are reviewed (the current generic evaluator compares medians).",
+    "baseline": null
+  },
+  {
+    "metric": "memory_bytes_per_additional_pane",
+    "direction": "max",
+    "value": 20000000,
+    "active": false,
+    "provisional": true,
+    "source": "Provisional PRODUCT.md memory budget of 20 MB steady-state per additional pane; inactive until a same-machine baseline and tolerance are reviewed.",
+    "baseline": null
+  },
+  {
+    "metric": "idle_cpu_percent",
+    "direction": "max",
+    "value": 0.1,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder quantification of PRODUCT.md effectively-zero idle CPU budget; pending phase 2 baseline.",
+    "baseline": null
+  },
+  {
+    "metric": "idle_gpu_percent",
+    "direction": "max",
+    "value": 0.1,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder quantification of PRODUCT.md effectively-zero idle GPU budget; pending phase 2 baseline.",
+    "baseline": null
+  },
+  {
+    "metric": "idle_swap_count_delta",
+    "direction": "max",
+    "value": 0,
+    "active": false,
+    "provisional": true,
+    "source": "Provisional PRODUCT.md idle no-timer-wake-churn budget, represented by no successful swaps during the idle interval; inactive until a same-machine baseline and tolerance are reviewed.",
+    "baseline": null
+  },
+  {
+    "metric": "conpty_rtt_ms",
+    "direction": "max",
+    "value": 50,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder pending the phase 2 same-machine baseline.",
+    "baseline": null
+  },
+  {
+    "metric": "key_to_first_swap_ms_proxy",
+    "direction": "max",
+    "value": 16.6667,
+    "active": false,
+    "provisional": true,
+    "source": "Placeholder software proxy for the PRODUCT.md one-60-Hz-frame budget; not a photon measurement or OS-floor subtraction.",
+    "baseline": null
+  },
+  {
+    "metric": "frame_time_p95_ms",
+    "direction": "max",
+    "value": 16.6667,
+    "active": false,
+    "provisional": true,
+    "source": "Inactive target pending a documented same-machine successful-SwapBuffers interval baseline and tolerance; excludes compositor scanout and photons.",
+    "baseline": null
+  }
+]

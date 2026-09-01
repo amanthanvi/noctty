@@ -133,6 +133,9 @@ pub const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
 pub const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
 pub const WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP + 6;
 pub const WM_WINHOSTTY_TERMINAL_HANDOFF = WM_APP + 7;
+// Benchmark-only: drive render-trace snapshots and armed output targets.
+pub const WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT = WM_APP + 8;
+pub const WM_WINHOSTTY_RENDER_TRACE_TARGET = WM_APP + 9;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;

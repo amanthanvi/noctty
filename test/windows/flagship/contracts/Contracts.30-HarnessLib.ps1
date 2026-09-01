@@ -198,7 +198,7 @@ foreach ($source in $resolutionSourceAsts) {
     $expectedAmpersands = if ($source.Path -eq $interactiveWin11Lib) {
         @(
             '& $bootstrapCmd powershell.exe -ExecutionPolicy Bypass -File $LauncherPath @ArgumentList',
-            '& cmd /c $devWindowsCmd zig build -Demit-exe=true',
+            '& cmd /c $devWindowsCmd zig build -Demit-exe=true @optimizeArguments',
             '& $Condition',
             '& $Condition'
         )

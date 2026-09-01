@@ -235,16 +235,32 @@ pub fn build(b: *std.Build) !void {
     // `addBenchStep` wires the shared dep graph so harnesses can import
     // internal modules (e.g. `src/apprt/win32_palette.zig` pulls in zf
     // and the Command catalogue).
+    const benches = [_]struct { name: []const u8, root: []const u8 }{
+        .{ .name = "palette-match", .root = "src/bench/palette_match.zig" },
+        .{ .name = "vt-throughput", .root = "src/bench/vt_throughput.zig" },
+    };
     if (config.app_runtime != .none) {
-        try addBenchStep(b, &deps, config.baselineTarget(), "palette-match", "src/bench/palette_match.zig");
+        // The compile root alone is not enough: terminal build options also
+        // derive from SharedDeps.config.optimize. Give the whole benchmark
+        // dependency graph a ReleaseFast config so a default `zig build
+        // bench:*` cannot measure Debug integrity checks hidden inside an
+        // otherwise release binary.
+        var bench_config = config;
+        bench_config.optimize = .ReleaseFast;
+        const bench_deps = try SharedDeps.init(b, &bench_config);
+        inline for (benches) |bench| {
+            try addBenchStep(b, &bench_deps, config.baselineTarget(), bench.name, bench.root);
+        }
     } else {
-        const bench_step = b.step(
-            "bench:palette-match",
-            "Build and run bench/palette-match microbench",
-        );
-        bench_step.dependOn(&b.addFail(
-            "bench:palette-match requires an application runtime",
-        ).step);
+        inline for (benches) |bench| {
+            const bench_step = b.step(
+                b.fmt("bench:{s}", .{bench.name}),
+                b.fmt("Build and run bench/{s} microbench", .{bench.name}),
+            );
+            bench_step.dependOn(&b.addFail(
+                b.fmt("bench:{s} requires an application runtime", .{bench.name}),
+            ).step);
+        }
     }
 }
 
@@ -264,6 +280,7 @@ fn addBenchStep(
         }),
     });
     _ = try deps.add(exe);
+    addBenchCoreImport(b, exe, target, .ReleaseFast);
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     const step = b.step(
@@ -271,4 +288,22 @@ fn addBenchStep(
         "Build and run bench/" ++ name ++ " microbench",
     );
     step.dependOn(&run.step);
+}
+
+fn addBenchCoreImport(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const bench_core = b.createModule(.{
+        .root_source_file = b.path("src/main_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    var imports = compile.root_module.import_table.iterator();
+    while (imports.next()) |entry| {
+        bench_core.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    compile.root_module.addImport("bench_core", bench_core);
 }

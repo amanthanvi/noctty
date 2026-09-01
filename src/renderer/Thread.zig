@@ -835,10 +835,6 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         }
     }
 
-    if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
-        self.surface.noteRendererUpdateFrame();
-    }
-
     // updateFrame returns the cursor mode from the same locked terminal
     // snapshot used to rebuild this frame.
     const frame_update: ?rendererpkg.Renderer.FrameUpdate = self.renderer.updateFrame(
@@ -852,6 +848,11 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         update.cursor_blinking
     else
         self.cursorShouldBlink();
+    if (frame_update) |update| {
+        if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
+            self.surface.noteRendererUpdateFrame(update.output_progress, cursor_blinking);
+        }
+    }
     if (!cursor_blinking) self.flags.cursor_blink_visible = true;
     if (self.flags.focused and cursor_blinking) {
         self.armCursorTimerIfDead(cursorBlinkInterval());

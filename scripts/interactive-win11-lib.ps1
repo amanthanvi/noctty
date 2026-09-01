@@ -461,7 +461,8 @@ function Get-InteractiveWin11ExePath {
 
 function Invoke-InteractiveWin11Build {
     param(
-        [Parameter(Mandatory)] [string] $RepoRoot
+        [Parameter(Mandatory)] [string] $RepoRoot,
+        [ValidateSet('Debug', 'ReleaseSafe', 'ReleaseFast', 'ReleaseSmall')] [string] $Optimize
     )
 
     $devWindowsCmd = Join-Path $RepoRoot 'scripts\dev-windows.cmd'
@@ -500,9 +501,14 @@ function Invoke-InteractiveWin11Build {
 
     Push-Location $RepoRoot
     try {
-        & cmd /c $devWindowsCmd zig build -Demit-exe=true
+        $optimizeArguments = @()
+        if (-not [string]::IsNullOrWhiteSpace($Optimize)) {
+            $optimizeArguments += "-Doptimize=$Optimize"
+        }
+        & cmd /c $devWindowsCmd zig build -Demit-exe=true @optimizeArguments
         if ($LASTEXITCODE -ne 0) {
-            throw "zig build -Demit-exe=true failed with exit code $LASTEXITCODE"
+            $buildDescription = @('zig', 'build', '-Demit-exe=true') + $optimizeArguments
+            throw "$($buildDescription -join ' ') failed with exit code $LASTEXITCODE"
         }
     }
     finally {

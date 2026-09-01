@@ -68,6 +68,7 @@ const win32_hints = @import("win32_hints.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
+const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
 const win32_input = @import("win32/input.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
@@ -79,6 +80,7 @@ test {
     _ = @import("win32/render_trace.zig");
     _ = @import("win32/gl_startup.zig");
     _ = @import("win32/pixel_format.zig");
+    _ = @import("win32/bench_trace.zig");
     _ = @import("win32/labels.zig");
     _ = @import("win32/input.zig");
     _ = @import("win32/chrome_layout.zig");
@@ -195,6 +197,9 @@ const windows = std.os.windows;
 pub const resourcesDir = internal_os.resourcesDir;
 
 const RenderTrace = render_trace.RenderTrace;
+const MemoryStageTrace = bench_trace.MemoryStageTrace;
+pub const BenchmarkMemoryStage = bench_trace.BenchmarkMemoryStage;
+pub const captureProcessOrigin = bench_trace.captureProcessOrigin;
 
 pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
 pub const suppressStartupLoaderErrorDialogs = gl_startup.suppressStartupLoaderErrorDialogs;
@@ -8167,7 +8172,14 @@ pub const App = struct {
         return try client_size_fn(ctx, live_hwnd);
     }
 
-    fn createGLContext(self: *App, hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
+    fn createGLContext(self: *App, hwnd: HWND) !struct {
+        hdc: HDC,
+        hglrc: HGLRC,
+        // Returned rather than logged-and-dropped so the caller can hand
+        // the selected format to its benchmark memory-stage trace. Nothing
+        // in the product path reads it.
+        provenance: pixel_format.WglPixelFormatProvenance,
+    } {
         if (self.core_app.first) beginOpenGLStartupDiagnostics();
 
         const hdc = sys.GetDC(hwnd) orelse {
@@ -8221,7 +8233,11 @@ pub const App = struct {
             return windows.unexpectedError(err);
         }
 
-        return .{ .hdc = hdc, .hglrc = hglrc };
+        return .{
+            .hdc = hdc,
+            .hglrc = hglrc,
+            .provenance = selection.provenance,
+        };
     }
 
     fn openUrl(self: *App, url: []const u8) !void {
@@ -22890,6 +22906,16 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
     switch (msg) {
         c.WM_WINHOSTTY_WAKE => return 0,
 
+        c.WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT => {
+            if (surface) |v| v.render_trace.requestSnapshot();
+            return 0;
+        },
+
+        c.WM_WINHOSTTY_RENDER_TRACE_TARGET => {
+            if (surface) |v| v.render_trace.setTargetOutputBytes(@intCast(wParam));
+            return 0;
+        },
+
         c.WM_WINHOSTTY_UIA_QUERY_REFRESH => {
             if (surface) |v| {
                 v.drainTerminalAccessibilityOutput();
@@ -23552,6 +23578,7 @@ pub const Surface = struct {
     deferred_char: DeferredCharState = .{},
     undo_capture_suspended: bool = false,
     render_trace: RenderTrace = .{},
+    memory_stage_trace: MemoryStageTrace = .{},
     /// Per-surface bounded undo stack for terminal-local replayable
     /// actions (`clear_screen`, `reset`). Structural history that
     /// retains live tabs/surfaces lives on `Host` because it crosses
@@ -23805,6 +23832,11 @@ pub const Surface = struct {
             .decorations_visible = initialDecorationsVisible(config, opts),
             .scrollbar_config = config.scrollbar,
             .render_trace = RenderTrace.init(app.core_app.alloc),
+            // Unlike the render trace there is no single-claimant rule here:
+            // the memory stage trace is JSONL and every surface appends its
+            // own lifecycle records to the shared file, serialized by a
+            // process-wide mutex in `bench_trace`.
+            .memory_stage_trace = MemoryStageTrace.init(app.core_app.alloc),
             .undo_stack = win32_undo.UndoStack.init(app.core_app.alloc),
             .search_bar = win32_search_bar.SearchBar.init(app.core_app.alloc),
             .drop_target = win32_surface_drop_target.DropTarget.init(
@@ -23834,6 +23866,11 @@ pub const Surface = struct {
         // the first COM callback has a valid context.
         self.drop_target.surface_ctx = @ptrCast(self);
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
+        // First memory-stage sample. Every later stage's private-bytes delta
+        // is measured against this one, so it has to be the first thing that
+        // happens after the trace field exists and before any window, DC,
+        // GL or terminal allocation.
+        self.noteBenchmarkMemoryStage(.surface_begin, null);
 
         const hwnd = sys.CreateWindowExW(
             0,
@@ -23878,11 +23915,16 @@ pub const Surface = struct {
         self.placement.visible = false;
         self.placement.visible_known = true;
         log.debug("surface.init hwnd created", .{});
+        self.noteBenchmarkMemoryStage(.child_hwnd_created, null);
 
         const gl = try app.createGLContext(hwnd);
         self.hdc = gl.hdc;
         self.hglrc = gl.hglrc;
         errdefer self.destroyGL();
+        // Must precede the stage note: `MemoryStageTrace.note` only emits
+        // the wgl_* provenance fields once the format has been published.
+        self.setBenchmarkWglPixelFormat(gl.provenance);
+        self.noteBenchmarkMemoryStage(.gl_context_created, null);
         log.debug("surface.init gl context created", .{});
 
         self.size = try app.clientSize(hwnd);
@@ -24613,6 +24655,60 @@ pub const Surface = struct {
         };
     }
 
+    pub fn noteBenchmarkMemoryStage(
+        self: *Surface,
+        stage: BenchmarkMemoryStage,
+        surface_id: ?u64,
+    ) void {
+        _ = self.memory_stage_trace.note(
+            stage,
+            @intCast(@intFromPtr(self)),
+            surface_id,
+        );
+    }
+
+    pub fn publishBenchmarkMemorySurfaceId(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.publishSurfaceId(surface_id);
+    }
+
+    pub fn setBenchmarkMemoryGeometry(
+        self: *Surface,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        columns: u32,
+        rows: u32,
+    ) void {
+        self.memory_stage_trace.setGeometry(
+            surface_width_px,
+            surface_height_px,
+            cell_width_px,
+            cell_height_px,
+            columns,
+            rows,
+        );
+    }
+
+    pub fn noteBenchmarkIoReaderSpawned(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.noteIoReaderSpawned(@intCast(@intFromPtr(self)), surface_id);
+    }
+
+    pub fn noteBenchmarkRendererThreadSpawned(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.noteRendererThreadSpawned(@intCast(@intFromPtr(self)), surface_id);
+    }
+
+    pub fn noteBenchmarkIoThreadSpawned(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.noteIoThreadSpawned(@intCast(@intFromPtr(self)), surface_id);
+    }
+
+    fn setBenchmarkWglPixelFormat(
+        self: *Surface,
+        value: pixel_format.WglPixelFormatProvenance,
+    ) void {
+        self.memory_stage_trace.setWglPixelFormat(value);
+    }
+
     /// Reserve the repaint slot for a renderer frame before the expensive
     /// `updateFrame` work, so a paint that completes during that work cannot
     /// be lost.
@@ -24818,8 +24914,21 @@ pub const Surface = struct {
         self.render_trace.noteRendererFollowupCallback();
     }
 
-    pub fn noteRendererUpdateFrame(self: *Surface) void {
-        self.render_trace.noteRendererUpdateFrame();
+    pub fn noteRendererUpdateFrame(
+        self: *Surface,
+        progress: ?rendererpkg.State.OutputProgress,
+        cursor_blinking: bool,
+    ) void {
+        self.render_trace.noteRendererUpdateFrame(
+            if (progress) |value| .{
+                .generation = value.generation,
+                .bytes = value.bytes,
+                .tick_ms = value.tick_ms,
+                .benchmark_end_marker_generation = value.benchmark_end_marker_generation,
+                .benchmark_end_marker_output_bytes = value.benchmark_end_marker_output_bytes,
+            } else null,
+            cursor_blinking,
+        );
     }
 
     pub fn makeGLContextCurrent(self: *Surface) !void {
@@ -24844,14 +24953,39 @@ pub const Surface = struct {
     }
 
     pub fn clearGLContextCurrent(self: *Surface) void {
-        const hdc = self.hdc orelse return;
-        const hglrc = self.hglrc orelse return;
+        _ = self.clearGLContextCurrentChecked();
+    }
 
-        if (sys.wglGetCurrentContext() != hglrc or sys.wglGetCurrentDC() != hdc) {
-            return;
+    /// Unbind this surface's GL context from the calling thread and report
+    /// whether the unbind boundary actually holds afterwards.
+    ///
+    /// Returns true only when the surface's context is provably not current
+    /// on this thread: either nothing of ours was current here, or
+    /// `wglMakeCurrent(null, null)` reported success. The benchmark memory
+    /// trace records `wgl_context_unbound` from this result, so a discarded
+    /// failure must never be reported as a completed unbind.
+    ///
+    /// The native actions taken are identical to the unchecked wrapper; only
+    /// the outcome is reported.
+    pub fn clearGLContextCurrentChecked(self: *Surface) bool {
+        // Without a context of our own, nothing of ours can be current.
+        const hglrc = self.hglrc orelse return true;
+        if (sys.wglGetCurrentContext() != hglrc) return true;
+
+        // Our context is current here, so it must be unbound. Preserve the
+        // pairing requirement: only clear when the bound DC is also ours,
+        // and report failure when we cannot establish that.
+        const hdc = self.hdc orelse return false;
+        if (sys.wglGetCurrentDC() != hdc) return false;
+
+        if (sys.wglMakeCurrent(null, null) == 0) {
+            log.warn(
+                "win32 wglMakeCurrent(null, null) failed during GL teardown err={}",
+                .{windows.kernel32.GetLastError()},
+            );
+            return false;
         }
-
-        _ = sys.wglMakeCurrent(null, null);
+        return true;
     }
 
     pub fn swapGLBuffers(self: *Surface) !void {
@@ -24863,6 +24997,11 @@ pub const Surface = struct {
             return windows.unexpectedError(err);
         }
         self.render_trace.noteSwapBuffers();
+        // Only the first swap that actually returned non-zero; the claim is
+        // idempotent so later swaps cost one atomic load.
+        if (self.memory_stage_trace.claimFirstSwapObservation()) {
+            self.noteBenchmarkMemoryStage(.first_successful_swap, null);
+        }
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {
@@ -27831,6 +27970,7 @@ pub const Surface = struct {
 
     fn destroy(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
+        self.noteBenchmarkMemoryStage(.destroy_begin, null);
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
         self.closeQuickSelect(false);
@@ -27859,6 +27999,9 @@ pub const Surface = struct {
             self.core_surface.deinit();
             self.core_initialized = false;
         }
+        // Outside the `core_initialized` branch so the stage is still
+        // emitted for a surface that failed before core init.
+        self.noteBenchmarkMemoryStage(.core_deinit_complete, null);
 
         // Drain the undo stack. Entries own scrollback / title bytes
         // allocated via `app.core_app.alloc`; `deinit` frees each.
@@ -27924,7 +28067,32 @@ pub const Surface = struct {
             self.progress_status = null;
         }
 
+        // App-level detachment is still per-pane teardown: `windowDestroyed`
+        // removes this surface from `App.windows`, discards the structural
+        // history entries referencing it, deinitializes the owning tab and
+        // its split tree when this was the tab's last pane, drops any
+        // prepared close tree, and reconciles pending shell state. Sampling
+        // before that draws the private-memory boundary in the wrong place
+        // and misattributes those still-held bytes to allocator or driver
+        // behaviour.
+        //
+        // Safe to sample afterwards: `windowDestroyed` reads `self`
+        // throughout but never frees it — `alloc.destroy(self)` below is the
+        // sole owner-side free, so `self` and its trace are necessarily live
+        // when the call returns.
         self.app.windowDestroyed(self);
+
+        // The final stage, then the trace itself. `MemoryStageTrace.deinit`
+        // clears `path`, after which `note` is a no-op — so this must stay
+        // the last thing before the Surface is freed, and in particular
+        // after `destroyGL` emits its teardown stages.
+        //
+        // The Surface and memory-stage trace path are both still live here
+        // and are freed immediately below. Both predate `surface_begin`, so
+        // stage deltas cancel them; the external pane-memory metric still
+        // includes one trace-path allocation per traced surface.
+        self.noteBenchmarkMemoryStage(.surface_destroy_complete, null);
+        self.memory_stage_trace.deinit(alloc);
         alloc.destroy(self);
     }
 
@@ -28440,16 +28608,47 @@ pub const Surface = struct {
         }
     }
 
+    /// Release the surface's native GL resources.
+    ///
+    /// Each benchmark teardown stage is emitted only when the boundary it
+    /// names actually holds. `Get-BenchMemoryStageSamples` validates stage
+    /// presence alone, so emitting a stage whose native call failed would
+    /// let a memory run report verified native teardown while the HGLRC or
+    /// DC was never released. A missing stage fails the run closed, which is
+    /// the intended outcome when cleanup did not happen.
     fn destroyGL(self: *Surface) void {
-        if (self.hglrc != null) {
-            self.clearGLContextCurrent();
-            _ = sys.wglDeleteContext(self.hglrc);
+        if (self.hglrc) |hglrc| {
+            if (self.clearGLContextCurrentChecked()) {
+                self.noteBenchmarkMemoryStage(.wgl_context_unbound, null);
+            }
+
+            const deleted = sys.wglDeleteContext(hglrc) != 0;
+            if (!deleted) {
+                log.warn(
+                    "win32 wglDeleteContext failed during surface teardown err={}",
+                    .{windows.kernel32.GetLastError()},
+                );
+            }
+            // Drop our reference either way. The Surface is freed moments
+            // from now, so retaining a handle we failed to delete would only
+            // strand it behind freed memory.
             self.hglrc = null;
+            if (deleted) self.noteBenchmarkMemoryStage(.wgl_context_deleted, null);
         }
 
-        if (self.hdc != null) {
-            if (self.hwnd) |hwnd| _ = sys.ReleaseDC(hwnd, self.hdc);
+        if (self.hdc) |hdc| {
+            // A private (CS_OWNDC) DC still reports success from ReleaseDC,
+            // so requiring success does not weaken the normal path; it only
+            // catches a release we never attempted or that genuinely failed.
+            const released = if (self.hwnd) |hwnd| sys.ReleaseDC(hwnd, hdc) != 0 else false;
+            if (!released) {
+                log.warn(
+                    "win32 ReleaseDC failed during surface teardown had_hwnd={} err={}",
+                    .{ self.hwnd != null, windows.kernel32.GetLastError() },
+                );
+            }
             self.hdc = null;
+            if (released) self.noteBenchmarkMemoryStage(.dc_released, null);
         }
 
         self.hwnd = null;
@@ -36218,4 +36417,118 @@ test "win32 tab overview parser accepts one-based tab numbers" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(@as(usize, 2), try std.fmt.parseUnsigned(usize, "2", 10));
+}
+
+test "win32 destroyGL records a teardown stage only when the cleanup succeeded" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // `Get-BenchMemoryStageSamples` validates stage presence alone, so a
+    // stage emitted after a failed native call would let a memory run report
+    // verified teardown for an HGLRC or DC that was never released. Each
+    // stage must therefore be gated on the call it names.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+
+    // A context handle the driver cannot delete, and a DC with no window to
+    // release it against. Both cleanups fail, so neither completion stage
+    // may appear. The unbind stage still appears: nothing of ours is current
+    // on this thread, so that boundary genuinely holds.
+    {
+        const sub_path = "teardown-failed.jsonl";
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        defer alloc.free(path);
+
+        surface.* = uninitializedInertStorage(Surface);
+        surface.memory_stage_trace = .{ .path = path };
+        surface.hwnd = null;
+        surface.hdc = @ptrFromInt(0x1000);
+        surface.hglrc = @ptrFromInt(0x1000);
+
+        surface.destroyGL();
+
+        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        defer alloc.free(contents);
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"wgl_context_unbound\"") != null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"wgl_context_deleted\"") == null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"dc_released\"") == null,
+        );
+        // The handles are dropped either way; only the claim is withheld.
+        try std.testing.expectEqual(@as(HGLRC, null), surface.hglrc);
+        try std.testing.expectEqual(@as(HDC, null), surface.hdc);
+    }
+
+    // A real window DC that ReleaseDC does release. The stage must appear,
+    // so the fail-closed rule does not break the ordinary teardown path.
+    {
+        const sub_path = "teardown-released.jsonl";
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        defer alloc.free(path);
+
+        const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+        const window_name = std.unicode.utf8ToUtf16LeStringLiteral("");
+        const hwnd = sys.CreateWindowExW(
+            0,
+            class,
+            window_name,
+            c.WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            null,
+            null,
+            sys.GetModuleHandleW(null),
+            null,
+        ) orelse return error.SkipZigTest;
+        defer _ = sys.DestroyWindow(hwnd);
+        const hdc = sys.GetDC(hwnd) orelse return error.SkipZigTest;
+
+        surface.* = uninitializedInertStorage(Surface);
+        surface.memory_stage_trace = .{ .path = path };
+        surface.hwnd = hwnd;
+        surface.hdc = hdc;
+        surface.hglrc = null;
+
+        surface.destroyGL();
+
+        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        defer alloc.free(contents);
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"dc_released\"") != null,
+        );
+        try std.testing.expectEqual(@as(HDC, null), surface.hdc);
+    }
+}
+
+test "win32 GL unbind reports the boundary it actually established" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+
+    // No context of ours exists, so nothing of ours can be current.
+    surface.* = uninitializedInertStorage(Surface);
+    surface.hglrc = null;
+    surface.hdc = null;
+    try std.testing.expect(surface.clearGLContextCurrentChecked());
+
+    // A context that is not current on this thread is already unbound here,
+    // so the boundary holds without calling wglMakeCurrent at all.
+    surface.* = uninitializedInertStorage(Surface);
+    surface.hglrc = @ptrFromInt(0x1000);
+    surface.hdc = @ptrFromInt(0x2000);
+    try std.testing.expect(sys.wglGetCurrentContext() != surface.hglrc);
+    try std.testing.expect(surface.clearGLContextCurrentChecked());
 }
