@@ -311,11 +311,12 @@ try {
           <div>
             <h3>Run the checksum and signature checks at once</h3>
             <p>
-              The repository verifier accepts only the current Noctty asset
-              contract. No published stable release matches that contract yet:
-              v1.3.123 uses the legacy <code>winghostty-*</code> asset layout,
-              so use the two manual checks above for that release. For a
-              matching release, the verifier downloads every asset, checks
+              The repository verifier accepts v1.3.124 and later, starting
+              with the first release that uses the current Noctty asset
+              contract. v1.3.123 uses the legacy
+              <code>winghostty-*</code> asset layout, so use the two manual
+              checks above for that release. For v1.3.124 or later, the
+              verifier downloads every asset, checks
               every GitHub digest and checksum entry, validates every embedded
               PE signature, and requires a single signer whose SPKI matches the
               key pinned into the updater. Releases do not currently publish
@@ -329,7 +330,7 @@ try {
 Set-Location .\noctty
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 `
-  -Version &lt;compatible-noctty-version&gt;</code></pre>
+  -Version &lt;1.3.124-or-later&gt;</code></pre>
         </li>
       </ol>
 

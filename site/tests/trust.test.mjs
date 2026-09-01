@@ -42,6 +42,11 @@ const linkTargetPath = (fromRelativePath, target) =>
 // so it covers the formulations a benchmark result is actually written in.
 // Case-sensitive where a unit is (MB, GB, KiB) so the lowercase SPKI pin and
 // the lowercase ?v= cache keys cannot collide with a byte-size unit.
+const BYTE_SIZE_FIGURE_PATTERNS = [
+  /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B(?:\s*\/\s*s(?:ec)?)?\b/,
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?(?:\s+per\s+second)?\b/i,
+];
+
 const PERFORMANCE_FIGURE_PATTERNS = [
   // Durations.
   /\b\d[\d,]*(?:\.\d+)?\s*(?:ms|milliseconds?|µs|μs|us|microseconds?|ns|nanoseconds?|seconds?|minutes?)\b/i,
@@ -55,8 +60,7 @@ const PERFORMANCE_FIGURE_PATTERNS = [
   // such as "1 API request per hour" are not mistaken for performance data.
   /\b\d[\d,]*(?:\.\d+)?\s*(?:(?:rendered|painted|processed)\s+)?(?:frames?|renders?|paints?|updates?|cells?|glyphs?|lines?|bytes?|bits?|keystrokes?)\s+per\s+(?:second|minute|hour|frame|millisecond|microsecond|nanosecond)\b/i,
   // Byte sizes and throughput, decimal or binary, abbreviated or spelled out.
-  /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B(?:\s*\/\s*s(?:ec)?)?\b/,
-  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?(?:\s+per\s+second)?\b/i,
+  ...BYTE_SIZE_FIGURE_PATTERNS,
   // Percentages framed as a performance delta.
   /\b\d+(?:\.\d+)?\s*(?:%|percent)\s*(?:\w+[\s-]+){0,3}(?:faster|slower|improvement|improved|reduction|reduced|speed-?up|overhead|gain|drop|regression|less|fewer|more)\b/i,
   /\b(?:faster|slower|improvement|reduction|speed-?up|overhead|gain|regression)\b[^.]{0,24}?\b\d+(?:\.\d+)?\s*(?:%|percent)/i,
@@ -64,6 +68,13 @@ const PERFORMANCE_FIGURE_PATTERNS = [
   /\b\d+(?:\.\d+)?\s*(?:x|×)\s*(?:faster|slower|throughput|speed|performance)\b/i,
   /\b\d+(?:\.\d+)?(?:x|×)\b(?!\d)/,
 ];
+
+// Migration tables may state configuration-size facts such as the default
+// scrollback limit. They still may not publish durations, rates, throughput,
+// percentages, or multipliers as performance results.
+const MIGRATION_PERFORMANCE_FIGURE_PATTERNS = PERFORMANCE_FIGURE_PATTERNS.filter(
+  (pattern) => !BYTE_SIZE_FIGURE_PATTERNS.includes(pattern),
+);
 
 // Terminals a comparison could name, plus the unnamed stand-ins for one.
 const RIVAL_TERMINAL =
@@ -375,6 +386,10 @@ test("trust page carries every implemented release verification layer", () => {
   );
   assert.match(
     trustHtml,
+    /verifier accepts v1\.3\.124 and later.*?first release that uses the current Noctty asset\s+contract/is,
+  );
+  assert.match(
+    trustHtml,
     /671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a/,
   );
 });
@@ -496,15 +511,18 @@ test("Windows Terminal opacity is converted from percent to fraction", () => {
 });
 
 for (const relativePath of MIGRATION_GUIDES) {
-  test(`${relativePath} keeps the honest-gap section`, () => {
+  test(`${relativePath} keeps the honest-gap section and no performance claims`, () => {
     const markdown = readFileSync(join(repoDir, relativePath), "utf8");
     assert.match(markdown, /## Honest gaps/);
     assert.match(markdown, /no screen reader has been\s+measured/i);
-    const claims = findClaimViolations(markdown, CROSS_TERMINAL_CLAIM_PATTERNS);
+    const claims = findClaimViolations(markdown, [
+      ...MIGRATION_PERFORMANCE_FIGURE_PATTERNS,
+      ...CROSS_TERMINAL_CLAIM_PATTERNS,
+    ]);
     assert.deepEqual(
       claims,
       [],
-      `no cross-terminal result is published; remove: ${claims.join(", ")}`,
+      `no performance result is published; remove: ${claims.join(", ")}`,
     );
   });
 }

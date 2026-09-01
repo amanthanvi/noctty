@@ -35,8 +35,9 @@ $forbiddenRules = @(
     @{ Pattern = "Built on libghostty by Mitchell Hashimoto"; Reason = "Prefer the repo-accurate Ghostty terminal-core wording." },
     # Cross-terminal speed claims, site-wide coarse net. site/tests/trust.test.mjs
     # is the authoritative and stricter guard for site/why-noctty.html and the two
-    # migration guides: it also bans hardcoded performance figures of any unit and
-    # comparisons keyed to a named competitor. Keep these two lists directionally
+    # migration guides: it also bans hardcoded rates, durations, throughput,
+    # percentage deltas, multipliers, and comparisons keyed to a named competitor
+    # while allowing configuration-size facts. Keep these two lists directionally
     # consistent; when they disagree, the test wins.
     @{ Pattern = "(?i)\bfast(?:er|est)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
     @{ Pattern = "(?i)\bslow(?:er|est)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
@@ -80,6 +81,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "do not currently publish"; Reason = "The trust page must not imply unavailable build-provenance attestations." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "v1.3.123 uses the legacy"; Reason = "The trust page must state that the promoted stable release predates the current verifier contract." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "verifier accepts v1.3.124 and later"; Reason = "The trust page should keep routing verifier-compatible releases correctly after the latest-version copy updates." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "miss a budget stated in PRODUCT.md"; Reason = "The trust page must keep the missed performance budgets visible." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }
