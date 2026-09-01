@@ -1425,6 +1425,20 @@ scrollbar: Scrollbar = .system,
 /// Specify this multiple times to configure multiple link matchers.
 link: RepeatableLink = .{},
 
+/// Regular expressions used by quick select to find targets in the visible
+/// terminal viewport. Specify this multiple times to add patterns. Bare values
+/// are used as-is; quoted values use Zig string literal syntax. An empty value
+/// clears the configured list. When the list is empty, built-in URL, path, git
+/// SHA, IP address, and UUID patterns apply.
+@"quick-select-patterns": QuickSelectPatterns = .{},
+
+/// ASCII characters used to generate quick-select labels. The value must have
+/// at least two characters, and letters must also be unique after ASCII case
+/// folding. Quote the value with Zig string literal syntax to preserve leading
+/// or trailing spaces. Labels are prefix-free, so a single character could
+/// only ever label one target.
+@"quick-select-alphabet": QuickSelectAlphabet = .{},
+
 /// Enable URL matching. URLs are matched on hover with control (Linux) or
 /// command (macOS) pressed and open using the default system application for
 /// the linked URL.
@@ -6582,6 +6596,13 @@ pub const Keybinds = struct {
             .toggle_command_palette,
         );
 
+        // Quick select. Ctrl+Shift+Space is otherwise unbound by defaults.
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .physical = .space }, .mods = .{ .ctrl = true, .shift = true } },
+            .toggle_quick_select,
+        );
+
         // Mac-specific keyboard bindings.
         if (comptime builtin.target.os.tag.isDarwin()) {
             try self.set.put(
@@ -7759,7 +7780,7 @@ pub const Keybinds = struct {
         try testing.expectEqual(0, keybinds.tables.count());
     }
 
-    test "parseCLI reset clears tables" {
+    test "parseCLI reset clears custom tables and restores default tables" {
         const testing = std.testing;
         var arena = ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
@@ -8378,25 +8399,12 @@ pub const RepeatableLink = struct {
     links: std.ArrayListUnmanaged(inputpkg.Link) = .{},
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
-        const input = std.mem.trim(
-            u8,
-            input_ orelse return error.ValueRequired,
-            &std.ascii.whitespace,
-        );
-
-        // Empty input clears custom links. The built-in URL matcher is
-        // appended later during surface derived-config construction.
-        if (input.len == 0) {
+        const regex = try parseOptionalRegexEntry(alloc, input_) orelse {
+            // The built-in URL matcher is appended later during surface
+            // derived-config construction.
             self.links.clearRetainingCapacity();
             return;
-        }
-
-        const regex = try parseRegexValue(alloc, input);
-        if (regex.len == 0) {
-            alloc.free(regex);
-            self.links.clearRetainingCapacity();
-            return;
-        }
+        };
         errdefer alloc.free(regex);
         try self.links.append(alloc, .{
             .regex = regex,
@@ -8455,7 +8463,7 @@ pub const RepeatableLink = struct {
         }
     }
 
-    fn parseRegexValue(alloc: Allocator, input: []const u8) ![]const u8 {
+    pub fn parseRegexValue(alloc: Allocator, input: []const u8) ![]const u8 {
         if (input.len >= 2 and input[0] == '"' and input[input.len - 1] == '"') {
             var buf: std.Io.Writer.Allocating = .init(alloc);
             defer buf.deinit();
@@ -8563,6 +8571,176 @@ pub const RepeatableLink = struct {
 
         const expected = try std.fmt.allocPrint(alloc, "link = \"{s}\"\n", .{regex});
         try testing.expectEqualStrings(expected, buf.written());
+    }
+};
+
+/// Parse a bare or quoted regex list entry. A null result clears the caller's
+/// list, including explicitly empty quoted values.
+fn parseOptionalRegexEntry(alloc: Allocator, input_: ?[]const u8) !?[]const u8 {
+    const input = std.mem.trim(
+        u8,
+        input_ orelse return error.ValueRequired,
+        &std.ascii.whitespace,
+    );
+    if (input.len == 0) return null;
+
+    const regex = try RepeatableLink.parseRegexValue(alloc, input);
+    if (regex.len != 0) return regex;
+    alloc.free(regex);
+    return null;
+}
+
+/// See `quick-select-patterns` for documentation.
+pub const QuickSelectPatterns = struct {
+    const Self = @This();
+
+    list: std.ArrayListUnmanaged([]const u8) = .{},
+
+    pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
+        const regex = try parseOptionalRegexEntry(alloc, input_) orelse {
+            self.list.clearRetainingCapacity();
+            return;
+        };
+        errdefer alloc.free(regex);
+        try self.list.append(alloc, regex);
+    }
+
+    pub fn clone(self: *const Self, alloc: Allocator) Allocator.Error!Self {
+        var list = try std.ArrayListUnmanaged([]const u8).initCapacity(alloc, self.list.items.len);
+        errdefer {
+            for (list.items) |item| alloc.free(item);
+            list.deinit(alloc);
+        }
+        for (self.list.items) |item| list.appendAssumeCapacity(try alloc.dupe(u8, item));
+        return .{ .list = list };
+    }
+
+    pub fn equal(self: Self, other: Self) bool {
+        if (self.list.items.len != other.list.items.len) return false;
+        for (self.list.items, other.list.items) |lhs, rhs| {
+            if (!std.mem.eql(u8, lhs, rhs)) return false;
+        } else return true;
+    }
+
+    pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
+        if (self.list.items.len == 0) {
+            try formatter.formatEntry(void, {});
+            return;
+        }
+        const alloc = allocpkg.default(null);
+        for (self.list.items) |item| {
+            const value = try std.fmt.allocPrint(alloc, "\"{f}\"", .{std.zig.fmtString(item)});
+            defer alloc.free(value);
+            try formatter.formatEntry([]const u8, value);
+        }
+    }
+
+    test "hints: quick select patterns parse bare quoted and clear values" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var patterns: Self = .{};
+
+        try patterns.parseCLI(alloc, "^foo://bar$");
+        try patterns.parseCLI(alloc, "\"^C:\\\\work$\"");
+        try testing.expectEqual(@as(usize, 2), patterns.list.items.len);
+        try testing.expectEqualStrings("^foo://bar$", patterns.list.items[0]);
+        try testing.expectEqualStrings("^C:\\work$", patterns.list.items[1]);
+
+        try patterns.parseCLI(alloc, "");
+        try testing.expectEqual(@as(usize, 0), patterns.list.items.len);
+    }
+};
+
+/// See `quick-select-alphabet` for documentation.
+pub const QuickSelectAlphabet = struct {
+    const Self = @This();
+
+    /// Home-row characters used to generate quick-select labels when the
+    /// user has not configured their own alphabet.
+    pub const default = "asdfghjkl";
+
+    pub const Error = error{
+        EmptyAlphabet,
+        AlphabetTooShort,
+        DuplicateCharacter,
+        CaseCollidingCharacter,
+        NonAsciiCharacter,
+    };
+
+    /// A usable alphabet has at least two characters and every character is a
+    /// distinct printable ASCII byte, so a typed label maps to exactly one
+    /// target.
+    ///
+    /// Two is the real floor, not one: labels are prefix-free, so a
+    /// single-character alphabet can only ever name one target. Accepting it
+    /// here would push the failure to the first viewport with two matches,
+    /// where the overlay would just silently refuse to open.
+    pub fn validate(alphabet: []const u8) Error!void {
+        if (alphabet.len == 0) return error.EmptyAlphabet;
+        if (alphabet.len == 1) return error.AlphabetTooShort;
+        var seen = [_]bool{false} ** 128;
+        for (alphabet) |char| {
+            if (char < 0x20 or char >= 0x7f) return error.NonAsciiCharacter;
+            if (seen[char]) return error.DuplicateCharacter;
+            if (std.ascii.isAlphabetic(char)) {
+                const folded = std.ascii.toLower(char);
+                if (seen[folded] or seen[std.ascii.toUpper(char)]) {
+                    return error.CaseCollidingCharacter;
+                }
+            }
+            seen[char] = true;
+        }
+    }
+
+    value: [:0]const u8 = Self.default,
+
+    pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
+        const input = std.mem.trim(
+            u8,
+            input_ orelse return error.ValueRequired,
+            &std.ascii.whitespace,
+        );
+        const alphabet = try RepeatableLink.parseRegexValue(alloc, input);
+        defer alloc.free(alphabet);
+        validate(alphabet) catch return error.InvalidValue;
+        self.value = try alloc.dupeZ(u8, alphabet);
+    }
+
+    pub fn clone(self: *const Self, alloc: Allocator) Allocator.Error!Self {
+        return .{ .value = try alloc.dupeZ(u8, self.value) };
+    }
+
+    pub fn equal(self: Self, other: Self) bool {
+        return std.mem.eql(u8, self.value, other.value);
+    }
+
+    pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
+        const alloc = allocpkg.default(null);
+        const value = try std.fmt.allocPrint(alloc, "\"{f}\"", .{std.zig.fmtString(self.value)});
+        defer alloc.free(value);
+        try formatter.formatEntry([]const u8, value);
+    }
+
+    test "hints: quick select alphabet validates non-empty unique ASCII" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var alphabet: Self = .{};
+        try alphabet.parseCLI(arena.allocator(), "arst");
+        try testing.expectEqualStrings("arst", alphabet.value);
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), ""));
+        // One character cannot label two targets, so it is rejected up front
+        // rather than failing later when the overlay tries to open.
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a"));
+        try testing.expectError(error.AlphabetTooShort, validate("a"));
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "aa"));
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "aA"));
+        try testing.expectError(error.CaseCollidingCharacter, validate("aA"));
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a\xC3\xA9"));
+        try alphabet.parseCLI(arena.allocator(), "\"ab \"");
+        try testing.expectEqualStrings("ab ", alphabet.value);
     }
 };
 

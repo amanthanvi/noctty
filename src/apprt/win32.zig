@@ -35,6 +35,7 @@ const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
 const win32_toast_winrt = @import("win32_toast_winrt.zig");
 const win32_taskbar_progress = @import("win32_taskbar_progress.zig");
+const win32_jump_list = @import("win32_jump_list.zig");
 const win32_powershell_install = @import("win32_powershell_install.zig");
 const win32_link_preview = @import("win32_link_preview.zig");
 const win32_quick_terminal = @import("win32_quick_terminal.zig");
@@ -63,6 +64,7 @@ const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
 const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
+const win32_hints = @import("win32_hints.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
@@ -424,6 +426,7 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
 const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
 const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.palette_list");
 const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.scrollbar");
+const quick_select_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.quick_select");
 
 /// Palette list row height at 96 DPI. Scaled via `Host.scaled` at paint.
 const palette_row_height: i32 = 36;
@@ -1969,6 +1972,15 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     return descriptor orelse error.IpcSecurityDescriptorFailed;
 }
 
+fn detectExplicitStartupWorkingDirectory(alloc: Allocator) bool {
+    var iter = cli_args.argsIterator(alloc) catch return false;
+    defer iter.deinit();
+    while (iter.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--working-directory=")) return true;
+    }
+    return false;
+}
+
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
 
@@ -2751,11 +2763,58 @@ fn sessionRestorePolicyAllows(
     initial_window: bool,
     has_initial_command: bool,
     startup_profile_picker: bool,
+    explicit_startup_working_directory: bool,
 ) bool {
     return sessionStatePolicyAllows(safe_mode, policy) and
         initial_window and
         !has_initial_command and
-        !startup_profile_picker;
+        !startup_profile_picker and
+        !explicit_startup_working_directory;
+}
+
+fn sessionSavePolicyAllows(
+    safe_mode: bool,
+    policy: configpkg.Config.WindowSaveState,
+    initial_window: bool,
+    has_initial_command: bool,
+    startup_profile_picker: bool,
+) bool {
+    return sessionRestorePolicyAllows(
+        safe_mode,
+        policy,
+        initial_window,
+        has_initial_command,
+        startup_profile_picker,
+        false,
+    );
+}
+
+fn writeOpenUrlTrace(file: std.fs.File, url: []const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
+    try writer.interface.print("{s}\r\n", .{url});
+    try writer.interface.flush();
+}
+
+/// Explicit Debug-build test seam for URL activation. When set, the Win32
+/// runtime records the requested URL instead of dispatching an uncontrolled
+/// ShellExecuteW. Release builds always use the system URL handler.
+fn recordOpenUrlForTest(alloc: Allocator, url: []const u8) !bool {
+    const raw_path = std.process.getEnvVarOwned(
+        alloc,
+        "NOCTTY_WIN32_OPEN_URL_TRACE_FILE",
+    ) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return false,
+        else => return err,
+    };
+    defer alloc.free(raw_path);
+    const path = std.mem.trim(u8, raw_path, " \t\r\n");
+    if (path.len == 0) return false;
+
+    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try writeOpenUrlTrace(file, url);
+    return true;
 }
 
 pub const App = struct {
@@ -2770,6 +2829,7 @@ pub const App = struct {
     host_class_atom: ATOM = 0,
     palette_list_class_atom: ATOM = 0,
     scrollbar_class_atom: ATOM = 0,
+    quick_select_class_atom: ATOM = 0,
     hosts: std.ArrayListUnmanaged(*Host) = .empty,
     windows: std.ArrayListUnmanaged(*Surface) = .empty,
     /// Internal test seam so action-path tests can drive real
@@ -2804,6 +2864,10 @@ pub const App = struct {
     launcher_quick_slot_keys: [3]?[:0]const u8 = .{ null, null, null },
     launcher_profile_target: ProfileOpenTarget = .tab,
     startup_profile_picker: bool = false,
+    /// True when argv explicitly selects a working directory. Such cold-start
+    /// flows must create their requested window rather than restore a saved
+    /// session and discard the CLI destination.
+    explicit_startup_working_directory: bool = false,
     wheel_settings: SystemWheelSettings = .{},
     system_dynamic_scrollbars: bool = true,
     ipc_pipe_name: ?[:0]const u16 = null,
@@ -2886,6 +2950,9 @@ pub const App = struct {
     /// unavailable, in which case progress continues to render only in
     /// the window title/status text.
     taskbar_progress: ?win32_taskbar_progress.TaskbarProgress = null,
+    /// Persisted taskbar destinations and their debounced shell COM commit.
+    /// `null` when the app-state path cannot be resolved or initialized.
+    jump_list: ?win32_jump_list.JumpList = null,
     toast_activation_post_pending: std.atomic.Value(bool) = .init(false),
     /// Absolute path supplied via `--config-file <path>` on the CLI.
     /// Resolved ONCE against the startup cwd during `App.init` — that's
@@ -2947,6 +3014,7 @@ pub const App = struct {
             .launcher_profile_order_hint = windows_shell.profileOrderHint(core_app.alloc),
             .launcher_profile_target = detectDefaultProfileTarget(core_app.alloc),
             .startup_profile_picker = detectStartupProfilePicker(core_app.alloc),
+            .explicit_startup_working_directory = detectExplicitStartupWorkingDirectory(core_app.alloc),
         };
         // Install before any host window exists, so the very first
         // SetWinEventHook registration already has somewhere to deliver.
@@ -3025,6 +3093,13 @@ pub const App = struct {
             std.log.warn("taskbar progress init failed err={}; falling back to title-only progress", .{err});
             break :blk null;
         };
+        if (localAppDataPathAlloc(core_app.alloc, win32_jump_list.state_filename)) |path| {
+            defer core_app.alloc.free(path);
+            self.jump_list = win32_jump_list.JumpList.init(core_app.alloc, path) catch |err| blk: {
+                log.warn("jump list state init failed err={}", .{err});
+                break :blk null;
+            };
+        }
         self.refreshSystemWheelSettings();
         self.refreshSystemScrollbarPreference();
         self.resolved_theme = resolveTheme(&self.config);
@@ -3174,6 +3249,7 @@ pub const App = struct {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
+        if (!self.embedding_mode) self.initializeJumpList();
         if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
         if (!self.embedding_mode and self.global_hotkeys_dirty and self.windows.items.len == 0) {
             self.global_hotkeys_dirty = false;
@@ -3303,6 +3379,35 @@ pub const App = struct {
                         continue;
                     }
                 }
+                // Our timer is a thread timer (`SetTimer(null, ...)`), which
+                // posts with a null hwnd. Checking that keeps us from
+                // swallowing a window timer whose numeric id happens to
+                // collide.
+                if (self.jump_list) |*jump_list| {
+                    if (@intFromPtr(msg.hwnd) == 0 and jump_list.handleTimer(msg.wParam)) {
+                        // Profile discovery is app-wide, so any host will do —
+                        // `initial-window=false` starts without a primary
+                        // surface. The request stays pending until one exists.
+                        if (self.hosts.items.len > 0 and
+                            jump_list.startupProfileDiscoveryPending())
+                        {
+                            const host = self.hosts.items[0];
+                            if (host.profiles == null or !host.profiles_complete) {
+                                _ = host.reloadProfiles() catch |err| {
+                                    log.warn("jump list deferred profile discovery failed err={}", .{err});
+                                    jump_list.retryStartupProfileDiscovery();
+                                    continue;
+                                };
+                            }
+                            if (host.profiles != null and host.profiles_complete) {
+                                jump_list.completeStartupProfileDiscovery();
+                            } else {
+                                jump_list.retryStartupProfileDiscovery();
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
                         self.stopQuitTimer();
@@ -3408,6 +3513,10 @@ pub const App = struct {
             taskbar.deinit();
             self.taskbar_progress = null;
         }
+        if (self.jump_list) |*jump_list| {
+            jump_list.deinit();
+            self.jump_list = null;
+        }
         if (self.cli_config_override_path) |path| {
             self.core_app.alloc.free(path);
             self.cli_config_override_path = null;
@@ -3429,6 +3538,11 @@ pub const App = struct {
     /// or allocation fails.
     fn localAppDataPath(self: *const App, name: []const u8) ?[]u8 {
         return localAppDataPathAlloc(self.core_app.alloc, name);
+    }
+
+    fn initializeJumpList(self: *App) void {
+        const jump_list = if (self.jump_list) |*value| value else return;
+        jump_list.startup();
     }
 
     /// Resolve `%LOCALAPPDATA%\noctty\palette-mru.txt`. Caller frees
@@ -3457,7 +3571,13 @@ pub const App = struct {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
         // session when the diagnostic run exits.
-        return self.sessionRestoreEligible();
+        return sessionSavePolicyAllows(
+            self.safe_mode,
+            self.config.@"window-save-state",
+            self.config.@"initial-window",
+            self.config.@"initial-command" != null,
+            self.startup_profile_picker,
+        );
     }
 
     fn sessionRestoreEligible(self: *const App) bool {
@@ -3468,6 +3588,7 @@ pub const App = struct {
             self.config.@"initial-window",
             self.config.@"initial-command" != null,
             self.startup_profile_picker,
+            self.explicit_startup_working_directory,
         );
     }
 
@@ -5123,17 +5244,25 @@ pub const App = struct {
                         self.config = config;
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
+                        var jump_list_profiles_pending = ssh_config_hosts_changed and self.jump_list != null;
+                        if (jump_list_profiles_pending) self.jump_list.?.updateProfiles(&.{});
                         for (self.hosts.items) |host| {
                             if (ssh_config_hosts_changed) {
                                 host.invalidateProfiles();
-                                if (host.overlay_mode == .profile) {
+                                if (host.overlay_mode == .profile or jump_list_profiles_pending) {
                                     _ = host.reloadProfiles() catch |err| blk: {
                                         log.warn("SSH profile reload after config change failed err={}", .{err});
                                         break :blk false;
                                     };
+                                    if (host.profiles != null and host.profiles_complete) {
+                                        jump_list_profiles_pending = false;
+                                    }
                                 }
                             }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
+                        }
+                        if (jump_list_profiles_pending) {
+                            self.jump_list.?.requestProfileDiscovery();
                         }
                         self.scheduleGlobalHotkeySync();
                         self.reconfigureTheme();
@@ -5461,9 +5590,17 @@ pub const App = struct {
                 return false;
             },
 
+            .toggle_quick_select => {
+                if (self.findSurfaceForTarget(target)) |surface| {
+                    return try surface.toggleQuickSelect();
+                }
+                return false;
+            },
+
             .pwd => {
                 if (self.findSurfaceForTarget(target)) |surface| {
                     try surface.setPwd(value.pwd);
+                    if (self.jump_list) |*jump_list| jump_list.noteRecent(value.pwd);
                     return true;
                 }
 
@@ -6187,6 +6324,30 @@ pub const App = struct {
         }
     }
 
+    fn ensureQuickSelectClass(self: *App) !void {
+        if (self.quick_select_class_atom != 0) return;
+
+        var wc: WNDCLASSEXW = .{
+            .cbSize = @sizeOf(WNDCLASSEXW),
+            .style = 0,
+            .lpfnWndProc = &quickSelectProc,
+            .cbClsExtra = 0,
+            .cbWndExtra = 0,
+            .hInstance = self.hinstance,
+            .hIcon = null,
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = quick_select_class_name,
+            .hIconSm = null,
+        };
+
+        self.quick_select_class_atom = sys.RegisterClassExW(&wc);
+        if (self.quick_select_class_atom == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+    }
+
     fn createWindowSurface(
         self: *App,
         config: *const configpkg.Config,
@@ -6688,6 +6849,7 @@ pub const App = struct {
             }
             self.removeHost(host);
         }
+        if (self.jump_list) |*jump_list| jump_list.scheduleIfStartupPending();
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
@@ -8063,6 +8225,9 @@ pub const App = struct {
     }
 
     fn openUrl(self: *App, url: []const u8) !void {
+        if (builtin.mode == .Debug and
+            try recordOpenUrlForTest(self.core_app.alloc, url)) return;
+
         const url_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, url);
         defer self.core_app.alloc.free(url_w);
 
@@ -9049,6 +9214,21 @@ const ConfirmPayload = struct {
     }
 };
 
+fn beginConfirmOverlay(
+    host: *Host,
+    payload: ConfirmPayload,
+    ensure_controls: *const fn (*Host) anyerror!void,
+    present: *const fn (*Host) anyerror!void,
+) !void {
+    // Lazy control creation finishes by resetting the overlay to its hidden
+    // baseline. Do that before installing the confirm payload so first-use
+    // initialization cannot discard the labels, body, and callbacks.
+    try ensure_controls(host);
+    host.confirm_payload = payload;
+    errdefer host.confirm_payload = null;
+    try present(host);
+}
+
 const ChildPlacement = struct {
     hwnd: ?HWND = null,
     rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
@@ -9212,6 +9392,8 @@ const Host = struct {
     overlay_hint_hwnd: ?HWND = null,
     overlay_accept_hwnd: ?HWND = null,
     overlay_cancel_hwnd: ?HWND = null,
+    overlay_accept_uia_provider: ?*win32_uia.SettingsControlProvider = null,
+    overlay_cancel_uia_provider: ?*win32_uia.SettingsControlProvider = null,
     overlay_button_prev_proc: ?*const anyopaque = null,
     cached_overlay_label: ?[:0]const u8 = null,
     cached_overlay_hint: ?[:0]const u8 = null,
@@ -9221,6 +9403,7 @@ const Host = struct {
     overlay_completion_value: ?[:0]const u8 = null,
     overlay_completion_result_id: ?PaletteStableId = null,
     profiles: ?[]windows_shell.Profile = null,
+    profiles_complete: bool = false,
     selected_profile: usize = 0,
     selected_profile_key: ?[:0]const u8 = null,
     chrome_brush: HBRUSH = null,
@@ -11819,6 +12002,21 @@ const Host = struct {
         destroySubclassedWindow(&self.overlay_edit_hwnd, &self.overlay_edit_prev_proc);
         destroyChildWindow(&self.overlay_hint_hwnd);
 
+        const overlay_button_providers = takeOverlayButtonUiaProviders(
+            &self.overlay_accept_uia_provider,
+            &self.overlay_cancel_uia_provider,
+        );
+        inline for (.{ overlay_button_providers.accept, overlay_button_providers.cancel }) |provider_opt| {
+            if (provider_opt) |provider| {
+                provider.detach();
+                scheduleDeferredUiaDisconnect(
+                    self.app,
+                    @ptrCast(provider),
+                    &overlayButtonDisconnectThunk,
+                    &overlayButtonReleaseThunk,
+                );
+            }
+        }
         const overlay_prev = self.overlay_button_prev_proc;
         self.overlay_button_prev_proc = null;
         destroySubclassedWindowWithPrev(&self.overlay_accept_hwnd, overlay_prev);
@@ -12318,12 +12516,20 @@ const Host = struct {
 
     fn reloadProfiles(self: *Host) !bool {
         const replacing = self.profiles != null;
-        const next_profiles = try windows_shell.listProfiles(
+        const discovery = try windows_shell.discoverProfiles(
             self.app.core_app.alloc,
             self.app.config.@"ssh-config-hosts",
         );
+        const next_profiles = discovery.profiles;
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
+        self.profiles_complete = discovery.complete;
+        if (self.app.jump_list) |*jump_list| {
+            // A later user-initiated load recovers startup discovery after its
+            // bounded transient-failure retry budget has been exhausted.
+            if (discovery.complete) jump_list.completeStartupProfileDiscovery();
+            jump_list.updateProfiles(next_profiles);
+        }
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
         self.app.applyLauncherQuickSlotPreferences(self.profiles.?);
         const profiles = self.profiles.?;
@@ -12352,6 +12558,7 @@ const Host = struct {
             windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
             self.profiles = null;
         }
+        self.profiles_complete = false;
     }
 
     fn reapplyLauncherProfilePreferences(self: *Host) !void {
@@ -12494,6 +12701,7 @@ const Host = struct {
         const profile = self.selectedProfile() orelse return false;
         const source = self.activeSurface() orelse return false;
         const surface = self.app.createProfileSurface(.{ .surface = source.core() }, profile, open_target) catch return false;
+        if (self.app.jump_list) |*jump_list| jump_list.noteProfileUsed(profile.key);
         if (self.overlay_mode == .profile) {
             self.hideOverlay();
             runUiActionOrLog("profile launch layout failed", self.layout());
@@ -12976,6 +13184,29 @@ const Host = struct {
         ) orelse return lastError();
         self.subclassButton(self.overlay_cancel_hwnd.?, &hostButtonProc, &self.overlay_button_prev_proc);
 
+        if (self.app.com_initialized) {
+            self.overlay_accept_uia_provider = win32_uia.SettingsControlProvider.create(
+                std.heap.page_allocator,
+                self.overlay_accept_hwnd.?,
+                .button,
+                null,
+            ) catch |err| blk: {
+                log.warn("overlay accept UIA provider unavailable err={}", .{err});
+                break :blk null;
+            };
+            self.overlay_cancel_uia_provider = win32_uia.SettingsControlProvider.create(
+                std.heap.page_allocator,
+                self.overlay_cancel_hwnd.?,
+                .button,
+                null,
+            ) catch |err| blk: {
+                log.warn("overlay cancel UIA provider unavailable err={}", .{err});
+                break :blk null;
+            };
+        } else {
+            log.warn("overlay button UIA providers disabled: UI thread is not a confirmed STA", .{});
+        }
+
         // Palette list — shown only when overlay_mode == .command_palette.
         // Stamped with a pointer to the Host via GWLP_USERDATA so the
         // wndproc can dispatch clicks back to `host.invokePaletteRow`.
@@ -13370,7 +13601,7 @@ const Host = struct {
         // branch, so we don't leak here.
         if (self.overlay_mode != .none) self.hideOverlay();
 
-        self.confirm_payload = .{
+        try beginConfirmOverlay(self, .{
             .title = title_owned,
             .body = body_owned,
             .accept_label = accept_owned,
@@ -13378,8 +13609,10 @@ const Host = struct {
             .on_accept = on_accept,
             .on_cancel = on_cancel,
             .userdata = userdata,
-        };
+        }, &Host.ensureOverlayControls, &Host.showConfirmOverlay);
+    }
 
+    fn showConfirmOverlay(self: *Host) !void {
         try self.showOverlay(.confirm, null);
     }
 
@@ -18726,6 +18959,94 @@ fn paletteListNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
     return host.buildPaletteListName(buf);
 }
 
+fn quickSelectNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    return surface.buildQuickSelectName(buf);
+}
+
+fn quickSelectFocusedThunk(ctx: *anyopaque) bool {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.quick_select_hwnd orelse return false;
+    return sys.GetFocus() == hwnd;
+}
+
+fn quickSelectRowCountThunk(ctx: *anyopaque) usize {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return 0;
+    return session.labels.count;
+}
+
+fn quickSelectSelectedIndexThunk(ctx: *anyopaque) ?usize {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    return surface.quickSelectFirstRemainingIndex();
+}
+
+fn quickSelectRowNameThunk(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return "Quick select target";
+    if (index >= session.labels.count or index >= session.scan.matches.len) return "Quick select target";
+    return win32_hints.accessibleTargetName(
+        buf,
+        index,
+        session.labels.count,
+        session.labels.get(index),
+        session.scan.matchText(index),
+    );
+}
+
+fn quickSelectRowEnabledThunk(ctx: *anyopaque, index: usize) bool {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return false;
+    return index < session.labels.count and session.labels.startsWith(index, session.prefix.typed());
+}
+
+fn quickSelectRowIdThunk(_: *anyopaque, index: usize) u64 {
+    return index + 1;
+}
+
+fn quickSelectRowBoundsThunk(ctx: *anyopaque, index: usize) ?win32_uia.PaletteListRowBounds {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.quick_select_hwnd orelse return null;
+    const host = surface.host orelse return null;
+    var client: RECT = undefined;
+    if (sys.GetClientRect(hwnd, &client) == 0) return null;
+    const metrics: win32_theme.ThemeMetrics = if (isHighContrastActive())
+        .highContrast()
+    else
+        .{};
+    const bounds = surface.quickSelectLabelRect(
+        index,
+        client,
+        metrics,
+        host.current_dpi,
+    ) orelse return null;
+    var origin: POINT = .{ .x = bounds.left, .y = bounds.top };
+    if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+    return .{
+        .left = @floatFromInt(origin.x),
+        .top = @floatFromInt(origin.y),
+        .width = @floatFromInt(bounds.right - bounds.left),
+        .height = @floatFromInt(bounds.bottom - bounds.top),
+    };
+}
+
+fn quickSelectSelectRowThunk(ctx: *anyopaque, index: usize) void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return;
+    if (index >= session.labels.count or !session.labels.startsWith(index, session.prefix.typed())) return;
+    const label = session.labels.get(index);
+    @memcpy(session.prefix.bytes[0..label.len], label);
+    session.prefix.len = label.len;
+    surface.quickSelectPrefixChanged();
+}
+
+fn quickSelectInvokeRowThunk(ctx: *anyopaque, index: usize) void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    surface.fireQuickSelect(index, false, false) catch |err| {
+        log.warn("quick select UIA action failed err={}", .{err});
+    };
+}
+
 fn paletteListRowCountThunk(ctx: *anyopaque) usize {
     const host: *const Host = @ptrCast(@alignCast(ctx));
     return host.palette_list_ranked_count;
@@ -19896,6 +20217,109 @@ fn paletteListProc(
     }
 }
 
+fn quickSelectProc(
+    hwnd: HWND,
+    msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+) callconv(.winapi) LRESULT {
+    const surface = getSurface(hwnd);
+    switch (msg) {
+        c.WM_ERASEBKGND => return 1,
+        c.WM_PAINT => {
+            if (surface) |value| value.paintQuickSelect();
+            return 0;
+        },
+        c.WM_SETFOCUS => {
+            if (surface) |value| if (value.quick_select_uia_provider) |provider| {
+                win32_uia.events.raiseFocusChanged(&provider.base);
+            };
+            return 0;
+        },
+        c.WM_KILLFOCUS => {
+            if (surface) |value| value.closeQuickSelect(false);
+            return 0;
+        },
+        // Keep capture through the full click. Closing on button-down would
+        // release capture early and let the matching button-up reach the
+        // terminal underneath (including its context-menu/reporting paths).
+        c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => {
+            return 0;
+        },
+        c.WM_XBUTTONDOWN => return 1,
+        c.WM_LBUTTONUP => {
+            if (surface) |value| {
+                if (value.quick_select_session) |*session| {
+                    if (consumeQuickSelectOpeningLeftButtonUp(
+                        &session.suppress_opening_left_button_up,
+                        &session.suppress_until_opening_keys_released,
+                        anyVirtualKeyPressed(),
+                    )) return 0;
+                }
+                value.closeQuickSelect(true);
+            }
+            return 0;
+        },
+        c.WM_RBUTTONUP, c.WM_MBUTTONUP => {
+            if (surface) |value| value.closeQuickSelect(true);
+            return 0;
+        },
+        c.WM_XBUTTONUP => {
+            if (surface) |value| value.closeQuickSelect(true);
+            // Windows requires TRUE for handled XButton messages.
+            return 1;
+        },
+        // Scrolling would invalidate the immutable viewport snapshot behind
+        // the visible labels, so the modal overlay owns wheel input too.
+        c.WM_MOUSEWHEEL,
+        c.WM_MOUSEHWHEEL,
+        c.WM_POINTERWHEEL,
+        c.WM_POINTERHWHEEL,
+        => return 0,
+        c.WM_CAPTURECHANGED => {
+            if (surface) |value| value.closeQuickSelect(false);
+            return 0;
+        },
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+            if (surface) |value| value.handleQuickSelectKey(wParam, lParam);
+            return 0;
+        },
+        c.WM_KEYUP, c.WM_SYSKEYUP => {
+            if (surface) |value| value.handleQuickSelectKeyUp();
+            return 0;
+        },
+        c.WM_CHAR, c.WM_SYSCHAR => {
+            if (surface) |value| value.handleQuickSelectChar(wParam);
+            return 0;
+        },
+        c.WM_DEADCHAR,
+        c.WM_SYSDEADCHAR,
+        => return 0,
+        c.WM_GETOBJECT => {
+            const value = surface orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (!value.app.com_initialized) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            value.ensureQuickSelectUiaProvider() catch |err| {
+                log.warn("quick select UIA provider unavailable err={}", .{err});
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            };
+            const provider = value.quick_select_uia_provider orelse
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (win32_uia.returnPaletteListProvider(
+                hwnd,
+                wParam,
+                lParam,
+                provider,
+            )) |result| return result;
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        c.WM_SETCURSOR => {
+            _ = sys.SetCursor(sys.LoadCursorW(null, c.IDC_ARROW));
+            return 1;
+        },
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
+    }
+}
+
 fn scrollbarProc(
     hwnd: HWND,
     msg: UINT,
@@ -20635,6 +21059,49 @@ fn detachChromeControlProvider(
         &chromeDisconnectThunk,
         &chromeReleaseThunk,
     );
+}
+
+fn overlayButtonDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.SettingsControlProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+
+fn overlayButtonReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.SettingsControlProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+}
+
+const OverlayButtonUiaProviders = struct {
+    accept: ?*win32_uia.SettingsControlProvider,
+    cancel: ?*win32_uia.SettingsControlProvider,
+};
+
+fn overlayButtonUiaProviderForHwnd(
+    hwnd: HWND,
+    accept_hwnd: ?HWND,
+    cancel_hwnd: ?HWND,
+    accept_provider: ?*win32_uia.SettingsControlProvider,
+    cancel_provider: ?*win32_uia.SettingsControlProvider,
+) ?*win32_uia.SettingsControlProvider {
+    if (accept_hwnd) |accept| {
+        if (hwnd == accept) return accept_provider;
+    }
+    if (cancel_hwnd) |cancel| {
+        if (hwnd == cancel) return cancel_provider;
+    }
+    return null;
+}
+
+fn takeOverlayButtonUiaProviders(
+    accept: *?*win32_uia.SettingsControlProvider,
+    cancel: *?*win32_uia.SettingsControlProvider,
+) OverlayButtonUiaProviders {
+    const result: OverlayButtonUiaProviders = .{
+        .accept = accept.*,
+        .cancel = cancel.*,
+    };
+    accept.* = null;
+    cancel.* = null;
+    return result;
 }
 
 fn shouldRefocusAfterOverlayHide(
@@ -22332,6 +22799,7 @@ const hotkeySpecForTrigger = win32_input.hotkeySpecForTrigger;
 const hotkeySpecEql = win32_input.hotkeySpecEql;
 
 const hotkeyRegistrationFailureReason = win32_input.hotkeyRegistrationFailureReason;
+const quickSelectAsciiFromKey = win32_input.quickSelectAsciiFromKey;
 
 fn quitTimerDelayMs(delay: configpkg.Config.Duration) UINT {
     const clamped_ns = @max(delay.duration, std.time.ns_per_s);
@@ -22830,6 +23298,170 @@ fn terminalAccessibilityOutputCallback(
     }
 }
 
+const QuickSelectSession = struct {
+    const PendingAction = struct {
+        trigger_vk: UINT,
+        index: ?usize,
+        ctrl: bool,
+        alt: bool,
+    };
+
+    scan: win32_hints.Scan,
+    labels: win32_hints.LabelSet,
+    prefix: win32_hints.PrefixState = .{},
+    pending_action: ?PendingAction = null,
+    awaiting_composed_char: bool = false,
+    suppress_until_opening_keys_released: bool = false,
+    suppress_opening_left_button_up: bool = false,
+    cell_width: i32,
+    cell_height: i32,
+    padding_left: i32,
+    padding_top: i32,
+    placed_rects: []RECT,
+    placed_slots: []?usize,
+    placed_count: usize = 0,
+    placement_client: ?RECT = null,
+    placement_metrics: ?win32_theme.ThemeMetrics = null,
+    placement_dpi: UINT = 0,
+    placement_complete: bool = false,
+
+    fn deinit(self: *QuickSelectSession, alloc: Allocator) void {
+        alloc.free(self.placed_slots);
+        alloc.free(self.placed_rects);
+        self.labels.deinit(alloc);
+        self.scan.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
+test "quick select label placement checks final positioned chips" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 100, .bottom = 100 };
+    var comparisons_remaining: usize = Surface.quick_select_placement_comparison_budget;
+    const occupied = [_]RECT{
+        .{ .left = 0, .top = 0, .right = 20, .bottom = 10 },
+        .{ .left = 10, .top = 10, .right = 30, .bottom = 20 },
+    };
+    const placed = Surface.quickSelectPositionLabel(
+        .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
+        client,
+        &occupied,
+        &comparisons_remaining,
+    ).?;
+    try std.testing.expectEqual(@as(i32, 20), placed.top);
+    try std.testing.expectEqual(@as(i32, 30), placed.bottom);
+}
+
+test "quick select label placement uses the free global grid" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 30, .bottom = 20 };
+    var comparisons_remaining: usize = Surface.quick_select_placement_comparison_budget;
+    const occupied = [_]RECT{
+        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
+        .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
+    };
+    const placed = Surface.quickSelectPositionLabel(
+        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
+        client,
+        &occupied,
+        &comparisons_remaining,
+    ).?;
+    try std.testing.expectEqual(@as(i32, 0), placed.left);
+    try std.testing.expectEqual(@as(i32, 10), placed.right);
+}
+
+test "quick select label placement reports an exhausted viewport" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 20, .bottom = 20 };
+    var comparisons_remaining: usize = Surface.quick_select_placement_comparison_budget;
+    const occupied = [_]RECT{
+        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
+        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
+        .{ .left = 0, .top = 10, .right = 10, .bottom = 20 },
+        .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
+    };
+    try std.testing.expect(Surface.quickSelectPositionLabel(
+        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
+        client,
+        &occupied,
+        &comparisons_remaining,
+    ) == null);
+}
+
+test "quick select label placement stops at its comparison budget" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 20, .bottom = 20 };
+    const occupied = [_]RECT{.{ .left = 0, .top = 0, .right = 10, .bottom = 10 }};
+    var comparisons_remaining: usize = 0;
+    try std.testing.expect(Surface.quickSelectPositionLabel(
+        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
+        client,
+        &occupied,
+        &comparisons_remaining,
+    ) == null);
+}
+
+fn quickSelectLabelDisplayUnit(byte: u8) u16 {
+    return if (byte == ' ') 0x2423 else byte;
+}
+
+/// Opening a modal overlay transfers focus while its shortcut is still held.
+/// Snapshotting this as a boolean is sufficient because the overlay ignores
+/// every label input until a key-up observes that no virtual key remains down.
+fn anyVirtualKeyPressed() bool {
+    for (0..256) |vk| {
+        if (win32_input.keyPressed(@intCast(vk))) return true;
+    }
+    return false;
+}
+
+test "quick select label renders spaces visibly" {
+    try std.testing.expectEqual(@as(u16, 0x2423), quickSelectLabelDisplayUnit(' '));
+    try std.testing.expectEqual(@as(u16, 'a'), quickSelectLabelDisplayUnit('a'));
+}
+
+fn quickSelectCanActivate(window_visible: bool, hwnd_visible: bool) bool {
+    return window_visible and hwnd_visible;
+}
+
+test "quick select activates only for a visible surface" {
+    try std.testing.expect(quickSelectCanActivate(true, true));
+    try std.testing.expect(!quickSelectCanActivate(false, true));
+    try std.testing.expect(!quickSelectCanActivate(true, false));
+}
+
+fn consumeQuickSelectOpeningLeftButtonUp(
+    suppress_button_up: *bool,
+    suppress_keys: *bool,
+    any_key_pressed: bool,
+) bool {
+    if (!suppress_button_up.*) return false;
+    suppress_button_up.* = false;
+    suppress_keys.* = any_key_pressed;
+    return true;
+}
+
+test "quick select consumes only the opening left button release" {
+    var suppress_button_up = true;
+    var suppress_keys = true;
+    try std.testing.expect(consumeQuickSelectOpeningLeftButtonUp(
+        &suppress_button_up,
+        &suppress_keys,
+        false,
+    ));
+    try std.testing.expect(!suppress_button_up);
+    try std.testing.expect(!suppress_keys);
+    try std.testing.expect(!consumeQuickSelectOpeningLeftButtonUp(
+        &suppress_button_up,
+        &suppress_keys,
+        false,
+    ));
+
+    suppress_button_up = true;
+    try std.testing.expect(consumeQuickSelectOpeningLeftButtonUp(
+        &suppress_button_up,
+        &suppress_keys,
+        true,
+    ));
+    try std.testing.expect(suppress_keys);
+}
+
 pub const Surface = struct {
     app: *App,
     shell_id: ?win32_shell.model.PaneId = null,
@@ -22903,6 +23535,10 @@ pub const Surface = struct {
     scrollbar_marker_revision: u64 = 0,
     scrollbar_marker_budget: usize = 0,
     scrollbar_paint_cache: ?ScrollbarPaintKey = null,
+    quick_select_hwnd: ?HWND = null,
+    quick_select_placement: ChildPlacement = .{},
+    quick_select_session: ?QuickSelectSession = null,
+    quick_select_uia_provider: ?*win32_uia.PaletteListProvider = null,
     pwd: ?[:0]const u8 = null,
     progress_status: ?[:0]const u8 = null,
     taskbar_progress: ?win32_taskbar_progress.ProgressReport = null,
@@ -24458,6 +25094,650 @@ pub const Surface = struct {
         );
         self.scrollbar_marker_budget = marker_budget;
         self.scrollbar_marker_revision +%= 1;
+    }
+
+    fn ensureQuickSelectUiaProvider(self: *Surface) !void {
+        if (!self.app.com_initialized or self.quick_select_uia_provider != null) return;
+        self.quick_select_uia_provider = try win32_uia.PaletteListProvider.create(
+            std.heap.page_allocator,
+            self.quick_select_hwnd orelse return error.NoQuickSelectWindow,
+            self.quickSelectUiaState(),
+        );
+    }
+
+    fn quickSelectUiaState(self: *const Surface) win32_uia.PaletteListState {
+        return .{
+            .ctx = @ptrCast(@constCast(self)),
+            .name = &quickSelectNameThunk,
+            .localized_control_type = "quick select targets",
+            .keyboard_focusable = true,
+            .focused = &quickSelectFocusedThunk,
+            .row_count = &quickSelectRowCountThunk,
+            .selected_index = &quickSelectSelectedIndexThunk,
+            .row_name = &quickSelectRowNameThunk,
+            .row_enabled = &quickSelectRowEnabledThunk,
+            .row_id = &quickSelectRowIdThunk,
+            .select_row = &quickSelectSelectRowThunk,
+            .invoke_row = &quickSelectInvokeRowThunk,
+            .row_bounds = &quickSelectRowBoundsThunk,
+            .use_com_threading = self.app.com_initialized,
+        };
+    }
+
+    fn quickSelectLabelRect(
+        self: *Surface,
+        index: usize,
+        client: RECT,
+        metrics: win32_theme.ThemeMetrics,
+        dpi: UINT,
+    ) ?RECT {
+        _ = self.ensureQuickSelectLabelRects(client, metrics, dpi);
+        const session = if (self.quick_select_session) |*value| value else return null;
+        if (index >= session.placed_slots.len) return null;
+        const slot = session.placed_slots[index] orelse return null;
+        return session.placed_rects[slot];
+    }
+
+    const quick_select_placement_comparison_budget = 262_144;
+
+    fn quickSelectPositionLabel(
+        raw: RECT,
+        client: RECT,
+        occupied: []const RECT,
+        comparisons_remaining: *usize,
+    ) ?RECT {
+        const height = raw.bottom - raw.top;
+        const width = raw.right - raw.left;
+        if (height <= 0 or width <= 0) return null;
+        const lane_count: usize = @intCast(@max(1, @divTrunc(client.bottom - client.top, height)));
+        for (0..lane_count * 2 + 1) |attempt| {
+            const magnitude: i32 = @intCast((attempt + 1) / 2);
+            const lane: i32 = if (attempt == 0)
+                0
+            else if (attempt % 2 == 1)
+                magnitude
+            else
+                -magnitude;
+            var candidate = raw;
+            candidate.top += lane * height;
+            candidate.bottom += lane * height;
+            if (candidate.top < client.top or candidate.bottom > client.bottom) continue;
+            for (occupied) |previous| {
+                if (comparisons_remaining.* == 0) return null;
+                comparisons_remaining.* -= 1;
+                if (candidate.left < previous.right and candidate.right > previous.left and
+                    candidate.top < previous.bottom and candidate.bottom > previous.top)
+                {
+                    break;
+                }
+            } else return candidate;
+        }
+
+        // If every target-local lane is occupied, tile across the viewport.
+        // Returning the known-overlapping raw rectangle would let a later
+        // opaque chip hide an earlier label and make its key undiscoverable.
+        var top = client.top;
+        while (top + height <= client.bottom) : (top += height) {
+            var left = client.left;
+            while (left + width <= client.right) : (left += width) {
+                const candidate: RECT = .{
+                    .left = left,
+                    .top = top,
+                    .right = left + width,
+                    .bottom = top + height,
+                };
+                for (occupied) |previous| {
+                    if (comparisons_remaining.* == 0) return null;
+                    comparisons_remaining.* -= 1;
+                    if (candidate.left < previous.right and candidate.right > previous.left and
+                        candidate.top < previous.bottom and candidate.bottom > previous.top)
+                    {
+                        break;
+                    }
+                } else return candidate;
+            }
+        }
+        return null;
+    }
+
+    fn ensureQuickSelectLabelRects(
+        self: *Surface,
+        client: RECT,
+        metrics: win32_theme.ThemeMetrics,
+        dpi: UINT,
+    ) bool {
+        const session = if (self.quick_select_session) |*value| value else return false;
+        if (session.placement_client) |previous_client| {
+            if (session.placement_metrics) |previous_metrics| {
+                if (std.meta.eql(previous_client, client) and
+                    std.meta.eql(previous_metrics, metrics) and
+                    session.placement_dpi == dpi)
+                {
+                    return session.placement_complete;
+                }
+            }
+        }
+
+        @memset(session.placed_slots, null);
+        session.placed_count = 0;
+        session.placement_complete = true;
+        session.placement_client = client;
+        session.placement_metrics = metrics;
+        session.placement_dpi = dpi;
+        var comparisons_remaining: usize = quick_select_placement_comparison_budget;
+        for (session.scan.matches, 0..) |_, index| {
+            if (!session.labels.startsWith(index, session.prefix.typed())) continue;
+            const raw = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse {
+                session.placement_complete = false;
+                continue;
+            };
+            const positioned = quickSelectPositionLabel(
+                raw,
+                client,
+                session.placed_rects[0..session.placed_count],
+                &comparisons_remaining,
+            ) orelse {
+                session.placement_complete = false;
+                if (comparisons_remaining == 0) break;
+                continue;
+            };
+            session.placed_rects[session.placed_count] = positioned;
+            session.placed_slots[index] = session.placed_count;
+            session.placed_count += 1;
+        }
+        return session.placement_complete;
+    }
+
+    fn quickSelectRawLabelRect(
+        self: *const Surface,
+        index: usize,
+        client: RECT,
+        metrics: win32_theme.ThemeMetrics,
+        dpi: UINT,
+    ) ?RECT {
+        const session = if (self.quick_select_session) |*value| value else return null;
+        if (index >= session.scan.matches.len or index >= session.labels.count) return null;
+        if (!session.labels.startsWith(index, session.prefix.typed())) return null;
+        const matched = session.scan.matches[index];
+        const placed = win32_hints.labelPlacement(.{
+            .left = matched.first.x,
+            .top = matched.first.y,
+            .right = @as(u32, matched.first.x) + 1,
+            .bottom = matched.first.y + 1,
+        }, session.labels.get(index).len, .{
+            .cell_width = session.cell_width,
+            .cell_height = session.cell_height,
+            .padding_left = session.padding_left,
+            .padding_top = session.padding_top,
+            .viewport_width = client.right,
+            .viewport_height = client.bottom,
+            .dpi = dpi,
+            .logical_padding_x = metrics.space_1,
+            .logical_stroke = metrics.stroke_hairline,
+        }) orelse return null;
+        return .{
+            .left = placed.left,
+            .top = placed.top,
+            .right = placed.right,
+            .bottom = placed.bottom,
+        };
+    }
+
+    fn quickSelectFirstRemainingIndex(self: *const Surface) ?usize {
+        const session = if (self.quick_select_session) |*value| value else return null;
+        for (0..session.labels.count) |index| {
+            if (session.labels.startsWith(index, session.prefix.typed())) return index;
+        }
+        return null;
+    }
+
+    fn buildQuickSelectName(self: *const Surface, buf: []u8) []const u8 {
+        const session = if (self.quick_select_session) |*value| value else return std.fmt.bufPrint(buf, "Quick select, 0 targets", .{}) catch "Quick select";
+        const count = session.labels.count;
+        // Screen readers speak this verbatim, so "1 targets" is a real defect.
+        const noun = if (count == 1) "target" else "targets";
+        const typed = session.prefix.typed();
+        if (typed.len == 0) {
+            return std.fmt.bufPrint(
+                buf,
+                "Quick select, {d} {s}",
+                .{ count, noun },
+            ) catch "Quick select";
+        }
+        var spoken_typed_buf: [win32_hints.PrefixState.max_len * 6]u8 = undefined;
+        const spoken_typed = win32_hints.accessibleLabelName(&spoken_typed_buf, typed);
+        return std.fmt.bufPrint(
+            buf,
+            "Quick select, {d} {s}, typed {s}",
+            .{ count, noun, spoken_typed },
+        ) catch "Quick select";
+    }
+
+    fn toggleQuickSelect(self: *Surface) !bool {
+        if (self.quick_select_session != null) {
+            self.closeQuickSelect(true);
+            return true;
+        }
+        const surface_hwnd = self.hwnd orelse return false;
+        if (!quickSelectCanActivate(
+            self.window_visible,
+            sys.IsWindowVisible(surface_hwnd) != 0,
+        )) return false;
+        if (!self.core_initialized) return false;
+
+        const alloc = self.app.core_app.alloc;
+        var render_state: terminal.RenderState = .empty;
+        defer render_state.deinit(alloc);
+        self.core_surface.renderer_state.mutex.lock();
+        render_state.update(
+            alloc,
+            self.core_surface.renderer_state.terminal,
+        ) catch |err| {
+            self.core_surface.renderer_state.mutex.unlock();
+            return err;
+        };
+        const renderer_size = self.core_surface.size;
+        self.core_surface.renderer_state.mutex.unlock();
+
+        const configured = self.app.config.@"quick-select-patterns".list.items;
+        const patterns: []const []const u8 = if (configured.len == 0)
+            &win32_hints.default_patterns
+        else
+            configured;
+        var scan = try win32_hints.scanRenderState(alloc, &render_state, patterns);
+        errdefer scan.deinit(alloc);
+        if (scan.matches.len == 0) {
+            scan.deinit(alloc);
+            return true;
+        }
+
+        var label_set = try win32_hints.generateLabels(
+            alloc,
+            self.app.config.@"quick-select-alphabet".value,
+            scan.matches.len,
+        );
+        errdefer label_set.deinit(alloc);
+        const placed_rects = try alloc.alloc(RECT, label_set.count);
+        errdefer alloc.free(placed_rects);
+        const placed_slots = try alloc.alloc(?usize, label_set.count);
+        errdefer alloc.free(placed_slots);
+
+        try self.ensureQuickSelectWindow();
+        self.quick_select_session = .{
+            .scan = scan,
+            .labels = label_set,
+            .cell_width = @intCast(renderer_size.cell.width),
+            .cell_height = @intCast(renderer_size.cell.height),
+            .padding_left = @intCast(renderer_size.padding.left),
+            .padding_top = @intCast(renderer_size.padding.top),
+            .placed_rects = placed_rects,
+            .placed_slots = placed_slots,
+            .suppress_until_opening_keys_released = anyVirtualKeyPressed(),
+            .suppress_opening_left_button_up = win32_input.keyPressed(c.VK_LBUTTON),
+        };
+
+        self.refreshQuickSelectPlacement();
+        const hwnd = self.quick_select_hwnd.?;
+        var client: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client) == 0) {
+            log.warn("quick select client rect unavailable", .{});
+            self.closeQuickSelect(false);
+            return true;
+        }
+        const host = self.host orelse {
+            log.warn("quick select host unavailable", .{});
+            self.closeQuickSelect(false);
+            return true;
+        };
+        const metrics: win32_theme.ThemeMetrics = if (isHighContrastActive())
+            .highContrast()
+        else
+            .{};
+        if (!self.ensureQuickSelectLabelRects(client, metrics, host.current_dpi)) {
+            log.warn("quick select has more visible labels than fit without overlap", .{});
+            self.closeQuickSelect(false);
+            return true;
+        }
+
+        self.ensureQuickSelectUiaProvider() catch |err| {
+            log.warn("quick select UIA provider unavailable err={}", .{err});
+        };
+
+        _ = applyChildVisibility(hwnd, &self.quick_select_placement, true);
+        _ = sys.SetFocus(hwnd);
+        // Color-keyed pixels are transparent to hit testing. Capture ensures
+        // every click over the modal overlay reaches its dismissal handler
+        // instead of leaking through to the terminal below.
+        _ = sys.SetCapture(hwnd);
+        _ = sys.InvalidateRect(hwnd, null, 0);
+        return true;
+    }
+
+    fn ensureQuickSelectWindow(self: *Surface) !void {
+        if (self.quick_select_hwnd != null) return;
+        try self.app.ensureQuickSelectClass();
+        const parent = self.hwnd orelse return error.NoSurfaceWindow;
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(parent, &rect) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+
+        self.quick_select_hwnd = sys.CreateWindowExW(
+            c.WS_EX_LAYERED,
+            quick_select_class_name,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            c.WS_CHILD | c.WS_TABSTOP,
+            0,
+            0,
+            @max(1, rect.right),
+            @max(1, rect.bottom),
+            parent,
+            null,
+            self.app.hinstance,
+            null,
+        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        const hwnd = self.quick_select_hwnd.?;
+        _ = sys.SetWindowLongPtrW(
+            hwnd,
+            c.GWLP_USERDATA,
+            @as(LONG_PTR, @intCast(@intFromPtr(self))),
+        );
+        if (sys.SetLayeredWindowAttributes(
+            hwnd,
+            scrollbar_transparent_key,
+            255,
+            c.LWA_ALPHA | c.LWA_COLORKEY,
+        ) == 0) {
+            _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+            _ = sys.DestroyWindow(hwnd);
+            self.quick_select_hwnd = null;
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+    }
+
+    fn refreshQuickSelectPlacement(self: *Surface) void {
+        const overlay = self.quick_select_hwnd orelse return;
+        const parent = self.hwnd orelse return;
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(parent, &rect) == 0) return;
+        _ = applyChildRect(overlay, &self.quick_select_placement, rect);
+    }
+
+    fn closeQuickSelect(self: *Surface, restore_focus: bool) void {
+        // Callers include unconditional lifecycle hooks (resize, hide,
+        // teardown), so closing when nothing is open must be a no-op —
+        // otherwise `restore_focus` would steal focus on every resize.
+        if (self.quick_select_hwnd == null and self.quick_select_session == null) return;
+
+        const overlay = self.quick_select_hwnd;
+        self.quick_select_hwnd = null;
+        self.quick_select_placement = .{};
+
+        if (self.quick_select_uia_provider) |provider| {
+            self.quick_select_uia_provider = null;
+            provider.raiseTeardown();
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &paletteDisconnectThunk,
+                &paletteReleaseThunk,
+            );
+        }
+        if (overlay) |hwnd| {
+            _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+            if (sys.GetCapture()) |capture| {
+                if (capture == hwnd) _ = sys.ReleaseCapture();
+            }
+            _ = sys.DestroyWindow(hwnd);
+        }
+        if (self.quick_select_session) |*session| session.deinit(self.app.core_app.alloc);
+        self.quick_select_session = null;
+
+        if (restore_focus) {
+            if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
+        }
+    }
+
+    fn quickSelectPrefixChanged(self: *Surface) void {
+        if (self.quick_select_session) |*session| session.placement_client = null;
+        if (self.quick_select_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
+        if (self.quick_select_uia_provider) |provider| {
+            win32_uia.events.raiseNameChanged(&provider.base);
+            win32_uia.events.raiseStructureChanged(
+                &provider.base,
+                .children_invalidated,
+                null,
+            );
+            if (self.quickSelectFirstRemainingIndex()) |index| provider.raiseSelectionChanged(index);
+        }
+    }
+
+    fn handleQuickSelectKey(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
+        const session = if (self.quick_select_session) |*value| value else return;
+        if (session.suppress_until_opening_keys_released) return;
+        if (wParam == c.VK_ESCAPE) {
+            session.pending_action = .{
+                .trigger_vk = c.VK_ESCAPE,
+                .index = null,
+                .ctrl = false,
+                .alt = false,
+            };
+            return;
+        }
+        if (session.pending_action != null) return;
+        if (wParam == c.VK_BACK) {
+            session.awaiting_composed_char = false;
+            if (session.prefix.backspace()) self.quickSelectPrefixChanged();
+            return;
+        }
+
+        const char = quickSelectAsciiFromKey(wParam, lParam) orelse {
+            session.awaiting_composed_char = true;
+            return;
+        };
+        session.awaiting_composed_char = false;
+        self.inputQuickSelectChar(session, char, @intCast(wParam & 0xFFFF));
+    }
+
+    fn handleQuickSelectChar(self: *Surface, wParam: WPARAM) void {
+        const session = if (self.quick_select_session) |*value| value else return;
+        if (session.suppress_until_opening_keys_released) return;
+        if (!session.awaiting_composed_char or session.pending_action != null) return;
+        session.awaiting_composed_char = false;
+        if (wParam < 0x20 or wParam >= 0x7F) return;
+        self.inputQuickSelectChar(session, @intCast(wParam), 0);
+    }
+
+    fn inputQuickSelectChar(
+        self: *Surface,
+        session: *QuickSelectSession,
+        char: u8,
+        trigger_vk: UINT,
+    ) void {
+        const mods = win32_input.quickSelectActionMods();
+        switch (session.prefix.input(&session.labels, char)) {
+            .ignored => {},
+            .narrowed => self.quickSelectPrefixChanged(),
+            .complete => |index| session.pending_action = .{
+                .trigger_vk = trigger_vk,
+                .index = index,
+                .ctrl = mods.ctrl,
+                .alt = mods.alt,
+            },
+        }
+    }
+
+    fn handleQuickSelectKeyUp(self: *Surface) void {
+        const session = if (self.quick_select_session) |*value| value else return;
+        if (session.suppress_until_opening_keys_released) {
+            session.suppress_until_opening_keys_released = anyVirtualKeyPressed();
+            return;
+        }
+        const pending = session.pending_action orelse return;
+        if ((pending.trigger_vk != 0 and win32_input.keyPressed(@intCast(pending.trigger_vk))) or
+            win32_input.keyPressed(c.VK_SHIFT) or
+            win32_input.keyPressed(c.VK_CONTROL) or
+            win32_input.keyPressed(c.VK_MENU))
+        {
+            return;
+        }
+        session.pending_action = null;
+        const index = pending.index orelse {
+            self.closeQuickSelect(true);
+            return;
+        };
+        self.fireQuickSelect(index, pending.ctrl, pending.alt) catch |err| {
+            log.warn("quick select action failed err={}", .{err});
+        };
+    }
+
+    /// Whether the cells a quick-select target occupies still hold the text
+    /// that was scanned when the overlay opened. Fails closed: any error, or a
+    /// span that no longer exists, counts as changed.
+    fn quickSelectTargetUnchanged(
+        self: *Surface,
+        session: *const QuickSelectSession,
+        index: usize,
+    ) bool {
+        if (!self.core_initialized) return false;
+        const alloc = self.app.core_app.alloc;
+        const matched = session.scan.matches[index];
+
+        var render_state: terminal.RenderState = .empty;
+        defer render_state.deinit(alloc);
+        self.core_surface.renderer_state.mutex.lock();
+        render_state.update(
+            alloc,
+            self.core_surface.renderer_state.terminal,
+        ) catch {
+            self.core_surface.renderer_state.mutex.unlock();
+            return false;
+        };
+        self.core_surface.renderer_state.mutex.unlock();
+
+        // Same builder as the open-time scan, wide-character spacers included,
+        // or a target containing a wide character would never compare equal.
+        var rendered = win32_hints.renderStateText(alloc, &render_state) catch return false;
+        defer rendered.deinit(alloc);
+
+        const current = win32_hints.spanTextRange(
+            rendered.text,
+            rendered.map,
+            matched,
+        ) orelse return false;
+        return std.mem.eql(u8, current, session.scan.matchText(index));
+    }
+
+    fn fireQuickSelect(self: *Surface, index: usize, ctrl: bool, alt: bool) !void {
+        const alloc = self.app.core_app.alloc;
+        const session = if (self.quick_select_session) |*value| value else return;
+        if (index >= session.scan.matches.len) return;
+        const payload = try alloc.dupeZ(u8, session.scan.matchText(index));
+        defer alloc.free(payload);
+
+        // Re-verify against the LIVE viewport before acting.
+        //
+        // The overlay is colorkey-transparent, so the terminal keeps drawing
+        // underneath a snapshot taken when quick select opened. A program that
+        // rewrites the labeled region after the overlay is up would otherwise
+        // let the user act on bytes that are no longer the bytes on screen.
+        // Checking here, at the moment of use, is the only point where "what
+        // the user sees" and "what we act on" can be compared.
+        if (!self.quickSelectTargetUnchanged(session, index)) {
+            log.warn("quick select target changed under the overlay; ignoring", .{});
+            self.closeQuickSelect(true);
+            return;
+        }
+
+        const action = win32_hints.resolveAction(payload, ctrl, alt);
+
+        self.closeQuickSelect(true);
+        if (action == .open) {
+            _ = try self.app.performAction(
+                .{ .surface = self.core() },
+                .open_url,
+                .{ .kind = .unknown, .url = payload },
+            );
+            return;
+        }
+        if (action == .paste) {
+            // Defense-in-depth classifier pass, same as the drop path.
+            //
+            // Core's `isSafe` only flags newlines and bracketed-paste-end
+            // sequences. A quick-select payload is attacker-rendered terminal
+            // output, not something the user typed or copied, so a single-line
+            // match like `https://x/$(payload)` or one carrying `%VAR%` would
+            // otherwise reach the pty with no confirmation. Consult the full
+            // verdict (control_chars, shell_metachar, mixed_content) and fire
+            // the same confirm overlay as the core `.UnsafePaste` branch.
+            if (self.app.config.@"clipboard-paste-protection") {
+                const verdict = win32_paste_protection.inspect(payload);
+                if (verdict.severity != .safe) {
+                    log.info("quick select paste flagged severity={s} reason={s}", .{
+                        @tagName(verdict.severity),
+                        verdict.reason,
+                    });
+                    try self.requestPasteConfirm(.paste, payload);
+                    return;
+                }
+            }
+            self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
+                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.paste, payload),
+                else => return err,
+            };
+            return;
+        }
+        try self.writeClipboardText(payload);
+    }
+
+    fn paintQuickSelect(self: *Surface) void {
+        const hwnd = self.quick_select_hwnd orelse return;
+        var ps: PAINTSTRUCT = undefined;
+        const hdc = sys.BeginPaint(hwnd, &ps);
+        defer _ = sys.EndPaint(hwnd, &ps);
+        var client: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client) == 0) return;
+        fillSolidRect(hdc, client, scrollbar_transparent_key);
+
+        const host = self.host orelse return;
+        const theme = &self.app.resolved_theme;
+        const metrics: win32_theme.ThemeMetrics = if (isHighContrastActive())
+            .highContrast()
+        else
+            .{};
+        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+        _ = sys.SetTextColor(hdc, theme.button_active_fg);
+        const previous_font: ?HGDIOBJ = if (host.chrome_font) |font| sys.SelectObject(hdc, font) else null;
+        defer {
+            if (previous_font) |font| _ = sys.SelectObject(hdc, font);
+        }
+
+        _ = self.ensureQuickSelectLabelRects(client, metrics, host.current_dpi);
+        const session = if (self.quick_select_session) |*value| value else return;
+        for (session.scan.matches, 0..) |_, index| {
+            const label = session.labels.get(index);
+            if (index >= session.placed_slots.len) continue;
+            const slot = session.placed_slots[index] orelse continue;
+            var chip = session.placed_rects[slot];
+            drawRoundedRect(
+                hdc,
+                chip,
+                theme.button_active_bg,
+                theme.button_active_border,
+                host.scaled(metrics.radius_md),
+            );
+
+            var utf16: [win32_hints.PrefixState.max_len]u16 = undefined;
+            for (label, 0..) |byte, i| utf16[i] = quickSelectLabelDisplayUnit(byte);
+            _ = sys.DrawTextW(
+                hdc,
+                @ptrCast(&utf16),
+                @intCast(label.len),
+                &chip,
+                c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
+            );
+        }
     }
 
     fn ensureScrollbarWindow(self: *Surface) !void {
@@ -26199,6 +27479,12 @@ pub const Surface = struct {
     fn windowSizeChanged(self: *Surface) void {
         self.syncCoreSizeFromClientRect();
 
+        // Quick select holds a viewport snapshot plus the cell metrics that
+        // were current when it opened. A resize or font-size change invalidates
+        // both, so labels would land on the wrong cells; close it instead of
+        // repositioning a stale overlay.
+        self.closeQuickSelect(true);
+
         // `MoveWindow(..., bRepaint = false)` resizes the child HWND without
         // guaranteeing a follow-up paint for the newly exposed pixels. Request
         // one from the child itself after `WM_SIZE`, when the default
@@ -26547,6 +27833,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
+        self.closeQuickSelect(false);
 
         if (self.terminal_accessibility) |session| {
             self.core_surface.setTerminalOutputInterested(false);
@@ -26654,7 +27941,13 @@ pub const Surface = struct {
     fn setVisible(self: *Surface, visible: bool) void {
         const visibility_changed = self.window_visible != visible;
         self.window_visible = visible;
-        if (!visible) self.deferred_char.clear();
+        if (!visible) {
+            self.deferred_char.clear();
+            // A quick-select child cannot exist before the surface HWND.
+            // Some structural tests deliberately use partial, HWND-less
+            // surfaces, so do not inspect overlay state in that case.
+            if (self.hwnd != null) self.closeQuickSelect(false);
+        }
 
         const hwnd = self.hwnd orelse return;
         const child_visibility_changed = applyChildVisibility(hwnd, &self.placement, visible);
@@ -32280,6 +33573,27 @@ test "automation-action win32 ipc maps specific failure ack" {
     );
 }
 
+test "hints: recorded URL launch trace preserves the exact request" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("quick-select-open-url.txt", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    try writeOpenUrlTrace(file, "https://example.com/a?x=1&y=2");
+    try file.seekTo(0);
+    const recorded = try file.readToEndAlloc(std.testing.allocator, 1024);
+    defer std.testing.allocator.free(recorded);
+    try std.testing.expectEqualStrings(
+        "https://example.com/a?x=1&y=2\r\n",
+        recorded,
+    );
+}
+
 test "win32 win32_ipc.readDataResponse treats legacy failure ack as IPCFailed" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -32980,14 +34294,21 @@ test "win32 layout action result propagates automation failure" {
 }
 
 test "win32 explicit startup flows bypass session restore" {
-    try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false));
-    try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, true, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, true));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
-    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
+    try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false, false));
+    try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, true, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, false, true));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true, true));
+
+    // Startup-only restore bypasses must not disable later session saves.
+    try std.testing.expect(sessionSavePolicyAllows(false, .default, true, false, false));
+    try std.testing.expect(!sessionSavePolicyAllows(false, .default, false, false, false));
+    try std.testing.expect(!sessionSavePolicyAllows(false, .default, true, true, false));
+    try std.testing.expect(!sessionSavePolicyAllows(false, .default, true, false, true));
 }
 
 test "win32 session restore transaction preserves first surface state" {

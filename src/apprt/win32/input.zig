@@ -380,6 +380,69 @@ pub fn currentMods() input.Mods {
     return currentModsFromKeyboardState(currentKeyboardState(&state));
 }
 
+fn quickSelectAltGrPressed(state: *const [256]u8) bool {
+    return (state[c.VK_RMENU] & 0x80) != 0 and
+        (state[c.VK_CONTROL] & 0x80) != 0;
+}
+
+fn quickSelectActionModsFromKeyboardState(state: *const [256]u8) input.Mods {
+    return normalizeAltGrMods(modsFromKeyboardState(state));
+}
+
+pub fn quickSelectActionMods() input.Mods {
+    var state: [256]u8 = [_]u8{0} ** 256;
+    if (currentKeyboardState(&state)) |keyboard_state| {
+        return quickSelectActionModsFromKeyboardState(keyboard_state);
+    }
+
+    return normalizeAltGrMods(fallbackMods());
+}
+
+/// Translate a key event into the single printable ASCII character a
+/// quick-select label is typed with, or null when the key is not one.
+///
+/// Ctrl and Alt select the action a completed label performs, so ordinary
+/// action modifiers are masked before translation. AltGr is preserved because
+/// Windows represents it as synthetic Ctrl + right Alt and layouts need that
+/// chord to produce printable label characters.
+pub fn quickSelectAsciiFromKey(wParam: WPARAM, lParam: LPARAM) ?u8 {
+    const vk: UINT = @intCast(wParam & 0xFFFF);
+    var state: [256]u8 = [_]u8{0} ** 256;
+    const keyboard_state = currentKeyboardState(&state) orelse {
+        const codepoint = unshiftedCodepointForVirtualKey(vk);
+        return if (codepoint >= 0x20 and codepoint < 0x7F)
+            @intCast(codepoint)
+        else
+            null;
+    };
+
+    if (!quickSelectAltGrPressed(keyboard_state)) {
+        state[c.VK_CONTROL] = 0;
+        state[c.VK_LCONTROL] = 0;
+        state[c.VK_RCONTROL] = 0;
+        state[c.VK_MENU] = 0;
+        state[c.VK_LMENU] = 0;
+        state[c.VK_RMENU] = 0;
+    }
+    var translation_mods = modsFromKeyboardState(keyboard_state);
+    if (quickSelectAltGrPressed(keyboard_state)) {
+        // Preserve the raw Ctrl+right-Alt keyboard state for ToUnicodeEx, but
+        // prevent translateKeyText's ordinary Ctrl-chord remasking from
+        // stripping the layout's AltGr mapping back to the unmodified key.
+        translation_mods.ctrl = false;
+        translation_mods.alt = false;
+    }
+    const translated = translateKeyText(
+        vk,
+        lParam,
+        translation_mods,
+        keyboard_state,
+    );
+    if (translated.len != 1) return null;
+    const char = translated.utf8[0];
+    return if (char >= 0x20 and char < 0x7F) char else null;
+}
+
 fn keyFromVirtualKey(vk: UINT, lParam: LPARAM) input.Key {
     return switch (vk) {
         c.VK_BACK => .backspace,
@@ -1516,6 +1579,25 @@ test "win32 XButton wParam decoding maps forward and back buttons" {
     // XBUTTON2 in HIWORD of wParam
     const wp2 = (@as(usize, c.XBUTTON2) << 16) | @as(usize, c.MK_XBUTTON2);
     try std.testing.expectEqual(c.XBUTTON2, highWord(wp2));
+}
+
+test "win32 quick select treats synthetic AltGr as label text instead of an action" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var state: [256]u8 = [_]u8{0} ** 256;
+    state[c.VK_CONTROL] = 0x80;
+    state[c.VK_LCONTROL] = 0x80;
+    state[c.VK_MENU] = 0x80;
+    state[c.VK_RMENU] = 0x80;
+    const altgr = withoutSyntheticAltGr(modsFromKeyboardState(&state));
+    try std.testing.expect(!altgr.ctrl);
+    try std.testing.expect(!altgr.alt);
+
+    state[c.VK_RMENU] = 0;
+    state[c.VK_LMENU] = 0x80;
+    const explicit = withoutSyntheticAltGr(modsFromKeyboardState(&state));
+    try std.testing.expect(explicit.ctrl);
+    try std.testing.expect(explicit.alt);
 }
 
 test "win32 normalizeWheelDelta maps discrete wheel steps to pixel deltas" {

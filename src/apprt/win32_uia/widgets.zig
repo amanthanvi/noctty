@@ -154,13 +154,20 @@ pub const PaletteListState = struct {
     /// the slice actually written. A typical implementation writes
     /// something like "Command palette: 3 of 87 — New Tab".
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
+    localized_control_type: []const u8 = "command palette matches",
+    keyboard_focusable: bool = false,
+    focused: ?*const fn (ctx: *anyopaque) bool = null,
     row_count: ?*const fn (ctx: *anyopaque) usize = null,
     selected_index: ?*const fn (ctx: *anyopaque) ?usize = null,
     row_name: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
     row_enabled: ?*const fn (ctx: *anyopaque, index: usize) bool = null,
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
+    invoke_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
     geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
+    /// Optional screen-space bounds for widgets whose rows are not arranged
+    /// as one contiguous vertical list (for example, terminal hint chips).
+    row_bounds: ?*const fn (ctx: *anyopaque, index: usize) ?PaletteListRowBounds = null,
     use_com_threading: bool = false,
 };
 
@@ -170,6 +177,8 @@ pub const PaletteListGeometry = struct {
     visible_count: usize,
     row_height: f64,
 };
+
+pub const PaletteListRowBounds = com.UiaRect;
 
 pub const TerminalState = struct {
     pub const Role = enum { terminal, edit };
@@ -312,6 +321,14 @@ pub const PaletteListProvider = struct {
         events.raiseSelectionItemSelected(&row.base);
     }
 
+    /// Publish removal while the provider and its row fragments are still
+    /// queryable, before the owner detaches and destroys the widget HWND.
+    pub fn raiseTeardown(self: *PaletteListProvider) void {
+        if (!self.isAvailable()) return;
+        events.raiseSelectionInvalidated(&self.base);
+        events.raiseStructureChanged(&self.base, .children_bulk_removed, null);
+    }
+
     fn fromBase(p: *com.IRawElementProviderSimple) *PaletteListProvider {
         return @fieldParentPtr("base", p);
     }
@@ -364,6 +381,13 @@ pub const PaletteListProvider = struct {
     }
 
     fn rowBounds(self: *const PaletteListProvider, index: usize) ?com.UiaRect {
+        if (!self.isAvailable() or index >= self.rowCount()) return null;
+        if (self.state.row_bounds) |callback| {
+            const value = callback(self.state.ctx, index) orelse return null;
+            if (!validPaletteBounds(value)) return null;
+            return value;
+        }
+
         const snapshot = self.geometry() orelse return null;
         if (index < snapshot.first_visible or index >= snapshot.first_visible + snapshot.visible_count) return null;
         const offset: f64 = @floatFromInt(index - snapshot.first_visible);
@@ -376,6 +400,26 @@ pub const PaletteListProvider = struct {
             .width = snapshot.bounds.width,
             .height = @min(snapshot.row_height, remaining),
         };
+    }
+
+    fn listBounds(self: *const PaletteListProvider) ?com.UiaRect {
+        if (self.geometry()) |value| return value.bounds;
+
+        var result: ?com.UiaRect = null;
+        for (0..self.rowCount()) |index| {
+            const row = self.rowBounds(index) orelse continue;
+            if (result) |*bounds| {
+                const right = @max(bounds.left + bounds.width, row.left + row.width);
+                const bottom = @max(bounds.top + bounds.height, row.top + row.height);
+                bounds.left = @min(bounds.left, row.left);
+                bounds.top = @min(bounds.top, row.top);
+                bounds.width = right - bounds.left;
+                bounds.height = bottom - bounds.top;
+            } else {
+                result = row;
+            }
+        }
+        return result;
     }
 
     fn rowEnabled(self: *const PaletteListProvider, index: usize) bool {
@@ -541,8 +585,10 @@ pub const PaletteListProvider = struct {
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_LocalizedControlTypePropertyId => {
-                const literal = std.unicode.utf8ToUtf16LeStringLiteral("command palette matches");
-                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                const bstr = allocBstrFromUtf8(
+                    self.alloc,
+                    self.state.localized_control_type,
+                ) orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_FrameworkIdPropertyId => {
@@ -554,11 +600,15 @@ pub const PaletteListProvider = struct {
             constants.UIA_IsContentElementPropertyId,
             constants.UIA_IsEnabledPropertyId,
             => out.* = com.VARIANT.fromBool(true),
-            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(false),
+            constants.UIA_IsKeyboardFocusablePropertyId => {
+                out.* = com.VARIANT.fromBool(self.state.keyboard_focusable);
+            },
             constants.UIA_HasKeyboardFocusPropertyId => {
-                // The EDIT sibling actually owns focus; the list
-                // announces selection via NameChanged instead.
-                out.* = com.VARIANT.fromBool(false);
+                const focused = if (self.state.focused) |callback|
+                    callback(self.state.ctx)
+                else
+                    false;
+                out.* = com.VARIANT.fromBool(focused);
             },
             else => {},
         }
@@ -643,7 +693,7 @@ pub const PaletteListProvider = struct {
         const self = fromFragment(self_fragment);
         out.* = .{ .left = 0, .top = 0, .width = 0, .height = 0 };
         if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.geometry()) |value| out.* = value.bounds;
+        if (self.listBounds()) |value| out.* = value;
         return com.S_OK;
     }
 
@@ -679,6 +729,21 @@ pub const PaletteListProvider = struct {
         const self = fromFragmentRoot(self_root);
         if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (!std.math.isFinite(x) or !std.math.isFinite(y)) return com.S_OK;
+        if (self.state.row_bounds != null) {
+            for (0..self.rowCount()) |index| {
+                const bounds = self.rowBounds(index) orelse continue;
+                if (x < bounds.left or x >= bounds.left + bounds.width or
+                    y < bounds.top or y >= bounds.top + bounds.height)
+                {
+                    continue;
+                }
+                const row = self.createRow(index) orelse return com.S_OK;
+                out.* = &row.fragment;
+                return com.S_OK;
+            }
+            return com.S_OK;
+        }
+
         const snapshot = self.geometry() orelse return com.S_OK;
         if (x < snapshot.bounds.left or x >= snapshot.bounds.left + snapshot.bounds.width or
             y < snapshot.bounds.top or y >= snapshot.bounds.top + snapshot.bounds.height)
@@ -699,14 +764,33 @@ pub const PaletteListProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromFragmentRoot(self_root);
         out.* = null;
-        return if (self.isAvailable()) com.S_OK else com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const focused = if (self.state.focused) |callback|
+            callback(self.state.ctx)
+        else
+            false;
+        if (focused) {
+            _ = FragmentAddRef(&self.fragment);
+            out.* = &self.fragment;
+        }
+        return com.S_OK;
     }
 };
+
+fn validPaletteBounds(bounds: com.UiaRect) bool {
+    return std.math.isFinite(bounds.left) and
+        std.math.isFinite(bounds.top) and
+        std.math.isFinite(bounds.width) and
+        std.math.isFinite(bounds.height) and
+        bounds.width > 0 and
+        bounds.height > 0;
+}
 
 const PaletteRowProvider = struct {
     base: com.IRawElementProviderSimple,
     fragment: com.IRawElementProviderFragment,
     selection_item: com.ISelectionItemProvider,
+    invoke_item: com.IInvokeProvider,
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     parent: *PaletteListProvider,
@@ -743,6 +827,12 @@ const PaletteRowProvider = struct {
         .get_IsSelected = GetIsSelected,
         .get_SelectionContainer = GetSelectionContainer,
     };
+    const invoke_vtbl: com.IInvokeProviderVtbl = .{
+        .QueryInterface = InvokeQueryInterface,
+        .AddRef = InvokeAddRef,
+        .Release = InvokeRelease,
+        .Invoke = Invoke,
+    };
 
     fn create(alloc: std.mem.Allocator, parent: *PaletteListProvider, index: usize, id: u64) !*PaletteRowProvider {
         const self = try alloc.create(PaletteRowProvider);
@@ -751,6 +841,7 @@ const PaletteRowProvider = struct {
             .base = .{ .vtbl = &simple_vtbl },
             .fragment = .{ .vtbl = &fragment_vtbl },
             .selection_item = .{ .vtbl = &selection_vtbl },
+            .invoke_item = .{ .vtbl = &invoke_vtbl },
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .parent = parent,
@@ -769,6 +860,9 @@ const PaletteRowProvider = struct {
     fn fromSelection(p: *com.ISelectionItemProvider) *PaletteRowProvider {
         return @fieldParentPtr("selection_item", p);
     }
+    fn fromInvoke(p: *com.IInvokeProvider) *PaletteRowProvider {
+        return @fieldParentPtr("invoke_item", p);
+    }
     fn available(self: *const PaletteRowProvider) bool {
         return self.parent.isAvailable() and
             self.index < self.parent.rowCount() and
@@ -777,7 +871,7 @@ const PaletteRowProvider = struct {
 
     fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
         out.* = null;
-        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else return com.E_NOINTERFACE;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else return com.E_NOINTERFACE;
         _ = self.refcount.fetchAdd(1, .monotonic);
         return com.S_OK;
     }
@@ -790,6 +884,9 @@ const PaletteRowProvider = struct {
     fn SelectionQueryInterface(p: *com.ISelectionItemProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
         return fromSelection(p).query(iid, out);
     }
+    fn InvokeQueryInterface(p: *com.IInvokeProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return fromInvoke(p).query(iid, out);
+    }
     fn addRef(self: *PaletteRowProvider) u32 {
         return self.refcount.fetchAdd(1, .monotonic) + 1;
     }
@@ -801,6 +898,9 @@ const PaletteRowProvider = struct {
     }
     fn SelectionAddRef(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
         return fromSelection(p).addRef();
+    }
+    fn InvokeAddRef(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return fromInvoke(p).addRef();
     }
     fn release(self: *PaletteRowProvider) u32 {
         const previous = self.refcount.fetchSub(1, .acq_rel);
@@ -820,6 +920,9 @@ const PaletteRowProvider = struct {
     fn SelectionRelease(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
         return fromSelection(p).release();
     }
+    fn InvokeRelease(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return fromInvoke(p).release();
+    }
     fn getProviderOptions(p: *com.IRawElementProviderSimple, out: *i32) callconv(.winapi) com.HRESULT {
         const self = fromBase(p);
         out.* = com.ProviderOptions_ServerSideProvider |
@@ -832,6 +935,9 @@ const PaletteRowProvider = struct {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (pattern == constants.UIA_SelectionItemPatternId) {
             out.* = @ptrCast(&self.selection_item);
+            _ = self.addRef();
+        } else if (pattern == constants.UIA_InvokePatternId and self.parent.state.invoke_row != null) {
+            out.* = @ptrCast(&self.invoke_item);
             _ = self.addRef();
         }
         return com.S_OK;
@@ -974,6 +1080,14 @@ const PaletteRowProvider = struct {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         out.* = &self.parent.base;
         _ = PaletteListProvider.AddRef(&self.parent.base);
+        return com.S_OK;
+    }
+    fn Invoke(p: *com.IInvokeProvider) callconv(.winapi) com.HRESULT {
+        const self = fromInvoke(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!self.parent.rowEnabled(self.index)) return com.UIA_E_ELEMENTNOTENABLED;
+        const callback = self.parent.state.invoke_row orelse return com.UIA_E_INVALIDOPERATION;
+        callback(self.parent.state.ctx, self.index);
         return com.S_OK;
     }
 };
@@ -4313,6 +4427,66 @@ test "PaletteListProvider QueryInterface accepts IUnknown" {
     _ = PaletteListProvider.Release(&p.base); // Drop the QI ref.
 }
 
+test "PaletteListProvider exposes configurable identity and focus" {
+    var counter: u32 = 0;
+    const callbacks = struct {
+        fn name(_: *anyopaque, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "Quick select, 1 target", .{}) catch "";
+        }
+
+        fn focused(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    const state: PaletteListState = .{
+        .ctx = @ptrCast(&counter),
+        .name = callbacks.name,
+        .localized_control_type = "quick select targets",
+        .keyboard_focusable = true,
+        .focused = callbacks.focused,
+    };
+
+    const provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    var localized_type = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_LocalizedControlTypePropertyId,
+        &localized_type,
+    ));
+    defer _ = com.VariantClear(&localized_type);
+    const expected_type = std.unicode.utf8ToUtf16LeStringLiteral("quick select targets");
+    try std.testing.expectEqual(@as(u32, expected_type.len), com.SysStringLen(localized_type.value.bstr));
+    try std.testing.expectEqualSlices(u16, expected_type, localized_type.value.bstr.?[0..expected_type.len]);
+
+    var focusable = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &focusable,
+    ));
+    try std.testing.expectEqual(com.VT_BOOL, focusable.vt);
+    try std.testing.expectEqual(com.VARIANT_TRUE, focusable.value.bool_val);
+
+    var focused = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_HasKeyboardFocusPropertyId,
+        &focused,
+    ));
+    try std.testing.expectEqual(com.VT_BOOL, focused.vt);
+    try std.testing.expectEqual(com.VARIANT_TRUE, focused.value.bool_val);
+
+    var focus_fragment: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentRootGetFocus(&provider.fragment_root, &focus_fragment),
+    );
+    try std.testing.expect(focus_fragment == &provider.fragment);
+    _ = PaletteListProvider.FragmentRelease(focus_fragment.?);
+}
+
 test "palette list and row providers propagate COM threading options" {
     var state_data = TestPaletteState{ .count = 1, .selected = 0 };
     var provider = try PaletteListProvider.create(
@@ -4344,9 +4518,11 @@ const TestPaletteState = struct {
     selected: ?usize = 1,
     id_base: u64 = 100,
     selected_by_provider: ?usize = null,
+    invoked_by_provider: ?usize = null,
     reentrant_provider: ?*PaletteListProvider = null,
     reentrant_queries: u32 = 0,
     list_geometry: ?PaletteListGeometry = null,
+    row_bounds: ?[]const PaletteListRowBounds = null,
     disabled_index: ?usize = null,
 
     fn name(_: *anyopaque, buf: []u8) []const u8 {
@@ -4390,9 +4566,20 @@ const TestPaletteState = struct {
         }
     }
 
+    fn invokeRow(ctx: *anyopaque, index: usize) void {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        self.invoked_by_provider = index;
+    }
+
     fn geometry(ctx: *anyopaque) ?PaletteListGeometry {
         const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
         return self.list_geometry;
+    }
+
+    fn rowBounds(ctx: *anyopaque, index: usize) ?PaletteListRowBounds {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        const bounds = self.row_bounds orelse return null;
+        return if (index < bounds.len) bounds[index] else null;
     }
 
     fn state(self: *TestPaletteState) PaletteListState {
@@ -4405,7 +4592,9 @@ const TestPaletteState = struct {
             .row_enabled = rowEnabled,
             .row_id = rowId,
             .select_row = selectRow,
+            .invoke_row = invokeRow,
             .geometry = geometry,
+            .row_bounds = if (self.row_bounds != null) rowBounds else null,
         };
     }
 };
@@ -4453,6 +4642,49 @@ test "Palette geometry maps scrolled rows and hit testing" {
         &outside,
     ));
     try std.testing.expectEqual(@as(?*com.IRawElementProviderFragment, null), outside);
+}
+
+test "Palette sparse row bounds support geometry and hit testing" {
+    const rows = [_]PaletteListRowBounds{
+        .{ .left = 100, .top = 200, .width = 30, .height = 20 },
+        .{ .left = 300, .top = 400, .width = 40, .height = 25 },
+    };
+    var state_data = TestPaletteState{
+        .count = rows.len,
+        .selected = 0,
+        .row_bounds = &rows,
+    };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    try std.testing.expectEqual(rows[1], provider.rowBounds(1).?);
+
+    var root_bounds: com.UiaRect = undefined;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentGetBoundingRectangle(&provider.fragment, &root_bounds),
+    );
+    try std.testing.expectEqual(@as(f64, 100), root_bounds.left);
+    try std.testing.expectEqual(@as(f64, 200), root_bounds.top);
+    try std.testing.expectEqual(@as(f64, 240), root_bounds.width);
+    try std.testing.expectEqual(@as(f64, 225), root_bounds.height);
+
+    var hit: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentRootElementProviderFromPoint(
+            &provider.fragment_root,
+            310,
+            410,
+            &hit,
+        ),
+    );
+    try std.testing.expect(hit != null);
+    if (hit) |fragment| {
+        const row = PaletteRowProvider.fromFragment(fragment);
+        try std.testing.expectEqual(@as(usize, 1), row.index);
+        _ = PaletteRowProvider.Release(&row.base);
+    }
 }
 
 test "PaletteListProvider exposes one-selection container semantics without fabricated focus" {
@@ -4509,8 +4741,27 @@ test "Palette row selection rejects disabled items" {
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.Select(&row.selection_item));
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.AddToSelection(&row.selection_item));
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.RemoveFromSelection(&row.selection_item));
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.Invoke(&row.invoke_item));
     try std.testing.expectEqual(@as(?usize, null), state_data.selected_by_provider);
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.SetFocus(&row.fragment));
+}
+
+test "Palette row exposes InvokePattern and invokes its callback" {
+    var state_data = TestPaletteState{ .count = 2 };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+    const row = provider.createRow(1).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+
+    var pattern: ?*com.IUnknown = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteRowProvider.GetPatternProvider(&row.base, constants.UIA_InvokePatternId, &pattern),
+    );
+    try std.testing.expect(pattern != null);
+    _ = PaletteRowProvider.InvokeRelease(@ptrCast(@alignCast(pattern.?)));
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Invoke(&row.invoke_item));
+    try std.testing.expectEqual(@as(?usize, 1), state_data.invoked_by_provider);
 }
 
 test "Palette row enforces required single-selection operations" {
@@ -6043,6 +6294,48 @@ test "edit provider exposes one mutable text selection" {
     );
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.AddToSelection(selected.?));
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.RemoveFromSelection(selected.?));
+}
+
+test "terminal provider exposes an active read-only selection" {
+    var data = TestTerminalStateData{
+        .value_text = "hello world",
+        .visible_value_text = "hello world",
+        .visible_range = .{ .start = 0, .end = 11 },
+        .caret_offset = 11,
+        .terminal_selection_range = .{ .start = 0, .end = 5 },
+        .terminal_selection_active_offset = 5,
+    };
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var supported: i32 = com.SupportedTextSelection_Single;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.get_SupportedTextSelection(&provider.text_iface, &supported),
+    );
+    try std.testing.expectEqual(com.SupportedTextSelection_None, supported);
+
+    var selections: ?*com.SAFEARRAY = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.GetSelection(&provider.text_iface, &selections),
+    );
+    defer _ = com.SafeArrayDestroy(selections);
+    var index: i32 = 0;
+    var selected: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        com.SafeArrayGetElement(selections.?, &index, @ptrCast(&selected)),
+    );
+    defer _ = TerminalTextRangeProvider.Release(selected.?);
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 0, .end = 5 },
+        TerminalTextRangeProvider.fromBase(selected.?).range,
+    );
 }
 
 test "read-only edit provider still exposes Value contract" {

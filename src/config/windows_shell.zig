@@ -9,8 +9,10 @@ const log = std.log.scoped(.windows_shell);
 const windows = std.os.windows;
 
 const wsl_probe_timeout_ms: windows.DWORD = 1500;
+const wsl_list_timeout_ms: windows.DWORD = 1500;
 var wsl_probe_mutex: std.Thread.Mutex = .{};
 var wsl_probe_cache: ?bool = null;
+var wsl_profile_probe_cache: ?bool = null;
 var ssh_missing_mutex: std.Thread.Mutex = .{};
 var ssh_missing_logged = false;
 const wsl_shell_integration_next_step =
@@ -53,6 +55,11 @@ pub const Profile = struct {
     }
 };
 
+pub const ProfileDiscovery = struct {
+    profiles: []Profile,
+    complete: bool,
+};
+
 /// Determine the default shell order for Windows:
 /// WSL -> pwsh -> powershell -> cmd.
 pub fn defaultShell(alloc: Allocator) !DefaultShell {
@@ -89,7 +96,36 @@ pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
         probeWslExecutableCached,
         listWslDistros,
         order_hint,
+        null,
     );
+    return try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts, null);
+}
+
+pub fn discoverProfiles(alloc: Allocator, include_ssh_hosts: bool) !ProfileDiscovery {
+    const order_hint = detectProfileOrderHint(alloc);
+    defer if (order_hint) |value| alloc.free(value);
+
+    var complete = true;
+    const shell_profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(
+        alloc,
+        lookupExecutable,
+        probeWslExecutableForProfiles,
+        listWslDistros,
+        order_hint,
+        &complete,
+    );
+    return .{
+        .profiles = try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts, &complete),
+        .complete = complete,
+    };
+}
+
+fn appendConfiguredSshProfiles(
+    alloc: Allocator,
+    shell_profiles: []Profile,
+    include_ssh_hosts: bool,
+    complete: ?*bool,
+) ![]Profile {
     if (!include_ssh_hosts) return shell_profiles;
 
     // SSH discovery is additive. Any failure below degrades to the detected
@@ -97,6 +133,7 @@ pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
     // "no profiles at all" and would leave the user with no picker.
     const hosts = windows_ssh_hosts.load(alloc) catch |err| {
         warnSshDiscoveryOnce(err);
+        if (complete) |value| value.* = false;
         return shell_profiles;
     };
     defer windows_ssh_hosts.deinitHosts(alloc, hosts);
@@ -104,6 +141,7 @@ pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
 
     const ssh_path = resolveSshExecutable(alloc, lookupExecutable, accessAbsolute) catch |err| {
         warnSshDiscoveryOnce(err);
+        if (complete) |value| value.* = false;
         return shell_profiles;
     };
     if (ssh_path == null) {
@@ -449,6 +487,7 @@ fn listProfilesWithLookupAndProbeAndWslList(
         probe,
         list_wsl,
         null,
+        null,
     );
 }
 
@@ -458,6 +497,7 @@ fn listProfilesWithLookupAndProbeAndWslListAndOrder(
     probe: anytype,
     list_wsl: anytype,
     order_hint: ?[]const u8,
+    complete: ?*bool,
 ) ![]Profile {
     var profiles: std.ArrayList(Profile) = .empty;
     errdefer {
@@ -468,7 +508,10 @@ fn listProfilesWithLookupAndProbeAndWslListAndOrder(
     if (try lookup(alloc, "wsl.exe")) |path| {
         defer alloc.free(path);
 
-        if (try probe(alloc, path)) {
+        const wsl_ready = try probe(alloc, path);
+        if (!wsl_ready) {
+            if (complete) |value| value.* = false;
+        } else {
             try appendProfile(
                 alloc,
                 &profiles,
@@ -736,6 +779,21 @@ fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
     return result;
 }
 
+fn probeWslExecutableForProfiles(alloc: Allocator, exe_path: []const u8) !bool {
+    if (builtin.os.tag != .windows) return true;
+
+    wsl_probe_mutex.lock();
+    defer wsl_probe_mutex.unlock();
+
+    if ((wsl_profile_probe_cache orelse false) or (wsl_probe_cache orelse false)) return true;
+
+    const result = try probeWslExecutable(alloc, exe_path);
+    // Profile discovery keeps transient negative results retryable while a
+    // successful probe remains stable for later palette/jump-list refreshes.
+    if (result) wsl_profile_probe_cache = true;
+    return result;
+}
+
 fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
     if (builtin.os.tag != .windows) return true;
 
@@ -903,6 +961,23 @@ fn lookupGitBash(alloc: Allocator, lookup: anytype) !?[]u8 {
     return null;
 }
 
+const WslOutputDrain = struct {
+    stdout: std.fs.File,
+    bytes: ?[]u8 = null,
+    err: ?anyerror = null,
+
+    fn run(self: *WslOutputDrain) void {
+        self.bytes = self.stdout.readToEndAlloc(std.heap.page_allocator, 64 * 1024) catch |err| {
+            self.err = err;
+            return;
+        };
+    }
+
+    fn deinit(self: *WslOutputDrain) void {
+        if (self.bytes) |bytes| std.heap.page_allocator.free(bytes);
+    }
+};
+
 fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     var child = std.process.Child.init(&.{ exe_path, "-l", "-q" }, alloc);
     child.stdin_behavior = .Ignore;
@@ -911,8 +986,9 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     child.create_no_window = true;
 
     try child.spawn();
+    var child_running = true;
     errdefer {
-        _ = child.kill() catch {};
+        if (child_running) _ = child.kill() catch {};
     }
 
     const stdout = child.stdout orelse {
@@ -920,10 +996,51 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
         return error.Unexpected;
     };
 
-    const raw_bytes = try stdout.readToEndAlloc(alloc, 64 * 1024);
-    defer alloc.free(raw_bytes);
+    // Drain concurrently so a large distro list cannot fill the anonymous
+    // pipe and prevent wsl.exe from reaching the signaled state below.
+    var drain: WslOutputDrain = .{ .stdout = stdout };
+    const drain_thread = try std.Thread.spawn(.{}, WslOutputDrain.run, .{&drain});
+    var drain_joined = false;
+    defer {
+        if (!drain_joined) drain_thread.join();
+        drain.deinit();
+    }
 
-    _ = try child.wait();
+    windows.WaitForSingleObjectEx(child.id, wsl_list_timeout_ms, false) catch |err| switch (err) {
+        error.WaitTimeOut => {
+            log.warn("WSL distro enumeration timed out exe={s} timeout_ms={}", .{
+                exe_path,
+                wsl_list_timeout_ms,
+            });
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            child_running = false;
+            drain_thread.join();
+            drain_joined = true;
+            return error.WslListTimeout;
+        },
+        else => {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            child_running = false;
+            drain_thread.join();
+            drain_joined = true;
+            return err;
+        },
+    };
+
+    drain_thread.join();
+    drain_joined = true;
+    const term = try child.wait();
+    child_running = false;
+    if (drain.err) |err| {
+        return err;
+    }
+    if (!childTermSucceeded(term)) {
+        log.warn("WSL distro enumeration exited unsuccessfully exe={s}", .{exe_path});
+        return error.WslListFailed;
+    }
+    const raw_bytes = drain.bytes orelse return error.Unexpected;
 
     // wsl.exe outputs UTF-16LE. Convert to UTF-8 before parsing.
     // bytesAsSlice returns align(1) u16, but utf16LeToUtf8Alloc needs align(2).
@@ -959,6 +1076,13 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     }
 
     return try result.toOwnedSlice(alloc);
+}
+
+fn childTermSucceeded(term: std.process.Child.Term) bool {
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Returns true for WSL distros that are internal service distributions
@@ -1250,6 +1374,60 @@ test "listProfilesWithLookupAndProbeAndWslList enumerates windows profiles" {
     try testing.expectEqual(ProfileKind.cmd, profiles[6].kind);
 }
 
+test "profile discovery reports a retryable WSL probe failure" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var complete = true;
+    const profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return false;
+        }
+    }.probe, struct {
+        fn list(_: Allocator, _: []const u8) ![][]u8 {
+            return error.UnexpectedWslList;
+        }
+    }.list, null, &complete);
+    defer deinitProfiles(alloc, profiles);
+
+    try testing.expect(!complete);
+    try testing.expectEqual(@as(usize, 1), profiles.len);
+    try testing.expectEqual(ProfileKind.cmd, profiles[0].kind);
+
+    complete = true;
+    const recovered = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    }.probe, struct {
+        fn list(a: Allocator, _: []const u8) ![][]u8 {
+            return try a.alloc([]u8, 0);
+        }
+    }.list, null, &complete);
+    defer deinitProfiles(alloc, recovered);
+    try testing.expect(complete);
+    try testing.expectEqual(@as(usize, 2), recovered.len);
+    try testing.expectEqual(ProfileKind.wsl_default, recovered[0].kind);
+}
+
+test "WSL enumeration requires a successful child exit" {
+    try std.testing.expect(childTermSucceeded(.{ .Exited = 0 }));
+    try std.testing.expect(!childTermSucceeded(.{ .Exited = 1 }));
+    try std.testing.expect(!childTermSucceeded(.{ .Unknown = 1 }));
+}
+
 test "ssh profiles append after shells with alias-only argv" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -1398,7 +1576,7 @@ test "listProfilesWithLookupAndProbeAndWslListAndOrder reorders windows profiles
             try values.append(alloc_, try alloc_.dupe(u8, "Debian"));
             return try values.toOwnedSlice(alloc_);
         }
-    }.list, "git,pwsh,Ubuntu,cmd");
+    }.list, "git,pwsh,Ubuntu,cmd", null);
     defer deinitProfiles(alloc, profiles);
 
     try testing.expectEqual(@as(usize, 7), profiles.len);

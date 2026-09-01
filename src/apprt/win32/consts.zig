@@ -124,6 +124,7 @@ pub const SIZE_MINIMIZED: u32 = 1;
 pub const SIZE_RESTORED: u32 = 0;
 pub const WM_SYSKEYDOWN = 0x0104;
 pub const WM_SYSKEYUP = 0x0105;
+pub const WM_SYSCHAR = 0x0106;
 pub const WM_SYSDEADCHAR = 0x0107;
 pub const WM_WINHOSTTY_WAKE = WM_APP + 1;
 pub const WM_WINHOSTTY_UPDATE = WM_APP + 2;
@@ -318,6 +319,7 @@ pub const SEARCH_CLOSE_ID: usize = 2108;
 pub const MF_POPUP: UINT = 0x00000010;
 pub const MF_CHECKED: UINT = 0x00000008;
 
+pub const VK_LBUTTON = 0x01;
 pub const VK_BACK = 0x08;
 pub const VK_TAB = 0x09;
 pub const VK_RETURN = 0x0D;
