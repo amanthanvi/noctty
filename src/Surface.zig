@@ -4915,6 +4915,7 @@ pub fn mouseButtonCallback(
                 }
 
                 try self.setSelection(null);
+                if (self.copy_mode_active) _ = try self.ensureCopyModeSelectionLocked();
                 try self.queueRender();
             },
             .@"copy-or-paste" => if (self.io.terminal.screens.active.selection) |sel| {
@@ -4924,6 +4925,7 @@ pub fn mouseButtonCallback(
                     .mixed,
                 );
                 try self.setSelection(null);
+                if (self.copy_mode_active) _ = try self.ensureCopyModeSelectionLocked();
                 try self.queueRender();
             } else {
                 // Pasting can trigger a lock grab in complete clipboard
