@@ -94,13 +94,17 @@ pub const Options = struct {
 /// `class` as was given on the command line.
 ///
 /// All of the arguments after the `+new-window` argument (except for the
-/// `--class` flag) will be sent to the remote noctty instance and will be
-/// parsed as command line flags. These flags will override certain settings
-/// when creating the first surface in the new window. Currently, only
-/// `--working-directory`, `--command`, and `--title` are supported. `-e` will
-/// also work as an alias for `--command`, except that if `-e` is found on the
-/// command line all following arguments will become part of the command and no
-/// more arguments will be parsed for configuration settings.
+/// `--class` flag) are normally sent to the remote noctty instance and parsed
+/// as command line flags. These flags override certain settings when creating
+/// the first surface in the new window. Currently,
+/// `--working-directory`, `--command`, and `--title` are supported.
+/// `--launch-layout=<name>` is handled separately: it sends only the validated
+/// layout name over a dedicated IPC request and cannot be combined with other
+/// arguments.
+/// `-e` will also work as an alias for `--command`, except that if
+/// `-e` is found on the command line all following arguments will become part
+/// of the command and no more arguments will be parsed for configuration
+/// settings.
 ///
 /// If `--working-directory` is found on the command line and is a relative
 /// path (i.e. doesn't start with `/`) it will be resolved to an absolute path
@@ -108,8 +112,9 @@ pub const Options = struct {
 /// command is run from. `~/` prefixes will also be expanded to the user's home
 /// directory.
 ///
-/// If `--working-directory` is _not_ found on the command line, the working
-/// directory that `noctty +new-window` is run from will be passed to noctty.
+/// For an ordinary new-window request, if `--working-directory` is _not_ found
+/// on the command line, the directory that `noctty +new-window` is run from
+/// will be passed to noctty. Layout requests use their saved pane directories.
 ///
 /// On Win32, `+new-window` uses a native named-pipe IPC channel to forward the
 /// collected command-line arguments into an already-running `noctty.exe`
@@ -129,6 +134,9 @@ pub const Options = struct {
 ///
 ///   * `--title`: A title that will override the title of the first surface in
 ///     the new window. The title override may be edited or removed later.
+///
+///   * `--launch-layout=<name>`: Materialize the saved named layout in a new
+///     window instead of creating a default first surface.
 ///
 ///   * `-e`: Any arguments after this will be interpreted as a command to
 ///     execute inside the first surface of the new window instead of the
@@ -182,7 +190,7 @@ fn runArgs(
         if (exit) return 1;
     }
 
-    if (!opts._working_directory_seen) {
+    if (!opts._working_directory_seen and !hasLaunchLayoutArgument(opts._arguments.items)) {
         const alloc = opts._arena.?.allocator();
         const cwd: std.fs.Dir = std.fs.cwd();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -216,4 +224,31 @@ fn runArgs(
 
     try stderr.print("+new-window could not find or start a matching noctty instance.\n", .{});
     return 1;
+}
+
+fn hasLaunchLayoutArgument(arguments: []const [:0]const u8) bool {
+    for (arguments) |arg| {
+        if (std.mem.eql(u8, arg, "-e")) break;
+        if (std.mem.startsWith(u8, arg, "--launch-layout=")) return true;
+    }
+    return false;
+}
+
+test "new-window layout request does not synthesize working directory" {
+    try std.testing.expect(hasLaunchLayoutArgument(&.{"--launch-layout=demo"}));
+    try std.testing.expect(hasLaunchLayoutArgument(&.{
+        "--working-directory=C:\\tmp",
+        "--launch-layout=demo",
+    }));
+    try std.testing.expect(!hasLaunchLayoutArgument(&.{"--title=demo"}));
+    try std.testing.expect(!hasLaunchLayoutArgument(&.{
+        "-e",
+        "tool.exe",
+        "--launch-layout=child-option",
+    }));
+    try std.testing.expect(hasLaunchLayoutArgument(&.{
+        "--launch-layout=demo",
+        "-e",
+        "tool.exe",
+    }));
 }

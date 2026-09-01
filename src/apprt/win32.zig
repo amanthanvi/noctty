@@ -52,6 +52,7 @@ const win32_status_bar = @import("win32_status_bar.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
 const win32_types = @import("win32_types.zig");
+const win32_layouts = @import("win32_layouts.zig");
 const win32_session_state = @import("win32_session_state.zig");
 const win32_session_persistence = @import("win32_session_persistence.zig");
 const win32_structural_history = @import("win32_structural_history.zig");
@@ -1371,6 +1372,65 @@ fn logForwardedArgvRejection(rejection: ForwardedArgvRejection) void {
     }
 }
 
+fn sendLaunchLayoutIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    name: []const u8,
+) !bool {
+    // Validate before probing the pipe. The caller uses `false` as the cold
+    // start fallback, so connecting first would let an invalid name spawn an
+    // otherwise ordinary window when no instance is listening.
+    const request = try win32_ipc.encodeLaunchLayoutRequest(alloc, name);
+    defer alloc.free(request);
+
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound, error.PipeUnreachable => return false,
+        error.PipeBusy => return error.IPCFailed,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+}
+
+fn trySendStartupLaunchLayoutIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    name: ?[]const u8,
+) !?bool {
+    const layout_name = name orelse return null;
+    return try sendLaunchLayoutIpc(alloc, pipe_name, layout_name);
+}
+
+const LaunchLayoutIpcArgument = union(enum) {
+    none,
+    name: []const u8,
+};
+
+fn scanLaunchLayoutIpcArgument(
+    arguments: ?[]const [:0]const u8,
+) !LaunchLayoutIpcArgument {
+    const argv = arguments orelse return .none;
+    const prefix = "--launch-layout=";
+    var name: ?[]const u8 = null;
+    for (argv) |arg| {
+        // Config parsing treats everything after -e as command payload.
+        // Match that boundary so a child command may legitimately receive an
+        // argument that looks like a Noctty layout option.
+        if (std.mem.eql(u8, arg, "-e")) break;
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        if (name != null) return error.MixedLaunchLayoutArguments;
+        name = arg[prefix.len..];
+    }
+
+    if (name) |value| {
+        if (argv.len != 1) return error.MixedLaunchLayoutArguments;
+        return .{ .name = value };
+    }
+    return .none;
+}
+
 /// Apply a forwarded `new_window` argv to `config`.
 ///
 /// Returns `error.ForbiddenForwardedArgument` for the whole request if any
@@ -1391,6 +1451,13 @@ fn applyNewWindowArguments(
     if (forwardedArgvRejection(argv) != null) {
         return error.ForbiddenForwardedArgument;
     }
+
+    // This clone inherits the app config's replay history, and `+new-window`
+    // always forwards at least a working directory, so the `finalize` below
+    // always runs. `launch-layout` is one-shot: an inherited startup step
+    // replayed here would turn an ordinary new window into a layout launch.
+    _ = config.dropLaunchLayoutReplaySteps(0);
+    config.@"launch-layout" = null;
 
     var iter: ForwardedArgIterator = .{ .args = argv };
     try config.loadIter(alloc_gpa, &iter);
@@ -1801,6 +1868,10 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 automation action IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
+        .launch_layout => handleLaunchLayoutIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
     }
     return kind;
 }
@@ -1858,6 +1929,36 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     defer app.core_app.alloc.free(payload.action_text);
 
     requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
+        const status: u8 = switch (err) {
+            error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
+            error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
+            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
+            error.NoAutomationTarget => win32_ipc.ack_no_automation_target,
+            else => return err,
+        };
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    const name = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe) catch |err| {
+        log.warn("invalid win32 launch-layout IPC request err={}", .{err});
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
+        return;
+    };
+    defer app.core_app.alloc.free(name);
+
+    // Name validation restricts this to an unambiguous action payload.
+    const action_text = try std.fmt.allocPrint(
+        app.core_app.alloc,
+        "launch_layout:{s}",
+        .{name},
+    );
+    defer app.core_app.alloc.free(action_text);
+
+    requestAutomationAction(app, .focused, action_text) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -2152,7 +2253,9 @@ fn persistRecoveryRecord(
 
 fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| {
-        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        // Recursive: `layouts\` sits one level below `%LOCALAPPDATA%\noctty`,
+        // which itself may not exist yet on a first save.
+        std.fs.cwd().makePath(dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -2170,10 +2273,24 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
     return !safe_mode and policy != .never;
 }
 
+fn layoutActionResult(success: bool) !bool {
+    if (!success) return error.LayoutActionFailed;
+    return true;
+}
+
 const SessionRestoreTransaction = struct {
     app: ?*App = null,
     host: ?*Host = null,
+    core_first: *bool,
+    core_first_before: bool,
     committed: bool = false,
+
+    fn init(app: *App) SessionRestoreTransaction {
+        return .{
+            .core_first = &app.core_app.first,
+            .core_first_before = app.core_app.first,
+        };
+    }
 
     fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
         if (self.host == null) {
@@ -2188,9 +2305,13 @@ const SessionRestoreTransaction = struct {
 
     fn rollback(self: *SessionRestoreTransaction) void {
         if (self.committed) return;
-        const app = self.app orelse return;
-        const host = self.host orelse return;
-        app.rollbackSessionRestoreHost(host);
+        if (self.app) |app| if (self.host) |host| {
+            app.rollbackSessionRestoreHost(host);
+            // A failed DestroyWindow deliberately retains the partial host.
+            // Do not make that live surface look like a fresh first surface.
+            if (std.mem.indexOfScalar(*Host, app.hosts.items, host) != null) return;
+        };
+        self.core_first.* = self.core_first_before;
     }
 };
 
@@ -2549,7 +2670,26 @@ pub const App = struct {
         // the normal instance nor competes for that instance's IPC endpoint.
         if (!self.safe_mode) try self.startIpcServer();
 
-        if (self.config.@"initial-window") {
+        if (self.config.@"launch-layout") |name| {
+            // An explicit CLI layout request is honored even when
+            // `initial-window` is disabled, because the user asked for this
+            // exact window. It is also one-shot: later ordinary new-window
+            // actions must not inherit and replay it from the app config.
+            const launched = self.launchNamedLayout(name, null);
+            self.config.@"launch-layout" = null;
+            // Clearing the field is not enough: `finalize` -> `loadTheme` and
+            // `changeConditionalState` replay `_replay_steps` through
+            // `loadIter`, and a per-window clone inherits that history, so a
+            // surviving startup step would turn a later ordinary new window
+            // into a layout launch.
+            _ = self.config.dropLaunchLayoutReplaySteps(0);
+            if (!launched) {
+                try self.createWindow(default_title);
+                if (self.primarySurface()) |surface| if (surface.host) |host| {
+                    host.setBanner(.err, "Layout could not be opened.") catch {};
+                };
+            }
+        } else if (self.config.@"initial-window") {
             const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
@@ -2764,6 +2904,16 @@ pub const App = struct {
         return self.localAppDataPath("session-state.json");
     }
 
+    fn namedLayoutPath(self: *const App, name: []const u8) ![]u8 {
+        const relative = try win32_layouts.relativePathAlloc(self.core_app.alloc, name);
+        defer self.core_app.alloc.free(relative);
+        return self.localAppDataPath(relative) orelse error.LocalAppDataUnavailable;
+    }
+
+    fn namedLayoutsDirectoryPath(self: *const App) ?[]u8 {
+        return self.localAppDataPath("layouts");
+    }
+
     fn sessionStateEnabled(self: *const App) bool {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
@@ -2869,6 +3019,186 @@ pub const App = struct {
         };
     }
 
+    fn launchNamedLayout(self: *App, name: []const u8, preferred_banner_host: ?*Host) bool {
+        const banner_host = preferred_banner_host orelse if (self.primarySurface()) |surface|
+            surface.host
+        else
+            null;
+        win32_layouts.validateName(name) catch |err| {
+            log.warn("named layout launch rejected invalid name name={s} err={}", .{ name, err });
+            if (banner_host) |host| host.setBanner(.err, "Invalid layout name.") catch {};
+            return false;
+        };
+        const path = self.namedLayoutPath(name) catch |err| {
+            log.warn("named layout launch path resolution failed name={s} err={}", .{ name, err });
+            if (banner_host) |host| host.setBanner(.err, "Layout path is unavailable.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(path);
+
+        var loaded = win32_session_persistence.loadLayoutAlloc(
+            self.core_app.alloc,
+            path,
+            win32_session_persistence.default_max_state_bytes,
+        );
+        defer loaded.deinit();
+        switch (loaded) {
+            .missing => {
+                log.warn("named layout launch file not found name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout was not found.") catch {};
+                return false;
+            },
+            .oversized => {
+                log.warn("named layout launch file exceeds size limit name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout file is too large.") catch {};
+                return false;
+            },
+            .transient => |err| {
+                log.warn("named layout launch read failed name={s} path={s} err={}", .{ name, path, err });
+                if (banner_host) |host| host.setBanner(.err, "Layout could not be read.") catch {};
+                return false;
+            },
+            .corrupt => |err| {
+                const quarantined = self.quarantineInvalidNamedLayout(path, name, err);
+                if (banner_host) |host| host.setBanner(
+                    .err,
+                    if (quarantined)
+                        "Invalid layout was quarantined."
+                    else
+                        "Invalid layout could not be quarantined.",
+                ) catch {};
+                return false;
+            },
+            .loaded => |parsed| {
+                if (parsed.value.windows.len != 1) {
+                    const quarantined = self.quarantineInvalidNamedLayout(
+                        path,
+                        name,
+                        error.InvalidWindowCount,
+                    );
+                    if (banner_host) |host| host.setBanner(
+                        .err,
+                        if (quarantined)
+                            "Invalid layout was quarantined."
+                        else
+                            "Invalid layout could not be quarantined.",
+                    ) catch {};
+                    return false;
+                }
+                // A layout file can come from a synced or shared directory, and
+                // materializing one spawns a shell per pane. Refuse oversized
+                // documents instead of quarantining them: the file may well be
+                // the user's own, just too large for one window.
+                win32_layouts.validateLaunchSize(parsed.value.windows[0]) catch |err| {
+                    log.warn("named layout launch rejected oversized document name={s} err={}", .{ name, err });
+                    if (banner_host) |host| host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
+                    return false;
+                };
+                // A layout is a shape, not a placement: the save path omits
+                // window geometry deliberately. Strip any a hand-authored or
+                // synced file carries so it cannot place the new window
+                // off-screen, resize it, or maximize it.
+                var shape = parsed.value.windows[0];
+                shape.x = null;
+                shape.y = null;
+                shape.width = null;
+                shape.height = null;
+                shape.state = null;
+                const surface = self.restoreSessionWindow(shape) catch |err| {
+                    log.warn("named layout materialization failed name={s} err={}", .{ name, err });
+                    if (banner_host) |host| host.setBanner(.err, "Layout could not be opened.") catch {};
+                    return false;
+                };
+                self.activateSurface(surface);
+                return true;
+            },
+        }
+    }
+
+    fn quarantineInvalidNamedLayout(
+        self: *App,
+        path: []const u8,
+        name: []const u8,
+        parse_error: anyerror,
+    ) bool {
+        const destination = win32_session_persistence.quarantineCorruptFileAlloc(
+            self.core_app.alloc,
+            path,
+        ) catch |err| {
+            log.warn("named layout quarantine failed name={s} path={s} parse_err={} move_err={}", .{ name, path, parse_error, err });
+            return false;
+        };
+        defer self.core_app.alloc.free(destination);
+        log.warn("named layout quarantined invalid file name={s} path={s} parse_err={}", .{ name, destination, parse_error });
+        return true;
+    }
+
+    fn saveNamedLayout(self: *App, target: apprt.Target, name: []const u8) bool {
+        const surface = self.findSurfaceForTarget(target) orelse {
+            log.warn("named layout save has no target surface name={s}", .{name});
+            return false;
+        };
+        const host = surface.host orelse {
+            log.warn("named layout save target has no host name={s}", .{name});
+            return false;
+        };
+        win32_layouts.validateName(name) catch |err| {
+            log.warn("named layout save rejected invalid name name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Invalid layout name.") catch {};
+            return false;
+        };
+        const path = self.namedLayoutPath(name) catch |err| {
+            log.warn("named layout save path resolution failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout path is unavailable.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(path);
+
+        var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
+        defer arena.deinit();
+        const window = buildSessionWindow(arena.allocator(), host, .layout) catch |err| {
+            log.warn("named layout save snapshot failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        // Launch refuses documents above this cap, so refuse to write one.
+        // Saving must not report success for a layout that can never open.
+        win32_layouts.validateLaunchSize(window) catch |err| {
+            log.warn("named layout save rejected oversized window name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
+            return false;
+        };
+        const layout_windows = [_]win32_session_state.Window{window};
+        const encoded = win32_session_state.encodeAlloc(
+            self.core_app.alloc,
+            .{ .windows = &layout_windows },
+        ) catch |err| {
+            log.warn("named layout save encode failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(encoded);
+        if (!namedLayoutEncodingFitsReadLimit(encoded.len)) {
+            log.warn(
+                "named layout save rejected oversized encoding name={s} bytes={d}",
+                .{ name, encoded.len },
+            );
+            host.setBanner(.err, "Layout data is too large.") catch {};
+            return false;
+        }
+        writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
+            log.warn("named layout save write failed name={s} path={s} err={}", .{ name, path, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        host.setBanner(.info, "Layout saved.") catch {};
+        return true;
+    }
+
+    fn namedLayoutEncodingFitsReadLimit(bytes: usize) bool {
+        return bytes <= win32_session_persistence.default_max_state_bytes;
+    }
+
     fn restoreSessionState(self: *App) !bool {
         var parsed = self.loadSessionState() catch |err| {
             log.warn("win32 session restore: state read failed; leaving file untouched err={}", .{err});
@@ -2953,7 +3283,7 @@ pub const App = struct {
         self: *App,
         window: win32_session_state.Window,
     ) !*Surface {
-        var transaction: SessionRestoreTransaction = .{};
+        var transaction = SessionRestoreTransaction.init(self);
         defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
@@ -3056,6 +3386,13 @@ pub const App = struct {
             .split;
         var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
         defer config.deinit();
+
+        // `initial-command` (from `-e` or the config option) applies to the
+        // ordinary first window. A restored pane's command comes from its
+        // saved profile, so clear it: otherwise `Surface.init` prefers it
+        // while `app.first` is set and the first pane of a restored session
+        // or a launched layout runs the wrong command.
+        config.@"initial-command" = null;
 
         // A refused profile (today: SSH) must not leave its key on the surface
         // either, or a later split of the restored pane would re-resolve it and
@@ -3180,25 +3517,32 @@ pub const App = struct {
         var built: usize = 0;
         for (self.hosts.items) |host| {
             if (hostSessionTabCount(host) == 0) continue;
-            windows_state[built] = try buildSessionWindow(alloc, host);
+            windows_state[built] = try buildSessionWindow(alloc, host, .session);
             built += 1;
         }
 
         return .{ .windows = windows_state };
     }
 
+    /// What a window snapshot is for. `.session` is this process's own restore
+    /// state; `.layout` is a user-visible named layout file, which carries only
+    /// the shape fields and no window geometry.
+    const SnapshotScope = enum { session, layout };
+
     fn buildSessionWindow(
         alloc: Allocator,
         host: *Host,
+        scope: SnapshotScope,
     ) !win32_session_state.Window {
         const tab_count = hostSessionTabCount(host);
+        if (scope == .layout and tab_count == 0) return error.EmptyTabs;
         const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
         var selected_tab: usize = 0;
         var built: usize = 0;
         for (host.tabs.items, 0..) |*tab, i| {
             if (tabContainsQuickTerminal(tab)) continue;
             if (i <= host.active_tab) selected_tab = built;
-            tabs[built] = try buildSessionTab(alloc, tab);
+            tabs[built] = try buildSessionTab(alloc, tab, scope);
             built += 1;
         }
 
@@ -3206,6 +3550,8 @@ pub const App = struct {
             .selected_tab = selected_tab,
             .tabs = tabs,
         };
+        // Geometry is restore state, not layout shape.
+        if (scope == .layout) return window;
         if (sessionWindowRect(host)) |rect| {
             window.x = rect.left;
             window.y = rect.top;
@@ -3221,6 +3567,7 @@ pub const App = struct {
     fn buildSessionTab(
         alloc: Allocator,
         tab: *const Tab,
+        scope: SnapshotScope,
     ) !win32_session_state.Tab {
         var selected_leaf: usize = 0;
         var leaf_index: usize = 0;
@@ -3235,33 +3582,43 @@ pub const App = struct {
 
         return .{
             .selected_leaf = selected_leaf,
-            .layout = try buildSessionLayout(alloc, tab),
+            .layout = try buildSessionLayout(alloc, tab, scope),
         };
     }
 
     fn buildSessionLayout(
         alloc: Allocator,
         tab: *const Tab,
+        scope: SnapshotScope,
     ) !win32_session_state.LayoutTree {
         if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
         for (tab.tree.nodes, 0..) |node, i| {
             nodes[i] = switch (node) {
-                .leaf => |surface| .{
-                    .pane = .{
+                // The two pane literals are deliberately separate. Anything
+                // added to the session pane below (terminal contents, process
+                // state) must stay out of user-visible layout files unless it
+                // is also added to the layout literal on purpose. Neither
+                // snapshot may persist an SSH launch for unattended restore.
+                .leaf => |surface| switch (scope) {
+                    .session => .{ .pane = .{
                         .cwd = if (surface.launched_ssh) null else surface.pwd,
-                        // Never persist an SSH launch: restore would relaunch
-                        // it unattended. The alias tab title goes with it, or
-                        // it would stick to the local shell that replaces the
-                        // pane. Both read the kind recorded at launch, not the
-                        // key text.
                         .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
                         .title_override = surface.title_override,
                         .tab_title_override = if (surface.launched_ssh)
                             null
                         else
                             surface.tab_title_override,
-                    },
+                    } },
+                    .layout => .{ .pane = .{
+                        .cwd = if (surface.launched_ssh) null else surface.pwd,
+                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
+                        .title_override = surface.title_override,
+                        .tab_title_override = if (surface.launched_ssh)
+                            null
+                        else
+                            surface.tab_title_override,
+                    } },
                 },
                 .split => |split| .{ .split = .{
                     .axis = switch (split.layout) {
@@ -3490,11 +3847,17 @@ pub const App = struct {
     fn tryForwardStartupToExistingInstance(self: *App) !bool {
         if (self.config.@"single-instance" != .true) return false;
 
-        const arguments = try collectStartupForwardArguments(self.core_app.alloc);
-        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
-
         const pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
         defer self.core_app.alloc.free(pipe_name);
+
+        if (try trySendStartupLaunchLayoutIpc(
+            self.core_app.alloc,
+            pipe_name,
+            self.config.@"launch-layout",
+        )) |forwarded| return forwarded;
+
+        const arguments = try collectStartupForwardArguments(self.core_app.alloc);
+        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
 
         return try sendNewWindowIpc(
             self.core_app.alloc,
@@ -4080,10 +4443,24 @@ pub const App = struct {
                     },
                     else => return err,
                 };
+                if (config.@"launch-layout") |name| {
+                    const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                    _ = self.launchNamedLayout(name, banner_host);
+                    return true;
+                }
                 _ = try self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = self.findSurfaceForTarget(target),
                 });
                 return true;
+            },
+
+            .launch_layout => {
+                const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                return layoutActionResult(self.launchNamedLayout(value.name, banner_host));
+            },
+
+            .save_layout => {
+                return layoutActionResult(self.saveNamedLayout(target, value.name));
             },
 
             .new_tab => {
@@ -4175,9 +4552,17 @@ pub const App = struct {
             .config_change => {
                 switch (target) {
                     .app => {
-                        const config = try value.config.clone(self.core_app.alloc);
+                        var config = try value.config.clone(self.core_app.alloc);
                         const ssh_config_hosts_changed =
                             self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
+                        // CLI launch-layout is a one-shot startup/new-window
+                        // request. Config reload reparses the original argv, so
+                        // strip it before installing the long-lived app config
+                        // -- both the parsed field and the replay step, since
+                        // a later theme or conditional-state reload would
+                        // otherwise put it back.
+                        config.@"launch-layout" = null;
+                        _ = config.dropLaunchLayoutReplaySteps(0);
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
                         // config change supersedes that transaction: dismiss
@@ -4800,10 +5185,18 @@ pub const App = struct {
     ) !bool {
         switch (action) {
             .new_window => {
+                const launch_layout = scanLaunchLayoutIpcArgument(value.arguments) catch |err| {
+                    log.err("--launch-layout must be the only +new-window argument", .{});
+                    return err;
+                };
+
                 const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
                 defer alloc.free(pipe_name);
-
-                if (try sendNewWindowIpc(alloc, pipe_name, value.arguments)) return true;
+                const forwarded = switch (launch_layout) {
+                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments),
+                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name),
+                };
+                if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
             },
         }
@@ -7972,6 +8365,8 @@ const Host = struct {
     palette_catalog_label_count: usize = 0,
     /// Owned installed-theme snapshot backing exact catalog payload names.
     palette_installed_themes: ?[]themepkg.Entry = null,
+    /// Owned saved-layout names backing exact catalog payload names.
+    palette_layout_names: ?[][]u8 = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
     /// Rows that physically fit in the current palette List HWND. This can be
@@ -9236,6 +9631,7 @@ const Host = struct {
         catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
             error.StorageTooSmall
@@ -9377,6 +9773,9 @@ const Host = struct {
         }
 
         self.appendInstalledThemesToPalette(catalog);
+        // Layouts come last of the dynamic providers so a large layouts
+        // directory can never displace installed-theme rows near capacity.
+        self.appendSavedLayoutsToPalette(catalog);
 
         catalog.appendReviewedHelp() catch |err| {
             log.warn("palette help batch rejected err={}", .{err});
@@ -9710,6 +10109,18 @@ const Host = struct {
                     self.abortPaletteAction("Profile could not be opened; no terminal was changed.");
                 }
             },
+            .layout => |name| {
+                const owned_name = self.app.core_app.alloc.dupe(u8, name) catch |err| {
+                    log.warn("palette layout name copy failed name={s} err={}", .{ name, err });
+                    self.abortPaletteAction("Layout could not be prepared.");
+                    return;
+                };
+                defer self.app.core_app.alloc.free(owned_name);
+                self.hideOverlay();
+                if (!self.app.launchNamedLayout(owned_name, self)) {
+                    self.abortPaletteAction("Layout could not be opened.");
+                }
+            },
             .setting => |key| {
                 const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse {
                     self.abortPaletteAction("Setting is no longer available; reopen the palette.");
@@ -9790,10 +10201,54 @@ const Host = struct {
         };
     }
 
+    fn appendSavedLayoutsToPalette(self: *Host, catalog: *PaletteCatalog) void {
+        const alloc = self.app.core_app.alloc;
+        const directory = self.app.namedLayoutsDirectoryPath() orelse return;
+        defer alloc.free(directory);
+        // Only help and recent-command rows are still pending at this point;
+        // actions, tabs, panes, profiles, settings, and themes are already in.
+        const reserve_items = win32_palette.catalog.reviewed_help.len +
+            self.app.palette_mru.len;
+        const free_items = (catalog.capacity() -| catalog.items().len) -| reserve_items;
+        const free_labels = self.palette_catalog_labels.len -| self.palette_catalog_label_count;
+        const limit = @min(win32_layouts.max_palette_entries, @min(free_items, free_labels));
+        if (limit == 0) return;
+
+        const names = win32_layouts.listNamesAlloc(alloc, directory, limit) catch |err| {
+            log.warn("palette layout enumeration failed path={s} err={}", .{ directory, err });
+            return;
+        };
+        self.palette_layout_names = names;
+        for (names) |name| {
+            var title_buffer: [palette_catalog_label_bytes]u8 = undefined;
+            const raw_title = std.fmt.bufPrint(
+                &title_buffer,
+                "Launch layout: {s}",
+                .{name},
+            ) catch continue;
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.stableStringId(.layout, name),
+                    .title = self.storePaletteCatalogLabel(raw_title),
+                    .subtitle = "Layout",
+                    .keywords = "layout workspace window tabs splits launch",
+                },
+                .payload = .{ .layout = name },
+            });
+        }
+    }
+
     fn clearPaletteInstalledThemes(self: *Host) void {
         const installed = self.palette_installed_themes orelse return;
         self.palette_installed_themes = null;
         themepkg.freeList(self.app.core_app.alloc, installed);
+    }
+
+    fn clearPaletteLayoutNames(self: *Host) void {
+        const names = self.palette_layout_names orelse return;
+        self.palette_layout_names = null;
+        for (names) |name| self.app.core_app.alloc.free(name);
+        self.app.core_app.alloc.free(names);
     }
 
     fn selectedPaletteThemeName(self: *Host) ?[]const u8 {
@@ -10298,6 +10753,7 @@ const Host = struct {
         if (self.palette_catalog) |*catalog| catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.destroyChildControls();
 
         if (self.banner_text) |value| self.app.core_app.alloc.free(value);
@@ -11647,6 +12103,7 @@ const Host = struct {
         if (self.palette_catalog) |*catalog| catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
         if (was_confirm or was_palette) {
@@ -28098,6 +28555,12 @@ test "win32 allocIpcPipeName prefixes sanitized namespace" {
     try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class", pipe_name_utf8);
 }
 
+test "win32 named layout encoding uses the persistence read limit" {
+    const limit = win32_session_persistence.default_max_state_bytes;
+    try std.testing.expect(App.namedLayoutEncodingFitsReadLimit(limit));
+    try std.testing.expect(!App.namedLayoutEncodingFitsReadLimit(limit + 1));
+}
+
 test "win32 normalizeForwardedStartupArg drops class and normalizes working directory" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -29575,6 +30038,63 @@ test "automation-action win32 ipc encodes focused action request" {
     try std.testing.expectEqualStrings("new_tab", request[18..]);
 }
 
+test "win32 launch-layout IPC argument scan isolates the layout name" {
+    const launch = try scanLaunchLayoutIpcArgument(&.{"--launch-layout=Project Alpha"});
+    try std.testing.expectEqualStrings("Project Alpha", launch.name);
+
+    try std.testing.expectError(
+        error.MixedLaunchLayoutArguments,
+        scanLaunchLayoutIpcArgument(&.{
+            "--launch-layout=Project Alpha",
+            "--title=other",
+        }),
+    );
+
+    const ordinary = try scanLaunchLayoutIpcArgument(&.{"--title=ordinary"});
+    try std.testing.expect(ordinary == .none);
+
+    const command = try scanLaunchLayoutIpcArgument(&.{
+        "-e",
+        "tool.exe",
+        "--launch-layout=child-option",
+    });
+    try std.testing.expect(command == .none);
+}
+
+test "win32 launch-layout IPC validates names before cold fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty.test.launch-layout-invalid-name",
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        sendLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+    );
+}
+
+test "win32 startup layout forwarding intercepts before generic argv" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty.test.startup-layout-invalid-name",
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    try std.testing.expectEqual(
+        @as(?bool, null),
+        try trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, null),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+    );
+}
+
 test "automation-action win32 ipc encodes surface action request" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -30008,7 +30528,7 @@ test "win32 ssh split and session state drop remote cwd" {
     var tab = try Tab.init(std.testing.allocator, 1, &surface);
     defer tab.deinit();
 
-    const layout = try App.buildSessionLayout(std.testing.allocator, &tab);
+    const layout = try App.buildSessionLayout(std.testing.allocator, &tab, .session);
     defer std.testing.allocator.free(layout.nodes);
     try std.testing.expect(layout.nodes[0].pane.cwd == null);
 }
@@ -30260,6 +30780,11 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
 }
 
+test "win32 layout action result propagates automation failure" {
+    try std.testing.expect(try layoutActionResult(true));
+    try std.testing.expectError(error.LayoutActionFailed, layoutActionResult(false));
+}
+
 test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false));
     try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false));
@@ -30269,6 +30794,24 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
+}
+
+test "win32 session restore transaction preserves first surface state" {
+    var core_app: CoreApp = undefined;
+    core_app.first = true;
+    var app: App = undefined;
+    app.core_app = &core_app;
+
+    var rolled_back = SessionRestoreTransaction.init(&app);
+    core_app.first = false;
+    rolled_back.rollback();
+    try std.testing.expect(core_app.first);
+
+    var committed = SessionRestoreTransaction.init(&app);
+    core_app.first = false;
+    committed.commit();
+    committed.rollback();
+    try std.testing.expect(!core_app.first);
 }
 
 test "win32 session state window rect requires complete geometry" {
@@ -30322,6 +30865,49 @@ test "win32 session state file write replaces through temp file" {
     while (try entries.next()) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "session-state.json.tmp-"));
     }
+}
+
+test "named layout fixture materializes through the session restore split tree builder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const fixture =
+        \\{ "schema_version": 1, "windows": [ { "selected_tab": 0, "tabs": [ { "selected_leaf": 1, "layout": { "root": 0, "nodes": [
+        \\  { "split": { "axis": "horizontal", "ratio": 0.25, "first": 1, "second": 2 } },
+        \\  { "pane": { "cwd": "C:\\\\left", "profile": "pwsh" } },
+        \\  { "split": { "axis": "vertical", "ratio": 0.75, "first": 3, "second": 4 } },
+        \\  { "pane": { "cwd": "C:\\\\top-right", "title_override": "Top" } },
+        \\  { "pane": { "cwd": "C:\\\\bottom-right", "tab_title_override": "Project" } }
+        \\] } } ] } ] }
+    ;
+    var parsed = try win32_session_state.parseAlloc(std.testing.allocator, fixture);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.windows.len);
+
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    const node_surfaces = [_]?*Surface{
+        null,
+        &surface_a,
+        null,
+        &surface_b,
+        &surface_c,
+    };
+    var tree = try App.buildRestoredSessionSplitTree(
+        std.testing.allocator,
+        parsed.value.windows[0].tabs[0].layout,
+        &node_surfaces,
+    );
+    defer tree.deinit();
+
+    try std.testing.expectEqual(@as(usize, 5), tree.nodes.len);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.horizontal, tree.nodes[0].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.25), tree.nodes[0].split.ratio);
+    try std.testing.expectEqual(&surface_a, tree.nodes[1].leaf);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.vertical, tree.nodes[2].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.75), tree.nodes[2].split.ratio);
+    try std.testing.expectEqual(&surface_b, tree.nodes[3].leaf);
+    try std.testing.expectEqual(&surface_c, tree.nodes[4].leaf);
 }
 
 test "win32 session restore rebuilds saved split tree shape" {

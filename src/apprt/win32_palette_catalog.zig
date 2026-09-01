@@ -62,6 +62,7 @@ pub const Payload = union(Kind) {
     /// Always resolved against a current action snapshot before dispatch.
     /// This is action MRU, never arbitrary shell command history.
     recent_command: ActionPayload,
+    layout: []const u8,
 };
 
 pub const Descriptor = struct {
@@ -536,6 +537,31 @@ test "bounded theme append keeps deterministic prefix under storage pressure" {
 
     const gamma_results = catalog.rank("%gamma", .{}, &ranked_storage);
     try std.testing.expectEqual(@as(usize, 0), gamma_results.len);
+}
+
+test "named layout palette entries preserve launch identity" {
+    var item_storage: [2]Item = undefined;
+    var payload_storage: [2]Payload = undefined;
+    var catalog = try Catalog.init(&item_storage, &payload_storage);
+    try catalog.append(.{
+        .item = .{
+            .id = stableStringId(.layout, "demo"),
+            .title = "Launch layout: demo",
+            .subtitle = "Layout",
+            .keywords = "layout workspace window tabs splits launch",
+        },
+        .payload = .{ .layout = "demo" },
+    });
+
+    var ranked_storage: [2]Ranked = undefined;
+    const ranked = catalog.rank("^demo", .{}, &ranked_storage);
+    try std.testing.expectEqual(@as(usize, 1), ranked.len);
+    try std.testing.expectEqual(Kind.layout, ranked[0].id.kind);
+    try std.testing.expect(ranked[0].id.eql(stableStringId(.layout, "demo")));
+    const descriptor = catalog.descriptorFor(ranked[0]).?;
+    try std.testing.expectEqualStrings("Launch layout: demo", descriptor.item.title);
+    try std.testing.expectEqualStrings("demo", descriptor.payload.layout);
+    try std.testing.expectEqual(@as(usize, 0), catalog.rank("^missing", .{}, &ranked_storage).len);
 }
 
 test "recent history accepts only exact current palette actions" {

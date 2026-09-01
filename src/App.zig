@@ -238,6 +238,7 @@ pub fn focusedSurface(self: *const App) ?*Surface {
 
 test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(isSafeAutomationAction(.new_tab));
+    try std.testing.expect(isSafeAutomationAction(.{ .launch_layout = "demo" }));
     try std.testing.expect(isSafeAutomationAction(.toggle_fullscreen));
     try std.testing.expect(isSafeAutomationAction(.quit));
     try std.testing.expect(!isSafeAutomationAction(.unbind));
@@ -596,6 +597,11 @@ pub fn performAction(
         .ignore => {},
         .quit => _ = try rt_app.performAction(.app, .quit, {}),
         .new_window => _ = try self.newWindow(rt_app, .{ .parent = null }),
+        .launch_layout => |name| _ = try rt_app.performAction(
+            .app,
+            .launch_layout,
+            .{ .name = name },
+        ),
         .open_config => _ = try rt_app.performAction(.app, .open_config, {}),
         .reload_config => _ = try rt_app.performAction(.app, .reload_config, .{}),
         .close_all_windows => _ = try rt_app.performAction(.app, .close_all_windows, {}),
@@ -634,6 +640,16 @@ pub fn performAllAction(
     rt_app: *apprt.App,
     action: input.Binding.Action,
 ) !void {
+    // A named layout is always a snapshot of the focused window. Global
+    // bindings normally fan surface actions out to every surface, which would
+    // rewrite the same layout once per pane and make iteration order observable.
+    if (action == .save_layout) {
+        if (self.focusedSurface()) |surface| {
+            _ = try surface.performBindingAction(action);
+        }
+        return;
+    }
+
     switch (action.scope()) {
         // App-scoped actions are handled by the app so that they aren't
         // repeated for each surface (since each surface forwards
@@ -691,7 +707,10 @@ fn automationActionTargetError(
 ) ?anyerror {
     return switch (target) {
         .focused => null,
-        .surface_id => if (action.scope() == .app) error.InvalidAutomationTarget else null,
+        .surface_id => if (action.scope() == .app or action == .save_layout)
+            error.InvalidAutomationTarget
+        else
+            null,
     };
 }
 
@@ -743,6 +762,8 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .adjust_selection,
         .jump_to_prompt,
         .new_window,
+        .launch_layout,
+        .save_layout,
         .new_tab,
         .previous_tab,
         .next_tab,
@@ -787,6 +808,15 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
 
         else => false,
     };
+}
+
+test "named layout automation save requires the focused target" {
+    const action = try input.Binding.Action.parse("save_layout:demo");
+    try std.testing.expect(automationActionTargetError(.focused, action) == null);
+    try std.testing.expectEqual(
+        error.InvalidAutomationTarget,
+        automationActionTargetError(.{ .surface_id = 42 }, action).?,
+    );
 }
 
 /// Handle a window message

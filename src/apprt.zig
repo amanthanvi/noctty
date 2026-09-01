@@ -20,6 +20,7 @@ pub const win32_shell = @import("apprt/win32_shell.zig");
 pub const win32_job_object = @import("apprt/win32_job_object.zig");
 pub const win32_session_state = @import("apprt/win32_session_state.zig");
 pub const win32_session_persistence = @import("apprt/win32_session_persistence.zig");
+pub const win32_layouts = @import("apprt/win32_layouts.zig");
 pub const win32_recovery = @import("apprt/win32_recovery.zig");
 pub const win32_settings_transaction = @import("apprt/win32_settings_transaction.zig");
 pub const win32_universal_palette = @import("apprt/win32_universal_palette.zig");
@@ -68,6 +69,7 @@ test {
     _ = win32_job_object;
     _ = win32_session_state;
     _ = win32_session_persistence;
+    _ = win32_layouts;
     _ = win32_recovery;
     _ = win32_settings_transaction;
     _ = win32_universal_palette;
