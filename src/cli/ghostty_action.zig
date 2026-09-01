@@ -111,6 +111,9 @@ pub const Action = enum {
     /// path from the root src/ directory.
     pub fn file(comptime self: Action) []const u8 {
         comptime {
+            // This conversion is instantiated once per action by helpgen.
+            // Keep enough quota as the Windows-only action set grows.
+            @setEvalBranchQuota(2_000);
             const filename = filename: {
                 const tag = @tagName(self);
                 var filename: [tag.len]u8 = undefined;
