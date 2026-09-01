@@ -20141,6 +20141,8 @@ fn quickSelectProc(
                 if (value.quick_select_session) |*session| {
                     if (consumeQuickSelectOpeningLeftButtonUp(
                         &session.suppress_opening_left_button_up,
+                        &session.suppress_until_opening_keys_released,
+                        anyVirtualKeyPressed(),
                     )) return 0;
                 }
                 value.closeQuickSelect(true);
@@ -23313,17 +23315,40 @@ test "quick select activates only for a visible surface" {
     try std.testing.expect(!quickSelectCanActivate(true, false));
 }
 
-fn consumeQuickSelectOpeningLeftButtonUp(suppress: *bool) bool {
-    if (!suppress.*) return false;
-    suppress.* = false;
+fn consumeQuickSelectOpeningLeftButtonUp(
+    suppress_button_up: *bool,
+    suppress_keys: *bool,
+    any_key_pressed: bool,
+) bool {
+    if (!suppress_button_up.*) return false;
+    suppress_button_up.* = false;
+    suppress_keys.* = any_key_pressed;
     return true;
 }
 
 test "quick select consumes only the opening left button release" {
-    var suppress = true;
-    try std.testing.expect(consumeQuickSelectOpeningLeftButtonUp(&suppress));
-    try std.testing.expect(!suppress);
-    try std.testing.expect(!consumeQuickSelectOpeningLeftButtonUp(&suppress));
+    var suppress_button_up = true;
+    var suppress_keys = true;
+    try std.testing.expect(consumeQuickSelectOpeningLeftButtonUp(
+        &suppress_button_up,
+        &suppress_keys,
+        false,
+    ));
+    try std.testing.expect(!suppress_button_up);
+    try std.testing.expect(!suppress_keys);
+    try std.testing.expect(!consumeQuickSelectOpeningLeftButtonUp(
+        &suppress_button_up,
+        &suppress_keys,
+        false,
+    ));
+
+    suppress_button_up = true;
+    try std.testing.expect(consumeQuickSelectOpeningLeftButtonUp(
+        &suppress_button_up,
+        &suppress_keys,
+        true,
+    ));
+    try std.testing.expect(suppress_keys);
 }
 
 pub const Surface = struct {
