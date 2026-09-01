@@ -552,14 +552,14 @@ fn isBidiControl(cp: u21) bool {
 
 /// Copy `text` for use as a jump-list item title, dropping bidi controls.
 pub fn buildTitleAlloc(alloc: Allocator, text: []const u8) ![]u8 {
+    var view = std.unicode.Utf8View.init(text) catch {
+        // Not valid UTF-8; nothing to reorder, so copy it through unchanged.
+        return try alloc.dupe(u8, text);
+    };
+
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
 
-    var view = std.unicode.Utf8View.init(text) catch {
-        // Not valid UTF-8; nothing to reorder, so copy it through unchanged.
-        out.deinit();
-        return try alloc.dupe(u8, text);
-    };
     var iter = view.iterator();
     while (iter.nextCodepointSlice()) |slice| {
         const cp = std.unicode.utf8Decode(slice) catch continue;
@@ -816,13 +816,14 @@ pub const JumpList = struct {
             log.warn("jump list recent update failed err={}", .{err});
             return;
         };
-        if (changed) {
-            _ = self.pending_recent_additions.insert(self.alloc, path) catch |err| {
-                log.warn("jump list recent persistence snapshot failed err={}", .{err});
-                return;
-            };
-        }
-        if (!changed and !reinstated) return;
+        // A pwd report is also a use event when this process's stale MRU
+        // already has the path at the front. Record it so a newer tombstone
+        // written by another process is removed during the next merge.
+        const recorded = self.pending_recent_additions.insert(self.alloc, path) catch |err| {
+            log.warn("jump list recent persistence snapshot failed err={}", .{err});
+            return;
+        };
+        if (!changed and !reinstated and !recorded) return;
         self.persist_dirty = true;
         self.rebuild_retry_count = 0;
         self.rebuild_dirty = true;
@@ -860,6 +861,7 @@ pub const JumpList = struct {
             }
         }
         const persisted = if (self.persist_dirty) self.persist() else true;
+        if (!persisted) self.schedule();
         if (rebuild_committed and persisted) {
             self.pending_recent_uses.deinit(self.alloc);
             self.pending_profile_uses.deinit(self.alloc);
@@ -915,6 +917,7 @@ pub const JumpList = struct {
             .read = true,
             .truncate = false,
             .lock = .exclusive,
+            .lock_nonblocking = true,
         }) catch |err| {
             log.warn("jump list state lock unavailable path={s} err={}", .{ lock_path, err });
             return false;
@@ -1530,6 +1533,28 @@ test "jump_list persistence merge applies local events to the latest snapshot" {
     try std.testing.expect(try merged.removed_recents.contains(alloc, "C:\\removed"));
     try std.testing.expect(merged.hidden_profiles.contains("wsl:new-hidden"));
     try std.testing.expect(!merged.hidden_profiles.contains("wsl:used"));
+}
+
+test "jump_list unchanged recent directory still records a use event" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer {
+        // This test exercises the in-memory event seam only.
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+
+    try std.testing.expect(try jump.recents.insert(alloc, "D:\\same-head"));
+    jump.noteRecent("D:\\same-head");
+    try std.testing.expect(jump.persist_dirty);
+    try std.testing.expect(try jump.pending_recent_additions.contains(alloc, "D:\\same-head"));
 }
 
 test "jump_list slot budget reserves profiles before recents" {
