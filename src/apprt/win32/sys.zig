@@ -255,8 +255,8 @@ pub extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
 
 pub extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
 
-/// Returns the HKL for the thread. Only the low word (the language
-/// identifier) is ever inspected, so this is typed as an integer.
+/// Returns the HKL for the thread. Callers inspect either the full HKL or its
+/// language identifier as appropriate, so this is typed as an integer.
 pub extern "user32" fn GetKeyboardLayout(idThread: DWORD) callconv(.winapi) usize;
 
 pub extern "user32" fn MapVirtualKeyW(uCode: UINT, uMapType: UINT) callconv(.winapi) UINT;
