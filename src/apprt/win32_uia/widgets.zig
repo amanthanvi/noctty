@@ -163,6 +163,7 @@ pub const PaletteListState = struct {
     row_enabled: ?*const fn (ctx: *anyopaque, index: usize) bool = null,
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
+    invoke_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
     geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
     /// Optional screen-space bounds for widgets whose rows are not arranged
     /// as one contiguous vertical list (for example, terminal hint chips).
@@ -781,6 +782,7 @@ const PaletteRowProvider = struct {
     base: com.IRawElementProviderSimple,
     fragment: com.IRawElementProviderFragment,
     selection_item: com.ISelectionItemProvider,
+    invoke_item: com.IInvokeProvider,
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     parent: *PaletteListProvider,
@@ -817,6 +819,12 @@ const PaletteRowProvider = struct {
         .get_IsSelected = GetIsSelected,
         .get_SelectionContainer = GetSelectionContainer,
     };
+    const invoke_vtbl: com.IInvokeProviderVtbl = .{
+        .QueryInterface = InvokeQueryInterface,
+        .AddRef = InvokeAddRef,
+        .Release = InvokeRelease,
+        .Invoke = Invoke,
+    };
 
     fn create(alloc: std.mem.Allocator, parent: *PaletteListProvider, index: usize, id: u64) !*PaletteRowProvider {
         const self = try alloc.create(PaletteRowProvider);
@@ -825,6 +833,7 @@ const PaletteRowProvider = struct {
             .base = .{ .vtbl = &simple_vtbl },
             .fragment = .{ .vtbl = &fragment_vtbl },
             .selection_item = .{ .vtbl = &selection_vtbl },
+            .invoke_item = .{ .vtbl = &invoke_vtbl },
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .parent = parent,
@@ -843,6 +852,9 @@ const PaletteRowProvider = struct {
     fn fromSelection(p: *com.ISelectionItemProvider) *PaletteRowProvider {
         return @fieldParentPtr("selection_item", p);
     }
+    fn fromInvoke(p: *com.IInvokeProvider) *PaletteRowProvider {
+        return @fieldParentPtr("invoke_item", p);
+    }
     fn available(self: *const PaletteRowProvider) bool {
         return self.parent.isAvailable() and
             self.index < self.parent.rowCount() and
@@ -851,7 +863,7 @@ const PaletteRowProvider = struct {
 
     fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
         out.* = null;
-        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else return com.E_NOINTERFACE;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else if (self.parent.state.invoke_row != null and iidEqual(iid, &com.IID_IInvokeProvider)) out.* = @ptrCast(&self.invoke_item) else return com.E_NOINTERFACE;
         _ = self.refcount.fetchAdd(1, .monotonic);
         return com.S_OK;
     }
@@ -864,6 +876,9 @@ const PaletteRowProvider = struct {
     fn SelectionQueryInterface(p: *com.ISelectionItemProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
         return fromSelection(p).query(iid, out);
     }
+    fn InvokeQueryInterface(p: *com.IInvokeProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return fromInvoke(p).query(iid, out);
+    }
     fn addRef(self: *PaletteRowProvider) u32 {
         return self.refcount.fetchAdd(1, .monotonic) + 1;
     }
@@ -875,6 +890,9 @@ const PaletteRowProvider = struct {
     }
     fn SelectionAddRef(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
         return fromSelection(p).addRef();
+    }
+    fn InvokeAddRef(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return fromInvoke(p).addRef();
     }
     fn release(self: *PaletteRowProvider) u32 {
         const previous = self.refcount.fetchSub(1, .acq_rel);
@@ -894,6 +912,9 @@ const PaletteRowProvider = struct {
     fn SelectionRelease(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
         return fromSelection(p).release();
     }
+    fn InvokeRelease(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return fromInvoke(p).release();
+    }
     fn getProviderOptions(p: *com.IRawElementProviderSimple, out: *i32) callconv(.winapi) com.HRESULT {
         const self = fromBase(p);
         out.* = com.ProviderOptions_ServerSideProvider |
@@ -906,6 +927,9 @@ const PaletteRowProvider = struct {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (pattern == constants.UIA_SelectionItemPatternId) {
             out.* = @ptrCast(&self.selection_item);
+            _ = self.addRef();
+        } else if (pattern == constants.UIA_InvokePatternId and self.parent.state.invoke_row != null) {
+            out.* = @ptrCast(&self.invoke_item);
             _ = self.addRef();
         }
         return com.S_OK;
@@ -1048,6 +1072,14 @@ const PaletteRowProvider = struct {
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         out.* = &self.parent.base;
         _ = PaletteListProvider.AddRef(&self.parent.base);
+        return com.S_OK;
+    }
+    fn Invoke(p: *com.IInvokeProvider) callconv(.winapi) com.HRESULT {
+        const self = fromInvoke(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!self.parent.rowEnabled(self.index)) return com.UIA_E_ELEMENTNOTENABLED;
+        const callback = self.parent.state.invoke_row orelse return com.UIA_E_INVALIDOPERATION;
+        callback(self.parent.state.ctx, self.index);
         return com.S_OK;
     }
 };
@@ -4478,6 +4510,7 @@ const TestPaletteState = struct {
     selected: ?usize = 1,
     id_base: u64 = 100,
     selected_by_provider: ?usize = null,
+    invoked_by_provider: ?usize = null,
     reentrant_provider: ?*PaletteListProvider = null,
     reentrant_queries: u32 = 0,
     list_geometry: ?PaletteListGeometry = null,
@@ -4525,6 +4558,11 @@ const TestPaletteState = struct {
         }
     }
 
+    fn invokeRow(ctx: *anyopaque, index: usize) void {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        self.invoked_by_provider = index;
+    }
+
     fn geometry(ctx: *anyopaque) ?PaletteListGeometry {
         const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
         return self.list_geometry;
@@ -4546,6 +4584,7 @@ const TestPaletteState = struct {
             .row_enabled = rowEnabled,
             .row_id = rowId,
             .select_row = selectRow,
+            .invoke_row = invokeRow,
             .geometry = geometry,
             .row_bounds = if (self.row_bounds != null) rowBounds else null,
         };
@@ -4694,8 +4733,27 @@ test "Palette row selection rejects disabled items" {
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.Select(&row.selection_item));
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.AddToSelection(&row.selection_item));
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.RemoveFromSelection(&row.selection_item));
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.Invoke(&row.invoke_item));
     try std.testing.expectEqual(@as(?usize, null), state_data.selected_by_provider);
     try std.testing.expectEqual(com.UIA_E_ELEMENTNOTENABLED, PaletteRowProvider.SetFocus(&row.fragment));
+}
+
+test "Palette row exposes InvokePattern and invokes its callback" {
+    var state_data = TestPaletteState{ .count = 2 };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+    const row = provider.createRow(1).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+
+    var pattern: ?*com.IUnknown = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteRowProvider.GetPatternProvider(&row.base, constants.UIA_InvokePatternId, &pattern),
+    );
+    try std.testing.expect(pattern != null);
+    _ = PaletteRowProvider.InvokeRelease(@ptrCast(@alignCast(pattern.?)));
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Invoke(&row.invoke_item));
+    try std.testing.expectEqual(@as(?usize, 1), state_data.invoked_by_provider);
 }
 
 test "Palette row enforces required single-selection operations" {

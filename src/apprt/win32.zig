@@ -18929,6 +18929,13 @@ fn quickSelectSelectRowThunk(ctx: *anyopaque, index: usize) void {
     surface.quickSelectPrefixChanged();
 }
 
+fn quickSelectInvokeRowThunk(ctx: *anyopaque, index: usize) void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    surface.fireQuickSelect(index, false, false) catch |err| {
+        log.warn("quick select UIA action failed err={}", .{err});
+    };
+}
+
 fn paletteListRowCountThunk(ctx: *anyopaque) usize {
     const host: *const Host = @ptrCast(@alignCast(ctx));
     return host.palette_list_ranked_count;
@@ -24923,6 +24930,7 @@ pub const Surface = struct {
             .row_enabled = &quickSelectRowEnabledThunk,
             .row_id = &quickSelectRowIdThunk,
             .select_row = &quickSelectSelectRowThunk,
+            .invoke_row = &quickSelectInvokeRowThunk,
             .row_bounds = &quickSelectRowBoundsThunk,
             .use_com_threading = self.app.com_initialized,
         };
