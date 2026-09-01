@@ -20,6 +20,7 @@ const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
 const win32_theme = @import("win32_theme.zig");
+const win32_power = @import("win32_power.zig");
 const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const win32_terminal_accessibility = @import("win32_terminal_accessibility.zig");
@@ -1569,6 +1570,10 @@ pub const App = struct {
             .launcher_profile_target = detectDefaultProfileTarget(core_app.alloc),
             .startup_profile_picker = detectStartupProfilePicker(core_app.alloc),
         };
+        // Install before any host window exists, so the very first
+        // SetWinEventHook registration already has somewhere to deliver.
+        cloak_event_app = self;
+        win32_power.setCloakEventHandler(&onHostCloakEvent);
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
@@ -1886,6 +1891,10 @@ pub const App = struct {
             self.shell_compositor.deinit();
             self.shell_compositor_initialized = false;
         }
+        // After destroyAllWindows: every Host has released its cloak-hook
+        // reference by now, so no further callback can reach a freed App.
+        win32_power.setCloakEventHandler(null);
+        cloak_event_app = null;
         self.hosts.deinit(self.core_app.alloc);
         self.windows.deinit(self.core_app.alloc);
         self.global_hotkeys.deinit(self.core_app.alloc);
@@ -4474,7 +4483,8 @@ pub const App = struct {
         try self.ensureScrollbarClass();
 
         const host = try self.core_app.alloc.create(Host);
-        errdefer self.core_app.alloc.destroy(host);
+        var host_registered = false;
+        errdefer if (!host_registered) self.core_app.alloc.destroy(host);
         host.* = .{
             .app = self,
             .id = self.allocateHostId(),
@@ -4514,14 +4524,29 @@ pub const App = struct {
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
         host.recreateTitlebarIconFonts();
-        errdefer _ = sys.DestroyWindow(hwnd);
+        errdefer if (!host_registered) {
+            _ = sys.DestroyWindow(hwnd);
+        };
 
         self.attachShellCompositorWindow(hwnd);
 
         try self.hosts.append(self.core_app.alloc, host);
+        host_registered = true;
+        errdefer {
+            // Keep the registered Host and its GWLP_USERDATA alive through
+            // WM_DESTROY so the normal compositor-detach path can find it.
+            if (sys.DestroyWindow(hwnd) == 0) {
+                // If teardown itself fails, WM_DESTROY did not provide the
+                // normal detach. Do it explicitly before host deinit.
+                self.detachShellCompositorWindow(hwnd);
+            }
+            self.removeHost(host);
+        }
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
+
+        host.power_notifications = win32_power.Notifications.init(hwnd);
 
         // Passive first-show for quick-terminal-keyboard-interactivity
         // = none: `SW_SHOWNOACTIVATE` makes the window visible but
@@ -5101,14 +5126,9 @@ pub const App = struct {
     }
 
     fn removeHost(self: *App, host: *Host) void {
-        for (self.hosts.items, 0..) |item, i| {
-            if (item == host) {
-                _ = self.hosts.swapRemove(i);
-                host.deinit();
-                self.core_app.alloc.destroy(host);
-                break;
-            }
-        }
+        if (!detachHostReference(&self.hosts, host)) return;
+        host.deinit();
+        self.core_app.alloc.destroy(host);
     }
 
     fn windowDestroyed(self: *App, surface: *Surface) void {
@@ -6325,6 +6345,15 @@ pub const App = struct {
     }
 };
 
+fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) bool {
+    for (hosts.items, 0..) |item, i| {
+        if (item != host) continue;
+        _ = hosts.swapRemove(i);
+        return true;
+    }
+    return false;
+}
+
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
     const alloc = request.alloc;
     defer {
@@ -6921,6 +6950,9 @@ const Host = struct {
     id: u32,
     shell_id: ?win32_shell.model.WindowId = null,
     hwnd: ?HWND = null,
+    power_notifications: win32_power.Notifications = .{},
+    surfaces_visible: bool = true,
+    dwm_cloaked: bool = false,
     cached_decorations_visible: bool = true,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     active_tab: usize = 0,
@@ -9378,6 +9410,7 @@ const Host = struct {
     }
 
     fn deinit(self: *Host) void {
+        self.power_notifications.deinit();
         // Stop the tween heartbeat timer before we tear down the
         // scheduler — leaving a SetTimer bound to a destroyed HWND
         // would panic the next time it fired.
@@ -10360,6 +10393,31 @@ const Host = struct {
             }
         }
         _ = sys.ShowWindow(hwnd, if (visible) c.SW_SHOW else c.SW_HIDE);
+        self.refreshSurfaceVisibility();
+    }
+
+    fn refreshSurfaceVisibility(self: *Host) void {
+        self.refreshSurfaceVisibilityObserving(null);
+    }
+
+    /// `observed_cloaked` is the transition a DWM cloak WinEvent just
+    /// reported, or `null` for message-driven refreshes that observed no
+    /// transition. Passing it through is what lets an uncloak recover when
+    /// `DwmGetWindowAttribute` fails; see `win32_power.resolveCloaked`.
+    fn refreshSurfaceVisibilityObserving(self: *Host, observed_cloaked: ?bool) void {
+        const hwnd = self.hwnd orelse return;
+        const state = win32_power.queryHostVisibility(
+            hwnd,
+            self.dwm_cloaked,
+            observed_cloaked,
+        );
+        self.dwm_cloaked = state.cloaked;
+        if (self.surfaces_visible == state.visible) return;
+        self.surfaces_visible = state.visible;
+        for (self.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| entry.view.syncOcclusion();
+        }
     }
 
     fn present(self: *Host) void {
@@ -10371,6 +10429,7 @@ const Host = struct {
         )) |show_cmd| {
             _ = sys.ShowWindow(hwnd, show_cmd);
         }
+        self.refreshSurfaceVisibility();
         _ = sys.SetForegroundWindow(hwnd);
         _ = sys.SetFocus(hwnd);
     }
@@ -17599,6 +17658,34 @@ fn getHost(hwnd: HWND) ?*Host {
     return windowData(Host, hwnd);
 }
 
+/// Target of the DWM cloak/uncloak WinEvent hook. Set for the lifetime of the
+/// App so the callback can resolve an HWND without a global `getHost`, which
+/// would be unsafe here: other window classes in this apprt store unrelated
+/// payloads in `GWLP_USERDATA`, and the hook sees every window on this thread.
+var cloak_event_app: ?*App = null;
+
+/// Runs on the UI thread (WINEVENT_OUTOFCONTEXT delivers through our own
+/// message pump), so it may touch host state directly.
+///
+/// A cloak transition has no window message, so without this a virtual-desktop
+/// switch that uncloaks a background window would leave `surfaces_visible`
+/// false; hidden surfaces skip rendering entirely, so nothing would repair it
+/// until an unrelated message arrived.
+///
+/// `cloaked` is the transition the event carried. It must reach the refresh:
+/// if it were dropped and the refresh's `DwmGetWindowAttribute` query then
+/// failed, the previous `cloaked = true` would be preserved and this very
+/// recovery path would be the thing that fails to recover.
+fn onHostCloakEvent(hwnd: HWND, cloaked: bool) void {
+    const app = cloak_event_app orelse return;
+    for (app.hosts.items) |host| {
+        const host_hwnd = host.hwnd orelse continue;
+        if (host_hwnd != hwnd) continue;
+        host.refreshSurfaceVisibilityObserving(cloaked);
+        return;
+    }
+}
+
 fn refocusActiveSurface(host: *Host) void {
     if (host.activeSurface()) |surface| {
         if (surface.hwnd) |surface_hwnd| _ = sys.SetFocus(surface_hwnd);
@@ -18372,6 +18459,14 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return 0;
         },
         c.WM_ACTIVATE => {
+            // Cloak/uncloak (virtual-desktop switches, shell animations)
+            // has NO window message -- the documented signal is the
+            // EVENT_OBJECT_CLOAKED/UNCLOAKED WinEvent, which
+            // `win32_power.Notifications` now hooks. This refresh is the
+            // belt-and-braces path for a missed or unavailable hook: a
+            // cloaked host renders nothing, so a stale `surfaces_visible`
+            // would otherwise mean a permanently frozen window.
+            if (host) |v| v.refreshSurfaceVisibility();
             if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {
                     if (v.app.config.@"quick-terminal-autohide") {
@@ -18891,6 +18986,37 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
+        win32_power.WM_POWERBROADCAST => {
+            // Only the power-setting notifications we registered for are
+            // ours. Suspend/resume and the legacy APM query messages must
+            // keep reaching DefWindowProcW.
+            if (wParam != win32_power.PBT_POWERSETTINGCHANGE) {
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+            _ = win32_power.handlePowerSettingChange(lParam);
+            return 1;
+        },
+
+        c.WM_SHOWWINDOW => {
+            const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (host) |v| v.refreshSurfaceVisibility();
+            return result;
+        },
+
+        c.WM_WINDOWPOSCHANGED => {
+            const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            // This fires once per mouse-move during a drag-move/resize and
+            // the visibility query costs a DWM round-trip, so skip it while
+            // a drag is in flight -- a window being dragged is by definition
+            // visible. The drag loop emits its last WM_WINDOWPOSCHANGED just
+            // BEFORE WM_EXITSIZEMOVE, so that one is skipped too and the
+            // WM_EXITSIZEMOVE arm does the catch-up refresh.
+            if (host) |v| {
+                if (!v.is_live_resize.load(.acquire)) v.refreshSurfaceVisibility();
+            }
+            return result;
+        },
+
         c.WM_ENTERSIZEMOVE => {
             // User started a drag-resize or drag-move. We don't know
             // which yet, but setting the flag on both is harmless —
@@ -18911,6 +19037,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.startResizeSettleRepaints();
                 v.forceVisibleSurfaceRepaintsNow();
                 v.forceHostCompositionPaint();
+                // The last WM_WINDOWPOSCHANGED of the drag was skipped by
+                // the live-resize guard, so re-check here.
+                v.refreshSurfaceVisibility();
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -18997,6 +19126,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         c.WM_DESTROY => {
             if (host) |v| {
                 v.app.detachShellCompositorWindow(hwnd);
+                v.power_notifications.deinit();
                 v.hwnd = null;
             }
             return 0;
@@ -23438,7 +23568,13 @@ pub const Surface = struct {
             };
         }
 
+        self.syncOcclusion();
+    }
+
+    fn syncOcclusion(self: *Surface) void {
         if (!self.core_initialized) return;
+        const visible = self.window_visible and
+            (if (self.host) |host| host.surfaces_visible else true);
         if (!shouldDispatchOcclusion(self.occlusion_visible, visible)) return;
         self.occlusion_visible = visible;
         self.core_surface.occlusionCallback(visible) catch |err| {
@@ -27003,6 +27139,26 @@ test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces"
     try std.testing.expect((effectiveHostWindowStyle(false, false, true) & c.WS_CLIPCHILDREN) != 0);
     try std.testing.expect((effectiveHostWindowStyle(true, true, true) & c.WS_CLIPCHILDREN) != 0);
     try std.testing.expect((effectiveHostWindowStyle(true, false, false) & c.WS_CLIPCHILDREN) == 0);
+}
+
+test "win32 failed cloned-host registration detaches the host reference" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var first: Host = undefined;
+    var failed_clone: Host = undefined;
+    var last: Host = undefined;
+    var hosts: std.ArrayListUnmanaged(*Host) = .empty;
+    defer hosts.deinit(std.testing.allocator);
+    try hosts.append(std.testing.allocator, &first);
+    try hosts.append(std.testing.allocator, &failed_clone);
+    try hosts.append(std.testing.allocator, &last);
+
+    try std.testing.expect(detachHostReference(&hosts, &failed_clone));
+    try std.testing.expectEqual(@as(usize, 2), hosts.items.len);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &failed_clone) == null);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &first) != null);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &last) != null);
+    try std.testing.expect(!detachHostReference(&hosts, &failed_clone));
 }
 
 test "win32 sharesHostWindowState only for same-host clones" {

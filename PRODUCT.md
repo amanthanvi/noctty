@@ -38,7 +38,8 @@ run fixes them; CI gates against them once measured):
 - Key-to-pixel latency: at most one frame at 60 Hz beyond the OS
   input/compositor floor.
 - Memory: under 20 MB steady-state per additional pane.
-- Idle: effectively 0% GPU/CPU with no timer wake churn.
+- Idle: effectively 0% GPU/CPU with no timer wake churn. See
+  [Windows power and battery behavior](docs/windows.md#power-and-battery).
 
 The benchmark suite (roadmap C01) defines the measurement methodology,
 workload, baseline machine, and tolerances; CI gates activate once that

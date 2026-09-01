@@ -109,6 +109,69 @@ Terminal progress reports are mapped to Windows taskbar progress for the
 active surface in each host window. Terminal apps can also set
 in-terminal progress state through Ghostty's shared VT/OSC support.
 
+## Power and battery
+
+noctty reads AC/battery and saver state from `GetSystemPowerStatus`, and
+subscribes to Windows power-setting notifications for the power source
+(`GUID_ACDC_POWER_SOURCE`) and Battery Saver (`GUID_POWER_SAVING_STATUS`).
+It additionally registers for Windows 11 Energy Saver
+(`GUID_ENERGY_SAVER_STATUS`), which can engage while plugged in; Microsoft
+currently documents that GUID as prerelease, so registration is best-effort
+and simply does not take effect on Windows builds that lack it. Battery
+Saver and Energy Saver are tracked as two independent flags and combined
+with OR only when pacing is decided, so one turning off cannot cancel
+pacing that the other still requires. `GetSystemPowerStatus` reports only
+Battery Saver, so the fallback query carries the last notified Energy Saver
+value forward instead of clearing it. A fallback query runs at most once
+every 30 seconds. This has not yet been verified on
+a machine with a battery -- see the status caveat below.
+
+`unfocused-render-fps` caps presentation for visible, unfocused surfaces
+and defaults to `30`. Values below `1` are treated as `1`; values above
+`125` have no additional effect, since the renderer never presents more
+often than every 8 ms.
+`power-saver-rendering` accepts `auto`, `on`, or `off` and defaults to
+`auto`: `auto` follows Windows Battery Saver or Energy Saver, `on` forces
+saver pacing, and `off` disables it. `auto` deliberately does **not** key
+off battery power alone: running unplugged with saver off keeps the normal
+cadence, because throttling a focused terminal merely because a laptop is
+unplugged is a far more aggressive default than following the saver signal
+the user actually opted into. Focused surfaces retain their normal cadence
+when saver pacing is inactive. Saver pacing caps presentation at about
+30 fps. Minimized and DWM-cloaked host windows do not present until they
+become visible again.
+
+Cloak and uncloak have no window message, so noctty hooks the documented
+`EVENT_OBJECT_CLOAKED` / `EVENT_OBJECT_UNCLOAKED` WinEvents with a single
+`SetWinEventHook` scoped to this process and the UI thread. Without it, a
+virtual-desktop switch that uncloaks a background window need not send
+`WM_ACTIVATE`, `WM_SHOWWINDOW`, or `WM_WINDOWPOSCHANGED`, and since hidden
+surfaces skip rendering entirely there would be no self-healing path back
+to visible. The window messages above remain as a fallback for a missed
+event or a failed hook registration, which degrades to the previous
+behaviour rather than failing window creation. The callback forwards which
+of the two events fired: the refresh it triggers re-queries
+`DwmGetWindowAttribute(DWMWA_CLOAKED)`, and if that query fails the
+observed transition is used instead of the last known cloak state, because
+preserving a stale "cloaked" across an uncloak would leave the window
+hidden with nothing left to re-query it. This hook path is argued from the
+Win32 contract and covered by unit tests over the pure event filter and the
+pure cloak-resolution policy; it has not been observed on hardware -- see
+the status caveat below.
+
+Focus here is **per surface, not per window**. In a split, only the pane
+with keyboard focus presents at the full rate; the other panes are
+"unfocused" even though you can see them, so a split tailing fast output
+side by side with your active pane is capped at `unfocused-render-fps`
+(30 by default). Raise that value if you watch live output in a background
+split.
+
+Set `NOCTTY_RENDER_TRACE_FILE` to an absolute output path to write a JSON
+render trace when the first traced surface is destroyed. Presented fps
+can be derived as
+`(swap_buffers_count - 1) * 1000 / (last_swap_at_ms - first_swap_at_ms)`
+when at least two swaps are present and the time difference is positive.
+
 ## Windows, tabs, and splits
 
 noctty uses a native Win32 host window with:

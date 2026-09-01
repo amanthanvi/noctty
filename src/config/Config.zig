@@ -1975,6 +1975,38 @@ keybind: Keybinds = .{},
 /// Changing this value at runtime will only affect new terminals.
 @"window-vsync": bool = true,
 
+/// Limit visible, unfocused terminal surfaces to this many rendered frames
+/// per second while output remains active.
+///
+/// Focus is per surface, not per window: in a split, every pane except the
+/// one with keyboard focus is "unfocused" even while visible, so a background
+/// split tailing fast output is capped by this value. Raise it if you watch
+/// live output side by side with your active pane.
+///
+/// Lower values reduce CPU, GPU, and power use at the cost of less fluid
+/// background updates. Values below 1 are treated as 1, and values above
+/// 125 have no additional effect because the renderer never presents more
+/// often than every 8 ms. The default is `30`.
+///
+/// This can be changed at runtime and affects all open terminals.
+@"unfocused-render-fps": u32 = 30,
+
+/// Control whether power-saving render scheduling is enabled.
+///
+/// Valid values:
+///
+/// * `auto` - Enable power-saving behavior when Windows reports that Battery
+///   Saver is active, or that Windows 11 Energy Saver is active (the latter
+///   uses a GUID Microsoft still documents as prerelease, so it is
+///   best-effort and inert on Windows builds that lack it).
+/// * `on` - Always enable power-saving behavior.
+/// * `off` - Never enable power-saving behavior.
+///
+/// The default is `auto`.
+///
+/// This can be changed at runtime and affects all open terminals.
+@"power-saver-rendering": PowerSaverRendering = .auto,
+
 /// If true, new windows will inherit the working directory of the
 /// previously focused window. If no window was previously focused, the default
 /// working directory will be used (the `working-directory` option).
@@ -4628,6 +4660,13 @@ pub const CustomShaderAnimation = enum(c_int) {
     false,
     true,
     always,
+};
+
+/// See power-saver-rendering.
+pub const PowerSaverRendering = enum {
+    auto,
+    on,
+    off,
 };
 
 /// Valid values for fullscreen config option

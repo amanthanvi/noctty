@@ -77,6 +77,10 @@ Win32-validated VT protocol coverage is tracked in
 - Terminal content renders with OpenGL 4.3+ via WGL.
 - Window chrome uses a separate D3D11/DirectComposition + DirectWrite
   pipeline with GDI fallback; it never touches the terminal renderer.
+- Presentation is power- and visibility-aware: focused non-saver cadence
+  is unchanged, unfocused and saver pacing is capped, and minimized or
+  DWM-cloaked windows stop presenting. Details and measurement fields are
+  in [windows.md](windows.md#power-and-battery).
 
 ### Updater
 
@@ -139,6 +143,11 @@ and lands incrementally.
   `ghostty-org/ghostty`.
 - Crash capture is local-only, and some hard-abort paths may still
   terminate before Windows can produce a dump.
+- Power- and visibility-aware render pacing has not been exercised on a
+  machine with a battery, and the DWM cloak/uncloak WinEvent path has not
+  been observed across a real virtual-desktop switch. Both are argued from
+  the documented Win32 contracts and covered by unit tests over the pure
+  policy and event-filter functions only.
 
 ## Out of scope
 
