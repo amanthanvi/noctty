@@ -20147,8 +20147,10 @@ fn quickSelectProc(
             if (surface) |value| value.handleQuickSelectKeyUp();
             return 0;
         },
-        c.WM_CHAR,
-        c.WM_SYSCHAR,
+        c.WM_CHAR, c.WM_SYSCHAR => {
+            if (surface) |value| value.handleQuickSelectChar(wParam);
+            return 0;
+        },
         c.WM_DEADCHAR,
         c.WM_SYSDEADCHAR,
         => return 0,
@@ -23158,7 +23160,7 @@ fn terminalAccessibilityOutputCallback(
 const QuickSelectSession = struct {
     const PendingAction = struct {
         trigger_vk: UINT,
-        index: usize,
+        index: ?usize,
         ctrl: bool,
         alt: bool,
     };
@@ -23167,6 +23169,7 @@ const QuickSelectSession = struct {
     labels: win32_hints.LabelSet,
     prefix: win32_hints.PrefixState = .{},
     pending_action: ?PendingAction = null,
+    awaiting_composed_char: bool = false,
     cell_width: i32,
     cell_height: i32,
     padding_left: i32,
@@ -23178,6 +23181,21 @@ const QuickSelectSession = struct {
         self.* = undefined;
     }
 };
+
+test "quick select label placement checks final positioned chips" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 100, .bottom = 100 };
+    const occupied = [_]RECT{
+        .{ .left = 0, .top = 0, .right = 20, .bottom = 10 },
+        .{ .left = 10, .top = 10, .right = 30, .bottom = 20 },
+    };
+    const placed = Surface.quickSelectPositionLabel(
+        .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
+        client,
+        &occupied,
+    );
+    try std.testing.expectEqual(@as(i32, 20), placed.top);
+    try std.testing.expectEqual(@as(i32, 30), placed.bottom);
+}
 
 pub const Surface = struct {
     app: *App,
@@ -24847,42 +24865,51 @@ pub const Surface = struct {
         metrics: win32_theme.ThemeMetrics,
         dpi: UINT,
     ) ?RECT {
-        var chip = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse return null;
-
-        // Adjacent targets can produce overlapping multi-character chips once
-        // labels outgrow the one-character alphabet. Give each colliding chip
-        // its own vertical lane so later opaque backgrounds cannot obscure an
-        // earlier label's distinguishing suffix. UIA row bounds call this same
-        // function, so accessibility geometry stays aligned with painting.
-        var lane: i32 = 0;
-        for (0..index) |previous_index| {
-            const previous = self.quickSelectRawLabelRect(
-                previous_index,
+        const placed = std.heap.page_allocator.alloc(RECT, index + 1) catch {
+            return self.quickSelectRawLabelRect(index, client, metrics, dpi);
+        };
+        defer std.heap.page_allocator.free(placed);
+        var placed_count: usize = 0;
+        for (0..index + 1) |candidate_index| {
+            const raw = self.quickSelectRawLabelRect(
+                candidate_index,
                 client,
                 metrics,
                 dpi,
             ) orelse continue;
-            if (chip.left < previous.right and chip.right > previous.left and
-                chip.top < previous.bottom and chip.bottom > previous.top)
-            {
-                lane += 1;
-            }
+            const positioned = quickSelectPositionLabel(raw, client, placed[0..placed_count]);
+            if (candidate_index == index) return positioned;
+            placed[placed_count] = positioned;
+            placed_count += 1;
         }
-        if (lane == 0) return chip;
+        return null;
+    }
 
-        const height = chip.bottom - chip.top;
-        const down_top = chip.top + lane * height;
-        if (down_top + height <= client.bottom) {
-            chip.top = down_top;
-            chip.bottom = down_top + height;
-            return chip;
+    fn quickSelectPositionLabel(raw: RECT, client: RECT, occupied: []const RECT) RECT {
+        const height = raw.bottom - raw.top;
+        if (height <= 0) return raw;
+        const lane_count: usize = @intCast(@max(1, @divTrunc(client.bottom - client.top, height)));
+        for (0..lane_count * 2 + 1) |attempt| {
+            const magnitude: i32 = @intCast((attempt + 1) / 2);
+            const lane: i32 = if (attempt == 0)
+                0
+            else if (attempt % 2 == 1)
+                magnitude
+            else
+                -magnitude;
+            var candidate = raw;
+            candidate.top += lane * height;
+            candidate.bottom += lane * height;
+            if (candidate.top < client.top or candidate.bottom > client.bottom) continue;
+            for (occupied) |previous| {
+                if (candidate.left < previous.right and candidate.right > previous.left and
+                    candidate.top < previous.bottom and candidate.bottom > previous.top)
+                {
+                    break;
+                }
+            } else return candidate;
         }
-        const up_top = chip.top - lane * height;
-        if (up_top >= client.top) {
-            chip.top = up_top;
-            chip.bottom = up_top + height;
-        }
-        return chip;
+        return raw;
     }
 
     fn quickSelectRawLabelRect(
@@ -25113,26 +25140,51 @@ pub const Surface = struct {
     }
 
     fn handleQuickSelectKey(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
+        const session = if (self.quick_select_session) |*value| value else return;
         if (wParam == c.VK_ESCAPE) {
-            self.closeQuickSelect(true);
+            session.pending_action = .{
+                .trigger_vk = c.VK_ESCAPE,
+                .index = null,
+                .ctrl = false,
+                .alt = false,
+            };
             return;
         }
+        if (session.pending_action != null) return;
         if (wParam == c.VK_BACK) {
-            if (self.quick_select_session) |*session| {
-                if (session.prefix.backspace()) self.quickSelectPrefixChanged();
-            }
+            session.awaiting_composed_char = false;
+            if (session.prefix.backspace()) self.quickSelectPrefixChanged();
             return;
         }
 
-        const char = quickSelectAsciiFromKey(wParam, lParam) orelse return;
-        const mods = win32_input.quickSelectActionMods();
+        const char = quickSelectAsciiFromKey(wParam, lParam) orelse {
+            session.awaiting_composed_char = true;
+            return;
+        };
+        session.awaiting_composed_char = false;
+        self.inputQuickSelectChar(session, char, @intCast(wParam & 0xFFFF));
+    }
+
+    fn handleQuickSelectChar(self: *Surface, wParam: WPARAM) void {
         const session = if (self.quick_select_session) |*value| value else return;
-        if (session.pending_action != null) return;
+        if (!session.awaiting_composed_char or session.pending_action != null) return;
+        session.awaiting_composed_char = false;
+        if (wParam < 0x20 or wParam >= 0x7F) return;
+        self.inputQuickSelectChar(session, @intCast(wParam), 0);
+    }
+
+    fn inputQuickSelectChar(
+        self: *Surface,
+        session: *QuickSelectSession,
+        char: u8,
+        trigger_vk: UINT,
+    ) void {
+        const mods = win32_input.quickSelectActionMods();
         switch (session.prefix.input(&session.labels, char)) {
             .ignored => {},
             .narrowed => self.quickSelectPrefixChanged(),
             .complete => |index| session.pending_action = .{
-                .trigger_vk = @intCast(wParam & 0xFFFF),
+                .trigger_vk = trigger_vk,
                 .index = index,
                 .ctrl = mods.ctrl,
                 .alt = mods.alt,
@@ -25143,7 +25195,7 @@ pub const Surface = struct {
     fn handleQuickSelectKeyUp(self: *Surface) void {
         const session = if (self.quick_select_session) |*value| value else return;
         const pending = session.pending_action orelse return;
-        if (win32_input.keyPressed(@intCast(pending.trigger_vk)) or
+        if ((pending.trigger_vk != 0 and win32_input.keyPressed(@intCast(pending.trigger_vk))) or
             win32_input.keyPressed(c.VK_SHIFT) or
             win32_input.keyPressed(c.VK_CONTROL) or
             win32_input.keyPressed(c.VK_MENU))
@@ -25151,7 +25203,11 @@ pub const Surface = struct {
             return;
         }
         session.pending_action = null;
-        self.fireQuickSelect(pending.index, pending.ctrl, pending.alt) catch |err| {
+        const index = pending.index orelse {
+            self.closeQuickSelect(true);
+            return;
+        };
+        self.fireQuickSelect(index, pending.ctrl, pending.alt) catch |err| {
             log.warn("quick select action failed err={}", .{err});
         };
     }
@@ -25278,14 +25334,20 @@ pub const Surface = struct {
             if (previous_font) |font| _ = sys.SelectObject(hdc, font);
         }
 
+        const placed = std.heap.page_allocator.alloc(RECT, session.labels.count) catch return;
+        defer std.heap.page_allocator.free(placed);
+        var placed_count: usize = 0;
         for (session.scan.matches, 0..) |_, index| {
             const label = session.labels.get(index);
-            var chip = self.quickSelectLabelRect(
+            const raw = self.quickSelectRawLabelRect(
                 index,
                 client,
                 metrics,
                 host.current_dpi,
             ) orelse continue;
+            var chip = quickSelectPositionLabel(raw, client, placed[0..placed_count]);
+            placed[placed_count] = chip;
+            placed_count += 1;
             drawRoundedRect(
                 hdc,
                 chip,

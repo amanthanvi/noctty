@@ -8668,6 +8668,7 @@ pub const QuickSelectAlphabet = struct {
         EmptyAlphabet,
         AlphabetTooShort,
         DuplicateCharacter,
+        CaseCollidingCharacter,
         NonAsciiCharacter,
     };
 
@@ -8686,6 +8687,12 @@ pub const QuickSelectAlphabet = struct {
         for (alphabet) |char| {
             if (char < 0x20 or char >= 0x7f) return error.NonAsciiCharacter;
             if (seen[char]) return error.DuplicateCharacter;
+            if (std.ascii.isAlphabetic(char)) {
+                const folded = std.ascii.toLower(char);
+                if (seen[folded] or seen[std.ascii.toUpper(char)]) {
+                    return error.CaseCollidingCharacter;
+                }
+            }
             seen[char] = true;
         }
     }
@@ -8727,6 +8734,8 @@ pub const QuickSelectAlphabet = struct {
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a"));
         try testing.expectError(error.AlphabetTooShort, validate("a"));
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "aa"));
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "aA"));
+        try testing.expectError(error.CaseCollidingCharacter, validate("aA"));
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a\xC3\xA9"));
     }
 };

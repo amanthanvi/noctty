@@ -1023,14 +1023,7 @@ test "hints: typed prefix falls back across ASCII letter case" {
     );
     try testing.expectEqualStrings("a", lower_prefix.typed());
 
-    var mixed = try generateLabels(alloc, "aA", 2);
-    defer mixed.deinit(alloc);
-    var mixed_prefix: PrefixState = .{};
-    try testing.expectEqual(
-        PrefixState.InputResult{ .complete = 1 },
-        mixed_prefix.input(&mixed, 'A'),
-    );
-    try testing.expectEqualStrings("A", mixed_prefix.typed());
+    try testing.expectError(error.CaseCollidingCharacter, generateLabels(alloc, "aA", 2));
 }
 
 test "hints: empty regex matches advance by UTF-8 codepoint" {
