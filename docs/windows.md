@@ -240,7 +240,7 @@ registration time only when noctty is still selected, then removes noctty's
 per-user COM registration. It does not overwrite a default-terminal choice
 made after noctty was registered. Both commands are idempotent.
 
-## Launch topology
+## Taskbar jump list
 
 The taskbar jump list has two categories:
 

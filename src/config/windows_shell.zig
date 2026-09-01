@@ -974,7 +974,11 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
 
     drain_thread.join();
     drain_joined = true;
-    if (drain.err) |err| return err;
+    if (drain.err) |err| {
+        _ = try child.wait();
+        child_running = false;
+        return err;
+    }
     const raw_bytes = drain.bytes orelse return error.Unexpected;
 
     _ = try child.wait();

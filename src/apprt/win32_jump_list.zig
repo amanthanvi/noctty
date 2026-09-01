@@ -1205,10 +1205,6 @@ pub const JumpList = struct {
             return false;
         };
         defer merged.deinit(self.alloc);
-        self.orderPendingRemovalEvents(&merged) catch |err| {
-            log.warn("jump list removal ordering failed err={}", .{err});
-            return false;
-        };
         self.applyPendingState(&merged) catch |err| {
             log.warn("jump list state merge failed err={}", .{err});
             return false;
@@ -1310,34 +1306,6 @@ pub const JumpList = struct {
                 event.key,
                 event.kind,
                 event.changed_ns,
-            );
-        }
-    }
-
-    fn orderPendingRemovalEvents(self: *JumpList, merged: *const LoadedState) !void {
-        // A process can observe a Shell removal from a list published by a
-        // different process. Reconcile against the locked shared history so
-        // the removal is not timestamped before the destination it removes.
-        for (self.pending_recent_removals.items.items) |path| {
-            const pending = (try self.pending_recent_events.latest(self.alloc, path)) orelse continue;
-            const latest = (try merged.recent_events.latest(self.alloc, path)) orelse continue;
-            if (latest.changed_ns <= pending.changed_ns) continue;
-            try self.pending_recent_events.upsert(
-                self.alloc,
-                path,
-                .removed,
-                latest.changed_ns,
-            );
-        }
-        for (self.pending_profile_hides.items.items) |key| {
-            const pending = self.pending_profile_events.latest(key) orelse continue;
-            const latest = merged.profile_events.latest(key) orelse continue;
-            if (latest.changed_ns <= pending.changed_ns) continue;
-            try self.pending_profile_events.upsert(
-                self.alloc,
-                key,
-                .hidden,
-                latest.changed_ns,
             );
         }
     }
@@ -2043,7 +2011,7 @@ test "jump_list persistence keeps the newer cross-process recent event" {
     try std.testing.expectEqual(@as(i64, 20), latest.changed_ns);
 }
 
-test "jump_list removal orders against the latest locked event history" {
+test "jump_list later cross-process use outranks an observed removal" {
     const alloc = std.testing.allocator;
     var jump: JumpList = .{
         .alloc = alloc,
@@ -2068,12 +2036,11 @@ test "jump_list removal orders against the latest locked event history" {
     try merged.recents.appendLoaded(alloc, "C:\\reused");
     try merged.recent_events.upsert(alloc, "C:\\reused", .used, 200);
 
-    try jump.orderPendingRemovalEvents(&merged);
     try jump.applyPendingState(&merged);
-    try std.testing.expect(!try merged.recents.contains(alloc, "C:\\reused"));
-    try std.testing.expect(try merged.removed_recents.contains(alloc, "C:\\reused"));
+    try std.testing.expect(try merged.recents.contains(alloc, "C:\\reused"));
+    try std.testing.expect(!try merged.removed_recents.contains(alloc, "C:\\reused"));
     const latest = (try merged.recent_events.latest(alloc, "C:\\reused")).?;
-    try std.testing.expectEqual(RecentEventKind.removed, latest.kind);
+    try std.testing.expectEqual(RecentEventKind.used, latest.kind);
     try std.testing.expectEqual(@as(i64, 200), latest.changed_ns);
 
     try std.testing.expect(try jump.pending_profile_hides.insert(alloc, "wsl:Ubuntu"));
@@ -2084,11 +2051,10 @@ test "jump_list removal orders against the latest locked event history" {
         300,
     );
     try merged.profile_events.upsert(alloc, "wsl:Ubuntu", .used, 400);
-    try jump.orderPendingRemovalEvents(&merged);
     try jump.applyPendingState(&merged);
-    try std.testing.expect(merged.hidden_profiles.contains("wsl:Ubuntu"));
+    try std.testing.expect(!merged.hidden_profiles.contains("wsl:Ubuntu"));
     const latest_profile = merged.profile_events.latest("wsl:Ubuntu").?;
-    try std.testing.expectEqual(ProfileEventKind.hidden, latest_profile.kind);
+    try std.testing.expectEqual(ProfileEventKind.used, latest_profile.kind);
     try std.testing.expectEqual(@as(i64, 400), latest_profile.changed_ns);
 }
 
