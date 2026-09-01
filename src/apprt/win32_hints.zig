@@ -118,6 +118,8 @@ pub const Match = struct {
     end: usize,
     first: point.Coordinate,
     last: point.Coordinate,
+    first_byte_offset: usize,
+    last_byte_end_offset: usize,
 };
 
 /// What firing a label does with the matched text.
@@ -194,6 +196,50 @@ pub fn spanText(
     }
     const finish = end orelse return null;
     return text[begin..finish];
+}
+
+/// Return the original byte subrange inside the first and last cells. Terminal
+/// grapheme bytes share one coordinate, so coordinates alone would expand a
+/// regex match of one codepoint to the entire multi-codepoint cell.
+pub fn spanTextRange(
+    text: []const u8,
+    map: []const point.Coordinate,
+    matched: Match,
+) ?[]const u8 {
+    const limit = @min(text.len, map.len);
+    var first_cell_start: ?usize = null;
+    var last_cell_start: ?usize = null;
+    for (map[0..limit], 0..) |coord, i| {
+        if (first_cell_start == null and coordEql(coord, matched.first)) {
+            first_cell_start = i;
+        }
+        if (last_cell_start == null and coordEql(coord, matched.last)) {
+            last_cell_start = i;
+        }
+        if (first_cell_start != null and last_cell_start != null) break;
+    }
+    const first_start = first_cell_start orelse return null;
+    const last_start = last_cell_start orelse return null;
+    if (last_start < first_start) return null;
+
+    var first_cell_end = first_start;
+    while (first_cell_end < limit and coordEql(map[first_cell_end], matched.first)) {
+        first_cell_end += 1;
+    }
+    var last_cell_end = last_start;
+    while (last_cell_end < limit and coordEql(map[last_cell_end], matched.last)) {
+        last_cell_end += 1;
+    }
+    if (matched.first_byte_offset > first_cell_end - first_start or
+        matched.last_byte_end_offset > last_cell_end - last_start)
+    {
+        return null;
+    }
+
+    const begin = first_start + matched.first_byte_offset;
+    const end = last_start + matched.last_byte_end_offset;
+    if (end <= begin) return null;
+    return text[begin..end];
 }
 
 /// Build the stable accessible name for one visible quick-select target.
@@ -377,7 +423,15 @@ pub fn extractMatches(
         while (offset < text.len and search_count < max_searches_per_pattern) {
             if (candidates.items.len >= max_candidate_count) break :pattern_loop;
             search_count += 1;
-            var region = regex.searchWithParam(text[offset..], .{}, &match_param) catch |err| switch (err) {
+            var region: oni.Region = .{};
+            _ = regex.searchAdvancedWithParam(
+                text,
+                offset,
+                text.len,
+                &region,
+                .{},
+                &match_param,
+            ) catch |err| switch (err) {
                 error.Mismatch,
                 error.RetryLimitInMatchOver,
                 error.RetryLimitInSearchOver,
@@ -388,10 +442,8 @@ pub fn extractMatches(
             };
             defer region.deinit();
 
-            const relative_start: usize = @intCast(region.starts()[0]);
-            const relative_end: usize = @intCast(region.ends()[0]);
-            const start = offset + relative_start;
-            const end = offset + relative_end;
+            const start: usize = @intCast(region.starts()[0]);
+            const end: usize = @intCast(region.ends()[0]);
             if (end > start) {
                 try candidates.append(alloc, .{
                     .start = start,
@@ -458,11 +510,25 @@ fn resolveCandidates(
     std.mem.sortUnstable(Candidate, accepted.items, {}, candidateReadingOrder);
     const result = try alloc.alloc(Match, accepted.items.len);
     for (accepted.items, result) |candidate, *matched| {
+        var first_cell_start = candidate.start;
+        while (first_cell_start > 0 and
+            coordEql(map[first_cell_start - 1], map[candidate.start]))
+        {
+            first_cell_start -= 1;
+        }
+        var last_cell_start = candidate.end - 1;
+        while (last_cell_start > 0 and
+            coordEql(map[last_cell_start - 1], map[candidate.end - 1]))
+        {
+            last_cell_start -= 1;
+        }
         matched.* = .{
             .start = candidate.start,
             .end = candidate.end,
             .first = map[candidate.start],
             .last = map[candidate.end - 1],
+            .first_byte_offset = candidate.start - first_cell_start,
+            .last_byte_end_offset = candidate.end - last_cell_start,
         };
     }
     return result;
@@ -870,6 +936,23 @@ test "hints: span text tracks a target's live cells" {
     try testing.expect(spanText(text, &map, .{ .x = 0, .y = 0 }, .{ .x = 9, .y = 0 }) == null);
 }
 
+test "hints: span text range preserves a partial grapheme match" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    const text = "e\u{0301}";
+    const map = [_]point.Coordinate{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 0, .y = 0 },
+        .{ .x = 0, .y = 0 },
+    };
+    const matches = try extractMatches(alloc, text, &map, &.{"e"});
+    defer alloc.free(matches);
+    try testing.expectEqual(@as(usize, 1), matches.len);
+    try testing.expectEqualStrings("e", spanTextRange(text, &map, matches[0]).?);
+}
+
 test "hints: labels are shortest first and prefix free" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -958,6 +1041,23 @@ test "hints: empty regex matches advance by UTF-8 codepoint" {
     const matches = try extractMatches(alloc, text, &map, &.{"(?=.)"});
     defer alloc.free(matches);
     try testing.expectEqual(@as(usize, 0), matches.len);
+}
+
+test "hints: anchored regex searches the original buffer once" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    const text = "abc";
+    const map = [_]point.Coordinate{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 1, .y = 0 },
+        .{ .x = 2, .y = 0 },
+    };
+    const matches = try extractMatches(alloc, text, &map, &.{"\\A."});
+    defer alloc.free(matches);
+    try testing.expectEqual(@as(usize, 1), matches.len);
+    try testing.expectEqualStrings("a", text[matches[0].start..matches[0].end]);
 }
 
 test "hints: overlap resolution prefers longest then earliest" {

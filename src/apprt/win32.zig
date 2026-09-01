@@ -25110,11 +25110,10 @@ pub const Surface = struct {
         var rendered = win32_hints.renderStateText(alloc, &render_state) catch return false;
         defer rendered.deinit(alloc);
 
-        const current = win32_hints.spanText(
+        const current = win32_hints.spanTextRange(
             rendered.text,
             rendered.map,
-            matched.first,
-            matched.last,
+            matched,
         ) orelse return false;
         return std.mem.eql(u8, current, session.scan.matchText(index));
     }
