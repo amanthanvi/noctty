@@ -105,13 +105,12 @@ level deep, up to 16 files: relative paths start at the `.ssh` directory, and
 absolute and `~/` paths are accepted. A leading `"` groups one path containing
 spaces, matching OpenSSH; a backslash is a path separator here, not an escape.
 
-Because that read is synchronous on the UI thread, an include is skipped
-rather than opened when it is globbed, UNC (`\\server\share`), a device path
-(`\\?\`, `\\.\`), or a mapped network drive letter — the last is checked with
-`GetDriveTypeW`, which answers from the local mount table without contacting
-the server. A refresh therefore cannot block on a network timeout. A directory
-junction or a `subst` alias whose target is remote is not detected, since both
-report the drive type of the letter rather than of the target.
+An include is skipped before the worker opens it when it is globbed, UNC
+(`\\server\share`), a device path (`\\?\`, `\\.\`), or a mapped network drive
+letter. The last is checked with `GetDriveTypeW`, which answers from the local
+mount table without contacting the server. A directory junction or a `subst`
+alias whose target is remote is not detected by that classification, but the
+bounded worker below still prevents its open from stalling the UI thread.
 
 Activating an entry runs `ssh <alias>`, so whatever that alias resolves to in
 your own SSH configuration takes effect — including any `ProxyCommand` or
