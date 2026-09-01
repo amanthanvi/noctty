@@ -3473,7 +3473,10 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
 /// `0`, so the whole history is cleared).
 pub fn dropLaunchLayoutReplaySteps(self: *Config, from: usize) ?[]const u8 {
     var found: ?[]const u8 = null;
-    var i = self._replay_steps.items.len;
+    var i = @min(from, self._replay_steps.items.len);
+    while (i < self._replay_steps.items.len) : (i += 1) {
+        if (self._replay_steps.items[i] == .@"-e") break;
+    }
     while (i > from) {
         i -= 1;
         const arg: []const u8 = switch (self._replay_steps.items[i]) {
@@ -3612,6 +3615,13 @@ test "launch-layout does not survive in the replay log once consumed" {
     try cfg._replay_steps.append(arena_alloc, .{
         .arg = try arena_alloc.dupeZ(u8, "--launch-layout=Project Alpha"),
     });
+    try cfg._replay_steps.append(arena_alloc, .@"-e");
+    try cfg._replay_steps.append(arena_alloc, .{
+        .arg = try arena_alloc.dupeZ(u8, "tool.exe"),
+    });
+    try cfg._replay_steps.append(arena_alloc, .{
+        .arg = try arena_alloc.dupeZ(u8, "--launch-layout=child-option"),
+    });
     cfg.@"launch-layout" = "Project Alpha";
 
     // Startup consumes the request. Clearing the field alone is not enough:
@@ -3628,6 +3638,15 @@ test "launch-layout does not survive in the replay log once consumed" {
     var replay_it = Replay.iterator(cfg._replay_steps.items, &replayed);
     try replayed.loadIter(alloc, &replay_it);
     try testing.expect(replayed.@"launch-layout" == null);
+    const command = replayed.@"initial-command" orelse return error.TestExpectedEqual;
+    switch (command) {
+        .shell => return error.TestExpectedEqual,
+        .direct => |argv| {
+            try testing.expectEqual(@as(usize, 2), argv.len);
+            try testing.expectEqualStrings("tool.exe", argv[0]);
+            try testing.expectEqualStrings("--launch-layout=child-option", argv[1]);
+        },
+    }
 }
 
 test "handle bom in config files" {
