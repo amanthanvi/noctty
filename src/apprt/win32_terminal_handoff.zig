@@ -365,12 +365,21 @@ pub const Server = struct {
         self.factory_registration_refs.store(refs_after - refs_before, .release);
     }
 
-    pub fn revoke(self: *Server) void {
-        const cookie = self.cookie orelse return;
-        self.cookie = null;
+    pub fn revoke(self: *Server) bool {
+        const cookie = self.cookie orelse return true;
         const hr = CoRevokeClassObject(cookie);
-        if (hr < 0) log.warn("CoRevokeClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
+        if (!self.finishRevoke(hr)) {
+            log.warn("CoRevokeClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
+            return false;
+        }
+        return true;
+    }
+
+    fn finishRevoke(self: *Server, hr: HRESULT) bool {
+        if (hr < 0) return false;
+        self.cookie = null;
         self.factory_registration_refs.store(0, .release);
+        return true;
     }
 
     /// Takes ownership of `session` and returns the identifier the UI thread
@@ -1910,6 +1919,26 @@ test "handoff server stays alive for outstanding class factory references" {
     try std.testing.expect(server.isBusy());
     try std.testing.expectEqual(@as(u32, 1), server.factory.base.vtbl.Release(&server.factory.base));
     try std.testing.expect(!server.isBusy());
+}
+
+test "handoff server retains registration state when revocation fails" {
+    const Queue = struct {
+        fn call(_: *anyopaque, _: *PendingSession) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    var server = Server.init(std.testing.allocator, &context, Queue.call);
+    server.cookie = 42;
+    server.factory_registration_refs.store(1, .release);
+
+    try std.testing.expect(!server.finishRevoke(E_FAIL));
+    try std.testing.expectEqual(@as(?DWORD, 42), server.cookie);
+    try std.testing.expectEqual(@as(u32, 1), server.factory_registration_refs.load(.acquire));
+
+    try std.testing.expect(server.finishRevoke(com.S_OK));
+    try std.testing.expectEqual(@as(?DWORD, null), server.cookie);
+    try std.testing.expectEqual(@as(u32, 0), server.factory_registration_refs.load(.acquire));
 }
 
 test "handoff selection commit rechecks the console half before writing" {

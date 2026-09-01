@@ -2693,7 +2693,7 @@ pub const App = struct {
         var terminal_handoff_server: ?win32_terminal_handoff.Server = null;
         defer if (terminal_handoff_server) |*server| {
             self.terminal_handoff_server = null;
-            server.revoke();
+            _ = server.revoke();
             server.drainPending();
         };
         if (self.embedding_mode) {
@@ -4421,7 +4421,7 @@ pub const App = struct {
 
         // Revoke first, then re-check. After the revoke no new activation can
         // arrive, so anything observed now is everything that can exist.
-        server.revoke();
+        if (!server.revoke()) return false;
         if (!server.isBusy()) return true;
 
         // Something landed in the gap between the check and the revoke. Take
