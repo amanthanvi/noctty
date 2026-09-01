@@ -20129,6 +20129,10 @@ fn quickSelectProc(
             if (surface) |value| value.closeQuickSelect(true);
             return 0;
         },
+        c.WM_CAPTURECHANGED => {
+            if (surface) |value| value.closeQuickSelect(false);
+            return 0;
+        },
         c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
             if (surface) |value| value.handleQuickSelectKey(wParam, lParam);
             return 0;
@@ -24941,6 +24945,10 @@ pub const Surface = struct {
         const hwnd = self.quick_select_hwnd.?;
         _ = applyChildVisibility(hwnd, &self.quick_select_placement, true);
         _ = sys.SetFocus(hwnd);
+        // Color-keyed pixels are transparent to hit testing. Capture ensures
+        // every click over the modal overlay reaches its dismissal handler
+        // instead of leaking through to the terminal below.
+        _ = sys.SetCapture(hwnd);
         _ = sys.InvalidateRect(hwnd, null, 0);
         return true;
     }
@@ -25017,6 +25025,9 @@ pub const Surface = struct {
         }
         if (overlay) |hwnd| {
             _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+            if (sys.GetCapture()) |capture| {
+                if (capture == hwnd) _ = sys.ReleaseCapture();
+            }
             _ = sys.DestroyWindow(hwnd);
         }
         if (self.quick_select_session) |*session| session.deinit(self.app.core_app.alloc);

@@ -206,11 +206,18 @@ pub fn accessibleTargetName(
     label: []const u8,
     text: []const u8,
 ) []const u8 {
-    return std.fmt.bufPrint(
+    const prefix = std.fmt.bufPrint(
         buf,
-        "Target {d} of {d}, label {s}, {s}",
-        .{ index + 1, count, label, text },
+        "Target {d} of {d}, label {s}, ",
+        .{ index + 1, count, label },
     ) catch "Quick select target";
+    const remaining = buf[prefix.len..];
+    var text_len = @min(text.len, remaining.len);
+    while (text_len > 0 and !std.unicode.utf8ValidateSlice(text[0..text_len])) {
+        text_len -= 1;
+    }
+    @memcpy(remaining[0..text_len], text[0..text_len]);
+    return buf[0 .. prefix.len + text_len];
 }
 
 /// One immutable visible-viewport scan. Match text borrows from `text`.
@@ -1072,4 +1079,18 @@ test "hints: accessible target names expose label and matched text" {
         "Target 1 of 2, label a, https://example.com/a",
         accessibleTargetName(&buf, 0, 2, "a", "https://example.com/a"),
     );
+}
+
+test "hints: accessible target names retain labels when text is truncated" {
+    var buf: [47]u8 = undefined;
+    const name = accessibleTargetName(
+        &buf,
+        12,
+        4096,
+        "zz",
+        "https://example.com/世界/世界/世界",
+    );
+    try std.testing.expect(std.mem.startsWith(u8, name, "Target 13 of 4096, label zz, "));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(name));
+    try std.testing.expect(name.len <= buf.len);
 }
