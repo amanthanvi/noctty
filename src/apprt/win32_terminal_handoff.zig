@@ -267,7 +267,6 @@ pub const PendingId = usize;
 pub const PendingQueue = struct {
     mutex: std.Thread.Mutex = .{},
     entries: std.ArrayList(Entry) = .empty,
-    next_id: PendingId = 1,
 
     const Entry = struct {
         id: PendingId,
@@ -283,11 +282,26 @@ pub const PendingQueue = struct {
     ) Allocator.Error!PendingId {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const id = self.next_id;
-        self.next_id +%= 1;
-        if (self.next_id == 0) self.next_id = 1;
+        var source: CryptoCapabilitySource = .{};
+        const id = self.nextCapabilityWithSource(&source);
         try self.entries.append(alloc, .{ .id = id, .session = session });
         return id;
+    }
+
+    const CryptoCapabilitySource = struct {
+        fn next(_: *@This()) PendingId {
+            return std.crypto.random.int(PendingId);
+        }
+    };
+
+    fn nextCapabilityWithSource(self: *PendingQueue, source: anytype) PendingId {
+        while (true) {
+            const candidate = source.next();
+            if (candidate == 0) continue;
+            for (self.entries.items) |entry| {
+                if (entry.id == candidate) break;
+            } else return candidate;
+        }
     }
 
     /// Resolves `id` and hands ownership back to the caller, or returns null
@@ -1860,6 +1874,24 @@ test "handoff pending queue resolves only identifiers it issued" {
     const id = try server.queuePending(session);
     try std.testing.expect(id != 0);
     try std.testing.expect(server.isBusy());
+
+    const Source = struct {
+        values: []const PendingId,
+        index: usize = 0,
+
+        fn next(self: *@This()) PendingId {
+            defer self.index += 1;
+            return self.values[self.index];
+        }
+    };
+    const available: PendingId = if (id == 42) 43 else 42;
+    const candidates = [_]PendingId{ 0, id, available };
+    var source: Source = .{ .values = &candidates };
+    try std.testing.expectEqual(
+        available,
+        server.pending.nextCapabilityWithSource(&source),
+    );
+    try std.testing.expectEqual(candidates.len, source.index);
 
     // A forged message carries an identifier we never handed out. It must be
     // dropped without disturbing the session that is genuinely waiting.
