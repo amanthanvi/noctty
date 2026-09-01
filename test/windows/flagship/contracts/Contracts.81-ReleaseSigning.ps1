@@ -321,9 +321,9 @@ foreach ($contract in @(
     @{ Pattern = '(?s)Get-FileSha256Lower.*?\$digest = .*?\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
-    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
+    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$signatureEvidence\.Count -ne 10'; Description = 'published verifier validates exactly ten downloaded Authenticode signatures' },
     @{ Pattern = '(?s)\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1.*?one consistent certificate'; Description = 'published verifier requires one consistent signer after shared updater-pin verification' },
-    @{ Pattern = "noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
+    @{ Pattern = "(?s)noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'.*?noctty/noctty-terminal-handoff-proxy\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Invoke-ContractTable -Contracts @(
