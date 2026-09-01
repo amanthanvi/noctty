@@ -1171,12 +1171,9 @@ fn sendAutomationAckRequest(
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
-    if (request.len < 13) return error.InvalidIpcRequest;
-    std.mem.writeInt(
-        u64,
-        request[5..13],
+    try win32_ipc.setAutomationRequestDeadline(
+        request,
         automationRequestDeadline(response_timeout_ms),
-        .little,
     );
     try win32_ipc.writeAll(pipe, request);
     return win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
@@ -1543,11 +1540,9 @@ fn sendLaunchLayoutIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    std.mem.writeInt(
-        u64,
-        request[5..13],
+    try win32_ipc.setAutomationRequestDeadline(
+        request,
         automationRequestDeadline(response_timeout_ms),
-        .little,
     );
     try win32_ipc.writeAll(pipe, request);
     return try win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));

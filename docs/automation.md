@@ -63,10 +63,12 @@ foreground-lock rules can still refuse the activation half in situations
 where the requesting process holds no foreground rights.
 
 `--working-directory` is the only launch override. Accepted values are
-`home`, `inherit`, `~`, paths beginning `~/` or `~\`, and local drive-letter
-absolute paths such as `C:\src`. Relative, drive-relative, and UNC/device
+`home`, `inherit`, `~`, paths beginning `~/` or `~\`, and drive-letter absolute
+paths such as `C:\src`. Relative, drive-relative, and UNC/device
 paths such as `\\host\share`, `//host/share`, `\\?\`, and `\\.\` are
-refused. `+new-tab` and `+new-split` inherit the source pane's command; no
+refused. This is syntax validation, not a locality guarantee: mapped or
+`subst` drives and junctions or other reparse points may still resolve
+off-box. `+new-tab` and `+new-split` inherit the source pane's command; no
 verb can choose a program to run. There is no `-e`, `--command`, or `--title`
 override for those verbs.
 

@@ -1170,6 +1170,30 @@ test "queued automation messages release consumer ownership during teardown" {
     text_request.retain();
     text_request.release();
     (Message{ .automation_command = text_request }).deinit(std.testing.allocator);
+
+    const tab_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .new_tab = .{ .target = .focused, .working_directory = "C:\\src" } },
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
+    tab_request.retain();
+    tab_request.release();
+    (Message{ .automation_command = tab_request }).deinit(std.testing.allocator);
+
+    const split_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .new_split = .{
+            .target = .{ .surface_id = 42 },
+            .direction = .down,
+            .working_directory = "C:\\src",
+        } },
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
+    split_request.retain();
+    split_request.release();
+    (Message{ .automation_command = split_request }).deinit(std.testing.allocator);
 }
 
 var automation_test_now_ms: u64 = 0;

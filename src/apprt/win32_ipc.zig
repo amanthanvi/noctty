@@ -101,6 +101,11 @@ fn appendU64(dst: *std.ArrayList(u8), alloc: Allocator, value: u64) !void {
     try dst.appendSlice(alloc, &buf);
 }
 
+pub fn setAutomationRequestDeadline(encoded: []u8, deadline_ms: u64) !void {
+    if (encoded.len < 13) return error.InvalidIpcRequest;
+    std.mem.writeInt(u64, encoded[5..13], deadline_ms, .little);
+}
+
 fn appendAutomationTarget(
     dst: *std.ArrayList(u8),
     alloc: Allocator,
@@ -1067,9 +1072,10 @@ test "win32 IPC silent client read is bounded" {
         }
     };
     const writer = try std.Thread.spawn(.{}, DelayedWriter.run, .{server});
-    defer writer.join();
+    errdefer writer.join();
     try readExactWithTimeout(client, &byte, std.math.maxInt(u64));
     try std.testing.expectEqual(@as(u8, 'y'), byte[0]);
+    writer.join();
 
     _ = windows.CloseHandle(server);
     server_open = false;
@@ -1090,6 +1096,18 @@ test "win32 IPC request kind values remain stable" {
     try std.testing.expectEqual(@as(u8, 2), @intFromEnum(RequestKind.list_windows));
     try std.testing.expectEqual(@as(u8, 3), @intFromEnum(RequestKind.perform_action));
     try std.testing.expectEqual(@as(u8, 8), @intFromEnum(RequestKind.launch_layout));
+}
+
+test "win32 IPC deadline patching stays codec-owned" {
+    const request = try encodeFocusRequest(std.testing.allocator, .focused, 0);
+    defer std.testing.allocator.free(request);
+
+    try setAutomationRequestDeadline(request, test_deadline_ms);
+    try std.testing.expectEqual(test_deadline_ms, readU64(request[5..13]));
+    try std.testing.expectError(
+        error.InvalidIpcRequest,
+        setAutomationRequestDeadline(request[0..12], test_deadline_ms),
+    );
 }
 
 test "win32 launch-layout IPC encode decode round trip" {
