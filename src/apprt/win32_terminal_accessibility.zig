@@ -75,6 +75,11 @@ pub const TerminalAccessibilitySession = struct {
     query_refresh_post_pending: std.atomic.Value(bool) = .init(false),
     last_refresh_ms: u64 = 0,
     refresh_timer_active: bool = false,
+    /// Set when a refresh was skipped because the renderer lock was held. The
+    /// retry has to run even for a client that registers no events and has not
+    /// queried recently, which `publishPolicy` would otherwise filter out, so
+    /// it is treated like `force` for the refresh gates below.
+    contention_retry_pending: bool = false,
     cached_text: []u8,
     cached_name: [256]u8 = undefined,
     cached_name_len: usize = 0,
@@ -133,17 +138,32 @@ pub const TerminalAccessibilitySession = struct {
     }
 
     pub fn acquireProvider(self: *TerminalAccessibilitySession) !*win32_uia.TerminalProvider {
+        // Refreshing here only freshens the cache. `error.WouldBlock` means the
+        // renderer lock is held, and this runs on the UI thread, so hand back
+        // the provider with the snapshot we already have rather than block.
         if (self.provider) |provider| {
-            _ = try self.refresh(.discard, false);
+            _ = self.refresh(.discard, false) catch |err| switch (err) {
+                error.WouldBlock => {
+                    self.armContentionRetry();
+                    return provider;
+                },
+                else => return err,
+            };
             return provider;
         }
-        _ = try self.refresh(.discard, false);
+        const contended = if (self.refresh(.discard, false)) |_| false else |err| switch (err) {
+            error.WouldBlock => true,
+            else => return err,
+        };
         const hwnd = self.ops.hwnd(self.ops.ctx) orelse return error.NoWindow;
         self.provider = try win32_uia.TerminalProvider.create(
             self.alloc,
             hwnd,
             self.state(),
         );
+        // The cache is still empty on this path, so the provider would serve an
+        // empty document until something else published. Retry from the timer.
+        if (contended) self.armContentionRetry();
         return self.provider.?;
     }
 
@@ -323,8 +343,12 @@ pub const TerminalAccessibilitySession = struct {
             win32_uia.events.clientsAreListening(),
             queryRecentlyActive(self.last_query_ms.load(.acquire), now_ms),
         );
-        if (!force and !policy.refresh_snapshot) return;
-        if (!force and !refreshDue(self.last_refresh_ms, now_ms)) {
+        // `handleTimer` cancels the timer before publishing, so a contention
+        // retry that lost the policy gate here would have nothing left to
+        // reschedule it. Let it through instead.
+        const force_refresh = force or self.contention_retry_pending;
+        if (!force_refresh and !policy.refresh_snapshot) return;
+        if (!force_refresh and !refreshDue(self.last_refresh_ms, now_ms)) {
             if (!self.refresh_timer_active) {
                 const hwnd = self.ops.hwnd(self.ops.ctx) orelse return;
                 if (sys.SetTimer(hwnd, self.timer_id, refreshDelay(self.last_refresh_ms, now_ms), null) != 0) {
@@ -334,6 +358,8 @@ pub const TerminalAccessibilitySession = struct {
             return;
         }
         self.cancelTimer();
+        // Consumed. If this refresh contends again, `armContentionRetry` re-sets it.
+        self.contention_retry_pending = false;
         const started_ms = now_ms;
         const is_focused = self.cached_focused.load(.acquire);
         const speech_mode: SpeechMode = if (requested_speech_mode == .discard or !is_focused)
@@ -351,6 +377,12 @@ pub const TerminalAccessibilitySession = struct {
             std.log.warn("win32 terminal UIA snapshot slow elapsed_ms={d}", .{completed_ms -| started_ms});
         }
         const refresh_result = result catch |err| {
+            // The renderer lock was held. Skipping is the correct outcome on
+            // the UI thread: keep the cached snapshot and retry from the timer.
+            if (err == error.WouldBlock) {
+                self.armContentionRetry();
+                return;
+            }
             std.log.warn("win32 terminal UIA snapshot refresh failed err={}", .{err});
             return;
         };
@@ -583,6 +615,18 @@ pub const TerminalAccessibilitySession = struct {
             self.pending_announcement_omitted[index] = false;
             self.pending_announcement_count += 1;
             remaining = remaining[chunk_len..];
+        }
+    }
+
+    /// Arm the periodic refresh timer after a refresh was skipped because the
+    /// renderer lock was held. Without this the snapshot stays as it was until
+    /// some unrelated output, focus, or query event happens to publish again.
+    fn armContentionRetry(self: *TerminalAccessibilitySession) void {
+        self.contention_retry_pending = true;
+        if (self.refresh_timer_active) return;
+        const hwnd = self.ops.hwnd(self.ops.ctx) orelse return;
+        if (sys.SetTimer(hwnd, self.timer_id, refresh_interval_ms, null) != 0) {
+            self.refresh_timer_active = true;
         }
     }
 
