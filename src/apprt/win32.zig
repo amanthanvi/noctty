@@ -1449,24 +1449,31 @@ fn normalizeForwardedStartupArg(
         // process exits having produced no window at all. Dropping just this
         // argument here is what makes the "still gets a window" promise
         // above true for `--working-directory=\\host\share` and friends.
-        if (!forwardedWorkingDirectoryAllowed(normalized)) {
-            log.warn(
-                "not forwarding --working-directory to the running instance: " ++
-                    "value is not a local absolute path",
-                .{},
-            );
-            return null;
-        }
-
-        return try std.fmt.allocPrintSentinel(
-            alloc,
-            "--working-directory={s}",
-            .{normalized},
-            0,
-        );
+        return try allocForwardedWorkingDirectoryArg(alloc, normalized);
     }
 
     return try alloc.dupeZ(u8, arg);
+}
+
+fn allocForwardedWorkingDirectoryArg(
+    alloc: Allocator,
+    value: []const u8,
+) !?[:0]const u8 {
+    if (!forwardedWorkingDirectoryAllowed(value)) {
+        log.warn(
+            "not forwarding --working-directory to the running instance: " ++
+                "value is not a local absolute path",
+            .{},
+        );
+        return null;
+    }
+
+    return try std.fmt.allocPrintSentinel(
+        alloc,
+        "--working-directory={s}",
+        .{value},
+        0,
+    );
 }
 
 fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
@@ -1493,12 +1500,9 @@ fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
         const cwd = std.fs.cwd();
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const wd = try cwd.realpath(".", &cwd_buf);
-        try argv.insert(alloc, 0, try std.fmt.allocPrintSentinel(
-            alloc,
-            "--working-directory={s}",
-            .{wd},
-            0,
-        ));
+        if (try allocForwardedWorkingDirectoryArg(alloc, wd)) |arg| {
+            try argv.insert(alloc, 0, arg);
+        }
     }
 
     if (argv.items.len == 0) {
@@ -28075,6 +28079,20 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
         std.testing.allocator,
         "wgh://activate?surface=abc",
     ) == null);
+}
+
+test "win32 synthesized forwarded working directory obeys receiver policy" {
+    try std.testing.expect(try allocForwardedWorkingDirectoryArg(
+        std.testing.allocator,
+        "\\\\host\\share",
+    ) == null);
+
+    const local = (try allocForwardedWorkingDirectoryArg(
+        std.testing.allocator,
+        "C:\\work",
+    )).?;
+    defer std.testing.allocator.free(local);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work", local);
 }
 
 test "win32 decorationsVisibleForConfig only hides none" {
