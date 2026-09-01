@@ -20122,10 +20122,13 @@ fn quickSelectProc(
             if (surface) |value| value.closeQuickSelect(false);
             return 0;
         },
-        // The overlay covers the terminal while it is up, so a click that
-        // would otherwise reach the terminal dismisses quick select instead
-        // of being silently swallowed.
+        // Keep capture through the full click. Closing on button-down would
+        // release capture early and let the matching button-up reach the
+        // terminal underneath (including its context-menu/reporting paths).
         c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => {
+            return 0;
+        },
+        c.WM_LBUTTONUP, c.WM_RBUTTONUP, c.WM_MBUTTONUP => {
             if (surface) |value| value.closeQuickSelect(true);
             return 0;
         },
