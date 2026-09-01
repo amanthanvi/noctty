@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 
 const siteDir = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PAGES = ['index.html', '404.html'];
+const PAGES = ['index.html', '404.html', 'why-noctty.html'];
 
 function inlineBootstrap(page) {
   const html = readFileSync(join(siteDir, page), 'utf8');
@@ -98,7 +98,7 @@ test('bootstrap migrates the pre-rebrand wg-theme key', () => {
   assert.equal(store.has('wg-theme'), false, 'the legacy key is cleared');
 });
 
-test('both pages ship the byte-identical bootstrap the CSP pins', () => {
-  const [index, notFound] = PAGES.map(inlineBootstrap);
-  assert.equal(index, notFound);
+test('all pages ship the byte-identical bootstrap the CSP pins', () => {
+  const [index, ...otherPages] = PAGES.map(inlineBootstrap);
+  for (const source of otherPages) assert.equal(index, source);
 });

@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getHeaderContract } from "../../scripts/build-site-assets.mjs";
+import {
+  getHeaderContract,
+  referencedLocalAssets,
+  withAssetCacheKeys,
+} from "../../scripts/build-site-assets.mjs";
 
 const bootstrap = 'document.documentElement.dataset.theme = "dark";';
 
@@ -23,6 +27,9 @@ function createSiteFixture(
   t.after(() => fs.rmSync(siteRoot, { recursive: true, force: true }));
   fs.writeFileSync(path.join(siteRoot, "index.html"), indexHtml, "utf8");
   fs.writeFileSync(path.join(siteRoot, "404.html"), notFoundHtml, "utf8");
+  // The trust page always matches index.html here, so each fixture below
+  // isolates the divergence it is actually testing.
+  fs.writeFileSync(path.join(siteRoot, "why-noctty.html"), indexHtml, "utf8");
   return siteRoot;
 }
 
@@ -105,5 +112,41 @@ test("the generated CSP rejects divergent index and not-found bootstraps", (t) =
   assert.throws(
     () => getHeaderContract(siteRoot),
     /site\/index\.html and site\/404\.html inline bootstrap scripts differ/,
+  );
+});
+
+test("same-origin absolute assets are local and receive cache keys", () => {
+  const html = [
+    '<script src="https://noctty.com/install.js"></script>',
+    '<script src="https://example.com/external.js"></script>',
+  ].join("");
+  assert.deepEqual([...referencedLocalAssets(html)], ["install.js"]);
+  assert.equal(
+    withAssetCacheKeys(html, "test.html", { "install.js": "digest" }),
+    [
+      '<script src="https://noctty.com/install.js?v=digest"></script>',
+      '<script src="https://example.com/external.js"></script>',
+    ].join(""),
+  );
+});
+
+test("nested-page assets resolve relative to their authored page", () => {
+  const html = '<link rel="stylesheet" href="../styles.css">';
+  assert.deepEqual(
+    [...referencedLocalAssets(html, "guides/setup.html")],
+    ["styles.css"],
+  );
+  assert.equal(
+    withAssetCacheKeys(html, "guides/setup.html", { "styles.css": "digest" }),
+    '<link rel="stylesheet" href="../styles.css?v=digest">',
+  );
+  assert.deepEqual(
+    [
+      ...referencedLocalAssets(
+        '<script src="setup.js"></script>',
+        "guides/setup.html",
+      ),
+    ],
+    ["guides/setup.js"],
   );
 });

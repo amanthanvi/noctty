@@ -66,8 +66,31 @@ $allowlist = [string[]] @(
     'styles.css'
     'terminal.js'
     'version.js'
+    'why-noctty.html'
 )
 [Array]::Sort($allowlist, [StringComparer]::Ordinal)
+
+# The authored pages on disk are the source of truth, not this list and not the
+# SITE_PAGES registry in scripts/build-site-assets.mjs. Both are checked against
+# the filesystem independently, so a page added to one and forgotten in the
+# other fails loudly here instead of passing every check and 404ing in
+# production.
+$allowlistSet = [Collections.Generic.HashSet[string]]::new(
+    [string[]] $allowlist,
+    [StringComparer]::Ordinal
+)
+# Recursive, with no directory exemptions, matching authoredPageNames() in
+# scripts/build-site-assets.mjs. A page authored at site/guides/setup.html is
+# otherwise invisible to both registries and to this check, and 404s live.
+foreach ($authoredPage in (Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force)) {
+    if ($authoredPage.Extension -notin @('.html', '.htm')) { continue }
+    $authoredRelativePath = $authoredPage.FullName.Substring(
+        $sourcePrefix.Length
+    ).Replace('\', '/')
+    if (-not $allowlistSet.Contains($authoredRelativePath)) {
+        throw "Authored site page is missing from the deploy payload allowlist: $authoredRelativePath"
+    }
+}
 
 $sourceFiles = [Collections.Generic.List[object]]::new()
 foreach ($relativePath in $allowlist) {

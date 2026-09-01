@@ -101,6 +101,12 @@ download against its checksum file before you run it.
 [docs/getting-started.md](docs/getting-started.md) explains the warning
 and walks through install, portable use, and uninstall.
 
+Before switching, read [why Noctty exists and how its releases are
+verified](https://noctty.com/why-noctty.html). Focused guides cover
+[moving from Windows Terminal](docs/migrate-from-windows-terminal.md) and
+[moving from Git Bash/mintty](docs/migrate-from-git-bash.md); both keep the
+old terminal installed while you test Noctty side by side.
+
 ## First launch
 
 On first launch, noctty writes a config template to
