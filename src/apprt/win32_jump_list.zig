@@ -343,9 +343,12 @@ const RecentList = struct {
 
     fn insert(self: *RecentList, alloc: Allocator, path: []const u8) !bool {
         if (!isRecentLocalPath(path)) return false;
+        const normalized = try normalizeRecentPathAlloc(alloc, path);
+        var normalized_owned = true;
+        defer if (normalized_owned) alloc.free(normalized);
 
         for (self.items.items, 0..) |item, index| {
-            if (!try pathsEqualIgnoreCase(alloc, item, path)) continue;
+            if (!try pathsEqualIgnoreCase(alloc, item, normalized)) continue;
             if (index == 0) return false;
             var i = index;
             while (i > 0) : (i -= 1) self.items.items[i] = self.items.items[i - 1];
@@ -353,28 +356,30 @@ const RecentList = struct {
             return true;
         }
 
-        const owned = try alloc.dupe(u8, path);
-        errdefer alloc.free(owned);
         if (self.items.items.len < max_recents) {
-            try self.items.append(alloc, owned);
+            try self.items.append(alloc, normalized);
         } else {
             alloc.free(self.items.items[max_recents - 1]);
         }
 
         var i = @min(self.items.items.len, max_recents) - 1;
         while (i > 0) : (i -= 1) self.items.items[i] = self.items.items[i - 1];
-        self.items.items[0] = owned;
+        self.items.items[0] = normalized;
+        normalized_owned = false;
         return true;
     }
 
     fn appendLoaded(self: *RecentList, alloc: Allocator, path: []const u8) !void {
         if (self.items.items.len >= max_recents or !isRecentLocalPath(path)) return;
+        const normalized = try normalizeRecentPathAlloc(alloc, path);
+        errdefer alloc.free(normalized);
         for (self.items.items) |item| {
-            if (try pathsEqualIgnoreCase(alloc, item, path)) return;
+            if (try pathsEqualIgnoreCase(alloc, item, normalized)) {
+                alloc.free(normalized);
+                return;
+            }
         }
-        const owned = try alloc.dupe(u8, path);
-        errdefer alloc.free(owned);
-        try self.items.append(alloc, owned);
+        try self.items.append(alloc, normalized);
     }
 
     fn contains(self: *const RecentList, alloc: Allocator, path: []const u8) !bool {
@@ -448,21 +453,24 @@ const RecentEventList = struct {
         kind: RecentEventKind,
         changed_ns: i64,
     ) !void {
+        if (!isRecentLocalPath(path)) return;
+        const normalized = try normalizeRecentPathAlloc(alloc, path);
+        var normalized_owned = true;
+        defer if (normalized_owned) alloc.free(normalized);
         for (self.items.items, 0..) |item, index| {
-            if (!try pathsEqualIgnoreCase(alloc, item.path, path)) continue;
+            if (!try pathsEqualIgnoreCase(alloc, item.path, normalized)) continue;
             if (item.changed_ns > changed_ns) return;
             alloc.free(item.path);
             _ = self.items.orderedRemove(index);
             break;
         }
 
-        const owned = try alloc.dupe(u8, path);
-        errdefer alloc.free(owned);
         try self.items.append(alloc, .{
-            .path = owned,
+            .path = normalized,
             .kind = kind,
             .changed_ns = changed_ns,
         });
+        normalized_owned = false;
         if (self.items.items.len > max_recents * 2) {
             var oldest: usize = 0;
             for (self.items.items[1..], 1..) |item, index| {
@@ -674,10 +682,24 @@ pub fn isRecentLocalPath(path: []const u8) bool {
     return true;
 }
 
+fn normalizeRecentPathAlloc(alloc: Allocator, path: []const u8) ![]u8 {
+    var end = path.len;
+    while (end > 3 and (path[end - 1] == '\\' or path[end - 1] == '/')) end -= 1;
+    const normalized = try alloc.dupe(u8, path[0..end]);
+    for (normalized[2..]) |*byte| {
+        if (byte.* == '/') byte.* = '\\';
+    }
+    return normalized;
+}
+
 fn pathsEqualIgnoreCase(alloc: Allocator, lhs: []const u8, rhs: []const u8) !bool {
-    const lhs_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, lhs);
+    const lhs_normalized = try normalizeRecentPathAlloc(alloc, lhs);
+    defer alloc.free(lhs_normalized);
+    const rhs_normalized = try normalizeRecentPathAlloc(alloc, rhs);
+    defer alloc.free(rhs_normalized);
+    const lhs_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, lhs_normalized);
     defer alloc.free(lhs_w);
-    const rhs_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, rhs);
+    const rhs_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, rhs_normalized);
     defer alloc.free(rhs_w);
     const result = CompareStringOrdinal(
         lhs_w.ptr,
@@ -844,6 +866,7 @@ pub const JumpList = struct {
     com_disabled: bool = false,
     startup_profile_discovery_pending: bool = false,
     startup_profile_discovery_retry_count: u8 = 0,
+    use_guards_rebuild_committed: bool = false,
 
     pub fn init(alloc: Allocator, state_path: []const u8) !JumpList {
         const owned_state_path = try alloc.dupe(u8, state_path);
@@ -988,30 +1011,36 @@ pub const JumpList = struct {
     }
 
     pub fn noteRecent(self: *JumpList, path: []const u8) void {
+        if (!isRecentLocalPath(path)) return;
+        const normalized = normalizeRecentPathAlloc(self.alloc, path) catch |err| {
+            log.warn("jump list recent normalization failed err={}", .{err});
+            return;
+        };
+        defer self.alloc.free(normalized);
         const changed_ns: i64 = @intCast(std.time.nanoTimestamp());
-        const reinstated = self.removed_recents.removePath(self.alloc, path) catch |err| {
+        const reinstated = self.removed_recents.removePath(self.alloc, normalized) catch |err| {
             log.warn("jump list recent reinstatement failed err={}", .{err});
             return;
         };
         if (reinstated) {
-            _ = self.pending_recent_removals.removePath(self.alloc, path) catch {};
+            _ = self.pending_recent_removals.removePath(self.alloc, normalized) catch {};
         }
-        _ = self.pending_recent_uses.insert(self.alloc, path) catch |err| {
+        _ = self.pending_recent_uses.insert(self.alloc, normalized) catch |err| {
             log.warn("jump list recent-use snapshot failed err={}", .{err});
             return;
         };
-        const changed = self.recents.insert(self.alloc, path) catch |err| {
+        const changed = self.recents.insert(self.alloc, normalized) catch |err| {
             log.warn("jump list recent update failed err={}", .{err});
             return;
         };
         // A pwd report is also a use event when this process's stale MRU
         // already has the path at the front. Record it so a newer tombstone
         // written by another process is removed during the next merge.
-        const recorded = self.pending_recent_additions.insert(self.alloc, path) catch |err| {
+        const recorded = self.pending_recent_additions.insert(self.alloc, normalized) catch |err| {
             log.warn("jump list recent persistence snapshot failed err={}", .{err});
             return;
         };
-        self.pending_recent_events.upsert(self.alloc, path, .used, changed_ns) catch |err| {
+        self.pending_recent_events.upsert(self.alloc, normalized, .used, changed_ns) catch |err| {
             log.warn("jump list recent event snapshot failed err={}", .{err});
             return;
         };
@@ -1054,9 +1083,15 @@ pub const JumpList = struct {
         }
         const persisted = if (self.persist_dirty) self.persist() else true;
         if (!persisted) self.schedule();
-        if (rebuild_committed and persisted) {
+        if (rebuild_committed) self.use_guards_rebuild_committed = true;
+        self.finishUseGuards(persisted);
+    }
+
+    fn finishUseGuards(self: *JumpList, persisted: bool) void {
+        if (self.use_guards_rebuild_committed and persisted) {
             self.pending_recent_uses.deinit(self.alloc);
             self.pending_profile_uses.deinit(self.alloc);
+            self.use_guards_rebuild_committed = false;
         }
     }
 
@@ -1234,6 +1269,7 @@ pub const JumpList = struct {
             var chosen: ?usize = null;
             for (merged.recent_events.items.items, 0..) |event, index| {
                 if (event.kind != .used or
+                    !isRecentLocalPath(event.path) or
                     try merged.removed_recents.contains(self.alloc, event.path) or
                     try next.contains(self.alloc, event.path)) continue;
                 const current = if (chosen) |value| merged.recent_events.items.items[value] else {
@@ -1479,8 +1515,10 @@ pub const JumpList = struct {
                     continue;
                 },
             };
-            errdefer self.alloc.free(arguments);
+            var arguments_owned = true;
+            errdefer if (arguments_owned) self.alloc.free(arguments);
             try result.items.append(self.alloc, arguments);
+            arguments_owned = false;
 
             @memset(arguments_buffer, 0);
             if (link.vtbl.GetDescription(
@@ -1974,6 +2012,83 @@ test "jump_list unchanged recent directory still records a use event" {
     try std.testing.expect(jump.persist_dirty);
     try std.testing.expect(try jump.pending_recent_additions.contains(alloc, "D:\\same-head"));
     try std.testing.expect(try jump.pending_recent_uses.contains(alloc, "D:\\same-head"));
+}
+
+test "jump_list rejects invalid recent use before queuing events" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+
+    jump.noteRecent("/home/user");
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_recent_events.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_recent_uses.items.items.len);
+    try std.testing.expect(!jump.persist_dirty);
+}
+
+test "jump_list normalizes separators and trailing directory syntax" {
+    const alloc = std.testing.allocator;
+    var recents: RecentList = .{};
+    defer recents.deinit(alloc);
+
+    try std.testing.expect(try recents.insert(alloc, "C:/work/"));
+    try std.testing.expectEqualStrings("C:\\work", recents.items.items[0]);
+    try std.testing.expect(!try recents.insert(alloc, "c:\\WORK\\"));
+    try std.testing.expectEqual(@as(usize, 1), recents.items.items.len);
+}
+
+test "jump_list rebuild skips an invalid persisted recent event" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+    var merged: LoadedState = .{};
+    defer merged.deinit(alloc);
+
+    try merged.recent_events.items.append(alloc, .{
+        .path = try alloc.dupe(u8, "/home/user"),
+        .kind = .used,
+        .changed_ns = 2,
+    });
+    try merged.recent_events.upsert(alloc, "C:\\valid", .used, 1);
+    try jump.rebuildMergedRecents(&merged);
+    try std.testing.expectEqual(@as(usize, 1), merged.recents.items.items.len);
+    try std.testing.expectEqualStrings("C:\\valid", merged.recents.items.items[0]);
+}
+
+test "jump_list clears use guards after a committed rebuild is persisted later" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+
+    try std.testing.expect(try jump.pending_recent_uses.insert(alloc, "C:\\used"));
+    try std.testing.expect(try jump.pending_profile_uses.insert(alloc, "wsl:used"));
+    jump.use_guards_rebuild_committed = true;
+    jump.finishUseGuards(false);
+    try std.testing.expectEqual(@as(usize, 1), jump.pending_recent_uses.items.items.len);
+    jump.finishUseGuards(true);
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_recent_uses.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_profile_uses.items.items.len);
+    try std.testing.expect(!jump.use_guards_rebuild_committed);
 }
 
 test "jump_list slot budget reserves profiles before recents" {
