@@ -705,7 +705,7 @@ pub fn overlayEditBorderColor(mode: HostOverlayMode, focused: bool, is_dark: boo
 pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent {
     if (!is_dark) {
         return switch (kind) {
-            .wsl_default, .wsl_distro => .{
+            .wsl_default, .wsl_distro, .ssh => .{
                 .idle_bg = rgb(228, 245, 233),
                 .idle_border = rgb(46, 125, 70),
                 .hover_bg = rgb(218, 238, 224),
@@ -759,7 +759,7 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
     }
 
     return switch (kind) {
-        .wsl_default, .wsl_distro => .{
+        .wsl_default, .wsl_distro, .ssh => .{
             .idle_bg = rgb(34, 46, 38),
             .idle_border = rgb(92, 176, 118),
             .hover_bg = rgb(40, 54, 44),

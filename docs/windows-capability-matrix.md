@@ -53,6 +53,7 @@ Last reviewed: 2026-08-12.
 | Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).              |
 | Tab dragging                                                                      | Same-window reorder and exact-pane drag-to-split. See [tab dragging notes](#tab-dragging).                                 |
 | Power-aware rendering                                                             | `unfocused-render-fps` caps visible background presentation; `power-saver-rendering` controls saver pacing; minimized and DWM-cloaked windows do not present. See [power and battery](windows.md#power-and-battery). |
+| SSH host discovery                                                                | Concrete aliases from `%USERPROFILE%\.ssh\config` appear as system `ssh.exe` launch entries in the picker and palette.    |
 
 ## Notes
 

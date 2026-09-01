@@ -87,6 +87,53 @@ in explicitly:
 command = wsl.exe
 ```
 
+## SSH hosts
+
+By default, noctty reads `%USERPROFILE%\.ssh\config` read-only whenever
+Windows profiles are refreshed. Each concrete alias on a `Host` line appears
+as `SSH: <alias>` in the profile picker and `Connect to <alias>` in the
+universal palette. Opening either entry starts the system `ssh.exe` with only
+the alias as its argument, in a new tab whose working directory is the user's
+home directory.
+
+Only `Host` lines are read. A line may carry multiple aliases; wildcard or
+negated patterns and aliases that are not plain printable ASCII are skipped.
+Every other keyword — `HostName`, `User`, `Port`, `ProxyCommand`, and the rest
+— is ignored here and left to `ssh`, which reads the same file. `Match` blocks
+are ignored, including their `Include` lines. `Include` files are read one
+level deep, up to 16 files: relative paths start at the `.ssh` directory, and
+absolute and `~/` paths are accepted. A leading `"` groups one path containing
+spaces, matching OpenSSH; a backslash is a path separator here, not an escape.
+
+An include is skipped before the worker opens it when it is globbed, UNC
+(`\\server\share`), a device path (`\\?\`, `\\.\`), or a mapped network drive
+letter. The last is checked with `GetDriveTypeW`, which answers from the local
+mount table without contacting the server. A directory junction or a `subst`
+alias whose target is remote is not detected by that classification, but the
+bounded worker below still prevents its open from stalling the UI thread.
+
+Activating an entry runs `ssh <alias>`, so whatever that alias resolves to in
+your own SSH configuration takes effect — including any `ProxyCommand` or
+`LocalCommand` it specifies, which run locally. This is ordinary `ssh`
+behavior; noctty adds no execution of its own, but it does turn the file into
+a one-click surface.
+
+SSH entries run without shell integration, which is injected into a local
+shell and cannot apply to a remote session. Session restore does not reopen
+them either: a restored window comes back with its local shells, and any SSH
+pane returns as the default shell rather than dialing out unattended.
+
+SSH entries always sort after the detected shells and cannot be reordered with
+`NOCTTY_WIN32_PROFILE_ORDER`, which addresses shell profiles only.
+
+Concrete `Include` files are scanned one level deep, up to 16 files. The root
+config and Include opens run off the UI thread under one shared 50 ms refresh
+budget; a slow or blocked path is skipped, and a later profile refresh can
+retry it.
+
+Set `ssh-config-hosts = false` to remove these entries. This feature does not
+provide a bundled SSH client, secrets vault, or fleet/connection management.
+
 ## App identity
 
 Installed builds create Start menu shortcuts with noctty's

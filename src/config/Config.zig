@@ -1524,6 +1524,16 @@ class: ?[:0]const u8 = null,
 ///   * `inherit` - The working directory of the launching process.
 @"working-directory": ?WorkingDirectory = null,
 
+/// Read `%USERPROFILE%\.ssh\config` read-only and list only its host aliases;
+/// no keys or secrets are read. Up to 16 concrete, non-network `Include`
+/// files one level deep are also scanned for host aliases; every other
+/// keyword is ignored.
+///
+/// Activating an entry runs `ssh <alias>`, which applies that alias's own
+/// configuration — including any `ProxyCommand` it specifies. Set this to
+/// `false` to remove the SSH entries.
+@"ssh-config-hosts": bool = true,
+
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
 /// overwrite previously set values. The list of actions is available in
 /// the documentation or using the `noctty +list-actions` command.
