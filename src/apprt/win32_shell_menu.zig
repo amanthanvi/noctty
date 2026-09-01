@@ -175,10 +175,14 @@ pub fn executablePathAlloc(alloc: Allocator, self_path: []const u8) ![]u8 {
 /// keeps the last character before the quote non-backslash for every target,
 /// and `C:\\.` / `C:\dir\.` both resolve to the intended directory.
 pub fn commandValueAlloc(alloc: Allocator, exe_path: []const u8) ![]u8 {
+    // The Shell command template treats `%%` as one literal percent. Escape
+    // the executable path before adding our one intentional `%V` target.
+    const escaped_exe_path = try std.mem.replaceOwned(u8, alloc, exe_path, "%", "%%");
+    defer alloc.free(escaped_exe_path);
     return try std.fmt.allocPrint(
         alloc,
         "\"{s}\" --working-directory=\"%V\\.\"",
-        .{exe_path},
+        .{escaped_exe_path},
     );
 }
 
@@ -588,10 +592,30 @@ fn expandAndParseForTest(
     command_value: []const u8,
     target: []const u8,
 ) ![]const []const u8 {
-    const expanded = try std.mem.replaceOwned(u8, alloc, command_value, "%V", target);
-    defer alloc.free(expanded);
+    var expanded: std.Io.Writer.Allocating = .init(alloc);
+    defer expanded.deinit();
+    var index: usize = 0;
+    while (index < command_value.len) {
+        if (command_value[index] == '%' and index + 1 < command_value.len) {
+            switch (command_value[index + 1]) {
+                '%' => {
+                    try expanded.writer.writeByte('%');
+                    index += 2;
+                    continue;
+                },
+                'V', 'v' => {
+                    try expanded.writer.writeAll(target);
+                    index += 2;
+                    continue;
+                },
+                else => {},
+            }
+        }
+        try expanded.writer.writeByte(command_value[index]);
+        index += 1;
+    }
 
-    const expanded_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, expanded);
+    const expanded_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, expanded.written());
     defer alloc.free(expanded_w);
 
     var iter = try std.process.ArgIteratorWindows.init(alloc, expanded_w);
@@ -657,6 +681,23 @@ test "shell-menu command survives Windows argv parsing for folders and drive roo
             argv[1],
         );
     }
+}
+
+test "shell-menu command preserves percent placeholders in the executable path" {
+    const testing = std.testing;
+    const exe = "C:\\Apps\\100%Valid\\noctty.exe";
+    const value = try commandValueAlloc(testing.allocator, exe);
+    defer testing.allocator.free(value);
+    try testing.expectEqualStrings(
+        "\"C:\\Apps\\100%%Valid\\noctty.exe\" --working-directory=\"%V\\.\"",
+        value,
+    );
+
+    const argv = try expandAndParseForTest(testing.allocator, value, "D:\\Work");
+    defer freeParsedForTest(testing.allocator, argv);
+    try testing.expectEqual(@as(usize, 2), argv.len);
+    try testing.expectEqualStrings(exe, argv[0]);
+    try testing.expectEqualStrings("--working-directory=D:\\Work\\.", argv[1]);
 }
 
 test "shell-menu display name is stable" {

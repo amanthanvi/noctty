@@ -88,17 +88,17 @@ Root: HKLM; Subkey: "Software\Classes\CLSID\{{1D349824-21FB-46C7-ACF3-746EDC991D
 ; Shared Interface\{IID}\ProxyStubClsid32 values are registered per-user by
 ; +register-default-terminal so their prior values can be restored safely.
 
-Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"
-Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: """{app}\noctty.exe"" --working-directory=""%V\."""
+Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: "{code:ShellMenuCommand}"; Flags: uninsdeletevalue uninsdeletekeyifempty
 
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: """{app}\noctty.exe"" --working-directory=""%V\."""
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: "{code:ShellMenuCommand}"; Flags: uninsdeletevalue uninsdeletekeyifempty
 
-Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"
-Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: """{app}\noctty.exe"" --working-directory=""%V\."""
+Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty\command"; ValueType: string; ValueName: ""; ValueData: "{code:ShellMenuCommand}"; Flags: uninsdeletevalue uninsdeletekeyifempty
 
 [Run]
 Filename: "{app}\noctty.exe"; Description: "Launch noctty"; Flags: nowait postinstall skipifsilent
@@ -135,4 +135,13 @@ begin
       '',
       RegisteredProxy) and
     (CompareText(RegisteredProxy, ExpectedProxy) = 0);
+end;
+
+function ShellMenuCommand(Param: String): String;
+var
+  ExePath: String;
+begin
+  ExePath := ExpandConstant('{app}\noctty.exe');
+  StringChangeEx(ExePath, '%', '%%', True);
+  Result := AddQuotes(ExePath) + ' --working-directory="%V\."';
 end;
