@@ -4891,7 +4891,7 @@ pub const App = struct {
 
             .new_tab => {
                 const source = self.findSurfaceForTarget(target);
-                _ = try self.createNewTab(source, null, false);
+                _ = try self.createNewTab(source, null, false, false);
                 return true;
             },
 
@@ -5690,6 +5690,7 @@ pub const App = struct {
                     source,
                     value.working_directory,
                     resolved.explicit_window_target,
+                    true,
                 );
             },
             .new_split => |value| {
@@ -6029,6 +6030,7 @@ pub const App = struct {
         source: ?*Surface,
         working_directory: ?[]const u8,
         explicit_window_target: bool,
+        inherit_launch_config: bool,
     ) !*Surface {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
         defer config.deinit();
@@ -6044,7 +6046,9 @@ pub const App = struct {
             // Launch command selection is app-runtime state and must be
             // inherited from the source snapshot rather than re-resolved from
             // mutable global/profile configuration.
-            inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
+            if (inherit_launch_config) {
+                inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
+            }
             if (explicit_window_target) {
                 const split_inherit = config.@"split-inherit-working-directory";
                 {
@@ -6069,6 +6073,9 @@ pub const App = struct {
             &surface.launch_profile_key,
             key,
         );
+        if (inherit_launch_config) {
+            if (source) |value| surface.launched_ssh = value.launched_ssh;
+        }
         if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
         self.activateSurface(surface);
         return surface;
@@ -6085,7 +6092,9 @@ pub const App = struct {
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
         const inherited_profile_key = try applyLaunchConfigFromSource(&config, source);
-        _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
+        if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
+            _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
+        }
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
             .host_id = source.host_id,
@@ -6098,6 +6107,7 @@ pub const App = struct {
             &surface.launch_profile_key,
             key,
         );
+        surface.launched_ssh = source.launched_ssh;
         tab_info.tab.clearRedoHistory();
         if (tab_info.host.pushStructuralUndo(.{
             .kind = .split_create,

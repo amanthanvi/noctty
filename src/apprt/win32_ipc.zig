@@ -587,12 +587,10 @@ fn readExactUntil(
     deadline_ms: u64,
 ) !void {
     var offset: usize = 0;
-    var attempted = false;
     while (offset < dst.len) {
         // A zero timeout is a nonblocking poll, not an automatic failure.
-        // Always attempt one ReadFile so an already-buffered response wins.
-        if (attempted and sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
-        attempted = true;
+        // Keep consuming immediately available bytes even after partial
+        // progress; enforce the deadline only when the pipe has no data.
         var read_len: u32 = 0;
         if (windows.kernel32.ReadFile(
             pipe,
