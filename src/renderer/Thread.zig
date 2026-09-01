@@ -701,6 +701,9 @@ fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) vo
     if (!now and self.renderer.hasVsync()) return;
 
     if (must_draw_from_app_thread) {
+        if (comptime @hasDecl(apprt.Surface, "noteRendererDrawRequest")) {
+            self.surface.noteRendererDrawRequest();
+        }
         if (comptime @hasDecl(apprt.Surface, "beginRendererRepaintRequest")) {
             if (!repaint_reserved and !self.surface.beginRendererRepaintRequest()) return;
         }
@@ -878,6 +881,9 @@ fn wakeupCallback(
     };
 
     const t = self_.?;
+    if (comptime @hasDecl(apprt.Surface, "noteRendererWakeupCallback")) {
+        t.surface.noteRendererWakeupCallback();
+    }
     if (t.renderOnce(true)) {
         t.scheduleRenderFollowup();
     }
