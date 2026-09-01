@@ -649,6 +649,10 @@ fn applyProfileLaunchConfig(
     try applyProfileCommandConfig(config, profile);
     if (profile.kind != .ssh) return;
 
+    try applySshLaunchHardening(config);
+}
+
+fn applySshLaunchHardening(config: *configpkg.Config) !void {
     // Shell integration injection rewrites the two-element ssh argv into a
     // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
     // it anyway: the integration scripts run locally.
@@ -760,6 +764,14 @@ fn applySplitWorkingDirectoryFromSource(
 
 fn shouldInheritSplitWorkingDirectory(source_launched_ssh: bool) bool {
     return !source_launched_ssh;
+}
+
+fn shouldResetNewTabWorkingDirectory(
+    explicit_window_target: bool,
+    inherit_launch_config: bool,
+    source_launched_ssh: bool,
+) bool {
+    return explicit_window_target or (inherit_launch_config and source_launched_ssh);
 }
 
 fn defaultIpcNamespace() []const u8 {
@@ -4908,7 +4920,7 @@ pub const App = struct {
 
             .new_split => {
                 const source = self.findSurfaceForTarget(target) orelse return false;
-                _ = try self.createNewSplit(source, splitDirectionFromAction(value), null);
+                _ = try self.createNewSplit(source, splitDirectionFromAction(value), null, false);
                 return true;
             },
 
@@ -5719,7 +5731,7 @@ pub const App = struct {
                     .up => .up,
                     .down => .down,
                 };
-                _ = try self.createNewSplit(source, direction, value.working_directory);
+                _ = try self.createNewSplit(source, direction, value.working_directory, true);
             },
             .focus => |target| {
                 const surface = switch (target) {
@@ -6054,9 +6066,14 @@ pub const App = struct {
         defer config.deinit();
         var inherited_profile_key: ?[]const u8 = null;
 
-        if (explicit_window_target) {
+        if (shouldResetNewTabWorkingDirectory(
+            explicit_window_target,
+            inherit_launch_config,
+            if (source) |surface| surface.launched_ssh else false,
+        )) {
             // `newConfig(.tab)` consults the globally focused surface. Reset
-            // and inherit from the explicitly requested host instead.
+            // and inherit from the explicitly requested host instead. An SSH
+            // source also needs the reset because its live cwd is remote.
             config.@"working-directory" = self.config.@"working-directory";
         }
         if (source) |surface| {
@@ -6067,7 +6084,7 @@ pub const App = struct {
             if (inherit_launch_config) {
                 inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
             }
-            if (explicit_window_target) {
+            if (explicit_window_target and shouldInheritSplitWorkingDirectory(surface.launched_ssh)) {
                 const split_inherit = config.@"split-inherit-working-directory";
                 {
                     defer config.@"split-inherit-working-directory" = split_inherit;
@@ -6104,12 +6121,16 @@ pub const App = struct {
         source: *Surface,
         direction: SplitTreeSurface.Split.Direction,
         working_directory: ?[]const u8,
+        inherit_launch_config: bool,
     ) !*Surface {
         const tab_info = self.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
-        const inherited_profile_key = try applyLaunchConfigFromSource(&config, source);
+        const inherited_profile_key = if (inherit_launch_config)
+            try applyLaunchConfigFromSource(&config, source)
+        else
+            try applySplitProfileConfigFromSource(&config, source);
         if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
             _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
         }
@@ -6125,7 +6146,9 @@ pub const App = struct {
             &surface.launch_profile_key,
             key,
         );
-        surface.launched_ssh = source.launched_ssh;
+        if (inherit_launch_config or inherited_profile_key != null) {
+            surface.launched_ssh = source.launched_ssh;
+        }
         tab_info.tab.clearRedoHistory();
         if (tab_info.host.pushStructuralUndo(.{
             .kind = .split_create,
@@ -6150,11 +6173,23 @@ pub const App = struct {
     ) !?[]const u8 {
         if (source.launch_command) |command| {
             config.command = try command.clone(config._arena.?.allocator());
+            if (source.launched_ssh) try applySshLaunchHardening(config);
             return source.launch_profile_key;
         }
 
         // Headless fixtures may not have a captured command. Preserve the
         // previous profile fallback for those tests.
+        const key = source.launch_profile_key orelse return null;
+        const host = source.host orelse return null;
+        const profile = (try host.profileForKey(key)) orelse return null;
+        try applyProfileLaunchConfig(config, profile);
+        return profile.key;
+    }
+
+    fn applySplitProfileConfigFromSource(
+        config: *configpkg.Config,
+        source: *Surface,
+    ) !?[]const u8 {
         const key = source.launch_profile_key orelse return null;
         const host = source.host orelse return null;
         const profile = (try host.profileForKey(key)) orelse return null;
@@ -32425,6 +32460,9 @@ test "win32 ssh split and session state drop remote cwd" {
 
     try std.testing.expect(!shouldInheritSplitWorkingDirectory(true));
     try std.testing.expect(shouldInheritSplitWorkingDirectory(false));
+    try std.testing.expect(shouldResetNewTabWorkingDirectory(false, true, true));
+    try std.testing.expect(shouldResetNewTabWorkingDirectory(true, true, false));
+    try std.testing.expect(!shouldResetNewTabWorkingDirectory(false, false, true));
 
     var surface: Surface = undefined;
     surface.pwd = "C:\\remote-controlled";
@@ -32532,6 +32570,39 @@ test "win32 automation tab inheritance preserves the captured source command" {
     try std.testing.expectEqual(@as(usize, 2), direct.len);
     try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
     try std.testing.expectEqualStrings("-NoLogo", direct[1]);
+}
+
+test "win32 automation ssh inheritance preserves command and hardening" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const command = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+    var source: Surface = undefined;
+    source.launch_command = .{ .direct = &command };
+    source.launch_profile_key = "ssh:production";
+    source.launched_ssh = true;
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    config.@"shell-integration" = .bash;
+    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
+
+    try std.testing.expectEqualStrings("ssh:production", inherited.?);
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
+    try std.testing.expectEqualStrings(command[0], config.command.?.direct[0]);
+    try std.testing.expectEqualStrings(command[1], config.command.?.direct[1]);
+}
+
+test "win32 ordinary split ignores a captured one-shot command" {
+    const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
+    var source: Surface = undefined;
+    source.launch_command = .{ .direct = &one_shot };
+    source.launch_profile_key = null;
+    source.host = null;
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    try std.testing.expect((try App.applySplitProfileConfigFromSource(&config, &source)) == null);
+    try std.testing.expect(config.command == null);
 }
 
 test "win32 automation omitted target falls back to the active surface" {
