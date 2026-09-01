@@ -122,10 +122,31 @@ test("same-origin absolute assets are local and receive cache keys", () => {
   ].join("");
   assert.deepEqual([...referencedLocalAssets(html)], ["install.js"]);
   assert.equal(
-    withAssetCacheKeys(html, "site/test.html", { "install.js": "digest" }),
+    withAssetCacheKeys(html, "test.html", { "install.js": "digest" }),
     [
       '<script src="https://noctty.com/install.js?v=digest"></script>',
       '<script src="https://example.com/external.js"></script>',
     ].join(""),
+  );
+});
+
+test("nested-page assets resolve relative to their authored page", () => {
+  const html = '<link rel="stylesheet" href="../styles.css">';
+  assert.deepEqual(
+    [...referencedLocalAssets(html, "guides/setup.html")],
+    ["styles.css"],
+  );
+  assert.equal(
+    withAssetCacheKeys(html, "guides/setup.html", { "styles.css": "digest" }),
+    '<link rel="stylesheet" href="../styles.css?v=digest">',
+  );
+  assert.deepEqual(
+    [
+      ...referencedLocalAssets(
+        '<script src="setup.js"></script>',
+        "guides/setup.html",
+      ),
+    ],
+    ["guides/setup.js"],
   );
 });

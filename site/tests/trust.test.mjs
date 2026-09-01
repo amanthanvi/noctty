@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 const siteDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = resolve(siteDir, "..");
 const trustHtml = readFileSync(join(siteDir, "why-noctty.html"), "utf8");
+const publishedVerifier = readFileSync(
+  join(repoDir, "scripts/verify-published-release.ps1"),
+  "utf8",
+);
 
 // Docs cited by the trust page and the migration guides that land with another
 // pull request. Each entry names the dependency it waits on so the exemption
@@ -143,7 +147,13 @@ function visibleHtmlText(html) {
   const text = html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+    .replace(
+      /<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>/gi,
+      " ",
+    )
+    // Inline elements do not add rendered whitespace. Removing them without a
+    // separator keeps split claims such as f<em>p</em>s visible to the guard.
+    .replace(/<[^>]+>/g, "")
     .replace(/&#(x[\da-f]+|\d+);/gi, (_, value) => {
       const radix = value[0].toLowerCase() === "x" ? 16 : 10;
       const digits = radix === 16 ? value.slice(1) : value;
@@ -332,6 +342,20 @@ test("claims guards read rendered text without blocking operational rates", () =
     ),
     ["60 fps"],
   );
+  assert.deepEqual(
+    findClaimViolations(
+      visibleHtmlText("Throughput: 60 f<em>p</em>s"),
+      PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    ["60 fps"],
+  );
+  assert.notDeepEqual(
+    findClaimViolations(
+      visibleHtmlText("Noctty out<em>performs</em> Windows Terminal"),
+      CROSS_TERMINAL_CLAIM_PATTERNS,
+    ),
+    [],
+  );
   assert.throws(
     () => visibleHtmlText("Throughput: 60&NoSuchEntity;fps"),
     /cannot decode named HTML entity &NoSuchEntity;/,
@@ -411,9 +435,25 @@ test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /winghostty\\winghostty\.com/);
   assert.match(trustHtml, /winghostty\\winghostty\.exe/);
   assert.match(trustHtml, /winghostty\\ghostty-vt\.dll/);
+  assert.match(
+    trustHtml,
+    /ReadByte\(\) -eq 0x4D.*?ReadByte\(\) -eq 0x5A.*?unexpected:.*?\$unexpectedPe/s,
+  );
   assert.match(trustHtml, /-AllowedPins @\(\$expectedSpki\)/);
   assert.match(trustHtml, /-TrustSelfSigned \$true/);
   assert.match(trustHtml, /verify-published-release\.ps1/);
+  assert.match(
+    trustHtml,
+    /\$version = "&lt;1\.3\.124-or-later&gt;".*?git clone --branch "v\$version" --depth 1.*?-Version \$version/s,
+  );
+  assert.match(
+    publishedVerifier,
+    /function Get-PortablePeRelativePaths.*?ReadByte\(\) -eq 0x4D.*?ReadByte\(\) -eq 0x5A/s,
+  );
+  assert.match(
+    publishedVerifier,
+    /\$unexpectedPortablePe.*?PE inventory mismatch.*?foreach \(\$relativePath in \$expectedPortablePePaths\)/s,
+  );
   assert.match(
     trustHtml,
     /v1\.3\.123 uses the legacy\s+<code>winghostty-\*<\/code> asset layout/i,

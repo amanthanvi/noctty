@@ -25,6 +25,32 @@ if (-not (Get-Command Get-AuthenticodeSignature -ErrorAction SilentlyContinue)) 
     throw 'Get-AuthenticodeSignature is required to verify published Windows binaries.'
 }
 
+function Get-PortablePeRelativePaths {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $rootPath = [System.IO.Path]::GetFullPath($Root)
+    $paths = [System.Collections.Generic.List[string]]::new()
+    foreach ($file in (Get-ChildItem -LiteralPath $rootPath -File -Recurse -Force)) {
+        $stream = [System.IO.File]::Open(
+            $file.FullName,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        try {
+            if ($stream.Length -ge 2 -and $stream.ReadByte() -eq 0x4D -and $stream.ReadByte() -eq 0x5A) {
+                $paths.Add(
+                    [System.IO.Path]::GetRelativePath($rootPath, $file.FullName).Replace('\', '/')
+                )
+            }
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    return @($paths)
+}
+
 $tag = "v$Version"
 $releaseJson = & gh release view $tag --repo $repository --json tagName,isDraft,isPrerelease,assets
 if ($LASTEXITCODE -ne 0) { throw "Could not load published release $tag from $repository." }
@@ -127,11 +153,15 @@ try {
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
-        foreach ($relativePath in @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')) {
+        $expectedPortablePePaths = @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')
+        $portablePePaths = @(Get-PortablePeRelativePaths -Root $extractDirectory)
+        $missingPortablePe = @($expectedPortablePePaths | Where-Object { $_ -notin $portablePePaths })
+        $unexpectedPortablePe = @($portablePePaths | Where-Object { $_ -notin $expectedPortablePePaths })
+        if ($missingPortablePe.Count -gt 0 -or $unexpectedPortablePe.Count -gt 0) {
+            throw "$portableName PE inventory mismatch. Missing: $($missingPortablePe -join ', '); unexpected: $($unexpectedPortablePe -join ', ')."
+        }
+        foreach ($relativePath in $expectedPortablePePaths) {
             $binaryPath = Join-Path $extractDirectory $relativePath
-            if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
-                throw "$portableName is missing signed binary $relativePath."
-            }
             $signatureEvidence.Add((Assert-ReleaseSignature `
                 -Path $binaryPath `
                 -Label "$relativePath $architecture" `

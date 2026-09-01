@@ -268,8 +268,9 @@ Get-FileHash $asset -Algorithm SHA256</code></pre>
               the PE files inside the portable ZIP are Authenticode-signed. The
               ZIP container is not, so the container is covered only by its
               checksum. The example accepts either legacy v1.3.123 package,
-              extracts all three signed PE files when given the portable ZIP,
-              and stops unless every embedded signature is valid and its
+              requires exactly the three expected PE files when given the
+              portable ZIP, rejects any additional embedded PE, and stops
+              unless every embedded signature is valid and its
               SubjectPublicKeyInfo hash matches the updater's published pin.
               Run this block in PowerShell 7 (<code>pwsh</code>); it stops
               before downloading anything on Windows PowerShell 5.1.
@@ -286,9 +287,22 @@ try {
   if (Test-Path -LiteralPath $portable) {
     $portableRoot = Join-Path $workRoot "portable"
     Expand-Archive -LiteralPath $portable -DestinationPath $portableRoot
-    $targets.Add((Resolve-Path -LiteralPath (Join-Path $portableRoot "winghostty\winghostty.com")).Path)
-    $targets.Add((Resolve-Path -LiteralPath (Join-Path $portableRoot "winghostty\winghostty.exe")).Path)
-    $targets.Add((Resolve-Path -LiteralPath (Join-Path $portableRoot "winghostty\ghostty-vt.dll")).Path)
+    $expectedPortablePe = @("winghostty\winghostty.com", "winghostty\winghostty.exe", "winghostty\ghostty-vt.dll")
+    $portablePe = @(
+      Get-ChildItem -LiteralPath $portableRoot -File -Recurse -Force | Where-Object {
+        $stream = [IO.File]::OpenRead($_.FullName)
+        try { $stream.Length -ge 2 -and $stream.ReadByte() -eq 0x4D -and $stream.ReadByte() -eq 0x5A }
+        finally { $stream.Dispose() }
+      } | ForEach-Object { [IO.Path]::GetRelativePath($portableRoot, $_.FullName) }
+    )
+    $missingPe = @($expectedPortablePe | Where-Object { $_ -notin $portablePe })
+    $unexpectedPe = @($portablePe | Where-Object { $_ -notin $expectedPortablePe })
+    if ($missingPe.Count -gt 0 -or $unexpectedPe.Count -gt 0) {
+      throw "Portable PE inventory mismatch. Missing: $($missingPe -join ', '); unexpected: $($unexpectedPe -join ', ')."
+    }
+    foreach ($relativePath in $expectedPortablePe) {
+      $targets.Add((Resolve-Path -LiteralPath (Join-Path $portableRoot $relativePath)).Path)
+    }
   }
   if ($targets.Count -eq 0) { throw "Download an installer or portable ZIP first." }
   $verifierRoot = Join-Path $workRoot "repository"
@@ -326,11 +340,12 @@ try {
               closed.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>git clone https://github.com/amanthanvi/noctty.git
+          <pre class="nc-proof-code" tabindex="0"><code>$version = "&lt;1.3.124-or-later&gt;"
+git clone --branch "v$version" --depth 1 https://github.com/amanthanvi/noctty.git
 Set-Location .\noctty
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 `
-  -Version &lt;1.3.124-or-later&gt;</code></pre>
+  -Version $version</code></pre>
         </li>
       </ol>
 

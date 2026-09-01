@@ -39,7 +39,6 @@ const sha256Hex = (text) =>
   crypto.createHash("sha256").update(text, "utf8").digest("hex");
 const sha256Base64 = (text) =>
   crypto.createHash("sha256").update(text, "utf8").digest("base64");
-const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const siteOrigin = "https://noctty.com";
 
 function readSiteFile(relativePath, directory = siteRoot) {
@@ -167,16 +166,31 @@ function attributeValue(attrs, name) {
   return match[1] ?? match[2] ?? match[3] ?? null;
 }
 
-export function referencedLocalAssets(html) {
+function localAssetPath(raw, htmlName) {
+  if (!raw) return null;
+  let pathname = raw.split(/[?#]/, 1)[0];
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(raw)) {
+    const target = new URL(raw, siteOrigin);
+    if (target.origin !== siteOrigin) return null;
+    pathname = target.pathname;
+  }
+  const normalized = pathname.startsWith("/")
+    ? path.posix.normalize(pathname.slice(1))
+    : path.posix.normalize(
+        path.posix.join(path.posix.dirname(htmlName), pathname),
+      );
+  if (normalized === ".." || normalized.startsWith("../")) {
+    throw new Error(
+      `site/${htmlName} references an asset outside site/: ${raw}`,
+    );
+  }
+  return normalized === "." ? null : normalized;
+}
+
+export function referencedLocalAssets(html, htmlName = "index.html") {
   const referenced = new Set();
   const add = (raw) => {
-    if (!raw) return;
-    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(raw)) {
-      const target = new URL(raw, siteOrigin);
-      if (target.origin !== siteOrigin) return;
-      raw = `${target.pathname}${target.search}${target.hash}`;
-    }
-    const normalized = raw.split(/[?#]/, 1)[0].replace(/^\.?\//, "");
+    const normalized = localAssetPath(raw, htmlName);
     if (normalized) referenced.add(normalized);
   };
   for (const [, attrs] of html.matchAll(/<script\b([^>]*)>/gi)) {
@@ -240,7 +254,7 @@ function assertPageRegistryCoversSite() {
 
 function assertDeclaredAssetsAreComplete(htmlName, html, assets) {
   const declared = new Set(assets);
-  const undeclared = [...referencedLocalAssets(html)].filter(
+  const undeclared = [...referencedLocalAssets(html, htmlName)].filter(
     (asset) => !declared.has(asset),
   );
   if (undeclared.length > 0) {
@@ -251,39 +265,45 @@ function assertDeclaredAssetsAreComplete(htmlName, html, assets) {
   }
 }
 
-export function withAssetCacheKeys(html, htmlPath, assets) {
-  let result = html;
-  for (const [asset, digest] of Object.entries(assets)) {
-    const escaped = escapeRegExp(asset);
-    const localPrefix = `((?:(?:https:)?//noctty\\.com(?::443)?/)|/|\\./)?`;
-    // Every attribute form referencedLocalAssets can see has to be versionable
-    // here too, or a reference discovery flagged would fail as "missing".
-    const quoted = new RegExp(
-      `(["'])${localPrefix}${escaped}(?:\\?v=[^"']*)?\\1`,
-      "gi",
+function withVersionedAttribute(attrs, name, htmlName, assets, referenced) {
+  const pattern = new RegExp(
+    `(\\s${name}\\s*=\\s*)(?:"([^"]*)"|'([^']*)'|([^\\s"'\`=<>]+))`,
+    "i",
+  );
+  return attrs.replace(pattern, (match, prefix, double, single, unquoted) => {
+    const raw = double ?? single ?? unquoted;
+    const asset = localAssetPath(raw, htmlName);
+    if (!asset || !Object.hasOwn(assets, asset)) return match;
+    referenced.add(asset);
+    const versioned = `${raw.split(/[?#]/, 1)[0]}?v=${assets[asset]}`;
+    if (double !== undefined) return `${prefix}"${versioned}"`;
+    if (single !== undefined) return `${prefix}'${versioned}'`;
+    return `${prefix}${versioned}`;
+  });
+}
+
+export function withAssetCacheKeys(html, htmlName, assets) {
+  const referenced = new Set();
+  let result = html.replace(/<script\b([^>]*)>/gi, (tag, attrs) =>
+    tag.replace(
+      attrs,
+      withVersionedAttribute(attrs, "src", htmlName, assets, referenced),
+    ),
+  );
+  result = result.replace(/<link\b([^>]*)>/gi, (tag, attrs) => {
+    const rel = attributeValue(attrs, "rel");
+    if (!rel || !/\bstylesheet\b/i.test(rel)) return tag;
+    return tag.replace(
+      attrs,
+      withVersionedAttribute(attrs, "href", htmlName, assets, referenced),
     );
-    const unquoted = new RegExp(
-      `((?:\\ssrc|\\shref)\\s*=\\s*)${localPrefix}${escaped}(?:\\?v=[^\\s"'\`=<>]*)?(?=[\\s/>])`,
-      "gi",
-    );
-    if (!quoted.test(result) && !unquoted.test(result)) {
+  });
+  for (const asset of Object.keys(assets)) {
+    if (!referenced.has(asset)) {
       throw new Error(
-        `${htmlPath} does not reference required local asset ${asset}.`,
+        `site/${htmlName} does not reference required local asset ${asset}.`,
       );
     }
-    quoted.lastIndex = 0;
-    unquoted.lastIndex = 0;
-    result = result
-      .replace(
-        quoted,
-        (_match, quote, referencePrefix = "") =>
-          `${quote}${referencePrefix}${asset}?v=${digest}${quote}`,
-      )
-      .replace(
-        unquoted,
-        (_match, attributePrefix, referencePrefix = "") =>
-          `${attributePrefix}${referencePrefix}${asset}?v=${digest}`,
-      );
   }
   return result;
 }
@@ -322,7 +342,7 @@ function main() {
       htmlName,
       withAssetCacheKeys(
         pages.get(htmlName),
-        `site/${htmlName}`,
+        htmlName,
         Object.fromEntries(assets.map((asset) => [asset, assetHashes[asset]])),
       ),
     );
