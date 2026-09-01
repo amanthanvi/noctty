@@ -2962,9 +2962,7 @@ pub const TerminalProvider = struct {
         const self = fromText(self_text);
         out.* = com.SupportedTextSelection_None;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.state.role == .edit) {
-            out.* = com.SupportedTextSelection_Single;
-        }
+        out.* = com.SupportedTextSelection_Single;
         return com.S_OK;
     }
 
@@ -4818,7 +4816,7 @@ test "TerminalProvider GetSelection reports the caret range and real selections"
     var selection: i32 = -1;
     const hr = TerminalProvider.get_SupportedTextSelection(&p.text_iface, &selection);
     try std.testing.expectEqual(com.S_OK, hr);
-    try std.testing.expectEqual(com.SupportedTextSelection_None, selection);
+    try std.testing.expectEqual(com.SupportedTextSelection_Single, selection);
 
     // No user selection: the documented contract is a degenerate range at
     // the insertion point, not an empty array. The terminal always has one.
