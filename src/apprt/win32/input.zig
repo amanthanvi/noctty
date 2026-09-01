@@ -314,6 +314,10 @@ fn normalizeAltGrMods(mods: input.Mods) input.Mods {
     return withoutSyntheticAltGr(mods);
 }
 
+fn bindingModsOverride(raw_mods: input.Mods, encoded_mods: input.Mods) ?input.Mods {
+    return if (!raw_mods.equal(encoded_mods)) raw_mods else null;
+}
+
 fn fallbackMods() input.Mods {
     return .{
         .shift = keyPressed(c.VK_SHIFT),
@@ -600,13 +604,8 @@ fn shouldDeferTextToCharMessage(
 
 fn deferTextToCharMessage(
     result: *Win32KeyMessage,
-    raw_mods: input.Mods,
     translated: KeyText,
 ) void {
-    // Binding lookup happens before composing events are discarded by the
-    // terminal encoder. Preserve the physical AltGr chord here so a deferred
-    // AltGr character cannot match an unrelated plain-key binding.
-    result.event.mods = raw_mods;
     result.event.utf8 = "";
     result.event.consumed_mods = .{};
     result.event.composing = true;
@@ -840,6 +839,11 @@ pub fn keyEventFromWin32Message(
             .action = action,
             .key = key,
             .mods = mods,
+            // Windows' synthetic Ctrl+right-Alt pair must remain visible to
+            // bindings so a deferred AltGr key cannot match a plain binding,
+            // and press/release hashes must use the same physical identity.
+            // Terminal encoding still uses the normalized modifiers above.
+            .binding_mods = bindingModsOverride(raw_mods, mods),
             // Derived for release events too, not just press/repeat: see
             // unshiftedCodepoint.
             .unshifted_codepoint = unshiftedCodepoint(
@@ -858,7 +862,7 @@ pub fn keyEventFromWin32Message(
             // Keep the physical-key event visible to bindings/modifier state
             // but defer text emission to WM_CHAR so plain typing doesn't rely
             // on ToUnicode/GetKeyboardState timing.
-            deferTextToCharMessage(&result, raw_mods, translated);
+            deferTextToCharMessage(&result, translated);
         }
     }
 
@@ -1234,23 +1238,56 @@ test "win32 deferred char authorization respects key handling effect" {
     try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.closed));
 }
 
-test "win32 deferred AltGr text preserves binding modifiers" {
+test "win32 AltGr binding identity agrees across deferred press and release" {
     const raw_alt_gr: input.Mods = .{
         .ctrl = true,
         .alt = true,
         .sides = .{ .ctrl = .left, .alt = .right },
     };
-    var message: Win32KeyMessage = .{ .event = .{
+    const normalized = withoutSyntheticAltGr(raw_alt_gr);
+    var press: Win32KeyMessage = .{ .event = .{
+        .action = .press,
         .key = .key_a,
-        .mods = withoutSyntheticAltGr(raw_alt_gr),
+        .mods = normalized,
+        .binding_mods = bindingModsOverride(raw_alt_gr, normalized),
+        .unshifted_codepoint = 'a',
     } };
+    const release: input.KeyEvent = .{
+        .action = .release,
+        .key = .key_a,
+        .mods = normalized,
+        .binding_mods = bindingModsOverride(raw_alt_gr, normalized),
+        .unshifted_codepoint = 'a',
+    };
 
-    deferTextToCharMessage(&message, raw_alt_gr, .{ .deferred_utf16_units = 1 });
+    deferTextToCharMessage(&press, .{ .deferred_utf16_units = 1 });
 
-    try std.testing.expect(std.meta.eql(raw_alt_gr, message.event.mods));
-    try std.testing.expect(message.event.composing);
-    try std.testing.expectEqualStrings("", message.event.utf8);
-    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
+    try std.testing.expect(std.meta.eql(normalized, press.event.mods));
+    try std.testing.expect(std.meta.eql(raw_alt_gr, press.event.bindingMods()));
+    try std.testing.expect(std.meta.eql(raw_alt_gr, release.bindingMods()));
+    try std.testing.expectEqual(press.event.bindingHash(), release.bindingHash());
+    try std.testing.expect(press.event.composing);
+    try std.testing.expectEqualStrings("", press.event.utf8);
+    try std.testing.expectEqual(@as(usize, 1), press.deferred_utf16_units);
+
+    // The binding-only override must not leak the synthetic Ctrl+Alt pair into
+    // Kitty release reporting. Its bytes stay identical to the normalized
+    // event that existed before binding identity was separated.
+    var expected_buf: [64]u8 = undefined;
+    var expected: std.Io.Writer = .fixed(&expected_buf);
+    var normalized_release = release;
+    normalized_release.binding_mods = null;
+    try input.key_encode.encode(&expected, normalized_release, .{
+        .kitty_flags = .{ .disambiguate = true, .report_events = true },
+    });
+
+    var actual_buf: [64]u8 = undefined;
+    var actual: std.Io.Writer = .fixed(&actual_buf);
+    try input.key_encode.encode(&actual, release, .{
+        .kitty_flags = .{ .disambiguate = true, .report_events = true },
+    });
+    try std.testing.expect(actual.buffered().len > 0);
+    try std.testing.expectEqualStrings(expected.buffered(), actual.buffered());
 }
 
 test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {

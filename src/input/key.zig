@@ -25,6 +25,12 @@ pub const KeyEvent = struct {
     /// Mods are the modifiers that are pressed.
     mods: Mods = .{},
 
+    /// Optional modifier identity used only for keybinding lookup and for
+    /// pairing a consumed key press with its release. This lets an apprt keep
+    /// physical modifier identity distinct from the modifiers that terminal
+    /// protocols should encode.
+    binding_mods: ?Mods = null,
+
     /// The mods that were consumed in order to generate the text
     /// in utf8. This has the mods set that were consumed, so to
     /// get the set of mods that are effective you must negate
@@ -54,6 +60,12 @@ pub const KeyEvent = struct {
         return self.mods.unset(self.consumed_mods);
     }
 
+    /// Returns the modifiers used for keybinding lookup and press/release
+    /// pairing. Most apprts use the encoded modifiers directly.
+    pub fn bindingMods(self: KeyEvent) Mods {
+        return self.binding_mods orelse self.mods;
+    }
+
     /// Returns a unique hash for this key event to be used for tracking
     /// uniquess specifically with bindings. This omits fields that are
     /// irrelevant for bindings.
@@ -63,7 +75,7 @@ pub const KeyEvent = struct {
         // These are all the fields that are explicitly part of Trigger.
         std.hash.autoHash(&hasher, self.key);
         std.hash.autoHash(&hasher, self.unshifted_codepoint);
-        std.hash.autoHash(&hasher, self.mods.binding());
+        std.hash.autoHash(&hasher, self.bindingMods().binding());
 
         // Notes on unmapped things and why:
         //
