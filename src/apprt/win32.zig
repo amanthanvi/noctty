@@ -5676,7 +5676,7 @@ pub const App = struct {
                     explicit_window_target: bool,
                 } = switch (value.target) {
                     .focused => .{
-                        .source = self.focusedSurfaceForUndoRedo(),
+                        .source = self.automationDefaultSurface(),
                         .explicit_window_target = false,
                     },
                     .window_id => |id| .{
@@ -5697,7 +5697,7 @@ pub const App = struct {
                     if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
                 }
                 const source = switch (value.target) {
-                    .focused => self.focusedSurfaceForUndoRedo(),
+                    .focused => self.automationDefaultSurface(),
                     .surface_id => |id| self.findSurfaceById(id),
                     .window_id => return error.InvalidAutomationTarget,
                 } orelse return error.AutomationTargetNotFound;
@@ -6041,9 +6041,10 @@ pub const App = struct {
         }
         if (source) |surface| {
             // newConfig inherits only the focused surface's working directory;
-            // profile command selection is app-runtime state and must be
-            // applied for both focused and explicit-window automation.
-            inherited_profile_key = try applyProfileConfigFromSource(&config, surface);
+            // Launch command selection is app-runtime state and must be
+            // inherited from the source snapshot rather than re-resolved from
+            // mutable global/profile configuration.
+            inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
             if (explicit_window_target) {
                 const split_inherit = config.@"split-inherit-working-directory";
                 {
@@ -6083,7 +6084,7 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
-        const inherited_profile_key = try applyProfileConfigFromSource(&config, source);
+        const inherited_profile_key = try applyLaunchConfigFromSource(&config, source);
         _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
@@ -6115,10 +6116,17 @@ pub const App = struct {
         return surface;
     }
 
-    fn applyProfileConfigFromSource(
+    fn applyLaunchConfigFromSource(
         config: *configpkg.Config,
         source: *Surface,
     ) !?[]const u8 {
+        if (source.launch_command) |command| {
+            config.command = try command.clone(config._arena.?.allocator());
+            return source.launch_profile_key;
+        }
+
+        // Headless fixtures may not have a captured command. Preserve the
+        // previous profile fallback for those tests.
         const key = source.launch_profile_key orelse return null;
         const host = source.host orelse return null;
         const profile = (try host.profileForKey(key)) orelse return null;
@@ -6696,6 +6704,13 @@ pub const App = struct {
         }
 
         return null;
+    }
+
+    fn automationDefaultSurface(self: *App) ?*Surface {
+        if (self.core_app.focusedSurface()) |core_surface| {
+            if (self.findSurfaceByCore(core_surface)) |surface| return surface;
+        }
+        return self.focusedSurfaceForUndoRedo() orelse self.primarySurface();
     }
 
     fn undoRedoSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
@@ -22615,6 +22630,7 @@ pub const Surface = struct {
     /// Recorded from the resolved profile kind at launch, so nothing downstream
     /// has to re-derive "is this SSH?" from the key text.
     launched_ssh: bool = false,
+    launch_command: ?configpkg.Command = null,
     mouse_shape: terminal.MouseShape = .text,
     mouse_visible: bool = true,
     hovered_link: ?[:0]const u8 = null,
@@ -22938,6 +22954,15 @@ pub const Surface = struct {
             session.pty.deinit();
             _ = windows.CloseHandle(session.client_process);
             self.adopted_session = null;
+        };
+        const launch_command = if (app.core_app.first)
+            config.@"initial-command" orelse config.command
+        else
+            config.command;
+        if (launch_command) |command| self.launch_command = try command.clone(app.core_app.alloc);
+        errdefer if (self.launch_command) |*command| {
+            command.deinit(app.core_app.alloc);
+            self.launch_command = null;
         };
         // The DropTarget's surface_ctx must be `self`, but we can't
         // initialise it until `self.*` has been fully assigned above
@@ -26359,6 +26384,10 @@ pub const Surface = struct {
         if (self.launch_profile_key) |value| {
             alloc.free(value);
             self.launch_profile_key = null;
+        }
+        if (self.launch_command) |*command| {
+            command.deinit(alloc);
+            self.launch_command = null;
         }
         if (self.key_table_name) |value| {
             alloc.free(value);
@@ -32405,31 +32434,54 @@ test "win32 session restore refuses ssh profiles regardless of key case" {
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
 }
 
-test "win32 automation tab profile inheritance applies the source command" {
+test "win32 automation tab inheritance preserves the captured source command" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    const reloaded_command = [_][:0]const u8{"cmd.exe"};
     var profiles = [_]windows_shell.Profile{.{
         .kind = .pwsh,
         .key = "pwsh",
         .label = "PowerShell",
-        .command = .{ .direct = &command },
+        .command = .{ .direct = &reloaded_command },
     }};
     var host: Host = undefined;
     host.profiles = &profiles;
     var source: Surface = undefined;
     source.host = &host;
     source.launch_profile_key = "pwsh";
+    source.launch_command = .{ .direct = &command };
 
     var config = try configpkg.Config.default(std.testing.allocator);
     defer config.deinit();
-    const inherited = try App.applyProfileConfigFromSource(&config, &source);
+    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
 
     try std.testing.expectEqualStrings("pwsh", inherited.?);
     const direct = config.command.?.direct;
     try std.testing.expectEqual(@as(usize, 2), direct.len);
     try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
     try std.testing.expectEqualStrings("-NoLogo", direct[1]);
+}
+
+test "win32 automation omitted target falls back to the active surface" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+
+    try std.testing.expect(!surface.window_focused);
+    try std.testing.expectEqual(@as(?*Surface, &surface), app.automationDefaultSurface());
 }
 
 test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {
