@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { getHeaderContract } from "../../scripts/build-site-assets.mjs";
+import {
+  getHeaderContract,
+  referencedLocalAssets,
+  withAssetCacheKeys,
+} from "../../scripts/build-site-assets.mjs";
 
 const bootstrap = 'document.documentElement.dataset.theme = "dark";';
 
@@ -108,5 +112,20 @@ test("the generated CSP rejects divergent index and not-found bootstraps", (t) =
   assert.throws(
     () => getHeaderContract(siteRoot),
     /site\/index\.html and site\/404\.html inline bootstrap scripts differ/,
+  );
+});
+
+test("same-origin absolute assets are local and receive cache keys", () => {
+  const html = [
+    '<script src="https://noctty.com/install.js"></script>',
+    '<script src="https://example.com/external.js"></script>',
+  ].join("");
+  assert.deepEqual([...referencedLocalAssets(html)], ["install.js"]);
+  assert.equal(
+    withAssetCacheKeys(html, "site/test.html", { "install.js": "digest" }),
+    [
+      '<script src="https://noctty.com/install.js?v=digest"></script>',
+      '<script src="https://example.com/external.js"></script>',
+    ].join(""),
   );
 });

@@ -43,8 +43,13 @@ const linkTargetPath = (fromRelativePath, target) =>
 // Case-sensitive where a unit is (MB, GB, KiB) so the lowercase SPKI pin and
 // the lowercase ?v= cache keys cannot collide with a byte-size unit.
 const BYTE_SIZE_FIGURE_PATTERNS = [
-  /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B(?:\s*\/\s*s(?:ec)?)?\b/,
-  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?(?:\s+per\s+second)?\b/i,
+  /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B\b/,
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?\b/i,
+];
+
+const BYTE_THROUGHPUT_FIGURE_PATTERNS = [
+  /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B\s*\/\s*s(?:ec)?\b/,
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera|kibi|mebi|gibi|tebi)(?:byte|bit)s?\s+per\s+second\b/i,
 ];
 
 const PERFORMANCE_FIGURE_PATTERNS = [
@@ -61,6 +66,7 @@ const PERFORMANCE_FIGURE_PATTERNS = [
   /\b\d[\d,]*(?:\.\d+)?\s*(?:(?:rendered|painted|processed)\s+)?(?:frames?|renders?|paints?|updates?|cells?|glyphs?|lines?|bytes?|bits?|keystrokes?)\s+per\s+(?:second|minute|hour|frame|millisecond|microsecond|nanosecond)\b/i,
   // Byte sizes and throughput, decimal or binary, abbreviated or spelled out.
   ...BYTE_SIZE_FIGURE_PATTERNS,
+  ...BYTE_THROUGHPUT_FIGURE_PATTERNS,
   // Percentages framed as a performance delta.
   /\b\d+(?:\.\d+)?\s*(?:%|percent)\s*(?:\w+[\s-]+){0,3}(?:faster|slower|improvement|improved|reduction|reduced|speed-?up|overhead|gain|drop|regression|less|fewer|more)\b/i,
   /\b(?:faster|slower|improvement|reduction|speed-?up|overhead|gain|regression)\b[^.]{0,24}?\b\d+(?:\.\d+)?\s*(?:%|percent)/i,
@@ -72,9 +78,10 @@ const PERFORMANCE_FIGURE_PATTERNS = [
 // Migration tables may state configuration-size facts such as the default
 // scrollback limit. They still may not publish durations, rates, throughput,
 // percentages, or multipliers as performance results.
-const MIGRATION_PERFORMANCE_FIGURE_PATTERNS = PERFORMANCE_FIGURE_PATTERNS.filter(
-  (pattern) => !BYTE_SIZE_FIGURE_PATTERNS.includes(pattern),
-);
+const MIGRATION_PERFORMANCE_FIGURE_PATTERNS =
+  PERFORMANCE_FIGURE_PATTERNS.filter(
+    (pattern) => !BYTE_SIZE_FIGURE_PATTERNS.includes(pattern),
+  );
 
 // Terminals a comparison could name, plus the unnamed stand-ins for one.
 const RIVAL_TERMINAL =
@@ -338,6 +345,27 @@ test("claims guards read rendered text without blocking operational rates", () =
   );
   assert.deepEqual(
     findClaimViolations(
+      "The default scrollback limit is 10 MB",
+      MIGRATION_PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    [],
+  );
+  assert.notDeepEqual(
+    findClaimViolations(
+      "Noctty renders at 500 MB/s",
+      MIGRATION_PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    [],
+  );
+  assert.notDeepEqual(
+    findClaimViolations(
+      "Noctty processes 2 gibibytes per second",
+      MIGRATION_PERFORMANCE_FIGURE_PATTERNS,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    findClaimViolations(
       "Windows Terminal places this setting higher in settings.json",
       CROSS_TERMINAL_CLAIM_PATTERNS,
     ),
@@ -358,7 +386,10 @@ test("trust page carries every implemented release verification layer", () => {
     trustHtml,
     /gh attestation verify|every published asset carries\s+a GitHub\s+build-provenance attestation/i,
   );
-  assert.match(trustHtml, /do not currently publish\s+build-provenance attestations/i);
+  assert.match(
+    trustHtml,
+    /do not currently publish\s+build-provenance attestations/i,
+  );
   assert.match(trustHtml, /Assert-ReleaseSignature/);
   assert.match(
     trustHtml,
@@ -369,7 +400,10 @@ test("trust page carries every implemented release verification layer", () => {
     /checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10/,
   );
   assert.match(trustHtml, /Expand-Archive/);
-  assert.match(trustHtml, /noctty-release-verification-.*?\[Guid\]::NewGuid\(\)/s);
+  assert.match(
+    trustHtml,
+    /noctty-release-verification-.*?\[Guid\]::NewGuid\(\)/s,
+  );
   assert.match(
     trustHtml,
     /finally\s*{.*?\[IO\.Directory\]::Delete\(\$workRoot, \$true\)/s,

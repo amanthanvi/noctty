@@ -40,6 +40,7 @@ const sha256Hex = (text) =>
 const sha256Base64 = (text) =>
   crypto.createHash("sha256").update(text, "utf8").digest("base64");
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const siteOrigin = "https://noctty.com";
 
 function readSiteFile(relativePath, directory = siteRoot) {
   const text = fs.readFileSync(path.join(directory, relativePath), "utf8");
@@ -166,11 +167,15 @@ function attributeValue(attrs, name) {
   return match[1] ?? match[2] ?? match[3] ?? null;
 }
 
-function referencedLocalAssets(html) {
+export function referencedLocalAssets(html) {
   const referenced = new Set();
   const add = (raw) => {
-    // Cross-origin and protocol-relative references are not ours to version.
-    if (!raw || /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(raw)) return;
+    if (!raw) return;
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(raw)) {
+      const target = new URL(raw, siteOrigin);
+      if (target.origin !== siteOrigin) return;
+      raw = `${target.pathname}${target.search}${target.hash}`;
+    }
     const normalized = raw.split(/[?#]/, 1)[0].replace(/^\.?\//, "");
     if (normalized) referenced.add(normalized);
   };
@@ -246,15 +251,19 @@ function assertDeclaredAssetsAreComplete(htmlName, html, assets) {
   }
 }
 
-function withAssetCacheKeys(html, htmlPath, assets) {
+export function withAssetCacheKeys(html, htmlPath, assets) {
   let result = html;
   for (const [asset, digest] of Object.entries(assets)) {
     const escaped = escapeRegExp(asset);
+    const localPrefix = `((?:(?:https:)?//noctty\\.com(?::443)?/)|/|\\./)?`;
     // Every attribute form referencedLocalAssets can see has to be versionable
     // here too, or a reference discovery flagged would fail as "missing".
-    const quoted = new RegExp(`(["'])(/?)${escaped}(?:\\?v=[^"']*)?\\1`, "g");
+    const quoted = new RegExp(
+      `(["'])${localPrefix}${escaped}(?:\\?v=[^"']*)?\\1`,
+      "gi",
+    );
     const unquoted = new RegExp(
-      `((?:\\ssrc|\\shref)\\s*=\\s*)(/?)${escaped}(?:\\?v=[^\\s"'\`=<>]*)?(?=[\\s/>])`,
+      `((?:\\ssrc|\\shref)\\s*=\\s*)${localPrefix}${escaped}(?:\\?v=[^\\s"'\`=<>]*)?(?=[\\s/>])`,
       "gi",
     );
     if (!quoted.test(result) && !unquoted.test(result)) {
@@ -267,13 +276,13 @@ function withAssetCacheKeys(html, htmlPath, assets) {
     result = result
       .replace(
         quoted,
-        (_match, quote, rootPrefix) =>
-          `${quote}${rootPrefix}${asset}?v=${digest}${quote}`,
+        (_match, quote, referencePrefix = "") =>
+          `${quote}${referencePrefix}${asset}?v=${digest}${quote}`,
       )
       .replace(
         unquoted,
-        (_match, prefix, rootPrefix) =>
-          `${prefix}${rootPrefix}${asset}?v=${digest}`,
+        (_match, attributePrefix, referencePrefix = "") =>
+          `${attributePrefix}${referencePrefix}${asset}?v=${digest}`,
       );
   }
   return result;
