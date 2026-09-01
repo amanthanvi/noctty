@@ -1433,8 +1433,9 @@ link: RepeatableLink = .{},
 @"quick-select-patterns": QuickSelectPatterns = .{},
 
 /// ASCII characters used to generate quick-select labels. The value must have
-/// at least two characters and each character must be unique. Labels are
-/// prefix-free, so a single character could only ever label one target.
+/// at least two characters, and letters must also be unique after ASCII case
+/// folding. Labels are prefix-free, so a single character could only ever
+/// label one target.
 @"quick-select-alphabet": QuickSelectAlphabet = .{},
 
 /// Enable URL matching. URLs are matched on hover with control (Linux) or

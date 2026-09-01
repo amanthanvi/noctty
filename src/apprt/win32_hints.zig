@@ -256,7 +256,12 @@ pub fn accessibleTargetName(
         buf,
         "Target {d} of {d}, label {s}, ",
         .{ index + 1, count, label },
-    ) catch "Quick select target";
+    ) catch {
+        const fallback = "Quick select target";
+        const len = @min(fallback.len, buf.len);
+        @memcpy(buf[0..len], fallback[0..len]);
+        return buf[0..len];
+    };
     const remaining = buf[prefix.len..];
     var text_len = @min(text.len, remaining.len);
     while (text_len > 0 and !std.unicode.utf8ValidateSlice(text[0..text_len])) {
@@ -404,8 +409,22 @@ pub fn extractMatches(
     var candidates: std.ArrayListUnmanaged(Candidate) = .empty;
     defer candidates.deinit(alloc);
 
+    if (patterns.len > max_pattern_count) {
+        std.log.warn("ignoring {d} quick-select patterns beyond the {d}-pattern scan limit", .{
+            patterns.len - max_pattern_count,
+            max_pattern_count,
+        });
+    }
     pattern_loop: for (patterns[0..@min(patterns.len, max_pattern_count)], 0..) |pattern, pattern_index| {
-        if (pattern.len == 0 or pattern.len > max_pattern_bytes) continue;
+        if (pattern.len == 0) continue;
+        if (pattern.len > max_pattern_bytes) {
+            std.log.warn("ignoring quick-select pattern index={d} bytes={d} limit={d}", .{
+                pattern_index,
+                pattern.len,
+                max_pattern_bytes,
+            });
+            continue;
+        }
         var regex = oni.Regex.init(
             pattern,
             .{},
@@ -1209,4 +1228,12 @@ test "hints: accessible target names retain labels when text is truncated" {
     try std.testing.expect(std.mem.startsWith(u8, name, "Target 13 of 4096, label zz, "));
     try std.testing.expect(std.unicode.utf8ValidateSlice(name));
     try std.testing.expect(name.len <= buf.len);
+}
+
+test "hints: accessible target names use a bounded fallback" {
+    var buf: [5]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Quick",
+        accessibleTargetName(&buf, 4095, 4096, "long-label", "text"),
+    );
 }

@@ -18894,7 +18894,7 @@ fn quickSelectRowIdThunk(_: *anyopaque, index: usize) u64 {
 }
 
 fn quickSelectRowBoundsThunk(ctx: *anyopaque, index: usize) ?win32_uia.PaletteListRowBounds {
-    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
     const hwnd = surface.quick_select_hwnd orelse return null;
     const host = surface.host orelse return null;
     var client: RECT = undefined;
@@ -23174,8 +23174,17 @@ const QuickSelectSession = struct {
     cell_height: i32,
     padding_left: i32,
     padding_top: i32,
+    placed_rects: []RECT,
+    placed_slots: []?usize,
+    placed_count: usize = 0,
+    placement_client: ?RECT = null,
+    placement_metrics: ?win32_theme.ThemeMetrics = null,
+    placement_dpi: UINT = 0,
+    placement_complete: bool = false,
 
     fn deinit(self: *QuickSelectSession, alloc: Allocator) void {
+        alloc.free(self.placed_slots);
+        alloc.free(self.placed_rects);
         self.labels.deinit(alloc);
         self.scan.deinit(alloc);
         self.* = undefined;
@@ -23192,9 +23201,39 @@ test "quick select label placement checks final positioned chips" {
         .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
         client,
         &occupied,
-    );
+    ).?;
     try std.testing.expectEqual(@as(i32, 20), placed.top);
     try std.testing.expectEqual(@as(i32, 30), placed.bottom);
+}
+
+test "quick select label placement uses the free global grid" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 30, .bottom = 20 };
+    const occupied = [_]RECT{
+        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
+        .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
+    };
+    const placed = Surface.quickSelectPositionLabel(
+        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
+        client,
+        &occupied,
+    ).?;
+    try std.testing.expectEqual(@as(i32, 0), placed.left);
+    try std.testing.expectEqual(@as(i32, 10), placed.right);
+}
+
+test "quick select label placement reports an exhausted viewport" {
+    const client: RECT = .{ .left = 0, .top = 0, .right = 20, .bottom = 20 };
+    const occupied = [_]RECT{
+        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
+        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
+        .{ .left = 0, .top = 10, .right = 10, .bottom = 20 },
+        .{ .left = 10, .top = 10, .right = 20, .bottom = 20 },
+    };
+    try std.testing.expect(Surface.quickSelectPositionLabel(
+        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
+        client,
+        &occupied,
+    ) == null);
 }
 
 pub const Surface = struct {
@@ -24859,35 +24898,23 @@ pub const Surface = struct {
     }
 
     fn quickSelectLabelRect(
-        self: *const Surface,
+        self: *Surface,
         index: usize,
         client: RECT,
         metrics: win32_theme.ThemeMetrics,
         dpi: UINT,
     ) ?RECT {
-        const placed = std.heap.page_allocator.alloc(RECT, index + 1) catch {
-            return self.quickSelectRawLabelRect(index, client, metrics, dpi);
-        };
-        defer std.heap.page_allocator.free(placed);
-        var placed_count: usize = 0;
-        for (0..index + 1) |candidate_index| {
-            const raw = self.quickSelectRawLabelRect(
-                candidate_index,
-                client,
-                metrics,
-                dpi,
-            ) orelse continue;
-            const positioned = quickSelectPositionLabel(raw, client, placed[0..placed_count]);
-            if (candidate_index == index) return positioned;
-            placed[placed_count] = positioned;
-            placed_count += 1;
-        }
-        return null;
+        _ = self.ensureQuickSelectLabelRects(client, metrics, dpi);
+        const session = if (self.quick_select_session) |*value| value else return null;
+        if (index >= session.placed_slots.len) return null;
+        const slot = session.placed_slots[index] orelse return null;
+        return session.placed_rects[slot];
     }
 
-    fn quickSelectPositionLabel(raw: RECT, client: RECT, occupied: []const RECT) RECT {
+    fn quickSelectPositionLabel(raw: RECT, client: RECT, occupied: []const RECT) ?RECT {
         const height = raw.bottom - raw.top;
-        if (height <= 0) return raw;
+        const width = raw.right - raw.left;
+        if (height <= 0 or width <= 0) return null;
         const lane_count: usize = @intCast(@max(1, @divTrunc(client.bottom - client.top, height)));
         for (0..lane_count * 2 + 1) |attempt| {
             const magnitude: i32 = @intCast((attempt + 1) / 2);
@@ -24909,7 +24936,71 @@ pub const Surface = struct {
                 }
             } else return candidate;
         }
-        return raw;
+
+        // If every target-local lane is occupied, tile across the viewport.
+        // Returning the known-overlapping raw rectangle would let a later
+        // opaque chip hide an earlier label and make its key undiscoverable.
+        var top = client.top;
+        while (top + height <= client.bottom) : (top += height) {
+            var left = client.left;
+            while (left + width <= client.right) : (left += width) {
+                const candidate: RECT = .{
+                    .left = left,
+                    .top = top,
+                    .right = left + width,
+                    .bottom = top + height,
+                };
+                for (occupied) |previous| {
+                    if (candidate.left < previous.right and candidate.right > previous.left and
+                        candidate.top < previous.bottom and candidate.bottom > previous.top)
+                    {
+                        break;
+                    }
+                } else return candidate;
+            }
+        }
+        return null;
+    }
+
+    fn ensureQuickSelectLabelRects(
+        self: *Surface,
+        client: RECT,
+        metrics: win32_theme.ThemeMetrics,
+        dpi: UINT,
+    ) bool {
+        const session = if (self.quick_select_session) |*value| value else return false;
+        if (session.placement_client) |previous_client| {
+            if (session.placement_metrics) |previous_metrics| {
+                if (std.meta.eql(previous_client, client) and
+                    std.meta.eql(previous_metrics, metrics) and
+                    session.placement_dpi == dpi)
+                {
+                    return session.placement_complete;
+                }
+            }
+        }
+
+        @memset(session.placed_slots, null);
+        session.placed_count = 0;
+        session.placement_complete = true;
+        session.placement_client = client;
+        session.placement_metrics = metrics;
+        session.placement_dpi = dpi;
+        for (session.scan.matches, 0..) |_, index| {
+            const raw = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse continue;
+            const positioned = quickSelectPositionLabel(
+                raw,
+                client,
+                session.placed_rects[0..session.placed_count],
+            ) orelse {
+                session.placement_complete = false;
+                continue;
+            };
+            session.placed_rects[session.placed_count] = positioned;
+            session.placed_slots[index] = session.placed_count;
+            session.placed_count += 1;
+        }
+        return session.placement_complete;
     }
 
     fn quickSelectRawLabelRect(
@@ -25014,6 +25105,10 @@ pub const Surface = struct {
             scan.matches.len,
         );
         errdefer label_set.deinit(alloc);
+        const placed_rects = try alloc.alloc(RECT, label_set.count);
+        errdefer alloc.free(placed_rects);
+        const placed_slots = try alloc.alloc(?usize, label_set.count);
+        errdefer alloc.free(placed_slots);
 
         try self.ensureQuickSelectWindow();
         self.quick_select_session = .{
@@ -25023,14 +25118,37 @@ pub const Surface = struct {
             .cell_height = @intCast(renderer_size.cell.height),
             .padding_left = @intCast(renderer_size.padding.left),
             .padding_top = @intCast(renderer_size.padding.top),
+            .placed_rects = placed_rects,
+            .placed_slots = placed_slots,
         };
+
+        self.refreshQuickSelectPlacement();
+        const hwnd = self.quick_select_hwnd.?;
+        var client: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client) == 0) {
+            log.warn("quick select client rect unavailable", .{});
+            self.closeQuickSelect(false);
+            return true;
+        }
+        const host = self.host orelse {
+            log.warn("quick select host unavailable", .{});
+            self.closeQuickSelect(false);
+            return true;
+        };
+        const metrics: win32_theme.ThemeMetrics = if (isHighContrastActive())
+            .highContrast()
+        else
+            .{};
+        if (!self.ensureQuickSelectLabelRects(client, metrics, host.current_dpi)) {
+            log.warn("quick select has more visible labels than fit without overlap", .{});
+            self.closeQuickSelect(false);
+            return true;
+        }
 
         self.ensureQuickSelectUiaProvider() catch |err| {
             log.warn("quick select UIA provider unavailable err={}", .{err});
         };
 
-        self.refreshQuickSelectPlacement();
-        const hwnd = self.quick_select_hwnd.?;
         _ = applyChildVisibility(hwnd, &self.quick_select_placement, true);
         _ = sys.SetFocus(hwnd);
         // Color-keyed pixels are transparent to hit testing. Capture ensures
@@ -25127,6 +25245,7 @@ pub const Surface = struct {
     }
 
     fn quickSelectPrefixChanged(self: *Surface) void {
+        if (self.quick_select_session) |*session| session.placement_client = null;
         if (self.quick_select_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
         if (self.quick_select_uia_provider) |provider| {
             win32_uia.events.raiseNameChanged(&provider.base);
@@ -25313,7 +25432,6 @@ pub const Surface = struct {
 
     fn paintQuickSelect(self: *Surface) void {
         const hwnd = self.quick_select_hwnd orelse return;
-        const session = if (self.quick_select_session) |*value| value else return;
         var ps: PAINTSTRUCT = undefined;
         const hdc = sys.BeginPaint(hwnd, &ps);
         defer _ = sys.EndPaint(hwnd, &ps);
@@ -25334,20 +25452,13 @@ pub const Surface = struct {
             if (previous_font) |font| _ = sys.SelectObject(hdc, font);
         }
 
-        const placed = std.heap.page_allocator.alloc(RECT, session.labels.count) catch return;
-        defer std.heap.page_allocator.free(placed);
-        var placed_count: usize = 0;
+        _ = self.ensureQuickSelectLabelRects(client, metrics, host.current_dpi);
+        const session = if (self.quick_select_session) |*value| value else return;
         for (session.scan.matches, 0..) |_, index| {
             const label = session.labels.get(index);
-            const raw = self.quickSelectRawLabelRect(
-                index,
-                client,
-                metrics,
-                host.current_dpi,
-            ) orelse continue;
-            var chip = quickSelectPositionLabel(raw, client, placed[0..placed_count]);
-            placed[placed_count] = chip;
-            placed_count += 1;
+            if (index >= session.placed_slots.len) continue;
+            const slot = session.placed_slots[index] orelse continue;
+            var chip = session.placed_rects[slot];
             drawRoundedRect(
                 hdc,
                 chip,

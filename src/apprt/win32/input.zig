@@ -386,14 +386,7 @@ fn quickSelectAltGrPressed(state: *const [256]u8) bool {
 }
 
 fn quickSelectActionModsFromKeyboardState(state: *const [256]u8) input.Mods {
-    var mods = modsFromKeyboardState(state);
-    if (quickSelectAltGrPressed(state)) {
-        // Windows exposes AltGr as synthetic Ctrl + right Alt. Those bits
-        // produce label text; they are not the completed label's action.
-        mods.ctrl = false;
-        mods.alt = false;
-    }
-    return mods;
+    return normalizeAltGrMods(modsFromKeyboardState(state));
 }
 
 pub fn quickSelectActionMods() input.Mods {
@@ -402,12 +395,7 @@ pub fn quickSelectActionMods() input.Mods {
         return quickSelectActionModsFromKeyboardState(keyboard_state);
     }
 
-    var mods = fallbackMods();
-    if (keyPressed(c.VK_RMENU) and mods.ctrl) {
-        mods.ctrl = false;
-        mods.alt = false;
-    }
-    return mods;
+    return normalizeAltGrMods(fallbackMods());
 }
 
 /// Translate a key event into the single printable ASCII character a
@@ -1593,7 +1581,7 @@ test "win32 XButton wParam decoding maps forward and back buttons" {
     try std.testing.expectEqual(c.XBUTTON2, highWord(wp2));
 }
 
-test "win32 quick select treats AltGr as label text instead of an action" {
+test "win32 quick select treats synthetic AltGr as label text instead of an action" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var state: [256]u8 = [_]u8{0} ** 256;
@@ -1601,13 +1589,13 @@ test "win32 quick select treats AltGr as label text instead of an action" {
     state[c.VK_LCONTROL] = 0x80;
     state[c.VK_MENU] = 0x80;
     state[c.VK_RMENU] = 0x80;
-    const altgr = quickSelectActionModsFromKeyboardState(&state);
+    const altgr = withoutSyntheticAltGr(modsFromKeyboardState(&state));
     try std.testing.expect(!altgr.ctrl);
     try std.testing.expect(!altgr.alt);
 
     state[c.VK_RMENU] = 0;
     state[c.VK_LMENU] = 0x80;
-    const explicit = quickSelectActionModsFromKeyboardState(&state);
+    const explicit = withoutSyntheticAltGr(modsFromKeyboardState(&state));
     try std.testing.expect(explicit.ctrl);
     try std.testing.expect(explicit.alt);
 }
