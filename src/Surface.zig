@@ -2571,7 +2571,7 @@ fn copySelectionToClipboards(
     sel: terminal.Selection,
     clipboards: []const apprt.Clipboard,
     format: input.Binding.Action.CopyToClipboard,
-) !void {
+) !bool {
     // Create an arena to simplify memory management here.
     var arena = ArenaAllocator.init(self.alloc);
     defer arena.deinit();
@@ -2692,6 +2692,7 @@ fn copySelectionToClipboards(
     if (copied and self.config.app_notifications.@"clipboard-copy") {
         try self.showAppNotification("noctty", "Copied selection to clipboard");
     }
+    return copied;
 }
 
 /// Set the selection contents.
@@ -2715,11 +2716,13 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
         .false => unreachable, // handled above with an early exit
 
         // Both standard and selection clipboards are set.
-        .clipboard => try self.copySelectionToClipboards(
-            sel,
-            &.{ .standard, .selection },
-            .mixed,
-        ),
+        .clipboard => {
+            _ = try self.copySelectionToClipboards(
+                sel,
+                &.{ .standard, .selection },
+                .mixed,
+            );
+        },
 
         // The selection clipboard is set if supported, otherwise the standard.
         .true => {
@@ -2727,7 +2730,7 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
                 .selection
             else
                 .standard;
-            try self.copySelectionToClipboards(
+            _ = try self.copySelectionToClipboards(
                 sel,
                 &.{clipboard},
                 .mixed,
@@ -4842,7 +4845,7 @@ pub fn mouseButtonCallback(
             },
             .copy => {
                 if (self.io.terminal.screens.active.selection) |sel| {
-                    try self.copySelectionToClipboards(
+                    _ = try self.copySelectionToClipboards(
                         sel,
                         &.{.standard},
                         .mixed,
@@ -4853,7 +4856,7 @@ pub fn mouseButtonCallback(
                 try self.queueRender();
             },
             .@"copy-or-paste" => if (self.io.terminal.screens.active.selection) |sel| {
-                try self.copySelectionToClipboards(
+                _ = try self.copySelectionToClipboards(
                     sel,
                     &.{.standard},
                     .mixed,
@@ -5916,11 +5919,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 defer self.renderer_state.mutex.unlock();
 
                 const sel = self.io.terminal.screens.active.selection orelse break :copied false;
-                try self.copySelectionToClipboards(
+                const clipboard_written = try self.copySelectionToClipboards(
                     sel,
                     &.{.standard},
                     format,
                 );
+                if (!clipboard_written) break :copied false;
 
                 // Clear the selection if configured to do so.
                 if (self.config.selection_clear_on_copy) {
@@ -6412,6 +6416,16 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         inline .activate_key_table,
         .activate_key_table_once,
         => |name, tag| {
+            // `copy_mode` owns selection and lifecycle state in addition to
+            // its key table. Route direct user activation through the same
+            // entry path as `toggle_copy_mode`; once that path sets the flag,
+            // its internal activation recurses here and performs the push.
+            if (std.mem.eql(u8, name, copy_mode_table_name) and
+                !self.copy_mode_active)
+            {
+                return try self.startCopyMode();
+            }
+
             // Look up the table in our config
             const set = self.config.keybind.tables.getPtr(name) orelse {
                 log.debug("key table not found: {s}", .{name});
