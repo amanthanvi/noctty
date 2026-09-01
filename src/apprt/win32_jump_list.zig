@@ -1138,6 +1138,13 @@ pub const JumpList = struct {
             self.rebuild_retry_count = 0;
             self.rebuild_dirty = true;
         }
+        // Directory activity is an external recovery trigger after the
+        // bounded startup discovery retries have been exhausted.
+        if (self.startup_profile_discovery_pending and
+            self.startup_profile_discovery_retry_count == max_rebuild_retries)
+        {
+            self.startup_profile_discovery_retry_count = 0;
+        }
         self.schedule();
     }
 
@@ -2425,13 +2432,19 @@ test "jump_list startup profile discovery stays pending until completion" {
         .hidden_profiles = .{},
         .startup_profile_discovery_pending = true,
     };
-    defer jump.deinit();
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
 
     try std.testing.expect(jump.startupProfileDiscoveryPending());
     jump.startup_profile_discovery_retry_count = max_rebuild_retries;
     jump.retryStartupProfileDiscovery();
     try std.testing.expect(jump.timer_id == null);
     try std.testing.expectEqual(max_rebuild_retries, jump.startup_profile_discovery_retry_count);
+    jump.noteRecent("C:\\recovery-trigger");
+    try std.testing.expectEqual(@as(u8, 0), jump.startup_profile_discovery_retry_count);
+    try std.testing.expect(jump.timer_id != null);
     // A failed discovery leaves the request untouched; only the caller's
     // explicit success transition consumes it.
     try std.testing.expect(jump.startupProfileDiscoveryPending());
