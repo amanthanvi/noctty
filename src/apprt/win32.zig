@@ -2355,6 +2355,23 @@ fn sessionRestorePolicyAllows(
         !explicit_startup_working_directory;
 }
 
+fn sessionSavePolicyAllows(
+    safe_mode: bool,
+    policy: configpkg.Config.WindowSaveState,
+    initial_window: bool,
+    has_initial_command: bool,
+    startup_profile_picker: bool,
+) bool {
+    return sessionRestorePolicyAllows(
+        safe_mode,
+        policy,
+        initial_window,
+        has_initial_command,
+        startup_profile_picker,
+        false,
+    );
+}
+
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
 
@@ -3094,9 +3111,12 @@ pub const App = struct {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
         // session when the diagnostic run exits.
-        return sessionStatePolicyAllows(
+        return sessionSavePolicyAllows(
             self.safe_mode,
             self.config.@"window-save-state",
+            self.config.@"initial-window",
+            self.config.@"initial-command" != null,
+            self.startup_profile_picker,
         );
     }
 
@@ -31769,7 +31789,10 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true, true));
 
     // Startup-only restore bypasses must not disable later session saves.
-    try std.testing.expect(sessionStatePolicyAllows(false, .default));
+    try std.testing.expect(sessionSavePolicyAllows(false, .default, true, false, false));
+    try std.testing.expect(!sessionSavePolicyAllows(false, .default, false, false, false));
+    try std.testing.expect(!sessionSavePolicyAllows(false, .default, true, true, false));
+    try std.testing.expect(!sessionSavePolicyAllows(false, .default, true, false, true));
 }
 
 test "win32 session restore transaction preserves first surface state" {

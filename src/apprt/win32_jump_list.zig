@@ -36,6 +36,11 @@ pub const debounce_ms: UINT = 500;
 const max_profile_tombstones: usize = 128;
 const max_profile_events: usize = max_profile_tombstones * 2;
 const max_rebuild_retries: u8 = 3;
+
+fn eventTimestamp() i64 {
+    // std.time.nanoTimestamp is UTC calendar time, not a boot-relative clock.
+    return @intCast(std.time.nanoTimestamp());
+}
 const max_shell_link_chars: usize = 32_768;
 const profile_description_prefix = "noctty-profile:";
 
@@ -1019,7 +1024,7 @@ pub const JumpList = struct {
     }
 
     pub fn noteProfileUsed(self: *JumpList, key: []const u8) void {
-        const changed_ns: i64 = @intCast(std.time.nanoTimestamp());
+        const changed_ns = eventTimestamp();
         const removed = self.hidden_profiles.remove(self.alloc, key);
         _ = self.pending_profile_hides.remove(self.alloc, key);
         const recorded = self.pending_profile_uses.insert(self.alloc, key) catch |err| {
@@ -1046,7 +1051,7 @@ pub const JumpList = struct {
             return;
         };
         defer self.alloc.free(normalized);
-        const changed_ns: i64 = @intCast(std.time.nanoTimestamp());
+        const changed_ns = eventTimestamp();
         const reinstated = self.removed_recents.removePath(self.alloc, normalized) catch |err| {
             log.warn("jump list recent reinstatement failed err={}", .{err});
             return;
@@ -1200,6 +1205,10 @@ pub const JumpList = struct {
             return false;
         };
         defer merged.deinit(self.alloc);
+        self.orderPendingRemovalEvents(&merged) catch |err| {
+            log.warn("jump list removal ordering failed err={}", .{err});
+            return false;
+        };
         self.applyPendingState(&merged) catch |err| {
             log.warn("jump list state merge failed err={}", .{err});
             return false;
@@ -1305,6 +1314,34 @@ pub const JumpList = struct {
         }
     }
 
+    fn orderPendingRemovalEvents(self: *JumpList, merged: *const LoadedState) !void {
+        // A process can observe a Shell removal from a list published by a
+        // different process. Reconcile against the locked shared history so
+        // the removal is not timestamped before the destination it removes.
+        for (self.pending_recent_removals.items.items) |path| {
+            const pending = (try self.pending_recent_events.latest(self.alloc, path)) orelse continue;
+            const latest = (try merged.recent_events.latest(self.alloc, path)) orelse continue;
+            if (latest.changed_ns <= pending.changed_ns) continue;
+            try self.pending_recent_events.upsert(
+                self.alloc,
+                path,
+                .removed,
+                latest.changed_ns,
+            );
+        }
+        for (self.pending_profile_hides.items.items) |key| {
+            const pending = self.pending_profile_events.latest(key) orelse continue;
+            const latest = merged.profile_events.latest(key) orelse continue;
+            if (latest.changed_ns <= pending.changed_ns) continue;
+            try self.pending_profile_events.upsert(
+                self.alloc,
+                key,
+                .hidden,
+                latest.changed_ns,
+            );
+        }
+    }
+
     fn rebuildMergedRecents(self: *const JumpList, merged: *LoadedState) !void {
         var next: RecentList = .{};
         errdefer next.deinit(self.alloc);
@@ -1341,16 +1378,6 @@ pub const JumpList = struct {
     fn clearProfiles(self: *JumpList) void {
         for (self.profiles.items) |*item| item.deinit(self.alloc);
         self.profiles.clearRetainingCapacity();
-    }
-
-    fn recentRemovalCausalTimestamp(self: *const JumpList, path: []const u8) !i64 {
-        const latest = try self.recent_events.latest(self.alloc, path);
-        return if (latest) |event| event.changed_ns else 0;
-    }
-
-    fn profileRemovalCausalTimestamp(self: *const JumpList, key: []const u8) i64 {
-        const latest = self.profile_events.latest(key);
-        return if (latest) |event| event.changed_ns else 0;
     }
 
     fn rebuildCom(self: *JumpList) !void {
@@ -1407,14 +1434,11 @@ pub const JumpList = struct {
             for (self.pending_recent_removals.items.items) |path| {
                 _ = try self.removed_recents.insert(self.alloc, path);
                 _ = self.pending_recent_additions.removePath(self.alloc, path) catch false;
-                // The Shell does not expose when a destination was removed.
-                // Tie the tombstone to the event that published this link so
-                // a later use persisted by another process can reinstate it.
                 try self.pending_recent_events.upsert(
                     self.alloc,
                     path,
                     .removed,
-                    try self.recentRemovalCausalTimestamp(path),
+                    eventTimestamp(),
                 );
             }
             self.persist_dirty = true;
@@ -1430,7 +1454,7 @@ pub const JumpList = struct {
                     self.alloc,
                     item.key,
                     .hidden,
-                    self.profileRemovalCausalTimestamp(item.key),
+                    eventTimestamp(),
                 );
                 self.persist_dirty = true;
                 self.persist_retry_count = 0;
@@ -2019,7 +2043,7 @@ test "jump_list persistence keeps the newer cross-process recent event" {
     try std.testing.expectEqual(@as(i64, 20), latest.changed_ns);
 }
 
-test "jump_list observed removal does not outrank a later cross-process use" {
+test "jump_list removal orders against the latest locked event history" {
     const alloc = std.testing.allocator;
     var jump: JumpList = .{
         .alloc = alloc,
@@ -2031,36 +2055,40 @@ test "jump_list observed removal does not outrank a later cross-process use" {
     };
     defer jump.deinit();
 
-    try jump.recent_events.upsert(alloc, "C:\\reused", .used, 100);
+    try std.testing.expect(try jump.pending_recent_removals.insert(alloc, "C:\\reused"));
     try jump.pending_recent_events.upsert(
         alloc,
         "C:\\reused",
         .removed,
-        try jump.recentRemovalCausalTimestamp("C:\\reused"),
+        100,
     );
 
     var merged: LoadedState = .{};
     defer merged.deinit(alloc);
+    try merged.recents.appendLoaded(alloc, "C:\\reused");
     try merged.recent_events.upsert(alloc, "C:\\reused", .used, 200);
 
+    try jump.orderPendingRemovalEvents(&merged);
     try jump.applyPendingState(&merged);
-    try std.testing.expect(try merged.recents.contains(alloc, "C:\\reused"));
+    try std.testing.expect(!try merged.recents.contains(alloc, "C:\\reused"));
+    try std.testing.expect(try merged.removed_recents.contains(alloc, "C:\\reused"));
     const latest = (try merged.recent_events.latest(alloc, "C:\\reused")).?;
-    try std.testing.expectEqual(RecentEventKind.used, latest.kind);
+    try std.testing.expectEqual(RecentEventKind.removed, latest.kind);
     try std.testing.expectEqual(@as(i64, 200), latest.changed_ns);
 
-    try jump.profile_events.upsert(alloc, "wsl:Ubuntu", .used, 300);
+    try std.testing.expect(try jump.pending_profile_hides.insert(alloc, "wsl:Ubuntu"));
     try jump.pending_profile_events.upsert(
         alloc,
         "wsl:Ubuntu",
         .hidden,
-        jump.profileRemovalCausalTimestamp("wsl:Ubuntu"),
+        300,
     );
     try merged.profile_events.upsert(alloc, "wsl:Ubuntu", .used, 400);
+    try jump.orderPendingRemovalEvents(&merged);
     try jump.applyPendingState(&merged);
-    try std.testing.expect(!merged.hidden_profiles.contains("wsl:Ubuntu"));
+    try std.testing.expect(merged.hidden_profiles.contains("wsl:Ubuntu"));
     const latest_profile = merged.profile_events.latest("wsl:Ubuntu").?;
-    try std.testing.expectEqual(ProfileEventKind.used, latest_profile.kind);
+    try std.testing.expectEqual(ProfileEventKind.hidden, latest_profile.kind);
     try std.testing.expectEqual(@as(i64, 400), latest_profile.changed_ns);
 }
 
