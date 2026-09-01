@@ -199,6 +199,8 @@ pub const TerminalSnapshot = struct {
     visible_range: terminal_text.OffsetRange,
     caret_offset: usize = 0,
     selection_range: terminal_text.OffsetRange = .{ .start = 0, .end = 0 },
+    terminal_selection_range: ?terminal_text.OffsetRange = null,
+    terminal_selection_active_offset: ?usize = null,
     geometry: ?TerminalRangeGeometry = null,
 };
 
@@ -1906,6 +1908,590 @@ pub fn returnSettingsSectionProvider(
     return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
+pub const ChromeControlState = struct {
+    pub const Role = enum {
+        tab_container,
+        tab_item,
+        button,
+        toggle,
+        live_text,
+        scrollbar,
+        decorative,
+    };
+
+    ctx: *anyopaque,
+    role: Role,
+    tag: usize = 0,
+    name: *const fn (*anyopaque, usize, []u8) []const u8,
+    selected: ?*const fn (*anyopaque, usize) bool = null,
+    selected_provider: ?*const fn (*anyopaque) ?*ChromeControlProvider = null,
+    selection_container: ?*const fn (*anyopaque) ?*ChromeControlProvider = null,
+    toggled: ?*const fn (*anyopaque, usize) bool = null,
+    range_value: ?*const fn (*anyopaque) ChromeRangeValue = null,
+    use_com_threading: bool = false,
+};
+
+pub const ChromeRangeValue = struct {
+    value: f64,
+    minimum: f64,
+    maximum: f64,
+    large_change: f64,
+    small_change: f64,
+};
+
+/// Concrete provider for native host-chrome HWNDs. The role is fixed at
+/// creation; live names, selection, toggles, and scrollbar values are queried
+/// from their owner only while the provider remains attached.
+pub const ChromeControlProvider = struct {
+    base: com.IRawElementProviderSimple,
+    invoke_iface: com.IInvokeProvider,
+    toggle_iface: com.IToggleProvider,
+    range_iface: com.IRangeValueProvider,
+    selection_iface: com.ISelectionProvider,
+    selection_item_iface: com.ISelectionItemProvider,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    hwnd: com.HWND,
+    state: ChromeControlState,
+    detached: std.atomic.Value(bool),
+    disconnected: std.atomic.Value(bool),
+
+    const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .get_ProviderOptions = get_ProviderOptions,
+        .GetPatternProvider = GetPatternProvider,
+        .GetPropertyValue = GetPropertyValue,
+        .get_HostRawElementProvider = get_HostRawElementProvider,
+    };
+    const invoke_vtbl: com.IInvokeProviderVtbl = .{
+        .QueryInterface = InvokeQueryInterface,
+        .AddRef = InvokeAddRef,
+        .Release = InvokeRelease,
+        .Invoke = Invoke,
+    };
+    const toggle_vtbl: com.IToggleProviderVtbl = .{
+        .QueryInterface = ToggleQueryInterface,
+        .AddRef = ToggleAddRef,
+        .Release = ToggleRelease,
+        .Toggle = Toggle,
+        .get_ToggleState = GetToggleState,
+    };
+    const range_vtbl: com.IRangeValueProviderVtbl = .{
+        .QueryInterface = RangeQueryInterface,
+        .AddRef = RangeAddRef,
+        .Release = RangeRelease,
+        .SetValue = SetRangeValue,
+        .get_Value = GetRangeValue,
+        .get_IsReadOnly = GetRangeIsReadOnly,
+        .get_Maximum = GetRangeMaximum,
+        .get_Minimum = GetRangeMinimum,
+        .get_LargeChange = GetRangeLargeChange,
+        .get_SmallChange = GetRangeSmallChange,
+    };
+    const selection_vtbl: com.ISelectionProviderVtbl = .{
+        .QueryInterface = SelectionQueryInterface,
+        .AddRef = SelectionAddRef,
+        .Release = SelectionRelease,
+        .GetSelection = GetSelection,
+        .get_CanSelectMultiple = GetCanSelectMultiple,
+        .get_IsSelectionRequired = GetIsSelectionRequired,
+    };
+    const selection_item_vtbl: com.ISelectionItemProviderVtbl = .{
+        .QueryInterface = SelectionItemQueryInterface,
+        .AddRef = SelectionItemAddRef,
+        .Release = SelectionItemRelease,
+        .Select = Select,
+        .AddToSelection = AddToSelection,
+        .RemoveFromSelection = RemoveFromSelection,
+        .get_IsSelected = GetIsSelected,
+        .get_SelectionContainer = GetSelectionContainer,
+    };
+
+    pub fn create(
+        alloc: std.mem.Allocator,
+        hwnd: com.HWND,
+        state: ChromeControlState,
+    ) !*ChromeControlProvider {
+        const self = try alloc.create(ChromeControlProvider);
+        self.* = .{
+            .base = .{ .vtbl = &simple_vtbl },
+            .invoke_iface = .{ .vtbl = &invoke_vtbl },
+            .toggle_iface = .{ .vtbl = &toggle_vtbl },
+            .range_iface = .{ .vtbl = &range_vtbl },
+            .selection_iface = .{ .vtbl = &selection_vtbl },
+            .selection_item_iface = .{ .vtbl = &selection_item_vtbl },
+            .refcount = .init(1),
+            .alloc = alloc,
+            .hwnd = hwnd,
+            .state = state,
+            .detached = .init(false),
+            .disconnected = .init(false),
+        };
+        return self;
+    }
+
+    pub fn detach(self: *ChromeControlProvider) void {
+        self.detached.store(true, .release);
+    }
+
+    pub fn disconnect(self: *ChromeControlProvider) com.HRESULT {
+        self.detach();
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        return self.finishDisconnect(com.UiaDisconnectProvider(&self.base));
+    }
+
+    /// Latch the terminal disconnect flag only once UIA has actually released
+    /// the provider. `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` is transient and the
+    /// deferred-disconnect pass retries it; latching on failure would turn
+    /// that retry into a silent `S_OK` that drops the creation reference while
+    /// the provider is still registered for an HWND that is already gone.
+    fn finishDisconnect(self: *ChromeControlProvider, hr: com.HRESULT) com.HRESULT {
+        if (hr == com.S_OK) self.disconnected.store(true, .release);
+        return hr;
+    }
+
+    pub fn raiseNameChanged(self: *ChromeControlProvider) void {
+        if (!self.available()) return;
+        events.raiseNameChanged(&self.base);
+    }
+
+    pub fn raiseSelected(self: *ChromeControlProvider, old: bool, new: bool) void {
+        if (!self.available() or old == new) return;
+        events.raisePropertyChanged(
+            &self.base,
+            constants.UIA_SelectionItemIsSelectedPropertyId,
+            com.VARIANT.fromBool(old),
+            com.VARIANT.fromBool(new),
+        );
+        if (new) events.raiseSelectionItemSelected(&self.base);
+    }
+
+    pub fn raiseToggleChanged(self: *ChromeControlProvider, old: bool, new: bool) void {
+        if (!self.available() or old == new) return;
+        events.raisePropertyChanged(
+            &self.base,
+            constants.UIA_ToggleToggleStatePropertyId,
+            com.VARIANT.fromI4(if (old) 1 else 0),
+            com.VARIANT.fromI4(if (new) 1 else 0),
+        );
+    }
+
+    fn raiseRangePropertyChanged(
+        self: *ChromeControlProvider,
+        property_id: i32,
+        old: f64,
+        new: f64,
+    ) void {
+        if (!self.available() or old == new) return;
+        events.raisePropertyChanged(
+            &self.base,
+            property_id,
+            com.VARIANT.fromR8(old),
+            com.VARIANT.fromR8(new),
+        );
+    }
+
+    pub fn raiseRangeChanged(
+        self: *ChromeControlProvider,
+        old: ChromeRangeValue,
+        new: ChromeRangeValue,
+    ) void {
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueValuePropertyId, old.value, new.value);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueMinimumPropertyId, old.minimum, new.minimum);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueMaximumPropertyId, old.maximum, new.maximum);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueLargeChangePropertyId, old.large_change, new.large_change);
+        self.raiseRangePropertyChanged(constants.UIA_RangeValueSmallChangePropertyId, old.small_change, new.small_change);
+    }
+
+    pub fn raiseLiveRegionChanged(self: *ChromeControlProvider) void {
+        if (!self.available()) return;
+        events.raiseNameChanged(&self.base);
+        events.raiseLiveRegionChanged(&self.base);
+    }
+
+    pub fn raiseFocusChanged(self: *ChromeControlProvider) void {
+        if (!self.available()) return;
+        events.raiseFocusChanged(&self.base);
+    }
+
+    fn available(self: *const ChromeControlProvider) bool {
+        return !self.detached.load(.acquire) and IsWindow(self.hwnd) != 0;
+    }
+
+    fn fromBase(p: *com.IRawElementProviderSimple) *ChromeControlProvider {
+        return @fieldParentPtr("base", p);
+    }
+    fn fromInvoke(p: *com.IInvokeProvider) *ChromeControlProvider {
+        return @fieldParentPtr("invoke_iface", p);
+    }
+    fn fromToggle(p: *com.IToggleProvider) *ChromeControlProvider {
+        return @fieldParentPtr("toggle_iface", p);
+    }
+    fn fromRange(p: *com.IRangeValueProvider) *ChromeControlProvider {
+        return @fieldParentPtr("range_iface", p);
+    }
+    fn fromSelection(p: *com.ISelectionProvider) *ChromeControlProvider {
+        return @fieldParentPtr("selection_iface", p);
+    }
+    fn fromSelectionItem(p: *com.ISelectionItemProvider) *ChromeControlProvider {
+        return @fieldParentPtr("selection_item_iface", p);
+    }
+
+    fn QueryInterface(
+        self_base: *com.IRawElementProviderSimple,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) {
+            out.* = @ptrCast(&self.base);
+        } else if ((self.state.role == .button) and iidEqual(iid, &com.IID_IInvokeProvider)) {
+            out.* = @ptrCast(&self.invoke_iface);
+        } else if (self.state.role == .toggle and iidEqual(iid, &com.IID_IToggleProvider)) {
+            out.* = @ptrCast(&self.toggle_iface);
+        } else if (self.state.role == .scrollbar and iidEqual(iid, &com.IID_IRangeValueProvider)) {
+            out.* = @ptrCast(&self.range_iface);
+        } else if (self.state.role == .tab_container and iidEqual(iid, &com.IID_ISelectionProvider)) {
+            out.* = @ptrCast(&self.selection_iface);
+        } else if (self.state.role == .tab_item and iidEqual(iid, &com.IID_ISelectionItemProvider)) {
+            out.* = @ptrCast(&self.selection_item_iface);
+        } else return com.E_NOINTERFACE;
+        _ = AddRef(&self.base);
+        return com.S_OK;
+    }
+
+    pub fn AddRef(self_base: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(self_base).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    pub fn Release(self_base: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        const self = fromBase(self_base);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+
+    fn get_ProviderOptions(
+        self_base: *com.IRawElementProviderSimple,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = com.ProviderOptions_ServerSideProvider |
+            (if (self.state.use_com_threading) com.ProviderOptions_UseComThreading else 0);
+        return com.S_OK;
+    }
+
+    fn GetPatternProvider(
+        self_base: *com.IRawElementProviderSimple,
+        pattern_id: i32,
+        out: *?*com.IUnknown,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const pattern: ?*com.IUnknown = switch (self.state.role) {
+            .button => if (pattern_id == constants.UIA_InvokePatternId) @ptrCast(&self.invoke_iface) else null,
+            .toggle => if (pattern_id == constants.UIA_TogglePatternId) @ptrCast(&self.toggle_iface) else null,
+            .scrollbar => if (pattern_id == constants.UIA_RangeValuePatternId) @ptrCast(&self.range_iface) else null,
+            .tab_container => if (pattern_id == constants.UIA_SelectionPatternId) @ptrCast(&self.selection_iface) else null,
+            .tab_item => if (pattern_id == constants.UIA_SelectionItemPatternId) @ptrCast(&self.selection_item_iface) else null,
+            .live_text, .decorative => null,
+        };
+        out.* = pattern orelse return com.S_OK;
+        _ = AddRef(&self.base);
+        return com.S_OK;
+    }
+
+    fn GetPropertyValue(
+        self_base: *com.IRawElementProviderSimple,
+        property_id: i32,
+        out: *com.VARIANT,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = com.VARIANT.empty();
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        switch (property_id) {
+            constants.UIA_ControlTypePropertyId => out.* = com.VARIANT.fromI4(switch (self.state.role) {
+                .tab_container => constants.UIA_TabControlTypeId,
+                .tab_item => constants.UIA_TabItemControlTypeId,
+                .button, .toggle => constants.UIA_ButtonControlTypeId,
+                .live_text, .decorative => constants.UIA_TextControlTypeId,
+                .scrollbar => constants.UIA_ScrollBarControlTypeId,
+            }),
+            constants.UIA_NamePropertyId => {
+                var buf: [512]u8 = undefined;
+                const name = self.state.name(self.state.ctx, self.state.tag, &buf);
+                const value = allocBstrFromUtf8(self.alloc, name) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(value);
+            },
+            constants.UIA_FrameworkIdPropertyId => {
+                out.* = com.VARIANT.fromBstr(com.SysAllocString(
+                    std.unicode.utf8ToUtf16LeStringLiteral("Win32"),
+                ) orelse return com.E_OUTOFMEMORY);
+            },
+            constants.UIA_IsControlElementPropertyId,
+            constants.UIA_IsContentElementPropertyId,
+            => out.* = com.VARIANT.fromBool(self.state.role != .decorative),
+            constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
+            constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(IsWindowVisible(self.hwnd) == 0),
+            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(switch (self.state.role) {
+                .tab_item, .button, .toggle => true,
+                else => false,
+            }),
+            constants.UIA_HasKeyboardFocusPropertyId => out.* = com.VARIANT.fromBool(hwndHasKeyboardFocus(self.hwnd)),
+            constants.UIA_SelectionItemIsSelectedPropertyId => if (self.state.role == .tab_item) {
+                const selected = self.state.selected orelse return com.E_NOTIMPL;
+                out.* = com.VARIANT.fromBool(selected(self.state.ctx, self.state.tag));
+            },
+            constants.UIA_ToggleToggleStatePropertyId => if (self.state.role == .toggle) {
+                const toggled = self.state.toggled orelse return com.E_NOTIMPL;
+                out.* = com.VARIANT.fromI4(if (toggled(self.state.ctx, self.state.tag)) 1 else 0);
+            },
+            constants.UIA_LiveSettingPropertyId => if (self.state.role == .live_text) {
+                out.* = com.VARIANT.fromI4(constants.LiveSetting_Polite);
+            },
+            constants.UIA_RangeValueValuePropertyId,
+            constants.UIA_RangeValueMinimumPropertyId,
+            constants.UIA_RangeValueMaximumPropertyId,
+            constants.UIA_RangeValueLargeChangePropertyId,
+            constants.UIA_RangeValueSmallChangePropertyId,
+            constants.UIA_RangeValueIsReadOnlyPropertyId,
+            => if (self.state.role == .scrollbar) {
+                const current_range = (self.state.range_value orelse return com.E_NOTIMPL)(self.state.ctx);
+                out.* = switch (property_id) {
+                    constants.UIA_RangeValueValuePropertyId => com.VARIANT.fromR8(current_range.value),
+                    constants.UIA_RangeValueMinimumPropertyId => com.VARIANT.fromR8(current_range.minimum),
+                    constants.UIA_RangeValueMaximumPropertyId => com.VARIANT.fromR8(current_range.maximum),
+                    constants.UIA_RangeValueLargeChangePropertyId => com.VARIANT.fromR8(current_range.large_change),
+                    constants.UIA_RangeValueSmallChangePropertyId => com.VARIANT.fromR8(current_range.small_change),
+                    else => com.VARIANT.fromBool(true),
+                };
+            },
+            else => {},
+        }
+        return com.S_OK;
+    }
+
+    fn get_HostRawElementProvider(
+        self_base: *com.IRawElementProviderSimple,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.UiaHostProviderFromHwnd(self.hwnd, out);
+    }
+
+    fn InvokeQueryInterface(p: *com.IInvokeProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromInvoke(p).base, iid, out);
+    }
+    fn InvokeAddRef(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return AddRef(&fromInvoke(p).base);
+    }
+    fn InvokeRelease(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return Release(&fromInvoke(p).base);
+    }
+    fn Invoke(p: *com.IInvokeProvider) callconv(.winapi) com.HRESULT {
+        const self = fromInvoke(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.state.role != .button) return com.UIA_E_INVALIDOPERATION;
+        return postButtonClicked(self.hwnd);
+    }
+
+    fn ToggleQueryInterface(p: *com.IToggleProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromToggle(p).base, iid, out);
+    }
+    fn ToggleAddRef(p: *com.IToggleProvider) callconv(.winapi) u32 {
+        return AddRef(&fromToggle(p).base);
+    }
+    fn ToggleRelease(p: *com.IToggleProvider) callconv(.winapi) u32 {
+        return Release(&fromToggle(p).base);
+    }
+    fn Toggle(p: *com.IToggleProvider) callconv(.winapi) com.HRESULT {
+        const self = fromToggle(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.state.role != .toggle) return com.UIA_E_INVALIDOPERATION;
+        return sendButtonClicked(self.hwnd);
+    }
+    fn GetToggleState(p: *com.IToggleProvider, out: *i32) callconv(.winapi) com.HRESULT {
+        const self = fromToggle(p);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const toggled = self.state.toggled orelse return com.E_NOTIMPL;
+        out.* = if (toggled(self.state.ctx, self.state.tag)) 1 else 0;
+        return com.S_OK;
+    }
+
+    fn RangeQueryInterface(p: *com.IRangeValueProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromRange(p).base, iid, out);
+    }
+    fn RangeAddRef(p: *com.IRangeValueProvider) callconv(.winapi) u32 {
+        return AddRef(&fromRange(p).base);
+    }
+    fn RangeRelease(p: *com.IRangeValueProvider) callconv(.winapi) u32 {
+        return Release(&fromRange(p).base);
+    }
+    fn range(self: *ChromeControlProvider) ?ChromeRangeValue {
+        if (!self.available() or self.state.role != .scrollbar) return null;
+        return (self.state.range_value orelse return null)(self.state.ctx);
+    }
+    fn SetRangeValue(p: *com.IRangeValueProvider, _: f64) callconv(.winapi) com.HRESULT {
+        const self = fromRange(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.UIA_E_INVALIDOPERATION;
+    }
+    fn GetRangeValue(p: *com.IRangeValueProvider, out: *f64) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        const value = fromRange(p).range() orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = value.value;
+        return com.S_OK;
+    }
+    fn GetRangeIsReadOnly(p: *com.IRangeValueProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        _ = fromRange(p).range() orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = 1;
+        return com.S_OK;
+    }
+    fn GetRangeMaximum(p: *com.IRangeValueProvider, out: *f64) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        const value = fromRange(p).range() orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = value.maximum;
+        return com.S_OK;
+    }
+    fn GetRangeMinimum(p: *com.IRangeValueProvider, out: *f64) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        const value = fromRange(p).range() orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = value.minimum;
+        return com.S_OK;
+    }
+    fn GetRangeLargeChange(p: *com.IRangeValueProvider, out: *f64) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        const value = fromRange(p).range() orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = value.large_change;
+        return com.S_OK;
+    }
+    fn GetRangeSmallChange(p: *com.IRangeValueProvider, out: *f64) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        const value = fromRange(p).range() orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = value.small_change;
+        return com.S_OK;
+    }
+
+    fn SelectionQueryInterface(p: *com.ISelectionProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromSelection(p).base, iid, out);
+    }
+    fn SelectionAddRef(p: *com.ISelectionProvider) callconv(.winapi) u32 {
+        return AddRef(&fromSelection(p).base);
+    }
+    fn SelectionRelease(p: *com.ISelectionProvider) callconv(.winapi) u32 {
+        return Release(&fromSelection(p).base);
+    }
+    fn GetSelection(p: *com.ISelectionProvider, out: *?*com.SAFEARRAY) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = (self.state.selected_provider orelse return com.E_NOTIMPL)(self.state.ctx) orelse {
+            out.* = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 0) orelse return com.E_OUTOFMEMORY;
+            return com.S_OK;
+        };
+        if (!selected.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const array = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 1) orelse return com.E_OUTOFMEMORY;
+        var index: i32 = 0;
+        const hr = com.SafeArrayPutElement(array, &index, @ptrCast(&selected.base));
+        if (hr != com.S_OK) {
+            _ = com.SafeArrayDestroy(array);
+            return hr;
+        }
+        out.* = array;
+        return com.S_OK;
+    }
+    fn GetCanSelectMultiple(p: *com.ISelectionProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        if (!fromSelection(p).available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.S_OK;
+    }
+    fn GetIsSelectionRequired(p: *com.ISelectionProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        if (!fromSelection(p).available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = 1;
+        return com.S_OK;
+    }
+
+    fn SelectionItemQueryInterface(p: *com.ISelectionItemProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromSelectionItem(p).base, iid, out);
+    }
+    fn SelectionItemAddRef(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
+        return AddRef(&fromSelectionItem(p).base);
+    }
+    fn SelectionItemRelease(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
+        return Release(&fromSelectionItem(p).base);
+    }
+    fn Select(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        const self = fromSelectionItem(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const result = sendButtonClicked(self.hwnd);
+        if (result != com.S_OK) return result;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = self.state.selected orelse return com.E_NOTIMPL;
+        return if (selected(self.state.ctx, self.state.tag)) com.S_OK else com.UIA_E_INVALIDOPERATION;
+    }
+    /// The tab container reports `CanSelectMultiple = false`, so UIA defines
+    /// `AddToSelection` on an item that is not already selected as an invalid
+    /// operation rather than a silent tab switch. `Select` remains the
+    /// documented way to move the selection.
+    fn AddToSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        const self = fromSelectionItem(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = self.state.selected orelse return com.E_NOTIMPL;
+        return if (selected(self.state.ctx, self.state.tag)) com.S_OK else com.UIA_E_INVALIDOPERATION;
+    }
+    fn RemoveFromSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        const self = fromSelectionItem(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = self.state.selected orelse return com.E_NOTIMPL;
+        return if (selected(self.state.ctx, self.state.tag)) com.UIA_E_INVALIDOPERATION else com.S_OK;
+    }
+    fn GetIsSelected(p: *com.ISelectionItemProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        const self = fromSelectionItem(p);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const selected = self.state.selected orelse return com.E_NOTIMPL;
+        out.* = if (selected(self.state.ctx, self.state.tag)) 1 else 0;
+        return com.S_OK;
+    }
+    fn GetSelectionContainer(
+        p: *com.ISelectionItemProvider,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromSelectionItem(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const container = (self.state.selection_container orelse return com.E_NOTIMPL)(self.state.ctx) orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!container.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        _ = AddRef(&container.base);
+        out.* = &container.base;
+        return com.S_OK;
+    }
+};
+
+pub fn returnChromeControlProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *ChromeControlProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId or !provider.available() or provider.hwnd != hwnd) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
+
 pub const TerminalProvider = struct {
     base: com.IRawElementProviderSimple,
     value_iface: com.IValueProvider,
@@ -2304,11 +2890,15 @@ pub const TerminalProvider = struct {
             else => com.E_OUTOFMEMORY,
         };
         defer self.alloc.free(snapshot.visible_text);
-        // TextPattern2.GetCaretRange is the canonical terminal caret API.
-        // Preserve a degenerate legacy GetSelection range for older clients
-        // even though terminals truthfully advertise no mutable selection.
+        // ITextProvider::GetSelection is documented to return a degenerate
+        // range at the insertion point when a control has a caret but no
+        // selection; an empty array is only correct for a control with no
+        // insertion point at all. A terminal always has a caret, so clients
+        // that track it through GetSelection rather than TextPattern2's
+        // GetCaretRange keep working. The caret anchor matches GetCaretRange:
+        // the active end of a live selection, otherwise the cursor.
         const selection_range = if (self.state.role == .terminal)
-            terminal_text.OffsetRange{
+            snapshot.terminal_selection_range orelse terminal_text.OffsetRange{
                 .start = snapshot.caret_offset,
                 .end = snapshot.caret_offset,
             }
@@ -2440,11 +3030,15 @@ pub const TerminalProvider = struct {
         };
         defer self.alloc.free(terminal_snapshot.visible_text);
 
+        const caret_offset = if (self.state.role == .terminal)
+            terminal_snapshot.terminal_selection_active_offset orelse terminal_snapshot.caret_offset
+        else
+            terminal_snapshot.caret_offset;
         const hr = self.createRangeFromSnapshot(
             &terminal_snapshot,
             .{
-                .start = terminal_snapshot.caret_offset,
-                .end = terminal_snapshot.caret_offset,
+                .start = caret_offset,
+                .end = caret_offset,
             },
             out,
         );
@@ -2586,6 +3180,27 @@ pub const TerminalProvider = struct {
             raw_snapshot.document_text,
             @min(raw_snapshot.selection_range.end, raw_snapshot.document_text.len),
         );
+        const terminal_selection_range = if (raw_snapshot.terminal_selection_range) |selection| blk: {
+            const start = utf8BoundaryAtOrBefore(
+                raw_snapshot.document_text,
+                @min(selection.start, raw_snapshot.document_text.len),
+            );
+            const end = utf8BoundaryAtOrBefore(
+                raw_snapshot.document_text,
+                @min(selection.end, raw_snapshot.document_text.len),
+            );
+            break :blk terminal_text.OffsetRange{
+                .start = @min(start, end),
+                .end = @max(start, end),
+            };
+        } else null;
+        const terminal_selection_active_offset = if (raw_snapshot.terminal_selection_active_offset) |active|
+            utf8BoundaryAtOrBefore(
+                raw_snapshot.document_text,
+                @min(active, raw_snapshot.document_text.len),
+            )
+        else
+            null;
         return .{
             .document_text = raw_snapshot.document_text,
             .visible_text = raw_snapshot.visible_text,
@@ -2595,6 +3210,8 @@ pub const TerminalProvider = struct {
                 .start = @min(selection_start, selection_end),
                 .end = @max(selection_start, selection_end),
             },
+            .terminal_selection_range = terminal_selection_range,
+            .terminal_selection_active_offset = terminal_selection_active_offset,
             .geometry = raw_snapshot.geometry,
         };
     }
@@ -4191,7 +4808,7 @@ test "TerminalProvider refcount and state retain balance across text provider re
     try std.testing.expectEqual(@as(u32, 1), state_data.releases);
 }
 
-test "TerminalProvider legacy caret compatibility reports no mutable selection" {
+test "TerminalProvider GetSelection reports the caret range and real selections" {
     var state_data = TestTerminalStateData{ .caret_offset = 6 };
     const state = testTerminalState(&state_data);
 
@@ -4203,9 +4820,10 @@ test "TerminalProvider legacy caret compatibility reports no mutable selection" 
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expectEqual(com.SupportedTextSelection_None, selection);
 
+    // No user selection: the documented contract is a degenerate range at
+    // the insertion point, not an empty array. The terminal always has one.
     var ranges: ?*com.SAFEARRAY = @ptrFromInt(0x10);
     try std.testing.expectEqual(com.S_OK, TerminalProvider.GetSelection(&p.text_iface, &ranges));
-    defer _ = com.SafeArrayDestroy(ranges);
     try std.testing.expect(ranges != null);
     var lower: i32 = -1;
     var upper: i32 = 0;
@@ -4213,14 +4831,38 @@ test "TerminalProvider legacy caret compatibility reports no mutable selection" 
     try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(ranges.?, 1, &upper));
     try std.testing.expectEqual(@as(i32, 0), lower);
     try std.testing.expectEqual(@as(i32, 0), upper);
-
-    var index: i32 = 0;
-    var selected: ?*com.ITextRangeProvider = null;
+    var caret_index: i32 = 0;
+    var caret_only: ?*com.ITextRangeProvider = null;
     try std.testing.expectEqual(
         com.S_OK,
-        com.SafeArrayGetElement(ranges.?, &index, @ptrCast(&selected)),
+        com.SafeArrayGetElement(ranges.?, &caret_index, @ptrCast(&caret_only)),
     );
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 6, .end = 6 },
+        TerminalTextRangeProvider.fromBase(caret_only.?).range,
+    );
+    _ = TerminalTextRangeProvider.Release(caret_only.?);
+
+    state_data.terminal_selection_range = .{ .start = 2, .end = 7 };
+    state_data.terminal_selection_active_offset = 2;
+    _ = com.SafeArrayDestroy(ranges);
+    ranges = null;
+    try std.testing.expectEqual(com.S_OK, TerminalProvider.GetSelection(&p.text_iface, &ranges));
+    defer _ = com.SafeArrayDestroy(ranges);
+    lower = -1;
+    upper = -1;
+    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetLBound(ranges.?, 1, &lower));
+    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(ranges.?, 1, &upper));
+    try std.testing.expectEqual(@as(i32, 0), lower);
+    try std.testing.expectEqual(@as(i32, 0), upper);
+    var index: i32 = 0;
+    var selected: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetElement(ranges.?, &index, @ptrCast(&selected)));
     defer _ = TerminalTextRangeProvider.Release(selected.?);
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 2, .end = 7 },
+        TerminalTextRangeProvider.fromBase(selected.?).range,
+    );
 
     var active: com.BOOL = 0;
     var caret: ?*com.ITextRangeProvider = null;
@@ -4230,14 +4872,22 @@ test "TerminalProvider legacy caret compatibility reports no mutable selection" 
     );
     defer _ = TerminalTextRangeProvider.Release(caret.?);
     try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 2, .end = 2 },
         TerminalTextRangeProvider.fromBase(caret.?).range,
-        TerminalTextRangeProvider.fromBase(selected.?).range,
-    );
-    try std.testing.expectEqual(
-        terminal_text.OffsetRange{ .start = 6, .end = 6 },
-        TerminalTextRangeProvider.fromBase(selected.?).range,
     );
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.Select(selected.?));
+
+    state_data.terminal_selection_active_offset = 7;
+    var reverse_caret: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.GetCaretRange(&p.text2_iface, &active, &reverse_caret),
+    );
+    defer _ = TerminalTextRangeProvider.Release(reverse_caret.?);
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 7, .end = 7 },
+        TerminalTextRangeProvider.fromBase(reverse_caret.?).range,
+    );
 }
 
 test "TerminalProvider visible ranges returns a SAFEARRAY" {
@@ -5131,6 +5781,8 @@ const TestTerminalStateData = struct {
     visible_value_text: []const u8 = "visible",
     visible_range: terminal_text.OffsetRange = .{ .start = 0, .end = 7 },
     caret_offset: usize = 0,
+    terminal_selection_range: ?terminal_text.OffsetRange = null,
+    terminal_selection_active_offset: ?usize = null,
 };
 
 const TestEditStateData = struct {
@@ -5577,6 +6229,317 @@ test "TerminalProvider maps hidden native windows to UIA offscreen" {
     try std.testing.expect(settingsControlIsOffscreen(0, false));
     try std.testing.expect(settingsControlIsOffscreen(1, true));
     try std.testing.expect(!settingsControlIsOffscreen(1, false));
+}
+
+test "uia ChromeControlProvider exposes live chrome patterns and detaches safely" {
+    const Context = struct {
+        selected_tag: usize = 1,
+        toggle_on: bool = true,
+        name_calls: usize = 0,
+        container: ?*ChromeControlProvider = null,
+        selected_item: ?*ChromeControlProvider = null,
+
+        fn name(ctx: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.name_calls += 1;
+            return std.fmt.bufPrint(buf, "chrome {d}", .{tag}) catch "";
+        }
+        fn selected(ctx: *anyopaque, tag: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.selected_tag == tag;
+        }
+        fn selectedProvider(ctx: *anyopaque) ?*ChromeControlProvider {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.selected_item;
+        }
+        fn selectionContainer(ctx: *anyopaque) ?*ChromeControlProvider {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.container;
+        }
+        fn toggled(ctx: *anyopaque, _: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.toggle_on;
+        }
+        fn rangeValue(_: *anyopaque) ChromeRangeValue {
+            return .{
+                .value = 25,
+                .minimum = 0,
+                .maximum = 100,
+                .large_change = 10,
+                .small_change = 1,
+            };
+        }
+    };
+
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
+    }.GetDesktopWindow;
+    const hwnd = GetDesktopWindow();
+    var context: Context = .{};
+    const context_ptr: *anyopaque = @ptrCast(&context);
+    const container = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .tab_container,
+        .name = Context.name,
+        .selected_provider = Context.selectedProvider,
+    });
+    defer _ = ChromeControlProvider.Release(&container.base);
+    defer container.detach();
+    context.container = container;
+
+    const item = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .tab_item,
+        .tag = 1,
+        .name = Context.name,
+        .selected = Context.selected,
+        .selection_container = Context.selectionContainer,
+    });
+    defer _ = ChromeControlProvider.Release(&item.base);
+    defer item.detach();
+    context.selected_item = item;
+
+    const toggle = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .toggle,
+        .tag = 2,
+        .name = Context.name,
+        .toggled = Context.toggled,
+    });
+    defer _ = ChromeControlProvider.Release(&toggle.base);
+    defer toggle.detach();
+
+    const scrollbar = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .scrollbar,
+        .name = Context.name,
+        .range_value = Context.rangeValue,
+    });
+    defer _ = ChromeControlProvider.Release(&scrollbar.base);
+    defer scrollbar.detach();
+
+    const live_text = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .live_text,
+        .tag = 3,
+        .name = Context.name,
+    });
+    defer _ = ChromeControlProvider.Release(&live_text.base);
+    defer live_text.detach();
+
+    const decorative = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .decorative,
+        .name = Context.name,
+    });
+    defer _ = ChromeControlProvider.Release(&decorative.base);
+    defer decorative.detach();
+
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPropertyValue(&container.base, constants.UIA_ControlTypePropertyId, &value),
+    );
+    try std.testing.expectEqual(constants.UIA_TabControlTypeId, value.value.i4);
+
+    var first_name = com.VARIANT.empty();
+    defer _ = com.VariantClear(&first_name);
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPropertyValue(&item.base, constants.UIA_NamePropertyId, &first_name),
+    );
+    var second_name = com.VARIANT.empty();
+    defer _ = com.VariantClear(&second_name);
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPropertyValue(&item.base, constants.UIA_NamePropertyId, &second_name),
+    );
+    const expected_name = std.unicode.utf8ToUtf16LeStringLiteral("chrome 1");
+    try std.testing.expect(first_name.value.bstr != null);
+    try std.testing.expect(second_name.value.bstr != null);
+    try std.testing.expect(first_name.value.bstr.? != second_name.value.bstr.?);
+    try std.testing.expectEqualSlices(u16, expected_name, first_name.value.bstr.?[0..expected_name.len]);
+
+    var pattern: ?*com.IUnknown = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPatternProvider(&container.base, constants.UIA_SelectionPatternId, &pattern),
+    );
+    try std.testing.expect(pattern == @as(?*com.IUnknown, @ptrCast(&container.selection_iface)));
+    _ = ChromeControlProvider.SelectionRelease(@ptrCast(@alignCast(pattern.?)));
+
+    var selection: ?*com.SAFEARRAY = null;
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetSelection(&container.selection_iface, &selection));
+    defer _ = com.SafeArrayDestroy(selection);
+    var selected_unknown: ?*com.IUnknown = null;
+    var selected_index: i32 = 0;
+    try std.testing.expectEqual(
+        com.S_OK,
+        com.SafeArrayGetElement(selection.?, &selected_index, @ptrCast(&selected_unknown)),
+    );
+    defer _ = selected_unknown.?.vtbl.Release(selected_unknown.?);
+    try std.testing.expect(selected_unknown == @as(?*com.IUnknown, @ptrCast(&item.base)));
+
+    var selected: com.BOOL = 0;
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetIsSelected(&item.selection_item_iface, &selected));
+    try std.testing.expectEqual(@as(com.BOOL, 1), selected);
+    var selection_container: ?*com.IRawElementProviderSimple = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetSelectionContainer(&item.selection_item_iface, &selection_container),
+    );
+    try std.testing.expect(selection_container == &container.base);
+    _ = ChromeControlProvider.Release(selection_container.?);
+
+    pattern = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPatternProvider(&toggle.base, constants.UIA_TogglePatternId, &pattern),
+    );
+    try std.testing.expect(pattern == @as(?*com.IUnknown, @ptrCast(&toggle.toggle_iface)));
+    _ = ChromeControlProvider.ToggleRelease(@ptrCast(@alignCast(pattern.?)));
+    var toggle_state: i32 = 0;
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetToggleState(&toggle.toggle_iface, &toggle_state));
+    try std.testing.expectEqual(@as(i32, 1), toggle_state);
+
+    var range_value: f64 = 0;
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetRangeValue(&scrollbar.range_iface, &range_value));
+    try std.testing.expectEqual(@as(f64, 25), range_value);
+    var read_only: com.BOOL = 0;
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetRangeIsReadOnly(&scrollbar.range_iface, &read_only));
+    try std.testing.expectEqual(@as(com.BOOL, 1), read_only);
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        ChromeControlProvider.SetRangeValue(&scrollbar.range_iface, 50),
+    );
+
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPropertyValue(&live_text.base, constants.UIA_LiveSettingPropertyId, &value),
+    );
+    try std.testing.expectEqual(constants.LiveSetting_Polite, value.value.i4);
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.GetPropertyValue(&decorative.base, constants.UIA_IsControlElementPropertyId, &value),
+    );
+    try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
+
+    const calls_before_detach = context.name_calls;
+    item.detach();
+    item.detach();
+    var detached_unknown: ?*anyopaque = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.QueryInterface(&item.base, &com.IID_IUnknown, &detached_unknown),
+    );
+    try std.testing.expect(detached_unknown == @as(?*anyopaque, @ptrCast(&item.base)));
+    _ = ChromeControlProvider.Release(@ptrCast(@alignCast(detached_unknown.?)));
+    value = com.VARIANT.empty();
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        ChromeControlProvider.GetPropertyValue(&item.base, constants.UIA_NamePropertyId, &value),
+    );
+    try std.testing.expectEqual(calls_before_detach, context.name_calls);
+}
+
+test "ChromeControlProvider tab items enforce required single selection" {
+    const Context = struct {
+        selected_tag: usize = 1,
+
+        fn name(_: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "tab {d}", .{tag}) catch "";
+        }
+        fn selected(ctx: *anyopaque, tag: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.selected_tag == tag;
+        }
+    };
+
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
+    }.GetDesktopWindow;
+    const hwnd = GetDesktopWindow();
+    var context: Context = .{};
+    const context_ptr: *anyopaque = @ptrCast(&context);
+
+    const selected_tab = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .tab_item,
+        .tag = 1,
+        .name = Context.name,
+        .selected = Context.selected,
+    });
+    defer _ = ChromeControlProvider.Release(&selected_tab.base);
+    defer selected_tab.detach();
+
+    const unselected_tab = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .tab_item,
+        .tag = 2,
+        .name = Context.name,
+        .selected = Context.selected,
+    });
+    defer _ = ChromeControlProvider.Release(&unselected_tab.base);
+    defer unselected_tab.detach();
+
+    // CanSelectMultiple is false, so AddToSelection may only confirm an
+    // already selected tab; it must never switch tabs behind the client.
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.AddToSelection(&selected_tab.selection_item_iface),
+    );
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        ChromeControlProvider.AddToSelection(&unselected_tab.selection_item_iface),
+    );
+
+    // IsSelectionRequired is true, so the selected tab cannot be deselected.
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        ChromeControlProvider.RemoveFromSelection(&selected_tab.selection_item_iface),
+    );
+    try std.testing.expectEqual(
+        com.S_OK,
+        ChromeControlProvider.RemoveFromSelection(&unselected_tab.selection_item_iface),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), context.selected_tag);
+}
+
+test "ChromeControlProvider disconnect latches only after UIA releases it" {
+    const Context = struct {
+        fn name(_: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "chrome {d}", .{tag}) catch "";
+        }
+    };
+
+    var context: usize = 0;
+    const provider = try ChromeControlProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        .{
+            .ctx = @ptrCast(&context),
+            .role = .decorative,
+            .name = Context.name,
+        },
+    );
+    defer _ = ChromeControlProvider.Release(&provider.base);
+
+    // A transient input-sync rejection must leave the provider undisconnected
+    // so the deferred retry reaches UIA again instead of short circuiting to
+    // S_OK and releasing the creation reference on a registered provider.
+    try std.testing.expectEqual(
+        com.RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+        provider.finishDisconnect(com.RPC_E_CANTCALLOUT_ININPUTSYNCCALL),
+    );
+    try std.testing.expect(!provider.disconnected.load(.acquire));
+
+    try std.testing.expectEqual(com.S_OK, provider.finishDisconnect(com.S_OK));
+    try std.testing.expect(provider.disconnected.load(.acquire));
+
+    // Disconnect stays idempotent once UIA has released the provider.
+    try std.testing.expectEqual(com.S_OK, provider.disconnect());
+    try std.testing.expect(provider.disconnected.load(.acquire));
 }
 
 test "SettingsControlProvider exposes ValueProvider only for edit controls" {
@@ -6540,6 +7503,8 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
                 .visible_text = visible_text,
                 .visible_range = d.visible_range,
                 .caret_offset = d.caret_offset,
+                .terminal_selection_range = d.terminal_selection_range,
+                .terminal_selection_active_offset = d.terminal_selection_active_offset,
             };
         }
 

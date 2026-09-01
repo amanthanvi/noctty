@@ -35,6 +35,8 @@ pub const IID_IRawElementProviderFragmentRoot = GUID.parse("{620CE2A5-AB8F-40A9-
 pub const IID_ISelectionProvider = GUID.parse("{FB8B03AF-3BDF-48D4-BD36-1A65793BE168}");
 pub const IID_ISelectionItemProvider = GUID.parse("{2ACAD808-B2D4-452D-A407-91FF1AD167B2}");
 pub const IID_IInvokeProvider = GUID.parse("{54FCB24B-E18E-47A2-B4D3-ECCBE77599A2}");
+pub const IID_IToggleProvider = GUID.parse("{56D00BD0-C4F4-433C-A836-1A52A57E0892}");
+pub const IID_IRangeValueProvider = GUID.parse("{36DC7AEF-33E6-4691-AFE1-2BE7274B3D33}");
 pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 pub const IID_ITextProvider = GUID.parse("{3589C92C-63F3-4367-99BB-ADA653B77CF2}");
 pub const IID_ITextProvider2 = GUID.parse("{0DC5E6ED-3E16-4BF1-8F9A-A979878BC195}");
@@ -64,7 +66,7 @@ pub const VARIANT_RECORD = extern struct {
     info: ?*anyopaque,
 };
 
-/// Simplified VARIANT covering only the fields we populate (I4, BSTR, BOOL).
+/// Simplified VARIANT covering only the fields we populate (I4, R8, BSTR, BOOL).
 /// The two-pointer record arm preserves the full OAIDL payload-union size even
 /// though noctty never emits VT_RECORD. The i64 arm preserves the SDK's
 /// eight-byte VARIANT alignment on 32-bit Windows.
@@ -75,6 +77,7 @@ pub const VARIANT = extern struct {
     wReserved3: u16 = 0,
     value: extern union {
         i64_val: i64,
+        r8: f64,
         i4: i32,
         bstr: BSTR,
         bool_val: i16,
@@ -88,6 +91,10 @@ pub const VARIANT = extern struct {
 
     pub fn fromI4(v: i32) VARIANT {
         return .{ .vt = VT_I4, .value = .{ .i4 = v } };
+    }
+
+    pub fn fromR8(v: f64) VARIANT {
+        return .{ .vt = VT_R8, .value = .{ .r8 = v } };
     }
 
     pub fn fromBstr(s: BSTR) VARIANT {
@@ -234,6 +241,37 @@ pub const IInvokeProviderVtbl = extern struct {
 
 pub const IInvokeProvider = extern struct {
     vtbl: *const IInvokeProviderVtbl,
+};
+
+// ── IToggleProvider / IRangeValueProvider ─────────────────────────────
+
+pub const IToggleProviderVtbl = extern struct {
+    QueryInterface: *const fn (*IToggleProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IToggleProvider) callconv(.winapi) u32,
+    Release: *const fn (*IToggleProvider) callconv(.winapi) u32,
+    Toggle: *const fn (*IToggleProvider) callconv(.winapi) HRESULT,
+    get_ToggleState: *const fn (*IToggleProvider, *i32) callconv(.winapi) HRESULT,
+};
+
+pub const IToggleProvider = extern struct {
+    vtbl: *const IToggleProviderVtbl,
+};
+
+pub const IRangeValueProviderVtbl = extern struct {
+    QueryInterface: *const fn (*IRangeValueProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IRangeValueProvider) callconv(.winapi) u32,
+    Release: *const fn (*IRangeValueProvider) callconv(.winapi) u32,
+    SetValue: *const fn (*IRangeValueProvider, f64) callconv(.winapi) HRESULT,
+    get_Value: *const fn (*IRangeValueProvider, *f64) callconv(.winapi) HRESULT,
+    get_IsReadOnly: *const fn (*IRangeValueProvider, *BOOL) callconv(.winapi) HRESULT,
+    get_Maximum: *const fn (*IRangeValueProvider, *f64) callconv(.winapi) HRESULT,
+    get_Minimum: *const fn (*IRangeValueProvider, *f64) callconv(.winapi) HRESULT,
+    get_LargeChange: *const fn (*IRangeValueProvider, *f64) callconv(.winapi) HRESULT,
+    get_SmallChange: *const fn (*IRangeValueProvider, *f64) callconv(.winapi) HRESULT,
+};
+
+pub const IRangeValueProvider = extern struct {
+    vtbl: *const IRangeValueProviderVtbl,
 };
 
 // ── IValueProvider ─────────────────────────────────────────────────────

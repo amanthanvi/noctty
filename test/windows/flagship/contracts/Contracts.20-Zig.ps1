@@ -343,9 +343,9 @@ Assert-ZigTestsDiscoveredAndRun `
     -RepoRoot $repoRoot `
     -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
     -ExpectedNames @(
-        'TerminalProvider legacy caret compatibility reports no mutable selection'
+        'TerminalProvider GetSelection reports the caret range and real selections'
     ) `
-    -Filter 'legacy caret compatibility reports no mutable selection'
+    -Filter 'GetSelection reports the caret range and real selections'
 Assert-ZigTestsDiscoveredAndRun `
     -RepoRoot $repoRoot `
     -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
