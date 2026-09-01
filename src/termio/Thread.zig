@@ -243,6 +243,10 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
 fn threadMain_(self: *Thread, io: *termio.Termio) !void {
     defer log.debug("IO thread exited", .{});
 
+    // Publish the worker's own startup before backend initialization can
+    // spawn the reader thread and publish its later benchmark stage.
+    io.surface_mailbox.surface.noteBenchmarkIoThreadStarted();
+
     // Right now, on Darwin, `std.Thread.setName` can only name the current
     // thread, and we have no way to get the current thread from within it,
     // so instead we use this code to name the thread instead.

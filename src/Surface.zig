@@ -64,6 +64,18 @@ pub fn noteBenchmarkIoReaderSpawned(self: *Surface) void {
     }
 }
 
+/// Record IO-thread startup from the worker itself. Emitting these stages
+/// after `spawn` returns on the parent can race the worker's reader-thread
+/// stage and make the benchmark snapshots appear out of causal order.
+pub fn noteBenchmarkIoThreadStarted(self: *Surface) void {
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkIoThreadSpawned")) {
+        self.rt_surface.noteBenchmarkIoThreadSpawned(self.id);
+    }
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
+        self.rt_surface.noteBenchmarkMemoryStage(.threads_started, self.id);
+    }
+}
+
 /// Minimum window size in cells. This is used to prevent the window from
 /// being resized to a size that is too small to be useful. These defaults
 /// are chosen to match the default size of Mac's Terminal.app, but is
@@ -855,12 +867,6 @@ pub fn init(
         .{ &self.io_thread, &self.io },
     );
     self.io_thr.setName("io") catch {};
-    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkIoThreadSpawned")) {
-        rt_surface.noteBenchmarkIoThreadSpawned(self.id);
-    }
-    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
-        rt_surface.noteBenchmarkMemoryStage(.threads_started, self.id);
-    }
 
     if (config.title) |title| {
         _ = try rt_app.performAction(

@@ -10,6 +10,8 @@ $benchmarkThresholds = Join-Path $repoRoot 'test\windows\bench-thresholds.json'
 $benchmarkSchema = Join-Path $repoRoot 'test\windows\bench-evidence.schema.json'
 $benchmarkHarness = Join-Path $repoRoot 'test\windows\bench-windows.ps1'
 $benchmarkHarnessText = Get-Content -LiteralPath $benchmarkHarness -Raw
+$termioThread = Join-Path $repoRoot 'src\termio\Thread.zig'
+$termioThreadText = Get-Content -LiteralPath $termioThread -Raw
 
 # ConvertFrom-Json throws on malformed input, which the caller records as a
 # contract failure for this fragment.
@@ -75,6 +77,13 @@ Invoke-ContractTable -Contracts @(
         Pattern = '(?s)\$endMarker\s*=\s*"NB.*?\$childScriptArguments \+= @\(''-EndMarker'', \$endMarker\).*?first_target_swap_benchmark_end_marker_generation'
         Kind = 'Text'
         Description = 'every interactive throughput workload uses a committed visible-marker endpoint'
+    }
+    @{
+        File = $termioThread
+        Content = { $termioThreadText }
+        Pattern = '(?s)noteBenchmarkIoThreadStarted\(\);.*?try io\.threadEnter'
+        Kind = 'Text'
+        Description = 'IO worker publishes its startup before backend reader-thread creation'
     }
     @{
         File = $benchmarkHarness
