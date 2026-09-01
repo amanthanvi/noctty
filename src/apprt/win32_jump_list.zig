@@ -1343,6 +1343,16 @@ pub const JumpList = struct {
         self.profiles.clearRetainingCapacity();
     }
 
+    fn recentRemovalCausalTimestamp(self: *const JumpList, path: []const u8) !i64 {
+        const latest = try self.recent_events.latest(self.alloc, path);
+        return if (latest) |event| event.changed_ns else 0;
+    }
+
+    fn profileRemovalCausalTimestamp(self: *const JumpList, key: []const u8) i64 {
+        const latest = self.profile_events.latest(key);
+        return if (latest) |event| event.changed_ns else 0;
+    }
+
     fn rebuildCom(self: *JumpList) !void {
         const exe_path = self.exe_path orelse return error.ExecutableUnavailable;
         const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, exe_path);
@@ -1397,11 +1407,14 @@ pub const JumpList = struct {
             for (self.pending_recent_removals.items.items) |path| {
                 _ = try self.removed_recents.insert(self.alloc, path);
                 _ = self.pending_recent_additions.removePath(self.alloc, path) catch false;
+                // The Shell does not expose when a destination was removed.
+                // Tie the tombstone to the event that published this link so
+                // a later use persisted by another process can reinstate it.
                 try self.pending_recent_events.upsert(
                     self.alloc,
                     path,
                     .removed,
-                    @intCast(std.time.nanoTimestamp()),
+                    try self.recentRemovalCausalTimestamp(path),
                 );
             }
             self.persist_dirty = true;
@@ -1417,7 +1430,7 @@ pub const JumpList = struct {
                     self.alloc,
                     item.key,
                     .hidden,
-                    @intCast(std.time.nanoTimestamp()),
+                    self.profileRemovalCausalTimestamp(item.key),
                 );
                 self.persist_dirty = true;
                 self.persist_retry_count = 0;
@@ -2004,6 +2017,51 @@ test "jump_list persistence keeps the newer cross-process recent event" {
     const latest = (try merged.recent_events.latest(alloc, "C:\\stale")).?;
     try std.testing.expectEqual(RecentEventKind.removed, latest.kind);
     try std.testing.expectEqual(@as(i64, 20), latest.changed_ns);
+}
+
+test "jump_list observed removal does not outrank a later cross-process use" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer jump.deinit();
+
+    try jump.recent_events.upsert(alloc, "C:\\reused", .used, 100);
+    try jump.pending_recent_events.upsert(
+        alloc,
+        "C:\\reused",
+        .removed,
+        try jump.recentRemovalCausalTimestamp("C:\\reused"),
+    );
+
+    var merged: LoadedState = .{};
+    defer merged.deinit(alloc);
+    try merged.recent_events.upsert(alloc, "C:\\reused", .used, 200);
+
+    try jump.applyPendingState(&merged);
+    try std.testing.expect(try merged.recents.contains(alloc, "C:\\reused"));
+    const latest = (try merged.recent_events.latest(alloc, "C:\\reused")).?;
+    try std.testing.expectEqual(RecentEventKind.used, latest.kind);
+    try std.testing.expectEqual(@as(i64, 200), latest.changed_ns);
+
+    try jump.profile_events.upsert(alloc, "wsl:Ubuntu", .used, 300);
+    try jump.pending_profile_events.upsert(
+        alloc,
+        "wsl:Ubuntu",
+        .hidden,
+        jump.profileRemovalCausalTimestamp("wsl:Ubuntu"),
+    );
+    try merged.profile_events.upsert(alloc, "wsl:Ubuntu", .used, 400);
+    try jump.applyPendingState(&merged);
+    try std.testing.expect(!merged.hidden_profiles.contains("wsl:Ubuntu"));
+    const latest_profile = merged.profile_events.latest("wsl:Ubuntu").?;
+    try std.testing.expectEqual(ProfileEventKind.used, latest_profile.kind);
+    try std.testing.expectEqual(@as(i64, 400), latest_profile.changed_ns);
 }
 
 test "jump_list persistence orders recent destinations across paths" {
