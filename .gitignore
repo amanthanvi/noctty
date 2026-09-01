@@ -20,6 +20,7 @@ CMakeFiles/
 /result*
 /.nixos-test-history
 /.sandbox/
+/.evidence-130/
 example/*.wasm
 test/ghostty
 test/cases/**/*.actual.png

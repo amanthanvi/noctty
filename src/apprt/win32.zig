@@ -11,15 +11,18 @@ const configpkg = @import("../config.zig");
 const config_edit = @import("../config/edit.zig");
 const themepkg = @import("../config/theme.zig");
 const windows_shell = @import("../config/windows_shell.zig");
+const windows_ssh_hosts = @import("../config/windows_ssh_hosts.zig");
 const input = @import("../input.zig");
 const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
+const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
 const win32_theme = @import("win32_theme.zig");
+const win32_power = @import("win32_power.zig");
 const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const win32_terminal_accessibility = @import("win32_terminal_accessibility.zig");
@@ -50,6 +53,7 @@ const win32_status_bar = @import("win32_status_bar.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
 const win32_types = @import("win32_types.zig");
+const win32_layouts = @import("win32_layouts.zig");
 const win32_session_state = @import("win32_session_state.zig");
 const win32_session_persistence = @import("win32_session_persistence.zig");
 const win32_structural_history = @import("win32_structural_history.zig");
@@ -58,8 +62,10 @@ const win32_compositor = @import("win32_compositor.zig");
 const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
+const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
+const pixel_format = @import("win32/pixel_format.zig");
 const labels = @import("win32/labels.zig");
 const win32_input = @import("win32/input.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
@@ -70,6 +76,7 @@ const sys = @import("win32/sys.zig");
 test {
     _ = @import("win32/render_trace.zig");
     _ = @import("win32/gl_startup.zig");
+    _ = @import("win32/pixel_format.zig");
     _ = @import("win32/labels.zig");
     _ = @import("win32/input.zig");
     _ = @import("win32/chrome_layout.zig");
@@ -352,6 +359,19 @@ fn windowData(comptime T: type, hwnd: HWND) ?*T {
 
 const RTL_OSVERSIONINFOW = sys.RTL_OSVERSIONINFOW;
 
+/// True when the calling thread is in a single-threaded apartment.
+///
+/// The terminal handoff depends on this: the STA stub marshals the returned
+/// system handles to the caller before returning to the message pump, which is
+/// what makes it safe to close noctty's copies when the queued handoff message
+/// is later dispatched on this same thread.
+fn currentApartmentIsSta() bool {
+    var apartment: sys.APTTYPE = sys.APTTYPE_CURRENT;
+    var qualifier: sys.APTTYPEQUALIFIER = 0;
+    if (sys.CoGetApartmentType(&apartment, &qualifier) < 0) return false;
+    return apartment == sys.APTTYPE_STA or apartment == sys.APTTYPE_MAINSTA;
+}
+
 /// Probe the Windows build number once; cache on `App.os_build`. Build
 /// 22000+ is Win11 (integrated titlebar / Snap Layouts); 22621+ supports
 /// `DWMWA_SYSTEMBACKDROP_TYPE`. Failure returns 0 so downstream gates
@@ -614,8 +634,38 @@ fn applyProfileSurfaceConfig(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
 ) !void {
-    try applyProfileCommandConfig(config, profile);
     config.@"working-directory" = .home;
+    try applyProfileLaunchConfig(config, profile);
+}
+
+/// Applies a profile's command plus the kind-specific hardening that has to
+/// hold on EVERY launch path — new surface, split, and restore alike. Splits
+/// used to apply only the command, which silently dropped the SSH guarantees
+/// below, so both paths go through here.
+fn applyProfileLaunchConfig(
+    config: *configpkg.Config,
+    profile: *const windows_shell.Profile,
+) !void {
+    try applyProfileCommandConfig(config, profile);
+    if (profile.kind != .ssh) return;
+
+    try applySshLaunchHardening(config);
+}
+
+fn applySshLaunchHardening(config: *configpkg.Config) !void {
+    // Shell integration injection rewrites the two-element ssh argv into a
+    // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
+    // it anyway: the integration scripts run locally.
+    config.@"shell-integration" = .none;
+
+    // `.home` alone loses to an inherited working directory, so resolve the
+    // path explicitly and let the drive-absolute branch of the cwd resolver
+    // take it. This is the same directory `ssh` itself expands `~` to.
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
+        const alloc = config._arena.?.allocator();
+        config.@"working-directory" = .{ .path = try alloc.dupe(u8, home) };
+    }
 }
 
 fn applyProfileCommandConfig(
@@ -671,6 +721,7 @@ fn shouldTreatWslSplitPwdAsStartupFallback(
 }
 
 fn applySplitWorkingDirectoryFromSource(
+    app: *App,
     config: *configpkg.Config,
     source: *Surface,
     startup_cwd: ?[]const u8,
@@ -678,7 +729,10 @@ fn applySplitWorkingDirectoryFromSource(
     if (!config.@"split-inherit-working-directory") return false;
 
     const alloc = config._arena.?.allocator();
-    const live_pwd = source.core().pwd(alloc) catch |err| blk: {
+    const live_pwd = (if (app.test_automation_pwd) |query|
+        query(alloc, source)
+    else
+        source.core().pwd(alloc)) catch |err| blk: {
         log.warn("win32 split cwd inheritance could not query live cwd err={}", .{err});
         break :blk null;
     };
@@ -706,6 +760,18 @@ fn applySplitWorkingDirectoryFromSource(
         }
     }
     return try applySplitWorkingDirectoryPath(config, candidate);
+}
+
+fn shouldInheritSplitWorkingDirectory(source_launched_ssh: bool) bool {
+    return !source_launched_ssh;
+}
+
+fn shouldResetNewTabWorkingDirectory(
+    explicit_window_target: bool,
+    inherit_launch_config: bool,
+    source_launched_ssh: bool,
+) bool {
+    return explicit_window_target or (inherit_launch_config and source_launched_ssh);
 }
 
 fn defaultIpcNamespace() []const u8 {
@@ -757,6 +823,204 @@ fn resolveIpcPipeNameForTarget(
     };
 }
 
+/// Connect to the single-instance IPC pipe as a client.
+///
+/// `error.FileNotFound` and `error.PipeUnreachable` both mean "there is no
+/// instance we can talk to"; callers must treat them the same and fall back
+/// to running locally. They are kept distinct only so the unreachable case
+/// can be logged differently.
+/// Backing store for a copied SID. `SECURITY_MAX_SID_SIZE` is 68 bytes, so
+/// 256 is ample. The alignment is required, not cosmetic: a `SID` ends in an
+/// array of `DWORD` sub-authorities, and `EqualSid` reads them as such.
+const SidBuffer = [256]u8;
+const sid_buffer_align = @alignOf(u32);
+
+/// Copy the current process token's user SID into `buf`, returning the
+/// populated prefix.
+fn currentUserSidBytes(buf: *align(sid_buffer_align) SidBuffer) ![]u8 {
+    var token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) == 0) return error.TokenQueryFailed;
+    defer _ = windows.CloseHandle(token);
+    return try tokenUserSidBytes(token, buf);
+}
+
+fn tokenUserSidBytes(
+    token: windows.HANDLE,
+    buf: *align(sid_buffer_align) SidBuffer,
+) ![]u8 {
+    var token_user_buf: [256]u8 align(@alignOf(sys.TOKEN_USER)) = undefined;
+    var token_user_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenUser,
+        &token_user_buf,
+        token_user_buf.len,
+        &token_user_len,
+    ) == 0) return error.TokenQueryFailed;
+
+    const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
+    const sid_len = sys.GetLengthSid(token_user.User.Sid);
+    if (sid_len == 0 or sid_len > buf.len) return error.TokenQueryFailed;
+
+    const sid_bytes: [*]const u8 = @ptrCast(token_user.User.Sid);
+    @memcpy(buf[0..sid_len], sid_bytes[0..sid_len]);
+    return buf[0..sid_len];
+}
+
+/// Mandatory integrity level of a token, as an `S-1-16-<rid>` RID.
+///
+/// Unlike `allocIpcPipeIntegritySid` this reports EVERY level including
+/// medium and below, because the comparison below needs the actual value
+/// rather than "is it above medium".
+fn tokenIntegrityRid(token: windows.HANDLE) ?u32 {
+    var label_buf: [256]u8 align(@alignOf(sys.TOKEN_MANDATORY_LABEL)) = undefined;
+    var label_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenIntegrityLevel,
+        &label_buf,
+        label_buf.len,
+        &label_len,
+    ) == 0) return null;
+    const label: *const sys.TOKEN_MANDATORY_LABEL = @ptrCast(&label_buf);
+
+    var sid_string: ?[*:0]u16 = null;
+    if (sys.ConvertSidToStringSidW(label.Label.Sid, &sid_string) == 0) return null;
+    const sid = sid_string orelse return null;
+    defer _ = sys.LocalFree(@ptrCast(sid));
+
+    return integrityRidFromSidString(std.mem.span(sid));
+}
+
+/// Is this connected pipe object owned and labelled for our trust level?
+///
+/// The single-instance pipe name is derived only from `--class`, so it is
+/// PREDICTABLE and lives in the machine-wide named-pipe namespace. Any local
+/// account can therefore pre-create `\\.\pipe\noctty.<class>` before we do.
+/// The server-side owner-only DACL does not help here: it protects the pipe
+/// WE create, not the one we CONNECT to. Without this check a squatter would
+/// receive our forwarded startup arguments (including the working directory)
+/// and could return a forged ack, so the real instance never starts and the
+/// user gets no window -- a cross-account disclosure plus a startup denial.
+///
+/// This runs before the first write. `ImpersonateNamedPipeClient` is
+/// documented to impersonate "the security context of the last message read
+/// from the pipe", so a server that has read nothing from us has no context
+/// to assume. That ordering is a defence in depth rather than the guarantee,
+/// though: the guarantee is that `connectToIpcPipe` opens with
+/// `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, which caps the server
+/// at an identification-only token whatever the timing.
+///
+/// Authentication is read from the descriptor attached to THIS pipe object.
+/// A PID lookup is not sufficient: a duplicated server handle can outlive
+/// its creating process, and the numeric PID can then be recycled.
+///
+/// Fails CLOSED: any query or parse error answers "not ours".
+fn ipcPipeServerIsTrusted(pipe: windows.HANDLE) bool {
+    const information = c.OWNER_SECURITY_INFORMATION | c.LABEL_SECURITY_INFORMATION;
+    var owner: ?*anyopaque = null;
+    var descriptor: ?*anyopaque = null;
+    if (sys.GetSecurityInfo(
+        pipe,
+        c.SE_KERNEL_OBJECT,
+        information,
+        &owner,
+        null,
+        null,
+        null,
+        &descriptor,
+    ) != 0) return false;
+    const attached = descriptor orelse return false;
+    defer _ = sys.LocalFree(attached);
+
+    var own_buf: SidBuffer align(sid_buffer_align) = undefined;
+    const own_sid = currentUserSidBytes(&own_buf) catch return false;
+    if (owner == null or sys.EqualSid(owner.?, @ptrCast(own_sid.ptr)) == 0) return false;
+
+    // The user SID is NOT sufficient on its own. Under the ordinary split
+    // UAC token, an elevated process and a medium-integrity process of the
+    // same account carry the SAME user SID, so `EqualSid` alone would let a
+    // medium-integrity squatter pre-create the predictable name and serve an
+    // ELEVATED client -- which would then hand its forwarded arguments
+    // downward and accept a forged ack. `SECURITY_IDENTIFICATION` prevents
+    // the squatter impersonating us; it says nothing about who it is.
+    //
+    // So require the server to be at least our own integrity level. Equal is
+    // fine (the normal case, and what the medium-to-medium path needs);
+    // higher is fine (a medium client talking to an elevated instance is
+    // already governed by the pipe's NO_WRITE_UP label); strictly lower is
+    // refused.
+    var own_token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &own_token,
+    ) == 0) return false;
+    defer _ = windows.CloseHandle(own_token);
+
+    const own_rid = tokenIntegrityRid(own_token) orelse return false;
+    const server_rid = descriptorIntegrityRid(attached) catch return false;
+    return server_rid >= own_rid;
+}
+
+fn descriptorIntegrityRid(descriptor: *anyopaque) error{InvalidSecurityDescriptor}!u32 {
+    var text: ?[*:0]u16 = null;
+    if (sys.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        c.SDDL_REVISION_1,
+        c.LABEL_SECURITY_INFORMATION,
+        &text,
+        null,
+    ) == 0) return error.InvalidSecurityDescriptor;
+    const text_ptr = text orelse return error.InvalidSecurityDescriptor;
+    defer _ = sys.LocalFree(@ptrCast(text_ptr));
+
+    return descriptorIntegrityRidFromSddl(std.mem.span(text_ptr));
+}
+
+fn descriptorIntegrityRidFromSddl(sddl: []const u16) error{InvalidSecurityDescriptor}!u32 {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-");
+    if (std.mem.indexOf(u16, sddl, prefix)) |start| {
+        var rid: u32 = 0;
+        var digits: usize = 0;
+        for (sddl[start + prefix.len ..]) |ch| {
+            if (ch < '0' or ch > '9') break;
+            rid = std.math.mul(u32, rid, 10) catch return error.InvalidSecurityDescriptor;
+            rid = std.math.add(u32, rid, ch - '0') catch return error.InvalidSecurityDescriptor;
+            digits += 1;
+        }
+        if (digits == 0) return error.InvalidSecurityDescriptor;
+        return rid;
+    }
+
+    // Windows renders well-known mandatory-label SIDs using SDDL aliases.
+    // The label-only descriptor contains no unrelated ACEs, so matching the
+    // trustee suffix is unambiguous.
+    const aliases = [_]struct { suffix: []const u16, rid: u32 }{
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;UN)"), .rid = 0x0000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;LW)"), .rid = 0x1000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;ME)"), .rid = 0x2000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;MP)"), .rid = 0x2100 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;HI)"), .rid = 0x3000 },
+        .{ .suffix = std.unicode.utf8ToUtf16LeStringLiteral(";;;SI)"), .rid = 0x4000 },
+    };
+    for (aliases) |alias| {
+        if (std.mem.indexOf(u16, sddl, alias.suffix) != null) return alias.rid;
+    }
+
+    // The producer always emits an explicit label. Missing or unknown labels
+    // must fail closed; otherwise a low-integrity same-user squatter can rely
+    // on Windows' implicit-medium interpretation and impersonate our server.
+    if (std.mem.indexOf(u16, sddl, std.unicode.utf8ToUtf16LeStringLiteral("(ML;")) != null) {
+        return error.InvalidSecurityDescriptor;
+    }
+    return error.InvalidSecurityDescriptor;
+}
+
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
@@ -766,14 +1030,43 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
             0,
             null,
             windows.OPEN_EXISTING,
-            windows.FILE_ATTRIBUTE_NORMAL,
+            // Deny impersonation outright rather than relying on the server
+            // never having read a message from us. See the constants.
+            windows.FILE_ATTRIBUTE_NORMAL |
+                c.SECURITY_SQOS_PRESENT |
+                c.SECURITY_IDENTIFICATION,
             null,
         );
-        if (handle != windows.INVALID_HANDLE_VALUE) return handle;
+        if (handle != windows.INVALID_HANDLE_VALUE) {
+            if (!ipcPipeServerIsTrusted(handle)) {
+                _ = windows.CloseHandle(handle);
+                log.warn(
+                    "single-instance pipe owner or integrity label is not trusted; " ++
+                        "refusing to forward anything to it",
+                    .{},
+                );
+                return error.PipeUnreachable;
+            }
+            setIpcClientNonblocking(handle) catch |err| {
+                _ = windows.CloseHandle(handle);
+                return err;
+            };
+            return handle;
+        }
 
         const err = windows.kernel32.GetLastError();
         switch (err) {
             .FILE_NOT_FOUND => return error.FileNotFound,
+
+            // The pipe exists but this token may not open it. The common
+            // cause is an elevated instance holding the name: its descriptor
+            // carries a NO_WRITE_UP mandatory label, so a medium-integrity
+            // client is denied at CreateFileW. That is the intended denial,
+            // but it must NOT abort startup -- an ordinary non-elevated
+            // launch has to fall through to its own local instance rather
+            // than failing to open a window at all.
+            .ACCESS_DENIED => return error.PipeUnreachable,
+
             .PIPE_BUSY => {
                 if (retries == 0 and sys.WaitNamedPipeW(pipe_name.ptr, 1000) != 0) {
                     retries += 1;
@@ -786,13 +1079,30 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
     }
 }
 
+fn setIpcClientNonblocking(pipe: windows.HANDLE) !void {
+    var mode: u32 = c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait;
+    if (sys.SetNamedPipeHandleState(pipe, &mode, null, null) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+}
+
 fn sendNewWindowIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
     arguments: ?[]const [:0]const u8,
+    response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         error.FileNotFound => return false,
+        // No instance we are allowed to talk to. Report "not forwarded" so
+        // the caller starts a local instance instead of aborting startup.
+        error.PipeUnreachable => {
+            log.info(
+                "single-instance pipe exists but is not accessible to this token; starting a local instance",
+                .{},
+            );
+            return false;
+        },
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -802,28 +1112,33 @@ fn sendNewWindowIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAck(pipe);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
 
 fn sendListWindowsIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    response_timeout_ms: u64,
 ) !?[]u8 {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return null,
+        // Both mean "no instance we can reach"; see `connectToIpcPipe`.
+        error.FileNotFound, error.PipeUnreachable => return null,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try win32_ipc.encodeListWindowsRequest(alloc);
+    const request = try win32_ipc.encodeListWindowsRequest(
+        alloc,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
     return try win32_ipc.readDataResponseWithTimeout(
         alloc,
         pipe,
-        win32_ipc.automation_response_timeout_ms,
+        std.math.maxInt(u64),
     );
 }
 
@@ -832,19 +1147,495 @@ fn sendPerformActionIpc(
     pipe_name: [:0]const u16,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodePerformActionRequest(
+        alloc,
+        target,
+        action_text,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendAutomationAckRequest(
+    pipe_name: [:0]const u16,
+    request: []u8,
+    response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return false,
+        // Both mean "no instance we can reach"; see `connectToIpcPipe`.
+        error.FileNotFound, error.PipeUnreachable => return false,
+        error.PipeBusy => return error.IPCFailed,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+    try win32_ipc.setAutomationRequestDeadline(
+        request,
+        automationRequestDeadline(response_timeout_ms),
+    );
+    try win32_ipc.writeAll(pipe, request);
+    return win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
+}
+
+fn sendFocusIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeFocusRequest(
+        alloc,
+        target,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendNewTabIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    working_directory: ?[]const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeNewTabRequest(
+        alloc,
+        target,
+        working_directory,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendNewSplitIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    direction: apprt.ipc.AutomationSplitDirection,
+    working_directory: ?[]const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeNewSplitRequest(
+        alloc,
+        target,
+        direction,
+        working_directory,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendAutomationTextIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    value: []const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeSendTextRequest(
+        alloc,
+        target,
+        value,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn automationRequestDeadline(response_timeout_ms: u64) u64 {
+    return sys.GetTickCount64() +| response_timeout_ms;
+}
+
+fn automationTextAllowed(text: []const u8) bool {
+    if (text.len == 0 or text.len > win32_ipc.max_action_text_len) return false;
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp <= 0x1F or cp == 0x7F or (cp >= 0x80 and cp <= 0x9F)) return false;
+    }
+    return win32_paste_protection.inspect(text).severity != .control_chars;
+}
+
+/// Configuration keys a forwarded `new_window` argv is allowed to set.
+///
+/// `applyNewWindowArguments` runs on the SERVER side of the single-instance
+/// IPC pipe and feeds caller-controlled argv straight into `Config.loadIter`,
+/// so the automation allowlist in `App.isSafeAutomationAction` is not the
+/// boundary for this request kind. Any process running as this user can write
+/// to the pipe, so this argv must be treated as untrusted input.
+///
+/// This is an ALLOWLIST, deliberately, and not a denylist. The config surface
+/// is ~190 fields and grows with every upstream merge; a denylist gets it
+/// wrong by omission every time a new key lands. Deny-by-default means an
+/// unrecognised key -- including any key added upstream after this list was
+/// written -- is refused until someone reviews it.
+///
+/// Admission rule: a key qualifies only if its value is a scalar, an enum, a
+/// color, or (for `title`) a display string that is sanitized downstream. A
+/// key does NOT qualify if its value is resolved as a filesystem path, a
+/// command, an environment variable, a font or theme NAME looked up against
+/// something, an additional configuration source, or bytes that can reach the
+/// pty. That rule excludes, among others:
+///
+///   - `command`, `initial-command`, `-e`  -> become the spawned child.
+///   - `input`                             -> written straight to the pty;
+///     its own doc comment warns it can execute programs in a shell.
+///   - `env`                               -> overrides are applied AFTER
+///     `shell_integration.setup`, so `ZDOTDIR` / `ENV` / `XDG_DATA_DIRS` /
+///     `GHOSTTY_BASH_RCFILE` / `PATH` become code execution at shell start.
+///   - `config-file`, `config-default-files`, `theme` -> config sources.
+///     `theme` accepts an absolute path and is parsed as a full config file
+///     (`config/theme.zig` `open`), so it is a `config-file` by proxy.
+///   - `background-image`, `bell-audio-path`, `custom-shader`,
+///     `gtk-custom-css`                    -> arbitrary file reads, and UNC
+///     values make this process authenticate to a remote SMB host.
+///   - `keybind`, `command-palette-entry`  -> inject attacker-chosen binding
+///     actions, re-opening the `.perform_action` allowlist by another door.
+///   - `enquiry-response`                  -> attacker bytes written to the
+///     pty when the child sends ENQ.
+///   - `title-report`, `window-save-state`, `class` -> not presentation.
+///   - `font-family*`, `font-style*`, `font-feature`, `font-variation*`,
+///     `font-codepoint-map`, `window-title-font-family` -> name strings that
+///     are resolved by font discovery. Excluded on the admission rule rather
+///     than because a concrete exploit is known.
+///
+/// `working-directory` is handled separately: it is admitted, but its VALUE
+/// is constrained by `forwardedWorkingDirectoryAllowed`.
+const forwarded_argv_allowed_keys = [_][]const u8{
+    // Window geometry, decoration, and state.
+    "window-width",
+    "window-height",
+    "window-position-x",
+    "window-position-y",
+    "window-padding-x",
+    "window-padding-y",
+    "window-padding-balance",
+    "window-padding-color",
+    "window-decoration",
+    "window-theme",
+    "window-colorspace",
+    "window-subtitle",
+    "window-titlebar-background",
+    "window-titlebar-foreground",
+    "window-show-tab-bar",
+    "window-new-tab-position",
+    "window-step-resize",
+    "window-vsync",
+    "maximize",
+    "fullscreen",
+    "title",
+
+    // Font sizing and rendering. Font NAME keys are deliberately absent.
+    "font-size",
+    "font-thicken",
+    "font-thicken-strength",
+    "font-synthetic-style",
+    "font-shaping-break",
+
+    // Colors and compositing.
+    "background",
+    "foreground",
+    "palette",
+    "selection-foreground",
+    "selection-background",
+    "cursor-color",
+    "cursor-text",
+    "cursor-style",
+    "cursor-style-blink",
+    "cursor-opacity",
+    "background-opacity",
+    "background-opacity-cells",
+    "background-blur",
+    "unfocused-split-opacity",
+    "unfocused-split-fill",
+    "split-divider-color",
+    "bold-color",
+    "faint-opacity",
+    "minimum-contrast",
+    "alpha-blending",
+};
+
+/// The one allowlisted key whose value needs its own check.
+const forwarded_working_directory_key = "working-directory";
+
+/// Extract the config key from a forwarded argument, or null when the
+/// argument is not in `--key[=value]` form.
+///
+/// `cli/args.zig` (:112-133) takes `key = arg[2..]` up to the first `=` and
+/// matches it with exact case-sensitive `mem.eql` against field names. There
+/// is no prefix abbreviation, no `--key value` separate-token form, no case
+/// folding, and no underscore/hyphen aliasing, so this sees exactly the key
+/// the loader will act on.
+fn forwardedArgumentKey(arg: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, arg, "--")) return null;
+    const body = arg[2..];
+    return if (std.mem.indexOfScalar(u8, body, '=')) |idx| body[0..idx] else body;
+}
+
+/// True when a forwarded config key is on the allowlist. `working-directory`
+/// is included here; its value is checked separately.
+fn forwardedKeyAllowed(key: []const u8) bool {
+    if (std.mem.eql(u8, key, forwarded_working_directory_key)) return true;
+    for (forwarded_argv_allowed_keys) |allowed| {
+        if (std.mem.eql(u8, key, allowed)) return true;
+    }
+    return false;
+}
+
+/// True when a key is safe to echo into a log line.
+///
+/// The refused key comes from the pipe, so it is attacker-controlled text and
+/// must not be logged raw (newlines would forge log records). Real config keys
+/// are lowercase ASCII with hyphens and digits, so anything else is reported
+/// generically instead.
+fn forwardedKeyLoggable(key: []const u8) bool {
+    if (key.len == 0 or key.len > 64) return false;
+    for (key) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or
+            (ch >= '0' and ch <= '9') or
+            ch == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Returns true when a forwarded `--working-directory` value is one the
+/// server is willing to honor.
+///
+/// The startup forwarder always sends the launching process's realpath'd cwd
+/// (`collectStartupForwardArguments`), so this key cannot be rejected
+/// outright without breaking every single-instance launch. It is instead
+/// constrained to the symbolic values, a home-relative path, or a local
+/// drive-letter absolute path.
+///
+/// SCOPE OF THIS CHECK, stated precisely: it rejects UNC *syntax* only. A
+/// mapped drive (`net use Z: \\host\share`), a `subst` drive, or a junction
+/// under a local drive still resolves off-box, and any same-user process can
+/// create those. That is acceptable under this channel's threat model --
+/// same-user code is already trusted -- and the point of the check is to stop
+/// a bare `\\attacker\share` value from making the server authenticate to an
+/// attacker-chosen SMB host.
+///
+/// The check is deliberately PURELY SYNTACTIC. An earlier version called
+/// `openDirAbsolute` to confirm the directory existed, but that resolution is
+/// itself the SMB authentication we are trying to avoid for mapped drives and
+/// junctions, and it was defeated by TOCTOU anyway since the path is
+/// re-resolved at spawn time.
+fn forwardedWorkingDirectoryAllowed(value: []const u8) bool {
+    var trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+
+    // `Config.parseCLI` strips one pair of surrounding double quotes, so a
+    // quoted path is a legal value and must not be refused here.
+    if (trimmed.len >= 2 and trimmed[0] == '"' and trimmed[trimmed.len - 1] == '"') {
+        trimmed = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], &std.ascii.whitespace);
+    }
+
+    if (std.mem.eql(u8, trimmed, "home")) return true;
+    if (std.mem.eql(u8, trimmed, "inherit")) return true;
+
+    // `~`, `~/...` and `~\...` are documented legal values that
+    // `WorkingDirectory.finalize` expands against the user's own home
+    // directory, so they cannot point off-box.
+    if (std.mem.eql(u8, trimmed, "~")) return true;
+    if (trimmed.len >= 2 and trimmed[0] == '~' and
+        (trimmed[1] == '/' or trimmed[1] == '\\')) return true;
+
+    // Everything else must be a local drive-letter absolute path. This
+    // rejects UNC (`\\host\share`, `//host/share`), device namespace
+    // (`\\?\`, `\\.\`), relative (`foo\bar`) and drive-relative (`C:foo`).
+    if (trimmed.len < 3) return false;
+    if (!std.ascii.isAlphabetic(trimmed[0])) return false;
+    if (trimmed[1] != ':') return false;
+    if (trimmed[2] != '\\' and trimmed[2] != '/') return false;
+    return true;
+}
+
+/// Why a forwarded argv was refused. `key` borrows from the argument and is
+/// only safe to log when `forwardedKeyLoggable(key)`.
+const ForwardedArgvRejection = struct {
+    reason: enum { not_allowlisted, bad_working_directory, not_a_config_flag },
+    key: []const u8,
+};
+
+/// Scan a forwarded `new_window` argv and describe the first argument that
+/// must not be honored, or null when every argument is acceptable.
+///
+/// Every element is scanned, so a repeated or trailing occurrence of a key
+/// cannot slip past by appearing after an acceptable one.
+fn forwardedArgvRejection(argv: []const [:0]const u8) ?ForwardedArgvRejection {
+    for (argv) |arg| {
+        const key = forwardedArgumentKey(arg) orelse {
+            // Not `--key[=value]`. `-e` lands here, and
+            // `Config.parseManuallyHook` would turn it into
+            // `initial-command`. Nothing in this form is ever legitimate on
+            // a forwarded argv, so refuse rather than relying on the loader
+            // to treat it as an inert diagnostic.
+            return .{ .reason = .not_a_config_flag, .key = arg };
+        };
+
+        if (!forwardedKeyAllowed(key)) {
+            return .{ .reason = .not_allowlisted, .key = key };
+        }
+
+        if (std.mem.eql(u8, key, forwarded_working_directory_key)) {
+            const value = if (std.mem.indexOfScalar(u8, arg, '=')) |idx|
+                arg[idx + 1 ..]
+            else
+                "";
+            if (!forwardedWorkingDirectoryAllowed(value)) {
+                return .{ .reason = .bad_working_directory, .key = key };
+            }
+        }
+    }
+    return null;
+}
+
+/// Log a refused forwarded argv at error level, without echoing untrusted
+/// text into the log.
+fn logForwardedArgvRejection(rejection: ForwardedArgvRejection) void {
+    switch (rejection.reason) {
+        .bad_working_directory => log.err(
+            "refusing forwarded new-window argv: working-directory must be home, inherit, ~/..., or a local absolute path",
+            .{},
+        ),
+        .not_a_config_flag => log.err(
+            "refusing forwarded new-window argv: contains an argument that is not a --key=value config flag",
+            .{},
+        ),
+        .not_allowlisted => if (forwardedKeyLoggable(rejection.key)) log.err(
+            "refusing forwarded new-window argv: key {s} is not permitted over IPC",
+            .{rejection.key},
+        ) else log.err(
+            "refusing forwarded new-window argv: contains a key that is not permitted over IPC",
+            .{},
+        ),
+    }
+}
+
+fn sendLaunchLayoutIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    name: []const u8,
+    response_timeout_ms: u64,
+) !bool {
+    // Validate before probing the pipe. The caller uses `false` as the cold
+    // start fallback, so connecting first would let an invalid name spawn an
+    // otherwise ordinary window when no instance is listening.
+    const request = try win32_ipc.encodeLaunchLayoutRequest(
+        alloc,
+        name,
+        0,
+    );
+    defer alloc.free(request);
+
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound, error.PipeUnreachable => return false,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try win32_ipc.encodePerformActionRequest(alloc, target, action_text);
-    defer alloc.free(request);
-
+    try win32_ipc.setAutomationRequestDeadline(
+        request,
+        automationRequestDeadline(response_timeout_ms),
+    );
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+    return try win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
+}
+
+fn trySendStartupLaunchLayoutIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    name: ?[]const u8,
+) !?bool {
+    const layout_name = name orelse return null;
+    return try sendLaunchLayoutIpc(
+        alloc,
+        pipe_name,
+        layout_name,
+        win32_ipc.automation_response_timeout_ms,
+    );
+}
+
+const LaunchLayoutIpcArgument = union(enum) {
+    none,
+    name: []const u8,
+};
+
+fn scanLaunchLayoutIpcArgument(
+    arguments: ?[]const [:0]const u8,
+) !LaunchLayoutIpcArgument {
+    const argv = arguments orelse return .none;
+    const prefix = "--launch-layout=";
+    var name: ?[]const u8 = null;
+    for (argv) |arg| {
+        // Config parsing treats everything after -e as command payload.
+        // Match that boundary so a child command may legitimately receive an
+        // argument that looks like a Noctty layout option.
+        if (std.mem.eql(u8, arg, "-e")) break;
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        if (name != null) return error.MixedLaunchLayoutArguments;
+        name = arg[prefix.len..];
+    }
+
+    if (name) |value| {
+        if (argv.len != 1) return error.MixedLaunchLayoutArguments;
+        return .{ .name = value };
+    }
+    return .none;
+}
+
+/// Apply a forwarded `new_window` argv to `config`.
+///
+/// Returns `error.ForbiddenForwardedArgument` for the whole request if any
+/// argument is rejected. Dropping individual keys silently would leave the
+/// caller with a window that does not match what was asked for, and would
+/// make an attacker's probe indistinguishable from a normal launch.
+///
+/// This function does not log, so that it stays a pure predicate over argv
+/// and can be unit tested; every caller logs the rejection it handles.
+fn automationWorkingDirectoryValue(value: []const u8) []const u8 {
+    var result = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (result.len >= 2 and result[0] == '"' and result[result.len - 1] == '"') {
+        result = std.mem.trim(u8, result[1 .. result.len - 1], &std.ascii.whitespace);
+    }
+    return result;
+}
+
+/// Mirrors #185's `forwardedWorkingDirectoryAllowed` on the receiver.
+fn automationWorkingDirectoryAllowed(value: []const u8) bool {
+    const path = automationWorkingDirectoryValue(value);
+    if (std.mem.eql(u8, path, "home") or std.mem.eql(u8, path, "inherit") or
+        std.mem.eql(u8, path, "~")) return true;
+    if (path.len >= 2 and path[0] == '~' and (path[1] == '/' or path[1] == '\\')) return true;
+    return path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and
+        (path[2] == '/' or path[2] == '\\');
+}
+
+fn applyAutomationWorkingDirectory(config: *configpkg.Config, value: []const u8) !void {
+    if (!automationWorkingDirectoryAllowed(value)) return error.AutomationPolicyRefused;
+    const alloc = config._arena.?.allocator();
+    const path = automationWorkingDirectoryValue(value);
+    if (std.mem.eql(u8, path, "~")) {
+        config.@"working-directory" = .home;
+        return;
+    }
+    var working_directory: configpkg.WorkingDirectory = undefined;
+    if (path.len >= 2 and path[0] == '~' and path[1] == '\\') {
+        const normalized = try alloc.dupe(u8, path);
+        normalized[1] = '/';
+        working_directory = .{ .path = normalized };
+    } else {
+        working_directory = .home;
+        try working_directory.parseCLI(alloc, path);
+    }
+    try working_directory.finalize(alloc);
+    config.@"working-directory" = working_directory;
 }
 
 fn applyNewWindowArguments(
@@ -854,6 +1645,17 @@ fn applyNewWindowArguments(
 ) !void {
     const argv = arguments orelse return;
     if (argv.len == 0) return;
+
+    if (forwardedArgvRejection(argv) != null) {
+        return error.ForbiddenForwardedArgument;
+    }
+
+    // This clone inherits the app config's replay history, and `+new-window`
+    // always forwards at least a working directory, so the `finalize` below
+    // always runs. `launch-layout` is one-shot: an inherited startup step
+    // replayed here would turn an ordinary new window into a layout launch.
+    _ = config.dropLaunchLayoutReplaySteps(0);
+    config.@"launch-layout" = null;
 
     var iter: ForwardedArgIterator = .{ .args = argv };
     try config.loadIter(alloc_gpa, &iter);
@@ -872,6 +1674,30 @@ fn normalizeForwardedStartupArg(
         return null;
     }
 
+    // Action Center launches carry the target as a positional URI. Preserve
+    // only a URI that the same parser used by the receiver accepts; malformed
+    // lookalikes still fall through to the non-flag rejection below.
+    if (win32_toast_activation.parseLaunchArg(arg)) |_| {
+        return try alloc.dupeZ(u8, arg);
+    } else |_| {}
+
+    // Drop anything the running instance would refuse, so an ordinary launch
+    // still gets a window instead of having the whole request rejected. This
+    // is a usability measure on OUR OWN argv, not a security control -- the
+    // server re-checks every argument, because a hostile pipe writer never
+    // runs this code.
+    const key = forwardedArgumentKey(arg) orelse {
+        log.warn("not forwarding non-flag startup argument to the running instance", .{});
+        return null;
+    };
+    if (!forwardedKeyAllowed(key)) {
+        log.warn(
+            "not forwarding {s} to the running instance: it may not be set over IPC",
+            .{key},
+        );
+        return null;
+    }
+
     if (std.mem.startsWith(u8, arg, "--working-directory=")) {
         const raw = arg["--working-directory=".len..];
         const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
@@ -884,15 +1710,38 @@ fn normalizeForwardedStartupArg(
         const expanded = homedir.expandHome(trimmed, &home_buf) catch trimmed;
         var realpath_buf: [std.fs.max_path_bytes]u8 = undefined;
         const normalized = cwd.realpath(expanded, &realpath_buf) catch expanded;
-        return try std.fmt.allocPrintSentinel(
-            alloc,
-            "--working-directory={s}",
-            .{normalized},
-            0,
-        );
+
+        // The key check above is not enough for this one option: the server
+        // refuses the ENTIRE argv on a bad working-directory VALUE, and it
+        // has already acknowledged the request by then, so the launching
+        // process exits having produced no window at all. Dropping just this
+        // argument here is what makes the "still gets a window" promise
+        // above true for `--working-directory=\\host\share` and friends.
+        return try allocForwardedWorkingDirectoryArg(alloc, normalized);
     }
 
     return try alloc.dupeZ(u8, arg);
+}
+
+fn allocForwardedWorkingDirectoryArg(
+    alloc: Allocator,
+    value: []const u8,
+) !?[:0]const u8 {
+    if (!forwardedWorkingDirectoryAllowed(value)) {
+        log.warn(
+            "not forwarding --working-directory to the running instance: " ++
+                "value is not a local absolute path",
+            .{},
+        );
+        return null;
+    }
+
+    return try std.fmt.allocPrintSentinel(
+        alloc,
+        "--working-directory={s}",
+        .{value},
+        0,
+    );
 }
 
 fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
@@ -919,12 +1768,9 @@ fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
         const cwd = std.fs.cwd();
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const wd = try cwd.realpath(".", &cwd_buf);
-        try argv.insert(alloc, 0, try std.fmt.allocPrintSentinel(
-            alloc,
-            "--working-directory={s}",
-            .{wd},
-            0,
-        ));
+        if (try allocForwardedWorkingDirectoryArg(alloc, wd)) |arg| {
+            try argv.insert(alloc, 0, arg);
+        }
     }
 
     if (argv.items.len == 0) {
@@ -935,19 +1781,227 @@ fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
     return try argv.toOwnedSlice(alloc);
 }
 
+/// Parse the relative identifier out of an integrity-level SID string of the
+/// form `S-1-16-<rid>`. Returns null for anything that is not a mandatory
+/// label SID, so callers fail closed rather than mislabelling the pipe.
+fn integrityRidFromSidString(sid: []const u16) ?u32 {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-");
+    if (sid.len <= prefix.len) return null;
+    if (!std.mem.eql(u16, sid[0..prefix.len], prefix)) return null;
+
+    var rid: u32 = 0;
+    for (sid[prefix.len..]) |unit| {
+        if (unit < '0' or unit > '9') return null;
+        rid = std.math.mul(u32, rid, 10) catch return null;
+        rid = std.math.add(u32, rid, @intCast(unit - '0')) catch return null;
+    }
+    return rid;
+}
+
+/// Render the SDDL text for the IPC pipe security descriptor into `buf`.
+///
+/// `D:P` is a protected DACL (no inherited ACEs) holding exactly one ACE:
+/// `GENERIC_ALL` for `user_sid`. An explicit mandatory-label ACE with the
+/// `NO_WRITE_UP` policy is always appended, which both prevents write-up and
+/// lets clients reject unlabeled same-user squatters.
+///
+/// RESIDUAL: `NO_WRITE_UP` does not deny reads, so a medium-integrity
+/// process can open an elevated instance's pipe for `GENERIC_READ` (a bare
+/// `READ_CONTROL` suffices). `WriteFile` on that handle then fails with
+/// `win32=5`, so this is an OCCUPANCY problem, not an access break —
+/// nothing is disclosed and no request can be submitted. But the server
+/// offers one pipe instance at a time, so one such open makes the next
+/// legitimate client fail with `win32=231 ERROR_PIPE_BUSY`. All of this is
+/// observed on hardware, not inferred.
+///
+/// The fix is `NO_READ_UP`, and it lands with the elevation work rather
+/// than here: that change labels the elevated endpoint `NWNR`, and the
+/// added `NR` has been verified on hardware to deny every medium open
+/// including `GENERIC_READ` and `READ_CONTROL`. Duplicating it here would
+/// collide on the same SDDL term for no net gain, and would invalidate the
+/// live descriptor readback recorded in docs/windows.md.
+fn buildIpcPipeSddl(
+    buf: []u16,
+    user_sid: []const u16,
+    integrity_sid: []const u16,
+) error{IpcSecurityDescriptorFailed}![:0]u16 {
+    var len: usize = 0;
+
+    const Appender = struct {
+        fn append(dest: []u16, at: *usize, text: []const u16) error{IpcSecurityDescriptorFailed}!void {
+            // Reserve one unit for the sentinel.
+            if (text.len + 1 > dest.len - at.*) return error.IpcSecurityDescriptorFailed;
+            @memcpy(dest[at.*..][0..text.len], text);
+            at.* += text.len;
+        }
+    };
+
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("O:"));
+    try Appender.append(buf, &len, user_sid);
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("D:P(A;;GA;;;"));
+    try Appender.append(buf, &len, user_sid);
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
+
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("S:(ML;;NW;;;"));
+    try Appender.append(buf, &len, integrity_sid);
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
+
+    buf[len] = 0;
+    return buf[0..len :0];
+}
+
+/// Resolve the process token's mandatory integrity level as an SDDL SID
+/// string at every integrity level.
+///
+/// Windows does not auto-label kernel objects created by a high-integrity
+/// process, and an unlabeled object evaluates as medium. Because the token
+/// USER SID is identical across the elevated and non-elevated tokens of one
+/// account, a DACL keyed on that SID alone would let a filtered medium-IL
+/// process drive an elevated instance's pipe. Returning the label SID here
+/// lets the caller add `S:(ML;;NW;;;S-1-16-<rid>)`, which blocks write-up.
+///
+/// RESIDUAL: the policy is `NW` only, not `NR`/`NX`. See the fuller note on
+/// `buildIpcPipeSddl`; in short, and now measured rather than assumed, a
+/// medium-integrity process can open an elevated instance's pipe for
+/// `GENERIC_READ` -- a bare `READ_CONTROL` is enough, it need not request
+/// read data access at all -- and `WriteFile` on that handle then fails
+/// `win32=5`. So this is an OCCUPANCY problem, not an access break, but the
+/// server offers one pipe instance at a time, so one such handle makes the
+/// next legitimate client fail `win32=231 ERROR_PIPE_BUSY`.
+///
+/// `NR` closes it, and that is no longer a supposition: the elevation work
+/// labels its elevated endpoint `NWNR`, and hardware verification shows the
+/// `NR` denies every medium open including `GENERIC_READ` and
+/// `READ_CONTROL`. It is supplied there rather than duplicated here, since
+/// both would collide on the same SDDL term for no net gain once they land,
+/// and changing the label here would invalidate this PR's live descriptor
+/// readback.
+///
+/// The returned string is OS-allocated; free it with `sys.LocalFree`.
+fn allocIpcPipeIntegritySid(token: windows.HANDLE) ![*:0]u16 {
+    var label_buf: [256]u8 align(@alignOf(sys.TOKEN_MANDATORY_LABEL)) = undefined;
+    var label_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenIntegrityLevel,
+        &label_buf,
+        label_buf.len,
+        &label_len,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const label: *const sys.TOKEN_MANDATORY_LABEL = @ptrCast(&label_buf);
+
+    var sid_string: ?[*:0]u16 = null;
+    if (sys.ConvertSidToStringSidW(
+        label.Label.Sid,
+        &sid_string,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const sid = sid_string orelse return error.IpcSecurityDescriptorFailed;
+
+    _ = integrityRidFromSidString(std.mem.span(sid)) orelse {
+        _ = sys.LocalFree(@ptrCast(sid));
+        return error.IpcSecurityDescriptorFailed;
+    };
+    return sid;
+}
+
+/// Build the security descriptor for the single-instance IPC pipe: a
+/// protected DACL whose only ACE grants full access to the SID that owns
+/// this process, plus an explicit mandatory-label ACE at the process's exact
+/// integrity level. Without it the pipe gets the default DACL, which is wider
+/// than the same-user contract the IPC verbs assume.
+///
+/// The current user's SID is resolved from the process token rather than
+/// using the `OW` (owner rights) SDDL alias, because an elevated token's
+/// default object owner is the Administrators group, not the user.
+///
+/// Returns a descriptor allocated by the OS; free it with `sys.LocalFree`.
+fn allocIpcPipeSecurityDescriptor() !*anyopaque {
+    var token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    defer _ = windows.CloseHandle(token);
+
+    // A TOKEN_USER plus the largest well-formed SID fits comfortably here;
+    // SECURITY_MAX_SID_SIZE is 68 bytes.
+    var token_user_buf: [256]u8 align(@alignOf(sys.TOKEN_USER)) = undefined;
+    var token_user_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenUser,
+        &token_user_buf,
+        token_user_buf.len,
+        &token_user_len,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
+
+    var sid_string: ?[*:0]u16 = null;
+    if (sys.ConvertSidToStringSidW(
+        token_user.User.Sid,
+        &sid_string,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const sid = sid_string orelse return error.IpcSecurityDescriptorFailed;
+    defer _ = sys.LocalFree(@ptrCast(sid));
+
+    const integrity_sid = try allocIpcPipeIntegritySid(token);
+    defer _ = sys.LocalFree(@ptrCast(integrity_sid));
+
+    // Pin the owner to the token user as well as granting that SID access.
+    // The client authenticates the owner and mandatory label directly from
+    // the connected pipe object, avoiding a recyclable process-ID lookup.
+    var sddl_buf: [320]u16 = undefined;
+    const sddl = try buildIpcPipeSddl(
+        &sddl_buf,
+        std.mem.span(sid),
+        std.mem.span(integrity_sid),
+    );
+
+    var descriptor: ?*anyopaque = null;
+    if (sys.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl.ptr,
+        c.SDDL_REVISION_1,
+        &descriptor,
+        null,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+
+    return descriptor orelse error.IpcSecurityDescriptorFailed;
+}
+
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
+
+    // Fail closed: with the default named-pipe security descriptor the pipe
+    // grants Administrators and LocalSystem full control, grants Everyone
+    // read (enough to occupy instances and observe the channel), and is
+    // reachable over SMB. Refuse to listen at all if the descriptor cannot
+    // be built rather than falling back to that.
+    const descriptor = allocIpcPipeSecurityDescriptor() catch |err| {
+        log.warn("failed to build win32 IPC pipe security descriptor err={}", .{err});
+        return;
+    };
+    defer _ = sys.LocalFree(descriptor);
+
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = windows.FALSE,
+    };
 
     server: while (!app.ipc_stop_requested.load(.acquire)) {
         const pipe = sys.CreateNamedPipeW(
             pipe_name.ptr,
             c.PIPE_ACCESS_DUPLEX,
-            windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+            windows.PIPE_TYPE_BYTE |
+                c.PIPE_READMODE_BYTE |
+                win32_ipc.pipe_nowait |
+                c.PIPE_REJECT_REMOTE_CLIENTS,
             c.PIPE_UNLIMITED_INSTANCES,
             16 * 1024,
             16 * 1024,
             0,
-            null,
+            &security_attributes,
         );
         if (pipe == windows.INVALID_HANDLE_VALUE) {
             log.warn("failed to create win32 IPC pipe err={}", .{
@@ -1004,12 +2058,60 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 new-window IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .list_windows => handleListWindowsIpcClient(app, pipe) catch |err| {
+        .list_windows, .list_windows_timed => handleListWindowsIpcClient(
+            app,
+            pipe,
+            kind == .list_windows_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation list IPC request err={}", .{err});
             try win32_ipc.writeDataResponse(pipe, false, "");
         },
-        .perform_action => handlePerformActionIpcClient(app, pipe) catch |err| {
+        .perform_action, .perform_action_timed => handlePerformActionIpcClient(
+            app,
+            pipe,
+            kind == .perform_action_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation action IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .launch_layout, .launch_layout_timed => handleLaunchLayoutIpcClient(
+            app,
+            pipe,
+            kind == .launch_layout_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .new_tab, .new_tab_timed => handleNewTabIpcClient(
+            app,
+            pipe,
+            kind == .new_tab_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation new-tab IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .new_split, .new_split_timed => handleNewSplitIpcClient(
+            app,
+            pipe,
+            kind == .new_split_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation new-split IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .focus, .focus_timed => handleFocusIpcClient(
+            app,
+            pipe,
+            kind == .focus_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation focus IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .send_text, .send_text_timed => handleSendTextIpcClient(
+            app,
+            pipe,
+            kind == .send_text_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation send-text IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
     }
@@ -1019,6 +2121,16 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
 fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
     const arguments = try win32_ipc.decodeNewWindowPayload(app.core_app.alloc, pipe);
     errdefer win32_ipc.freeOwnedArguments(app.core_app.alloc, arguments);
+
+    // Reject policy-invalid requests before the success ACK. The UI-thread
+    // path repeats the same checks as defense in depth, but acknowledging
+    // here first would make +new-window exit successfully without creating a
+    // window.
+    if (!newWindowIpcArgumentsAccepted(arguments)) {
+        try win32_ipc.writeAck(pipe, false);
+        win32_ipc.freeOwnedArguments(app.core_app.alloc, arguments);
+        return;
+    }
 
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
@@ -1033,14 +2145,28 @@ fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const json = try requestAutomationWindowListJson(app, app.core_app.alloc);
+fn newWindowIpcArgumentsAccepted(arguments: ?[]const [:0]const u8) bool {
+    const argv = arguments orelse return true;
+    return switch (scanForwardedToastActivation(argv)) {
+        .activation => true,
+        .malformed => false,
+        .none => forwardedArgvRejection(argv) == null,
+    };
+}
+
+fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const deadline_ms = try win32_ipc.decodeListWindowsDeadline(pipe, timed);
+    const json = try requestAutomationWindowListJson(
+        app,
+        app.core_app.alloc,
+        deadline_ms,
+    );
     defer app.core_app.alloc.free(json);
     try win32_ipc.writeDataResponse(pipe, true, json);
 }
 
-fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe, timed) catch |err| switch (err) {
         error.InvalidAutomationAction => {
             try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
             return;
@@ -1049,7 +2175,12 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     };
     defer app.core_app.alloc.free(payload.action_text);
 
-    requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
+    requestAutomationAction(
+        app,
+        payload.target,
+        payload.action_text,
+        payload.deadline_ms,
+    ) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -1063,8 +2194,161 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
-    const request = try CoreApp.Message.AutomationWindowListRequest.create(alloc);
+fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe, timed) catch |err| {
+        log.warn("invalid win32 launch-layout IPC request err={}", .{err});
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
+        return;
+    };
+    defer app.core_app.alloc.free(payload.name);
+
+    // Name validation restricts this to an unambiguous action payload.
+    const action_text = try std.fmt.allocPrint(
+        app.core_app.alloc,
+        "launch_layout:{s}",
+        .{payload.name},
+    );
+    defer app.core_app.alloc.free(action_text);
+
+    requestAutomationAction(
+        app,
+        .focused,
+        action_text,
+        payload.deadline_ms,
+    ) catch |err| {
+        const status: u8 = switch (err) {
+            error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
+            error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
+            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
+            error.NoAutomationTarget => win32_ipc.ack_no_automation_target,
+            else => return err,
+        };
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodeFocusPayload(pipe, timed) catch |err| switch (err) {
+        error.InvalidAutomationTarget => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
+            return;
+        },
+        else => return err,
+    };
+    requestAutomationCommand(
+        app,
+        .{ .focus = payload.target },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeSendTextPayload(app.core_app.alloc, pipe, timed) catch |err| switch (err) {
+        error.InvalidAutomationText => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+            return;
+        },
+        error.InvalidAutomationTarget => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
+            return;
+        },
+        else => return err,
+    };
+    defer payload.deinit(app.core_app.alloc);
+    requestAutomationCommand(
+        app,
+        .{ .send_text = .{
+            .target = payload.target,
+            .text = payload.text,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn automationCommandAckStatus(err: anyerror) ?u8 {
+    return switch (err) {
+        error.InvalidAutomationTarget, error.InvalidAutomationDirection => win32_ipc.ack_invalid_automation_target,
+        error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
+        error.AutomationPolicyRefused, error.InvalidAutomationWorkingDirectory => win32_ipc.ack_automation_policy_refused,
+        else => null,
+    };
+}
+
+fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeNewTabPayload(app.core_app.alloc, pipe, timed) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    defer payload.deinit(app.core_app.alloc);
+    if (payload.working_directory) |cwd| if (!automationWorkingDirectoryAllowed(cwd)) {
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+        return;
+    };
+    requestAutomationCommand(
+        app,
+        .{ .new_tab = .{
+            .target = payload.target,
+            .working_directory = payload.working_directory,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeNewSplitPayload(app.core_app.alloc, pipe, timed) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    defer payload.deinit(app.core_app.alloc);
+    if (payload.working_directory) |cwd| if (!automationWorkingDirectoryAllowed(cwd)) {
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+        return;
+    };
+    requestAutomationCommand(
+        app,
+        .{ .new_split = .{
+            .target = payload.target,
+            .direction = payload.direction,
+            .working_directory = payload.working_directory,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn requestAutomationWindowListJson(
+    app: *App,
+    alloc: Allocator,
+    client_deadline_ms: u64,
+) ![]u8 {
+    const request = try CoreApp.Message.AutomationWindowListRequest.create(
+        alloc,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
+    );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
@@ -1076,7 +2360,7 @@ fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
     return request.takeResult() orelse error.IPCFailed;
 }
@@ -1085,6 +2369,7 @@ fn requestAutomationAction(
     app: *App,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    client_deadline_ms: u64,
 ) !void {
     if (action_text.len == 0 or action_text.len > win32_ipc.max_action_text_len) {
         return error.InvalidAutomationAction;
@@ -1094,6 +2379,8 @@ fn requestAutomationAction(
         app.core_app.alloc,
         target,
         action_text,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
     );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
@@ -1106,17 +2393,69 @@ fn requestAutomationAction(
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
 }
 
-fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
-    const deadline_ms = sys.GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
-    while (!completed.load(.acquire)) {
-        if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
-        if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+fn requestAutomationCommand(
+    app: *App,
+    command: apprt.ipc.AutomationCommand,
+    client_deadline_ms: u64,
+) !void {
+    const request = try CoreApp.Message.AutomationCommandRequest.create(
+        app.core_app.alloc,
+        command,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
+    );
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
+    const mailbox: CoreApp.Mailbox = .{
+        .rt_app = app,
+        .mailbox = &app.core_app.mailbox,
+    };
+    if (mailbox.push(.{ .automation_command = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
+        return error.IPCFailed;
+    }
+
+    try waitForAutomationCompletion(app, &request.lifecycle);
+    if (request.err) |err| return err;
+}
+
+fn waitForAutomationCompletion(
+    app: *const App,
+    lifecycle: *CoreApp.Message.AutomationRequestLifecycle,
+) !void {
+    while (true) {
+        switch (lifecycle.load()) {
+            .completed => return,
+            .cancelled => return error.IPCFailed,
+            .pending => {
+                if (app.ipc_stop_requested.load(.acquire)) {
+                    if (lifecycle.cancel()) return error.IPCFailed;
+                } else if (automationNowMs() > lifecycle.deadline_ms) {
+                    if (lifecycle.cancel()) return error.IpcTimeout;
+                }
+            },
+            // Once the app thread has claimed a mutating request, the client
+            // waits for its actual outcome instead of reporting a timeout that
+            // could encourage a duplicate retry.
+            .claimed => {},
+        }
         std.Thread.sleep(std.time.ns_per_ms);
     }
+}
+
+fn automationNowMs() u64 {
+    return sys.GetTickCount64();
+}
+
+fn serverAutomationDeadline(client_deadline_ms: u64) u64 {
+    return @min(
+        client_deadline_ms,
+        automationNowMs() +| win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -1344,7 +2683,9 @@ fn persistRecoveryRecord(
 
 fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| {
-        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        // Recursive: `layouts\` sits one level below `%LOCALAPPDATA%\noctty`,
+        // which itself may not exist yet on a first save.
+        std.fs.cwd().makePath(dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -1362,10 +2703,24 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
     return !safe_mode and policy != .never;
 }
 
+fn layoutActionResult(success: bool) !bool {
+    if (!success) return error.LayoutActionFailed;
+    return true;
+}
+
 const SessionRestoreTransaction = struct {
     app: ?*App = null,
     host: ?*Host = null,
+    core_first: *bool,
+    core_first_before: bool,
     committed: bool = false,
+
+    fn init(app: *App) SessionRestoreTransaction {
+        return .{
+            .core_first = &app.core_app.first,
+            .core_first_before = app.core_app.first,
+        };
+    }
 
     fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
         if (self.host == null) {
@@ -1380,9 +2735,13 @@ const SessionRestoreTransaction = struct {
 
     fn rollback(self: *SessionRestoreTransaction) void {
         if (self.committed) return;
-        const app = self.app orelse return;
-        const host = self.host orelse return;
-        app.rollbackSessionRestoreHost(host);
+        if (self.app) |app| if (self.host) |host| {
+            app.rollbackSessionRestoreHost(host);
+            // A failed DestroyWindow deliberately retains the partial host.
+            // Do not make that live surface look like a fresh first surface.
+            if (std.mem.indexOfScalar(*Host, app.hosts.items, host) != null) return;
+        };
+        self.core_first.* = self.core_first_before;
     }
 };
 
@@ -1422,6 +2781,16 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) anyerror!*Surface = null,
+    /// Test-only seam for automation snapshots built without a live core
+    /// surface. Returned strings are owned by the caller.
+    test_automation_pwd: ?*const fn (Allocator, *Surface) anyerror!?[]const u8 = null,
+    /// Test-only seam proving automation uses the protected paste encoder.
+    test_automation_paste: ?*const fn (
+        surface: *Surface,
+        state: apprt.ClipboardRequest,
+        text: [:0]const u8,
+        confirmed: bool,
+    ) anyerror!void = null,
     /// Test-only interleaving seam for the focus revision race between a
     /// structural split-close prepare and commit.
     test_before_split_undo_shell_commit: ?*const fn (
@@ -1438,12 +2807,16 @@ pub const App = struct {
     wheel_settings: SystemWheelSettings = .{},
     system_dynamic_scrollbars: bool = true,
     ipc_pipe_name: ?[:0]const u16 = null,
+    /// Effective sanitized namespace captured when the IPC server starts.
+    ipc_namespace: ?[]const u8 = null,
     ipc_thread: ?std.Thread = null,
     ipc_stop_requested: std.atomic.Value(bool) = .init(false),
     global_hotkeys: std.ArrayListUnmanaged(RegisteredGlobalHotkey) = .empty,
     global_hotkeys_dirty: bool = false,
     ui_thread_id: DWORD = 0,
     quit_timer_id: ?UINT_PTR = null,
+    terminal_handoff_idle_timer_id: ?UINT_PTR = null,
+    terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
@@ -1537,6 +2910,10 @@ pub const App = struct {
     pending_toast_activation: ?win32_toast_activation.ActivationTarget = null,
     /// Ephemeral recovery launch: default config, no saved workspace restore.
     safe_mode: bool = false,
+    /// COM SCM activation for the Windows default-terminal handoff server.
+    /// This process owns adopted sessions directly; raw HANDLE values are
+    /// never forwarded through the serialized single-instance IPC channel.
+    embedding_mode: bool = false,
     recovery_startup: RecoveryStartup = .{},
     /// Top-level shell composition only. Terminal child HWNDs retain their
     /// existing WGL/SwapBuffers ownership regardless of this backend state.
@@ -1551,7 +2928,8 @@ pub const App = struct {
         core_app: *CoreApp,
         opts: struct { safe_mode: bool = false },
     ) !void {
-        const recovery_startup = beginRecoveryStartup(core_app.alloc);
+        const embedding_mode = win32_terminal_handoff.isEmbeddingProcess(core_app.alloc);
+        const recovery_startup = if (embedding_mode) RecoveryStartup{} else beginRecoveryStartup(core_app.alloc);
         const safe_mode = opts.safe_mode or recovery_startup.decision == .safe_mode;
         self.* = .{
             .core_app = core_app,
@@ -1562,6 +2940,7 @@ pub const App = struct {
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),
             .safe_mode = safe_mode,
+            .embedding_mode = embedding_mode,
             .recovery_startup = recovery_startup,
             .hinstance = sys.GetModuleHandleW(null),
             .launcher_profile_hint = detectDefaultProfileHint(core_app.alloc),
@@ -1569,6 +2948,10 @@ pub const App = struct {
             .launcher_profile_target = detectDefaultProfileTarget(core_app.alloc),
             .startup_profile_picker = detectStartupProfilePicker(core_app.alloc),
         };
+        // Install before any host window exists, so the very first
+        // SetWinEventHook registration already has somewhere to deliver.
+        cloak_event_app = self;
+        win32_power.setCloakEventHandler(&onHostCloakEvent);
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
@@ -1713,7 +3096,7 @@ pub const App = struct {
 
         try self.ensureWindowClass();
 
-        if (!self.safe_mode and try self.tryForwardStartupToExistingInstance()) {
+        if (!self.embedding_mode and !self.safe_mode and try self.tryForwardStartupToExistingInstance()) {
             // Forwarding is a successful startup outcome for this process.
             // Mark it ready so repeated new-window launches cannot accumulate
             // false crash-loop evidence and trigger automatic safe mode.
@@ -1728,16 +3111,58 @@ pub const App = struct {
         defer {
             self.stopUndoPruneTimer();
             self.stopQuitTimer();
+            self.stopTerminalHandoffIdleTimer();
             drainDeferredUiaDisconnects(ui_thread_id);
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             self.running = false;
         }
 
+        var terminal_handoff_server: ?win32_terminal_handoff.Server = null;
+        defer if (terminal_handoff_server) |*server| {
+            self.terminal_handoff_server = null;
+            _ = server.revoke();
+            server.drainPending();
+        };
+        if (self.embedding_mode) {
+            if (!self.com_initialized) return error.ComApartmentUnavailable;
+            terminal_handoff_server = win32_terminal_handoff.Server.init(
+                self.core_app.alloc,
+                self,
+                queueTerminalHandoff,
+            );
+            // Publish before registering: once the class object is live a
+            // client can activate it, and the session queue has to be
+            // reachable from the very first handoff.
+            self.terminal_handoff_server = &terminal_handoff_server.?;
+            try terminal_handoff_server.?.register();
+            self.startTerminalHandoffIdleTimer();
+        }
+
         // Safe mode is an isolated recovery process. It neither forwards into
         // the normal instance nor competes for that instance's IPC endpoint.
-        if (!self.safe_mode) try self.startIpcServer();
+        if (!self.embedding_mode and !self.safe_mode) try self.startIpcServer();
 
-        if (self.config.@"initial-window") {
+        if (!self.embedding_mode and self.config.@"launch-layout" != null) {
+            const name = self.config.@"launch-layout".?;
+            // An explicit CLI layout request is honored even when
+            // `initial-window` is disabled, because the user asked for this
+            // exact window. It is also one-shot: later ordinary new-window
+            // actions must not inherit and replay it from the app config.
+            const launched = self.launchNamedLayout(name, null);
+            self.config.@"launch-layout" = null;
+            // Clearing the field is not enough: `finalize` -> `loadTheme` and
+            // `changeConditionalState` replay `_replay_steps` through
+            // `loadIter`, and a per-window clone inherits that history, so a
+            // surviving startup step would turn a later ordinary new window
+            // into a layout launch.
+            _ = self.config.dropLaunchLayoutReplaySteps(0);
+            if (!launched) {
+                try self.createWindow(default_title);
+                if (self.primarySurface()) |surface| if (surface.host) |host| {
+                    host.setBanner(.err, "Layout could not be opened.") catch {};
+                };
+            }
+        } else if (!self.embedding_mode and self.config.@"initial-window") {
             const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
@@ -1745,18 +3170,18 @@ pub const App = struct {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
             }
-        } else {
+        } else if (!self.embedding_mode) {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
-        self.scheduleGlobalHotkeySync();
-        if (self.global_hotkeys_dirty and self.windows.items.len == 0) {
+        if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
+        if (!self.embedding_mode and self.global_hotkeys_dirty and self.windows.items.len == 0) {
             self.global_hotkeys_dirty = false;
             self.syncGlobalHotkeys() catch |err| {
                 log.err("failed to sync win32 global hotkeys err={}", .{err});
             };
         }
-        if (self.windows.items.len == 0) self.startQuitTimer();
+        if (!self.embedding_mode and self.windows.items.len == 0) self.startQuitTimer();
 
         self.markRecoveryReady();
 
@@ -1802,6 +3227,56 @@ pub const App = struct {
                 continue;
             }
 
+            if (msg.message == c.WM_WINHOSTTY_TERMINAL_HANDOFF) {
+                // The message carries an opaque identifier, never a pointer.
+                // Any process on this desktop at our integrity level can post
+                // into this loop, and a pointer taken from the message would be
+                // an address of the sender's choosing that we dereference,
+                // deinitialize and free. Identifiers are resolved against the
+                // server's own table and anything unrecognized is dropped.
+                const server = self.terminal_handoff_server orelse {
+                    log.warn("terminal handoff message arrived without a handoff server", .{});
+                    continue;
+                };
+                const pending = server.takePending(terminalHandoffId(msg.lParam)) orelse {
+                    log.warn("ignoring terminal handoff message with an unknown session id", .{});
+                    continue;
+                };
+                defer {
+                    pending.deinit();
+                    self.core_app.alloc.destroy(pending);
+                }
+                self.stopTerminalHandoffIdleTimer();
+                // This same-STA message runs only after the COM stub has
+                // marshaled the returned system handles into OpenConsole.
+                //
+                // That ordering is the entire reason closing here is safe, and
+                // it holds only while the handoff class lives in an STA. Under
+                // an MTA the stub can still be marshaling when this runs, and
+                // closing would break every console launch in a way that looks
+                // like an unrelated pipe bug. Refuse to close rather than
+                // silently corrupt the handoff.
+                if (currentApartmentIsSta()) {
+                    pending.closeMarshaledPipeCopies();
+                } else {
+                    log.err("terminal handoff dispatched outside an STA; leaving marshaled pipe copies open", .{});
+                }
+                self.createAdoptedWindow(pending) catch |err| {
+                    log.err("terminal handoff surface creation failed err={}", .{err});
+                    if (self.embedding_mode and self.windows.items.len == 0) {
+                        if (self.exitEmbeddingServerIfIdle()) {
+                            self.running = false;
+                            sys.PostQuitMessage(1);
+                        } else {
+                            self.startTerminalHandoffIdleTimer();
+                        }
+                    }
+                };
+                try self.core_app.tick(self);
+                if (!self.running and self.windows.items.len == 0) break;
+                continue;
+            }
+
             if (msg.message == c.WM_WINHOSTTY_UIA_DISCONNECT) {
                 if (msg.lParam == 0) {
                     log.warn("win32 UIA deferred disconnect message had no context", .{});
@@ -1813,6 +3288,21 @@ pub const App = struct {
             }
 
             if (msg.message == c.WM_TIMER) {
+                if (self.terminal_handoff_idle_timer_id) |timer_id| {
+                    if (msg.wParam == timer_id) {
+                        self.stopTerminalHandoffIdleTimer();
+                        if (self.embedding_mode and self.windows.items.len == 0) {
+                            if (self.exitEmbeddingServerIfIdle()) {
+                                log.info("terminal handoff server idle timeout", .{});
+                                self.running = false;
+                                sys.PostQuitMessage(0);
+                            } else {
+                                self.startTerminalHandoffIdleTimer();
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
                         self.stopQuitTimer();
@@ -1867,6 +3357,7 @@ pub const App = struct {
     pub fn terminate(self: *App) void {
         self.stopUndoPruneTimer();
         self.stopQuitTimer();
+        self.stopTerminalHandoffIdleTimer();
         self.update_check_running.store(false, .release);
         if (self.update_notice) |*notice| {
             notice.deinit(self.core_app.alloc);
@@ -1886,6 +3377,10 @@ pub const App = struct {
             self.shell_compositor.deinit();
             self.shell_compositor_initialized = false;
         }
+        // After destroyAllWindows: every Host has released its cloak-hook
+        // reference by now, so no further callback can reach a freed App.
+        win32_power.setCloakEventHandler(null);
+        cloak_event_app = null;
         self.hosts.deinit(self.core_app.alloc);
         self.windows.deinit(self.core_app.alloc);
         self.global_hotkeys.deinit(self.core_app.alloc);
@@ -1948,6 +3443,16 @@ pub const App = struct {
         return self.localAppDataPath("session-state.json");
     }
 
+    fn namedLayoutPath(self: *const App, name: []const u8) ![]u8 {
+        const relative = try win32_layouts.relativePathAlloc(self.core_app.alloc, name);
+        defer self.core_app.alloc.free(relative);
+        return self.localAppDataPath(relative) orelse error.LocalAppDataUnavailable;
+    }
+
+    fn namedLayoutsDirectoryPath(self: *const App) ?[]u8 {
+        return self.localAppDataPath("layouts");
+    }
+
     fn sessionStateEnabled(self: *const App) bool {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
@@ -1956,6 +3461,7 @@ pub const App = struct {
     }
 
     fn sessionRestoreEligible(self: *const App) bool {
+        if (self.embedding_mode) return false;
         return sessionRestorePolicyAllows(
             self.safe_mode,
             self.config.@"window-save-state",
@@ -2053,6 +3559,186 @@ pub const App = struct {
         };
     }
 
+    fn launchNamedLayout(self: *App, name: []const u8, preferred_banner_host: ?*Host) bool {
+        const banner_host = preferred_banner_host orelse if (self.primarySurface()) |surface|
+            surface.host
+        else
+            null;
+        win32_layouts.validateName(name) catch |err| {
+            log.warn("named layout launch rejected invalid name name={s} err={}", .{ name, err });
+            if (banner_host) |host| host.setBanner(.err, "Invalid layout name.") catch {};
+            return false;
+        };
+        const path = self.namedLayoutPath(name) catch |err| {
+            log.warn("named layout launch path resolution failed name={s} err={}", .{ name, err });
+            if (banner_host) |host| host.setBanner(.err, "Layout path is unavailable.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(path);
+
+        var loaded = win32_session_persistence.loadLayoutAlloc(
+            self.core_app.alloc,
+            path,
+            win32_session_persistence.default_max_state_bytes,
+        );
+        defer loaded.deinit();
+        switch (loaded) {
+            .missing => {
+                log.warn("named layout launch file not found name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout was not found.") catch {};
+                return false;
+            },
+            .oversized => {
+                log.warn("named layout launch file exceeds size limit name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout file is too large.") catch {};
+                return false;
+            },
+            .transient => |err| {
+                log.warn("named layout launch read failed name={s} path={s} err={}", .{ name, path, err });
+                if (banner_host) |host| host.setBanner(.err, "Layout could not be read.") catch {};
+                return false;
+            },
+            .corrupt => |err| {
+                const quarantined = self.quarantineInvalidNamedLayout(path, name, err);
+                if (banner_host) |host| host.setBanner(
+                    .err,
+                    if (quarantined)
+                        "Invalid layout was quarantined."
+                    else
+                        "Invalid layout could not be quarantined.",
+                ) catch {};
+                return false;
+            },
+            .loaded => |parsed| {
+                if (parsed.value.windows.len != 1) {
+                    const quarantined = self.quarantineInvalidNamedLayout(
+                        path,
+                        name,
+                        error.InvalidWindowCount,
+                    );
+                    if (banner_host) |host| host.setBanner(
+                        .err,
+                        if (quarantined)
+                            "Invalid layout was quarantined."
+                        else
+                            "Invalid layout could not be quarantined.",
+                    ) catch {};
+                    return false;
+                }
+                // A layout file can come from a synced or shared directory, and
+                // materializing one spawns a shell per pane. Refuse oversized
+                // documents instead of quarantining them: the file may well be
+                // the user's own, just too large for one window.
+                win32_layouts.validateLaunchSize(parsed.value.windows[0]) catch |err| {
+                    log.warn("named layout launch rejected oversized document name={s} err={}", .{ name, err });
+                    if (banner_host) |host| host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
+                    return false;
+                };
+                // A layout is a shape, not a placement: the save path omits
+                // window geometry deliberately. Strip any a hand-authored or
+                // synced file carries so it cannot place the new window
+                // off-screen, resize it, or maximize it.
+                var shape = parsed.value.windows[0];
+                shape.x = null;
+                shape.y = null;
+                shape.width = null;
+                shape.height = null;
+                shape.state = null;
+                const surface = self.restoreSessionWindow(shape) catch |err| {
+                    log.warn("named layout materialization failed name={s} err={}", .{ name, err });
+                    if (banner_host) |host| host.setBanner(.err, "Layout could not be opened.") catch {};
+                    return false;
+                };
+                self.activateSurface(surface);
+                return true;
+            },
+        }
+    }
+
+    fn quarantineInvalidNamedLayout(
+        self: *App,
+        path: []const u8,
+        name: []const u8,
+        parse_error: anyerror,
+    ) bool {
+        const destination = win32_session_persistence.quarantineCorruptFileAlloc(
+            self.core_app.alloc,
+            path,
+        ) catch |err| {
+            log.warn("named layout quarantine failed name={s} path={s} parse_err={} move_err={}", .{ name, path, parse_error, err });
+            return false;
+        };
+        defer self.core_app.alloc.free(destination);
+        log.warn("named layout quarantined invalid file name={s} path={s} parse_err={}", .{ name, destination, parse_error });
+        return true;
+    }
+
+    fn saveNamedLayout(self: *App, target: apprt.Target, name: []const u8) bool {
+        const surface = self.findSurfaceForTarget(target) orelse {
+            log.warn("named layout save has no target surface name={s}", .{name});
+            return false;
+        };
+        const host = surface.host orelse {
+            log.warn("named layout save target has no host name={s}", .{name});
+            return false;
+        };
+        win32_layouts.validateName(name) catch |err| {
+            log.warn("named layout save rejected invalid name name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Invalid layout name.") catch {};
+            return false;
+        };
+        const path = self.namedLayoutPath(name) catch |err| {
+            log.warn("named layout save path resolution failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout path is unavailable.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(path);
+
+        var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
+        defer arena.deinit();
+        const window = buildSessionWindow(arena.allocator(), host, .layout) catch |err| {
+            log.warn("named layout save snapshot failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        // Launch refuses documents above this cap, so refuse to write one.
+        // Saving must not report success for a layout that can never open.
+        win32_layouts.validateLaunchSize(window) catch |err| {
+            log.warn("named layout save rejected oversized window name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
+            return false;
+        };
+        const layout_windows = [_]win32_session_state.Window{window};
+        const encoded = win32_session_state.encodeAlloc(
+            self.core_app.alloc,
+            .{ .windows = &layout_windows },
+        ) catch |err| {
+            log.warn("named layout save encode failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(encoded);
+        if (!namedLayoutEncodingFitsReadLimit(encoded.len)) {
+            log.warn(
+                "named layout save rejected oversized encoding name={s} bytes={d}",
+                .{ name, encoded.len },
+            );
+            host.setBanner(.err, "Layout data is too large.") catch {};
+            return false;
+        }
+        writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
+            log.warn("named layout save write failed name={s} path={s} err={}", .{ name, path, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        host.setBanner(.info, "Layout saved.") catch {};
+        return true;
+    }
+
+    fn namedLayoutEncodingFitsReadLimit(bytes: usize) bool {
+        return bytes <= win32_session_persistence.default_max_state_bytes;
+    }
+
     fn restoreSessionState(self: *App) !bool {
         var parsed = self.loadSessionState() catch |err| {
             log.warn("win32 session restore: state read failed; leaving file untouched err={}", .{err});
@@ -2137,7 +3823,7 @@ pub const App = struct {
         self: *App,
         window: win32_session_state.Window,
     ) !*Surface {
-        var transaction: SessionRestoreTransaction = .{};
+        var transaction = SessionRestoreTransaction.init(self);
         defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
@@ -2241,7 +3927,20 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
         defer config.deinit();
 
-        if (pane.profile) |key| try self.applyRestoredProfileConfig(&config, host, key);
+        // `initial-command` (from `-e` or the config option) applies to the
+        // ordinary first window. A restored pane's command comes from its
+        // saved profile, so clear it: otherwise `Surface.init` prefers it
+        // while `app.first` is set and the first pane of a restored session
+        // or a launched layout runs the wrong command.
+        config.@"initial-command" = null;
+
+        // A refused profile (today: SSH) must not leave its key on the surface
+        // either, or a later split of the restored pane would re-resolve it and
+        // launch the connection this restore just declined.
+        const profile_applied = if (pane.profile) |key|
+            try self.applyRestoredProfileConfig(&config, host, key)
+        else
+            false;
         if (pane.cwd) |cwd| {
             const alloc = config._arena.?.allocator();
             config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
@@ -2260,7 +3959,9 @@ pub const App = struct {
         });
         transaction.noteSurface(surface);
 
-        if (pane.profile) |key| try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
+        if (profile_applied) {
+            try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, pane.profile.?);
+        }
         if (pane.title_override) |title| try surface.setTitleOverride(title);
         if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
         if (pane.cwd) |cwd| try surface.setPwd(cwd);
@@ -2272,17 +3973,20 @@ pub const App = struct {
         config: *configpkg.Config,
         host: ?*Host,
         key: []const u8,
-    ) !void {
+    ) !bool {
         if (host) |existing| {
-            if ((try existing.profileForKey(key))) |profile| {
-                try applyProfileSurfaceConfig(config, profile);
-            }
-            return;
+            const profile = (try existing.profileForKey(key)) orelse return false;
+            if (!isSessionRestorableProfile(profile)) return false;
+            try applyProfileSurfaceConfig(config, profile);
+            return true;
         }
 
-        const profiles = try windows_shell.listProfiles(self.core_app.alloc);
+        const profiles = try windows_shell.listProfiles(
+            self.core_app.alloc,
+            self.config.@"ssh-config-hosts",
+        );
         defer windows_shell.deinitProfiles(self.core_app.alloc, profiles);
-        try applyProfileConfigByKey(config, profiles, key);
+        return try applyProfileConfigByKey(config, profiles, key);
     }
 
     fn applyRestoredWindowPlacement(
@@ -2353,25 +4057,32 @@ pub const App = struct {
         var built: usize = 0;
         for (self.hosts.items) |host| {
             if (hostSessionTabCount(host) == 0) continue;
-            windows_state[built] = try buildSessionWindow(alloc, host);
+            windows_state[built] = try buildSessionWindow(alloc, host, .session);
             built += 1;
         }
 
         return .{ .windows = windows_state };
     }
 
+    /// What a window snapshot is for. `.session` is this process's own restore
+    /// state; `.layout` is a user-visible named layout file, which carries only
+    /// the shape fields and no window geometry.
+    const SnapshotScope = enum { session, layout };
+
     fn buildSessionWindow(
         alloc: Allocator,
         host: *Host,
+        scope: SnapshotScope,
     ) !win32_session_state.Window {
         const tab_count = hostSessionTabCount(host);
+        if (scope == .layout and tab_count == 0) return error.EmptyTabs;
         const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
         var selected_tab: usize = 0;
         var built: usize = 0;
         for (host.tabs.items, 0..) |*tab, i| {
             if (tabContainsQuickTerminal(tab)) continue;
             if (i <= host.active_tab) selected_tab = built;
-            tabs[built] = try buildSessionTab(alloc, tab);
+            tabs[built] = try buildSessionTab(alloc, tab, scope);
             built += 1;
         }
 
@@ -2379,6 +4090,8 @@ pub const App = struct {
             .selected_tab = selected_tab,
             .tabs = tabs,
         };
+        // Geometry is restore state, not layout shape.
+        if (scope == .layout) return window;
         if (sessionWindowRect(host)) |rect| {
             window.x = rect.left;
             window.y = rect.top;
@@ -2394,6 +4107,7 @@ pub const App = struct {
     fn buildSessionTab(
         alloc: Allocator,
         tab: *const Tab,
+        scope: SnapshotScope,
     ) !win32_session_state.Tab {
         var selected_leaf: usize = 0;
         var leaf_index: usize = 0;
@@ -2408,24 +4122,44 @@ pub const App = struct {
 
         return .{
             .selected_leaf = selected_leaf,
-            .layout = try buildSessionLayout(alloc, tab),
+            .layout = try buildSessionLayout(alloc, tab, scope),
         };
     }
 
     fn buildSessionLayout(
         alloc: Allocator,
         tab: *const Tab,
+        scope: SnapshotScope,
     ) !win32_session_state.LayoutTree {
         if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
         for (tab.tree.nodes, 0..) |node, i| {
             nodes[i] = switch (node) {
-                .leaf => |surface| .{ .pane = .{
-                    .cwd = surface.pwd,
-                    .profile = surface.launch_profile_key,
-                    .title_override = surface.title_override,
-                    .tab_title_override = surface.tab_title_override,
-                } },
+                // The two pane literals are deliberately separate. Anything
+                // added to the session pane below (terminal contents, process
+                // state) must stay out of user-visible layout files unless it
+                // is also added to the layout literal on purpose. Neither
+                // snapshot may persist an SSH launch for unattended restore.
+                .leaf => |surface| switch (scope) {
+                    .session => .{ .pane = .{
+                        .cwd = if (surface.launched_ssh) null else surface.pwd,
+                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
+                        .title_override = surface.title_override,
+                        .tab_title_override = if (surface.launched_ssh)
+                            null
+                        else
+                            surface.tab_title_override,
+                    } },
+                    .layout => .{ .pane = .{
+                        .cwd = if (surface.launched_ssh) null else surface.pwd,
+                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
+                        .title_override = surface.title_override,
+                        .tab_title_override = if (surface.launched_ssh)
+                            null
+                        else
+                            surface.tab_title_override,
+                    } },
+                },
                 .split => |split| .{ .split = .{
                     .axis = switch (split.layout) {
                         .horizontal => .horizontal,
@@ -2653,16 +4387,23 @@ pub const App = struct {
     fn tryForwardStartupToExistingInstance(self: *App) !bool {
         if (self.config.@"single-instance" != .true) return false;
 
-        const arguments = try collectStartupForwardArguments(self.core_app.alloc);
-        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
-
         const pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
         defer self.core_app.alloc.free(pipe_name);
+
+        if (try trySendStartupLaunchLayoutIpc(
+            self.core_app.alloc,
+            pipe_name,
+            self.config.@"launch-layout",
+        )) |forwarded| return forwarded;
+
+        const arguments = try collectStartupForwardArguments(self.core_app.alloc);
+        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
 
         return try sendNewWindowIpc(
             self.core_app.alloc,
             pipe_name,
             arguments,
+            win32_ipc.automation_response_timeout_ms,
         );
     }
 
@@ -2670,7 +4411,13 @@ pub const App = struct {
         if (self.config.@"single-instance" != .true) return;
         if (self.ipc_thread != null) return;
 
-        self.ipc_pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
+        self.ipc_namespace = try sanitizeIpcNamespace(self.core_app.alloc, self.config.class);
+        errdefer {
+            if (self.ipc_namespace) |namespace| self.core_app.alloc.free(namespace);
+            self.ipc_namespace = null;
+        }
+
+        self.ipc_pipe_name = try allocIpcPipeName(self.core_app.alloc, self.ipc_namespace);
         errdefer {
             if (self.ipc_pipe_name) |pipe_name| self.core_app.alloc.free(pipe_name);
             self.ipc_pipe_name = null;
@@ -2699,6 +4446,10 @@ pub const App = struct {
         if (self.ipc_pipe_name) |pipe_name| {
             self.core_app.alloc.free(pipe_name);
             self.ipc_pipe_name = null;
+        }
+        if (self.ipc_namespace) |namespace| {
+            self.core_app.alloc.free(namespace);
+            self.ipc_namespace = null;
         }
         self.ipc_stop_requested.store(false, .release);
     }
@@ -3072,6 +4823,53 @@ pub const App = struct {
         }
     }
 
+    fn startTerminalHandoffIdleTimer(self: *App) void {
+        self.stopTerminalHandoffIdleTimer();
+        const timer_id = sys.SetTimer(null, 0, 5000, null);
+        if (timer_id == 0) {
+            log.err("failed to start terminal handoff idle timer err={}", .{windows.kernel32.GetLastError()});
+            return;
+        }
+        self.terminal_handoff_idle_timer_id = timer_id;
+    }
+
+    fn stopTerminalHandoffIdleTimer(self: *App) void {
+        if (self.terminal_handoff_idle_timer_id) |timer_id| {
+            _ = sys.KillTimer(null, timer_id);
+            self.terminal_handoff_idle_timer_id = null;
+        }
+    }
+
+    /// Decide whether the embedding-mode server may exit, and close the race
+    /// against an in-flight activation while deciding.
+    ///
+    /// Returning true means the class object has been revoked and no client
+    /// can still be mid-activation, so the caller may quit. Returning false
+    /// means a client holds the class object or a handoff is already queued;
+    /// the class object is left registered (or re-registered) and the caller
+    /// must keep running.
+    fn exitEmbeddingServerIfIdle(self: *App) bool {
+        const server = self.terminal_handoff_server orelse return true;
+
+        // A client between CoGetClassObject and CreateInstance holds a
+        // LockServer reference, and a client that created an ITerminalHandoff3
+        // without locking still owns a live object. Exiting under either one
+        // would fail its activation.
+        if (server.isBusy()) return false;
+
+        // Revoke first, then re-check. After the revoke no new activation can
+        // arrive, so anything observed now is everything that can exist.
+        if (!server.revoke()) return false;
+        if (!server.isBusy()) return true;
+
+        // Something landed in the gap between the check and the revoke. Take
+        // the class object back and keep serving.
+        server.register() catch |err| {
+            log.err("failed to re-register terminal handoff class object err={}", .{err});
+        };
+        return false;
+    }
+
     fn stopUndoPruneTimer(self: *App) void {
         if (self.undo_prune_timer_id) |timer_id| {
             _ = sys.KillTimer(null, timer_id);
@@ -3214,72 +5012,64 @@ pub const App = struct {
                     .window,
                 );
                 defer config.deinit();
-                try applyNewWindowArguments(self.core_app.alloc, &config, forwarded_arguments);
+                // The forwarded argv reaches us over the single-instance IPC
+                // pipe, so it is only as trusted as any process running as
+                // this user. Refuse the whole request unless every key is on
+                // the presentation allowlist.
+                if (forwarded_arguments) |argv| {
+                    if (forwardedArgvRejection(argv)) |rejection| {
+                        logForwardedArgvRejection(rejection);
+                        return true;
+                    }
+                }
+                applyNewWindowArguments(
+                    self.core_app.alloc,
+                    &config,
+                    forwarded_arguments,
+                ) catch |err| switch (err) {
+                    // Defense in depth: `applyNewWindowArguments` enforces
+                    // the same filter independently. Treat a rejection as
+                    // handled so it cannot abort the app tick. Logged here
+                    // too so the rejection can never become silent if the
+                    // pre-check above is ever refactored away.
+                    error.ForbiddenForwardedArgument => {
+                        log.err(
+                            "refusing forwarded new-window argv: rejected by applyNewWindowArguments",
+                            .{},
+                        );
+                        return true;
+                    },
+                    else => return err,
+                };
+                if (config.@"launch-layout") |name| {
+                    const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                    _ = self.launchNamedLayout(name, banner_host);
+                    return true;
+                }
                 _ = try self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = self.findSurfaceForTarget(target),
                 });
                 return true;
             },
 
+            .launch_layout => {
+                const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                return layoutActionResult(self.launchNamedLayout(value.name, banner_host));
+            },
+
+            .save_layout => {
+                return layoutActionResult(self.saveNamedLayout(target, value.name));
+            },
+
             .new_tab => {
-                var config = try apprt.surface.newConfig(
-                    self.core_app,
-                    &self.config,
-                    .tab,
-                );
-                defer config.deinit();
                 const source = self.findSurfaceForTarget(target);
-                const surface = try self.createWindowSurface(&config, default_title, .{
-                    .host_id = if (source) |v| v.host_id else null,
-                    .tab_insert_index = if (source) |v| if (v.host) |host|
-                        windowNewTabInsertIndex(host, self.config.@"window-new-tab-position")
-                    else
-                        null else null,
-                    .clone_state_from = source,
-                });
-                if (source) |v| {
-                    v.invalidateRedoForUnsupportedTabStructuralAction();
-                }
-                self.activateSurface(surface);
+                _ = try self.createNewTab(source, null, false, false);
                 return true;
             },
 
             .new_split => {
-                var config = try apprt.surface.newConfig(
-                    self.core_app,
-                    &self.config,
-                    .split,
-                );
-                defer config.deinit();
                 const source = self.findSurfaceForTarget(target) orelse return false;
-                const tab_info = self.findTabForSurface(source) orelse return false;
-                const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
-                _ = try applySplitWorkingDirectoryFromSource(&config, source, self.startup_cwd);
-                const split_direction = splitDirectionFromAction(value);
-                const surface = try self.createWindowSurface(&config, default_title, .{
-                    .host_id = source.host_id,
-                    .tab_id = tab_info.tab.id,
-                    .clone_state_from = source,
-                    .split_direction = split_direction,
-                });
-                if (inherited_profile_key) |key| {
-                    try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
-                }
-                tab_info.tab.clearRedoHistory();
-                if (tab_info.host.pushStructuralUndo(.{
-                    .kind = .split_create,
-                    .timestamp_ms = sys.GetTickCount64(),
-                    .sequence_id = self.nextUndoSequence(),
-                    .payload = .{ .split_create = .{
-                        .source_surface = source,
-                        .created_surface = surface,
-                        .direction = split_direction,
-                    } },
-                })) |_| {} else |err| {
-                    log.warn("new_split undo snapshot failed err={}", .{err});
-                    _ = tab_info.host.clearStructuralRedo();
-                }
-                self.activateSurface(surface);
+                _ = try self.createNewSplit(source, splitDirectionFromAction(value), null, false);
                 return true;
             },
 
@@ -3307,7 +5097,17 @@ pub const App = struct {
             .config_change => {
                 switch (target) {
                     .app => {
-                        const config = try value.config.clone(self.core_app.alloc);
+                        var config = try value.config.clone(self.core_app.alloc);
+                        const ssh_config_hosts_changed =
+                            self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
+                        // CLI launch-layout is a one-shot startup/new-window
+                        // request. Config reload reparses the original argv, so
+                        // strip it before installing the long-lived app config
+                        // -- both the parsed field and the replay step, since
+                        // a later theme or conditional-state reload would
+                        // otherwise put it back.
+                        config.@"launch-layout" = null;
+                        _ = config.dropLaunchLayoutReplaySteps(0);
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
                         // config change supersedes that transaction: dismiss
@@ -3324,6 +5124,15 @@ pub const App = struct {
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
                         for (self.hosts.items) |host| {
+                            if (ssh_config_hosts_changed) {
+                                host.invalidateProfiles();
+                                if (host.overlay_mode == .profile) {
+                                    _ = host.reloadProfiles() catch |err| blk: {
+                                        log.warn("SSH profile reload after config change failed err={}", .{err});
+                                        break :blk false;
+                                    };
+                                }
+                            }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
                         }
                         self.scheduleGlobalHotkeySync();
@@ -3918,13 +5727,22 @@ pub const App = struct {
         target: apprt.ipc.Target,
         comptime action: apprt.ipc.Action.Key,
         value: apprt.ipc.Action.Value(action),
+        response_timeout_ms: u64,
     ) !bool {
         switch (action) {
             .new_window => {
+                const launch_layout = scanLaunchLayoutIpcArgument(value.arguments) catch |err| {
+                    log.err("--launch-layout must be the only +new-window argument", .{});
+                    return err;
+                };
+
                 const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
                 defer alloc.free(pipe_name);
-
-                if (try sendNewWindowIpc(alloc, pipe_name, value.arguments)) return true;
+                const forwarded = switch (launch_layout) {
+                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments, response_timeout_ms),
+                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name, response_timeout_ms),
+                };
+                if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
             },
         }
@@ -3933,10 +5751,11 @@ pub const App = struct {
     pub fn queryAutomationWindowList(
         alloc: Allocator,
         target: apprt.ipc.Target,
+        response_timeout_ms: u64,
     ) !?[]u8 {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
-        return try sendListWindowsIpc(alloc, pipe_name);
+        return try sendListWindowsIpc(alloc, pipe_name, response_timeout_ms);
     }
 
     pub fn performAutomationAction(
@@ -3944,10 +5763,155 @@ pub const App = struct {
         target: apprt.ipc.Target,
         action_target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
+        response_timeout_ms: u64,
     ) !bool {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
-        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text);
+        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text, response_timeout_ms);
+    }
+
+    pub fn focusAutomationTarget(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendFocusIpc(alloc, pipe_name, automation_target, response_timeout_ms);
+    }
+
+    pub fn newAutomationTab(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        working_directory: ?[]const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendNewTabIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            working_directory,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn newAutomationSplit(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        direction: apprt.ipc.AutomationSplitDirection,
+        working_directory: ?[]const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendNewSplitIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            direction,
+            working_directory,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn sendAutomationText(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        text: []const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendAutomationTextIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            text,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn performAutomationCommand(self: *App, command: apprt.ipc.AutomationCommand) !void {
+        switch (command) {
+            .new_tab => |value| {
+                if (value.working_directory) |cwd| {
+                    if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
+                }
+                const resolved: struct {
+                    source: ?*Surface,
+                    explicit_window_target: bool,
+                } = switch (value.target) {
+                    .focused => .{
+                        .source = self.automationDefaultSurface(),
+                        .explicit_window_target = false,
+                    },
+                    .window_id => |id| .{
+                        .source = self.activeSurfaceForHost(id),
+                        .explicit_window_target = true,
+                    },
+                    .surface_id => return error.InvalidAutomationTarget,
+                };
+                const source = resolved.source orelse return error.AutomationTargetNotFound;
+                _ = try self.createNewTab(
+                    source,
+                    value.working_directory,
+                    resolved.explicit_window_target,
+                    true,
+                );
+            },
+            .new_split => |value| {
+                if (value.working_directory) |cwd| {
+                    if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
+                }
+                const source = switch (value.target) {
+                    .focused => self.automationDefaultSurface(),
+                    .surface_id => |id| self.findSurfaceById(id),
+                    .window_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                const direction: SplitTreeSurface.Split.Direction = switch (value.direction) {
+                    .left => .left,
+                    .right => .right,
+                    .up => .up,
+                    .down => .down,
+                };
+                _ = try self.createNewSplit(source, direction, value.working_directory, true);
+            },
+            .focus => |target| {
+                const surface = switch (target) {
+                    .surface_id => |id| self.findLiveSurfaceById(id),
+                    .window_id => |id| self.activeSurfaceForHost(id),
+                    .focused => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                self.activateSurface(surface);
+            },
+            .send_text => |value| {
+                const surface = switch (value.target) {
+                    .surface_id => |id| self.findLiveSurfaceById(id),
+                    .focused, .window_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                if (!automationTextAllowed(value.text)) return error.AutomationPolicyRefused;
+
+                const text_z = try self.core_app.alloc.dupeZ(u8, value.text);
+                defer self.core_app.alloc.free(text_z);
+                if (self.test_automation_paste) |paste| {
+                    paste(surface, .paste, text_z, false) catch |err| switch (err) {
+                        error.UnsafePaste => return error.AutomationPolicyRefused,
+                        else => return err,
+                    };
+                } else {
+                    surface.core().completeClipboardRequest(.paste, text_z, false) catch |err| switch (err) {
+                        error.UnsafePaste => return error.AutomationPolicyRefused,
+                        else => return err,
+                    };
+                }
+            },
+        }
     }
 
     pub fn buildAutomationWindowListJson(
@@ -3967,6 +5931,19 @@ pub const App = struct {
         self: *App,
         alloc: Allocator,
     ) !apprt.ipc.AutomationWindowList {
+        const namespace = self.ipc_namespace orelse return error.IpcServerNotStarted;
+        var instance: apprt.ipc.AutomationInstance = instance: {
+            const version = try alloc.dupe(u8, build_config.version_string);
+            errdefer alloc.free(version);
+            const namespace_copy = try alloc.dupe(u8, namespace);
+            break :instance .{
+                .pid = sys.GetCurrentProcessId(),
+                .version = version,
+                .class = namespace_copy,
+            };
+        };
+        errdefer instance.deinit(alloc);
+
         const window_entries = try alloc.alloc(apprt.ipc.AutomationWindow, self.automationWindowCount());
         var built: usize = 0;
         errdefer {
@@ -3976,11 +5953,11 @@ pub const App = struct {
 
         for (self.hosts.items) |host| {
             if (host.tabs.items.len == 0) continue;
-            window_entries[built] = try buildAutomationWindow(alloc, host);
+            window_entries[built] = try self.buildAutomationWindow(alloc, host);
             built += 1;
         }
 
-        return .{ .windows = window_entries };
+        return .{ .instance = instance, .windows = window_entries };
     }
 
     fn automationWindowCount(self: *const App) usize {
@@ -3993,6 +5970,7 @@ pub const App = struct {
     }
 
     fn buildAutomationWindow(
+        self: *App,
         alloc: Allocator,
         host: *Host,
     ) !apprt.ipc.AutomationWindow {
@@ -4006,14 +5984,24 @@ pub const App = struct {
         var active_tab_id: ?u32 = null;
         for (host.tabs.items, 0..) |*tab, i| {
             const active = i == host.active_tab;
-            tabs[i] = try buildAutomationTab(alloc, tab, active);
+            tabs[i] = try self.buildAutomationTab(alloc, tab, active);
             if (active) active_tab_id = tab.id;
             built += 1;
         }
 
+        const title = try alloc.dupe(u8, host.cached_window_title orelse "noctty");
+
         return .{
             .window_id = host.id,
-            .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
+            .title = title,
+            // `GetForegroundWindow` returns the top-level host even when the
+            // keyboard focus is in one of its child controls. Surface focus
+            // alone would incorrectly report every host as unfocused then.
+            .focused = automationHostFocused(
+                host.hwnd,
+                sys.GetForegroundWindow(),
+                if (host.activeSurface()) |surface| surface.window_focused else false,
+            ),
             .active_tab_id = active_tab_id,
             .tab_count = @intCast(tabs.len),
             .pane_count = automationPaneCount(tabs),
@@ -4022,18 +6010,36 @@ pub const App = struct {
     }
 
     fn buildAutomationTab(
+        self: *App,
         alloc: Allocator,
         tab: *const Tab,
         active: bool,
     ) !apprt.ipc.AutomationTab {
         var panes: std.ArrayList(apprt.ipc.AutomationPane) = .empty;
+        // Registration order matters: `defer` and `errdefer` run LIFO, so the
+        // per-pane string cleanup must be registered AFTER the list teardown
+        // in order to run BEFORE it. The reverse order reads `panes.items`
+        // after `deinit` has freed the backing buffer.
         defer panes.deinit(alloc);
+        errdefer for (panes.items) |*pane| pane.deinit(alloc);
 
         const focused_surface = tab.focusedSurface();
         var it = tab.tree.iterator();
         while (it.next()) |entry| {
+            const title = if (entry.view.effectiveTitle()) |value|
+                try alloc.dupe(u8, value)
+            else
+                null;
+            errdefer if (title) |value| alloc.free(value);
+            const working_directory = if (self.test_automation_pwd) |query|
+                try query(alloc, entry.view)
+            else
+                try entry.view.core().pwd(alloc);
+            errdefer if (working_directory) |value| alloc.free(value);
             try panes.append(alloc, .{
                 .surface_id = entry.view.core().id,
+                .title = title,
+                .working_directory = working_directory,
                 .focused = if (focused_surface) |surface| surface == entry.view else false,
                 // True only for the focused pane in the active tab, not every
                 // tab-local focused pane.
@@ -4198,6 +6204,137 @@ pub const App = struct {
         return surface;
     }
 
+    fn createNewTab(
+        self: *App,
+        source: ?*Surface,
+        working_directory: ?[]const u8,
+        explicit_window_target: bool,
+        inherit_launch_config: bool,
+    ) !*Surface {
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
+        defer config.deinit();
+        var inherited_profile_key: ?[]const u8 = null;
+
+        if (shouldResetNewTabWorkingDirectory(
+            explicit_window_target,
+            inherit_launch_config,
+            if (source) |surface| surface.launched_ssh else false,
+        )) {
+            // `newConfig(.tab)` consults the globally focused surface. Reset
+            // and inherit from the explicitly requested host instead. An SSH
+            // source also needs the reset because its live cwd is remote.
+            config.@"working-directory" = self.config.@"working-directory";
+        }
+        if (source) |surface| {
+            // newConfig inherits only the focused surface's working directory;
+            // Launch command selection is app-runtime state and must be
+            // inherited from the source snapshot rather than re-resolved from
+            // mutable global/profile configuration.
+            if (inherit_launch_config) {
+                inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
+            }
+            if (explicit_window_target and shouldInheritSplitWorkingDirectory(surface.launched_ssh)) {
+                const split_inherit = config.@"split-inherit-working-directory";
+                {
+                    defer config.@"split-inherit-working-directory" = split_inherit;
+                    config.@"split-inherit-working-directory" = config.@"tab-inherit-working-directory";
+                    _ = try applySplitWorkingDirectoryFromSource(self, &config, surface, self.startup_cwd);
+                }
+            }
+        }
+
+        if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = if (source) |value| value.host_id else null,
+            .tab_insert_index = if (source) |value| if (value.host) |host|
+                windowNewTabInsertIndex(host, self.config.@"window-new-tab-position")
+            else
+                null else null,
+            .clone_state_from = source,
+        });
+        if (inherited_profile_key) |key| try appendOwnedString(
+            self.core_app.alloc,
+            &surface.launch_profile_key,
+            key,
+        );
+        if (inherit_launch_config) {
+            if (source) |value| surface.launched_ssh = value.launched_ssh;
+        }
+        if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
+        self.activateSurface(surface);
+        return surface;
+    }
+
+    fn createNewSplit(
+        self: *App,
+        source: *Surface,
+        direction: SplitTreeSurface.Split.Direction,
+        working_directory: ?[]const u8,
+        inherit_launch_config: bool,
+    ) !*Surface {
+        const tab_info = self.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
+        defer config.deinit();
+        config.@"working-directory" = self.config.@"working-directory";
+        const inherited_profile_key = if (inherit_launch_config)
+            try applyLaunchConfigFromSource(&config, source)
+        else
+            try applySplitProfileConfigFromSource(&config, source);
+        if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
+            _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
+        }
+        if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = source.host_id,
+            .tab_id = tab_info.tab.id,
+            .clone_state_from = source,
+            .split_direction = direction,
+        });
+        if (inherited_profile_key) |key| try appendOwnedString(
+            self.core_app.alloc,
+            &surface.launch_profile_key,
+            key,
+        );
+        if (inherit_launch_config or inherited_profile_key != null) {
+            surface.launched_ssh = source.launched_ssh;
+        }
+        tab_info.tab.clearRedoHistory();
+        if (tab_info.host.pushStructuralUndo(.{
+            .kind = .split_create,
+            .timestamp_ms = sys.GetTickCount64(),
+            .sequence_id = self.nextUndoSequence(),
+            .payload = .{ .split_create = .{
+                .source_surface = source,
+                .created_surface = surface,
+                .direction = direction,
+            } },
+        })) |_| {} else |err| {
+            log.warn("new_split undo snapshot failed err={}", .{err});
+            _ = tab_info.host.clearStructuralRedo();
+        }
+        self.activateSurface(surface);
+        return surface;
+    }
+
+    fn applyLaunchConfigFromSource(
+        config: *configpkg.Config,
+        source: *Surface,
+    ) !?[]const u8 {
+        if (source.launch_command) |command| {
+            config.command = try command.clone(config._arena.?.allocator());
+            if (source.launched_ssh) try applySshLaunchHardening(config);
+            return source.launch_profile_key;
+        }
+
+        // Headless fixtures may not have a captured command. Preserve the
+        // previous profile fallback for those tests.
+        const key = source.launch_profile_key orelse return null;
+        const host = source.host orelse return null;
+        const profile = (try host.profileForKey(key)) orelse return null;
+        try applyProfileLaunchConfig(config, profile);
+        return profile.key;
+    }
+
     fn applySplitProfileConfigFromSource(
         config: *configpkg.Config,
         source: *Surface,
@@ -4205,7 +6342,7 @@ pub const App = struct {
         const key = source.launch_profile_key orelse return null;
         const host = source.host orelse return null;
         const profile = (try host.profileForKey(key)) orelse return null;
-        try applyProfileCommandConfig(config, profile);
+        try applyProfileLaunchConfig(config, profile);
         return profile.key;
     }
 
@@ -4237,7 +6374,8 @@ pub const App = struct {
             else => null,
         };
 
-        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, profile.label);
+        const surface_title = sshProfileAlias(profile) orelse profile.label;
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, surface_title);
         defer self.core_app.alloc.free(title_w);
         const surface = try self.createWindowSurface(&config, title_w.ptr, .{
             .host_id = if (open_target == .window) null else if (source) |v| v.host_id else null,
@@ -4249,11 +6387,28 @@ pub const App = struct {
             .clone_state_from = source,
         });
         try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
+        surface.launched_ssh = profile.kind == .ssh;
+        if (sshProfileAlias(profile)) |alias| {
+            try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
+        }
         return surface;
     }
 
     fn createWindow(self: *App, title: LPCWSTR) !void {
         _ = try self.createWindowSurface(&self.config, title, .{});
+    }
+
+    fn createAdoptedWindow(
+        self: *App,
+        pending: *win32_terminal_handoff.PendingSession,
+    ) !void {
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .window);
+        defer config.deinit();
+        const alloc = config._arena.?.allocator();
+        config.title = try alloc.dupeZ(u8, pending.title);
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, pending.title);
+        defer self.core_app.alloc.free(title_w);
+        _ = try self.createWindowSurface(&config, title_w.ptr, .{ .adopted_session = pending });
     }
 
     fn refreshSystemWheelSettings(self: *App) void {
@@ -4340,7 +6495,7 @@ pub const App = struct {
         var duplicate_slot: ?usize = null;
         for (self.launcher_quick_slot_keys, 0..) |existing, index| {
             if (existing) |value| {
-                if (std.ascii.eqlIgnoreCase(value, key)) {
+                if (storedProfileKeyEquals(value, key)) {
                     duplicate_slot = index;
                     break;
                 }
@@ -4474,7 +6629,8 @@ pub const App = struct {
         try self.ensureScrollbarClass();
 
         const host = try self.core_app.alloc.create(Host);
-        errdefer self.core_app.alloc.destroy(host);
+        var host_registered = false;
+        errdefer if (!host_registered) self.core_app.alloc.destroy(host);
         host.* = .{
             .app = self,
             .id = self.allocateHostId(),
@@ -4514,14 +6670,29 @@ pub const App = struct {
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
         host.recreateTitlebarIconFonts();
-        errdefer _ = sys.DestroyWindow(hwnd);
+        errdefer if (!host_registered) {
+            _ = sys.DestroyWindow(hwnd);
+        };
 
         self.attachShellCompositorWindow(hwnd);
 
         try self.hosts.append(self.core_app.alloc, host);
+        host_registered = true;
+        errdefer {
+            // Keep the registered Host and its GWLP_USERDATA alive through
+            // WM_DESTROY so the normal compositor-detach path can find it.
+            if (sys.DestroyWindow(hwnd) == 0) {
+                // If teardown itself fails, WM_DESTROY did not provide the
+                // normal detach. Do it explicitly before host deinit.
+                self.detachShellCompositorWindow(hwnd);
+            }
+            self.removeHost(host);
+        }
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
+
+        host.power_notifications = win32_power.Notifications.init(hwnd);
 
         // Passive first-show for quick-terminal-keyboard-interactivity
         // = none: `SW_SHOWNOACTIVATE` makes the window visible but
@@ -4706,6 +6877,12 @@ pub const App = struct {
         return null;
     }
 
+    fn findLiveSurfaceById(self: *App, surface_id: u64) ?*Surface {
+        const surface = self.findSurfaceById(surface_id) orelse return null;
+        _ = self.findTabForSurface(surface) orelse return null;
+        return surface;
+    }
+
     fn inheritHostWindowState(_: *App, destination: *Host, source: *Host) !void {
         const dst_hwnd = destination.hwnd orelse return;
         const src_hwnd = source.hwnd orelse return;
@@ -4745,6 +6922,13 @@ pub const App = struct {
         }
 
         return null;
+    }
+
+    fn automationDefaultSurface(self: *App) ?*Surface {
+        if (self.core_app.focusedSurface()) |core_surface| {
+            if (self.findSurfaceByCore(core_surface)) |surface| return surface;
+        }
+        return self.focusedSurfaceForUndoRedo() orelse self.primarySurface();
     }
 
     fn undoRedoSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
@@ -4908,12 +7092,19 @@ pub const App = struct {
         const host = surface.host orelse return;
         const tab_info = self.findTabForSurface(surface) orelse return;
         const previous_surface = host.activeSurface();
+        const previous_tab_id = if (host.active_tab < host.tabs.items.len)
+            host.tabs.items[host.active_tab].id
+        else
+            null;
         host.active_tab = tab_info.index;
         surface.syncSharedHostWindowState(previous_surface);
         host.prepareActiveTabVisibility(tab_info.index);
         var active_it = tab_info.tab.tree.iterator();
         while (active_it.next()) |entry| entry.view.setVisible(true);
         runUiActionOrLog("tab activation layout failed", host.layout());
+        // Same-host tab creation reaches this path before its first layout.
+        // Raise selection only after the tab button/provider exists.
+        host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         runUiActionOrLog("tab activation chrome refresh failed", host.refreshChrome());
         if (focus) {
             surface.presentWindow();
@@ -5069,6 +7260,10 @@ pub const App = struct {
     fn noteSurfaceFocused(self: *App, surface: *Surface) bool {
         const found = self.findTabForSurface(surface) orelse return false;
         const handle = found.tab.findHandle(surface) orelse return false;
+        const previous_tab_id = if (found.host.active_tab < found.host.tabs.items.len)
+            found.host.tabs.items[found.host.active_tab].id
+        else
+            null;
         const changed = surfaceFocusStateChanged(
             found.host.active_tab,
             found.tab.focused,
@@ -5076,6 +7271,7 @@ pub const App = struct {
             handle,
         );
         found.host.active_tab = found.index;
+        found.host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         found.tab.focused = handle;
         self.commitShellSurfaceFocus(surface);
         return changed;
@@ -5101,20 +7297,19 @@ pub const App = struct {
     }
 
     fn removeHost(self: *App, host: *Host) void {
-        for (self.hosts.items, 0..) |item, i| {
-            if (item == host) {
-                _ = self.hosts.swapRemove(i);
-                host.deinit();
-                self.core_app.alloc.destroy(host);
-                break;
-            }
-        }
+        if (!detachHostReference(&self.hosts, host)) return;
+        host.deinit();
+        self.core_app.alloc.destroy(host);
     }
 
     fn windowDestroyed(self: *App, surface: *Surface) void {
         self.removeWindow(surface);
         if (surface.host) |host| {
             if (self.session_restore_rollback_host == host) return;
+            const previous_tab_id = if (host.active_tab < host.tabs.items.len)
+                host.tabs.items[host.active_tab].id
+            else
+                null;
             surface.invalidateStructuralHistoryForDestroy();
             host.discardStructuralEntriesReferencing(surface);
 
@@ -5133,6 +7328,7 @@ pub const App = struct {
                         // avoids shifting the live array after poisoning the slot
                         // with `undefined` during Tab.deinit().
                         var removed = host.tabs.orderedRemove(i);
+                        host.destroyTabButton(&removed);
                         removed.deinit();
                         if (host.active_tab >= host.tabs.items.len and host.tabs.items.len > 0) {
                             host.active_tab = host.tabs.items.len - 1;
@@ -5158,6 +7354,7 @@ pub const App = struct {
                     break;
                 }
             }
+            host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
 
             if (surface.pending_close_tree) |*unused_tree| {
                 unused_tree.deinit();
@@ -5200,7 +7397,18 @@ pub const App = struct {
             }
         }
 
-        if (self.windows.items.len == 0 and self.running) self.startQuitTimer();
+        if (self.windows.items.len == 0 and self.running) {
+            if (self.embedding_mode) {
+                if (self.exitEmbeddingServerIfIdle()) {
+                    self.running = false;
+                    sys.PostQuitMessage(0);
+                } else {
+                    self.startTerminalHandoffIdleTimer();
+                }
+            } else {
+                self.startQuitTimer();
+            }
+        }
     }
 
     fn gotoWindow(self: *App, target: apprt.Target, direction: apprt.action.GotoWindow) !bool {
@@ -5797,37 +8005,6 @@ pub const App = struct {
         return try client_size_fn(ctx, live_hwnd);
     }
 
-    fn defaultPixelFormatDescriptor() PIXELFORMATDESCRIPTOR {
-        return .{
-            .nSize = @sizeOf(PIXELFORMATDESCRIPTOR),
-            .nVersion = 1,
-            .dwFlags = c.PFD_DRAW_TO_WINDOW | c.PFD_SUPPORT_OPENGL | c.PFD_DOUBLEBUFFER,
-            .iPixelType = c.PFD_TYPE_RGBA,
-            .cColorBits = 32,
-            .cRedBits = 0,
-            .cRedShift = 0,
-            .cGreenBits = 0,
-            .cGreenShift = 0,
-            .cBlueBits = 0,
-            .cBlueShift = 0,
-            .cAlphaBits = 8,
-            .cAlphaShift = 0,
-            .cAccumBits = 0,
-            .cAccumRedBits = 0,
-            .cAccumGreenBits = 0,
-            .cAccumBlueBits = 0,
-            .cAccumAlphaBits = 0,
-            .cDepthBits = 24,
-            .cStencilBits = 8,
-            .cAuxBuffers = 0,
-            .iLayerType = c.PFD_MAIN_PLANE,
-            .bReserved = 0,
-            .dwLayerMask = 0,
-            .dwVisibleMask = 0,
-            .dwDamageMask = 0,
-        };
-    }
-
     fn createGLContext(self: *App, hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
         if (self.core_app.first) beginOpenGLStartupDiagnostics();
 
@@ -5837,19 +8014,37 @@ pub const App = struct {
         };
         errdefer _ = sys.ReleaseDC(hwnd, hdc);
 
-        const pfd = defaultPixelFormatDescriptor();
-        const pixel_format = sys.ChoosePixelFormat(hdc, &pfd);
-        if (pixel_format == 0) {
-            const err = windows.kernel32.GetLastError();
-            recordOpenGLStartupWin32Failure(.choose_pixel_format, err);
-            return windows.unexpectedError(err);
+        const format_before = sys.GetPixelFormat(hdc);
+        if (format_before != 0) {
+            recordOpenGLStartupError(.set_pixel_format, error.PixelFormatAlreadySet);
+            return error.PixelFormatAlreadySet;
         }
 
-        if (sys.SetPixelFormat(hdc, pixel_format, &pfd) == 0) {
+        var selection = try pixel_format.chooseRealPixelFormat(self.hinstance, hwnd, hdc);
+        log.debug(
+            "selected WGL pixel format index={} source={s} srgb_capable={} depth_bits={} stencil_bits={}",
+            .{
+                selection.provenance.index,
+                @tagName(selection.provenance.selection_source),
+                selection.provenance.srgb_capable,
+                selection.provenance.depth_bits,
+                selection.provenance.stencil_bits,
+            },
+        );
+
+        if (sys.SetPixelFormat(hdc, selection.pixel_format, &selection.descriptor) == 0) {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.set_pixel_format, err);
             return windows.unexpectedError(err);
         }
+        pixel_format.validatePixelFormatSetTransition(
+            format_before,
+            selection.pixel_format,
+            sys.GetPixelFormat(hdc),
+        ) catch |err| {
+            recordOpenGLStartupError(.set_pixel_format, err);
+            return err;
+        };
 
         const hglrc = sys.wglCreateContext(hdc) orelse {
             const err = windows.kernel32.GetLastError();
@@ -6325,6 +8520,24 @@ pub const App = struct {
     }
 };
 
+fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) bool {
+    for (hosts.items, 0..) |item, i| {
+        if (item != host) continue;
+        _ = hosts.swapRemove(i);
+        return true;
+    }
+    return false;
+}
+
+fn automationHostFocused(
+    host_hwnd: ?HWND,
+    foreground_hwnd: ?HWND,
+    surface_focused_fallback: bool,
+) bool {
+    const hwnd = host_hwnd orelse return surface_focused_fallback;
+    return foreground_hwnd == hwnd;
+}
+
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
     const alloc = request.alloc;
     defer {
@@ -6536,6 +8749,34 @@ fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckComple
         completion.deinit();
         completion.alloc.destroy(completion);
     }
+}
+
+/// Read a handoff session identifier out of a message parameter. The value is
+/// attacker-controlled, so it is only ever used as a lookup key.
+fn terminalHandoffId(lparam: LPARAM) win32_terminal_handoff.PendingId {
+    return @bitCast(lparam);
+}
+
+fn queueTerminalHandoff(ctx: *anyopaque, pending: *win32_terminal_handoff.PendingSession) bool {
+    const self: *App = @ptrCast(@alignCast(ctx));
+    const ui_thread_id = @atomicLoad(DWORD, &self.ui_thread_id, .acquire);
+    if (ui_thread_id == 0) return false;
+    const server = self.terminal_handoff_server orelse return false;
+
+    // The session stays in process-owned state; the message carries only the
+    // identifier that stands for it.
+    const id = server.queuePending(pending) catch return false;
+    if (sys.PostThreadMessageW(
+        ui_thread_id,
+        c.WM_WINHOSTTY_TERMINAL_HANDOFF,
+        0,
+        @as(LPARAM, @bitCast(id)),
+    ) != 0) return true;
+
+    // Nothing will ever claim the identifier, so hand ownership back to the
+    // caller rather than leaking the session into the table.
+    _ = server.takePending(id);
+    return false;
 }
 
 fn winrtToastActivationCallback(ctx: *anyopaque, launch: []const u8) void {
@@ -6832,6 +9073,7 @@ const Tab = struct {
     focused: SplitTreeSurface.Node.Handle = .root,
     button_hwnd: ?HWND = null,
     button_prev_proc: ?*const anyopaque = null,
+    uia_provider: ?*win32_uia.ChromeControlProvider = null,
     cached_button_title: ?[:0]const u8 = null,
     cached_button_label: ?[:0]const u8 = null,
     cached_button_index: usize = 0,
@@ -6852,6 +9094,7 @@ const Tab = struct {
     }
 
     fn deinit(self: *Tab) void {
+        std.debug.assert(self.uia_provider == null);
         if (self.cached_button_title) |value| self.alloc.free(value);
         if (self.cached_button_label) |value| self.alloc.free(value);
         destroySubclassedWindow(&self.button_hwnd, &self.button_prev_proc);
@@ -6921,6 +9164,9 @@ const Host = struct {
     id: u32,
     shell_id: ?win32_shell.model.WindowId = null,
     hwnd: ?HWND = null,
+    power_notifications: win32_power.Notifications = .{},
+    surfaces_visible: bool = true,
+    dwm_cloaked: bool = false,
     cached_decorations_visible: bool = true,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     active_tab: usize = 0,
@@ -7006,9 +9252,11 @@ const Host = struct {
     cached_window_title: ?[:0]const u8 = null,
 
     overflow_hwnd: ?HWND = null, // dropdown chevron (▾)
+    overflow_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     overflow_placement: ChildPlacement = .{},
     chrome_button_prev_proc: ?*const anyopaque = null,
     new_tab_hwnd: ?HWND = null,
+    new_tab_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     new_tab_placement: ChildPlacement = .{},
     overlay_label_placement: ChildPlacement = .{},
     overlay_edit_placement: ChildPlacement = .{},
@@ -7053,6 +9301,10 @@ const Host = struct {
     focused_quick_slot: ?usize = null,
     banner_kind: HostBannerKind = .none,
     banner_text: ?[:0]const u8 = null,
+    banner_hwnd: ?HWND = null,
+    banner_placement: ChildPlacement = .{},
+    banner_prev_proc: ?*const anyopaque = null,
+    banner_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     update_open_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
     update_dismiss_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
     tab_drag_index: ?usize = null,
@@ -7069,6 +9321,10 @@ const Host = struct {
     // on every WM_PAINT; rebuilt on EDIT text change.
     palette_list_hwnd: ?HWND = null,
     root_uia_provider: ?*win32_uia.RootProvider = null,
+    tab_container_hwnd: ?HWND = null,
+    tab_container_placement: ChildPlacement = .{},
+    tab_container_prev_proc: ?*const anyopaque = null,
+    tab_container_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     palette_list_uia_provider: ?*win32_uia.PaletteListProvider = null,
     palette_list_placement: ChildPlacement = .{},
     palette_catalog_items: [palette_catalog_capacity]PaletteItem = undefined,
@@ -7078,6 +9334,8 @@ const Host = struct {
     palette_catalog_label_count: usize = 0,
     /// Owned installed-theme snapshot backing exact catalog payload names.
     palette_installed_themes: ?[]themepkg.Entry = null,
+    /// Owned saved-layout names backing exact catalog payload names.
+    palette_layout_names: ?[][]u8 = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
     /// Rows that physically fit in the current palette List HWND. This can be
@@ -7506,9 +9764,13 @@ const Host = struct {
         // so hidden surfaces cannot live past `undo-timeout`.
         if (index >= self.tabs.items.len) return null;
 
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         var removed = self.tabs.orderedRemove(index);
         const tab_id = removed.id;
-        destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
+        self.destroyTabButton(&removed);
         removed.button_placement = .{};
         removed.button_label_cache_valid = false;
 
@@ -7524,6 +9786,7 @@ const Host = struct {
             self.tabs.items.len - 1
         else
             index;
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
 
         return .{
             .kind = .close_tab,
@@ -7550,6 +9813,10 @@ const Host = struct {
 
     fn restoreClosedTabEntry(self: *Host, value: *CloseTabUndo) !bool {
         const insert_index = clampTabInsertIndex(value.index, self.tabs.items.len);
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
             const shell_id = value.shell_id orelse return error.ShellStateOutOfSync;
@@ -7564,6 +9831,12 @@ const Host = struct {
             value.tab = self.tabs.orderedRemove(insert_index);
             return err;
         };
+        // Detaching destroys the tab button and its UIA provider. Rebuild the
+        // restored button before raising the selected-item notification so
+        // assistive clients receive the event from a live provider.
+        self.prepareActiveTabVisibility(self.active_tab);
+        self.layout() catch |err| log.warn("tab restore layout sync failed err={}", .{err});
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("tab-restore");
         return self.activeSurface() != null;
     }
@@ -7571,6 +9844,10 @@ const Host = struct {
     fn redoClosedTabEntry(self: *Host, value: *CloseTabUndo) !bool {
         if (value.tab != null) return false;
         const index = self.findTabIndexById(value.tab_id) orelse return false;
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         var shell_prepared: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
             const shell_id = value.shell_id orelse return error.ShellStateOutOfSync;
@@ -7578,7 +9855,7 @@ const Host = struct {
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
         var removed = self.tabs.orderedRemove(index);
-        destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
+        self.destroyTabButton(&removed);
         removed.button_placement = .{};
         removed.button_label_cache_valid = false;
 
@@ -7604,6 +9881,7 @@ const Host = struct {
             while (restored_it.next()) |entry| entry.view.host_active = true;
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("tab-redetach");
         return true;
     }
@@ -7620,6 +9898,10 @@ const Host = struct {
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         const next_tree = try found.tab.tree.remove(self.app.core_app.alloc, created_handle);
         found.tab.tree.deinit();
         found.tab.tree = next_tree;
@@ -7635,6 +9917,7 @@ const Host = struct {
             log.err("split-create undo shell commit failed err={}", .{err});
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         value.created_surface.shell_id = null;
         value.created_surface.shell_committed = false;
         self.app.auditShellNativeMapping("split-create-undo");
@@ -7661,6 +9944,10 @@ const Host = struct {
         }
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
+        const previous_tab_id = if (self.active_tab < self.tabs.items.len)
+            self.tabs.items[self.active_tab].id
+        else
+            null;
         const source_handle = found.tab.findHandle(value.source_surface) orelse return false;
         const inserted = try SplitTreeSurface.init(self.app.core_app.alloc, value.created_surface);
         defer {
@@ -7688,6 +9975,7 @@ const Host = struct {
             value.created_surface.shell_id = prepared.created.pane;
             value.created_surface.shell_committed = true;
         }
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("split-create-redo");
         return true;
     }
@@ -7707,6 +9995,10 @@ const Host = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const old_active = self.active_tab;
+        const previous_tab_id = if (old_active < self.tabs.items.len)
+            self.tabs.items[old_active].id
+        else
+            null;
         std.mem.swap(SplitTreeSurface, &self.tabs.items[target_index].tree, &value.alternate_tree);
         std.mem.swap(SplitTreeSurface.Node.Handle, &self.tabs.items[target_index].focused, &value.alternate_focus);
         const insert_index = clampTabInsertIndex(value.source_index, self.tabs.items.len);
@@ -7733,6 +10025,7 @@ const Host = struct {
         // tab button before focus returns to the source tab.
         self.prepareActiveTabVisibility(self.active_tab);
         self.layout() catch |err| log.warn("tab split transfer undo layout sync failed err={}", .{err});
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.refreshChrome() catch |err| log.warn("tab split transfer undo chrome sync failed err={}", .{err});
         self.app.auditShellNativeMapping("tab-subtree-transfer-undo");
         return true;
@@ -7752,8 +10045,12 @@ const Host = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const old_active = self.active_tab;
+        const previous_tab_id = if (old_active < self.tabs.items.len)
+            self.tabs.items[old_active].id
+        else
+            null;
         var removed = self.tabs.orderedRemove(source_index);
-        destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
+        self.destroyTabButton(&removed);
         removed.button_placement = .{};
         removed.button_label_cache_valid = false;
         const target_index = self.findTabIndexById(value.target_tab_id) orelse {
@@ -7776,6 +10073,7 @@ const Host = struct {
             self.active_tab = old_active;
             return err;
         };
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.prepareActiveTabVisibility(self.active_tab);
         self.layout() catch |err| log.warn("tab split transfer redo layout sync failed err={}", .{err});
         self.refreshChrome() catch |err| log.warn("tab split transfer redo chrome sync failed err={}", .{err});
@@ -8342,6 +10640,7 @@ const Host = struct {
         catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
             error.StorageTooSmall
@@ -8460,8 +10759,8 @@ const Host = struct {
                 _ = self.appendPaletteDescriptor(.{
                     .item = .{
                         .id = win32_palette.catalog.stableStringId(.profile, profile.key),
-                        .title = profile.label,
-                        .subtitle = "Profile",
+                        .title = profile.palette_title orelse profile.label,
+                        .subtitle = if (profile.kind == .ssh) "SSH host" else "Profile",
                         .keywords = profile.key,
                     },
                     .payload = .{ .profile = profile.key },
@@ -8483,6 +10782,9 @@ const Host = struct {
         }
 
         self.appendInstalledThemesToPalette(catalog);
+        // Layouts come last of the dynamic providers so a large layouts
+        // directory can never displace installed-theme rows near capacity.
+        self.appendSavedLayoutsToPalette(catalog);
 
         catalog.appendReviewedHelp() catch |err| {
             log.warn("palette help batch rejected err={}", .{err});
@@ -8816,6 +11118,18 @@ const Host = struct {
                     self.abortPaletteAction("Profile could not be opened; no terminal was changed.");
                 }
             },
+            .layout => |name| {
+                const owned_name = self.app.core_app.alloc.dupe(u8, name) catch |err| {
+                    log.warn("palette layout name copy failed name={s} err={}", .{ name, err });
+                    self.abortPaletteAction("Layout could not be prepared.");
+                    return;
+                };
+                defer self.app.core_app.alloc.free(owned_name);
+                self.hideOverlay();
+                if (!self.app.launchNamedLayout(owned_name, self)) {
+                    self.abortPaletteAction("Layout could not be opened.");
+                }
+            },
             .setting => |key| {
                 const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse {
                     self.abortPaletteAction("Setting is no longer available; reopen the palette.");
@@ -8896,10 +11210,54 @@ const Host = struct {
         };
     }
 
+    fn appendSavedLayoutsToPalette(self: *Host, catalog: *PaletteCatalog) void {
+        const alloc = self.app.core_app.alloc;
+        const directory = self.app.namedLayoutsDirectoryPath() orelse return;
+        defer alloc.free(directory);
+        // Only help and recent-command rows are still pending at this point;
+        // actions, tabs, panes, profiles, settings, and themes are already in.
+        const reserve_items = win32_palette.catalog.reviewed_help.len +
+            self.app.palette_mru.len;
+        const free_items = (catalog.capacity() -| catalog.items().len) -| reserve_items;
+        const free_labels = self.palette_catalog_labels.len -| self.palette_catalog_label_count;
+        const limit = @min(win32_layouts.max_palette_entries, @min(free_items, free_labels));
+        if (limit == 0) return;
+
+        const names = win32_layouts.listNamesAlloc(alloc, directory, limit) catch |err| {
+            log.warn("palette layout enumeration failed path={s} err={}", .{ directory, err });
+            return;
+        };
+        self.palette_layout_names = names;
+        for (names) |name| {
+            var title_buffer: [palette_catalog_label_bytes]u8 = undefined;
+            const raw_title = std.fmt.bufPrint(
+                &title_buffer,
+                "Launch layout: {s}",
+                .{name},
+            ) catch continue;
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.stableStringId(.layout, name),
+                    .title = self.storePaletteCatalogLabel(raw_title),
+                    .subtitle = "Layout",
+                    .keywords = "layout workspace window tabs splits launch",
+                },
+                .payload = .{ .layout = name },
+            });
+        }
+    }
+
     fn clearPaletteInstalledThemes(self: *Host) void {
         const installed = self.palette_installed_themes orelse return;
         self.palette_installed_themes = null;
         themepkg.freeList(self.app.core_app.alloc, installed);
+    }
+
+    fn clearPaletteLayoutNames(self: *Host) void {
+        const names = self.palette_layout_names orelse return;
+        self.palette_layout_names = null;
+        for (names) |name| self.app.core_app.alloc.free(name);
+        self.app.core_app.alloc.free(names);
     }
 
     fn selectedPaletteThemeName(self: *Host) ?[]const u8 {
@@ -9378,6 +11736,7 @@ const Host = struct {
     }
 
     fn deinit(self: *Host) void {
+        self.power_notifications.deinit();
         // Stop the tween heartbeat timer before we tear down the
         // scheduler — leaving a SetTimer bound to a destroyed HWND
         // would panic the next time it fired.
@@ -9403,6 +11762,7 @@ const Host = struct {
         if (self.palette_catalog) |*catalog| catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.destroyChildControls();
 
         if (self.banner_text) |value| self.app.core_app.alloc.free(value);
@@ -9438,6 +11798,12 @@ const Host = struct {
             }
         }
 
+        for (self.tabs.items) |*tab| detachChromeControlProvider(self.app, &tab.uia_provider);
+        detachChromeControlProvider(self.app, &self.tab_container_uia_provider);
+        detachChromeControlProvider(self.app, &self.new_tab_uia_provider);
+        detachChromeControlProvider(self.app, &self.overflow_uia_provider);
+        detachChromeControlProvider(self.app, &self.banner_uia_provider);
+
         destroyChildWindow(&self.overlay_label_hwnd);
         if (self.overlay_edit_uia_provider) |provider| {
             self.overlay_edit_uia_provider = null;
@@ -9462,6 +11828,8 @@ const Host = struct {
         self.chrome_button_prev_proc = null;
         destroySubclassedWindowWithPrev(&self.new_tab_hwnd, chrome_prev);
         destroySubclassedWindowWithPrev(&self.overflow_hwnd, chrome_prev);
+        destroySubclassedWindow(&self.banner_hwnd, &self.banner_prev_proc);
+        destroySubclassedWindow(&self.tab_container_hwnd, &self.tab_container_prev_proc);
 
         if (self.root_uia_provider) |provider| {
             self.root_uia_provider = null;
@@ -9595,6 +11963,11 @@ const Host = struct {
             if (tab.button_hwnd == button_hwnd) return i;
         }
         return null;
+    }
+
+    fn destroyTabButton(self: *Host, tab: *Tab) void {
+        detachChromeControlProvider(self.app, &tab.uia_provider);
+        destroySubclassedWindow(&tab.button_hwnd, &tab.button_prev_proc);
     }
 
     fn tabIndexAtScreenX(self: *Host, screen_x: i32) ?usize {
@@ -9742,6 +12115,7 @@ const Host = struct {
             .none, .new_tab => return false,
         };
         if (source_index >= self.tabs.items.len or source_index == self.active_tab) return false;
+        const previous_tab_id = self.tabs.items[self.active_tab].id;
         const source_tab_shell = self.tabs.items[source_index].shell_id orelse return false;
         const source_model = self.app.shell_runtime.state.tabConst(source_tab_shell) orelse return false;
         const source_root = source_model.root;
@@ -9794,7 +12168,7 @@ const Host = struct {
         self.tabs.items[self.active_tab].tree = next_tree;
         self.tabs.items[self.active_tab].focused = @enumFromInt(target_node_count + source_focus.idx());
         var removed = self.tabs.orderedRemove(source_index);
-        destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
+        self.destroyTabButton(&removed);
         removed.button_placement = .{};
         removed.button_label_cache_valid = false;
         const target_index = self.findTabIndexById(target_tab_id) orelse unreachable;
@@ -9831,6 +12205,7 @@ const Host = struct {
         if (committed_entry.payload.tab_subtree_transfer.source_tab) |*source_tab| {
             source_tab.clearRedoHistory();
         }
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.tabs.items[self.active_tab].clearRedoHistory();
         while (self.structural_undo_entries.items.len > win32_undo.max_entries) {
             win32_structural_history.evictOldest(
@@ -9850,6 +12225,11 @@ const Host = struct {
 
     fn activateTabIndex(self: *Host, index: usize) bool {
         if (index >= self.tabs.items.len) return false;
+        const previous_index = self.active_tab;
+        const previous_tab_id = if (previous_index < self.tabs.items.len)
+            self.tabs.items[previous_index].id
+        else
+            null;
         if (self.active_tab != index) {
             // Hide inactive tab HWNDs/search controls before the active
             // index changes so rapid Ctrl+Tab repeats don't leave previous
@@ -9857,6 +12237,7 @@ const Host = struct {
             self.prepareActiveTabVisibility(index);
         }
         self.active_tab = index;
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         // The underline retarget happens in `layoutTabStrip` —
         // `active_tab` is read there and fed to `retargetTabUnderline`
         // with precomputed coords. Invoking layout after the index
@@ -9870,6 +12251,25 @@ const Host = struct {
         }
         self.forceHostCompositionPaint();
         return false;
+    }
+
+    fn notifyActiveTabUiaSelectionChanged(self: *Host, previous_tab_id: ?u32) void {
+        const current = self.activeTab();
+        const current_tab_id: ?u32 = if (current) |tab| tab.id else null;
+        if (previous_tab_id == current_tab_id) return;
+        if (previous_tab_id) |id| {
+            if (self.findTabIndexById(id)) |index| {
+                if (self.tabs.items[index].uia_provider) |provider| {
+                    provider.raiseSelected(true, false);
+                }
+            }
+        }
+        if (current) |tab| {
+            if (tab.uia_provider) |provider| provider.raiseSelected(false, true);
+        }
+        if (self.tab_container_uia_provider) |provider| {
+            win32_uia.events.raiseSelectionInvalidated(&provider.base);
+        }
     }
 
     fn activateTabByDirection(self: *Host, goto: apprt.action.GotoTab) bool {
@@ -9918,7 +12318,10 @@ const Host = struct {
 
     fn reloadProfiles(self: *Host) !bool {
         const replacing = self.profiles != null;
-        const next_profiles = try windows_shell.listProfiles(self.app.core_app.alloc);
+        const next_profiles = try windows_shell.listProfiles(
+            self.app.core_app.alloc,
+            self.app.config.@"ssh-config-hosts",
+        );
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
@@ -9942,6 +12345,13 @@ const Host = struct {
         if (self.selected_profile >= profiles.len) self.selected_profile = 0;
         _ = try self.setSelectedProfileIndex(self.selected_profile);
         return true;
+    }
+
+    fn invalidateProfiles(self: *Host) void {
+        if (self.profiles) |profiles| {
+            windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
+            self.profiles = null;
+        }
     }
 
     fn reapplyLauncherProfilePreferences(self: *Host) !void {
@@ -10360,6 +12770,31 @@ const Host = struct {
             }
         }
         _ = sys.ShowWindow(hwnd, if (visible) c.SW_SHOW else c.SW_HIDE);
+        self.refreshSurfaceVisibility();
+    }
+
+    fn refreshSurfaceVisibility(self: *Host) void {
+        self.refreshSurfaceVisibilityObserving(null);
+    }
+
+    /// `observed_cloaked` is the transition a DWM cloak WinEvent just
+    /// reported, or `null` for message-driven refreshes that observed no
+    /// transition. Passing it through is what lets an uncloak recover when
+    /// `DwmGetWindowAttribute` fails; see `win32_power.resolveCloaked`.
+    fn refreshSurfaceVisibilityObserving(self: *Host, observed_cloaked: ?bool) void {
+        const hwnd = self.hwnd orelse return;
+        const state = win32_power.queryHostVisibility(
+            hwnd,
+            self.dwm_cloaked,
+            observed_cloaked,
+        );
+        self.dwm_cloaked = state.cloaked;
+        if (self.surfaces_visible == state.visible) return;
+        self.surfaces_visible = state.visible;
+        for (self.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| entry.view.syncOcclusion();
+        }
     }
 
     fn present(self: *Host) void {
@@ -10371,6 +12806,7 @@ const Host = struct {
         )) |show_cmd| {
             _ = sys.ShowWindow(hwnd, show_cmd);
         }
+        self.refreshSurfaceVisibility();
         _ = sys.SetForegroundWindow(hwnd);
         _ = sys.SetFocus(hwnd);
     }
@@ -10387,6 +12823,14 @@ const Host = struct {
 
         self.banner_kind = next_kind;
         try appendOwnedString(self.app.core_app.alloc, &self.banner_text, text);
+        if (self.banner_hwnd) |banner_hwnd| {
+            _ = applyChildVisibility(
+                banner_hwnd,
+                &self.banner_placement,
+                self.banner_text != null and self.overlay_mode == .none,
+            );
+        }
+        if (self.banner_uia_provider) |provider| provider.raiseLiveRegionChanged();
         self.invalidateBannerText();
         // While an overlay is open, banner text is rendered inside the
         // overlay feedback lane rather than the ordinary host banner lane.
@@ -10567,8 +13011,113 @@ const Host = struct {
         self.hideOverlay();
     }
 
+    fn tabContainerUiaName(_: *anyopaque, _: usize, _: []u8) []const u8 {
+        return "Tabs";
+    }
+
+    fn tabItemUiaName(ctx: *anyopaque, tab_id: usize, buf: []u8) []const u8 {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        for (self.tabs.items) |*tab| {
+            if (tab.id != tab_id) continue;
+            return std.fmt.bufPrint(
+                buf,
+                "{s}",
+                .{if (tab.cached_button_label) |label| label else "Tab"},
+            ) catch "Tab";
+        }
+        return "Tab";
+    }
+
+    fn tabItemUiaSelected(ctx: *anyopaque, tab_id: usize) bool {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        for (self.tabs.items, 0..) |tab, index| {
+            if (tab.id == tab_id) return index == self.active_tab;
+        }
+        return false;
+    }
+
+    fn activeTabUiaProvider(ctx: *anyopaque) ?*win32_uia.ChromeControlProvider {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        return if (self.activeTab()) |tab| tab.uia_provider else null;
+    }
+
+    fn tabContainerUiaProvider(ctx: *anyopaque) ?*win32_uia.ChromeControlProvider {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        return self.tab_container_uia_provider;
+    }
+
+    fn hostActionUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
+        return switch (tag) {
+            0 => "New tab",
+            else => "More tabs",
+        };
+    }
+
+    fn bannerUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        return if (self.banner_text) |text|
+            std.fmt.bufPrint(buf, "{s}", .{text}) catch "Notification"
+        else
+            "";
+    }
+
+    fn createChromeUiaProvider(
+        self: *Host,
+        hwnd: HWND,
+        state: win32_uia.ChromeControlState,
+    ) ?*win32_uia.ChromeControlProvider {
+        // Both helpers already bail out unless COM is initialised, so the
+        // provider always uses COM threading; callers do not repeat it.
+        if (!self.app.com_initialized) return null;
+        var threaded_state = state;
+        threaded_state.use_com_threading = true;
+        return win32_uia.ChromeControlProvider.create(
+            std.heap.page_allocator,
+            hwnd,
+            threaded_state,
+        ) catch |err| {
+            log.warn("chrome UIA provider unavailable err={}", .{err});
+            return null;
+        };
+    }
+
     fn ensureChromeButtons(self: *Host) !void {
         const hwnd = self.hwnd orelse return;
+
+        if (self.tab_container_hwnd == null) {
+            self.tab_container_hwnd = sys.CreateWindowExW(
+                c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT,
+                prompt_label_class,
+                std.unicode.utf8ToUtf16LeStringLiteral(""),
+                c.WS_CHILD | c.WS_VISIBLE | c.SS_OWNERDRAW,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                @ptrFromInt(1912),
+                self.app.hinstance,
+                null,
+            ) orelse return lastError();
+            _ = sys.SetLayeredWindowAttributes(self.tab_container_hwnd.?, 0, 0, c.LWA_ALPHA);
+            _ = sys.SetWindowLongPtrW(
+                self.tab_container_hwnd.?,
+                c.GWLP_USERDATA,
+                @as(LONG_PTR, @intCast(@intFromPtr(self))),
+            );
+            const previous = sys.SetWindowLongPtrW(
+                self.tab_container_hwnd.?,
+                c.GWLP_WNDPROC,
+                @as(LONG_PTR, @intCast(@intFromPtr(&tabContainerProc))),
+            );
+            self.tab_container_prev_proc = if (previous == 0) null else @ptrFromInt(@as(usize, @intCast(previous)));
+            self.tab_container_uia_provider = self.createChromeUiaProvider(self.tab_container_hwnd.?, .{
+                .ctx = @ptrCast(self),
+                .role = .tab_container,
+                .name = &tabContainerUiaName,
+                .selected_provider = &activeTabUiaProvider,
+            });
+        }
 
         if (self.new_tab_hwnd == null) {
             self.new_tab_hwnd = sys.CreateWindowExW(
@@ -10586,6 +13135,12 @@ const Host = struct {
                 null,
             ) orelse return lastError();
             self.subclassButton(self.new_tab_hwnd.?, &hostButtonProc, &self.chrome_button_prev_proc);
+            self.new_tab_uia_provider = self.createChromeUiaProvider(self.new_tab_hwnd.?, .{
+                .ctx = @ptrCast(self),
+                .role = .button,
+                .tag = 0,
+                .name = &hostActionUiaName,
+            });
         }
 
         if (self.overflow_hwnd == null) {
@@ -10604,6 +13159,46 @@ const Host = struct {
                 null,
             ) orelse return lastError();
             self.subclassButton(self.overflow_hwnd.?, &hostButtonProc, &self.chrome_button_prev_proc);
+            self.overflow_uia_provider = self.createChromeUiaProvider(self.overflow_hwnd.?, .{
+                .ctx = @ptrCast(self),
+                .role = .button,
+                .tag = 1,
+                .name = &hostActionUiaName,
+            });
+        }
+
+        if (self.banner_hwnd == null) {
+            self.banner_hwnd = sys.CreateWindowExW(
+                c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT,
+                prompt_label_class,
+                std.unicode.utf8ToUtf16LeStringLiteral(""),
+                c.WS_CHILD | c.SS_OWNERDRAW,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                @ptrFromInt(1913),
+                self.app.hinstance,
+                null,
+            ) orelse return lastError();
+            _ = sys.SetLayeredWindowAttributes(self.banner_hwnd.?, 0, 0, c.LWA_ALPHA);
+            _ = sys.SetWindowLongPtrW(
+                self.banner_hwnd.?,
+                c.GWLP_USERDATA,
+                @as(LONG_PTR, @intCast(@intFromPtr(self))),
+            );
+            const previous = sys.SetWindowLongPtrW(
+                self.banner_hwnd.?,
+                c.GWLP_WNDPROC,
+                @as(LONG_PTR, @intCast(@intFromPtr(&hostBannerProc))),
+            );
+            self.banner_prev_proc = if (previous == 0) null else @ptrFromInt(@as(usize, @intCast(previous)));
+            self.banner_uia_provider = self.createChromeUiaProvider(self.banner_hwnd.?, .{
+                .ctx = @ptrCast(self),
+                .role = .live_text,
+                .name = &bannerUiaName,
+            });
         }
     }
 
@@ -10716,6 +13311,7 @@ const Host = struct {
         if (self.palette_catalog) |*catalog| catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
         if (was_confirm or was_palette) {
@@ -11607,6 +14203,14 @@ const Host = struct {
         return surface.search_bar_results_hwnd != null and child == surface.search_bar_results_hwnd.?;
     }
 
+    fn chromeUiaProviderForHwnd(self: *Host, child: HWND) ?*win32_uia.ChromeControlProvider {
+        if (self.new_tab_hwnd == child) return self.new_tab_uia_provider;
+        if (self.overflow_hwnd == child) return self.overflow_uia_provider;
+        const surface = self.searchControlSurface(child) orelse return null;
+        const role = surface.searchBarButtonRole(child) orelse return null;
+        return surface.search_bar_button_uia_providers[@intFromEnum(role)];
+    }
+
     fn searchBarButtonRole(self: *const Host, child: HWND) ?SearchBarButtonRole {
         const surface = self.searchControlSurface(child) orelse return null;
         return surface.searchBarButtonRole(child);
@@ -12462,10 +15066,7 @@ const Host = struct {
                     try self.setBanner(.err, message);
                     return false;
                 }
-                self.active_tab = requested - 1;
-                if (self.tabs.items[self.active_tab].focusedSurface()) |next_surface| {
-                    self.app.activateSurface(next_surface);
-                }
+                _ = self.activateTabIndex(requested - 1);
             },
             .confirm => {
                 // Enter maps to Accept.
@@ -13160,11 +15761,20 @@ const Host = struct {
                     null,
                 ) orelse return lastError();
                 self.subclassButton(tab.button_hwnd.?, &tabButtonProc, &tab.button_prev_proc);
+                tab.uia_provider = self.createChromeUiaProvider(tab.button_hwnd.?, .{
+                    .ctx = @ptrCast(self),
+                    .role = .tab_item,
+                    .tag = tab.id,
+                    .name = &tabItemUiaName,
+                    .selected = &tabItemUiaSelected,
+                    .selection_container = &tabContainerUiaProvider,
+                });
             } else if (!ownedStringEquals(tab.cached_button_label, label)) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
                 _ = sys.SetWindowTextW(tab.button_hwnd.?, label_w.ptr);
+                if (tab.uia_provider) |provider| provider.raiseNameChanged();
             }
             try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_title, title);
             tab.cached_button_index = i;
@@ -13230,6 +15840,54 @@ const Host = struct {
         // motion collapses to a snap via `retargetTabUnderline`.
         if (active_tab_left) |left| {
             self.retargetTabUnderline(left, button_width);
+        }
+
+        // The tab-strip Selection container is an invisible, hit-transparent
+        // child that exists only so UIA has one element to hang ControlType
+        // Tab and the Selection pattern on (the tab buttons are siblings, not
+        // children, of it — they stay parented to the host so layout, drag
+        // and drop, and overflow are untouched). Give it the strip's real
+        // rect so a screen reader reading by position lands on the tabs
+        // rather than on a degenerate box at the window origin.
+        if (self.tab_container_hwnd) |container_hwnd| {
+            const visible_tabs: i32 = @intCast(tab_range.count);
+            if (visible_tabs > 0) {
+                changed.* = applyChildRect(
+                    container_hwnd,
+                    &self.tab_container_placement,
+                    childRect(
+                        0,
+                        button_y,
+                        visible_tabs * button_width,
+                        button_height,
+                    ),
+                ) or changed.*;
+                changed.* = applyChildVisibility(container_hwnd, &self.tab_container_placement, true) or changed.*;
+            } else {
+                changed.* = applyChildVisibility(container_hwnd, &self.tab_container_placement, false) or changed.*;
+            }
+        }
+
+        // The banner is painted text with no control of its own, so its
+        // provider lives on an invisible child. Track the painted row (same
+        // offsets `paintChrome` uses) so position and touch navigation land
+        // on the banner instead of at the window origin. Visibility stays
+        // owned by `setBanner`.
+        if (self.banner_hwnd) |banner_hwnd| {
+            const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
+            const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
+            const banner_y: i32 = self.tabBarHeight() + overlay_offset + inspector_offset + self.scaled(2);
+            const banner_x = self.scaled(16);
+            changed.* = applyChildRect(
+                banner_hwnd,
+                &self.banner_placement,
+                childRect(
+                    banner_x,
+                    banner_y,
+                    @max(1, width - banner_x),
+                    self.scaled(24),
+                ),
+            ) or changed.*;
         }
 
         // Right-side cluster: [+][▾] — new tab and dropdown chevron.
@@ -14919,6 +17577,7 @@ const SurfaceInitOptions = struct {
     /// (`quick-terminal-keyboard-interactivity = none`) on first
     /// toggle-on.
     passive_show: bool = false,
+    adopted_session: ?*win32_terminal_handoff.PendingSession = null,
 };
 
 const SplitSurfaceAttachRollback = struct {
@@ -15093,6 +17752,99 @@ fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
     };
 }
 
+/// True when `title` contains a byte that must not survive into a stored
+/// window/tab title. See `sanitizeTitleAlloc` for why.
+/// Control code points that must never survive into a stored title.
+fn isTitleControlCodepoint(cp: u21) bool {
+    // C0 controls and DEL.
+    if (cp < 0x20 or cp == 0x7F) return true;
+    // C1 controls U+0080..U+009F, which include 8-bit CSI (U+009B) and
+    // 8-bit ST (U+009C).
+    if (cp >= 0x80 and cp <= 0x9F) return true;
+    return false;
+}
+
+/// One scanned unit of a title: the bytes to keep (empty when the unit must
+/// be dropped) and the offset of the next unit.
+const TitleUnit = struct {
+    keep: []const u8,
+    next: usize,
+};
+
+/// Decode one UTF-8 unit, dropping controls and anything that is not valid
+/// UTF-8.
+///
+/// This is deliberately CODE-POINT oriented rather than byte oriented. A
+/// byte-level filter for the range 0x80..0x9F would corrupt ordinary text,
+/// because those bytes also occur as UTF-8 CONTINUATION bytes -- `U+20AC`
+/// (the euro sign) is `E2 82 AC`, whose second byte is 0x82. Decoding first
+/// means a raw `0x9B` is recognized as an 8-bit CSI and removed while `€`
+/// survives intact.
+///
+/// Invalid UTF-8 is dropped one byte at a time rather than passed through:
+/// it cannot be rendered meaningfully, and letting it through would also let
+/// an OVERLONG encoding of a C1 control (for example `E0 82 9B`) evade the
+/// control check. `std.unicode.utf8Decode` rejects overlong forms and
+/// surrogates, so this fails closed. Dropping the trailing bytes of a
+/// truncated sequence also removes the lone-`0xC2` tail that would otherwise
+/// leave invalid UTF-8 in the stored title.
+fn nextTitleUnit(title: []const u8, i: usize) TitleUnit {
+    const len = std.unicode.utf8ByteSequenceLength(title[i]) catch {
+        return .{ .keep = "", .next = i + 1 };
+    };
+    if (i + len > title.len) return .{ .keep = "", .next = title.len };
+
+    const seq = title[i .. i + len];
+    const cp = std.unicode.utf8Decode(seq) catch {
+        return .{ .keep = "", .next = i + 1 };
+    };
+    if (isTitleControlCodepoint(cp)) return .{ .keep = "", .next = i + len };
+    return .{ .keep = seq, .next = i + len };
+}
+
+fn titleNeedsSanitize(title: []const u8) bool {
+    var i: usize = 0;
+    while (i < title.len) {
+        const unit = nextTitleUnit(title, i);
+        // A kept unit is always at least one byte, so an empty `keep` means
+        // this unit was dropped.
+        if (unit.keep.len == 0) return true;
+        i = unit.next;
+    }
+    return false;
+}
+
+/// Strip C0 controls, DEL, and C1 controls from a title.
+///
+/// A stored title is not display-only: with `title-report = true` the child
+/// process can issue `CSI 21 t` and the surface answers with
+/// `ESC ] l <title> ESC \` written back to the pty
+/// (`Surface.handleMessage` `.report_title`). Titles arrive from two places
+/// — OSC 0/2 from the child, and `set_surface_title` / `set_tab_title`
+/// performed over the automation IPC pipe — and the IPC path does not honor
+/// the `config.title != null` guard that the OSC path checks. Sanitizing at
+/// the apprt setters covers both, so an IPC peer cannot smuggle an escape
+/// sequence into the terminal by way of the title.
+///
+/// Returns null when `title` is already clean, so the common path allocates
+/// nothing. Otherwise returns an owned copy the caller must free.
+fn sanitizeTitleAlloc(alloc: Allocator, title: []const u8) Allocator.Error!?[]u8 {
+    if (!titleNeedsSanitize(title)) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, title.len);
+
+    var i: usize = 0;
+    while (i < title.len) {
+        const unit = nextTitleUnit(title, i);
+        out.appendSliceAssumeCapacity(unit.keep);
+        i = unit.next;
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
 fn appendOwnedString(
     alloc: Allocator,
     target: *?[:0]const u8,
@@ -15114,6 +17866,16 @@ fn appendOwnedString(
     const next: ?[:0]const u8 = if (value) |v| try alloc.dupeZ(u8, v) else null;
     if (target.*) |existing| alloc.free(existing);
     target.* = next;
+}
+
+fn appendSanitizedTitle(
+    alloc: Allocator,
+    target: *?[:0]const u8,
+    title: ?[]const u8,
+) !void {
+    const sanitized = if (title) |value| try sanitizeTitleAlloc(alloc, value) else null;
+    defer if (sanitized) |value| alloc.free(value);
+    try appendOwnedString(alloc, target, if (sanitized) |value| value else title);
 }
 
 const ownedStringEquals = labels.ownedStringEquals;
@@ -15712,7 +18474,9 @@ fn drawPaletteRowText(hdc: HDC, text: []const u8, rect: RECT, color: u32) void {
     // under 256 chars); anything longer gets truncated rather than
     // allocating per paint.
     var buf: [256]u16 = undefined;
-    const copied = std.unicode.utf8ToUtf16Le(&buf, text) catch buf.len;
+    // On invalid UTF-8 only a prefix was written, so falling back to `buf.len`
+    // would render uninitialized stack. Draw nothing instead.
+    const copied = std.unicode.utf8ToUtf16Le(&buf, text) catch 0;
     const n: usize = @min(copied, buf.len - 1);
     buf[n] = 0;
 
@@ -17140,6 +19904,14 @@ fn scrollbarProc(
 ) callconv(.winapi) LRESULT {
     const surface = getSurface(hwnd);
     switch (msg) {
+        c.WM_GETOBJECT => {
+            if (surface) |value| {
+                if (value.scrollbar_uia_provider) |provider| {
+                    if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+                }
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT => {
             if (surface) |value| value.paintScrollbar();
@@ -17244,14 +20016,30 @@ const startsWithIgnoreCase = labels.startsWithIgnoreCase;
 const resolveProfileSelection = labels.resolveProfileSelection;
 
 const profileIndexByKey = labels.profileIndexByKey;
+const profileKeyEquals = labels.profileKeyEquals;
+const storedProfileKeyEquals = labels.storedProfileKeyEquals;
 
 fn applyProfileConfigByKey(
     config: *configpkg.Config,
     profiles: []const windows_shell.Profile,
     key: []const u8,
-) !void {
-    const index = profileIndexByKey(profiles, key) orelse return;
-    try applyProfileSurfaceConfig(config, &profiles[index]);
+) !bool {
+    if (startsWithIgnoreCase(key, "ssh:")) return false;
+    const index = profileIndexByKey(profiles, key) orelse return false;
+    const profile = &profiles[index];
+    if (!isSessionRestorableProfile(profile)) return false;
+    try applyProfileSurfaceConfig(config, profile);
+    return true;
+}
+
+/// Session restore relaunches a pane's profile unattended at startup. An SSH
+/// profile would dial out with no interaction, so it is refused here.
+///
+/// The key prefix is rejected before lookup so case variants in a persisted
+/// state file cannot bypass the guard. Live SSH profile lookup remains
+/// case-sensitive because OpenSSH host aliases are case-sensitive.
+fn isSessionRestorableProfile(profile: *const windows_shell.Profile) bool {
+    return profile.kind != .ssh;
 }
 
 const preferredProfileIndex = labels.preferredProfileIndex;
@@ -17447,6 +20235,26 @@ const buildProfileChromeBadgeText = labels.buildProfileChromeBadgeText;
 
 const buildProfileStatusBadgeText = labels.buildProfileStatusBadgeText;
 
+fn sshProfileAlias(profile: *const windows_shell.Profile) ?[]const u8 {
+    if (profile.kind != .ssh or !std.mem.startsWith(u8, profile.key, "ssh:")) return null;
+    const alias = profile.key["ssh:".len..];
+    return if (alias.len > 0) alias else null;
+}
+
+fn sshAliasFromLaunchKey(launched_ssh: bool, key: ?[]const u8) ?[]const u8 {
+    if (!launched_ssh) return null;
+    const value = key orelse return null;
+    if (!std.ascii.startsWithIgnoreCase(value, "ssh:")) return null;
+    const alias = value["ssh:".len..];
+    return if (alias.len > 0) alias else null;
+}
+
+fn isAutomaticSshCommandTitle(title: []const u8) bool {
+    const base = std.fs.path.basename(title);
+    return std.ascii.eqlIgnoreCase(base, "ssh.exe") or
+        std.ascii.eqlIgnoreCase(base, "ssh");
+}
+
 const profileStatusBadgeTextLen = labels.profileStatusBadgeTextLen;
 /// Build a label for the profile dropdown menu: "Profile Name\tCtrl+Shift+N"
 const buildDropdownProfileLabel = labels.buildDropdownProfileLabel;
@@ -17597,6 +20405,34 @@ fn expectedButtonClick(notify: u16, child: ?HWND, expected: ?HWND) bool {
 
 fn getHost(hwnd: HWND) ?*Host {
     return windowData(Host, hwnd);
+}
+
+/// Target of the DWM cloak/uncloak WinEvent hook. Set for the lifetime of the
+/// App so the callback can resolve an HWND without a global `getHost`, which
+/// would be unsafe here: other window classes in this apprt store unrelated
+/// payloads in `GWLP_USERDATA`, and the hook sees every window on this thread.
+var cloak_event_app: ?*App = null;
+
+/// Runs on the UI thread (WINEVENT_OUTOFCONTEXT delivers through our own
+/// message pump), so it may touch host state directly.
+///
+/// A cloak transition has no window message, so without this a virtual-desktop
+/// switch that uncloaks a background window would leave `surfaces_visible`
+/// false; hidden surfaces skip rendering entirely, so nothing would repair it
+/// until an unrelated message arrived.
+///
+/// `cloaked` is the transition the event carried. It must reach the refresh:
+/// if it were dropped and the refresh's `DwmGetWindowAttribute` query then
+/// failed, the previous `cloaked = true` would be preserved and this very
+/// recovery path would be the thing that fails to recover.
+fn onHostCloakEvent(hwnd: HWND, cloaked: bool) void {
+    const app = cloak_event_app orelse return;
+    for (app.hosts.items) |host| {
+        const host_hwnd = host.hwnd orelse continue;
+        if (host_hwnd != hwnd) continue;
+        host.refreshSurfaceVisibilityObserving(cloaked);
+        return;
+    }
 }
 
 fn refocusActiveSurface(host: *Host) void {
@@ -17779,6 +20615,27 @@ fn terminalReleaseThunk(ctx: *anyopaque) void {
     const provider: *win32_uia.TerminalProvider = @ptrCast(@alignCast(ctx));
     _ = win32_uia.TerminalProvider.Release(&provider.base);
 }
+fn chromeDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.ChromeControlProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn chromeReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.ChromeControlProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.ChromeControlProvider.Release(&provider.base);
+}
+fn detachChromeControlProvider(
+    app: *App,
+    slot: *?*win32_uia.ChromeControlProvider,
+) void {
+    const provider = slot.* orelse return;
+    slot.* = null;
+    provider.detach();
+    scheduleDeferredUiaDisconnect(
+        app,
+        @ptrCast(provider),
+        &chromeDisconnectThunk,
+        &chromeReleaseThunk,
+    );
+}
 
 fn shouldRefocusAfterOverlayHide(
     focused: ?HWND,
@@ -17802,9 +20659,40 @@ fn runUiActionOrLog(comptime context: []const u8, action: anytype) void {
     _ = action catch |err| logUiActionError(context, err);
 }
 
+fn tabContainerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    if (getHost(hwnd)) |host| {
+        if (msg == c.WM_GETOBJECT) {
+            if (host.tab_container_uia_provider) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
+        if (msg == c.WM_NCHITTEST) return c.HTTRANSPARENT;
+        if (host.tab_container_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    if (getHost(hwnd)) |host| {
+        if (msg == c.WM_GETOBJECT) {
+            if (host.banner_uia_provider) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
+        if (msg == c.WM_NCHITTEST) return c.HTTRANSPARENT;
+        if (host.banner_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
+        if (msg == c.WM_GETOBJECT) {
+            if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
         // Keyboard routing for the overlay accept/cancel pair. In
         // confirm mode the EDIT control is hidden and focus lands on
         // the accept button; without this path Esc has no effect
@@ -17864,6 +20752,9 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 if (v.searchControlSurface(hwnd)) |surface| {
                     v.app.activateSurfaceNoFocus(surface);
                 }
+                if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
+                    provider.raiseFocusChanged();
+                }
             },
             c.WM_KILLFOCUS => {
                 v.setFocusedQuickSlot(null);
@@ -17911,7 +20802,17 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
     const host = getHost(hwnd);
     if (host) |v| {
         if (v.tabIndexForButton(hwnd)) |index| {
+            if (msg == c.WM_GETOBJECT) {
+                if (v.tabs.items[index].uia_provider) |provider| {
+                    if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+                }
+            }
             switch (msg) {
+                c.WM_SETFOCUS => {
+                    if (v.tabs.items[index].uia_provider) |provider| {
+                        provider.raiseFocusChanged();
+                    }
+                },
                 c.WM_LBUTTONDOWN => {
                     const down_x = signedLowWord(lParamBits(lParam));
                     var btn_rect: RECT = undefined;
@@ -18152,6 +21053,18 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+fn searchLabelProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    if (getSurface(hwnd)) |surface| {
+        if (msg == c.WM_GETOBJECT) {
+            if (surface.searchLabelUiaProvider(hwnd)) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
+        if (surface.searchLabelPrevProc(hwnd)) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (msg == c.WM_GETOBJECT) {
@@ -18372,6 +21285,14 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return 0;
         },
         c.WM_ACTIVATE => {
+            // Cloak/uncloak (virtual-desktop switches, shell animations)
+            // has NO window message -- the documented signal is the
+            // EVENT_OBJECT_CLOAKED/UNCLOAKED WinEvent, which
+            // `win32_power.Notifications` now hooks. This refresh is the
+            // belt-and-braces path for a missed or unavailable hook: a
+            // cloaked host renders nothing, so a stale `surfaces_visible`
+            // would otherwise mean a permanently frozen window.
+            if (host) |v| v.refreshSurfaceVisibility();
             if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {
                     if (v.app.config.@"quick-terminal-autohide") {
@@ -18391,7 +21312,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
         // animation is active; stops as soon as the scheduler empties.
         // Separate from the App-level quit timer, which uses
-        // `SetTimer(null, …)` on the thread queue.
+        // `sys.SetTimer(null, …)` on the thread queue.
         c.WM_TIMER => {
             if (wParam == c.TWEEN_TIMER_ID) {
                 if (host) |v| v.tickTweens();
@@ -18821,8 +21742,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 for (v.tabs.items, 0..) |*tab, i| {
                     if (child_hwnd) |child| {
                         if (tab.button_hwnd == child) {
-                            v.active_tab = i;
-                            if (tab.focusedSurface()) |surface| v.app.activateSurface(surface);
+                            _ = v.activateTabIndex(i);
                             return 0;
                         }
                     }
@@ -18891,6 +21811,37 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
+        win32_power.WM_POWERBROADCAST => {
+            // Only the power-setting notifications we registered for are
+            // ours. Suspend/resume and the legacy APM query messages must
+            // keep reaching DefWindowProcW.
+            if (wParam != win32_power.PBT_POWERSETTINGCHANGE) {
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+            _ = win32_power.handlePowerSettingChange(lParam);
+            return 1;
+        },
+
+        c.WM_SHOWWINDOW => {
+            const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (host) |v| v.refreshSurfaceVisibility();
+            return result;
+        },
+
+        c.WM_WINDOWPOSCHANGED => {
+            const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            // This fires once per mouse-move during a drag-move/resize and
+            // the visibility query costs a DWM round-trip, so skip it while
+            // a drag is in flight -- a window being dragged is by definition
+            // visible. The drag loop emits its last WM_WINDOWPOSCHANGED just
+            // BEFORE WM_EXITSIZEMOVE, so that one is skipped too and the
+            // WM_EXITSIZEMOVE arm does the catch-up refresh.
+            if (host) |v| {
+                if (!v.is_live_resize.load(.acquire)) v.refreshSurfaceVisibility();
+            }
+            return result;
+        },
+
         c.WM_ENTERSIZEMOVE => {
             // User started a drag-resize or drag-move. We don't know
             // which yet, but setting the flag on both is harmless —
@@ -18911,6 +21862,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.startResizeSettleRepaints();
                 v.forceVisibleSurfaceRepaintsNow();
                 v.forceHostCompositionPaint();
+                // The last WM_WINDOWPOSCHANGED of the drag was skipped by
+                // the live-resize guard, so re-check here.
+                v.refreshSurfaceVisibility();
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -18996,7 +21950,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
         c.WM_DESTROY => {
             if (host) |v| {
+                v.destroyChildControls();
                 v.app.detachShellCompositorWindow(hwnd);
+                v.power_notifications.deinit();
                 v.hwnd = null;
             }
             return 0;
@@ -19112,7 +22068,7 @@ fn applyQuickSlotPreferenceOrder(
         const key = key_opt orelse continue;
         var found: ?usize = null;
         for (profiles, 0..) |profile, index| {
-            if (std.ascii.eqlIgnoreCase(profile.key, key)) {
+            if (profileKeyEquals(profile, key)) {
                 found = index;
                 break;
             }
@@ -19786,6 +22742,12 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 if (v.destroy_on_wm_destroy) {
                     v.destroy();
                 } else if (v.hwnd == hwnd) {
+                    // The chrome children die with this window. Detach their
+                    // providers here rather than leaving them to decide
+                    // availability from `IsWindow`, which can answer yes again
+                    // once the system recycles the handle value.
+                    detachChromeControlProvider(v.app, &v.scrollbar_uia_provider);
+                    v.destroySearchBarControls();
                     v.hwnd = null;
                 }
             }
@@ -19883,6 +22845,7 @@ pub const Surface = struct {
     hglrc: HGLRC = null,
     core_surface: CoreSurface = undefined,
     core_initialized: bool = false,
+    adopted_session: ?ptypkg.AdoptedSession = null,
     destroy_on_wm_destroy: bool = false,
     content_scale: apprt.ContentScale = .{ .x = 1, .y = 1 },
     size: apprt.SurfaceSize = .{ .width = 800, .height = 600 },
@@ -19891,6 +22854,10 @@ pub const Surface = struct {
     title_override: ?[:0]const u8 = null,
     tab_title_override: ?[:0]const u8 = null,
     launch_profile_key: ?[:0]const u8 = null,
+    /// Recorded from the resolved profile kind at launch, so nothing downstream
+    /// has to re-derive "is this SSH?" from the key text.
+    launched_ssh: bool = false,
+    launch_command: ?configpkg.Command = null,
     mouse_shape: terminal.MouseShape = .text,
     mouse_visible: bool = true,
     hovered_link: ?[:0]const u8 = null,
@@ -19926,6 +22893,7 @@ pub const Surface = struct {
     scrollbar: terminal.Scrollbar = .zero,
     scrollbar_state: win32_scrollbar_geometry.ScrollbarState = .{},
     scrollbar_hwnd: ?HWND = null,
+    scrollbar_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     scrollbar_placement: ChildPlacement = .{},
     scrollbar_leave_armed: bool = false,
     scrollbar_leave_hwnd: ?HWND = null,
@@ -19960,6 +22928,7 @@ pub const Surface = struct {
     search_bar_frame_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
     search_bar_frame_visible: bool = false,
     search_bar_bg_hwnd: ?HWND = null,
+    search_bar_bg_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     search_bar_bg_placement: ChildPlacement = .{},
     search_bar_edit_hwnd: ?HWND = null,
     search_bar_edit_prev_proc: ?*const anyopaque = null,
@@ -19973,6 +22942,7 @@ pub const Surface = struct {
     search_bar_word_hwnd: ?HWND = null,
     search_bar_close_hwnd: ?HWND = null,
     search_bar_button_prev_procs: [6]?*const anyopaque = [_]?*const anyopaque{null} ** 6,
+    search_bar_button_uia_providers: [6]?*win32_uia.ChromeControlProvider = [_]?*win32_uia.ChromeControlProvider{null} ** 6,
     search_bar_prev_placement: ChildPlacement = .{},
     search_bar_next_placement: ChildPlacement = .{},
     search_bar_regex_placement: ChildPlacement = .{},
@@ -19980,6 +22950,8 @@ pub const Surface = struct {
     search_bar_word_placement: ChildPlacement = .{},
     search_bar_close_placement: ChildPlacement = .{},
     search_bar_results_hwnd: ?HWND = null,
+    search_bar_results_uia_provider: ?*win32_uia.ChromeControlProvider = null,
+    search_bar_label_prev_procs: [2]?*const anyopaque = .{ null, null },
     search_bar_results_placement: ChildPlacement = .{},
     search_bar_results_cache: ?[:0]const u8 = null,
     /// OLE drop target registered on the surface HWND. `null` when
@@ -20016,6 +22988,86 @@ pub const Surface = struct {
             .whole_word => self.search_bar_word_hwnd,
             .close => self.search_bar_close_hwnd,
         };
+    }
+
+    fn searchControlUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
+        return switch (@as(SearchBarButtonRole, @enumFromInt(tag))) {
+            .prev => "Previous match",
+            .next => "Next match",
+            .regex => "Regular expression",
+            .case_sensitive => "Case sensitive",
+            .whole_word => "Whole word",
+            .close => "Close search",
+        };
+    }
+
+    fn searchToggleUiaState(ctx: *anyopaque, tag: usize) bool {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        return self.searchBarButtonActive(@enumFromInt(tag));
+    }
+
+    fn searchResultsUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        return if (self.search_bar_results_cache) |text|
+            std.fmt.bufPrint(buf, "{s}", .{text}) catch "Search results"
+        else
+            "Search results";
+    }
+
+    fn decorativeUiaName(_: *anyopaque, _: usize, _: []u8) []const u8 {
+        return "";
+    }
+
+    fn scrollbarUiaName(_: *anyopaque, _: usize, _: []u8) []const u8 {
+        return "Terminal scrollbar";
+    }
+
+    fn scrollbarUiaRangeValue(value: terminal.Scrollbar) win32_uia.ChromeRangeValue {
+        const maximum = value.total -| value.len;
+        return .{
+            .value = @floatFromInt(@min(value.offset, maximum)),
+            .minimum = 0,
+            .maximum = @floatFromInt(maximum),
+            .large_change = @floatFromInt(value.len),
+            .small_change = 1,
+        };
+    }
+
+    fn scrollbarUiaRange(ctx: *anyopaque) win32_uia.ChromeRangeValue {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        return scrollbarUiaRangeValue(self.scrollbar);
+    }
+
+    fn createChromeUiaProvider(
+        self: *Surface,
+        hwnd: HWND,
+        state: win32_uia.ChromeControlState,
+    ) ?*win32_uia.ChromeControlProvider {
+        // Both helpers already bail out unless COM is initialised, so the
+        // provider always uses COM threading; callers do not repeat it.
+        if (!self.app.com_initialized) return null;
+        var threaded_state = state;
+        threaded_state.use_com_threading = true;
+        return win32_uia.ChromeControlProvider.create(
+            std.heap.page_allocator,
+            hwnd,
+            threaded_state,
+        ) catch |err| {
+            log.warn("surface chrome UIA provider unavailable err={}", .{err});
+            return null;
+        };
+    }
+
+    fn searchLabelUiaProvider(self: *Surface, hwnd: HWND) ?*win32_uia.ChromeControlProvider {
+        if (self.search_bar_bg_hwnd == hwnd) return self.search_bar_bg_uia_provider;
+        if (self.search_bar_results_hwnd == hwnd) return self.search_bar_results_uia_provider;
+        return null;
+    }
+
+    fn searchLabelPrevProc(self: *Surface, hwnd: HWND) ?*const anyopaque {
+        if (self.search_bar_bg_hwnd == hwnd) return self.search_bar_label_prev_procs[0];
+        if (self.search_bar_results_hwnd == hwnd) return self.search_bar_label_prev_procs[1];
+        return null;
     }
 
     fn searchEditUiaState(self: *Surface) win32_uia.TerminalState {
@@ -20109,6 +23161,7 @@ pub const Surface = struct {
         self.* = .{
             .app = app,
             .host = host,
+            .adopted_session = if (opts.adopted_session) |pending| pending.takeAdopted() else null,
             .quick_terminal = opts.quick_terminal,
             .host_id = host.id,
             .host_active = true,
@@ -20123,6 +23176,20 @@ pub const Surface = struct {
                 undefined, // surface_ctx — fixed up below after the address stabilises
                 &surfaceDropPayloadCallback,
             ),
+        };
+        errdefer if (self.adopted_session) |*session| {
+            session.pty.deinit();
+            _ = windows.CloseHandle(session.client_process);
+            self.adopted_session = null;
+        };
+        const launch_command = if (app.core_app.first)
+            config.@"initial-command" orelse config.command
+        else
+            config.command;
+        if (launch_command) |command| self.launch_command = try command.clone(app.core_app.alloc);
+        errdefer if (self.launch_command) |*command| {
+            command.deinit(app.core_app.alloc);
+            self.launch_command = null;
         };
         // The DropTarget's surface_ctx must be `self`, but we can't
         // initialise it until `self.*` has been fully assigned above
@@ -20328,6 +23395,12 @@ pub const Surface = struct {
 
     pub fn core(self: *Surface) *CoreSurface {
         return &self.core_surface;
+    }
+
+    pub fn takeAdoptedSession(self: *Surface) ?ptypkg.AdoptedSession {
+        const result = self.adopted_session;
+        self.adopted_session = null;
+        return result;
     }
 
     pub fn ref(self: *Surface, alloc: Allocator) !*Surface {
@@ -20562,7 +23635,10 @@ pub const Surface = struct {
             );
         }
 
-        appendOwnedString(alloc, &self.title, restored.title) catch |err| {
+        // Undo snapshots are serialized terminal state and may predate the
+        // normal title setters. Keep the title-report cache on the same
+        // control-byte policy as live OSC and automation title updates.
+        appendSanitizedTitle(alloc, &self.title, restored.title) catch |err| {
             log.warn("undo snapshot title cache sync failed err={}", .{err});
         };
         appendOwnedString(alloc, &self.pwd, restored.pwd) catch |err| {
@@ -20901,13 +23977,45 @@ pub const Surface = struct {
         };
     }
 
+    /// Reserve the repaint slot for a renderer frame before the expensive
+    /// `updateFrame` work, so a paint that completes during that work cannot
+    /// be lost.
+    pub fn beginRendererFrameUpdate(self: *Surface) bool {
+        return self.beginRendererRepaintRequest();
+    }
+
+    /// Close the interleaving where paint completion clears the reservation
+    /// and checks retry_pending after the renderer observed the old pending
+    /// reservation but before it publishes retry_pending. Either the paint
+    /// completion consumes the retry and sends a wake, or this requester
+    /// reacquires the now-idle reservation and continues immediately.
+    fn completeRendererRepaintCoalesce(self: *Surface) bool {
+        if (self.renderer_repaint_requested.load(.acquire)) return false;
+        if (!self.renderer_repaint_retry_pending.swap(false, .acq_rel)) return false;
+        if (self.renderer_repaint_requested.cmpxchgStrong(
+            false,
+            true,
+            .acq_rel,
+            .acquire,
+        ) == null) return true;
+
+        // Another renderer request acquired the reservation between the
+        // idle observation and CAS. Its paint must retain our retry.
+        self.renderer_repaint_retry_pending.store(true, .release);
+        return false;
+    }
+
     pub fn beginRendererRepaintRequest(self: *Surface) bool {
         if (!self.renderer_repaint_requested.swap(true, .acq_rel)) {
             self.render_trace.noteRendererRepaintAccepted();
             return true;
         }
-        self.render_trace.noteRendererRepaintCoalesced();
         self.renderer_repaint_retry_pending.store(true, .release);
+        if (self.completeRendererRepaintCoalesce()) {
+            self.render_trace.noteRendererRepaintAccepted();
+            return true;
+        }
+        self.render_trace.noteRendererRepaintCoalesced();
         return false;
     }
 
@@ -21122,9 +24230,33 @@ pub const Surface = struct {
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {
-        if (ownedStringEquals(self.title, title)) return;
         const alloc = self.app.core_app.alloc;
-        try appendOwnedString(alloc, &self.title, title);
+        // Both the OSC 0/2 path and the automation IPC path
+        // (`set_surface_title`) land here, and a stored title can be echoed
+        // back to the pty by `title-report`. See `sanitizeTitleAlloc`.
+        const sanitized = try sanitizeTitleAlloc(alloc, title);
+        defer if (sanitized) |v| alloc.free(v);
+        const value = sanitized orelse title;
+
+        var changed = false;
+
+        // Direct commands initially report argv[0] as their title. Keep an
+        // SSH alias over that automatic value, then release it as soon as the
+        // remote terminal supplies a different title.
+        if (sshAliasFromLaunchKey(self.launched_ssh, self.launch_profile_key)) |alias| {
+            if (self.tab_title_override) |override| {
+                if (std.mem.eql(u8, override, alias) and !isAutomaticSshCommandTitle(value)) {
+                    try appendOwnedString(alloc, &self.tab_title_override, null);
+                    changed = true;
+                }
+            }
+        }
+
+        if (!ownedStringEquals(self.title, value)) {
+            try appendOwnedString(alloc, &self.title, value);
+            changed = true;
+        }
+        if (!changed) return;
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
     }
@@ -21134,17 +24266,28 @@ pub const Surface = struct {
     }
 
     fn setTitleOverride(self: *Surface, title: ?[]const u8) !void {
-        if (optionalOwnedStringEquals(self.title_override, title)) return;
         const alloc = self.app.core_app.alloc;
-        try appendOwnedString(alloc, &self.title_override, title);
+        const sanitized = if (title) |v| try sanitizeTitleAlloc(alloc, v) else null;
+        defer if (sanitized) |v| alloc.free(v);
+        const value: ?[]const u8 = if (sanitized) |v| v else title;
+
+        if (optionalOwnedStringEquals(self.title_override, value)) return;
+        try appendOwnedString(alloc, &self.title_override, value);
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
     }
 
     fn setTabTitleOverride(self: *Surface, title: ?[]const u8) !void {
-        if (optionalOwnedStringEquals(self.tab_title_override, title)) return;
         const alloc = self.app.core_app.alloc;
-        try appendOwnedString(alloc, &self.tab_title_override, title);
+        // `set_tab_title` is reachable over the automation IPC pipe and
+        // `effectiveTitle` can surface this value to `title-report`, so it
+        // gets the same sanitizing as `setTitle`.
+        const sanitized = if (title) |v| try sanitizeTitleAlloc(alloc, v) else null;
+        defer if (sanitized) |v| alloc.free(v);
+        const value: ?[]const u8 = if (sanitized) |v| v else title;
+
+        if (optionalOwnedStringEquals(self.tab_title_override, value)) return;
+        try appendOwnedString(alloc, &self.tab_title_override, value);
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
     }
@@ -21347,11 +24490,18 @@ pub const Surface = struct {
         ) == 0) {
             return lastError();
         }
+        self.scrollbar_uia_provider = self.createChromeUiaProvider(scrollbar_hwnd, .{
+            .ctx = @ptrCast(self),
+            .role = .scrollbar,
+            .name = &scrollbarUiaName,
+            .range_value = &scrollbarUiaRange,
+        });
     }
 
     fn destroyScrollbarWindow(self: *Surface) void {
         if (self.scrollbar_state.dragging) _ = sys.ReleaseCapture();
         self.clearScrollbarMarkers();
+        detachChromeControlProvider(self.app, &self.scrollbar_uia_provider);
         if (self.scrollbar_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
         self.scrollbar_hwnd = null;
         self.scrollbar_placement = .{};
@@ -21922,6 +25072,19 @@ pub const Surface = struct {
             &hostButtonProc,
             &self.search_bar_button_prev_procs[@intFromEnum(role)],
         );
+        self.search_bar_button_uia_providers[@intFromEnum(role)] = self.createChromeUiaProvider(hwnd, .{
+            .ctx = @ptrCast(self),
+            .role = switch (role) {
+                .regex, .case_sensitive, .whole_word => .toggle,
+                else => .button,
+            },
+            .tag = @intFromEnum(role),
+            .name = &searchControlUiaName,
+            .toggled = if (role == .regex or role == .case_sensitive or role == .whole_word)
+                &searchToggleUiaState
+            else
+                null,
+        });
         return hwnd;
     }
 
@@ -21945,6 +25108,25 @@ pub const Surface = struct {
             self.app.hinstance,
             null,
         ) orelse return lastError();
+        _ = sys.SetWindowLongPtrW(
+            self.search_bar_bg_hwnd.?,
+            c.GWLP_USERDATA,
+            @as(LONG_PTR, @intCast(@intFromPtr(self))),
+        );
+        const background_previous = sys.SetWindowLongPtrW(
+            self.search_bar_bg_hwnd.?,
+            c.GWLP_WNDPROC,
+            @as(LONG_PTR, @intCast(@intFromPtr(&searchLabelProc))),
+        );
+        self.search_bar_label_prev_procs[0] = if (background_previous == 0)
+            null
+        else
+            @ptrFromInt(@as(usize, @intCast(background_previous)));
+        self.search_bar_bg_uia_provider = self.createChromeUiaProvider(self.search_bar_bg_hwnd.?, .{
+            .ctx = @ptrCast(self),
+            .role = .decorative,
+            .name = &decorativeUiaName,
+        });
 
         self.search_bar_edit_hwnd = sys.CreateWindowExW(
             0,
@@ -21960,7 +25142,6 @@ pub const Surface = struct {
             self.app.hinstance,
             null,
         ) orelse return lastError();
-
         const edit_hwnd = self.search_bar_edit_hwnd.?;
         setWindowData(edit_hwnd, host);
         const edit_prev = sys.SetWindowLongPtrW(
@@ -22016,6 +25197,25 @@ pub const Surface = struct {
             self.app.hinstance,
             null,
         ) orelse return lastError();
+        _ = sys.SetWindowLongPtrW(
+            self.search_bar_results_hwnd.?,
+            c.GWLP_USERDATA,
+            @as(LONG_PTR, @intCast(@intFromPtr(self))),
+        );
+        const results_previous = sys.SetWindowLongPtrW(
+            self.search_bar_results_hwnd.?,
+            c.GWLP_WNDPROC,
+            @as(LONG_PTR, @intCast(@intFromPtr(&searchLabelProc))),
+        );
+        self.search_bar_label_prev_procs[1] = if (results_previous == 0)
+            null
+        else
+            @ptrFromInt(@as(usize, @intCast(results_previous)));
+        self.search_bar_results_uia_provider = self.createChromeUiaProvider(self.search_bar_results_hwnd.?, .{
+            .ctx = @ptrCast(self),
+            .role = .live_text,
+            .name = &searchResultsUiaName,
+        });
 
         self.applySearchBarFont(host.chrome_font);
         _ = try self.syncSearchBarResultsText();
@@ -22024,6 +25224,11 @@ pub const Surface = struct {
 
     fn destroySearchBarControls(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
+        detachChromeControlProvider(self.app, &self.search_bar_bg_uia_provider);
+        detachChromeControlProvider(self.app, &self.search_bar_results_uia_provider);
+        for (&self.search_bar_button_uia_providers) |*provider| {
+            detachChromeControlProvider(self.app, provider);
+        }
         if (self.search_bar_edit_uia_provider) |provider| {
             self.search_bar_edit_uia_provider = null;
             self.search_bar_edit_uia_selection = null;
@@ -22060,6 +25265,8 @@ pub const Surface = struct {
         self.search_bar_bg_hwnd = null;
         self.search_bar_edit_prev_proc = null;
         self.search_bar_button_prev_procs = [_]?*const anyopaque{null} ** 6;
+        self.search_bar_button_uia_providers = [_]?*win32_uia.ChromeControlProvider{null} ** 6;
+        self.search_bar_label_prev_procs = .{ null, null };
         self.search_bar_bg_placement = .{};
         self.search_bar_edit_placement = .{};
         self.search_bar_prev_placement = .{};
@@ -22243,12 +25450,16 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         const text = try buildSearchBarResultsText(alloc, &self.search_bar);
         defer alloc.free(text);
-        return try syncWindowTextUtf8Cached(
+        const changed = try syncWindowTextUtf8Cached(
             alloc,
             hwnd,
             &self.search_bar_results_cache,
             text,
         );
+        if (changed) {
+            if (self.search_bar_results_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        }
+        return changed;
     }
 
     fn issueSearchNow(self: *Surface, force: bool) !bool {
@@ -22329,11 +25540,22 @@ pub const Surface = struct {
 
     fn handleSearchToggleClick(self: *Surface, command_id: usize) !bool {
         const now_ms: i64 = @intCast(sys.GetTickCount64());
-        switch (command_id) {
-            c.SEARCH_REGEX_ID => self.search_bar.toggleRegex(now_ms),
-            c.SEARCH_CASE_ID => self.search_bar.toggleCase(now_ms),
-            c.SEARCH_WORD_ID => self.search_bar.toggleWord(now_ms),
+        const role: SearchBarButtonRole = switch (command_id) {
+            c.SEARCH_REGEX_ID => .regex,
+            c.SEARCH_CASE_ID => .case_sensitive,
+            c.SEARCH_WORD_ID => .whole_word,
             else => return false,
+        };
+        const old = self.searchBarButtonActive(role);
+        switch (role) {
+            .regex => self.search_bar.toggleRegex(now_ms),
+            .case_sensitive => self.search_bar.toggleCase(now_ms),
+            .whole_word => self.search_bar.toggleWord(now_ms),
+            else => unreachable,
+        }
+        const new = self.searchBarButtonActive(role);
+        if (self.search_bar_button_uia_providers[@intFromEnum(role)]) |provider| {
+            provider.raiseToggleChanged(old, new);
         }
 
         self.invalidateSearchButtons();
@@ -23390,6 +26612,10 @@ pub const Surface = struct {
             alloc.free(value);
             self.launch_profile_key = null;
         }
+        if (self.launch_command) |*command| {
+            command.deinit(alloc);
+            self.launch_command = null;
+        }
         if (self.key_table_name) |value| {
             alloc.free(value);
             self.key_table_name = null;
@@ -23438,7 +26664,13 @@ pub const Surface = struct {
             };
         }
 
+        self.syncOcclusion();
+    }
+
+    fn syncOcclusion(self: *Surface) void {
         if (!self.core_initialized) return;
+        const visible = self.window_visible and
+            (if (self.host) |host| host.surfaces_visible else true);
         if (!shouldDispatchOcclusion(self.occlusion_visible, visible)) return;
         self.occlusion_visible = visible;
         self.core_surface.occlusionCallback(visible) catch |err| {
@@ -23593,6 +26825,12 @@ pub const Surface = struct {
         const offset_changed = self.scrollbar.offset != value.offset;
         const status_changed = scrollStatusTextChanged(old, value);
         self.scrollbar = value;
+        if (self.scrollbar_uia_provider) |provider| {
+            provider.raiseRangeChanged(
+                scrollbarUiaRangeValue(old),
+                scrollbarUiaRangeValue(value),
+            );
+        }
         if (old.total != value.total or old.len != value.len) {
             self.clearScrollbarMarkers();
         }
@@ -24189,6 +27427,18 @@ test "win32 undo history ordering uses sequence when timestamps tie" {
     try std.testing.expect(win32_structural_history.sortsAfter(11, 1, 10, 99));
 }
 
+test "win32 scrollbar UIA range clamps value and exposes viewport bounds" {
+    const range = Surface.scrollbarUiaRangeValue(.{
+        .total = 100,
+        .offset = 99,
+        .len = 20,
+    });
+    try std.testing.expectEqual(@as(f64, 80), range.value);
+    try std.testing.expectEqual(@as(f64, 80), range.maximum);
+    try std.testing.expectEqual(@as(f64, 20), range.large_change);
+    try std.testing.expectEqual(@as(f64, 1), range.small_change);
+}
+
 test "win32 undo prune expires local and structural histories" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -24600,6 +27850,191 @@ test "win32 structural redo invalidation clears affected tab redo only" {
     try std.testing.expectEqual(@as(usize, 0), surface_b.undo_stack.redoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_c.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_c.undo_stack.redoDepth());
+}
+
+test "automation in-app new_tab action does not query source pwd" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var source: Surface = undefined;
+    var created: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+        .surfaces = &.{
+            .{
+                .storage = &source,
+                .host = &host,
+                .register = true,
+                .free_launch_profile_key_on_deinit = true,
+            },
+            .{
+                .storage = &created,
+                .host = &host,
+                .window_visible = false,
+                .host_active = false,
+                .free_launch_profile_key_on_deinit = true,
+            },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
+
+    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    var profiles = [_]windows_shell.Profile{.{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &command },
+    }};
+    host.profiles = &profiles;
+    source.launch_profile_key = try core_app.alloc.dupeZ(u8, "pwsh");
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_ref: *Surface = undefined;
+        var pwd_calls: usize = 0;
+
+        fn queryPwd(_: Allocator, _: *Surface) !?[]const u8 {
+            pwd_calls += 1;
+            return error.UnexpectedPwdQuery;
+        }
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            // Ordinary in-app tabs retain the configured default rather than
+            // inheriting the source profile command used by automation.
+            try std.testing.expect(config.command == null);
+            created_ref.app = hook_app;
+            created_ref.host = host_ref;
+            created_ref.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index orelse host_ref.tabs.items.len,
+                try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created_ref),
+            );
+            return created_ref;
+        }
+    };
+
+    Hook.host_ref = &host;
+    Hook.created_ref = &created;
+    Hook.pwd_calls = 0;
+    app.test_automation_pwd = &Hook.queryPwd;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    try std.testing.expect(try app.performAction(.app, .new_tab, {}));
+    try std.testing.expectEqual(@as(usize, 0), Hook.pwd_calls);
+    try std.testing.expect(created.launch_profile_key == null);
+}
+
+test "automation explicit-window new_tab reanchors inactive host cwd and override wins" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var inherited: Surface = undefined;
+    var overridden: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 11, .register = true, .next_tab_id = 2 },
+            .{ .storage = &host_b, .id = 12, .register = true, .next_tab_id = 2 },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a, .register = true, .window_focused = true },
+            .{ .storage = &surface_b, .host = &host_b, .register = true, .host_active = false },
+            .{ .storage = &inherited, .host = &host_b, .window_visible = false, .host_active = false },
+            .{ .storage = &overridden, .host = &host_b, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 1 },
+            .{ .host = &host_b, .surface = &surface_b, .id = 1 },
+        },
+    });
+    defer session.deinit();
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_refs: [2]*Surface = undefined;
+        var create_calls: usize = 0;
+        var pwd_calls: usize = 0;
+
+        fn queryPwd(alloc: Allocator, source: *Surface) !?[]const u8 {
+            try std.testing.expectEqual(@as(u32, 12), source.host_id);
+            pwd_calls += 1;
+            return try alloc.dupe(u8, "C:\\inactive-host");
+        }
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            const call_index = create_calls;
+            create_calls += 1;
+            try std.testing.expect(call_index < created_refs.len);
+            try std.testing.expectEqual(@as(?u32, host_ref.id), opts.host_id);
+            try std.testing.expect(opts.clone_state_from != null);
+            try std.testing.expectEqual(host_ref.id, opts.clone_state_from.?.host_id);
+
+            const expected = if (call_index == 0) "C:\\inactive-host" else "D:\\explicit-override";
+            const working_directory = config.@"working-directory" orelse
+                return error.MissingWorkingDirectory;
+            switch (working_directory) {
+                .path => |path| try std.testing.expectEqualStrings(expected, path),
+                .home, .inherit => return error.UnexpectedWorkingDirectory,
+            }
+
+            const created = created_refs[call_index];
+            created.app = hook_app;
+            created.host = host_ref;
+            created.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created);
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index.?,
+                try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created),
+            );
+            return created;
+        }
+    };
+
+    Hook.host_ref = &host_b;
+    Hook.created_refs = .{ &inherited, &overridden };
+    Hook.create_calls = 0;
+    Hook.pwd_calls = 0;
+    app.test_automation_pwd = &Hook.queryPwd;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    try std.testing.expect(!surface_b.host_active);
+    try app.performAutomationCommand(.{ .new_tab = .{
+        .target = .{ .window_id = host_b.id },
+        .working_directory = null,
+    } });
+    try app.performAutomationCommand(.{ .new_tab = .{
+        .target = .{ .window_id = host_b.id },
+        .working_directory = "D:\\explicit-override",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 2), Hook.create_calls);
+    try std.testing.expectEqual(@as(usize, 2), Hook.pwd_calls);
 }
 
 test "win32 new_tab action inserts after the active tab by default, clears current tab redo, and activates the created tab" {
@@ -26318,6 +29753,65 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
     try std.testing.expectEqual(@as(usize, 0), surface_b.undo_stack.redoDepth());
 }
 
+test "win32 windowDestroyed detaches the removed tab UIA provider" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const ProviderContext = struct {
+        fn name(_: *anyopaque, _: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "removed tab", .{}) catch "";
+        }
+    };
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
+    }.GetDesktopWindow;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    var context: u8 = 0;
+    const hwnd = GetDesktopWindow();
+    const provider = try win32_uia.ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = @ptrCast(&context),
+        .role = .tab_item,
+        .tag = 1,
+        .name = ProviderContext.name,
+    });
+    _ = provider.base.vtbl.AddRef(&provider.base);
+    defer _ = provider.base.vtbl.Release(&provider.base);
+    host.tabs.items[0].uia_provider = provider;
+
+    app.windowDestroyed(&surface_a);
+
+    try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+    try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
+    try std.testing.expect(
+        win32_uia.returnChromeControlProvider(
+            hwnd,
+            0,
+            win32_uia.UiaRootObjectId,
+            provider,
+        ) == null,
+    );
+}
+
 test "win32 terminal undo snapshot restores terminal state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -26876,6 +30370,12 @@ test "win32 allocIpcPipeName prefixes sanitized namespace" {
     try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class", pipe_name_utf8);
 }
 
+test "win32 named layout encoding uses the persistence read limit" {
+    const limit = win32_session_persistence.default_max_state_bytes;
+    try std.testing.expect(App.namedLayoutEncodingFitsReadLimit(limit));
+    try std.testing.expect(!App.namedLayoutEncodingFitsReadLimit(limit + 1));
+}
+
 test "win32 normalizeForwardedStartupArg drops class and normalizes working directory" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -26889,6 +30389,41 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
     const other = (try normalizeForwardedStartupArg(std.testing.allocator, "--title=Inbox")).?;
     defer std.testing.allocator.free(other);
     try std.testing.expectEqualStrings("--title=Inbox", other);
+
+    const activation = (try normalizeForwardedStartupArg(
+        std.testing.allocator,
+        "wgh://activate?surface=42&tab=7",
+    )).?;
+    defer std.testing.allocator.free(activation);
+    try std.testing.expectEqualStrings("wgh://activate?surface=42&tab=7", activation);
+
+    try std.testing.expect(try normalizeForwardedStartupArg(
+        std.testing.allocator,
+        "wgh://activate?surface=abc",
+    ) == null);
+}
+
+test "win32 synthesized forwarded working directory obeys receiver policy" {
+    try std.testing.expect(try allocForwardedWorkingDirectoryArg(
+        std.testing.allocator,
+        "\\\\host\\share",
+    ) == null);
+
+    const local = (try allocForwardedWorkingDirectoryArg(
+        std.testing.allocator,
+        "C:\\work",
+    )).?;
+    defer std.testing.allocator.free(local);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work", local);
+}
+
+test "win32 new-window IPC rejects policy failures before acknowledgement" {
+    try std.testing.expect(newWindowIpcArgumentsAccepted(null));
+    try std.testing.expect(newWindowIpcArgumentsAccepted(&.{"--title=Inbox"}));
+    try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{"--command=calc.exe"}));
+    try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{
+        "--working-directory=\\\\host\\share",
+    }));
 }
 
 test "win32 decorationsVisibleForConfig only hides none" {
@@ -27003,6 +30538,26 @@ test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces"
     try std.testing.expect((effectiveHostWindowStyle(false, false, true) & c.WS_CLIPCHILDREN) != 0);
     try std.testing.expect((effectiveHostWindowStyle(true, true, true) & c.WS_CLIPCHILDREN) != 0);
     try std.testing.expect((effectiveHostWindowStyle(true, false, false) & c.WS_CLIPCHILDREN) == 0);
+}
+
+test "win32 failed cloned-host registration detaches the host reference" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var first: Host = undefined;
+    var failed_clone: Host = undefined;
+    var last: Host = undefined;
+    var hosts: std.ArrayListUnmanaged(*Host) = .empty;
+    defer hosts.deinit(std.testing.allocator);
+    try hosts.append(std.testing.allocator, &first);
+    try hosts.append(std.testing.allocator, &failed_clone);
+    try hosts.append(std.testing.allocator, &last);
+
+    try std.testing.expect(detachHostReference(&hosts, &failed_clone));
+    try std.testing.expectEqual(@as(usize, 2), hosts.items.len);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &failed_clone) == null);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &first) != null);
+    try std.testing.expect(std.mem.indexOfScalar(*Host, hosts.items, &last) != null);
+    try std.testing.expect(!detachHostReference(&hosts, &failed_clone));
 }
 
 test "win32 sharesHostWindowState only for same-host clones" {
@@ -27234,13 +30789,26 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     var app: App = undefined;
     app.windows = .empty;
     app.hosts = .empty;
+    app.ipc_namespace = "lane_9";
+    app.test_automation_pwd = &struct {
+        fn query(alloc: Allocator, surface: *Surface) !?[]const u8 {
+            return switch (surface.core().id) {
+                701 => null,
+                702 => try alloc.dupe(u8, "C:\\work\\\"quote\"\t\r\n"),
+                703 => try alloc.dupe(u8, "home"),
+                else => error.UnexpectedSurface,
+            };
+        }
+    }.query;
     defer app.windows.deinit(std.testing.allocator);
     defer app.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 17;
+    host.hwnd = null;
     host.tabs = .empty;
     host.active_tab = 1;
+    host.cached_window_title = "host \"quote\"\\slash\t\r\n";
     defer {
         for (host.tabs.items) |*tab| tab.deinit();
         host.tabs.deinit(std.testing.allocator);
@@ -27251,6 +30819,9 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     tab0_surface.core_surface.id = 701;
     tab0_surface.host = &host;
     tab0_surface.host_id = host.id;
+    tab0_surface.title = null;
+    tab0_surface.title_override = null;
+    tab0_surface.tab_title_override = null;
 
     var tab1_primary: Surface = undefined;
     tab1_primary.core_surface = undefined;
@@ -27258,12 +30829,18 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     tab1_primary.host = &host;
     tab1_primary.host_id = host.id;
     tab1_primary.window_focused = true;
+    tab1_primary.title = "terminal title";
+    tab1_primary.title_override = "surface title";
+    tab1_primary.tab_title_override = "tab \"title\"\\\t\r\n";
 
     var tab1_split: Surface = undefined;
     tab1_split.core_surface = undefined;
     tab1_split.core_surface.id = 703;
     tab1_split.host = &host;
     tab1_split.host_id = host.id;
+    tab1_split.title = "split title";
+    tab1_split.title_override = null;
+    tab1_split.tab_title_override = null;
 
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &tab0_surface));
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 4, &tab1_primary));
@@ -27292,10 +30869,70 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tab_count\":2,\"pane_count\":3,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"pane_count\":1,\"panes\":[{\"surface_id\":701,\"focused\":true,\"active\":false}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"pane_count\":2,\"panes\":[{\"surface_id\":703,\"focused\":false,\"active\":false},{\"surface_id\":702,\"focused\":true,\"active\":true}]}]}]}",
-        json,
-    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("noctty.windows.v3", apprt.ipc.automation_window_list_schema);
+    try std.testing.expectEqual(@as(u32, 3), apprt.ipc.automation_window_list_api_version);
+    try std.testing.expectEqualStrings("noctty.windows.v3", root.get("schema").?.string);
+    try std.testing.expectEqual(@as(i64, 3), root.get("api_version").?.integer);
+    const instance = root.get("instance").?.object;
+    try std.testing.expectEqual(@as(i64, sys.GetCurrentProcessId()), instance.get("pid").?.integer);
+    try std.testing.expectEqualStrings(build_config.version_string, instance.get("version").?.string);
+    try std.testing.expectEqualStrings("lane_9", instance.get("class").?.string);
+
+    const windows_json = root.get("windows").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), windows_json.len);
+    const window = windows_json[0].object;
+    try std.testing.expectEqual(@as(i64, 17), window.get("window_id").?.integer);
+    try std.testing.expectEqualStrings("host \"quote\"\\slash\t\r\n", window.get("title").?.string);
+    try std.testing.expect(window.get("focused").?.bool);
+    try std.testing.expectEqual(@as(i64, 4), window.get("active_tab_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), window.get("tab_count").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), window.get("pane_count").?.integer);
+    const tabs = window.get("tabs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), tabs.len);
+    try std.testing.expectEqual(@as(i64, 3), tabs[0].object.get("tab_id").?.integer);
+    try std.testing.expect(!tabs[0].object.get("active").?.bool);
+    try std.testing.expectEqual(@as(i64, 701), tabs[0].object.get("focused_surface_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), tabs[0].object.get("pane_count").?.integer);
+    const null_pane = tabs[0].object.get("panes").?.array.items[0].object;
+    try std.testing.expectEqual(@as(i64, 701), null_pane.get("surface_id").?.integer);
+    try std.testing.expect(null_pane.get("focused").?.bool);
+    try std.testing.expect(!null_pane.get("active").?.bool);
+    try std.testing.expect(null_pane.get("title").? == .null);
+    try std.testing.expect(null_pane.get("working_directory").? == .null);
+    const active_panes = tabs[1].object.get("panes").?.array.items;
+    try std.testing.expectEqual(@as(i64, 4), tabs[1].object.get("tab_id").?.integer);
+    try std.testing.expect(tabs[1].object.get("active").?.bool);
+    try std.testing.expectEqual(@as(i64, 702), tabs[1].object.get("focused_surface_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), tabs[1].object.get("pane_count").?.integer);
+    try std.testing.expectEqual(@as(usize, 2), active_panes.len);
+    try std.testing.expectEqual(@as(i64, 703), active_panes[0].object.get("surface_id").?.integer);
+    try std.testing.expectEqualStrings("split title", active_panes[0].object.get("title").?.string);
+    try std.testing.expectEqualStrings("home", active_panes[0].object.get("working_directory").?.string);
+    try std.testing.expectEqual(@as(i64, 702), active_panes[1].object.get("surface_id").?.integer);
+    try std.testing.expectEqualStrings("tab \"title\"\\\t\r\n", active_panes[1].object.get("title").?.string);
+    try std.testing.expectEqualStrings("C:\\work\\\"quote\"\t\r\n", active_panes[1].object.get("working_directory").?.string);
+    try std.testing.expect(active_panes[1].object.get("focused").?.bool);
+    try std.testing.expect(active_panes[1].object.get("active").?.bool);
+    try std.testing.expect(active_panes[1].object.get("pid") == null);
+
+    for ([_][]const u8{ "grid", "scrollback", "selection", "clipboard", "shell_input" }) |key| {
+        try std.testing.expect(std.mem.indexOf(u8, json, key) == null);
+    }
+}
+
+test "automation-window-list host focus follows the foreground host" {
+    const host: HWND = @ptrFromInt(1);
+    const other: HWND = @ptrFromInt(2);
+
+    // Child-control focus still presents its top-level host as foreground.
+    try std.testing.expect(automationHostFocused(host, host, false));
+    try std.testing.expect(!automationHostFocused(host, other, true));
+    try std.testing.expect(!automationHostFocused(host, null, true));
+    // HWND-free unit fixtures retain the existing surface-state fallback.
+    try std.testing.expect(automationHostFocused(null, null, true));
 }
 
 test "automation-window-list win32 json skips empty hosts kept alive for undo history" {
@@ -27304,6 +30941,12 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     var app: App = undefined;
     app.windows = .empty;
     app.hosts = .empty;
+    app.ipc_namespace = "empty-host-test";
+    app.test_automation_pwd = &struct {
+        fn query(_: Allocator, _: *Surface) !?[]const u8 {
+            return null;
+        }
+    }.query;
     defer app.windows.deinit(std.testing.allocator);
     defer app.hosts.deinit(std.testing.allocator);
 
@@ -27320,6 +30963,7 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     live_host.id = 17;
     live_host.tabs = .empty;
     live_host.active_tab = 0;
+    live_host.cached_window_title = null;
     defer {
         for (live_host.tabs.items) |*tab| tab.deinit();
         live_host.tabs.deinit(std.testing.allocator);
@@ -27331,6 +30975,9 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     surface.host = &live_host;
     surface.host_id = live_host.id;
     surface.window_focused = true;
+    surface.title = null;
+    surface.title_override = null;
+    surface.tab_title_override = null;
 
     try live_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 5, &surface));
     try app.hosts.append(std.testing.allocator, &empty_host);
@@ -27340,26 +30987,1060 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tab_count\":1,\"pane_count\":1,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"pane_count\":1,\"panes\":[{\"surface_id\":801,\"focused\":true,\"active\":true}]}]}]}",
-        json,
-    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const windows_json = parsed.value.object.get("windows").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), windows_json.len);
+    const window = windows_json[0].object;
+    try std.testing.expectEqual(@as(i64, 17), window.get("window_id").?.integer);
+    try std.testing.expectEqualStrings("noctty", window.get("title").?.string);
+    const pane = window.get("tabs").?.array.items[0].object.get("panes").?.array.items[0].object;
+    try std.testing.expect(pane.get("title").? == .null);
+    try std.testing.expect(pane.get("working_directory").? == .null);
 }
 
-test "win32 timed out automation request remains owned until consumption" {
+test "win32 timed out automation request stays owned and cannot be claimed" {
     const request = try CoreApp.Message.AutomationActionRequest.create(
         std.testing.allocator,
         .focused,
         "new_tab",
+        std.math.maxInt(u64),
+        automationNowMs,
     );
     request.retain();
+    try std.testing.expect(request.lifecycle.cancel());
     request.release(); // Producer times out and drops its ownership.
     try std.testing.expectEqualStrings("new_tab", request.action_text);
-    request.completed.store(true, .release);
+    try std.testing.expect(!request.lifecycle.claim());
     request.release(); // Delayed mailbox consumer owns the final reference.
 }
 
-test "win32 IPC silent client read is bounded" {
+test "win32 IPC pipe SDDL renders the exact DACL and mandatory label" {
+    const user_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1111-2222-3333-1001");
+    const medium_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-8192");
+    const high_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-12288");
+
+    var buf: [320]u16 = undefined;
+
+    // Medium integrity is explicit so clients can reject an unlabeled
+    // same-user squatter instead of treating it as implicitly medium.
+    {
+        const sddl = try buildIpcPipeSddl(&buf, user_sid, medium_sid);
+        var utf8: [320]u8 = undefined;
+        const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
+        try std.testing.expectEqualStrings(
+            "O:S-1-5-21-1111-2222-3333-1001" ++
+                "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)" ++
+                "S:(ML;;NW;;;S-1-16-8192)",
+            utf8[0..len],
+        );
+    }
+
+    // Above medium: the label ACE is what stops a filtered medium-integrity
+    // token of the SAME user from opening the elevated instance's pipe for
+    // write. The DACL alone cannot, because the token USER SID is identical
+    // across the elevated and non-elevated tokens of one account.
+    {
+        const sddl = try buildIpcPipeSddl(&buf, user_sid, high_sid);
+        var utf8: [320]u8 = undefined;
+        const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
+        try std.testing.expectEqualStrings(
+            "O:S-1-5-21-1111-2222-3333-1001" ++
+                "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)" ++
+                "S:(ML;;NW;;;S-1-16-12288)",
+            utf8[0..len],
+        );
+    }
+
+    // A buffer too small to hold the text plus its sentinel fails closed.
+    var tiny: [8]u16 = undefined;
+    try std.testing.expectError(
+        error.IpcSecurityDescriptorFailed,
+        buildIpcPipeSddl(&tiny, user_sid, medium_sid),
+    );
+}
+
+test "win32 integrity SID parsing accepts only mandatory label SIDs" {
+    const expect = std.testing.expect;
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+
+    try std.testing.expectEqual(
+        @as(?u32, 0x3000),
+        integrityRidFromSidString(L("S-1-16-12288")),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 0x2000),
+        integrityRidFromSidString(L("S-1-16-8192")),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 0x4000),
+        integrityRidFromSidString(L("S-1-16-16384")),
+    );
+
+    // Anything that is not S-1-16-<digits> must fail closed rather than be
+    // treated as an integrity level.
+    try expect(integrityRidFromSidString(L("S-1-5-21-1-2-3-1001")) == null);
+    try expect(integrityRidFromSidString(L("S-1-16-")) == null);
+    try expect(integrityRidFromSidString(L("S-1-16-12a88")) == null);
+    try expect(integrityRidFromSidString(L("")) == null);
+    try expect(integrityRidFromSidString(L("S-1-16-99999999999")) == null);
+}
+
+test "win32 pipe descriptor integrity parsing accepts SDDL aliases" {
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expectEqual(
+        @as(u32, 0x3000),
+        try descriptorIntegrityRidFromSddl(L("S:AI(ML;;NW;;;HI)")),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x4000),
+        try descriptorIntegrityRidFromSddl(L("S:(ML;;NWNR;;;SI)")),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0x3000),
+        try descriptorIntegrityRidFromSddl(L("S:(ML;;NW;;;S-1-16-12288)")),
+    );
+    try std.testing.expectError(
+        error.InvalidSecurityDescriptor,
+        descriptorIntegrityRidFromSddl(L("")),
+    );
+    try std.testing.expectError(
+        error.InvalidSecurityDescriptor,
+        descriptorIntegrityRidFromSddl(L("S:(ML;;NW;;;ZZ)")),
+    );
+}
+
+/// Render a security descriptor to SDDL text.
+///
+/// Any two descriptors being compared must BOTH come through this one helper.
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW` abbreviates a
+/// well-known SID to its two-letter alias (`SY`, `BA`, `LA`, ...) while
+/// `ConvertSidToStringSidW` always emits the full `S-1-5-...` form, so
+/// rendering one side each way cannot be compared for any account that has an
+/// alias -- which includes a runner executing as built-in Administrator or as
+/// SYSTEM.
+///
+/// Helper shape borrowed from the equivalent fix on
+/// `issues/123-paste-path-audit-fuzz` (`win32_ipc.zig` `descriptorSddlAlloc`);
+/// keep the two in sync, or collapse them into one shared helper, when those
+/// branches meet.
+fn testDescriptorSddlAlloc(
+    alloc: Allocator,
+    descriptor: *anyopaque,
+    information: u32,
+) ![]u8 {
+    var text: ?[*:0]u16 = null;
+    if (sys.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        c.SDDL_REVISION_1,
+        information,
+        &text,
+        null,
+    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    defer _ = sys.LocalFree(@ptrCast(text.?));
+
+    return std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(text.?));
+}
+
+/// Rewrite `GENERIC_ALL` to `FILE_ALL_ACCESS` in SDDL text.
+///
+/// Windows resolves generic rights against the object's generic mapping when
+/// an ACE is ATTACHED, so a descriptor built asking for `GA` reads back off a
+/// named pipe as `FA`. Same access, canonical spelling. The request side has
+/// to be normalized before it can be compared with what the object carries.
+fn testMapGenericAllToFileAllAlloc(alloc: Allocator, sddl: []const u8) ![]u8 {
+    return std.mem.replaceOwned(u8, alloc, sddl, ";;GA;;", ";;FA;;");
+}
+
+/// Drop the `AI` / `AR` ACL control flags from SDDL text.
+///
+/// `CreateNamedPipeW` hands our descriptor to the object manager, which runs
+/// the auto-inheritance algorithm and stamps `SE_SACL_AUTO_INHERITED` on the
+/// copy it attaches (the DACL escapes this only because we mark it protected).
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW` then renders `S:AI(`
+/// where the descriptor we asked for renders `S:(` — so a comparison of the two
+/// spellings fails on any host that gets a label at all, i.e. an ELEVATED one.
+/// That is why this only ever reproduced on CI: a medium-integrity developer
+/// machine emits no label, so there is no SACL to stamp.
+///
+/// These two flags record how an ACL was assembled, never who may do what, so
+/// normalizing them away loses no access-control coverage. `P` is deliberately
+/// NOT stripped — assertion (3) below still requires a protected DACL.
+fn testStripAclAutoInheritFlagsAlloc(alloc: Allocator, sddl: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < sddl.len) {
+        // ACL flags only appear between an ACL introducer and its first ACE.
+        if (!isTestSddlAclIntroducer(sddl, i)) {
+            try out.append(alloc, sddl[i]);
+            i += 1;
+            continue;
+        }
+
+        try out.appendSlice(alloc, sddl[i .. i + 2]);
+        i += 2;
+        while (i < sddl.len and sddl[i] != '(' and !isTestSddlAclIntroducer(sddl, i)) {
+            if (sddl[i] == 'A' and
+                i + 1 < sddl.len and
+                (sddl[i + 1] == 'I' or sddl[i + 1] == 'R'))
+            {
+                i += 2;
+                continue;
+            }
+            try out.append(alloc, sddl[i]);
+            i += 1;
+        }
+    }
+
+    return out.toOwnedSlice(alloc);
+}
+
+fn isTestSddlAclIntroducer(sddl: []const u8, i: usize) bool {
+    return (sddl[i] == 'D' or sddl[i] == 'S') and
+        i + 1 < sddl.len and
+        sddl[i + 1] == ':';
+}
+
+test "win32 SDDL auto-inherit normalization keeps every access-bearing field" {
+    const alloc = std.testing.allocator;
+
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        // The exact shape CI produced on an elevated runner.
+        .{
+            .in = "D:P(A;;FA;;;LA)S:AI(ML;;NW;;;HI)",
+            .want = "D:P(A;;FA;;;LA)S:(ML;;NW;;;HI)",
+        },
+        // Already normalized: unchanged.
+        .{
+            .in = "D:P(A;;FA;;;LA)S:(ML;;NW;;;HI)",
+            .want = "D:P(A;;FA;;;LA)S:(ML;;NW;;;HI)",
+        },
+        // Medium integrity: no label, therefore no SACL at all.
+        .{ .in = "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)", .want = "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)" },
+        // AR as well as AI, and on both ACLs.
+        .{ .in = "D:AIAR(A;;FA;;;LA)S:AR(ML;;NW;;;HI)", .want = "D:(A;;FA;;;LA)S:(ML;;NW;;;HI)" },
+        // `P` survives -- losing it would silently allow an inheritable ACE.
+        .{ .in = "D:PAI(A;;FA;;;LA)", .want = "D:P(A;;FA;;;LA)" },
+        // Trustee aliases that merely CONTAIN A/I/R live inside ACEs, which the
+        // flag scan never enters. AN (Anonymous) and AU are the ones that matter.
+        .{ .in = "D:P(A;;FA;;;AN)(A;;FA;;;AU)", .want = "D:P(A;;FA;;;AN)(A;;FA;;;AU)" },
+        // Owner and group sections are copied through untouched.
+        .{ .in = "O:LAG:BAD:PAI(A;;FA;;;LA)", .want = "O:LAG:BAD:P(A;;FA;;;LA)" },
+    };
+
+    for (cases) |case| {
+        const got = try testStripAclAutoInheritFlagsAlloc(alloc, case.in);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(case.want, got);
+    }
+}
+
+test "win32 IPC pipe descriptor attaches the expected owner DACL and label" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const requested = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(requested);
+
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = requested,
+        .bInheritHandle = windows.FALSE,
+    };
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        alloc,
+        "\\\\.\\pipe\\noctty-ipc-sddl-{d}",
+        .{sys.GetTickCount64()},
+        0,
+    );
+    defer alloc.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name_utf8);
+    defer alloc.free(pipe_name);
+
+    // Assert against the descriptor Windows ACTUALLY ATTACHED, not against the
+    // string we handed in. Only the live object shows the generic-rights
+    // mapping, and only the live object proves the label survived creation.
+    const pipe = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE |
+            c.PIPE_READMODE_BYTE |
+            win32_ipc.pipe_nowait |
+            c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        1024,
+        1024,
+        0,
+        &security_attributes,
+    );
+    try std.testing.expect(pipe != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(pipe);
+
+    // DACL *and* label. Requesting the DACL alone would assert nothing about
+    // the label, and would pass even if a label were wrongly emitted at medium
+    // integrity. LABEL_SECURITY_INFORMATION needs no SeSecurityPrivilege.
+    const information = c.OWNER_SECURITY_INFORMATION |
+        c.DACL_SECURITY_INFORMATION |
+        c.LABEL_SECURITY_INFORMATION;
+
+    var attached: ?*anyopaque = null;
+    const status = sys.GetSecurityInfo(
+        pipe,
+        c.SE_KERNEL_OBJECT,
+        information,
+        null,
+        null,
+        null,
+        null,
+        &attached,
+    );
+    try std.testing.expectEqual(@as(u32, 0), status);
+    defer _ = sys.LocalFree(attached.?);
+
+    const attached_text = try testDescriptorSddlAlloc(alloc, attached.?, information);
+    defer alloc.free(attached_text);
+
+    // Only the auto-inheritance bookkeeping the object manager stamps on the
+    // attached copy is normalized away; every access-bearing field of the live
+    // descriptor is compared exactly. See testStripAclAutoInheritFlagsAlloc.
+    const actual = try testStripAclAutoInheritFlagsAlloc(alloc, attached_text);
+    defer alloc.free(actual);
+
+    // (1) What the pipe carries must equal what we asked for, once generic
+    // rights are normalized and both sides are rendered the same way.
+    {
+        const requested_text = try testDescriptorSddlAlloc(alloc, requested, information);
+        defer alloc.free(requested_text);
+        const requested_mapped = try testMapGenericAllToFileAllAlloc(alloc, requested_text);
+        defer alloc.free(requested_mapped);
+        try std.testing.expectEqualStrings(requested_mapped, actual);
+    }
+
+    // (2) That alone would still pass if `allocIpcPipeSecurityDescriptor` were
+    // changed to request a wider trustee, so rebuild the descriptor we WANT
+    // independently from the token's own SID and require an exact match.
+    var token: windows.HANDLE = undefined;
+    try std.testing.expect(sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) != 0);
+    defer _ = windows.CloseHandle(token);
+
+    var token_user_buf: [256]u8 align(@alignOf(sys.TOKEN_USER)) = undefined;
+    var token_user_len: u32 = 0;
+    try std.testing.expect(sys.GetTokenInformation(
+        token,
+        c.TokenUser,
+        &token_user_buf,
+        token_user_buf.len,
+        &token_user_len,
+    ) != 0);
+    const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
+
+    var user_sid: ?[*:0]u16 = null;
+    try std.testing.expect(sys.ConvertSidToStringSidW(
+        token_user.User.Sid,
+        &user_sid,
+    ) != 0);
+    defer _ = sys.LocalFree(@ptrCast(user_sid.?));
+
+    const integrity_sid = try allocIpcPipeIntegritySid(token);
+    defer _ = sys.LocalFree(@ptrCast(integrity_sid));
+
+    var reference_buf: [320]u16 = undefined;
+    const reference_sddl = try buildIpcPipeSddl(
+        &reference_buf,
+        std.mem.span(user_sid.?),
+        std.mem.span(integrity_sid),
+    );
+
+    var reference: ?*anyopaque = null;
+    try std.testing.expect(sys.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        reference_sddl.ptr,
+        c.SDDL_REVISION_1,
+        &reference,
+        null,
+    ) != 0);
+    defer _ = sys.LocalFree(reference.?);
+
+    const reference_text = try testDescriptorSddlAlloc(alloc, reference.?, information);
+    defer alloc.free(reference_text);
+    const reference_mapped = try testMapGenericAllToFileAllAlloc(alloc, reference_text);
+    defer alloc.free(reference_mapped);
+    try std.testing.expectEqualStrings(reference_mapped, actual);
+
+    // (3) Pin the SHAPE independently, so a future change to the SDDL we
+    // request cannot quietly widen access while still matching (1) and (2).
+    const dacl_idx = std.mem.indexOf(u8, actual, "D:") orelse
+        return error.TestUnexpectedResult;
+    const sacl_idx = std.mem.indexOf(u8, actual, "S:");
+    const owner_text = actual[0..dacl_idx];
+    const dacl_text = if (sacl_idx) |idx| actual[dacl_idx..idx] else actual[dacl_idx..];
+    const sacl_text = if (sacl_idx) |idx| actual[idx..] else "";
+
+    // The exact token-user owner was proved above. Its rendered SID shape is
+    // environment-dependent (domain user, virtual account, or well-known
+    // service alias), so only pin the owner field itself here.
+    try std.testing.expect(owner_text.len > 2);
+    try std.testing.expect(std.mem.startsWith(u8, owner_text, "O:"));
+    try std.testing.expect(std.mem.startsWith(u8, dacl_text, "D:P"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "(A;"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "("));
+    try std.testing.expect(std.mem.indexOf(u8, dacl_text, ";;;WD)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dacl_text, ";;;AN)") == null);
+
+    // Every endpoint must carry its exact label. An absent label is not
+    // equivalent for authentication because Windows would interpret a
+    // low-integrity squatter's unlabeled object as medium.
+    try std.testing.expect(std.mem.startsWith(u8, sacl_text, "S:"));
+    try std.testing.expect(std.mem.indexOf(u8, sacl_text, "(ML;;NW;;;") != null);
+    const rid = integrityRidFromSidString(std.mem.span(integrity_sid)).?;
+    try std.testing.expect(rid >= c.SECURITY_MANDATORY_LOW_RID);
+}
+
+test "win32 IPC pipe DACL still admits a same-user client" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const descriptor = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(descriptor);
+
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = windows.FALSE,
+    };
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty-ipc-dacl-{d}",
+        .{sys.GetTickCount64()},
+        0,
+    );
+    defer std.testing.allocator.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        pipe_name_utf8,
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    const server = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE |
+            c.PIPE_READMODE_BYTE |
+            win32_ipc.pipe_nowait |
+            c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        1024,
+        1024,
+        0,
+        &security_attributes,
+    );
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
+
+    // The CLI verbs reach the server through this same CreateFileW path,
+    // so the restrictive DACL must not lock the owning user out.
+    const client = windows.kernel32.CreateFileW(
+        pipe_name.ptr,
+        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        0,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(client);
+}
+
+test "win32 forwarded new-window argv refuses everything off the allowlist" {
+    const expect = std.testing.expect;
+
+    // THE PROPERTY THAT MATTERS: the filter is deny-by-default, so a key
+    // nobody enumerated -- including any key a future upstream merge adds --
+    // is refused rather than allowed by omission. These names are not in the
+    // allowlist and are not in any denylist either.
+    try expect(!forwardedKeyAllowed("totally-made-up-key"));
+    try expect(!forwardedKeyAllowed("some-future-upstream-key"));
+    try expect(!forwardedKeyAllowed(""));
+
+    // Each of these reproduces arbitrary code execution, an arbitrary file
+    // read, an SMB authentication, or a pty write if it is honored.
+    for ([_][]const u8{
+        "command",
+        "initial-command",
+        "config-file",
+        "config-default-files",
+        "theme",
+        "custom-shader",
+        "gtk-custom-css",
+        // Written straight to the pty; its doc comment warns it can execute
+        // programs in a shell.
+        "input",
+        // Overrides are applied after shell-integration setup, so ZDOTDIR /
+        // ENV / XDG_DATA_DIRS / PATH become code execution at shell start.
+        "env",
+        // Arbitrary file read, and a UNC value authenticates to a remote host.
+        "background-image",
+        "bell-audio-path",
+        // Re-open the perform_action allowlist through another door.
+        "keybind",
+        "command-palette-entry",
+        // Attacker bytes written to the pty on ENQ.
+        "enquiry-response",
+        // Not presentation.
+        "title-report",
+        "window-save-state",
+        "class",
+        "single-instance",
+    }) |key| {
+        try expect(!forwardedKeyAllowed(key));
+    }
+
+    // Prefix confusion must not admit anything: `windows-...` is a different
+    // key from `window-...`.
+    try expect(!forwardedKeyAllowed("windows-job-object-kill-on-close"));
+    try expect(forwardedKeyAllowed("window-height"));
+
+    // Representative allowlisted keys still work.
+    for ([_][]const u8{
+        "window-width",
+        "window-height",
+        "font-size",
+        "title",
+        "background",
+        "background-opacity",
+        "fullscreen",
+        "maximize",
+        "working-directory",
+    }) |key| {
+        try expect(forwardedKeyAllowed(key));
+    }
+}
+
+test "win32 forwarded argv key extraction matches the config loader" {
+    const expect = std.testing.expect;
+
+    try std.testing.expectEqualStrings("font-size", forwardedArgumentKey("--font-size=14").?);
+    try std.testing.expectEqualStrings("maximize", forwardedArgumentKey("--maximize").?);
+    // Only the segment before the FIRST `=` is the key, matching
+    // cli/args.zig.
+    try std.testing.expectEqualStrings("title", forwardedArgumentKey("--title=a=b").?);
+    try std.testing.expectEqualStrings("", forwardedArgumentKey("--=x").?);
+
+    // Not `--key[=value]` form; these are refused wholesale by
+    // `forwardedArgvRejection`.
+    try expect(forwardedArgumentKey("-e") == null);
+    try expect(forwardedArgumentKey("powershell") == null);
+    try expect(forwardedArgumentKey("-") == null);
+}
+
+test "win32 forwarded rejection reasons are classified and safe to log" {
+    const argv_bad_key = [_][:0]const u8{"--input=calc.exe"};
+    const r1 = forwardedArgvRejection(&argv_bad_key).?;
+    try std.testing.expectEqual(.not_allowlisted, r1.reason);
+    try std.testing.expectEqualStrings("input", r1.key);
+    try std.testing.expect(forwardedKeyLoggable(r1.key));
+
+    // `-e` becomes `initial-command` in Config.parseManuallyHook.
+    const argv_dash_e = [_][:0]const u8{ "-e", "calc.exe" };
+    try std.testing.expectEqual(
+        .not_a_config_flag,
+        forwardedArgvRejection(&argv_dash_e).?.reason,
+    );
+
+    const argv_wd = [_][:0]const u8{"--working-directory=\\\\attacker\\share"};
+    try std.testing.expectEqual(
+        .bad_working_directory,
+        forwardedArgvRejection(&argv_wd).?.reason,
+    );
+
+    // A bad key later in the argv is still caught.
+    const argv_trailing = [_][:0]const u8{ "--font-size=14", "--env=ZDOTDIR=C:\\a" };
+    try std.testing.expectEqualStrings(
+        "env",
+        forwardedArgvRejection(&argv_trailing).?.key,
+    );
+
+    const argv_ok = [_][:0]const u8{ "--font-size=14", "--working-directory=home" };
+    try std.testing.expect(forwardedArgvRejection(&argv_ok) == null);
+
+    // A refused key is attacker-controlled text, so it must not be echoed
+    // into a log line raw.
+    try std.testing.expect(!forwardedKeyLoggable("has space"));
+    try std.testing.expect(!forwardedKeyLoggable("newline\ninjected"));
+    try std.testing.expect(!forwardedKeyLoggable("UPPER"));
+    try std.testing.expect(!forwardedKeyLoggable("a" ** 65));
+    try std.testing.expect(forwardedKeyLoggable("window-height"));
+}
+
+test "win32 forwarded working-directory rejects UNC syntax and keeps legal forms" {
+    const expect = std.testing.expect;
+
+    try expect(forwardedWorkingDirectoryAllowed("home"));
+    try expect(forwardedWorkingDirectoryAllowed("inherit"));
+
+    // Documented legal values that an earlier revision wrongly refused,
+    // killing the whole +new-window request with only a log line.
+    try expect(forwardedWorkingDirectoryAllowed("~"));
+    try expect(forwardedWorkingDirectoryAllowed("~/projects"));
+    try expect(forwardedWorkingDirectoryAllowed("~\\projects"));
+    try expect(forwardedWorkingDirectoryAllowed("\"C:\\Program Files\\x\""));
+    try expect(forwardedWorkingDirectoryAllowed("  C:\\Users\\me  "));
+
+    // A literal UNC value would make this process authenticate to an
+    // attacker-chosen SMB host. NOTE: this is a check on SYNTAX only -- a
+    // mapped drive or a junction still resolves off-box.
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\attacker\\share"));
+    try expect(!forwardedWorkingDirectoryAllowed("//attacker/share"));
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\?\\UNC\\attacker\\share"));
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\?\\C:\\Windows"));
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\.\\pipe\\x"));
+    try expect(!forwardedWorkingDirectoryAllowed("relative\\path"));
+    try expect(!forwardedWorkingDirectoryAllowed("C:foo"));
+    try expect(!forwardedWorkingDirectoryAllowed(""));
+    try expect(!forwardedWorkingDirectoryAllowed("\"\\\\attacker\\share\""));
+
+    // A realpath'd local cwd is what the startup forwarder always sends, so
+    // it has to keep working or single-instance launches break.
+    if (builtin.os.tag == .windows) {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+        try expect(forwardedWorkingDirectoryAllowed(cwd));
+    }
+}
+
+test "win32 applyNewWindowArguments rejects a forwarded command outright" {
+    const alloc = std.testing.allocator;
+
+    // The whole request must be refused rather than silently stripping the
+    // key, so the caller never builds a window from a half-honored argv.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--window-height=40",
+                "--command=powershell -enc AAAA",
+            }),
+        );
+        try std.testing.expect(config.command == null);
+    }
+
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--config-file=C:/tmp/evil.conf",
+            }),
+        );
+    }
+
+    // `--input` is written straight to the pty and its own doc comment warns
+    // it can execute programs in a shell.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--input=powershell -enc AAAA\n",
+            }),
+        );
+        try std.testing.expectEqual(@as(usize, 0), config.input.list.items.len);
+    }
+
+    // `--env` reaches the child after shell-integration setup, so it can
+    // repoint ZDOTDIR/ENV and run an attacker script at shell start.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--env=ZDOTDIR=C:\\attacker",
+            }),
+        );
+    }
+
+    // Deny-by-default: a key that appears in NO list is still refused.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--some-key-nobody-enumerated=1",
+            }),
+        );
+    }
+
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--working-directory=\\\\attacker\\share",
+            }),
+        );
+    }
+
+    // A benign argv is still applied, including the working-directory the
+    // startup forwarder always sends.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+            "--window-height=40",
+            "--font-size=16",
+            "--working-directory=home",
+        });
+        try std.testing.expectEqual(@as(u32, 40), config.@"window-height");
+        try std.testing.expectEqual(@as(f32, 16), config.@"font-size");
+    }
+}
+
+test "win32 title sanitizing strips control bytes from IPC and OSC titles" {
+    const alloc = std.testing.allocator;
+
+    // Clean titles allocate nothing.
+    try std.testing.expect(try sanitizeTitleAlloc(alloc, "hello world") == null);
+    try std.testing.expect(try sanitizeTitleAlloc(alloc, "caf\u{00e9} \u{4e2d}\u{6587}") == null);
+
+    // With `title-report = true` a stored title is echoed back to the child
+    // as `ESC ] l <title> ESC \`, so an ESC in an IPC-supplied title would
+    // let a pipe writer inject a sequence into the pty.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\x1b]0;pwned\x07b")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a]0;pwnedb", out);
+    }
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\x1b\\b\nc\rd\x00e\x7ff")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a\\bcdef", out);
+    }
+    // 8-bit CSI (U+009B) and ST (U+009C) as UTF-8.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\u{009b}0mb\u{009c}c")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a0mbc", out);
+    }
+
+    // RAW 8-bit C1 bytes, not the two-byte UTF-8 form. An IPC payload is
+    // arbitrary bytes, so nothing forces a pipe writer to spell C1 the way
+    // the previous byte-pair check expected.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\x9b0mb\x9cc\x80d\x9fe")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a0mbcde", out);
+    }
+
+    // The bytes 0x80..0x9F are also UTF-8 CONTINUATION bytes, so stripping
+    // them at the byte level would corrupt ordinary text. U+20AC is
+    // `E2 82 AC` and U+0161 is `C5 A1`; both must survive untouched.
+    try std.testing.expect(try sanitizeTitleAlloc(alloc, "10 \u{20ac} \u{0161}") == null);
+
+    // An OVERLONG encoding of U+009B must not slip past by dodging the
+    // canonical two-byte form. `utf8Decode` rejects it, so it is dropped.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\xe0\x82\x9bb")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("ab", out);
+    }
+
+    // Invalid UTF-8 is removed rather than stored: a lone continuation byte,
+    // and a truncated lead byte at the very end of the input.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\xffb")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("ab", out);
+    }
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "ab\xc2")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("ab", out);
+    }
+
+    // A dropped unit never stalls the scan.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "\x9b\x9b\x9b")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("", out);
+    }
+}
+
+test "win32 undo title cache sanitizes bytes before title reporting" {
+    const alloc = std.testing.allocator;
+    var title: ?[:0]const u8 = null;
+    defer if (title) |value| alloc.free(value);
+
+    try appendSanitizedTitle(alloc, &title, "safe\x1b]0;injected\x07title");
+    try std.testing.expectEqualStrings("safe]0;injectedtitle", title.?);
+}
+
+test "win32 IPC client authenticates the connected pipe descriptor" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        alloc,
+        "\\\\.\\pipe\\noctty-ipc-serverauth-{d}",
+        .{sys.GetTickCount64()},
+        0,
+    );
+    defer alloc.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name_utf8);
+    defer alloc.free(pipe_name);
+
+    const descriptor = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(descriptor);
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = windows.FALSE,
+    };
+
+    const server = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE |
+            c.PIPE_READMODE_BYTE |
+            win32_ipc.pipe_nowait |
+            c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        1024,
+        1024,
+        0,
+        &security_attributes,
+    );
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
+
+    // `connectToIpcPipe` performs the authentication itself, so connecting
+    // to OUR OWN server succeeding is what proves the check ran and passed
+    // rather than being skipped: if the SID comparison were broken in the
+    // "reject" direction this returns `error.PipeUnreachable` instead.
+    const client = try connectToIpcPipe(pipe_name);
+    defer _ = windows.CloseHandle(client);
+
+    // And directly, so a future refactor that drops the call site still
+    // fails a test rather than silently disabling the check.
+    try std.testing.expect(ipcPipeServerIsTrusted(client));
+
+    // The comparison operates on a real, well-formed SID rather than an
+    // empty slice that would trivially compare equal.
+    var own_buf: SidBuffer align(sid_buffer_align) = undefined;
+    const own_sid = try currentUserSidBytes(&own_buf);
+    try std.testing.expect(own_sid.len >= 8);
+    try std.testing.expectEqual(@as(u8, 1), own_sid[0]); // SID revision
+
+    // The integrity half of the check reads a real level. A same-user SID
+    // is NOT sufficient on its own, because a split UAC token shares it
+    // across integrity levels.
+    var token: windows.HANDLE = undefined;
+    try std.testing.expect(sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) != 0);
+    defer _ = windows.CloseHandle(token);
+    const rid = tokenIntegrityRid(token).?;
+    // Any interactive or service token sits at low or above; a zero here
+    // would make the `>=` comparison vacuous.
+    try std.testing.expect(rid >= c.SECURITY_MANDATORY_LOW_RID);
+
+    // NOTE: the REJECT directions cannot be exercised here. A foreign-user
+    // server needs a second local account, and a lower-integrity server
+    // needs a medium process while this suite runs elevated; neither is
+    // creatable from a test. Both are argued from the fail-closed structure
+    // of `ipcPipeServerIsTrusted` (every error path returns false, and the
+    // final comparison is `server_rid >= own_rid`), not observed.
+}
+
+test "automation focus selects exact targets without fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var detached_surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 11, .register = true },
+            .{ .storage = &host_b, .id = 12, .register = true },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a },
+            .{ .storage = &surface_b, .host = &host_a },
+            .{ .storage = &surface_c, .host = &host_b },
+            .{ .storage = &detached_surface, .host = &host_a, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 1 },
+            .{ .host = &host_a, .surface = &surface_b, .id = 2 },
+            .{ .host = &host_b, .surface = &surface_c, .id = 3 },
+        },
+    });
+    defer session.deinit();
+    surface_a.core_surface.id = 101;
+    surface_b.core_surface.id = 102;
+    surface_c.core_surface.id = 103;
+    detached_surface.core_surface.id = 104;
+
+    try std.testing.expectEqual(@as(?*Surface, &surface_a), app.findLiveSurfaceById(101));
+    try std.testing.expect(app.findLiveSurfaceById(104) == null);
+
+    try app.performAutomationCommand(.{ .focus = .{ .surface_id = 102 } });
+    try std.testing.expectEqual(@as(usize, 1), host_a.active_tab);
+    try app.performAutomationCommand(.{ .focus = .{ .window_id = 12 } });
+    try std.testing.expectEqual(&surface_c, host_b.activeSurface().?);
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .focus = .{ .surface_id = 999 } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .focus = .{ .surface_id = 104 } }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .focus = .focused }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .new_tab = .{
+            .target = .{ .surface_id = 102 },
+            .working_directory = null,
+        } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .new_split = .{
+            .target = .{ .surface_id = 999 },
+            .direction = .right,
+            .working_directory = null,
+        } }),
+    );
+}
+
+test "automation working directory receiver policy mirrors forwarded syntax" {
+    for ([_][]const u8{ "home", "inherit", "~", "~/x", "~\\x", "C:\\x" }) |value| {
+        try std.testing.expect(automationWorkingDirectoryAllowed(value));
+    }
+    for ([_][]const u8{ "", "relative", "C:relative", "\\\\host\\share", "//host/share", "\\\\?\\C:\\x", "\\\\.\\x" }) |value| {
+        try std.testing.expect(!automationWorkingDirectoryAllowed(value));
+    }
+}
+
+test "automation send text enforces receiver policy and protected paste path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Hook = struct {
+        var calls: usize = 0;
+        var expected: []const u8 = "";
+        var unsafe = false;
+        fn paste(
+            surface: *Surface,
+            state: apprt.ClipboardRequest,
+            text: [:0]const u8,
+            confirmed: bool,
+        ) !void {
+            try std.testing.expectEqual(@as(u64, 201), surface.core().id);
+            try std.testing.expectEqual(apprt.ClipboardRequest.paste, state);
+            try std.testing.expectEqualStrings(expected, text);
+            try std.testing.expect(!confirmed);
+            calls += 1;
+            if (unsafe) return error.UnsafePaste;
+        }
+    };
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    surface.core_surface.id = 201;
+    app.test_automation_paste = &Hook.paste;
+    Hook.calls = 0;
+
+    for ([_][]const u8{ "printable UTF-8: \xcf\x80", "$HOME && echo ok | more" }) |text| {
+        Hook.expected = text;
+        try app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 201 },
+            .text = text,
+        } });
+    }
+    try std.testing.expectEqual(@as(usize, 2), Hook.calls);
+    Hook.expected = "unsafe";
+    Hook.unsafe = true;
+    try std.testing.expectError(
+        error.AutomationPolicyRefused,
+        app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 201 },
+            .text = "unsafe",
+        } }),
+    );
+    Hook.unsafe = false;
+
+    const refused = [_][]const u8{
+        "\r",
+        "\n",
+        "\t",
+        "\x00",
+        "\x1b",
+        "\x7f",
+        "\xc2\x80",
+    };
+    for (refused) |text| {
+        try std.testing.expectError(
+            error.AutomationPolicyRefused,
+            app.performAutomationCommand(.{ .send_text = .{
+                .target = .{ .surface_id = 201 },
+                .text = text,
+            } }),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 3), Hook.calls);
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .send_text = .{ .target = .focused, .text = "ok" } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 999 },
+            .text = "ok",
+        } }),
+    );
+}
+
+test "win32 IPC silent synchronous client read is bounded" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
@@ -27402,6 +32083,7 @@ test "win32 IPC silent client read is bounded" {
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(client);
+    try setIpcClientNonblocking(client);
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
@@ -27411,20 +32093,24 @@ test "win32 IPC silent client read is bounded" {
     var byte: [1]u8 = undefined;
     try std.testing.expectError(
         error.IpcTimeout,
-        win32_ipc.readExactWithTimeout(server, &byte, 10),
+        win32_ipc.readExactWithTimeout(client, &byte, 10),
     );
 }
 
-test "win32 win32_ipc.encodeListWindowsRequest preserves legacy zero-argc trailer" {
+test "win32 win32_ipc.encodeListWindowsRequest carries the response deadline" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try win32_ipc.encodeListWindowsRequest(std.testing.allocator);
+    const deadline_ms: u64 = 0x0102030405060708;
+    const request = try win32_ipc.encodeListWindowsRequest(
+        std.testing.allocator,
+        deadline_ms,
+    );
     defer std.testing.allocator.free(request);
 
-    try std.testing.expectEqual(@as(usize, 9), request.len);
+    try std.testing.expectEqual(@as(usize, 13), request.len);
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows), request[4]);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, request[5..9], .little));
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows_timed), request[4]);
+    try std.testing.expectEqual(deadline_ms, std.mem.readInt(u64, request[5..13], .little));
 }
 
 test "automation-action win32 ipc encodes focused action request" {
@@ -27434,15 +32120,79 @@ test "automation-action win32 ipc encodes focused action request" {
         std.testing.allocator,
         .focused,
         "new_tab",
+        0x0102030405060708,
     );
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
-    try std.testing.expectEqual(@as(u8, 0), request[5]);
-    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[6..14], .little));
-    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[14..18], .little));
-    try std.testing.expectEqualStrings("new_tab", request[18..]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action_timed), request[4]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
+    try std.testing.expectEqual(@as(u8, 0), request[13]);
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[14..22], .little));
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[22..26], .little));
+    try std.testing.expectEqualStrings("new_tab", request[26..]);
+}
+
+test "win32 launch-layout IPC argument scan isolates the layout name" {
+    const launch = try scanLaunchLayoutIpcArgument(&.{"--launch-layout=Project Alpha"});
+    try std.testing.expectEqualStrings("Project Alpha", launch.name);
+
+    try std.testing.expectError(
+        error.MixedLaunchLayoutArguments,
+        scanLaunchLayoutIpcArgument(&.{
+            "--launch-layout=Project Alpha",
+            "--title=other",
+        }),
+    );
+
+    const ordinary = try scanLaunchLayoutIpcArgument(&.{"--title=ordinary"});
+    try std.testing.expect(ordinary == .none);
+
+    const command = try scanLaunchLayoutIpcArgument(&.{
+        "-e",
+        "tool.exe",
+        "--launch-layout=child-option",
+    });
+    try std.testing.expect(command == .none);
+}
+
+test "win32 launch-layout IPC validates names before cold fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty.test.launch-layout-invalid-name",
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        sendLaunchLayoutIpc(
+            std.testing.allocator,
+            pipe_name,
+            "CON",
+            win32_ipc.automation_response_timeout_ms,
+        ),
+    );
+}
+
+test "win32 startup layout forwarding intercepts before generic argv" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty.test.startup-layout-invalid-name",
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    try std.testing.expectEqual(
+        @as(?bool, null),
+        try trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, null),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+    );
 }
 
 test "automation-action win32 ipc encodes surface action request" {
@@ -27452,15 +32202,17 @@ test "automation-action win32 ipc encodes surface action request" {
         std.testing.allocator,
         .{ .surface_id = 42 },
         "toggle_fullscreen",
+        0x0102030405060708,
     );
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
-    try std.testing.expectEqual(@as(u8, 1), request[5]);
-    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[6..14], .little));
-    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[14..18], .little));
-    try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action_timed), request[4]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
+    try std.testing.expectEqual(@as(u8, 1), request[13]);
+    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[14..22], .little));
+    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[22..26], .little));
+    try std.testing.expectEqualStrings("toggle_fullscreen", request[26..]);
 }
 
 test "automation-action win32 ipc rejects oversized action before encode" {
@@ -27472,7 +32224,12 @@ test "automation-action win32 ipc rejects oversized action before encode" {
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        win32_ipc.encodePerformActionRequest(std.testing.allocator, .focused, action_text),
+        win32_ipc.encodePerformActionRequest(
+            std.testing.allocator,
+            .focused,
+            action_text,
+            0x0102030405060708,
+        ),
     );
 }
 
@@ -27488,16 +32245,17 @@ test "automation-action win32 ipc rejects oversized decoded action" {
     });
     defer file.close();
 
-    var header: [13]u8 = undefined;
-    header[0] = 0;
-    std.mem.writeInt(u64, header[1..9], 0, .little);
-    std.mem.writeInt(u32, header[9..13], win32_ipc.max_action_text_len + 1, .little);
+    var header: [21]u8 = undefined;
+    std.mem.writeInt(u64, header[0..8], std.math.maxInt(u64), .little);
+    header[8] = 0;
+    std.mem.writeInt(u64, header[9..17], 0, .little);
+    std.mem.writeInt(u32, header[17..21], win32_ipc.max_action_text_len + 1, .little);
     try file.writeAll(&header);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle),
+        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle, true),
     );
 }
 
@@ -27794,6 +32552,246 @@ test "win32 applyProfileCommandConfig preserves inherited working directory" {
     try std.testing.expectEqualStrings("C:\\work", clone.@"working-directory".?.path);
 }
 
+test "win32 ssh profile surface config uses home working directory" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var base = try configpkg.Config.default(std.testing.allocator);
+    defer base.deinit();
+    var clone = base.shallowClone(std.testing.allocator);
+    defer clone.deinit();
+    const clone_alloc = clone._arena.?.allocator();
+    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
+
+    // Production builds SSH profiles as a two-element direct argv.
+    const argv = try std.testing.allocator.alloc([:0]const u8, 2);
+    argv[0] = try std.testing.allocator.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    argv[1] = try std.testing.allocator.dupeZ(u8, "production");
+    var profile: windows_shell.Profile = .{
+        .kind = .ssh,
+        .key = try std.testing.allocator.dupe(u8, "ssh:production"),
+        .label = try std.testing.allocator.dupe(u8, "SSH: production"),
+        .palette_title = try std.testing.allocator.dupe(u8, "Connect to production"),
+        .command = .{ .direct = argv },
+    };
+    defer profile.deinit(std.testing.allocator);
+
+    try applyProfileSurfaceConfig(&clone, &profile);
+
+    try std.testing.expect(clone.command != null);
+    try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
+    try std.testing.expectEqualStrings("production", clone.command.?.direct[1]);
+
+    // An explicit home path, not `.home`, so it outranks the inherited cwd.
+    try std.testing.expect(clone.@"working-directory".? == .path);
+    try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
+    try std.testing.expectEqualStrings("production", sshProfileAlias(&profile).?);
+}
+
+test "win32 ssh hardening also holds on the split launch path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The split path used to apply only the command, which silently dropped
+    // shell-integration=none and let the ssh argv be flattened into cmd.exe /C.
+    var base = try configpkg.Config.default(std.testing.allocator);
+    defer base.deinit();
+    base.@"shell-integration" = .bash;
+    var clone = base.shallowClone(std.testing.allocator);
+    defer clone.deinit();
+    const clone_alloc = clone._arena.?.allocator();
+    clone.@"shell-integration" = .bash;
+    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
+
+    const argv = try std.testing.allocator.alloc([:0]const u8, 2);
+    argv[0] = try std.testing.allocator.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    argv[1] = try std.testing.allocator.dupeZ(u8, "production");
+    var profile: windows_shell.Profile = .{
+        .kind = .ssh,
+        .key = try std.testing.allocator.dupe(u8, "ssh:production"),
+        .label = try std.testing.allocator.dupe(u8, "SSH: production"),
+        .command = .{ .direct = argv },
+    };
+    defer profile.deinit(std.testing.allocator);
+
+    try applyProfileLaunchConfig(&clone, &profile);
+
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
+    try std.testing.expect(clone.@"working-directory".? == .path);
+    try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
+    try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
+}
+
+test "win32 ssh split and session state drop remote cwd" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(!shouldInheritSplitWorkingDirectory(true));
+    try std.testing.expect(shouldInheritSplitWorkingDirectory(false));
+    try std.testing.expect(shouldResetNewTabWorkingDirectory(false, true, true));
+    try std.testing.expect(shouldResetNewTabWorkingDirectory(true, true, false));
+    try std.testing.expect(!shouldResetNewTabWorkingDirectory(false, false, true));
+
+    var surface: Surface = undefined;
+    surface.pwd = "C:\\remote-controlled";
+    surface.launched_ssh = true;
+    surface.launch_profile_key = null;
+    surface.title_override = null;
+    surface.tab_title_override = null;
+    var tab = try Tab.init(std.testing.allocator, 1, &surface);
+    defer tab.deinit();
+
+    const layout = try App.buildSessionLayout(std.testing.allocator, &tab, .session);
+    defer std.testing.allocator.free(layout.nodes);
+    try std.testing.expect(layout.nodes[0].pane.cwd == null);
+}
+
+test "win32 ssh title identity survives profile refresh" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "production",
+        sshAliasFromLaunchKey(true, "ssh:production").?,
+    );
+    try std.testing.expect(sshAliasFromLaunchKey(false, "ssh:production") == null);
+    try std.testing.expect(sshAliasFromLaunchKey(true, "cmd.exe") == null);
+    try std.testing.expect(isAutomaticSshCommandTitle("C:\\Windows\\System32\\OpenSSH\\ssh.exe"));
+    try std.testing.expect(isAutomaticSshCommandTitle("ssh"));
+    try std.testing.expect(!isAutomaticSshCommandTitle("prod.example.com"));
+}
+
+test "win32 session restore refuses ssh profiles regardless of key case" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+
+    const argv = try alloc.alloc([:0]const u8, 2);
+    argv[0] = try alloc.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    argv[1] = try alloc.dupeZ(u8, "prod");
+    const cmd_argv = try alloc.alloc([:0]const u8, 1);
+    cmd_argv[0] = try alloc.dupeZ(u8, "cmd.exe");
+    var profiles = [_]windows_shell.Profile{
+        .{
+            .kind = .cmd,
+            .key = try alloc.dupe(u8, "cmd.exe"),
+            .label = try alloc.dupe(u8, "Command Prompt"),
+            .command = .{ .direct = cmd_argv },
+        },
+        .{
+            .kind = .ssh,
+            .key = try alloc.dupe(u8, "ssh:prod"),
+            .label = try alloc.dupe(u8, "SSH: prod"),
+            .command = .{ .direct = argv },
+        },
+    };
+    defer for (&profiles) |*profile| profile.deinit(alloc);
+
+    // Live SSH profile lookup is case-sensitive, so a state file naming
+    // "SSH:prod" does not resolve `ssh:prod`. The refusal must key on the
+    // prefix before lookup, or a case
+    // variant could bypass the guard and dial out at startup with no interaction.
+    for ([_][]const u8{ "ssh:prod", "SSH:prod", "Ssh:PROD" }) |key| {
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        if (std.mem.eql(u8, key, "ssh:prod")) {
+            try std.testing.expect(profileIndexByKey(&profiles, key) != null);
+        } else {
+            try std.testing.expect(profileIndexByKey(&profiles, key) == null);
+        }
+        try std.testing.expect(!(try applyProfileConfigByKey(&clone, &profiles, key)));
+        try std.testing.expect(clone.command == null);
+    }
+
+    // A local profile still restores.
+    var clone = base.shallowClone(alloc);
+    defer clone.deinit();
+    try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "CMD.EXE"));
+    try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
+}
+
+test "win32 automation tab inheritance preserves the captured source command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    const reloaded_command = [_][:0]const u8{"cmd.exe"};
+    var profiles = [_]windows_shell.Profile{.{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &reloaded_command },
+    }};
+    var host: Host = undefined;
+    host.profiles = &profiles;
+    var source: Surface = undefined;
+    source.host = &host;
+    source.launch_profile_key = "pwsh";
+    source.launch_command = .{ .direct = &command };
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
+
+    try std.testing.expectEqualStrings("pwsh", inherited.?);
+    const direct = config.command.?.direct;
+    try std.testing.expectEqual(@as(usize, 2), direct.len);
+    try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
+    try std.testing.expectEqualStrings("-NoLogo", direct[1]);
+}
+
+test "win32 automation ssh inheritance preserves command and hardening" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const command = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+    var source: Surface = undefined;
+    source.launch_command = .{ .direct = &command };
+    source.launch_profile_key = "ssh:production";
+    source.launched_ssh = true;
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    config.@"shell-integration" = .bash;
+    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
+
+    try std.testing.expectEqualStrings("ssh:production", inherited.?);
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
+    try std.testing.expectEqualStrings(command[0], config.command.?.direct[0]);
+    try std.testing.expectEqualStrings(command[1], config.command.?.direct[1]);
+}
+
+test "win32 ordinary split ignores a captured one-shot command" {
+    const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
+    var source: Surface = undefined;
+    source.launch_command = .{ .direct = &one_shot };
+    source.launch_profile_key = null;
+    source.host = null;
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    try std.testing.expect((try App.applySplitProfileConfigFromSource(&config, &source)) == null);
+    try std.testing.expect(config.command == null);
+}
+
+test "win32 automation omitted target falls back to the active surface" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+
+    try std.testing.expect(!surface.window_focused);
+    try std.testing.expectEqual(@as(?*Surface, &surface), app.automationDefaultSurface());
+}
+
 test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -27814,7 +32812,7 @@ test "win32 applyProfileConfigByKey applies saved first-pane profile before host
     defer profile.deinit(std.testing.allocator);
     const profiles = [_]windows_shell.Profile{profile};
 
-    try applyProfileConfigByKey(&clone, &profiles, "cmd.exe");
+    try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "cmd.exe"));
 
     try std.testing.expect(clone.command != null);
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
@@ -27976,6 +32974,11 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
 }
 
+test "win32 layout action result propagates automation failure" {
+    try std.testing.expect(try layoutActionResult(true));
+    try std.testing.expectError(error.LayoutActionFailed, layoutActionResult(false));
+}
+
 test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false));
     try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false));
@@ -27985,6 +32988,24 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
+}
+
+test "win32 session restore transaction preserves first surface state" {
+    var core_app: CoreApp = undefined;
+    core_app.first = true;
+    var app: App = undefined;
+    app.core_app = &core_app;
+
+    var rolled_back = SessionRestoreTransaction.init(&app);
+    core_app.first = false;
+    rolled_back.rollback();
+    try std.testing.expect(core_app.first);
+
+    var committed = SessionRestoreTransaction.init(&app);
+    core_app.first = false;
+    committed.commit();
+    committed.rollback();
+    try std.testing.expect(!core_app.first);
 }
 
 test "win32 session state window rect requires complete geometry" {
@@ -28038,6 +33059,49 @@ test "win32 session state file write replaces through temp file" {
     while (try entries.next()) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "session-state.json.tmp-"));
     }
+}
+
+test "named layout fixture materializes through the session restore split tree builder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const fixture =
+        \\{ "schema_version": 1, "windows": [ { "selected_tab": 0, "tabs": [ { "selected_leaf": 1, "layout": { "root": 0, "nodes": [
+        \\  { "split": { "axis": "horizontal", "ratio": 0.25, "first": 1, "second": 2 } },
+        \\  { "pane": { "cwd": "C:\\\\left", "profile": "pwsh" } },
+        \\  { "split": { "axis": "vertical", "ratio": 0.75, "first": 3, "second": 4 } },
+        \\  { "pane": { "cwd": "C:\\\\top-right", "title_override": "Top" } },
+        \\  { "pane": { "cwd": "C:\\\\bottom-right", "tab_title_override": "Project" } }
+        \\] } } ] } ] }
+    ;
+    var parsed = try win32_session_state.parseAlloc(std.testing.allocator, fixture);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.windows.len);
+
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    const node_surfaces = [_]?*Surface{
+        null,
+        &surface_a,
+        null,
+        &surface_b,
+        &surface_c,
+    };
+    var tree = try App.buildRestoredSessionSplitTree(
+        std.testing.allocator,
+        parsed.value.windows[0].tabs[0].layout,
+        &node_surfaces,
+    );
+    defer tree.deinit();
+
+    try std.testing.expectEqual(@as(usize, 5), tree.nodes.len);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.horizontal, tree.nodes[0].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.25), tree.nodes[0].split.ratio);
+    try std.testing.expectEqual(&surface_a, tree.nodes[1].leaf);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.vertical, tree.nodes[2].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.75), tree.nodes[2].split.ratio);
+    try std.testing.expectEqual(&surface_b, tree.nodes[3].leaf);
+    try std.testing.expectEqual(&surface_c, tree.nodes[4].leaf);
 }
 
 test "win32 session restore rebuilds saved split tree shape" {

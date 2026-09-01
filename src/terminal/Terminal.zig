@@ -745,11 +745,9 @@ fn printCell(
             .spacer_tail => {
                 assert(self.screens.active.cursor.x > 0);
 
-                // So integrity checks pass. We fix this up later so we don't
-                // need to do this without safety checks.
-                if (comptime std.debug.runtime_safety) {
-                    cell.wide = .narrow;
-                }
+                // Keep the row valid while clearCells clears the wide head
+                // and verifies page integrity. We overwrite this cell below.
+                cell.wide = .narrow;
 
                 const wide_cell = self.screens.active.cursorCellLeft(1);
                 self.screens.active.clearCells(
@@ -13098,4 +13096,19 @@ test "Terminal: deleteLines wide char at right margin with full clear" {
     // and the orphaned spacer_tail at col 39 triggers a page integrity
     // violation in clearCells.
     try t.scrollUp(t.rows);
+}
+
+test "Terminal: overwrite wide tail preserves page integrity" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 3, .rows = 2 });
+    defer t.deinit(alloc);
+
+    try t.print('橋');
+    t.setCursorPos(1, 2);
+    try t.print('X');
+
+    try t.screens.active.cursor.page_pin.node.data.verifyIntegrity(alloc);
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings(" X", str);
 }

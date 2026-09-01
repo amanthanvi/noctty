@@ -1,0 +1,5 @@
+#pragma comment(linker, "/export:DllCanUnloadNow")
+#pragma comment(linker, "/export:DllGetClassObject")
+#pragma comment(linker, "/export:DllRegisterServer")
+#pragma comment(linker, "/export:DllUnregisterServer")
+#pragma comment(linker, "/export:GetProxyDllInfo")

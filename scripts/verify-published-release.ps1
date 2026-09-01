@@ -153,7 +153,12 @@ try {
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
-        $expectedPortablePePaths = @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')
+        $expectedPortablePePaths = @(
+            'noctty/noctty.com',
+            'noctty/noctty.exe',
+            'noctty/ghostty-vt.dll',
+            'noctty/noctty-terminal-handoff-proxy.dll'
+        )
         $portablePePaths = @(Get-PortablePeRelativePaths -Root $extractDirectory)
         $missingPortablePe = @($expectedPortablePePaths | Where-Object { $_ -notin $portablePePaths })
         $unexpectedPortablePe = @($portablePePaths | Where-Object { $_ -notin $expectedPortablePePaths })
@@ -170,8 +175,8 @@ try {
         }
     }
 
-    if ($signatureEvidence.Count -ne 8) {
-        throw "Published release must contain exactly eight verified PE signatures; found $($signatureEvidence.Count)."
+    if ($signatureEvidence.Count -ne 10) {
+        throw "Published release must contain exactly ten verified PE signatures; found $($signatureEvidence.Count)."
     }
 
     $thumbprints = @($signatureEvidence | ForEach-Object { $_.Thumbprint } | Sort-Object -Unique)

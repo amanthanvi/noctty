@@ -531,6 +531,12 @@ pub const Action = union(enum) {
     /// this will bring it to the front.
     new_window,
 
+    /// Open the named saved layout in a new window.
+    launch_layout: []const u8,
+
+    /// Save the focused window as the named layout.
+    save_layout: []const u8,
+
     /// Open a new tab.
     new_tab,
 
@@ -1310,6 +1316,7 @@ pub const Action = union(enum) {
 
             // These are app but can be special-cased in a surface context.
             .new_window,
+            .launch_layout,
             .undo,
             .redo,
             => .app,
@@ -1338,6 +1345,7 @@ pub const Action = union(enum) {
             .prompt_tab_title,
             .set_surface_title,
             .set_tab_title,
+            .save_layout,
             .clear_screen,
             .select_all,
             .scroll_to_top,
@@ -2624,7 +2632,7 @@ pub const Set = struct {
     ///
     pub fn getEvent(self: *const Set, event: KeyEvent) ?Entry {
         var trigger: Trigger = .{
-            .mods = event.mods.binding(),
+            .mods = event.bindingMods().binding(),
             .key = .{ .physical = event.key },
         };
         if (self.get(trigger)) |v| return v;
@@ -3317,6 +3325,21 @@ test "parse: action with string" {
         try testing.expect(binding.action == .set_tab_title);
         try testing.expectEqualStrings("tab", binding.action.set_tab_title);
     }
+}
+
+test "named layout binding actions parse and classify" {
+    const launch = try Action.parse("launch_layout:Project Alpha");
+    try std.testing.expect(launch == .launch_layout);
+    try std.testing.expectEqualStrings("Project Alpha", launch.launch_layout);
+    try std.testing.expectEqual(Action.Scope.app, launch.scope());
+
+    const save = try Action.parse("save_layout:demo");
+    try std.testing.expect(save == .save_layout);
+    try std.testing.expectEqualStrings("demo", save.save_layout);
+    try std.testing.expectEqual(Action.Scope.surface, save.scope());
+
+    try std.testing.expectError(Error.InvalidFormat, Action.parse("launch_layout"));
+    try std.testing.expectError(Error.InvalidFormat, Action.parse("save_layout"));
 }
 
 test "parse: action with enum" {
@@ -4274,6 +4297,24 @@ test "set: getEvent physical" {
         });
         try testing.expect(action == null);
     }
+}
+
+test "set: getEvent honors binding-only modifiers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "ctrl+alt+a=new_window");
+
+    const entry = s.getEvent(.{
+        .key = .key_a,
+        .mods = .{},
+        .binding_mods = .{ .ctrl = true, .alt = true },
+        .unshifted_codepoint = 'a',
+    }).?.value_ptr.*.leaf;
+    try testing.expect(entry.action == .new_window);
 }
 
 test "set: getEvent codepoint" {

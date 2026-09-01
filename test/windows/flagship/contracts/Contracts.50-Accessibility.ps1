@@ -1612,10 +1612,11 @@ $selectionItemRoutes = [regex]::Matches(
     $win32UiaWidgetsText,
     'events\.raiseSelectionItemSelected\('
 )
-if ($selectionItemRoutes.Count -ne 2 -or
+if ($selectionItemRoutes.Count -ne 3 -or
     $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&row\.base\);' -or
-    $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&self\.base\);') {
-    throw 'UIA selection-item-selected routing must have exactly the palette-row and settings-section helper calls.'
+    $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&self\.base\);' -or
+    $win32UiaWidgetsText -notmatch 'if \(new\) events\.raiseSelectionItemSelected\(&self\.base\);') {
+    throw 'UIA selection-item-selected routing must have exactly the palette-row, settings-section, and chrome tab-item helper calls.'
 }
 $boundedSelectionDispatch = '(?s)fn sendButtonClicked\(hwnd: com\.HWND\).*?SendMessageTimeoutW\(\s*parent,\s*WM_COMMAND,\s*@intCast\(control_id\),\s*@bitCast\(@intFromPtr\(hwnd\)\),\s*SMTO_BLOCK \| SMTO_ABORTIFHUNG,\s*settings_selection_timeout_ms,\s*&ignored'
 if ($win32UiaWidgetsText -notmatch $boundedSelectionDispatch) {

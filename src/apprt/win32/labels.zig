@@ -552,6 +552,18 @@ pub fn startsWithIgnoreCase(haystack: []const u8, prefix: []const u8) bool {
     return true;
 }
 
+pub fn storedProfileKeyEquals(a: []const u8, b: []const u8) bool {
+    if (startsWithIgnoreCase(a, "ssh:") or startsWithIgnoreCase(b, "ssh:")) {
+        return std.mem.eql(u8, a, b);
+    }
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+pub fn profileKeyEquals(profile: windows_shell.Profile, key: []const u8) bool {
+    if (profile.kind == .ssh) return std.mem.eql(u8, profile.key, key);
+    return storedProfileKeyEquals(profile.key, key);
+}
+
 pub fn resolveProfileSelection(
     profiles: []const windows_shell.Profile,
     input_text: []const u8,
@@ -571,9 +583,11 @@ pub fn resolveProfileSelection(
     var unique_match: ?usize = null;
     var match_count: usize = 0;
     for (profiles, 0..) |profile, index| {
-        if (std.ascii.eqlIgnoreCase(profile.key, input_text) or
-            std.ascii.eqlIgnoreCase(profile.label, input_text))
-        {
+        const label_matches = if (profile.kind == .ssh)
+            std.mem.eql(u8, profile.label, input_text)
+        else
+            std.ascii.eqlIgnoreCase(profile.label, input_text);
+        if (profileKeyEquals(profile, input_text) or label_matches) {
             exact_match = index;
             break;
         }
@@ -592,7 +606,7 @@ pub fn resolveProfileSelection(
 
 pub fn profileIndexByKey(profiles: []const windows_shell.Profile, key: []const u8) ?usize {
     for (profiles, 0..) |profile, index| {
-        if (std.ascii.eqlIgnoreCase(profile.key, key)) return index;
+        if (profileKeyEquals(profile, key)) return index;
     }
     return null;
 }
@@ -614,7 +628,7 @@ pub fn preferredProfileIndex(
         null;
     if (preferred_key) |key| {
         for (profiles, 0..) |profile, index| {
-            if (std.ascii.eqlIgnoreCase(profile.key, key)) return index;
+            if (profileKeyEquals(profile, key)) return index;
         }
     }
 
@@ -1451,6 +1465,7 @@ pub fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []con
         .profile => |key| key,
         .setting => |key| key,
         .theme => |name| name,
+        .layout => |name| name,
         .tab, .pane, .help => descriptor.item.title,
     };
 }
@@ -1745,6 +1760,7 @@ fn profileKindBadge(kind: windows_shell.ProfileKind) []const u8 {
         .powershell => "PS",
         .git_bash => "GIT",
         .cmd => "CMD",
+        .ssh => "SSH",
     };
 }
 
@@ -1755,6 +1771,9 @@ fn profileKindGlyph(kind: windows_shell.ProfileKind) []const u8 {
         .powershell => ">_",
         .git_bash => "$>",
         .cmd => "C>",
+        // Distinct from WSL's "<>": this is the one kind that opens a network
+        // session, so it should not share another kind's cue.
+        .ssh => "->",
     };
 }
 
@@ -2179,7 +2198,7 @@ fn buildInspectorButtonLabel(
 pub fn findLauncherQuickSlotOrdinal(slot_keys: [3]?[:0]const u8, key: []const u8) ?usize {
     for (slot_keys, 0..) |slot_key, index| {
         if (slot_key) |value| {
-            if (std.ascii.eqlIgnoreCase(value, key)) return index;
+            if (storedProfileKeyEquals(value, key)) return index;
         }
     }
     return null;
@@ -2214,9 +2233,25 @@ test "win32 profileIndexByKey finds launch profile key" {
             .label = "Ubuntu",
             .command = .{ .shell = "wsl.exe" },
         },
+        .{
+            .kind = .ssh,
+            .key = "ssh:PROD",
+            .label = "SSH: PROD",
+            .command = .{ .shell = "ssh.exe PROD" },
+        },
+        .{
+            .kind = .ssh,
+            .key = "ssh:prod",
+            .label = "SSH: prod",
+            .command = .{ .shell = "ssh.exe prod" },
+        },
     };
 
     try std.testing.expectEqual(@as(?usize, 1), profileIndexByKey(&profiles, "wsl:Ubuntu"));
+    try std.testing.expectEqual(@as(?usize, 1), profileIndexByKey(&profiles, "WSL:UBUNTU"));
+    try std.testing.expectEqual(@as(?usize, 2), profileIndexByKey(&profiles, "ssh:PROD"));
+    try std.testing.expectEqual(@as(?usize, 3), profileIndexByKey(&profiles, "ssh:prod"));
+    try std.testing.expectEqual(@as(?usize, null), profileIndexByKey(&profiles, "SSH:prod"));
     try std.testing.expectEqual(@as(?usize, null), profileIndexByKey(&profiles, "missing"));
 }
 

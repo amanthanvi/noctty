@@ -54,7 +54,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "terminal.js"; Pattern = "%LOCALAPPDATA%\\noctty\\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty"; Reason = "Landing page should keep a repo link." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install AmanThanvi.noctty"; Reason = "Hero copy should surface the official WinGet install command." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "formerly WingHostty"; Reason = "Hero should keep the rename note so former WingHostty users recognize the project." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Formerly winghostty"; CaseSensitive = $true; Reason = "Footer should keep the rename note so former winghostty users recognize the project." },
     @{ Path = Join-Path $siteRoot "install.js"; Pattern = "scoop install noctty/noctty"; Reason = "Copied install text should include the official Scoop install command." },
     @{ Path = Join-Path $siteRoot "install.js"; Pattern = "https://github.com/amanthanvi/scoop-noctty"; Reason = "Copied Scoop install text should include the official bucket source." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },
@@ -83,6 +83,8 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "v1.3.123 uses the legacy"; Reason = "The trust page must state that the promoted stable release predates the current verifier contract." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "verifier accepts v1.3.124 and later"; Reason = "The trust page should keep routing verifier-compatible releases correctly after the latest-version copy updates." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "NVDA pass against a pre-release Debug build found mixed results"; Reason = "The trust page must reflect the measured pre-release NVDA evidence without presenting it as release validation." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Narrator and JAWS remain unmeasured"; Reason = "The trust page must distinguish the unmeasured readers from the measured NVDA pass." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "miss a budget stated in PRODUCT.md"; Reason = "The trust page must keep the missed performance budgets visible." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }
 )
@@ -106,7 +108,7 @@ foreach ($rule in $requiredRules) {
         continue
     }
 
-    $match = Select-String -Path $rule.Path -Pattern $rule.Pattern -SimpleMatch
+    $match = Select-String -Path $rule.Path -Pattern $rule.Pattern -SimpleMatch -CaseSensitive:([bool]$rule.CaseSensitive)
     if (-not $match) {
         $failures.Add(('{0}: missing required pattern "{1}" - {2}' -f $rule.Path, $rule.Pattern, $rule.Reason))
     }

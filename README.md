@@ -6,13 +6,13 @@
 </p>
 
 <p align="center">
-  <strong>Noctty</strong> (formerly WingHostty) — <em>Ghostty's terminal core in a fast, native Windows app.</em>
+  <strong>Noctty</strong> (formerly winghostty) — <em>Ghostty's terminal core in a fast, native Windows app.</em>
   <br />
   Tabs, splits, and session restore · Native Win32, OpenGL renderer · No telemetry
 </p>
 
 <p align="center">
-  <sub>WingHostty was renamed to Noctty in August 2026 following a
+  <sub>winghostty was renamed to Noctty in August 2026 following a
   <a href="https://github.com/amanthanvi/noctty/issues/119">trademark request from the Ghostty team</a>;
   same project, same maintainer.</sub>
 </p>
@@ -128,6 +128,9 @@ A few keybindings to get moving: `Ctrl+Shift+T` opens a tab,
 panes, `Ctrl+Shift+P` opens the command palette, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` copy and paste. The full table, plus how to rebind, is in
 [docs/getting-started.md](docs/getting-started.md#5-keybindings).
+
+Local CLI automation is documented in
+[docs/automation.md](docs/automation.md).
 
 ## Status
 

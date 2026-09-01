@@ -14,6 +14,7 @@ const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
 const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
+const win32_power = @import("../apprt/win32_power.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -60,6 +61,13 @@ const DRAW_INTERVAL = 8; // 120 FPS
 const CURSOR_BLINK_INTERVAL = 600;
 const RENDER_FOLLOWUP_BURST_MS = 128;
 
+comptime {
+    // The power policy returns this same interval for focused, non-saver
+    // surfaces so their pacing stays exactly what it was before adaptive
+    // rendering existed. Keep the two constants in lockstep.
+    std.debug.assert(DRAW_INTERVAL == win32_power.DEFAULT_PRESENT_INTERVAL_MS);
+}
+
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
 /// If this is `true` then we send a `redraw_surface` message to the apprt
@@ -95,14 +103,22 @@ stop_c: xev.Completion = .{},
 /// The timer used for rendering
 render_h: xev.Timer,
 render_c: xev.Completion = .{},
+render_reset_c: xev.Completion = .{},
 render_followup_pending: bool = false,
+/// Absolute Win32 tick when the active render follow-up should fire.
+render_timer_due_ms: u64 = 0,
+last_present_request_ms: u64 = 0,
 
 /// The timer used for draw calls. Draw calls don't update from the
 /// terminal state so they're much cheaper. They're used for animation
 /// and are paused when the terminal is not focused.
 draw_h: xev.Timer,
 draw_c: xev.Completion = .{},
+draw_reset_c: xev.Completion = .{},
 draw_active: bool = false,
+/// Absolute Win32 tick when the active draw timer should fire. This lets a
+/// focus or power-policy change shorten an already-queued slow interval.
+draw_timer_due_ms: u64 = 0,
 
 /// This async is used to force a draw immediately. This does not
 /// coalesce like the wakeup does.
@@ -161,10 +177,14 @@ flags: packed struct {
 
 pub const DerivedConfig = struct {
     custom_shader_animation: configpkg.CustomShaderAnimation,
+    unfocused_render_fps: u32,
+    power_saver_rendering: configpkg.PowerSaverRendering,
 
     pub fn init(config: *const configpkg.Config) DerivedConfig {
         return .{
             .custom_shader_animation = config.@"custom-shader-animation",
+            .unfocused_render_fps = config.@"unfocused-render-fps",
+            .power_saver_rendering = config.@"power-saver-rendering",
         };
     }
 };
@@ -295,15 +315,11 @@ fn threadMain_(self: *Thread) !void {
     // Send an initial wakeup message so that we render right away.
     try self.wakeup.notify();
 
-    // Start blinking the cursor.
-    self.cursor_h.run(
-        &self.loop,
-        &self.cursor_c,
-        cursorBlinkInterval(),
-        Thread,
-        self,
-        cursorTimerCallback,
-    );
+    // Start blinking only when the terminal's cursor mode requests it.
+    // Steady cursors must not keep a 500 ms renderer wake loop alive.
+    if (self.cursorShouldBlink()) {
+        self.armCursorTimerIfDead(cursorBlinkInterval());
+    }
 
     // Start the draw timer
     self.syncDrawTimer();
@@ -375,18 +391,46 @@ fn syncDrawTimer(self: *Thread) void {
     // even checking the active state in case we have a pending shutdown.
     self.draw_active = true;
 
-    // If our draw timer is already active, then we don't have to do anything.
-    if (self.draw_c.state() == .active) return;
+    const delay_ms = self.nextPresentTimerDelayMs() orelse {
+        self.draw_active = false;
+        return;
+    };
 
-    // Start the timer which loops
+    if (self.draw_c.state() == .active) {
+        if (apprt.runtime != apprt.win32) return;
+
+        const now_ms = win32_power.tickCountMs();
+        if (!timerNeedsEarlierDeadline(now_ms, self.draw_timer_due_ms, delay_ms)) return;
+        self.draw_h.reset(
+            &self.loop,
+            &self.draw_c,
+            &self.draw_reset_c,
+            delay_ms,
+            Thread,
+            self,
+            drawCallback,
+        );
+        self.draw_timer_due_ms = now_ms +| delay_ms;
+        return;
+    }
+
+    // Start the timer which loops.
     self.draw_h.run(
         &self.loop,
         &self.draw_c,
-        DRAW_INTERVAL,
+        delay_ms,
         Thread,
         self,
         drawCallback,
     );
+    if (apprt.runtime == apprt.win32) {
+        self.draw_timer_due_ms = win32_power.tickCountMs() +| delay_ms;
+    }
+}
+
+fn timerNeedsEarlierDeadline(now_ms: u64, due_ms: u64, next_delay_ms: u64) bool {
+    if (due_ms == 0) return true;
+    return next_delay_ms < due_ms -| now_ms;
 }
 
 /// Enqueue a message and wake the renderer to process it.
@@ -444,10 +488,16 @@ fn drainMailbox(self: *Thread) !bool {
                 // Visibility affects our QoS class
                 self.setQosClass();
 
-                // If we became visible then we immediately trigger a draw.
-                // We don't need to update frame data because that should
-                // still be happening.
-                if (v) self.drawFrame(false);
+                // Becoming visible used to draw immediately here, on the
+                // assumption that frame data kept updating while hidden.
+                // It no longer does — hidden surfaces skip `updateFrame`
+                // entirely — so drawing now would present a stale frame AND
+                // start the throttle clock, deferring the real repaint by a
+                // full interval. `drainMailbox` is only ever called from
+                // `renderOnce`, which does `updateFrame` + `drawFrame` right
+                // after this, so the first visible frame is both fresh and
+                // immediate.
+                if (v) self.last_present_request_ms = 0;
 
                 // Notify the renderer so it can update any state.
                 self.renderer.setVisible(v);
@@ -483,13 +533,15 @@ fn drainMailbox(self: *Thread) !bool {
                     // active, its callback owns the eventual rearm.
                     self.flags.cursor_blink_visible = true;
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(cursorBlinkInterval());
+                    if (self.cursorShouldBlink()) {
+                        self.armCursorTimerIfDead(cursorBlinkInterval());
+                    }
                 }
             },
 
             .reset_cursor_blink => {
                 self.flags.cursor_blink_visible = true;
-                if (self.flags.focused) {
+                if (self.flags.focused and self.cursorShouldBlink()) {
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
                     self.armCursorTimerIfDead(cursorBlinkInterval());
                 }
@@ -573,11 +625,76 @@ fn shouldAcceptSearchGeneration(self: *const Thread, generation: u64) bool {
     return self.search_generation.load(.acquire) == generation;
 }
 
+fn powerSnapshot(self: *const Thread) win32_power.Snapshot {
+    _ = self;
+    if (apprt.runtime != apprt.win32) return .{};
+    win32_power.pollIfStale();
+    return win32_power.snapshot();
+}
+
+fn minimumPresentIntervalMs(self: *const Thread) ?u64 {
+    if (apprt.runtime != apprt.win32) {
+        return if (self.flags.visible) DRAW_INTERVAL else null;
+    }
+    return win32_power.minimumPresentIntervalMs(
+        self.flags.focused,
+        self.flags.visible,
+        self.powerSnapshot(),
+        .{
+            .unfocused_render_fps = self.config.unfocused_render_fps,
+            .power_saver_rendering = self.config.power_saver_rendering,
+        },
+    );
+}
+
+fn presentWaitMs(self: *const Thread, interval_ms: u64) u64 {
+    if (interval_ms <= DRAW_INTERVAL or self.last_present_request_ms == 0) return 0;
+    const elapsed_ms = win32_power.tickCountMs() -| self.last_present_request_ms;
+    return interval_ms -| elapsed_ms;
+}
+
+fn nextPresentTimerDelayMs(self: *const Thread) ?u64 {
+    const interval_ms = self.minimumPresentIntervalMs() orelse return null;
+    const wait_ms = self.presentWaitMs(interval_ms);
+    return if (wait_ms > 0) wait_ms else interval_ms;
+}
+
+fn notePresentRequest(self: *Thread, interval_ms: u64) void {
+    if (interval_ms <= DRAW_INTERVAL) {
+        self.last_present_request_ms = 0;
+        return;
+    }
+    self.last_present_request_ms = win32_power.tickCountMs();
+}
+
 /// Trigger a draw. This will not update frame data or anything, it will
 /// just trigger a draw/paint.
 fn drawFrame(self: *Thread, now: bool) void {
-    // If we're invisible, we do not draw.
-    if (!self.flags.visible) return;
+    self.drawFrameWithReservation(now, false);
+}
+
+fn drawFrameWithReservation(self: *Thread, now: bool, repaint_reserved: bool) void {
+    // A caller-held reservation must be released on every path that does not
+    // hand it to a paint. Leaking one leaves renderer_repaint_requested set
+    // forever, after which every later repaint coalesces into a request that
+    // is never finished and the pane stops updating until a resize-settle or
+    // health recovery cancels it.
+    var reservation_held = repaint_reserved;
+    defer if (reservation_held) {
+        if (comptime @hasDecl(apprt.Surface, "cancelRendererRepaintRequest")) {
+            self.surface.cancelRendererRepaintRequest();
+        }
+    };
+
+    const interval_ms = self.minimumPresentIntervalMs() orelse return;
+
+    // `now` is the forced, vsync-bypassing path (`drawNowCallback`): a
+    // resize, a damage event, something the user is looking at right this
+    // moment. Dropping it would leave visible artifacts on screen for up to a
+    // full interval — a whole second at `unfocused-render-fps = 1` — so
+    // pacing does not apply. Forced draws are event-driven, not timer-driven,
+    // so this cannot become a busy loop.
+    if (!now and self.presentWaitMs(interval_ms) > 0) return;
 
     // If the renderer is managing a vsync on its own, we only draw
     // when we're forced to via `now`.
@@ -588,8 +705,12 @@ fn drawFrame(self: *Thread, now: bool) void {
             self.surface.noteRendererDrawRequest();
         }
         if (comptime @hasDecl(apprt.Surface, "beginRendererRepaintRequest")) {
-            if (!self.surface.beginRendererRepaintRequest()) return;
+            if (!repaint_reserved and !self.surface.beginRendererRepaintRequest()) return;
         }
+
+        // From here the reservation belongs to the queued paint: either the
+        // paint completes it, or the failed push below cancels it.
+        reservation_held = false;
 
         if (self.app_mailbox.push(
             .{ .redraw_surface = self.surface },
@@ -598,24 +719,53 @@ fn drawFrame(self: *Thread, now: bool) void {
             if (comptime @hasDecl(apprt.Surface, "cancelRendererRepaintRequest")) {
                 self.surface.cancelRendererRepaintRequest();
             }
+        } else {
+            self.notePresentRequest(interval_ms);
         }
     } else {
-        self.renderer.drawFrame(false) catch |err|
+        // Nothing will complete a reservation on this path, so the deferred
+        // cancel above releases it once the synchronous draw returns.
+        self.renderer.drawFrame(false) catch |err| {
             log.warn("error drawing err={}", .{err});
+            return;
+        };
+        self.notePresentRequest(interval_ms);
     }
 }
 
 fn scheduleRenderFollowup(self: *Thread) void {
-    if (self.render_followup_pending) return;
+    const delay_ms = self.nextPresentTimerDelayMs() orelse return;
+
+    if (self.render_followup_pending) {
+        if (apprt.runtime != apprt.win32) return;
+
+        const now_ms = win32_power.tickCountMs();
+        if (!timerNeedsEarlierDeadline(now_ms, self.render_timer_due_ms, delay_ms)) return;
+        self.render_h.reset(
+            &self.loop,
+            &self.render_c,
+            &self.render_reset_c,
+            delay_ms,
+            Thread,
+            self,
+            renderCallback,
+        );
+        self.render_timer_due_ms = now_ms +| delay_ms;
+        return;
+    }
+
     self.render_followup_pending = true;
     self.render_h.run(
         &self.loop,
         &self.render_c,
-        DRAW_INTERVAL,
+        delay_ms,
         Thread,
         self,
         renderCallback,
     );
+    if (apprt.runtime == apprt.win32) {
+        self.render_timer_due_ms = win32_power.tickCountMs() +| delay_ms;
+    }
 }
 
 /// Arm the cursor's one-shot timer only when libxev no longer owns the
@@ -632,6 +782,12 @@ fn armCursorTimerIfDead(self: *Thread, delay_ms: u64) void {
         self,
         cursorTimerCallback,
     );
+}
+
+fn cursorShouldBlink(self: *Thread) bool {
+    self.state.mutex.lock();
+    defer self.state.mutex.unlock();
+    return self.state.terminal.modes.get(.cursor_blinking);
 }
 
 fn refreshRenderFollowupDeadline(self: *Thread) void {
@@ -660,18 +816,49 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         return false;
     };
 
-    // Update our frame data.
+    // Invisible surfaces retain terminal state but do no renderer work. A
+    // throttled surface defers both updateFrame and presentation through the
+    // existing follow-up timer so background output cannot burn CPU at the
+    // uncapped wakeup rate.
+    const interval_ms = self.minimumPresentIntervalMs() orelse return false;
+    if (self.presentWaitMs(interval_ms) > 0) return true;
+
+    var repaint_reserved = false;
+    if (must_draw_from_app_thread and self.flags.visible and !self.renderer.hasVsync()) {
+        if (comptime @hasDecl(apprt.Surface, "beginRendererFrameUpdate")) {
+            if (!self.surface.beginRendererFrameUpdate()) {
+                const keep_due_to_dirty = self.shouldContinueRenderFollowup();
+                if (from_wakeup and keep_due_to_dirty) self.refreshRenderFollowupDeadline();
+                return keep_due_to_dirty or self.renderFollowupWindowActive();
+            }
+            repaint_reserved = true;
+        }
+    }
+
     if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
         self.surface.noteRendererUpdateFrame();
     }
-    self.renderer.updateFrame(
+
+    // updateFrame returns the cursor mode from the same locked terminal
+    // snapshot used to rebuild this frame.
+    const frame_update: ?rendererpkg.Renderer.FrameUpdate = self.renderer.updateFrame(
         self.state,
         self.flags.cursor_blink_visible,
-    ) catch |err|
+    ) catch |err| frame_update: {
         log.warn("error rendering err={}", .{err});
+        break :frame_update null;
+    };
+    const cursor_blinking = if (frame_update) |update|
+        update.cursor_blinking
+    else
+        self.cursorShouldBlink();
+    if (!cursor_blinking) self.flags.cursor_blink_visible = true;
+    if (self.flags.focused and cursor_blinking) {
+        self.armCursorTimerIfDead(cursorBlinkInterval());
+    }
 
     // Draw.
-    self.drawFrame(false);
+    self.drawFrameWithReservation(false, repaint_reserved);
 
     // On Win32, xev async wakes can coalesce while a render pass is still
     // in flight. If terminal dirtiness reappeared during the pass, keep a
@@ -697,7 +884,6 @@ fn wakeupCallback(
     if (comptime @hasDecl(apprt.Surface, "noteRendererWakeupCallback")) {
         t.surface.noteRendererWakeupCallback();
     }
-
     if (t.renderOnce(true)) {
         t.scheduleRenderFollowup();
     }
@@ -729,22 +915,52 @@ fn drawCallback(
     _: *xev.Completion,
     r: xev.Timer.RunError!void,
 ) xev.CallbackAction {
-    _ = r catch unreachable;
+    _ = r catch |err| switch (err) {
+        // `Timer.reset` cancels the previous completion before rearming it.
+        // The replacement timer is already scheduled; this callback belongs
+        // only to the canceled run.
+        error.Canceled => return .disarm,
+        else => unreachable,
+    };
     const t: *Thread = self_ orelse {
         // This shouldn't happen so we log it.
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
+    t.draw_timer_due_ms = 0;
 
     // Draw
     t.drawFrame(false);
 
     // Only continue if we're still active
     if (t.draw_active) {
-        t.draw_h.run(&t.loop, &t.draw_c, DRAW_INTERVAL, Thread, t, drawCallback);
+        if (t.nextPresentTimerDelayMs()) |delay_ms| {
+            t.draw_h.run(&t.loop, &t.draw_c, delay_ms, Thread, t, drawCallback);
+            if (apprt.runtime == apprt.win32) {
+                t.draw_timer_due_ms = win32_power.tickCountMs() +| delay_ms;
+            }
+        } else {
+            t.draw_active = false;
+        }
     }
 
     return .disarm;
+}
+
+test "draw timer shortens an active slow interval" {
+    try std.testing.expect(timerNeedsEarlierDeadline(100, 1100, 8));
+    try std.testing.expect(!timerNeedsEarlierDeadline(1095, 1100, 8));
+    try std.testing.expect(!timerNeedsEarlierDeadline(100, 108, 8));
+    try std.testing.expect(timerNeedsEarlierDeadline(100, 0, 8));
+}
+
+test "render follow-up timer shortens an active slow interval" {
+    // A focus/config change from 1 fps to focused cadence must replace the
+    // pending one-second follow-up with an 8 ms deadline.
+    try std.testing.expect(timerNeedsEarlierDeadline(200, 1200, DRAW_INTERVAL));
+    // Never postpone an already-earlier follow-up or reset an equal deadline.
+    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, 1000));
+    try std.testing.expect(!timerNeedsEarlierDeadline(200, 208, DRAW_INTERVAL));
 }
 
 fn renderCallback(
@@ -753,22 +969,40 @@ fn renderCallback(
     _: *xev.Completion,
     r: xev.Timer.RunError!void,
 ) xev.CallbackAction {
-    _ = r catch unreachable;
+    _ = r catch |err| switch (err) {
+        // A reset has already armed the replacement follow-up. Leave its
+        // pending flag and deadline intact when the canceled run reports back.
+        error.Canceled => return .disarm,
+        else => unreachable,
+    };
     const t: *Thread = self_ orelse {
         // This shouldn't happen so we log it.
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
     t.render_followup_pending = false;
+    t.render_timer_due_ms = 0;
     if (comptime @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
         t.surface.noteRendererFollowupCallback();
     }
-
-    if (t.renderOnce(false)) {
-        t.scheduleRenderFollowup();
+    switch (renderFollowupDecision(
+        t.shouldContinueRenderFollowup(),
+        t.renderFollowupWindowActive(),
+    )) {
+        .render => if (t.renderOnce(false)) t.scheduleRenderFollowup(),
+        .poll => t.scheduleRenderFollowup(),
+        .stop => {},
     }
 
     return .disarm;
+}
+
+const RenderFollowupDecision = enum { stop, poll, render };
+
+fn renderFollowupDecision(dirty: bool, window_active: bool) RenderFollowupDecision {
+    if (dirty) return .render;
+    if (window_active) return .poll;
+    return .stop;
 }
 
 fn cursorTimerCallback(
@@ -805,14 +1039,19 @@ fn cursorTimerCallback(
         null;
     switch (cursorBlinkTimerDecision(
         t.flags.focused,
+        t.cursorShouldBlink(),
         cursorBlinkInterval(),
         reset_elapsed_ns,
     )) {
         .disarm => {
             // An unfocused surface needs no recurring cursor timer. Focus
             // regain will arm a new one once this callback has been popped.
+            const was_visible = t.flags.cursor_blink_visible;
             t.flags.cursor_blink_visible = true;
             t.cursor_blink_reset_at = null;
+            if (!was_visible) {
+                t.wakeup.notify() catch {};
+            }
             return .disarm;
         },
         .rearm_after => |delay_ms| {
@@ -848,6 +1087,7 @@ fn stopCallback(
 
 /// Returns the interval for the blinking cursor in milliseconds.
 fn cursorBlinkInterval() u64 {
+    var interval: u64 = CURSOR_BLINK_INTERVAL;
     if (std.valgrind.runningOnValgrind() > 0) {
         // If we're running under Valgrind, the cursor blink adds enough
         // churn that it makes some stalls annoying unless you're on a
@@ -856,10 +1096,10 @@ fn cursorBlinkInterval() u64 {
         // This is a hack, we should change some of our cursor timer
         // logic to be more efficient:
         // https://github.com/ghostty-org/ghostty/issues/8003
-        return CURSOR_BLINK_INTERVAL * 5;
+        interval *= 5;
     }
 
-    return CURSOR_BLINK_INTERVAL;
+    return interval;
 }
 
 fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ns: u64) u64 {
@@ -877,10 +1117,11 @@ const CursorBlinkTimerDecision = union(enum) {
 
 fn cursorBlinkTimerDecision(
     focused: bool,
+    blinking: bool,
     interval_ms: u64,
     reset_elapsed_ns: ?u64,
 ) CursorBlinkTimerDecision {
-    if (!focused) return .disarm;
+    if (!focused or !blinking) return .disarm;
     if (reset_elapsed_ns) |elapsed_ns| {
         const remaining_ms = cursorBlinkRemainingMs(interval_ms, elapsed_ns);
         if (remaining_ms > 0) return .{ .rearm_after = remaining_ms };
@@ -912,20 +1153,37 @@ test "cursor blink timer decision preserves focus and reset state" {
 
     try testing.expectEqual(
         CursorBlinkTimerDecision.disarm,
-        cursorBlinkTimerDecision(false, 500, 1),
+        cursorBlinkTimerDecision(false, true, 500, 1),
     );
     try testing.expectEqual(
         CursorBlinkTimerDecision.toggle,
-        cursorBlinkTimerDecision(true, 500, null),
+        cursorBlinkTimerDecision(true, true, 500, null),
     );
     try testing.expectEqual(
         CursorBlinkTimerDecision{ .rearm_after = 500 },
-        cursorBlinkTimerDecision(true, 500, 1),
+        cursorBlinkTimerDecision(true, true, 500, 1),
     );
     try testing.expectEqual(
         CursorBlinkTimerDecision.toggle,
-        cursorBlinkTimerDecision(true, 500, 500 * std.time.ns_per_ms),
+        cursorBlinkTimerDecision(true, true, 500, 500 * std.time.ns_per_ms),
     );
+}
+
+test "cursor blink timer disarms for a steady cursor" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.disarm,
+        cursorBlinkTimerDecision(true, false, 500, null),
+    );
+}
+
+test "render followup does not redraw a clean terminal" {
+    const testing = std.testing;
+
+    try testing.expectEqual(RenderFollowupDecision.poll, renderFollowupDecision(false, true));
+    try testing.expectEqual(RenderFollowupDecision.render, renderFollowupDecision(true, true));
+    try testing.expectEqual(RenderFollowupDecision.stop, renderFollowupDecision(false, false));
 }
 
 test "renderer follow-up check tracks visible terminal dirtiness" {

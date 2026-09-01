@@ -15,6 +15,9 @@ pub const Options = struct {
     /// default local noctty instance.
     class: ?[:0]const u8 = null,
 
+    /// How long to wait for the running instance to respond.
+    timeout: u64 = 10_000,
+
     /// If set, perform the action against a specific surface from
     /// `+list-windows` instead of the focused surface.
     @"surface-id": ?u64 = null,
@@ -48,6 +51,15 @@ pub const Options = struct {
 /// `write_screen_file`, and `crash` are rejected by the running instance. New
 /// action variants are denied until explicitly added to the automation
 /// allowlist.
+///
+/// Flags:
+///
+///   * `--class=<class>`: Select a custom instance namespace.
+///
+///   * `--surface-id=<id>`: Target a nonzero pane ID from `+list-windows`.
+///
+///   * `--timeout=<ms>`: Response timeout in milliseconds, from 0 through
+///     10000. The default is 10000.
 pub fn run(alloc: Allocator) !u8 {
     var iter = try args.argsIterator(alloc);
     defer iter.deinit();
@@ -79,6 +91,7 @@ const PerformAutomationActionFn = *const fn (
     target: apprt.ipc.Target,
     action_target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    timeout_ms: u64,
 ) anyerror!bool;
 
 fn runArgsWithPerform(
@@ -107,10 +120,26 @@ fn runArgsWithPerform(
             continue;
         }
         if (lib.cutPrefix(u8, arg, "--surface-id=")) |raw| {
-            opts.@"surface-id" = std.fmt.parseInt(u64, raw, 10) catch {
+            const id = std.fmt.parseInt(u64, raw, 10) catch {
                 try stderr.print("Invalid --surface-id value: {s}\n", .{raw});
                 return 1;
             };
+            if (id == 0) {
+                try stderr.print("--surface-id must be nonzero.\n", .{});
+                return 1;
+            }
+            opts.@"surface-id" = id;
+            continue;
+        }
+        if (lib.cutPrefix(u8, arg, "--timeout=")) |raw| {
+            opts.timeout = std.fmt.parseInt(u64, raw, 10) catch {
+                try stderr.print("Invalid --timeout value: {s}\n", .{raw});
+                return 1;
+            };
+            if (opts.timeout > 10_000) {
+                try stderr.print("--timeout must be between 0 and 10000 milliseconds.\n", .{});
+                return 1;
+            }
             continue;
         }
         if (std.mem.startsWith(u8, arg, "-")) {
@@ -150,6 +179,7 @@ fn runArgsWithPerform(
         if (opts.class) |class| .{ .class = class } else .detect,
         if (opts.@"surface-id") |id| .{ .surface_id = id } else .focused,
         action,
+        opts.timeout,
     ) catch |err| switch (err) {
         error.InvalidAutomationTarget => {
             try stderr.print("Invalid automation target for action: {s}\n", .{action});
@@ -157,7 +187,7 @@ fn runArgsWithPerform(
         },
         error.NoAutomationTarget => {
             try stderr.print("No matching automation target for action: {s}\n", .{action});
-            return 1;
+            return 3;
         },
         error.InvalidAutomationAction => {
             try stderr.print("Invalid action for +perform-action: {s}\n", .{action});
@@ -165,23 +195,18 @@ fn runArgsWithPerform(
         },
         error.UnsafeAutomationAction => {
             try stderr.print("Unsafe action rejected for +perform-action: {s}\n", .{action});
-            return 1;
+            return 4;
         },
-        error.IPCFailed => {
-            try stderr.print("Performing automation action via IPC failed.\n", .{});
-            return 1;
+        else => {
+            try stderr.print("Performing automation action via IPC failed: {}\n", .{err});
+            return 5;
         },
-        error.InvalidIpcResponse => {
-            try stderr.print("Performing automation action via IPC failed: invalid response from the target instance.\n", .{});
-            return 1;
-        },
-        else => return err,
     };
 
     if (ok) return 0;
 
     try stderr.print("No matching noctty instance is listening for automation actions.\n", .{});
-    return 1;
+    return 2;
 }
 
 fn performAutomationAction(
@@ -189,12 +214,14 @@ fn performAutomationAction(
     target: apprt.ipc.Target,
     action_target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    timeout_ms: u64,
 ) !bool {
     return try apprt.App.performAutomationAction(
         alloc,
         target,
         action_target,
         action_text,
+        timeout_ms,
     );
 }
 
@@ -211,6 +238,7 @@ test "automation-action cli forwards class surface and action" {
             target: apprt.ipc.Target,
             action_target: apprt.ipc.AutomationActionTarget,
             action_text: []const u8,
+            timeout_ms: u64,
         ) !bool {
             seen_class = switch (target) {
                 .class => |class| try testing.allocator.dupe(u8, class),
@@ -221,6 +249,7 @@ test "automation-action cli forwards class surface and action" {
                 .focused => return error.UnexpectedTarget,
             };
             seen_action = try testing.allocator.dupe(u8, action_text);
+            try testing.expectEqual(@as(u64, 0), timeout_ms);
             return true;
         }
     };
@@ -229,7 +258,7 @@ test "automation-action cli forwards class surface and action" {
 
     var iter = try std.process.ArgIteratorGeneral(.{}).init(
         testing.allocator,
-        "--class=lane9 --surface-id=42 new_tab",
+        "--class=lane9 --surface-id=42 --timeout=0 new_tab",
     );
     defer iter.deinit();
 
@@ -259,6 +288,7 @@ test "automation-action cli rejects invalid action before ipc" {
             _: apprt.ipc.Target,
             _: apprt.ipc.AutomationActionTarget,
             _: []const u8,
+            _: u64,
         ) !bool {
             return error.UnexpectedIpc;
         }
@@ -296,6 +326,7 @@ test "automation-action cli rejects app action with surface id before ipc" {
             _: apprt.ipc.Target,
             _: apprt.ipc.AutomationActionTarget,
             _: []const u8,
+            _: u64,
         ) !bool {
             return error.UnexpectedIpc;
         }
@@ -333,6 +364,7 @@ test "automation-action cli reports invalid ipc response" {
             _: apprt.ipc.Target,
             _: apprt.ipc.AutomationActionTarget,
             _: []const u8,
+            _: u64,
         ) !bool {
             return error.InvalidIpcResponse;
         }
@@ -354,9 +386,79 @@ test "automation-action cli reports invalid ipc response" {
         &Hook.perform,
     );
 
-    try testing.expectEqual(@as(u8, 1), exit_code);
-    try testing.expectEqualStrings(
-        "Performing automation action via IPC failed: invalid response from the target instance.\n",
-        stderr_buf.written(),
-    );
+    try testing.expectEqual(@as(u8, 5), exit_code);
+    try testing.expect(std.mem.startsWith(u8, stderr_buf.written(), "Performing automation action via IPC failed:"));
+}
+
+test "automation-action cli rejects invalid arguments before ipc" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var called = false;
+
+        fn perform(_: Allocator, _: apprt.ipc.Target, _: apprt.ipc.AutomationActionTarget, _: []const u8, _: u64) !bool {
+            called = true;
+            return true;
+        }
+    };
+
+    for ([_][]const u8{
+        "--surface-id=0 new_tab",
+        "--surface-id=18446744073709551616 new_tab",
+        "--timeout=10001 new_tab",
+        "--timeout=18446744073709551616 new_tab",
+        "",
+        "new_tab close_tab",
+    }) |command_line| {
+        Hook.called = false;
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        defer iter.deinit();
+
+        var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr_buf.deinit();
+
+        try testing.expectEqual(@as(u8, 1), try runArgsWithPerform(
+            testing.allocator,
+            &iter,
+            &stderr_buf.writer,
+            &Hook.perform,
+        ));
+        try testing.expect(!Hook.called);
+    }
+}
+
+test "automation-action cli maps stable runtime exit codes" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var outcome: u8 = 0;
+
+        fn perform(_: Allocator, _: apprt.ipc.Target, _: apprt.ipc.AutomationActionTarget, _: []const u8, timeout_ms: u64) !bool {
+            try testing.expectEqual(@as(u64, 10_000), timeout_ms);
+            return switch (outcome) {
+                1 => error.InvalidAutomationTarget,
+                2 => false,
+                3 => error.NoAutomationTarget,
+                4 => error.UnsafeAutomationAction,
+                5 => error.IPCFailed,
+                else => true,
+            };
+        }
+    };
+
+    for ([_]u8{ 1, 2, 3, 4, 5 }) |expected| {
+        Hook.outcome = expected;
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, "new_tab");
+        defer iter.deinit();
+
+        var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr_buf.deinit();
+
+        try testing.expectEqual(expected, try runArgsWithPerform(
+            testing.allocator,
+            &iter,
+            &stderr_buf.writer,
+            &Hook.perform,
+        ));
+    }
 }

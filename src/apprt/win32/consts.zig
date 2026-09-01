@@ -8,6 +8,7 @@ const WPARAM = win32_types.WPARAM;
 const UINT = win32_types.UINT;
 const UINT_PTR = win32_types.UINT_PTR;
 const DWORD = win32_types.DWORD;
+const LRESULT = win32_types.LRESULT;
 const WORD = win32_types.WORD;
 
 pub const CS_OWNDC = 0x0020;
@@ -42,6 +43,7 @@ pub const HTBOTTOM = 15;
 pub const HTBOTTOMLEFT = 16;
 pub const HTBOTTOMRIGHT = 17;
 pub const HTCLOSE = 20;
+pub const HTTRANSPARENT: LRESULT = -1;
 
 pub const SW_SHOW = 5;
 pub const SW_SHOWNOACTIVATE = 4;
@@ -113,6 +115,8 @@ pub const WM_SETCURSOR = 0x0020;
 pub const WM_SETFOCUS = 0x0007;
 pub const WM_SETTINGCHANGE = 0x001A;
 pub const WM_SIZE = 0x0005;
+pub const WM_SHOWWINDOW = 0x0018;
+pub const WM_WINDOWPOSCHANGED = 0x0047;
 pub const WM_ENTERSIZEMOVE = 0x0231;
 pub const WM_EXITSIZEMOVE = 0x0232;
 pub const SIZE_MAXIMIZED: u32 = 2;
@@ -127,6 +131,7 @@ pub const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
 pub const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
 pub const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
 pub const WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP + 6;
+pub const WM_WINHOSTTY_TERMINAL_HANDOFF = WM_APP + 7;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
@@ -150,6 +155,7 @@ pub const MOD_CONTROL = 0x0002;
 pub const MOD_SHIFT = 0x0004;
 pub const MOD_WIN = 0x0008;
 pub const TO_UNICODE_NO_STATE_CHANGE: UINT = 0x0004;
+pub const MAPVK_VK_TO_VSC: UINT = 0;
 pub const SWP_NOSIZE = 0x0001;
 pub const SWP_NOMOVE = 0x0002;
 pub const SWP_NOZORDER = 0x0004;
@@ -371,6 +377,7 @@ pub const VK_OEM_4 = 0xDB;
 pub const VK_OEM_5 = 0xDC;
 pub const VK_OEM_6 = 0xDD;
 pub const VK_OEM_7 = 0xDE;
+pub const VK_OEM_102 = 0xE2;
 pub const VK_PACKET = 0xE7;
 
 pub const KF_EXTENDED = 1 << 24;
@@ -383,6 +390,60 @@ pub const ERROR_FILE_NOT_FOUND = 2;
 pub const PIPE_READMODE_BYTE = 0x00000000;
 pub const PIPE_ACCESS_DUPLEX = 0x00000003;
 pub const PIPE_UNLIMITED_INSTANCES = 255;
+
+/// Refuse pipe clients that arrive over SMB from another machine. Named
+/// pipes are reachable as `\\<host>\pipe\<name>` by default, so the
+/// single-instance IPC pipe must opt out explicitly.
+pub const PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
+
+/// Token access and info classes used to resolve the current user's SID and
+/// integrity level for the IPC pipe security descriptor.
+pub const TOKEN_QUERY = 0x0008;
+pub const TokenUser = 1;
+pub const TokenIntegrityLevel = 25;
+
+/// Least privilege that still permits `OpenProcessToken` on another
+/// process, used to authenticate the IPC pipe server. Deliberately NOT
+/// `PROCESS_QUERY_INFORMATION`, which additionally grants access this check
+/// has no use for.
+pub const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+/// Security quality-of-service flags for `CreateFileW` on a named pipe.
+///
+/// A named-pipe server impersonates at `SecurityImpersonation` BY DEFAULT.
+/// Passing `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` lets the server
+/// learn who we are but not act as us: `ImpersonateNamedPipeClient`'s
+/// documented rule is that impersonation is permitted when "the requested
+/// impersonation level of the token is less than SecurityImpersonation, such
+/// as SecurityIdentification" -- the resulting token can be queried but not
+/// used to open objects on our behalf.
+pub const SECURITY_SQOS_PRESENT = 0x00100000;
+pub const SECURITY_IDENTIFICATION = 0x00010000;
+
+/// Relative identifier of the medium mandatory integrity level
+/// (`S-1-16-8192`). Windows treats an object with no mandatory label as
+/// medium integrity, so a label ACE is only worth adding above this.
+pub const SECURITY_MANDATORY_MEDIUM_RID = 0x2000;
+
+/// `S-1-16-4096`. The lowest level any interactive or service token
+/// carries, used only as a sanity floor in tests.
+pub const SECURITY_MANDATORY_LOW_RID = 0x1000;
+
+/// SDDL string revision accepted by
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW`.
+pub const SDDL_REVISION_1 = 1;
+
+/// `SECURITY_INFORMATION` bits used when reading the IPC pipe descriptor back
+/// as SDDL. `LABEL_SECURITY_INFORMATION` selects the mandatory-label ACE in
+/// the SACL without needing `SeSecurityPrivilege`.
+pub const DACL_SECURITY_INFORMATION = 0x00000004;
+pub const LABEL_SECURITY_INFORMATION = 0x00000010;
+pub const OWNER_SECURITY_INFORMATION = 0x00000001;
+
+/// `SE_OBJECT_TYPE.SE_KERNEL_OBJECT`, for reading a named pipe's descriptor
+/// back off the live handle with `GetSecurityInfo`.
+pub const SE_KERNEL_OBJECT = 6;
 
 /// Main-thread COM apartment for in-process STA clients (settings path
 /// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means

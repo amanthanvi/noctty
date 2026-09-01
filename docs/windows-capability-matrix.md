@@ -5,7 +5,7 @@ Windows. Cells stay short; rows with real nuance point into the
 [Notes](#notes) section below. Update rows when Windows behavior changes or
 when upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-08-12.
+Last reviewed: 2026-08-21.
 
 ## Status legend
 
@@ -37,7 +37,7 @@ Last reviewed: 2026-08-12.
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates). |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\noctty\session-state.json`. Terminal contents and child processes are not restored.                                                                                               |
 | [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Windows 11 22H2+ with `background-opacity < 1` requests the DWM tabbed backdrop; accepted but inert on Windows 10 and 11 21H2. Radii are treated as on/off.                                                                                                                           |
-| [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial. See [accessibility notes](#accessibility).                                                                                                                                                                                                                  |
+| [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial: UI Automation covers the daily chrome and terminal text, but caption buttons, overlay rows, and menus are uncovered. Only NVDA has been measured, with mixed results. See [accessibility notes](#accessibility) and the [screen-reader matrix](accessibility-matrix.md).  |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                              |
 
 ## Windows-Specific
@@ -47,11 +47,15 @@ Last reviewed: 2026-08-12.
 | [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. noctty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. See [renderer notes](#renderer).                                        |
 | [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\noctty\...`, not the macOS/Linux paths documented upstream.      |
-| Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |
+| Local automation                                                                  | Versioned JSON state and stable local verbs for windows, tabs, splits, focus, policy-allowed actions, and control-free text. See [automation.md](automation.md). |
 | [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark title bar, high-contrast palette switching, IME, drag-and-drop, and native context menus.      |
 | Universal palette                                                                 | One blended, fuzzy-ranked command surface. See [universal palette notes](#universal-palette).                              |
+| Named layouts                                                                     | Saves one window's tab/split/profile/cwd/title shape and materializes it in a new window from keybind, palette, or CLI.     |
 | Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).              |
 | Tab dragging                                                                      | Same-window reorder and exact-pane drag-to-split. See [tab dragging notes](#tab-dragging).                                 |
+| Power-aware rendering                                                             | `unfocused-render-fps` caps visible background presentation; `power-saver-rendering` controls saver pacing; minimized and DWM-cloaked windows do not present. See [power and battery](windows.md#power-and-battery). |
+| SSH host discovery                                                                | Concrete aliases from `%USERPROFILE%\.ssh\config` appear as system `ssh.exe` launch entries in the picker and palette.    |
+| Windows default terminal                                                          | `+register-default-terminal` selects noctty per user through the Windows Terminal 1.24-or-newer OpenConsole handoff; see [windows.md](windows.md#default-terminal). |
 
 ## Notes
 
@@ -73,10 +77,16 @@ that:
 
 ### Accessibility
 
-The Win32 host exposes a UI Automation root provider, the command palette
-exposes a list provider, and terminal text is available read-only through
-`ITextProvider` / `ITextRangeProvider`. Broader application-chrome coverage
-and screen-reader validation remain incomplete.
+The Win32 host exposes a UI Automation root provider; tabs, the new-tab and
+overflow buttons, docked-search controls, the search result count, host
+banners, and the terminal scrollbar expose per-widget providers with the
+patterns their roles require; the command palette and settings sections
+expose list and selection semantics; and terminal text is available through
+`ITextProvider` / `ITextRangeProvider` / `ITextProvider2` including real
+selections. Caption buttons, overlay rows, menus, and toasts are still
+uncovered. Only NVDA has been measured, on a pre-release branch build,
+and several chrome elements do not announce their role or state through
+it — see the [screen-reader matrix](accessibility-matrix.md).
 
 ### Renderer
 

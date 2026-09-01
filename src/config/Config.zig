@@ -1524,6 +1524,16 @@ class: ?[:0]const u8 = null,
 ///   * `inherit` - The working directory of the launching process.
 @"working-directory": ?WorkingDirectory = null,
 
+/// Read `%USERPROFILE%\.ssh\config` read-only and list only its host aliases;
+/// no keys or secrets are read. Up to 16 concrete, non-network `Include`
+/// files one level deep are also scanned for host aliases; every other
+/// keyword is ignored.
+///
+/// Activating an entry runs `ssh <alias>`, which applies that alias's own
+/// configuration — including any `ProxyCommand` it specifies. Set this to
+/// `false` to remove the SSH entries.
+@"ssh-config-hosts": bool = true,
+
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
 /// overwrite previously set values. The list of actions is available in
 /// the documentation or using the `noctty +list-actions` command.
@@ -1974,6 +1984,38 @@ keybind: Keybinds = .{},
 ///
 /// Changing this value at runtime will only affect new terminals.
 @"window-vsync": bool = true,
+
+/// Limit visible, unfocused terminal surfaces to this many rendered frames
+/// per second while output remains active.
+///
+/// Focus is per surface, not per window: in a split, every pane except the
+/// one with keyboard focus is "unfocused" even while visible, so a background
+/// split tailing fast output is capped by this value. Raise it if you watch
+/// live output side by side with your active pane.
+///
+/// Lower values reduce CPU, GPU, and power use at the cost of less fluid
+/// background updates. Values below 1 are treated as 1, and values above
+/// 125 have no additional effect because the renderer never presents more
+/// often than every 8 ms. The default is `30`.
+///
+/// This can be changed at runtime and affects all open terminals.
+@"unfocused-render-fps": u32 = 30,
+
+/// Control whether power-saving render scheduling is enabled.
+///
+/// Valid values:
+///
+/// * `auto` - Enable power-saving behavior when Windows reports that Battery
+///   Saver is active, or that Windows 11 Energy Saver is active (the latter
+///   uses a GUID Microsoft still documents as prerelease, so it is
+///   best-effort and inert on Windows builds that lack it).
+/// * `on` - Always enable power-saving behavior.
+/// * `off` - Never enable power-saving behavior.
+///
+/// The default is `auto`.
+///
+/// This can be changed at runtime and affects all open terminals.
+@"power-saver-rendering": PowerSaverRendering = .auto,
 
 /// If true, new windows will inherit the working directory of the
 /// previously focused window. If no window was previously focused, the default
@@ -2487,6 +2529,18 @@ keybind: Keybinds = .{},
 /// `false` will mean that Ghostty will quit after the configured delay if no
 /// window is ever created.
 @"initial-window": bool = true,
+
+/// Materialize a saved Windows layout instead of creating the ordinary
+/// initial window, for example `noctty --launch-layout=<name>` or
+/// `noctty +new-window --launch-layout=<name>`.
+///
+/// This is a CLI-only configuration and it is one-shot. Setting it in a
+/// configuration file has no effect (it is not an error, but the value is
+/// discarded with a warning), because a configuration file is read on every
+/// start and the layout would then replay on each launch instead of when the
+/// user asks for it. It is also cleared after it is honored, so a later
+/// ordinary new window and a configuration reload never replay it.
+@"launch-layout": ?[]const u8 = null,
 
 /// The duration that undo operations remain available. After this
 /// time, the operation will be removed from the undo stack and
@@ -3363,6 +3417,31 @@ fn loadFsFile(self: *Config, alloc: Allocator, file: *std.fs.File, path: []const
     try self.loadReader(alloc, reader, path);
 }
 
+/// Configuration files may not set the one-shot `launch-layout` option.
+/// Filter it before `loadIter` so neither the parsed value nor a replay step
+/// can ever be created, including for recursive files and theme files.
+const ConfigFileIterator = struct {
+    inner: *cli.args.LineIterator,
+
+    pub fn next(self: *@This()) ?[]const u8 {
+        while (self.inner.next()) |arg| {
+            if (launchLayoutArgValue(arg)) |name| {
+                log.warn(
+                    "{s}: ignoring launch-layout={s}; it can only be set on the command line",
+                    .{ self.inner.filepath, name },
+                );
+                continue;
+            }
+            return arg;
+        }
+        return null;
+    }
+
+    pub fn location(self: *const @This(), alloc: Allocator) Allocator.Error!?cli.Location {
+        return self.inner.location(alloc);
+    }
+};
+
 /// Load config from the given Reader.
 fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []const u8) !void {
     bom: {
@@ -3375,9 +3454,199 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
             reader.toss(bom.len);
         }
     }
-    var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+    var line_iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+    var iter: ConfigFileIterator = .{ .inner = &line_iter };
     try self.loadIter(alloc, &iter);
+
     try self.expandPaths(std.fs.path.dirname(path).?);
+}
+
+/// Remove the `--launch-layout` steps at or after `from` in the replay log,
+/// returning the last value they set.
+///
+/// `launch-layout` is one-shot, but `loadTheme` and `changeConditionalState`
+/// feed `_replay_steps` straight to `loadIter`, which bypasses every guard
+/// that clears the parsed field. A step left behind therefore restores the
+/// value later. Two callers need this: `loadReader`, for a value a
+/// configuration file set (pass the length recorded before that file parsed),
+/// and the win32 runtime once it has consumed the command-line request (pass
+/// `0`, so the whole history is cleared).
+pub fn dropLaunchLayoutReplaySteps(self: *Config, from: usize) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    var i = @min(from, self._replay_steps.items.len);
+    while (i < self._replay_steps.items.len) : (i += 1) {
+        if (self._replay_steps.items[i] == .@"-e") break;
+    }
+    while (i > from) {
+        i -= 1;
+        const arg: []const u8 = switch (self._replay_steps.items[i]) {
+            .arg => |value| value,
+            .conditional_arg => |value| value.arg,
+            else => continue,
+        };
+        const value = launchLayoutArgValue(arg) orelse continue;
+        // Iterating backwards, so the first match is the file's last word.
+        if (found == null) found = value;
+        _ = self._replay_steps.orderedRemove(i);
+    }
+    return found;
+}
+
+fn launchLayoutArgValue(arg: []const u8) ?[]const u8 {
+    const prefix = "--launch-layout";
+    if (!std.mem.startsWith(u8, arg, prefix)) return null;
+    if (arg.len == prefix.len) return "";
+    if (arg[prefix.len] != '=') return null;
+    return arg[prefix.len + 1 ..];
+}
+
+test "launch-layout is ignored in configuration files" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A configuration file is read on every start, so a layout named there
+    // would replay on each launch. The value is dropped.
+    {
+        var reader: std.Io.Reader = .fixed("launch-layout = Project Alpha\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+
+        try testing.expect(cfg.@"launch-layout" == null);
+
+        // And it must not come back through replay. `finalize` -> `loadTheme`
+        // and `changeConditionalState` both re-run `_replay_steps` through
+        // `loadIter`, which does not pass through `loadReader`.
+        for (cfg._replay_steps.items) |step| {
+            const arg: []const u8 = switch (step) {
+                .arg => |value| value,
+                .conditional_arg => |value| value.arg,
+                else => continue,
+            };
+            try testing.expect(!std.mem.startsWith(u8, arg, "--launch-layout"));
+        }
+
+        var replayed = try Config.default(alloc);
+        defer replayed.deinit();
+        var replay_it = Replay.iterator(cfg._replay_steps.items, &replayed);
+        try replayed.loadIter(alloc, &replay_it);
+        try testing.expect(replayed.@"launch-layout" == null);
+    }
+
+    // A command-line value survives a later file load (`loadRecursiveFiles`
+    // runs after `loadCliArgs`), even when the file tries to override it.
+    {
+        var reader: std.Io.Reader = .fixed("launch-layout = Project Beta\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        cfg.@"launch-layout" = "Project Alpha";
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+
+        try testing.expectEqualStrings("Project Alpha", cfg.@"launch-layout".?);
+    }
+
+    // Theme files use a separate reader and then replay the prior config.
+    // Neither path may resurrect a file-origin launch request, while an
+    // explicit CLI value must still survive the theme reload.
+    {
+        var td = try internal_os.TempDir.init();
+        defer td.deinit();
+        var write_buf: [4096]u8 = undefined;
+        {
+            var file = try td.dir.createFile("theme", .{});
+            defer file.close();
+            var writer = file.writer(&write_buf);
+            try writer.interface.writeAll(
+                "launch-layout = Theme Layout\nbackground = #123abc\n",
+            );
+            try writer.end();
+        }
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try td.dir.realpath("theme", &path_buf);
+
+        var arena = ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const theme_arg = try std.fmt.allocPrint(
+            arena.allocator(),
+            "--theme={s}",
+            .{path},
+        );
+
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var args_iter: TestIterator = .{ .data = &.{
+            "--launch-layout=CLI Layout",
+            theme_arg,
+        } };
+        try cfg.loadIter(alloc, &args_iter);
+        try cfg.finalize();
+        try testing.expectEqualStrings("CLI Layout", cfg.@"launch-layout".?);
+
+        for (cfg._replay_steps.items) |step| {
+            const arg: []const u8 = switch (step) {
+                .arg => |value| value,
+                .conditional_arg => |value| value.arg,
+                else => continue,
+            };
+            try testing.expect(!std.mem.eql(u8, arg, "--launch-layout=Theme Layout"));
+        }
+    }
+}
+
+test "launch-layout does not survive in the replay log once consumed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena_alloc = cfg._arena.?.allocator();
+
+    // What `loadCliArgs` leaves behind for `noctty --launch-layout=<name>`.
+    try cfg._replay_steps.append(arena_alloc, .{
+        .arg = try arena_alloc.dupeZ(u8, "--launch-layout=Project Alpha"),
+    });
+    try cfg._replay_steps.append(arena_alloc, .@"-e");
+    try cfg._replay_steps.append(arena_alloc, .{
+        .arg = try arena_alloc.dupeZ(u8, "tool.exe"),
+    });
+    try cfg._replay_steps.append(arena_alloc, .{
+        .arg = try arena_alloc.dupeZ(u8, "--launch-layout=child-option"),
+    });
+    cfg.@"launch-layout" = "Project Alpha";
+
+    // Startup consumes the request. Clearing the field alone is not enough:
+    // `loadTheme` and `changeConditionalState` replay `_replay_steps` through
+    // `loadIter`, and a per-window clone inherits that history.
+    cfg.@"launch-layout" = null;
+    try testing.expectEqualStrings(
+        "Project Alpha",
+        cfg.dropLaunchLayoutReplaySteps(0).?,
+    );
+
+    var replayed = try Config.default(alloc);
+    defer replayed.deinit();
+    var replay_it = Replay.iterator(cfg._replay_steps.items, &replayed);
+    try replayed.loadIter(alloc, &replay_it);
+    try testing.expect(replayed.@"launch-layout" == null);
+    const command = replayed.@"initial-command" orelse return error.TestExpectedEqual;
+    switch (command) {
+        .shell => return error.TestExpectedEqual,
+        .direct => |argv| {
+            try testing.expectEqual(@as(usize, 2), argv.len);
+            try testing.expectEqualStrings("tool.exe", argv[0]);
+            try testing.expectEqualStrings("--launch-layout=child-option", argv[1]);
+        },
+    }
 }
 
 test "handle bom in config files" {
@@ -3861,7 +4130,8 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     var buf: [2048]u8 = undefined;
     var file_reader = file.reader(&buf);
     const reader = &file_reader.interface;
-    var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+    var line_iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+    var iter: ConfigFileIterator = .{ .inner = &line_iter };
     try new_config.loadIter(alloc_gpa, &iter);
 
     // Setup our replay to be conditional.
@@ -4126,6 +4396,12 @@ pub fn parseManuallyHook(
     arg: []const u8,
     iter: anytype,
 ) !bool {
+    if (builtin.os.tag == .windows and std.ascii.eqlIgnoreCase(arg, "-Embedding")) {
+        // COM's SCM appends this switch for local-server activation. It is a
+        // process-mode marker, not a user configuration field.
+        return false;
+    }
+
     if (std.mem.eql(u8, arg, "-e")) {
         // Add the special -e marker. This prevents:
         // (1) config-file from adding args to the end (see #2908)
@@ -4179,6 +4455,17 @@ pub fn parseManuallyHook(
 
     // If we didn't find a special case, continue parsing normally
     return true;
+}
+
+test "handoff embedding switch is consumed by Windows config parsing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var cfg = try Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, "-Embedding");
+    defer iter.deinit();
+    try cli.args.parse(Config, std.testing.allocator, &cfg, &iter);
+    try std.testing.expect(cfg._diagnostics.empty());
+    try std.testing.expectEqual(@as(usize, 0), cfg._replay_steps.items.len);
 }
 
 fn compatGtkTabsLocation(
@@ -4628,6 +4915,13 @@ pub const CustomShaderAnimation = enum(c_int) {
     false,
     true,
     always,
+};
+
+/// See power-saver-rendering.
+pub const PowerSaverRendering = enum {
+    auto,
+    on,
+    off,
 };
 
 /// Valid values for fullscreen config option

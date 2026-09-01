@@ -77,6 +77,7 @@ pub fn create(alloc: Allocator) CreateError!*App {
     var app = try alloc.create(App);
     errdefer alloc.destroy(app);
     try app.init(alloc);
+    app.font_grid_set.startDiscoveryPrefetch();
     return app;
 }
 
@@ -123,6 +124,15 @@ pub fn destroy(self: *App) void {
 
     // Free the app memory
     self.alloc.destroy(self);
+}
+
+test "App create overlaps Windows font discovery with runtime startup" {
+    if (comptime builtin.target.os.tag != .windows or
+        !@hasDecl(font.Discover, "refresh")) return;
+
+    const app = try create(std.testing.allocator);
+    defer app.destroy();
+    try std.testing.expect(app.font_grid_set.discoveryPrefetchStarted());
 }
 
 /// Tick ticks the app loop. This will drain our mailbox and process those
@@ -228,6 +238,7 @@ pub fn focusedSurface(self: *const App) ?*Surface {
 
 test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(isSafeAutomationAction(.new_tab));
+    try std.testing.expect(isSafeAutomationAction(.{ .launch_layout = "demo" }));
     try std.testing.expect(isSafeAutomationAction(.toggle_fullscreen));
     try std.testing.expect(isSafeAutomationAction(.quit));
     try std.testing.expect(!isSafeAutomationAction(.unbind));
@@ -236,6 +247,96 @@ test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(!isSafeAutomationAction(.paste_from_clipboard));
     try std.testing.expect(!isSafeAutomationAction(.{ .write_screen_file = .copy }));
     try std.testing.expect(!isSafeAutomationAction(.{ .crash = .main }));
+
+    // end_key_sequence flushes the queued key-sequence writes to the pty,
+    // so it is terminal input even though it takes no argument.
+    try std.testing.expect(!isSafeAutomationAction(.end_key_sequence));
+
+    // clear_screen writes 0x0C to the child at a prompt and erases the
+    // full scrollback, so it is terminal input too.
+    try std.testing.expect(!isSafeAutomationAction(.clear_screen));
+
+    // undo/redo REPLAY a previously captured action, so allowlisting them
+    // would re-open every action they can replay. The Win32 undo stack can
+    // hold a `clear_screen` entry, and redoing it calls
+    // `reapplyUndoableAction`, which queues the same
+    // `.clear_screen{ .history = true }` io message the direct action does
+    // (src/apprt/win32.zig `reapplyUndoableAction`) -- i.e. a pty write and a
+    // full scrollback erase, reachable without ever naming `clear_screen`.
+    // Undo additionally restores a snapshot title straight into the apprt
+    // cache, bypassing the title sanitizer these setters otherwise enforce.
+    // Gating on the replayed entry would mean plumbing the automation origin
+    // through the whole apprt action dispatch; refusing both is the
+    // deny-by-default answer and costs only IPC-driven undo/redo.
+    try std.testing.expect(!isSafeAutomationAction(.undo));
+    try std.testing.expect(!isSafeAutomationAction(.redo));
+
+    // Key table actions only move the binding stack and stay allowed.
+    try std.testing.expect(isSafeAutomationAction(.deactivate_all_key_tables));
+}
+
+test "automation-action safety rejects end_key_sequence parsed from IPC text" {
+    const action = try input.Binding.Action.parse("end_key_sequence");
+    try std.testing.expect(!isSafeAutomationAction(action));
+}
+
+/// An App with just enough state for `performAutomationAction` to run its
+/// pre-dispatch checks. `font_grid_set` is untouched on that path, so this
+/// avoids standing up the font subsystem for a pure gating test.
+fn testAutomationApp() App {
+    return .{
+        .alloc = std.testing.allocator,
+        .surfaces = .{},
+        .mailbox = .{},
+        .font_grid_set = undefined,
+        .config_conditional_state = .{},
+    };
+}
+
+test "automation-action dispatch rejects unsafe actions before dispatching" {
+    var app = testAutomationApp();
+    defer app.surfaces.deinit(app.alloc);
+
+    // `performAutomationAction` returns before it touches `rt_app` for every
+    // outcome asserted here: the safety gate rejects first, and with no
+    // focused surface the fallback is a surface-scope check. A dangling but
+    // correctly aligned pointer is therefore never dereferenced.
+    const rt_app: *apprt.App = @ptrFromInt(@alignOf(apprt.App));
+
+    // These go through the real IPC entry point, so deleting the
+    // `isSafeAutomationAction` gate inside `performAutomationAction` fails
+    // this test rather than leaving the parse-only tests above green.
+    for ([_][]const u8{
+        "end_key_sequence",
+        "clear_screen",
+        "paste_from_clipboard",
+        // Reachable pty writes by replay rather than by name.
+        "undo",
+        "redo",
+    }) |action_text| {
+        try std.testing.expectError(
+            error.UnsafeAutomationAction,
+            app.performAutomationAction(rt_app, .focused, action_text),
+        );
+        try std.testing.expectError(
+            error.UnsafeAutomationAction,
+            app.performAutomationAction(rt_app, .{ .surface_id = 1 }, action_text),
+        );
+    }
+
+    // An allowlisted surface-scoped action gets past the gate and fails
+    // later for lack of a target, which is what proves the gate is what
+    // rejected the actions above.
+    try std.testing.expectError(
+        error.NoAutomationTarget,
+        app.performAutomationAction(rt_app, .focused, "scroll_to_top"),
+    );
+
+    // Unparseable action text is rejected before the gate.
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        app.performAutomationAction(rt_app, .focused, "no_such_action_zz"),
+    );
 }
 
 test "automation-action surface id targets reject app scoped actions" {
@@ -282,22 +383,35 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 try self.newWindow(rt_app, msg);
             },
             .automation_window_list => |request| {
-                request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
-                    request.err = err;
-                    break :blk null;
-                };
-                request.completed.store(true, .release);
+                if (request.lifecycle.claim()) {
+                    request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
+                        request.err = err;
+                        break :blk null;
+                    };
+                    request.lifecycle.complete();
+                }
                 request.release();
             },
             .automation_action => |request| {
-                self.performAutomationAction(
-                    rt_app,
-                    request.target,
-                    request.action_text,
-                ) catch |err| {
-                    request.err = err;
-                };
-                request.completed.store(true, .release);
+                if (request.lifecycle.claim()) {
+                    self.performAutomationAction(
+                        rt_app,
+                        request.target,
+                        request.action_text,
+                    ) catch |err| {
+                        request.err = err;
+                    };
+                    request.lifecycle.complete();
+                }
+                request.release();
+            },
+            .automation_command => |request| {
+                if (request.lifecycle.claim()) {
+                    rt_app.performAutomationCommand(request.command) catch |err| {
+                        request.err = err;
+                    };
+                    request.lifecycle.complete();
+                }
                 request.release();
             },
             .close => |surface| self.closeSurface(surface),
@@ -496,6 +610,11 @@ pub fn performAction(
         .ignore => {},
         .quit => _ = try rt_app.performAction(.app, .quit, {}),
         .new_window => _ = try self.newWindow(rt_app, .{ .parent = null }),
+        .launch_layout => |name| _ = try rt_app.performAction(
+            .app,
+            .launch_layout,
+            .{ .name = name },
+        ),
         .open_config => _ = try rt_app.performAction(.app, .open_config, {}),
         .reload_config => _ = try rt_app.performAction(.app, .reload_config, .{}),
         .close_all_windows => _ = try rt_app.performAction(.app, .close_all_windows, {}),
@@ -534,6 +653,16 @@ pub fn performAllAction(
     rt_app: *apprt.App,
     action: input.Binding.Action,
 ) !void {
+    // A named layout is always a snapshot of the focused window. Global
+    // bindings normally fan surface actions out to every surface, which would
+    // rewrite the same layout once per pane and make iteration order observable.
+    if (action == .save_layout) {
+        if (self.focusedSurface()) |surface| {
+            _ = try surface.performBindingAction(action);
+        }
+        return;
+    }
+
     switch (action.scope()) {
         // App-scoped actions are handled by the app so that they aren't
         // repeated for each surface (since each surface forwards
@@ -591,10 +720,29 @@ fn automationActionTargetError(
 ) ?anyerror {
     return switch (target) {
         .focused => null,
-        .surface_id => if (action.scope() == .app) error.InvalidAutomationTarget else null,
+        .surface_id => if (action.scope() == .app or action == .save_layout)
+            error.InvalidAutomationTarget
+        else
+            null,
     };
 }
 
+/// Actions that `+perform-action` may invoke over IPC.
+///
+/// Anything that can put bytes on the pty is excluded:
+///
+///   - `end_key_sequence` resolves to `endKeySequence(.flush, ...)`, which
+///     writes the pending key-sequence queue to the terminal.
+///   - `clear_screen` reaches `Termio.clearScreen`, which sends `0x0C` (FF)
+///     to the child when the cursor is at a prompt, and also erases the
+///     full scrollback without regard to `readonly`.
+///
+/// This is only the boundary for the `.perform_action` IPC request kind.
+/// The `.new_window` kind on the same pipe carries argv and is filtered
+/// separately in `apprt/win32.zig` (`applyNewWindowArguments`); the pipe
+/// itself is restricted to the same user and is not a privilege boundary.
+///
+/// New action variants default to unsafe until they are reviewed.
 fn isSafeAutomationAction(action: input.Binding.Action) bool {
     return switch (action) {
         .ignore,
@@ -615,7 +763,6 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .prompt_tab_title,
         .set_surface_title,
         .set_tab_title,
-        .clear_screen,
         .select_all,
         .scroll_to_top,
         .scroll_to_bottom,
@@ -628,6 +775,8 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .adjust_selection,
         .jump_to_prompt,
         .new_window,
+        .launch_layout,
+        .save_layout,
         .new_tab,
         .previous_tab,
         .next_tab,
@@ -663,9 +812,6 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .toggle_visibility,
         .toggle_background_opacity,
         .check_for_updates,
-        .undo,
-        .redo,
-        .end_key_sequence,
         .activate_key_table,
         .activate_key_table_once,
         .deactivate_key_table,
@@ -675,6 +821,15 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
 
         else => false,
     };
+}
+
+test "named layout automation save requires the focused target" {
+    const action = try input.Binding.Action.parse("save_layout:demo");
+    try std.testing.expect(automationActionTargetError(.focused, action) == null);
+    try std.testing.expectEqual(
+        error.InvalidAutomationTarget,
+        automationActionTargetError(.{ .surface_id = 42 }, action).?,
+    );
 }
 
 /// Handle a window message
@@ -733,6 +888,9 @@ pub const Message = union(enum) {
     /// Perform a safe parsed keybinding action on the app thread.
     automation_action: *AutomationActionRequest,
 
+    /// Perform a stable automation verb on the app thread.
+    automation_command: *AutomationCommandRequest,
+
     /// Close a surface. This notifies the runtime that a surface
     /// should close.
     close: *Surface,
@@ -757,6 +915,7 @@ pub const Message = union(enum) {
             .new_window => |message| message.deinit(alloc),
             .automation_window_list => |request| request.release(),
             .automation_action => |request| request.release(),
+            .automation_command => |request| request.release(),
             .surface_message => |payload| {
                 var message = payload.message;
                 message.deinit();
@@ -765,16 +924,84 @@ pub const Message = union(enum) {
         }
     }
 
+    pub const AutomationRequestLifecycle = struct {
+        pub const State = enum(u8) {
+            pending,
+            claimed,
+            completed,
+            cancelled,
+        };
+
+        state: std.atomic.Value(u8),
+        deadline_ms: u64,
+        now_ms: *const fn () u64,
+
+        pub fn init(deadline_ms: u64, now_ms: *const fn () u64) @This() {
+            return .{
+                .state = .init(@intFromEnum(State.pending)),
+                .deadline_ms = deadline_ms,
+                .now_ms = now_ms,
+            };
+        }
+
+        pub fn load(self: *const @This()) State {
+            return @enumFromInt(self.state.load(.acquire));
+        }
+
+        pub fn claim(self: *@This()) bool {
+            if (self.state.cmpxchgStrong(
+                @intFromEnum(State.pending),
+                @intFromEnum(State.claimed),
+                .acq_rel,
+                .acquire,
+            ) != null) return false;
+
+            // Recheck only after winning the claim. Checking first leaves a
+            // preemption window where the deadline can pass before the CAS.
+            // Equality is the documented zero-timeout one-attempt window.
+            if (self.now_ms() <= self.deadline_ms) return true;
+            const observed = self.state.cmpxchgStrong(
+                @intFromEnum(State.claimed),
+                @intFromEnum(State.cancelled),
+                .acq_rel,
+                .acquire,
+            );
+            std.debug.assert(observed == null);
+            return false;
+        }
+
+        pub fn cancel(self: *@This()) bool {
+            return self.state.cmpxchgStrong(
+                @intFromEnum(State.pending),
+                @intFromEnum(State.cancelled),
+                .acq_rel,
+                .acquire,
+            ) == null;
+        }
+
+        pub fn complete(self: *@This()) void {
+            std.debug.assert(self.load() == .claimed);
+            self.state.store(@intFromEnum(State.completed), .release);
+        }
+    };
+
     pub const AutomationWindowListRequest = struct {
         alloc: Allocator,
         refs: std.atomic.Value(u32) = .init(1),
-        completed: std.atomic.Value(bool) = .init(false),
+        lifecycle: AutomationRequestLifecycle,
         result: ?[]u8 = null,
         err: ?anyerror = null,
 
-        pub fn create(alloc: Allocator) !*@This() {
+        pub fn create(
+            alloc: Allocator,
+            deadline_ms: u64,
+            now_ms: *const fn () u64,
+        ) !*@This() {
             const request = try alloc.create(@This());
-            request.* = .{ .alloc = alloc };
+            request.* = .{
+                .alloc = alloc,
+                .lifecycle = .init(deadline_ms, now_ms),
+            };
             return request;
         }
 
@@ -800,13 +1027,15 @@ pub const Message = union(enum) {
         refs: std.atomic.Value(u32) = .init(1),
         target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
-        completed: std.atomic.Value(bool) = .init(false),
+        lifecycle: AutomationRequestLifecycle,
         err: ?anyerror = null,
 
         pub fn create(
             alloc: Allocator,
             target: apprt.ipc.AutomationActionTarget,
             action_text: []const u8,
+            deadline_ms: u64,
+            now_ms: *const fn () u64,
         ) !*@This() {
             const request = try alloc.create(@This());
             errdefer alloc.destroy(request);
@@ -814,6 +1043,7 @@ pub const Message = union(enum) {
                 .alloc = alloc,
                 .target = target,
                 .action_text = try alloc.dupe(u8, action_text),
+                .lifecycle = .init(deadline_ms, now_ms),
             };
             return request;
         }
@@ -825,6 +1055,61 @@ pub const Message = union(enum) {
         pub fn release(self: *@This()) void {
             if (self.refs.fetchSub(1, .acq_rel) != 1) return;
             self.alloc.free(self.action_text);
+            self.alloc.destroy(self);
+        }
+    };
+
+    pub const AutomationCommandRequest = struct {
+        alloc: Allocator,
+        refs: std.atomic.Value(u32) = .init(1),
+        command: apprt.ipc.AutomationCommand,
+        lifecycle: AutomationRequestLifecycle,
+        err: ?anyerror = null,
+
+        pub fn create(
+            alloc: Allocator,
+            command: apprt.ipc.AutomationCommand,
+            deadline_ms: u64,
+            now_ms: *const fn () u64,
+        ) !*@This() {
+            const request = try alloc.create(@This());
+            errdefer alloc.destroy(request);
+            const owned: apprt.ipc.AutomationCommand = switch (command) {
+                .new_tab => |value| .{ .new_tab = .{
+                    .target = value.target,
+                    .working_directory = if (value.working_directory) |cwd| try alloc.dupe(u8, cwd) else null,
+                } },
+                .new_split => |value| .{ .new_split = .{
+                    .target = value.target,
+                    .direction = value.direction,
+                    .working_directory = if (value.working_directory) |cwd| try alloc.dupe(u8, cwd) else null,
+                } },
+                .focus => |target| .{ .focus = target },
+                .send_text => |value| .{ .send_text = .{
+                    .target = value.target,
+                    .text = try alloc.dupe(u8, value.text),
+                } },
+            };
+            request.* = .{
+                .alloc = alloc,
+                .command = owned,
+                .lifecycle = .init(deadline_ms, now_ms),
+            };
+            return request;
+        }
+
+        pub fn retain(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+
+        pub fn release(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            switch (self.command) {
+                .new_tab => |value| if (value.working_directory) |cwd| self.alloc.free(cwd),
+                .new_split => |value| if (value.working_directory) |cwd| self.alloc.free(cwd),
+                .send_text => |value| self.alloc.free(value.text),
+                .focus => {},
+            }
             self.alloc.destroy(self);
         }
     };
@@ -850,15 +1135,118 @@ test "queued automation messages release consumer ownership during teardown" {
         std.testing.allocator,
         .focused,
         "new_tab",
+        std.math.maxInt(u64),
+        automationTestNow,
     );
     action_request.retain();
     action_request.release();
     (Message{ .automation_action = action_request }).deinit(std.testing.allocator);
 
-    const list_request = try Message.AutomationWindowListRequest.create(std.testing.allocator);
+    const list_request = try Message.AutomationWindowListRequest.create(
+        std.testing.allocator,
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
     list_request.retain();
     list_request.release();
     (Message{ .automation_window_list = list_request }).deinit(std.testing.allocator);
+
+    const focus_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .focus = .{ .surface_id = 42 } },
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
+    focus_request.retain();
+    focus_request.release();
+    (Message{ .automation_command = focus_request }).deinit(std.testing.allocator);
+
+    const text_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .send_text = .{ .target = .{ .surface_id = 42 }, .text = "hello" } },
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
+    text_request.retain();
+    text_request.release();
+    (Message{ .automation_command = text_request }).deinit(std.testing.allocator);
+
+    const tab_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .new_tab = .{ .target = .focused, .working_directory = "C:\\src" } },
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
+    tab_request.retain();
+    tab_request.release();
+    (Message{ .automation_command = tab_request }).deinit(std.testing.allocator);
+
+    const split_request = try Message.AutomationCommandRequest.create(
+        std.testing.allocator,
+        .{ .new_split = .{
+            .target = .{ .surface_id = 42 },
+            .direction = .down,
+            .working_directory = "C:\\src",
+        } },
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
+    split_request.retain();
+    split_request.release();
+    (Message{ .automation_command = split_request }).deinit(std.testing.allocator);
+}
+
+var automation_test_now_ms: u64 = 0;
+
+fn automationTestNow() u64 {
+    return automation_test_now_ms;
+}
+
+test "automation request cancellation prevents late consumer execution" {
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
+    try std.testing.expect(lifecycle.cancel());
+    try std.testing.expect(!lifecycle.claim());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.cancelled,
+        lifecycle.load(),
+    );
+}
+
+test "claimed automation request cannot report an ambiguous timeout" {
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
+    try std.testing.expect(lifecycle.claim());
+    try std.testing.expect(!lifecycle.cancel());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.claimed,
+        lifecycle.load(),
+    );
+    lifecycle.complete();
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.completed,
+        lifecycle.load(),
+    );
+}
+
+test "automation request can be claimed on the exact deadline tick" {
+    automation_test_now_ms = 100;
+    defer automation_test_now_ms = 0;
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
+    try std.testing.expect(lifecycle.claim());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.claimed,
+        lifecycle.load(),
+    );
+}
+
+test "automation request cannot be claimed after the deadline tick" {
+    automation_test_now_ms = 101;
+    defer automation_test_now_ms = 0;
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
+    try std.testing.expect(!lifecycle.claim());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.cancelled,
+        lifecycle.load(),
+    );
 }
 
 /// Mailbox is the way that other threads send the app thread messages.

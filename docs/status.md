@@ -4,7 +4,7 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-12, against current fork HEAD.
+Last updated: 2026-08-30, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -51,6 +51,8 @@ Win32-validated VT protocol coverage is tracked in
 - Native right-click context menus.
 - In-app profile picker for detected shells: PowerShell 7, Windows
   PowerShell, `cmd`, Git Bash, and WSL distributions when WSL responds.
+- Concrete aliases from `%USERPROFILE%\.ssh\config` appear in the profile
+  picker and universal palette and launch through the system `ssh.exe`.
 - Per-monitor DPI scaling.
 - DWM dark title bar that follows the app theme.
 - High-contrast mode detection and palette switching.
@@ -62,21 +64,31 @@ Win32-validated VT protocol coverage is tracked in
 - Session restore via `window-save-state`: windows, tabs, splits,
   profiles, working directories, and explicit titles come back; terminal
   contents and child processes do not.
+- Named layouts (C17): save the focused window's tabs, splits, profiles,
+  working directories, and titles, then launch it in a new window from a
+  keybind, the universal palette, or `+new-window --launch-layout=<name>`.
 - Ctrl-based default keybindings, mostly shared with Ghostty's
   non-macOS defaults; Windows-specific exceptions include `Alt+Arrow`
   pane focus and `Alt+F4` to close the window.
 - Native settings window (Appearance, Terminal, Shell, Privacy, Updates,
   Keybindings, Advanced) that stages edits until Save and patches your
   config without rewriting unrelated text.
-- Universal palette: actions, tabs, panes, profiles, themes, native
+- Universal palette: actions, tabs, panes, profiles, named layouts, themes, native
   settings, help, and recent commands in one fuzzy-searched,
   keyboard-driven list.
+- Local CLI automation with versioned JSON state and policy-bounded verbs
+  for windows, tabs, splits, focus, actions, and control-free text; see
+  [automation.md](automation.md).
 
 ### Renderer
 
 - Terminal content renders with OpenGL 4.3+ via WGL.
 - Window chrome uses a separate D3D11/DirectComposition + DirectWrite
   pipeline with GDI fallback; it never touches the terminal renderer.
+- Presentation is power- and visibility-aware: focused non-saver cadence
+  is unchanged, unfocused and saver pacing is capped, and minimized or
+  DWM-cloaked windows stop presenting. Details and measurement fields are
+  in [windows.md](windows.md#power-and-battery).
 
 ### Updater
 
@@ -106,14 +118,42 @@ Win32-validated VT protocol coverage is tracked in
 
 ## Experimental / partial
 
+### Default-terminal handoff
+
+Per-user registration and exact selection restore are implemented through
+`+register-default-terminal` and `+unregister-default-terminal`, using Windows
+Terminal 1.24 or newer OpenConsole for console delegation. The runtime handoff
+is not functional yet: live validation reaches noctty, but the adopted session
+closes before a visible window appears. Do not select noctty as the normal
+default terminal yet. Details in [windows.md](windows.md#default-terminal).
+
 ### Windows UI Automation (accessibility)
 
-UI Automation coverage is partial. Terminal text is exposed read-only
-through TextPattern/TextPattern2 with bounded ranges, visible geometry,
-and an active caret anchor. The host and command palette expose focus
-and selection semantics, while standard settings controls use native
-HWND providers. Still to do: broader per-widget coverage and a full
-Narrator/NVDA release matrix.
+UI Automation covers the window chrome a screen-reader user touches
+daily. Tabs expose TabItem with selection state, the new-tab and
+overflow buttons have real names instead of their painted glyphs, the
+docked-search toggles expose Toggle state, the search result count and
+host banners are live regions, and the terminal scrollbar exposes
+RangeValue. Terminal text is exposed through TextPattern/TextPattern2
+with bounded ranges (up to 500 history rows within a 40,000-cell budget,
+plus the live viewport), visible
+geometry, a truthful caret while the live screen remains inside that bounded
+snapshot, and real selections. In deeper scrollback the viewport remains
+available but the off-window live caret is reported at the document end. The
+command palette and settings sections expose list and selection semantics.
+
+Not yet covered: custom-painted caption buttons, the profile picker and
+tab-overview overlay rows, context menus, toasts, and quick-terminal
+chrome. There is also no keyboard focus-region cycle, so chrome cannot
+be reached from the terminal without a mouse.
+
+No screen reader has been measured against a release yet. NVDA has been
+measured against a pre-release branch build, with mixed results: the
+terminal text, scrollbar, live regions and banners read correctly, while
+tab items, the search flag toggles and the docked search query edit do
+not announce their role, state or name. The per-widget expectations,
+what the automated UIA harness proves, and the per-reader results are
+published in [accessibility-matrix.md](accessibility-matrix.md).
 
 ### Win32 runtime extraction
 
@@ -139,6 +179,11 @@ and lands incrementally.
   `ghostty-org/ghostty`.
 - Crash capture is local-only, and some hard-abort paths may still
   terminate before Windows can produce a dump.
+- Power- and visibility-aware render pacing has not been exercised on a
+  machine with a battery, and the DWM cloak/uncloak WinEvent path has not
+  been observed across a real virtual-desktop switch. Both are argued from
+  the documented Win32 contracts and covered by unit tests over the pure
+  policy and event-filter functions only.
 
 ## Out of scope
 
@@ -151,7 +196,13 @@ and lands incrementally.
 
 No formal roadmap. Likely next areas:
 
-- Broader UI Automation / screen reader coverage.
+- Narrator and JAWS results for the
+  [screen-reader matrix](accessibility-matrix.md), NVDA at 100/200/300%
+  scaling and with High Contrast on, and the fixes for the NVDA failures
+  already recorded there, plus UI Automation for caption buttons,
+  overlay rows, and menus.
+- A keyboard focus-region cycle so window chrome is reachable without a
+  mouse.
 - Continuing the `src/apprt/win32.zig` extraction.
 - Portable ZIP updater apply/rollback.
 - Broader local crash metadata and report packaging.

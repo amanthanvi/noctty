@@ -44,7 +44,9 @@ const darwin = if (builtin.os.tag.isDarwin()) struct {
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 const WRITE_BUF_SIZE = 4 * 1024;
-const WINDOWS_READ_BUF_SIZE = 16 * 1024;
+// ConPTY hands back large bursts; a 16 KiB batch made the reader the
+// bottleneck on high-throughput output. 64 KiB is the product default.
+const WINDOWS_READ_BUF_SIZE = 64 * 1024;
 
 fn pathEntryEquals(a: []const u8, b: []const u8) bool {
     return if (builtin.os.tag == .windows)
@@ -118,7 +120,7 @@ pub fn deinit(self: *Exec) void {
 /// This is called before any termio begins. This should not be called
 /// after termio begins because it may put the internal terminal state
 /// into a bad state.
-pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
+pub fn initTerminal(self: *Exec, term: *terminal.Terminal) !void {
     // If we have an initial pwd requested by the subprocess, then we
     // set that on the terminal now. This allows rapidly initializing
     // new surfaces to use the proper pwd.
@@ -127,14 +129,15 @@ pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
     };
 
     // Setup our initial grid/screen size from the terminal. This
-    // can't fail because the pty should not exist at this point.
-    self.resize(.{
+    // A normally spawned pty does not exist yet, but an adopted handoff pty is
+    // already open and its signal pipe can disappear before this first resize.
+    try self.resize(.{
         .columns = term.cols,
         .rows = term.rows,
     }, .{
         .width = term.width_px,
         .height = term.height_px,
-    }) catch unreachable;
+    });
 }
 
 pub fn threadEnter(
@@ -158,10 +161,14 @@ pub fn threadEnter(
     errdefer self.subprocess.stop();
 
     // Watcher to detect subprocess exit
-    var process: ?xev.Process = if (self.subprocess.process) |v| switch (v) {
-        .fork_exec => |cmd| try xev.Process.init(
-            cmd.pid orelse return error.ProcessNoPid,
-        ),
+    const is_adopted = if (comptime builtin.os.tag == .windows)
+        self.subprocess.adopted_client_process != null
+    else
+        false;
+    var process: ?xev.Process = if (is_adopted)
+        null
+    else if (self.subprocess.process) |v| switch (v) {
+        .fork_exec => |cmd| try xev.Process.init(cmd.pid orelse return error.ProcessNoPid),
 
         // If we're executing via Flatpak then we can't do
         // traditional process watching (its implemented
@@ -191,11 +198,18 @@ pub fn threadEnter(
     errdefer termios_timer.deinit();
 
     // Start our read thread
-    const read_thread = try std.Thread.spawn(
-        .{},
-        if (builtin.os.tag == .windows) ReadThread.threadMainWindows else ReadThread.threadMainPosix,
-        .{ pty_fds.read, io, pipe[0] },
-    );
+    const read_thread = if (comptime builtin.os.tag == .windows)
+        try std.Thread.spawn(
+            internal_os.surfaceThreadSpawnConfig(),
+            ReadThread.threadMainWindows,
+            .{ pty_fds.read, io, pipe[0], self.subprocess.adopted_client_process, process_start },
+        )
+    else
+        try std.Thread.spawn(
+            internal_os.surfaceThreadSpawnConfig(),
+            ReadThread.threadMainPosix,
+            .{ pty_fds.read, io, pipe[0] },
+        );
     read_thread.setName("io-reader") catch {};
 
     const command: ?*Command = if (self.subprocess.process) |*subprocess| switch (subprocess.*) {
@@ -222,7 +236,7 @@ pub fn threadEnter(
         termio.Termio.ThreadData,
         td,
         processExit,
-    ) else if (comptime flatpak_support) flatpak: {
+    ) else if (!is_adopted and comptime flatpak_support) flatpak: {
         switch (self.subprocess.process orelse break :flatpak) {
             // If we're in flatpak and we have a flatpak command
             // then we can run the special flatpak logic for watching.
@@ -635,6 +649,7 @@ pub const Config = struct {
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
     windows_job_object_plan: WindowsJobObjectPlan = if (builtin.os.tag == .windows) .{ .mode = .never } else {},
+    adopted_session: if (builtin.os.tag == .windows) ?ptypkg.AdoptedSession else void = if (builtin.os.tag == .windows) null else {},
 };
 
 const Subprocess = struct {
@@ -652,6 +667,7 @@ const Subprocess = struct {
     screen_size: renderer.ScreenSize,
     pty: ?Pty = null,
     process: ?Process = null,
+    adopted_client_process: if (builtin.os.tag == .windows) ?windows.HANDLE else void = if (builtin.os.tag == .windows) null else {},
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
@@ -685,6 +701,23 @@ const Subprocess = struct {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const alloc = arena.allocator();
+
+        if (comptime builtin.os.tag == .windows) if (cfg.adopted_session) |session| {
+            return .{
+                .arena = arena,
+                .env = cfg.env,
+                .cwd = null,
+                .args = &.{},
+                .grid_size = .{},
+                .screen_size = .{ .width = 1, .height = 1 },
+                .pty = session.pty,
+                .adopted_client_process = session.client_process,
+                .rt_pre_exec_info = cfg.rt_pre_exec_info,
+                .rt_post_fork_info = cfg.rt_post_fork_info,
+                // Adopted sessions never create or join a noctty job object.
+                .windows_job_object_plan = .{ .mode = .never },
+            };
+        };
 
         // Get our env. If a default env isn't provided by the caller
         // then we get it ourselves.
@@ -961,6 +994,10 @@ const Subprocess = struct {
     pub fn deinit(self: *Subprocess) void {
         self.stop();
         if (self.pty) |*pty| pty.deinit();
+        if (comptime builtin.os.tag == .windows) if (self.adopted_client_process) |handle| {
+            _ = windows.CloseHandle(handle);
+            self.adopted_client_process = null;
+        };
         if (self.env) |*env| env.deinit();
         self.arena.deinit();
         self.* = undefined;
@@ -972,6 +1009,12 @@ const Subprocess = struct {
         read: Pty.Fd,
         write: Pty.Fd,
     } {
+        if (comptime builtin.os.tag == .windows) if (self.adopted_client_process != null) {
+            const pty = &(self.pty orelse return error.ProcessNotStarted);
+            std.debug.assert(pty.isAdopted());
+            return .{ .read = pty.out_pipe, .write = pty.in_pipe };
+        };
+
         assert(self.pty == null and self.process == null);
 
         // This function is funny because on POSIX systems it can
@@ -1098,7 +1141,7 @@ const Subprocess = struct {
             .stdin = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
             .stdout = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
             .stderr = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
-            .pseudo_console = if (builtin.os.tag == .windows) pty.pseudo_console else {},
+            .pseudo_console = if (builtin.os.tag == .windows) pty.pseudoConsole().? else {},
             .os_pre_exec = switch (comptime builtin.os.tag) {
                 .windows => null,
                 else => f: {
@@ -1168,6 +1211,7 @@ const Subprocess = struct {
     /// Called to notify that we exited externally so we can unset our
     /// running state.
     pub fn externalExit(self: *Subprocess) void {
+        if (comptime builtin.os.tag == .windows) if (self.adopted_client_process != null) return;
         switch (self.process orelse return) {
             .fork_exec => |*cmd| cmd.closeWindowsJobObject(),
             .flatpak => {},
@@ -1180,6 +1224,14 @@ const Subprocess = struct {
     /// for it to terminate, so it will not block.
     /// This does not close the pty.
     pub fn stop(self: *Subprocess) void {
+        if (comptime builtin.os.tag == .windows) if (self.adopted_client_process != null) {
+            // The client and OpenConsole server are adopted, never children.
+            // Closing the signal pipe requests shutdown without terminating
+            // either process.
+            if (self.pty) |*pty| pty.closeAdoptedSignal();
+            return;
+        };
+
         switch (self.process orelse return) {
             .fork_exec => |*cmd| {
                 // Note: this will also wait for the command to exit, so
@@ -1449,7 +1501,13 @@ pub const ReadThread = struct {
         }
     }
 
-    fn threadMainWindows(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
+    fn threadMainWindows(
+        fd: posix.fd_t,
+        io: *termio.Termio,
+        quit: posix.fd_t,
+        adopted_client_process: ?windows.HANDLE,
+        process_start: std.time.Instant,
+    ) void {
         // Always close our end of the pipe when we exit.
         defer posix.close(quit);
 
@@ -1470,11 +1528,27 @@ pub const ReadThread = struct {
                         // Check for a quit signal
                         .OPERATION_ABORTED => break,
 
+                        // Output EOF is authoritative for adopted sessions:
+                        // descendants may keep running after the root client.
+                        .BROKEN_PIPE => {
+                            if (adopted_client_process) |process| {
+                                notifyAdoptedExit(io, process, process_start);
+                            }
+                            return;
+                        },
+
                         else => {
                             log.err("io reader error err={}", .{err});
                             unreachable;
                         },
                     }
+                }
+
+                if (n == 0) {
+                    if (adopted_client_process) |process| {
+                        notifyAdoptedExit(io, process, process_start);
+                    }
+                    return;
                 }
 
                 @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
@@ -1493,7 +1567,109 @@ pub const ReadThread = struct {
             }
         }
     }
+
+    fn notifyAdoptedExit(
+        io: *termio.Termio,
+        client_process: windows.HANDLE,
+        process_start: std.time.Instant,
+    ) void {
+        var exit_code: windows.DWORD = 0;
+        if (windows.kernel32.GetExitCodeProcess(client_process, &exit_code) == 0) {
+            log.warn("adopted client exit-code query failed err={}", .{windows.kernel32.GetLastError()});
+            exit_code = 1;
+        } else if (exit_code == windows.exp.STILL_ACTIVE) {
+            // EOF still ends the session. A root process that deliberately
+            // closed its output before exiting has no final code to report.
+            log.warn("adopted client still active after output EOF; reporting success", .{});
+            exit_code = 0;
+        }
+
+        const runtime_ms = runtime: {
+            const process_end = std.time.Instant.now() catch break :runtime 0;
+            break :runtime process_end.since(process_start) / std.time.ns_per_ms;
+        };
+        _ = io.surface_mailbox.push(.{
+            .child_exited = .{
+                .exit_code = exit_code,
+                .runtime_ms = runtime_ms,
+            },
+        }, .{ .forever = {} });
+    }
 };
+
+test "handoff adopted execution reuses pipes without spawn job or terminate" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const duplicate = struct {
+        fn handle(source: windows.HANDLE) !windows.HANDLE {
+            var result: windows.HANDLE = undefined;
+            const current = std.os.windows.GetCurrentProcess();
+            if (windows.kernel32.DuplicateHandle(
+                current,
+                source,
+                current,
+                &result,
+                0,
+                std.os.windows.FALSE,
+                std.os.windows.DUPLICATE_SAME_ACCESS,
+            ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+            return result;
+        }
+    }.handle;
+
+    var signal_read: windows.HANDLE = undefined;
+    var signal_write: windows.HANDLE = undefined;
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    defer _ = windows.CloseHandle(signal_read);
+
+    const current = std.os.windows.GetCurrentProcess();
+    const server_process = try duplicate(current);
+    const reference = try duplicate(current);
+    const client_process = try duplicate(current);
+    var session = ptypkg.AdoptedSession{
+        .pty = try Pty.openAdopted(.{}, signal_write, server_process, reference),
+        .client_process = client_process,
+    };
+    var session_owned = true;
+    defer if (session_owned) {
+        session.pty.deinit();
+        _ = windows.CloseHandle(session.client_process);
+    };
+
+    var env = EnvMap.init(std.testing.allocator);
+    var env_owned = true;
+    defer if (env_owned) env.deinit();
+    var subprocess = try Subprocess.init(std.testing.allocator, .{
+        .env = env,
+        .resources_dir = null,
+        .term = "xterm-256color",
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .adopted_session = session,
+    });
+    session_owned = false;
+    env_owned = false;
+    defer subprocess.deinit();
+
+    const fds = try subprocess.start(std.testing.allocator);
+    try std.testing.expect(fds.read != windows.INVALID_HANDLE_VALUE);
+    try std.testing.expect(fds.write != windows.INVALID_HANDLE_VALUE);
+    try std.testing.expect(subprocess.process == null);
+    try std.testing.expect(!subprocess.windows_job_object_plan.wantsJobObject());
+
+    subprocess.stop();
+    var byte: [1]u8 = undefined;
+    var read: windows.DWORD = 0;
+    try std.testing.expect(windows.kernel32.ReadFile(signal_read, &byte, byte.len, &read, null) == 0);
+    try std.testing.expectEqual(std.os.windows.Win32Error.BROKEN_PIPE, windows.kernel32.GetLastError());
+    var exit_code: windows.DWORD = 0;
+    try std.testing.expect(windows.kernel32.GetExitCodeProcess(subprocess.adopted_client_process.?, &exit_code) != 0);
+    try std.testing.expectEqual(windows.exp.STILL_ACTIVE, exit_code);
+    try std.testing.expectError(error.ResizeFailed, subprocess.resize(
+        .{ .columns = 80, .rows = 24 },
+        .{ .width = 640, .height = 480 },
+    ));
+}
 
 /// Builds the argv array for the process we should exec for the
 /// configured command. This isn't as straightforward as it seems since

@@ -38,22 +38,22 @@ Noctty's config is a plain key/value file at
 `%LOCALAPPDATA%\noctty\config.ghostty`. One setting per line, no JSON, no
 profile inheritance. Copy only the lines you need.
 
-| Windows Terminal             | Noctty                                 | Notes                                                                       |
-| ---------------------------- | -------------------------------------- | --------------------------------------------------------------------------- |
-| `commandline`                | `command`                              | Quote a path containing spaces with the `direct:` form.                     |
-| `startingDirectory`          | `working-directory`                    |                                                                             |
-| `font.face`                  | `font-family`                          |                                                                             |
-| `font.size`                  | `font-size`                            |                                                                             |
-| `colorScheme`                | `theme`                                | Bundled names come from `noctty +list-themes`. A WT scheme is not imported. |
+| Windows Terminal             | Noctty                                 | Notes                                                                               |
+| ---------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
+| `commandline`                | `command`                              | Quote a path containing spaces with the `direct:` form.                             |
+| `startingDirectory`          | `working-directory`                    |                                                                                     |
+| `font.face`                  | `font-family`                          |                                                                                     |
+| `font.size`                  | `font-size`                            |                                                                                     |
+| `colorScheme`                | `theme`                                | Bundled names come from `noctty +list-themes`. A WT scheme is not imported.         |
 | `opacity`                    | `background-opacity`                   | Divide the Windows Terminal percentage by 100: `50` becomes `0.5`; `1.0` is opaque. |
-| `useAcrylic`                 | `background-blur`                      | Windows 11 22H2 or later only, and only with `background-opacity` below 1.  |
-| `padding`                    | `window-padding-x`, `window-padding-y` | Noctty splits horizontal and vertical padding.                              |
-| `copyOnSelect`               | `copy-on-select`                       |                                                                             |
-| `cursorShape`                | `cursor-style`                         |                                                                             |
-| `historySize`                | `scrollback-limit`                     | Different unit: WT counts lines, Noctty counts bytes. The default is 10 MB. |
-| `initialCols`, `initialRows` | `window-width`, `window-height`        | Grid cells, as in WT. Both must be set or both are ignored.                 |
-| `backgroundImage`            | `background-image`                     |                                                                             |
-| `bellStyle`                  | `bell-features`                        | Different vocabulary; check `noctty +show-config --default --docs`.         |
+| `useAcrylic`                 | `background-blur`                      | Windows 11 22H2 or later only, and only with `background-opacity` below 1.          |
+| `padding`                    | `window-padding-x`, `window-padding-y` | Noctty splits horizontal and vertical padding.                                      |
+| `copyOnSelect`               | `copy-on-select`                       |                                                                                     |
+| `cursorShape`                | `cursor-style`                         |                                                                                     |
+| `historySize`                | `scrollback-limit`                     | Different unit: WT counts lines, Noctty counts bytes. The default is 10 MB.         |
+| `initialCols`, `initialRows` | `window-width`, `window-height`        | Grid cells, as in WT. Both must be set or both are ignored.                         |
+| `backgroundImage`            | `background-image`                     |                                                                                     |
+| `bellStyle`                  | `bell-features`                        | Different vocabulary; check `noctty +show-config --default --docs`.                 |
 
 A short starting config:
 

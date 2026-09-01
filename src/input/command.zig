@@ -691,6 +691,8 @@ fn actionCommands(action: Action.Key) []const Command {
         .set_font_size,
         .set_surface_title,
         .set_tab_title,
+        .launch_layout,
+        .save_layout,
         .search,
         .scroll_to_row,
         .scroll_page_fractional,

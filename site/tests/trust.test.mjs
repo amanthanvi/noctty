@@ -22,10 +22,6 @@ const PENDING_DOCS = new Map([
     "docs/windows-benchmark-methodology.md",
     { issue: "#121", pr: "#191", label: "#121 / PR #191" },
   ],
-  [
-    "docs/accessibility-matrix.md",
-    { issue: "#145", pr: "#192", label: "#145 / PR #192" },
-  ],
 ]);
 
 const MIGRATION_GUIDES = [
@@ -478,7 +474,19 @@ test("trust page states its limits without hedging", () => {
   assert.match(trustHtml, /SmartScreen will\s+warn/);
   assert.match(trustHtml, /Two results miss a budget stated in PRODUCT\.md/);
   assert.match(trustHtml, /Key-to-pixel\s+latency is not measured at all/);
-  assert.match(trustHtml, /No screen reader has been run/);
+  assert.match(
+    trustHtml,
+    /No screen reader has been run against a release build/,
+  );
+  assert.match(
+    trustHtml,
+    /NVDA pass against a pre-release Debug build found mixed results/i,
+  );
+  assert.match(trustHtml, /Narrator and JAWS remain unmeasured/);
+  assert.doesNotMatch(
+    trustHtml,
+    /Narrator, NVDA, and JAWS as not yet measured in every row/i,
+  );
   assert.match(
     trustHtml,
     /No comparison against another terminal is published/,

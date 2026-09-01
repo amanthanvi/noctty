@@ -101,6 +101,8 @@ pub const AccessibleTextSnapshot = struct {
     text: []u8,
     visible_range: OffsetRange,
     caret_offset: usize,
+    selection_range: ?OffsetRange = null,
+    selection_active_offset: ?usize = null,
     cell_for_byte: []TerminalCellPosition,
     viewport_rows: u32,
     viewport_columns: u32,
@@ -204,16 +206,42 @@ pub fn snapshotTerminalAccessiblePlainText(
     const screen = terminal_state.screens.active;
     const pages = &screen.pages;
     const viewport_top = pages.getTopLeft(.viewport);
+    const active_top = pages.getTopLeft(.active);
     const history_rows = accessibleHistoryRows(pages.cols, !screen.no_scrollback);
-    const document_top = switch (viewport_top.upOverflow(history_rows)) {
+    const viewport_bottom = pages.getBottomRight(.viewport) orelse return error.UnknownPoint;
+    const active_bottom = pages.getBottomRight(.active) orelse return error.UnknownPoint;
+    const history_top = switch (active_top.upOverflow(history_rows)) {
         .offset => |pin| pin,
         .overflow => |overflow| overflow.end,
     };
-    const viewport_bottom = pages.getBottomRight(.viewport) orelse return error.UnknownPoint;
+
+    // The window is history plus one viewport of rows. It normally ends at the
+    // active screen so the caret stays inside it, but a viewport scrolled
+    // farther back than the history budget would otherwise fall outside the
+    // window entirely and leave `visible_range` empty while a full screen of
+    // text is on display. Slide the same-sized window up to the viewport
+    // instead of growing it; the off-window caret degrades to the document end.
+    const document_top = if (viewport_top.isBetween(history_top, active_bottom))
+        history_top
+    else
+        viewport_top;
+    const budget_rows = history_rows + @as(usize, pages.rows);
+    const budget_bottom: terminal.Pin = blk: {
+        var pin = switch (document_top.downOverflow(budget_rows -| 1)) {
+            .offset => |value| value,
+            .overflow => |overflow| overflow.end,
+        };
+        pin.x = active_bottom.x;
+        break :blk pin;
+    };
+    const document_bottom = if (budget_bottom.isBetween(document_top, active_bottom))
+        budget_bottom
+    else
+        active_bottom;
 
     var formatter = terminal.formatter.PageListFormatter.init(pages, .plain);
     formatter.top_left = document_top;
-    formatter.bottom_right = viewport_bottom;
+    formatter.bottom_right = document_bottom;
     formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
     try formatter.format(&text_writer.writer);
 
@@ -254,15 +282,124 @@ pub fn snapshotTerminalAccessiblePlainText(
         cursor_row,
         @intCast(screen.cursor.x),
     );
+    const selection = selectionOffsets(text, pin_map.items, screen);
     return .{
         .alloc = alloc,
         .text = text,
         .visible_range = visible,
         .caret_offset = caret_offset,
+        .selection_range = if (selection) |value| value.range else null,
+        .selection_active_offset = if (selection) |value| value.active_offset else null,
         .cell_for_byte = cell_for_byte,
         .viewport_rows = @intCast(pages.rows),
         .viewport_columns = @intCast(pages.cols),
     };
+}
+
+const SelectionOffsets = struct {
+    range: OffsetRange,
+    active_offset: usize,
+};
+
+fn selectionOffsets(
+    text: []const u8,
+    pin_map: []const terminal.Pin,
+    screen: *const terminal.Screen,
+) ?SelectionOffsets {
+    const selection = screen.selection orelse return null;
+    if (pin_map.len != text.len) return null;
+
+    if (selection.rectangle) {
+        const active = screen.pages.pointFromPin(.screen, selection.end()) orelse return null;
+        const anchor = screen.pages.pointFromPin(.screen, selection.start()) orelse return null;
+        var first: ?usize = null;
+        var last_end: usize = 0;
+        var index: usize = 0;
+        while (index < text.len) {
+            const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
+            if (text[index] == '\n') {
+                index += scalar_len;
+                continue;
+            }
+            const pin = pin_map[index];
+            const point = screen.pages.pointFromPin(.screen, pin) orelse return null;
+            if (point.screen.y == active.screen.y and selection.contains(screen, pin)) {
+                if (first == null) first = index;
+                last_end = index + scalar_len;
+            }
+            index += scalar_len;
+        }
+        const start = first orelse return null;
+        return .{
+            .range = .{ .start = start, .end = last_end },
+            .active_offset = if (active.screen.x <= anchor.screen.x) start else last_end,
+        };
+    }
+
+    const top_left = selection.topLeft(screen);
+    const bottom_right = selection.bottomRight(screen);
+    if (pin_map.len == 0) return null;
+    const first_pin = pin_map[0];
+    const last_pin = pin_map[pin_map.len - 1];
+    const start = scalarRangeForPin(text, pin_map, top_left) orelse blk: {
+        if (top_left.before(first_pin)) break :blk OffsetRange{ .start = 0, .end = 0 };
+        if (last_pin.before(top_left)) break :blk OffsetRange{ .start = text.len, .end = text.len };
+        const boundary = scalarBoundaryBeforePin(text, pin_map, top_left) orelse return null;
+        break :blk OffsetRange{ .start = boundary, .end = boundary };
+    };
+    const end = scalarRangeForPin(text, pin_map, bottom_right) orelse blk: {
+        if (bottom_right.before(first_pin)) break :blk OffsetRange{ .start = 0, .end = 0 };
+        if (last_pin.before(bottom_right)) break :blk OffsetRange{ .start = text.len, .end = text.len };
+        const boundary = scalarBoundaryBeforePin(text, pin_map, bottom_right) orelse return null;
+        break :blk OffsetRange{ .start = boundary, .end = boundary };
+    };
+    if (start.start >= end.end) return null;
+    return .{
+        .range = .{ .start = start.start, .end = end.end },
+        .active_offset = if (selection.end().eql(top_left)) start.start else end.end,
+    };
+}
+
+/// Return the text insertion boundary immediately before an unmapped terminal
+/// pin. The plain formatter omits trailing blank cells, so a live selection
+/// endpoint can be inside the document window without owning any output byte.
+fn scalarBoundaryBeforePin(
+    text: []const u8,
+    pin_map: []const terminal.Pin,
+    target: terminal.Pin,
+) ?usize {
+    var boundary: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
+        if (text[index] != '\n') {
+            const pin = pin_map[index];
+            if (target.before(pin)) break;
+            if (pin.before(target)) boundary = index + scalar_len;
+        }
+        index += scalar_len;
+    }
+    return boundary;
+}
+
+fn scalarRangeForPin(
+    text: []const u8,
+    pin_map: []const terminal.Pin,
+    target: terminal.Pin,
+) ?OffsetRange {
+    var index: usize = 0;
+    while (index < text.len) {
+        const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
+        if (pin_map[index].eql(target)) {
+            var end = index + scalar_len;
+            while (end < text.len and text[end] != '\n' and pin_map[end].eql(target)) {
+                end += std.unicode.utf8ByteSequenceLength(text[end]) catch return null;
+            }
+            return .{ .start = index, .end = end };
+        }
+        index += scalar_len;
+    }
+    return null;
 }
 
 fn caretOffsetForGridPosition(
@@ -539,6 +676,233 @@ test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
         try std.testing.expect(cell.row >= 0);
         try std.testing.expect(cell.row < 3);
     }
+}
+
+test "accessible snapshot keeps the live caret truthful while scrolled back" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 20,
+        .rows = 3,
+        .max_scrollback = 100,
+    });
+    defer t.deinit(std.testing.allocator);
+
+    try t.printString("row-0\nrow-1\nrow-2\nrow-3\ntail");
+    t.cursorLeft(2);
+    var active = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer active.deinit();
+    try std.testing.expectEqual(@as(u8, 'i'), active.text[active.caret_offset]);
+
+    t.screens.active.scroll(.{ .delta_row = -2 });
+    var scrolled = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer scrolled.deinit();
+
+    try std.testing.expectEqualStrings(active.text, scrolled.text);
+    try std.testing.expectEqual(active.caret_offset, scrolled.caret_offset);
+    try std.testing.expect(!std.meta.eql(active.visible_range, scrolled.visible_range));
+    try std.testing.expect(scrolled.caret_offset > scrolled.visible_range.end);
+    try std.testing.expectEqual(@as(u8, 'i'), scrolled.text[scrolled.caret_offset]);
+}
+
+test "accessible snapshot keeps a deeply scrolled viewport inside the document window" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 20,
+        .rows = 3,
+        .max_scrollback = 10_000_000,
+    });
+    defer t.deinit(std.testing.allocator);
+
+    var line: [32]u8 = undefined;
+    for (0..900) |index| {
+        const value = try std.fmt.bufPrint(&line, "row-{d:0>3}\n", .{index});
+        try t.printString(value);
+    }
+
+    // Scroll farther back than the history budget, so the viewport and the
+    // active screen can no longer share one bounded window.
+    t.screens.active.scroll(.top);
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    // The viewport is on screen, so it must be reported as visible rather than
+    // collapsed to a degenerate range at the end of the document.
+    try std.testing.expect(snapshot.visible_range.start < snapshot.visible_range.end);
+    const visible = snapshot.text[snapshot.visible_range.start..snapshot.visible_range.end];
+    try std.testing.expect(std.mem.indexOf(u8, visible, "row-000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "row-002") != null);
+    for (snapshot.cell_for_byte[snapshot.visible_range.start..snapshot.visible_range.end]) |cell| {
+        try std.testing.expect(cell.row >= 0);
+        try std.testing.expect(cell.row < 3);
+    }
+
+    // Sliding the window must not grow it past the same history budget.
+    var line_count: usize = 1;
+    for (snapshot.text) |byte| if (byte == '\n') {
+        line_count += 1;
+    };
+    const history_rows = accessibleHistoryRows(t.screens.active.pages.cols, true);
+    try std.testing.expect(line_count <= history_rows + 3);
+}
+
+test "accessible snapshot exposes ordered terminal selection and active end" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("abcdef\nghijkl\nmnopqr");
+
+    const screen = t.screens.active;
+    const first = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    const last = screen.pages.pin(.{ .screen = .{ .x = 3, .y = 1 } }).?;
+    try screen.select(terminal.Selection.init(first, last, false));
+    var forward = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer forward.deinit();
+    const forward_range = forward.selection_range.?;
+    try std.testing.expectEqualStrings("bcdef\nghij", forward.text[forward_range.start..forward_range.end]);
+    try std.testing.expectEqual(forward_range.end, forward.selection_active_offset.?);
+
+    try screen.select(terminal.Selection.init(last, first, false));
+    var reverse = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer reverse.deinit();
+    try std.testing.expectEqual(forward_range, reverse.selection_range.?);
+    try std.testing.expectEqual(reverse.selection_range.?.start, reverse.selection_active_offset.?);
+}
+
+test "accessible selection includes every scalar in the endpoint grapheme" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("Ae\u{301}B");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const grapheme = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, grapheme, false));
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    const range = snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("Ae\u{301}", snapshot.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+}
+
+test "accessible selection endpoint excludes the formatter newline" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("ABCD\nEFGH");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const row_end = screen.pages.pin(.{ .screen = .{ .x = 3, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, row_end, false));
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    const range = snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("ABCD", snapshot.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+}
+
+test "accessible selection clamps trimmed trailing-cell endpoints" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("AB\nCD");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const trailing = screen.pages.pin(.{ .screen = .{ .x = 6, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, trailing, false));
+    var forward = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer forward.deinit();
+    const range = forward.selection_range.?;
+    try std.testing.expectEqualStrings("AB", forward.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, forward.selection_active_offset.?);
+
+    try screen.select(terminal.Selection.init(trailing, anchor, false));
+    var reverse = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer reverse.deinit();
+    try std.testing.expectEqual(range, reverse.selection_range.?);
+    try std.testing.expectEqual(range.start, reverse.selection_active_offset.?);
+}
+
+test "accessible selection clamps endpoints outside the document window" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+
+    const screen = t.screens.active;
+    const before = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const middle = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
+    const after = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 2 } }).?;
+    const pin_map = [_]terminal.Pin{middle};
+
+    try screen.select(terminal.Selection.init(before, after, false));
+    const forward = selectionOffsets("M", &pin_map, screen).?;
+    try std.testing.expectEqual(OffsetRange{ .start = 0, .end = 1 }, forward.range);
+    try std.testing.expectEqual(@as(usize, 1), forward.active_offset);
+
+    try screen.select(terminal.Selection.init(after, before, false));
+    const reverse = selectionOffsets("M", &pin_map, screen).?;
+    try std.testing.expectEqual(forward.range, reverse.range);
+    try std.testing.expectEqual(@as(usize, 0), reverse.active_offset);
+
+    const before_end = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(before, before_end, false));
+    try std.testing.expect(selectionOffsets("M", &pin_map, screen) == null);
+}
+
+test "rectangular terminal selection exposes only its active row" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+    try t.printString("abcdef\nghijkl\nmnopqr");
+
+    const screen = t.screens.active;
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    const active = screen.pages.pin(.{ .screen = .{ .x = 3, .y = 2 } }).?;
+    try screen.select(terminal.Selection.init(anchor, active, true));
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
+
+    const range = snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("nop", snapshot.text[range.start..range.end]);
+    try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+
+    const line_end_active = screen.pages.pin(.{ .screen = .{ .x = 5, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, line_end_active, true));
+    var line_end_snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer line_end_snapshot.deinit();
+
+    const line_end_range = line_end_snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("bcdef", line_end_snapshot.text[line_end_range.start..line_end_range.end]);
+    try std.testing.expectEqual(line_end_range.end, line_end_snapshot.selection_active_offset.?);
+
+    const trailing_active = screen.pages.pin(.{ .screen = .{ .x = 7, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, trailing_active, true));
+    var trailing_snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer trailing_snapshot.deinit();
+
+    const trailing_range = trailing_snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("bcdef", trailing_snapshot.text[trailing_range.start..trailing_range.end]);
+    try std.testing.expectEqual(trailing_range.end, trailing_snapshot.selection_active_offset.?);
 }
 
 test "accessible history policy follows scrollback and cell budget" {

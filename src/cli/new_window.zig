@@ -15,6 +15,9 @@ pub const Options = struct {
     /// If set, open up a new window in a custom instance of noctty.
     class: ?[:0]const u8 = null,
 
+    /// How long to wait for the running instance to respond.
+    timeout: u64 = 10_000,
+
     /// Did the user specify a `--working-directory` argument on the command line?
     _working_directory_seen: bool = false,
 
@@ -56,6 +59,12 @@ pub const Options = struct {
             return null;
         }
 
+        if (lib.cutPrefix(u8, arg, "--timeout=")) |rest| {
+            self.timeout = std.fmt.parseInt(u64, rest, 10) catch return error.InvalidValue;
+            if (self.timeout > 10_000) return error.InvalidValue;
+            return null;
+        }
+
         if (lib.cutPrefix(u8, arg, "--working-directory=")) |rest| {
             const stripped = std.mem.trim(u8, rest, &std.ascii.whitespace);
             if (std.mem.eql(u8, stripped, "home")) return try alloc.dupeZ(u8, arg);
@@ -94,13 +103,17 @@ pub const Options = struct {
 /// `class` as was given on the command line.
 ///
 /// All of the arguments after the `+new-window` argument (except for the
-/// `--class` flag) will be sent to the remote noctty instance and will be
-/// parsed as command line flags. These flags will override certain settings
-/// when creating the first surface in the new window. Currently, only
-/// `--working-directory`, `--command`, and `--title` are supported. `-e` will
-/// also work as an alias for `--command`, except that if `-e` is found on the
-/// command line all following arguments will become part of the command and no
-/// more arguments will be parsed for configuration settings.
+/// `--class` flag) are normally sent to the remote noctty instance and parsed
+/// as command line flags. These flags override certain settings when creating
+/// the first surface in the new window. Currently,
+/// `--working-directory`, `--command`, and `--title` are supported.
+/// `--launch-layout=<name>` is handled separately: it sends only the validated
+/// layout name over a dedicated IPC request and cannot be combined with other
+/// arguments.
+/// `-e` will also work as an alias for `--command`, except that if
+/// `-e` is found on the command line all following arguments will become part
+/// of the command and no more arguments will be parsed for configuration
+/// settings.
 ///
 /// If `--working-directory` is found on the command line and is a relative
 /// path (i.e. doesn't start with `/`) it will be resolved to an absolute path
@@ -108,8 +121,9 @@ pub const Options = struct {
 /// command is run from. `~/` prefixes will also be expanded to the user's home
 /// directory.
 ///
-/// If `--working-directory` is _not_ found on the command line, the working
-/// directory that `noctty +new-window` is run from will be passed to noctty.
+/// For an ordinary new-window request, if `--working-directory` is _not_ found
+/// on the command line, the directory that `noctty +new-window` is run from
+/// will be passed to noctty. Layout requests use their saved pane directories.
 ///
 /// On Win32, `+new-window` uses a native named-pipe IPC channel to forward the
 /// collected command-line arguments into an already-running `noctty.exe`
@@ -123,12 +137,18 @@ pub const Options = struct {
 ///     noctty. On Win32 this selects the IPC namespace and is also forwarded
 ///     to the fallback process launch path.
 ///
+///   * `--timeout=<ms>`: Response timeout in milliseconds, from 0 through
+///     10000. The default is 10000.
+///
 ///   * `--command`: The command to be executed in the first surface of the new window.
 ///
 ///   * `--working-directory=<directory>`: The working directory to pass to noctty.
 ///
 ///   * `--title`: A title that will override the title of the first surface in
 ///     the new window. The title override may be edited or removed later.
+///
+///   * `--launch-layout=<name>`: Materialize the saved named layout in a new
+///     window instead of creating a default first surface.
 ///
 ///   * `-e`: Any arguments after this will be interpreted as a command to
 ///     execute inside the first surface of the new window instead of the
@@ -152,6 +172,27 @@ fn runArgs(
     alloc_gpa: Allocator,
     argsIter: anytype,
     stderr: *std.Io.Writer,
+) !u8 {
+    return runArgsWithPerform(
+        alloc_gpa,
+        argsIter,
+        stderr,
+        performNewWindow,
+    );
+}
+
+const PerformNewWindowFn = *const fn (
+    alloc: Allocator,
+    target: apprt.ipc.Target,
+    arguments: ?[][:0]const u8,
+    timeout_ms: u64,
+) anyerror!bool;
+
+fn runArgsWithPerform(
+    alloc_gpa: Allocator,
+    argsIter: anytype,
+    stderr: *std.Io.Writer,
+    performNewWindowFn: PerformNewWindowFn,
 ) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
@@ -182,7 +223,7 @@ fn runArgs(
         if (exit) return 1;
     }
 
-    if (!opts._working_directory_seen) {
+    if (!opts._working_directory_seen and !hasLaunchLayoutArgument(opts._arguments.items)) {
         const alloc = opts._arena.?.allocator();
         const cwd: std.fs.Dir = std.fs.cwd();
         var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -195,25 +236,165 @@ fn runArgs(
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    if (apprt.App.performIpc(
+    if (performNewWindowFn(
         alloc,
         if (opts.class) |class| .{ .class = class } else .detect,
-        .new_window,
-        .{
-            .arguments = if (opts._arguments.items.len == 0) null else opts._arguments.items,
-        },
-    ) catch |err| switch (err) {
-        error.IPCFailed => {
-            // The apprt should have printed a more specific error message
-            // already.
-            return 1;
-        },
-        else => {
-            try stderr.print("Sending the IPC failed: {}", .{err});
-            return 1;
-        },
+        if (opts._arguments.items.len == 0) null else opts._arguments.items,
+        opts.timeout,
+    ) catch |err| {
+        try stderr.print("Sending the IPC or fallback launch failed: {}\n", .{err});
+        return 5;
     }) return 0;
 
     try stderr.print("+new-window could not find or start a matching noctty instance.\n", .{});
-    return 1;
+    return 5;
+}
+
+fn performNewWindow(
+    alloc: Allocator,
+    target: apprt.ipc.Target,
+    arguments: ?[][:0]const u8,
+    timeout_ms: u64,
+) !bool {
+    return try apprt.App.performIpc(
+        alloc,
+        target,
+        .new_window,
+        .{ .arguments = arguments },
+        timeout_ms,
+    );
+}
+
+test "automation-new-window cli forwards class timeout and passthrough arguments" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var called = false;
+
+        fn perform(
+            _: Allocator,
+            target: apprt.ipc.Target,
+            arguments: ?[][:0]const u8,
+            timeout_ms: u64,
+        ) !bool {
+            called = true;
+            const class = switch (target) {
+                .class => |value| value,
+                .detect => return error.UnexpectedTarget,
+            };
+            try testing.expectEqualStrings("lane9", class);
+            try testing.expectEqual(@as(u64, 42), timeout_ms);
+            try testing.expect(arguments != null);
+            try testing.expectEqual(@as(usize, 2), arguments.?.len);
+            try testing.expect(std.mem.startsWith(u8, arguments.?[0], "--working-directory="));
+            try testing.expectEqualStrings("--title=kept", arguments.?[1]);
+            return true;
+        }
+    };
+    Hook.called = false;
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "--class=lane9 --timeout=42 --working-directory=. --title=kept",
+    );
+    defer iter.deinit();
+
+    var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stderr_buf.deinit();
+
+    try testing.expectEqual(@as(u8, 0), try runArgsWithPerform(
+        testing.allocator,
+        &iter,
+        &stderr_buf.writer,
+        &Hook.perform,
+    ));
+    try testing.expect(Hook.called);
+    try testing.expectEqualStrings("", stderr_buf.written());
+}
+
+test "automation-new-window cli rejects invalid timeout before ipc" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var called = false;
+
+        fn perform(_: Allocator, _: apprt.ipc.Target, _: ?[][:0]const u8, _: u64) !bool {
+            called = true;
+            return true;
+        }
+    };
+
+    for ([_][]const u8{ "--timeout=10001", "--timeout=18446744073709551616" }) |command_line| {
+        Hook.called = false;
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, command_line);
+        defer iter.deinit();
+
+        var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr_buf.deinit();
+
+        try testing.expectEqual(@as(u8, 1), try runArgsWithPerform(
+            testing.allocator,
+            &iter,
+            &stderr_buf.writer,
+            &Hook.perform,
+        ));
+        try testing.expect(!Hook.called);
+    }
+}
+
+test "automation-new-window cli maps fallback and transport failures to five" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        var fail_transport = false;
+
+        fn perform(_: Allocator, _: apprt.ipc.Target, _: ?[][:0]const u8, timeout_ms: u64) !bool {
+            try testing.expectEqual(@as(u64, 10_000), timeout_ms);
+            if (fail_transport) return error.IPCFailed;
+            return false;
+        }
+    };
+
+    for ([_]bool{ false, true }) |fail_transport| {
+        Hook.fail_transport = fail_transport;
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(testing.allocator, "--working-directory=.");
+        defer iter.deinit();
+
+        var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr_buf.deinit();
+
+        try testing.expectEqual(@as(u8, 5), try runArgsWithPerform(
+            testing.allocator,
+            &iter,
+            &stderr_buf.writer,
+            &Hook.perform,
+        ));
+    }
+}
+
+fn hasLaunchLayoutArgument(arguments: []const [:0]const u8) bool {
+    for (arguments) |arg| {
+        if (std.mem.eql(u8, arg, "-e")) break;
+        if (std.mem.startsWith(u8, arg, "--launch-layout=")) return true;
+    }
+    return false;
+}
+
+test "new-window layout request does not synthesize working directory" {
+    try std.testing.expect(hasLaunchLayoutArgument(&.{"--launch-layout=demo"}));
+    try std.testing.expect(hasLaunchLayoutArgument(&.{
+        "--working-directory=C:\\tmp",
+        "--launch-layout=demo",
+    }));
+    try std.testing.expect(!hasLaunchLayoutArgument(&.{"--title=demo"}));
+    try std.testing.expect(!hasLaunchLayoutArgument(&.{
+        "-e",
+        "tool.exe",
+        "--launch-layout=child-option",
+    }));
+    try std.testing.expect(hasLaunchLayoutArgument(&.{
+        "--launch-layout=demo",
+        "-e",
+        "tool.exe",
+    }));
 }

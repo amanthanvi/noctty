@@ -6,7 +6,7 @@
 
 # DESCRIPTION
 
-noctty (formerly WingHostty) is a GPU-accelerated terminal emulator for
+noctty (formerly winghostty) is a GPU-accelerated terminal emulator for
 Windows. It embeds the terminal core from the Ghostty project inside a
 native Win32 application, adding tabs, splits, session restoration, a
 native settings window, and a keyboard-driven command palette.

@@ -23,6 +23,19 @@ pub const LoadResult = union(enum) {
 };
 
 pub fn loadAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) LoadResult {
+    return loadWithParser(alloc, absolute_path, max_bytes, schema.parseAlloc);
+}
+
+pub fn loadLayoutAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) LoadResult {
+    return loadWithParser(alloc, absolute_path, max_bytes, schema.parseLayoutAlloc);
+}
+
+fn loadWithParser(
+    alloc: Allocator,
+    absolute_path: []const u8,
+    max_bytes: usize,
+    comptime parse: fn (Allocator, []const u8) anyerror!std.json.Parsed(schema.SessionState),
+) LoadResult {
     const raw = readFileBoundedAlloc(alloc, absolute_path, max_bytes) catch |err| return switch (err) {
         error.FileNotFound => .missing,
         error.FileTooBig => .oversized,
@@ -30,7 +43,9 @@ pub fn loadAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) 
     };
     defer alloc.free(raw);
 
-    const parsed = schema.parseAlloc(alloc, raw) catch |err| return switch (err) {
+    // `parseAlloc` parses with `.allocate = .alloc_always`, so the document
+    // owns every string and survives the `raw` free above.
+    const parsed = parse(alloc, raw) catch |err| return switch (err) {
         error.OutOfMemory => .{ .transient = err },
         else => .{ .corrupt = err },
     };
@@ -257,4 +272,41 @@ test "win32 session persistence schema round-trips multi-window selected indices
     try std.testing.expectEqual(@as(usize, 2), parsed.value.windows.len);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.windows[0].selected_tab);
     try std.testing.expectEqual(@as(usize, 0), parsed.value.windows[1].selected_tab);
+}
+
+test "win32 session persistence named layout load owns pane strings after the read buffer is freed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Deliberately escape-free values: `std.json` borrows those directly from
+    // the read buffer that `loadAlloc` frees before it returns.
+    const raw =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:/src/noctty","profile":"pwsh.exe","title_override":"Build","tab_title_override":"Project"}}]}}]}]}
+    ;
+    {
+        var file = try tmp.dir.createFile("layout.json", .{});
+        defer file.close();
+        try file.writeAll(raw);
+    }
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.json");
+    defer std.testing.allocator.free(path);
+
+    var result = loadAlloc(std.testing.allocator, path, default_max_state_bytes);
+    defer result.deinit();
+    const parsed = switch (result) {
+        .loaded => |value| value.value,
+        else => return error.TestExpectedEqual,
+    };
+
+    // Recycle the freed read buffer. A borrowed string would now observe this
+    // scratch fill instead of its persisted value.
+    const scratch = try std.testing.allocator.alloc(u8, raw.len);
+    defer std.testing.allocator.free(scratch);
+    @memset(scratch, 'Z');
+
+    const pane = parsed.windows[0].tabs[0].layout.nodes[0].pane;
+    try std.testing.expectEqualStrings("C:/src/noctty", pane.cwd.?);
+    try std.testing.expectEqualStrings("pwsh.exe", pane.profile.?);
+    try std.testing.expectEqualStrings("Build", pane.title_override.?);
+    try std.testing.expectEqualStrings("Project", pane.tab_title_override.?);
 }

@@ -158,7 +158,7 @@
           </div>
           <div>
             <dt>Accessibility</dt>
-            <dd>UI Automation providers for most chrome and terminal text; no screen reader measured yet</dd>
+            <dd>UI Automation providers for most chrome and terminal text; no release-build screen-reader measurement yet</dd>
           </div>
           <div>
             <dt>Performance</dt>
@@ -225,14 +225,16 @@
             events.
           </p>
           <p>
-            No screen reader has been run against a release build. The published
-            per-widget matrix records Narrator, NVDA, and JAWS as not yet
-            measured in every row, and carries the per-release procedure that
-            would change them. A UI Automation tree proves structure, not
-            speech. Window chrome also cannot be reached from the terminal with
-            the keyboard alone.
+            No screen reader has been run against a release build. An authorized
+            NVDA pass against a pre-release Debug build found mixed results:
+            several custom-class providers were spoken, while tabs, search
+            controls, and palette state still had failures or partial
+            announcements. Narrator and JAWS remain unmeasured. The per-widget
+            matrix records the exact build and limitations. A UI Automation tree
+            proves structure, not speech. Window chrome also cannot be reached
+            from the terminal with the keyboard alone.
           </p>
-          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/accessibility-matrix.md" target="_blank" rel="noopener noreferrer">The screen-reader matrix, unmeasured rows and all</a>
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/accessibility-matrix.md" target="_blank" rel="noopener noreferrer">The screen-reader matrix, measured and unmeasured rows</a>
         </article>
       </div>
     </section>

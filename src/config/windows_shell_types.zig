@@ -10,4 +10,5 @@ pub const ProfileKind = enum {
     powershell,
     git_bash,
     cmd,
+    ssh,
 };

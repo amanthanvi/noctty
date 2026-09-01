@@ -218,6 +218,8 @@ pub extern "user32" fn RegisterClipboardFormatW(lpszFormat: [*:0]const u16) call
 
 pub extern "user32" fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) callconv(.winapi) ATOM;
 
+pub extern "user32" fn UnregisterClassW(lpClassName: LPCWSTR, hInstance: HINSTANCE) callconv(.winapi) BOOL;
+
 pub extern "user32" fn CreateWindowExW(
     dwExStyle: u32,
     lpClassName: LPCWSTR,
@@ -254,6 +256,12 @@ pub extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi
 pub extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
 
 pub extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
+
+/// Returns the HKL for the thread. Callers inspect either the full HKL or its
+/// language identifier as appropriate, so this is typed as an integer.
+pub extern "user32" fn GetKeyboardLayout(idThread: DWORD) callconv(.winapi) usize;
+
+pub extern "user32" fn MapVirtualKeyW(uCode: UINT, uMapType: UINT) callconv(.winapi) UINT;
 
 pub extern "user32" fn GetMonitorInfoW(hMonitor: HMONITOR, lpmi: *MONITORINFO) callconv(.winapi) BOOL;
 
@@ -400,6 +408,16 @@ pub extern "ole32" fn CoInitializeEx(pvReserved: ?*anyopaque, dwCoInit: u32) cal
 
 pub extern "ole32" fn CoUninitialize() callconv(.winapi) void;
 
+pub const APTTYPE = i32;
+pub const APTTYPEQUALIFIER = i32;
+pub const APTTYPE_CURRENT: APTTYPE = -1;
+pub const APTTYPE_STA: APTTYPE = 0;
+pub const APTTYPE_MTA: APTTYPE = 1;
+pub const APTTYPE_NA: APTTYPE = 2;
+pub const APTTYPE_MAINSTA: APTTYPE = 3;
+
+pub extern "ole32" fn CoGetApartmentType(pAptType: *APTTYPE, pAptQualifier: *APTTYPEQUALIFIER) callconv(.winapi) i32;
+
 pub extern "ntdll" fn RtlGetVersion(lpVersionInformation: *RTL_OSVERSIONINFOW) callconv(.winapi) i32;
 
 /// Atomic replace of an existing file. Used by the settings save path
@@ -445,6 +463,100 @@ pub extern "kernel32" fn ConnectNamedPipe(
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn SetNamedPipeHandleState(
+    hNamedPipe: windows.HANDLE,
+    lpMode: ?*DWORD,
+    lpMaxCollectionCount: ?*DWORD,
+    lpCollectDataTimeout: ?*DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn PeekNamedPipe(
+    hNamedPipe: windows.HANDLE,
+    lpBuffer: ?*anyopaque,
+    nBufferSize: DWORD,
+    lpBytesRead: ?*DWORD,
+    lpTotalBytesAvail: ?*DWORD,
+    lpBytesLeftThisMessage: ?*DWORD,
+) callconv(.winapi) BOOL;
+
+/// `SID_AND_ATTRIBUTES`/`TOKEN_USER` as returned by `GetTokenInformation`
+/// with `TokenUser`. Only the SID pointer is used; the SID itself lives in
+/// the caller-provided buffer.
+pub const SID_AND_ATTRIBUTES = extern struct {
+    Sid: *anyopaque,
+    Attributes: DWORD,
+};
+
+pub const TOKEN_USER = extern struct {
+    User: SID_AND_ATTRIBUTES,
+};
+
+/// `TOKEN_MANDATORY_LABEL` as returned by `GetTokenInformation` with
+/// `TokenIntegrityLevel`. `Label.Sid` is an `S-1-16-<rid>` integrity SID.
+pub const TOKEN_MANDATORY_LABEL = extern struct {
+    Label: SID_AND_ATTRIBUTES,
+};
+
+pub extern "advapi32" fn OpenProcessToken(
+    ProcessHandle: HANDLE,
+    DesiredAccess: DWORD,
+    TokenHandle: *HANDLE,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn EqualSid(
+    pSid1: *anyopaque,
+    pSid2: *anyopaque,
+) callconv(.winapi) BOOL;
+
+/// Byte length of a well-formed SID. Returns 0 if the SID is malformed.
+pub extern "advapi32" fn GetLengthSid(
+    pSid: *anyopaque,
+) callconv(.winapi) DWORD;
+
+pub extern "advapi32" fn GetTokenInformation(
+    TokenHandle: HANDLE,
+    TokenInformationClass: DWORD,
+    TokenInformation: ?*anyopaque,
+    TokenInformationLength: DWORD,
+    ReturnLength: *DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertSidToStringSidW(
+    Sid: *anyopaque,
+    StringSid: *?[*:0]u16,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    StringSecurityDescriptor: [*:0]const u16,
+    StringSDRevision: DWORD,
+    SecurityDescriptor: *?*anyopaque,
+    SecurityDescriptorSize: ?*u32,
+) callconv(.winapi) BOOL;
+
+/// Read the security descriptor attached to a kernel object. Returns a
+/// Win32 error code (0 == ERROR_SUCCESS), not a BOOL. The out-descriptor is
+/// LocalAlloc'd; free it with `LocalFree`.
+pub extern "advapi32" fn GetSecurityInfo(
+    handle: HANDLE,
+    ObjectType: DWORD,
+    SecurityInfo: DWORD,
+    ppsidOwner: ?*?*anyopaque,
+    ppsidGroup: ?*?*anyopaque,
+    ppDacl: ?*?*anyopaque,
+    ppSacl: ?*?*anyopaque,
+    ppSecurityDescriptor: *?*anyopaque,
+) callconv(.winapi) DWORD;
+
+pub extern "advapi32" fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+    SecurityDescriptor: *anyopaque,
+    RequestedStringSDRevision: DWORD,
+    SecurityInformation: DWORD,
+    StringSecurityDescriptor: *?[*:0]u16,
+    StringSecurityDescriptorLen: ?*u32,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn LocalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+
 pub extern "kernel32" fn GetProcAddress(hModule: HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 
 pub extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) HMODULE;
@@ -462,6 +574,10 @@ pub extern "kernel32" fn GlobalLock(hMem: ?*anyopaque) callconv(.winapi) ?*anyop
 pub extern "kernel32" fn GlobalUnlock(hMem: ?*anyopaque) callconv(.winapi) BOOL;
 
 pub extern "gdi32" fn ChoosePixelFormat(hdc: HDC, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
+
+pub extern "gdi32" fn DescribePixelFormat(hdc: HDC, format: i32, size: UINT, ppfd: *PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
+
+pub extern "gdi32" fn GetPixelFormat(hdc: HDC) callconv(.winapi) i32;
 
 pub extern "gdi32" fn CreateSolidBrush(color: COLORREF) callconv(.winapi) HBRUSH;
 
@@ -541,6 +657,8 @@ pub extern "shell32" fn DragFinish(hDrop: *anyopaque) callconv(.winapi) void;
 pub extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi) BOOL;
 
 pub extern "user32" fn GetParent(hWnd: HWND) callconv(.winapi) ?HWND;
+
+pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 
 pub extern "user32" fn IsChild(hWndParent: HWND, hWnd: HWND) callconv(.winapi) BOOL;
 

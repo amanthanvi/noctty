@@ -730,6 +730,9 @@ pub fn init(
                     return err;
                 }
             else {},
+            .adopted_session = if (builtin.os.tag == .windows)
+                rt_surface.takeAdoptedSession()
+            else {},
         });
         errdefer io_exec.deinit();
 
@@ -802,7 +805,7 @@ pub fn init(
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         rendererpkg.Thread.threadMain,
         .{&self.renderer_thread},
     );
@@ -810,7 +813,7 @@ pub fn init(
 
     // Start our IO thread
     self.io_thr = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         termio.Thread.threadMain,
         .{ &self.io_thread, &self.io },
     );
@@ -854,6 +857,8 @@ pub fn deinit(self: *Surface) void {
         self.io_thr.join();
     }
 
+    var renderer_deinit_safe = true;
+
     // Stop rendering thread
     {
         self.renderer_thread.stop.notify() catch |err|
@@ -862,12 +867,28 @@ pub fn deinit(self: *Surface) void {
 
         // We need to become the active rendering thread again
         self.renderer.threadEnter(self.rt_surface) catch unreachable;
+        // Renderer resources belong to this runtime surface's graphics
+        // context. Teardown is back on the app thread now, so restore that
+        // context before deleting any graphics objects.
+        self.renderer.prepareSurfaceDeinit(self.rt_surface) catch |err| {
+            log.err("error preparing renderer surface deinit err={}", .{err});
+            // Deleting GL resources with no current context (or another
+            // pane's context) is unsafe. Keep the rest of Surface teardown
+            // running, but deliberately abandon the renderer-owned resources
+            // in this exceptional path; destroying the WGL context later is
+            // safer than issuing deletes against the wrong share group.
+            renderer_deinit_safe = false;
+        };
     }
 
     // We need to deinit AFTER everything is stopped, since there are
     // shared values between the two threads.
     self.renderer_thread.deinit();
-    self.renderer.deinit();
+    if (renderer_deinit_safe) {
+        self.renderer.deinit();
+    } else {
+        log.err("abandoning renderer resources after surface context rebind failure", .{});
+    }
     self.io_thread.deinit();
     self.io.deinit();
 
@@ -2805,6 +2826,46 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     try self.queueRender();
 }
 
+fn applyKeyRemaps(
+    remaps: *const input.KeyRemapSet,
+    event_orig: input.KeyEvent,
+) input.KeyEvent {
+    var event = event_orig;
+    event.mods = remaps.apply(event_orig.mods);
+    if (event_orig.binding_mods) |binding_mods| {
+        event.binding_mods = remaps.apply(binding_mods);
+    }
+    return event;
+}
+
+test "key remaps apply to binding-only modifiers" {
+    const testing = std.testing;
+
+    var remaps: input.KeyRemapSet = .empty;
+    defer remaps.deinit(testing.allocator);
+    try remaps.parse(testing.allocator, "right_alt=super");
+    remaps.finalize();
+
+    const raw_alt_gr: input.Mods = .{
+        .ctrl = true,
+        .alt = true,
+        .sides = .{ .ctrl = .left, .alt = .right },
+    };
+    const event = applyKeyRemaps(&remaps, .{
+        .key = .key_a,
+        .mods = .{},
+        .binding_mods = raw_alt_gr,
+        .unshifted_codepoint = 'a',
+    });
+
+    try testing.expect(event.mods.empty());
+    try testing.expectEqual(input.Mods{
+        .ctrl = true,
+        .super = true,
+        .sides = .{ .ctrl = .left, .super = .left },
+    }, event.bindingMods());
+}
+
 /// Returns true if the given key event would trigger a keybinding
 /// if it were to be processed. This is useful for determining if
 /// a key event should be sent to the terminal or not.
@@ -2818,10 +2879,7 @@ pub fn keyEventIsBinding(
     event_orig: input.KeyEvent,
 ) ?input.Binding.Flags {
     // Apply key remappings for consistency with keyCallback
-    var event = event_orig;
-    if (self.config.key_remaps.isRemapped(event_orig.mods)) {
-        event.mods = self.config.key_remaps.apply(event_orig.mods);
-    }
+    const event = applyKeyRemaps(&self.config.key_remaps, event_orig);
 
     switch (event.action) {
         .release => return null,
@@ -2865,10 +2923,7 @@ pub fn keyCallback(
 
     // Apply key remappings to transform modifiers before any processing.
     // This allows users to remap modifier keys at the app level.
-    var event = event_orig;
-    if (self.config.key_remaps.isRemapped(event_orig.mods)) {
-        event.mods = self.config.key_remaps.apply(event_orig.mods);
-    }
+    const event = applyKeyRemaps(&self.config.key_remaps, event_orig);
 
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
@@ -5254,6 +5309,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .{ .parent = self },
             ),
 
+            .launch_layout => |name| return try self.rt_app.performAction(
+                .app,
+                .launch_layout,
+                .{ .name = name },
+            ),
+
             // Undo and redo both support both surface and app targeting.
             // If we are triggering on a surface then we perform the
             // action with the surface target.
@@ -5278,6 +5339,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
     }
 
     switch (action.scoped(.surface).?) {
+        .save_layout => |name| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .save_layout,
+            .{ .name = name },
+        ),
+
         .csi, .esc => |data| {
             // We need to send the CSI/ESC sequence as a single write request.
             // If you split it across two then the shell can interpret it

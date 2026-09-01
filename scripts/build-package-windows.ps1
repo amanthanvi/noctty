@@ -25,7 +25,8 @@ $buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    "ghostty-vt.dll"
+    "ghostty-vt.dll",
+    "noctty-terminal-handoff-proxy.dll"
 )
 
 Push-Location $repoRoot
