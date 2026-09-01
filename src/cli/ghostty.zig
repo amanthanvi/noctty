@@ -28,6 +28,8 @@ const focus = @import("focus.zig");
 const send_text = @import("send_text.zig");
 const new_tab = @import("new_tab.zig");
 const new_split = @import("new_split.zig");
+const register_shell_menu = @import("register_shell_menu.zig");
+const unregister_shell_menu = @import("unregister_shell_menu.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -85,6 +87,8 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"send-text" => try send_text.run(alloc),
         .@"new-tab" => try new_tab.run(alloc),
         .@"new-split" => try new_split.run(alloc),
+        .@"register-shell-menu" => try register_shell_menu.run(alloc),
+        .@"unregister-shell-menu" => try unregister_shell_menu.run(alloc),
     };
 }
 
@@ -119,6 +123,8 @@ pub fn options(comptime self: Action) type {
             .@"send-text" => send_text.Options,
             .@"new-tab" => new_tab.Options,
             .@"new-split" => new_split.Options,
+            .@"register-shell-menu" => register_shell_menu.Options,
+            .@"unregister-shell-menu" => unregister_shell_menu.Options,
         };
     }
 }
