@@ -4912,6 +4912,9 @@ pub fn mouseButtonCallback(
                     ) orelse break :sel;
                     try self.setSelection(sel);
                 }
+                if (self.copy_mode_active) {
+                    self.copy_mode_screen = self.io.terminal.screens.active_key;
+                }
                 try self.queueRender();
 
                 // Don't consume so that we show the context menu in apprt.
