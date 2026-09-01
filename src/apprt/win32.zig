@@ -8890,6 +8890,11 @@ const Host = struct {
             value.tab = self.tabs.orderedRemove(insert_index);
             return err;
         };
+        // Detaching destroys the tab button and its UIA provider. Rebuild the
+        // restored button before raising the selected-item notification so
+        // assistive clients receive the event from a live provider.
+        self.prepareActiveTabVisibility(self.active_tab);
+        self.layout() catch |err| log.warn("tab restore layout sync failed err={}", .{err});
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("tab-restore");
         return self.activeSurface() != null;
@@ -9073,13 +9078,13 @@ const Host = struct {
             self.active_tab = old_active;
             return err;
         };
-        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         // The moved pane stayed visible throughout the drag, so the normal
         // activation fast path cannot infer that the restored target tab must
         // be hidden. Re-establish tab visibility and recreate the detached
         // tab button before focus returns to the source tab.
         self.prepareActiveTabVisibility(self.active_tab);
         self.layout() catch |err| log.warn("tab split transfer undo layout sync failed err={}", .{err});
+        self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.refreshChrome() catch |err| log.warn("tab split transfer undo chrome sync failed err={}", .{err});
         self.app.auditShellNativeMapping("tab-subtree-transfer-undo");
         return true;
