@@ -317,6 +317,10 @@ fn selectionOffsets(
         var index: usize = 0;
         while (index < text.len) {
             const scalar_len = std.unicode.utf8ByteSequenceLength(text[index]) catch return null;
+            if (text[index] == '\n') {
+                index += scalar_len;
+                continue;
+            }
             const pin = pin_map[index];
             const point = screen.pages.pointFromPin(.screen, pin) orelse return null;
             if (point.screen.y == active.screen.y and selection.contains(screen, pin)) {
@@ -832,6 +836,15 @@ test "rectangular terminal selection exposes only its active row" {
     const range = snapshot.selection_range.?;
     try std.testing.expectEqualStrings("nop", snapshot.text[range.start..range.end]);
     try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+
+    const line_end_active = screen.pages.pin(.{ .screen = .{ .x = 5, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(anchor, line_end_active, true));
+    var line_end_snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer line_end_snapshot.deinit();
+
+    const line_end_range = line_end_snapshot.selection_range.?;
+    try std.testing.expectEqualStrings("bcdef", line_end_snapshot.text[line_end_range.start..line_end_range.end]);
+    try std.testing.expectEqual(line_end_range.end, line_end_snapshot.selection_active_offset.?);
 }
 
 test "accessible history policy follows scrollback and cell budget" {
