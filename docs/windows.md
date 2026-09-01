@@ -319,10 +319,12 @@ single-instance IPC path used by `+new-window`.
 The named pipe behind it is restricted to processes running as the same
 user: it is created with `PIPE_REJECT_REMOTE_CLIENTS` and a protected
 DACL whose single ACE grants access to the SID of the token that owns
-the running noctty process. When that process runs above medium
-integrity, a `NO_WRITE_UP` mandatory-label ACE is added as well, so a
-filtered (non-elevated) token of the same account cannot drive an
-elevated instance.
+the running noctty process. Every pipe is also labeled explicitly with
+the process token's exact integrity level and a `NO_WRITE_UP`
+mandatory-label ACE. Above medium integrity, that label prevents a
+filtered (non-elevated) token of the same account from driving the
+elevated instance; at medium integrity, the explicit label lets clients
+reject an otherwise unlabeled same-user pipe squatter.
 
 That denial is **observed against a real elevated instance**, not
 inferred. From a medium-integrity process, `CreateFileW` on the elevated
@@ -337,8 +339,8 @@ succeeds, so `NO_WRITE_UP` does not lock out the intended client. The
 live descriptor reads back
 `D:P(A;;FA;;;S-1-5-21-...-1001)S:AI(ML;;NW;;;HI)`, confirming the label
 survives object creation; a medium-integrity instance reads back the same
-DACL with an **empty** label, which is correct and proves the readback
-distinguishes present from absent.
+DACL with `S:AI(ML;;NW;;;ME)`, proving that the endpoint is labeled
+explicitly at every integrity level.
 
 **Known residual — a lower-integrity process can stall the channel.** The
 label sets `NO_WRITE_UP` only, so it does not deny *reads*: a medium
