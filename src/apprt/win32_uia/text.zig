@@ -336,8 +336,19 @@ fn selectionOffsets(
 
     const top_left = selection.topLeft(screen);
     const bottom_right = selection.bottomRight(screen);
-    const start = scalarRangeForPin(text, pin_map, top_left) orelse return null;
-    const end = scalarRangeForPin(text, pin_map, bottom_right) orelse return null;
+    if (pin_map.len == 0) return null;
+    const first_pin = pin_map[0];
+    const last_pin = pin_map[pin_map.len - 1];
+    const start = scalarRangeForPin(text, pin_map, top_left) orelse
+        if (top_left.before(first_pin))
+            OffsetRange{ .start = 0, .end = 0 }
+        else
+            return null;
+    const end = scalarRangeForPin(text, pin_map, bottom_right) orelse
+        if (last_pin.before(bottom_right))
+            OffsetRange{ .start = text.len, .end = text.len }
+        else
+            return null;
     return .{
         .range = .{ .start = start.start, .end = end.end },
         .active_offset = if (selection.end().eql(top_left)) start.start else end.end,
@@ -771,6 +782,35 @@ test "accessible selection endpoint excludes the formatter newline" {
     const range = snapshot.selection_range.?;
     try std.testing.expectEqualStrings("ABCD", snapshot.text[range.start..range.end]);
     try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
+}
+
+test "accessible selection clamps endpoints outside the document window" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 8,
+        .rows = 3,
+        .max_scrollback = 10,
+    });
+    defer t.deinit(std.testing.allocator);
+
+    const screen = t.screens.active;
+    const before = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const middle = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
+    const after = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 2 } }).?;
+    const pin_map = [_]terminal.Pin{middle};
+
+    try screen.select(terminal.Selection.init(before, after, false));
+    const forward = selectionOffsets("M", &pin_map, screen).?;
+    try std.testing.expectEqual(OffsetRange{ .start = 0, .end = 1 }, forward.range);
+    try std.testing.expectEqual(@as(usize, 1), forward.active_offset);
+
+    try screen.select(terminal.Selection.init(after, before, false));
+    const reverse = selectionOffsets("M", &pin_map, screen).?;
+    try std.testing.expectEqual(forward.range, reverse.range);
+    try std.testing.expectEqual(@as(usize, 0), reverse.active_offset);
+
+    const before_end = screen.pages.pin(.{ .screen = .{ .x = 1, .y = 0 } }).?;
+    try screen.select(terminal.Selection.init(before, before_end, false));
+    try std.testing.expect(selectionOffsets("M", &pin_map, screen) == null);
 }
 
 test "rectangular terminal selection exposes only its active row" {

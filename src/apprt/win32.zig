@@ -6435,6 +6435,7 @@ pub const App = struct {
                         // avoids shifting the live array after poisoning the slot
                         // with `undefined` during Tab.deinit().
                         var removed = host.tabs.orderedRemove(i);
+                        host.destroyTabButton(&removed);
                         removed.deinit();
                         if (host.active_tab >= host.tabs.items.len and host.tabs.items.len > 0) {
                             host.active_tab = host.tabs.items.len - 1;
@@ -8152,6 +8153,7 @@ const Tab = struct {
     }
 
     fn deinit(self: *Tab) void {
+        std.debug.assert(self.uia_provider == null);
         if (self.cached_button_title) |value| self.alloc.free(value);
         if (self.cached_button_label) |value| self.alloc.free(value);
         destroySubclassedWindow(&self.button_hwnd, &self.button_prev_proc);
@@ -28590,6 +28592,65 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 1), surface_b.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 0), surface_b.undo_stack.redoDepth());
+}
+
+test "win32 windowDestroyed detaches the removed tab UIA provider" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const ProviderContext = struct {
+        fn name(_: *anyopaque, _: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "removed tab", .{}) catch "";
+        }
+    };
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
+    }.GetDesktopWindow;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+
+    var context: u8 = 0;
+    const hwnd = GetDesktopWindow();
+    const provider = try win32_uia.ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = @ptrCast(&context),
+        .role = .tab_item,
+        .tag = 1,
+        .name = ProviderContext.name,
+    });
+    _ = provider.base.vtbl.AddRef(&provider.base);
+    defer _ = provider.base.vtbl.Release(&provider.base);
+    host.tabs.items[0].uia_provider = provider;
+
+    app.windowDestroyed(&surface_a);
+
+    try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+    try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
+    try std.testing.expect(
+        win32_uia.returnChromeControlProvider(
+            hwnd,
+            0,
+            win32_uia.UiaRootObjectId,
+            provider,
+        ) == null,
+    );
 }
 
 test "win32 terminal undo snapshot restores terminal state" {
