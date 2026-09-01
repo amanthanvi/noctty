@@ -20143,8 +20143,10 @@ fn quickSelectProc(
             if (surface) |value| value.handleQuickSelectKey(wParam, lParam);
             return 0;
         },
-        c.WM_KEYUP,
-        c.WM_SYSKEYUP,
+        c.WM_KEYUP, c.WM_SYSKEYUP => {
+            if (surface) |value| value.handleQuickSelectKeyUp();
+            return 0;
+        },
         c.WM_CHAR,
         c.WM_SYSCHAR,
         c.WM_DEADCHAR,
@@ -23154,9 +23156,17 @@ fn terminalAccessibilityOutputCallback(
 }
 
 const QuickSelectSession = struct {
+    const PendingAction = struct {
+        trigger_vk: UINT,
+        index: usize,
+        ctrl: bool,
+        alt: bool,
+    };
+
     scan: win32_hints.Scan,
     labels: win32_hints.LabelSet,
     prefix: win32_hints.PrefixState = .{},
+    pending_action: ?PendingAction = null,
     cell_width: i32,
     cell_height: i32,
     padding_left: i32,
@@ -24837,6 +24847,51 @@ pub const Surface = struct {
         metrics: win32_theme.ThemeMetrics,
         dpi: UINT,
     ) ?RECT {
+        var chip = self.quickSelectRawLabelRect(index, client, metrics, dpi) orelse return null;
+
+        // Adjacent targets can produce overlapping multi-character chips once
+        // labels outgrow the one-character alphabet. Give each colliding chip
+        // its own vertical lane so later opaque backgrounds cannot obscure an
+        // earlier label's distinguishing suffix. UIA row bounds call this same
+        // function, so accessibility geometry stays aligned with painting.
+        var lane: i32 = 0;
+        for (0..index) |previous_index| {
+            const previous = self.quickSelectRawLabelRect(
+                previous_index,
+                client,
+                metrics,
+                dpi,
+            ) orelse continue;
+            if (chip.left < previous.right and chip.right > previous.left and
+                chip.top < previous.bottom and chip.bottom > previous.top)
+            {
+                lane += 1;
+            }
+        }
+        if (lane == 0) return chip;
+
+        const height = chip.bottom - chip.top;
+        const down_top = chip.top + lane * height;
+        if (down_top + height <= client.bottom) {
+            chip.top = down_top;
+            chip.bottom = down_top + height;
+            return chip;
+        }
+        const up_top = chip.top - lane * height;
+        if (up_top >= client.top) {
+            chip.top = up_top;
+            chip.bottom = up_top + height;
+        }
+        return chip;
+    }
+
+    fn quickSelectRawLabelRect(
+        self: *const Surface,
+        index: usize,
+        client: RECT,
+        metrics: win32_theme.ThemeMetrics,
+        dpi: UINT,
+    ) ?RECT {
         const session = if (self.quick_select_session) |*value| value else return null;
         if (index >= session.scan.matches.len or index >= session.labels.count) return null;
         if (!session.labels.startsWith(index, session.prefix.typed())) return null;
@@ -25072,13 +25127,33 @@ pub const Surface = struct {
         const char = quickSelectAsciiFromKey(wParam, lParam) orelse return;
         const mods = win32_input.quickSelectActionMods();
         const session = if (self.quick_select_session) |*value| value else return;
+        if (session.pending_action != null) return;
         switch (session.prefix.input(&session.labels, char)) {
             .ignored => {},
             .narrowed => self.quickSelectPrefixChanged(),
-            .complete => |index| self.fireQuickSelect(index, mods.ctrl, mods.alt) catch |err| {
-                log.warn("quick select action failed err={}", .{err});
+            .complete => |index| session.pending_action = .{
+                .trigger_vk = @intCast(wParam & 0xFFFF),
+                .index = index,
+                .ctrl = mods.ctrl,
+                .alt = mods.alt,
             },
         }
+    }
+
+    fn handleQuickSelectKeyUp(self: *Surface) void {
+        const session = if (self.quick_select_session) |*value| value else return;
+        const pending = session.pending_action orelse return;
+        if (win32_input.keyPressed(@intCast(pending.trigger_vk)) or
+            win32_input.keyPressed(c.VK_SHIFT) or
+            win32_input.keyPressed(c.VK_CONTROL) or
+            win32_input.keyPressed(c.VK_MENU))
+        {
+            return;
+        }
+        session.pending_action = null;
+        self.fireQuickSelect(pending.index, pending.ctrl, pending.alt) catch |err| {
+            log.warn("quick select action failed err={}", .{err});
+        };
     }
 
     /// Whether the cells a quick-select target occupies still hold the text

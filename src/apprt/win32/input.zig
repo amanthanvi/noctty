@@ -436,10 +436,18 @@ pub fn quickSelectAsciiFromKey(wParam: WPARAM, lParam: LPARAM) ?u8 {
         state[c.VK_LMENU] = 0;
         state[c.VK_RMENU] = 0;
     }
+    var translation_mods = modsFromKeyboardState(keyboard_state);
+    if (quickSelectAltGrPressed(keyboard_state)) {
+        // Preserve the raw Ctrl+right-Alt keyboard state for ToUnicodeEx, but
+        // prevent translateKeyText's ordinary Ctrl-chord remasking from
+        // stripping the layout's AltGr mapping back to the unmodified key.
+        translation_mods.ctrl = false;
+        translation_mods.alt = false;
+    }
     const translated = translateKeyText(
         vk,
         lParam,
-        modsFromKeyboardState(keyboard_state),
+        translation_mods,
         keyboard_state,
     );
     if (translated.len != 1) return null;

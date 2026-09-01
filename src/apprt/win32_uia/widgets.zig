@@ -755,7 +755,16 @@ pub const PaletteListProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromFragmentRoot(self_root);
         out.* = null;
-        return if (self.isAvailable()) com.S_OK else com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const focused = if (self.state.focused) |callback|
+            callback(self.state.ctx)
+        else
+            false;
+        if (focused) {
+            _ = FragmentAddRef(&self.fragment);
+            out.* = &self.fragment;
+        }
+        return com.S_OK;
     }
 };
 
@@ -4428,6 +4437,14 @@ test "PaletteListProvider exposes configurable identity and focus" {
     ));
     try std.testing.expectEqual(com.VT_BOOL, focused.vt);
     try std.testing.expectEqual(com.VARIANT_TRUE, focused.value.bool_val);
+
+    var focus_fragment: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentRootGetFocus(&provider.fragment_root, &focus_fragment),
+    );
+    try std.testing.expect(focus_fragment == &provider.fragment);
+    _ = PaletteListProvider.FragmentRelease(focus_fragment.?);
 }
 
 test "palette list and row providers propagate COM threading options" {

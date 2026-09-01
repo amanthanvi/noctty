@@ -406,13 +406,19 @@ pub fn extractMatches(
 
     pattern_loop: for (patterns[0..@min(patterns.len, max_pattern_count)], 0..) |pattern, pattern_index| {
         if (pattern.len == 0 or pattern.len > max_pattern_bytes) continue;
-        var regex = try oni.Regex.init(
+        var regex = oni.Regex.init(
             pattern,
             .{},
             oni.Encoding.utf8,
             oni.Syntax.default,
             null,
-        );
+        ) catch |err| {
+            std.log.warn("ignoring invalid quick-select pattern index={d} err={}", .{
+                pattern_index,
+                err,
+            });
+            continue;
+        };
         defer regex.deinit();
         var match_param = try oni.MatchParam.init();
         defer match_param.deinit();
@@ -1058,6 +1064,23 @@ test "hints: anchored regex searches the original buffer once" {
     defer alloc.free(matches);
     try testing.expectEqual(@as(usize, 1), matches.len);
     try testing.expectEqualStrings("a", text[matches[0].start..matches[0].end]);
+}
+
+test "hints: invalid regex does not suppress later valid patterns" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    const text = "abc";
+    const map = [_]point.Coordinate{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 1, .y = 0 },
+        .{ .x = 2, .y = 0 },
+    };
+    const matches = try extractMatches(alloc, text, &map, &.{ "[", "b" });
+    defer alloc.free(matches);
+    try testing.expectEqual(@as(usize, 1), matches.len);
+    try testing.expectEqualStrings("b", text[matches[0].start..matches[0].end]);
 }
 
 test "hints: overlap resolution prefers longest then earliest" {
