@@ -507,6 +507,7 @@ Zig string literals. An empty value clears configured patterns; when the
 configured list is empty, the built-in patterns apply. `quick-select-alphabet`
 sets the unique printable ASCII characters used for labels, requires at least
 two characters, and treats ASCII letters that differ only by case as duplicates.
+Use Zig string literal syntax to preserve leading or trailing spaces.
 
 ## Quick terminal and global hotkeys
 

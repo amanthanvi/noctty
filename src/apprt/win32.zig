@@ -20134,7 +20134,11 @@ fn quickSelectProc(
         },
         // Scrolling would invalidate the immutable viewport snapshot behind
         // the visible labels, so the modal overlay owns wheel input too.
-        c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL => return 0,
+        c.WM_MOUSEWHEEL,
+        c.WM_MOUSEHWHEEL,
+        c.WM_POINTERWHEEL,
+        c.WM_POINTERHWHEEL,
+        => return 0,
         c.WM_CAPTURECHANGED => {
             if (surface) |value| value.closeQuickSelect(false);
             return 0;

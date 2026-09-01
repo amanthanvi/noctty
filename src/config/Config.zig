@@ -1434,8 +1434,9 @@ link: RepeatableLink = .{},
 
 /// ASCII characters used to generate quick-select labels. The value must have
 /// at least two characters, and letters must also be unique after ASCII case
-/// folding. Labels are prefix-free, so a single character could only ever
-/// label one target.
+/// folding. Quote the value with Zig string literal syntax to preserve leading
+/// or trailing spaces. Labels are prefix-free, so a single character could
+/// only ever label one target.
 @"quick-select-alphabet": QuickSelectAlphabet = .{},
 
 /// Enable URL matching. URLs are matched on hover with control (Linux) or
@@ -8615,6 +8616,10 @@ pub const QuickSelectPatterns = struct {
 
     pub fn clone(self: *const Self, alloc: Allocator) Allocator.Error!Self {
         var list = try std.ArrayListUnmanaged([]const u8).initCapacity(alloc, self.list.items.len);
+        errdefer {
+            for (list.items) |item| alloc.free(item);
+            list.deinit(alloc);
+        }
         for (self.list.items) |item| list.appendAssumeCapacity(try alloc.dupe(u8, item));
         return .{ .list = list };
     }
@@ -8706,8 +8711,10 @@ pub const QuickSelectAlphabet = struct {
             input_ orelse return error.ValueRequired,
             &std.ascii.whitespace,
         );
-        validate(input) catch return error.InvalidValue;
-        self.value = try alloc.dupeZ(u8, input);
+        const alphabet = try RepeatableLink.parseRegexValue(alloc, input);
+        defer alloc.free(alphabet);
+        validate(alphabet) catch return error.InvalidValue;
+        self.value = try alloc.dupeZ(u8, alphabet);
     }
 
     pub fn clone(self: *const Self, alloc: Allocator) Allocator.Error!Self {
@@ -8738,6 +8745,8 @@ pub const QuickSelectAlphabet = struct {
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "aA"));
         try testing.expectError(error.CaseCollidingCharacter, validate("aA"));
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a\xC3\xA9"));
+        try alphabet.parseCLI(arena.allocator(), "\"ab \"");
+        try testing.expectEqualStrings("ab ", alphabet.value);
     }
 };
 
