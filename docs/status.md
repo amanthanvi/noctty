@@ -87,6 +87,8 @@ Win32-validated VT protocol coverage is tracked in
 - Quick select (`Ctrl+Shift+Space`) labels URL, path, git SHA, IP address,
   and UUID matches in the visible viewport for keyboard copy, allowed-scheme
   open, or protected paste.
+- Copy mode (`Ctrl+Shift+X`) provides modal vi-style selection and scrollback
+  navigation, with keyboard copy/cancel and no PTY input leakage.
 
 ### Performance measurement
 

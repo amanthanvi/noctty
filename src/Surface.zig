@@ -86,6 +86,34 @@ pub const min_window_height_cells: u32 = 4;
 /// The maximum number of key tables that can be active at any
 /// given time. `activate_key_table` calls after this are ignored.
 const max_active_key_tables = 8;
+const copy_mode_table_name = "copy_mode";
+
+/// One entry on the active key-table stack.
+const KeyTableEntry = struct {
+    set: *const input.Binding.Set,
+    once: bool,
+};
+
+/// Stable identity for one physical key across press/release modifier-state
+/// changes. Live modifiers belong to binding lookup, not release pairing.
+const KeyPressIdentity = struct {
+    key: input.Key,
+    unshifted_codepoint: u21,
+
+    fn fromEvent(event: input.KeyEvent) KeyPressIdentity {
+        return .{
+            .key = event.key,
+            .unshifted_codepoint = event.unshifted_codepoint,
+        };
+    }
+
+    fn eql(self: KeyPressIdentity, other: KeyPressIdentity) bool {
+        if (self.key != .unidentified or other.key != .unidentified) {
+            return self.key == other.key;
+        }
+        return self.unshifted_codepoint == other.unshifted_codepoint;
+    }
+};
 
 /// Unique ID used to identify this surface for IPC purposes. It is
 /// exposed to the commands running in surfaces as the environment variable
@@ -193,6 +221,15 @@ visible: bool = true,
 
 /// Used to determine whether to continuously scroll.
 selection_scroll_active: bool = false,
+
+/// True while the built-in copy-mode key table owns keyboard input and
+/// the terminal selection is acting as its cursor/anchor.
+copy_mode_active: bool = false,
+
+/// Screen whose selection currently anchors copy mode. Terminal output can
+/// switch between the primary and alternate screens while the modal key table
+/// remains active, so selection actions use this to re-anchor on the new one.
+copy_mode_screen: ?terminal.ScreenSet.Key = null,
 
 /// True if the surface is in read-only mode. When read-only, no input
 /// is sent to the PTY but terminal-level operations like selections,
@@ -326,18 +363,83 @@ pub const Keyboard = struct {
     /// in this is the first activated table (NOT the default keybinding set).
     ///
     /// This is bounded by `max_active_key_tables`.
-    table_stack: std.ArrayListUnmanaged(struct {
-        set: *const input.Binding.Set,
-        once: bool,
-    }) = .empty,
+    table_stack: std.ArrayListUnmanaged(KeyTableEntry) = .empty,
 
-    /// The last handled binding. This is used to prevent encoding release
-    /// events for handled bindings. We only need to keep track of one because
-    /// at least at the time of writing this, its impossible for two keys of
-    /// a combination to be handled by different bindings before the release
-    /// of the prior (namely since you can't bind modifier-only).
-    last_trigger: ?u64 = null,
+    /// The most recently released handled key. This retains the duplicate-
+    /// release fallback after its entry leaves `consumed_presses`.
+    last_trigger: ?KeyPressIdentity = null,
+
+    /// Presses consumed by bindings and therefore requiring their matching
+    /// release to be consumed too. Unlike `last_trigger`, this handles
+    /// overlapping keys in modal tables without swallowing releases for
+    /// presses that were forwarded to the terminal.
+    consumed_presses: std.ArrayListUnmanaged(KeyPressIdentity) = .empty,
+
+    fn rememberConsumedPress(
+        self: *Keyboard,
+        alloc: Allocator,
+        identity: KeyPressIdentity,
+    ) Allocator.Error!void {
+        for (self.consumed_presses.items) |existing| {
+            if (existing.eql(identity)) return;
+        }
+        try self.consumed_presses.append(alloc, identity);
+    }
+
+    fn takeConsumedPress(self: *Keyboard, identity: KeyPressIdentity) bool {
+        for (self.consumed_presses.items, 0..) |existing, index| {
+            if (!existing.eql(identity)) continue;
+            _ = self.consumed_presses.swapRemove(index);
+            return true;
+        }
+        return false;
+    }
 };
+
+test "keyboard tracks overlapping consumed presses independently" {
+    const testing = std.testing;
+    var keyboard: Keyboard = .{};
+    defer keyboard.consumed_presses.deinit(testing.allocator);
+    const left: KeyPressIdentity = .{ .key = .arrow_left, .unshifted_codepoint = 0 };
+    const right: KeyPressIdentity = .{ .key = .arrow_right, .unshifted_codepoint = 0 };
+    try keyboard.rememberConsumedPress(testing.allocator, left);
+    try keyboard.rememberConsumedPress(testing.allocator, right);
+    try keyboard.rememberConsumedPress(testing.allocator, left);
+    try testing.expectEqual(@as(usize, 2), keyboard.consumed_presses.items.len);
+    try testing.expect(keyboard.takeConsumedPress(left));
+    try testing.expect(!keyboard.takeConsumedPress(left));
+    try testing.expect(keyboard.takeConsumedPress(right));
+    try testing.expectEqual(@as(usize, 0), keyboard.consumed_presses.items.len);
+}
+
+test "keyboard retains more than 64 overlapping consumed presses" {
+    const testing = std.testing;
+    var keyboard: Keyboard = .{};
+    defer keyboard.consumed_presses.deinit(testing.allocator);
+
+    for (1..66) |codepoint| try keyboard.rememberConsumedPress(
+        testing.allocator,
+        .{ .key = .unidentified, .unshifted_codepoint = @intCast(codepoint) },
+    );
+    try testing.expectEqual(@as(usize, 65), keyboard.consumed_presses.items.len);
+    for (1..66) |codepoint| try testing.expect(keyboard.takeConsumedPress(.{
+        .key = .unidentified,
+        .unshifted_codepoint = @intCast(codepoint),
+    }));
+    try testing.expectEqual(@as(usize, 0), keyboard.consumed_presses.items.len);
+}
+
+test "consumed press identity ignores changing modifier state" {
+    const pressed = KeyPressIdentity.fromEvent(.{
+        .key = .shift_left,
+        .mods = .{ .shift = true },
+    });
+    const released = KeyPressIdentity.fromEvent(.{
+        .action = .release,
+        .key = .shift_left,
+    });
+    try std.testing.expectEqual(pressed, released);
+}
 
 /// The configuration that a surface has, this is copied from the main
 /// Config struct usually to prevent sharing a single value.
@@ -950,6 +1052,7 @@ pub fn deinit(self: *Surface) void {
     for (self.keyboard.sequence_queued.items) |req| req.deinit();
     self.keyboard.sequence_queued.deinit(self.alloc);
     self.keyboard.table_stack.deinit(self.alloc);
+    self.keyboard.consumed_presses.deinit(self.alloc);
 
     // Clean up our font grid
     self.app.font_grid_set.deref(self.font_grid_key);
@@ -2492,7 +2595,7 @@ fn copySelectionToClipboards(
     sel: terminal.Selection,
     clipboards: []const apprt.Clipboard,
     format: input.Binding.Action.CopyToClipboard,
-) !void {
+) !bool {
     // Create an arena to simplify memory management here.
     var arena = ArenaAllocator.init(self.alloc);
     defer arena.deinit();
@@ -2611,8 +2714,14 @@ fn copySelectionToClipboards(
     }
 
     if (copied and self.config.app_notifications.@"clipboard-copy") {
-        try self.showAppNotification("noctty", "Copied selection to clipboard");
+        self.showAppNotification("noctty", "Copied selection to clipboard") catch |err| {
+            // Clipboard delivery is the requested action; a secondary desktop
+            // notification failure must not turn a successful copy into a
+            // failure or strand copy mode after the clipboard was updated.
+            log.warn("failed to show clipboard copy notification err={}", .{err});
+        };
     }
+    return copied;
 }
 
 /// Set the selection contents.
@@ -2636,11 +2745,13 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
         .false => unreachable, // handled above with an early exit
 
         // Both standard and selection clipboards are set.
-        .clipboard => try self.copySelectionToClipboards(
-            sel,
-            &.{ .standard, .selection },
-            .mixed,
-        ),
+        .clipboard => {
+            _ = try self.copySelectionToClipboards(
+                sel,
+                &.{ .standard, .selection },
+                .mixed,
+            );
+        },
 
         // The selection clipboard is set if supported, otherwise the standard.
         .true => {
@@ -2648,7 +2759,7 @@ fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
                 .selection
             else
                 .standard;
-            try self.copySelectionToClipboards(
+            _ = try self.copySelectionToClipboards(
                 sel,
                 &.{clipboard},
                 .mixed,
@@ -2825,7 +2936,7 @@ pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
     if (self.renderer_state.preedit != null or
         preedit_ != null)
     {
-        if (self.config.selection_clear_on_typing) {
+        if (self.config.selection_clear_on_typing and !self.copy_mode_active) {
             self.setSelection(null) catch {};
         }
     }
@@ -3170,8 +3281,15 @@ fn maybeHandleBinding(
         // Release events never trigger a binding but we need to check if
         // we consumed the press event so we don't encode the release.
         .release => {
+            const identity = KeyPressIdentity.fromEvent(event);
+            if (self.keyboard.takeConsumedPress(identity)) {
+                // Retain the most recently released key for apprts that emit
+                // the same release more than once for one physical press.
+                self.keyboard.last_trigger = identity;
+                return .consumed;
+            }
             if (self.keyboard.last_trigger) |last| {
-                if (last == event.bindingHash()) {
+                if (last.eql(identity)) {
                     // We don't reset the last trigger on release because
                     // an apprt may send multiple release events for a single
                     // press event.
@@ -3182,8 +3300,17 @@ fn maybeHandleBinding(
             return null;
         },
 
-        // Carry on processing.
-        .press, .repeat => {},
+        // Carry on processing. A new physical press supersedes the retained
+        // duplicate-release fallback for that key. Without this, a later
+        // unbound or explicitly forwarded press could lose its real release.
+        .press => {
+            const identity = KeyPressIdentity.fromEvent(event);
+            _ = self.keyboard.takeConsumedPress(identity);
+            if (self.keyboard.last_trigger) |last| {
+                if (last.eql(identity)) self.keyboard.last_trigger = null;
+            }
+        },
+        .repeat => {},
     }
 
     // Find an entry in the keybind set that matches our event.
@@ -3204,6 +3331,11 @@ fn maybeHandleBinding(
             // invalid sequence handling to ignore it.
             if (self.catchAllIsIgnore()) {
                 self.endKeySequence(.drop, .retain);
+                const identity = KeyPressIdentity.fromEvent(event);
+                self.keyboard.last_trigger = identity;
+                if (event.action == .press) {
+                    try self.keyboard.rememberConsumedPress(self.alloc, identity);
+                }
                 return .ignored;
             }
 
@@ -3345,6 +3477,18 @@ fn maybeHandleBinding(
             // If we're in a sequence, clear it.
             self.endKeySequence(.drop, .retain);
 
+            // Swallow the matching release too. Without this the press is
+            // dropped but `last_trigger` stays null, so the release falls
+            // through to normal encoding and a client using the Kitty
+            // protocol with `report_events` sees a release for a key it
+            // never saw pressed. That breaks copy mode's isolation
+            // contract, where `catch_all = ignore` is the whole mechanism.
+            const identity = KeyPressIdentity.fromEvent(event);
+            self.keyboard.last_trigger = identity;
+            if (event.action == .press) {
+                try self.keyboard.rememberConsumedPress(self.alloc, identity);
+            }
+
             return .ignored;
         };
     }
@@ -3368,7 +3512,11 @@ fn maybeHandleBinding(
         self.endKeySequence(.drop, .retain);
 
         // Store our last trigger so we don't encode the release event
-        self.keyboard.last_trigger = event.bindingHash();
+        const identity = KeyPressIdentity.fromEvent(event);
+        self.keyboard.last_trigger = identity;
+        if (event.action == .press) {
+            try self.keyboard.rememberConsumedPress(self.alloc, identity);
+        }
 
         if (insp_ev) |ev| {
             ev.binding = self.alloc.dupe(
@@ -3392,6 +3540,290 @@ fn maybeHandleBinding(
     return null;
 }
 
+fn copyModeStartPin(
+    cursor: terminal.Pin,
+    viewport_tl: terminal.Pin,
+    viewport_br: terminal.Pin,
+) terminal.Pin {
+    return if (cursor.isBetween(viewport_tl, viewport_br)) cursor else viewport_br;
+}
+
+test "copy mode starts at a visible cursor or the viewport edge" {
+    const testing = std.testing;
+    var screen = try terminal.Screen.init(testing.allocator, .{
+        .cols = 8,
+        .rows = 4,
+        .max_scrollback = 0,
+    });
+    defer screen.deinit();
+    try screen.testWriteString("one\ntwo\nthree");
+
+    const before = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const viewport_tl = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
+    const viewport_br = screen.pages.pin(.{ .screen = .{ .x = 4, .y = 2 } }).?;
+    const visible = screen.pages.pin(.{ .screen = .{ .x = 2, .y = 1 } }).?;
+
+    try testing.expectEqual(
+        visible,
+        copyModeStartPin(visible, viewport_tl, viewport_br),
+    );
+    try testing.expectEqual(
+        viewport_br,
+        copyModeStartPin(before, viewport_tl, viewport_br),
+    );
+}
+
+fn copyModeTableIsActive(self: *const Surface) bool {
+    if (!self.copy_mode_active) return false;
+    const table = self.config.keybind.tables.getPtr(copy_mode_table_name) orelse return false;
+    const stack = self.keyboard.table_stack.items;
+    return stack.len > 0 and stack[stack.len - 1].set == table;
+}
+
+fn copyModeStackContains(
+    stack: []const KeyTableEntry,
+    table: *const input.Binding.Set,
+) bool {
+    for (stack) |entry| {
+        if (entry.set == table) return true;
+    }
+    return false;
+}
+
+/// How many tables must be popped to remove every copy-mode entry from the
+/// stack, or 0 if it is not on the stack at all.
+///
+/// Copy mode is not necessarily innermost: users can activate further tables
+/// from within it (`keybind = copy_mode/t=activate_key_table:foo`), which
+/// buries it. Popping only once in that case removes the wrong table and
+/// strands copy_mode.
+///
+/// The search runs outward-in, from the outermost stack entry, so a stack that
+/// contains copy_mode more than once (reachable through a custom
+/// `activate_key_table:copy_mode` binding) is unwound completely.
+/// `copy_mode_active` is a single flag, so exactly one copy mode exists no
+/// matter how many times the table was pushed; leaving a second copy of it
+/// behind with the flag cleared is the wedge this count exists to prevent.
+fn copyModePopCount(
+    stack: []const KeyTableEntry,
+    table: *const input.Binding.Set,
+) usize {
+    for (stack, 0..) |entry, i| {
+        if (entry.set == table) return stack.len - i;
+    }
+    return 0;
+}
+
+test "copy mode pops every table down to and including copy_mode" {
+    const testing = std.testing;
+    // Distinct array slots: identical comptime-const empty structs can share
+    // a single address, which would make every pointer comparison match.
+    var sets: [3]input.Binding.Set = .{ .{}, .{}, .{} };
+    const copy_mode = &sets[0];
+    const other = &sets[1];
+    const inner = &sets[2];
+
+    // Not on the stack at all.
+    try testing.expectEqual(@as(usize, 0), copyModePopCount(&.{}, copy_mode));
+    try testing.expectEqual(
+        @as(usize, 0),
+        copyModePopCount(&.{.{ .set = other, .once = false }}, copy_mode),
+    );
+
+    // Innermost: a single pop, the ordinary case.
+    try testing.expectEqual(
+        @as(usize, 1),
+        copyModePopCount(&.{.{ .set = copy_mode, .once = false }}, copy_mode),
+    );
+
+    // Buried by a user-activated table. Popping once here would strand
+    // copy_mode, whose catch_all=ignore then swallows every key.
+    try testing.expectEqual(
+        @as(usize, 2),
+        copyModePopCount(&.{
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = false },
+        }, copy_mode),
+    );
+    // A table activated BEFORE copy mode is left alone: only copy_mode and
+    // what was stacked on top of it come off.
+    try testing.expectEqual(
+        @as(usize, 2),
+        copyModePopCount(&.{
+            .{ .set = other, .once = false },
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = true },
+        }, copy_mode),
+    );
+
+    // Copy mode pushed twice (a custom `activate_key_table:copy_mode` inside
+    // a table reached from copy mode). Stopping at the innermost occurrence
+    // would leave the outer one on the stack with `copy_mode_active` cleared,
+    // and its catch_all would then eat every key once the tables above it
+    // were popped. Unwind all of it.
+    try testing.expectEqual(
+        @as(usize, 4),
+        copyModePopCount(&.{
+            .{ .set = copy_mode, .once = false },
+            .{ .set = other, .once = false },
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = false },
+        }, copy_mode),
+    );
+
+    // A table activated before copy mode still survives a duplicated entry.
+    try testing.expectEqual(
+        @as(usize, 3),
+        copyModePopCount(&.{
+            .{ .set = other, .once = false },
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = false },
+            .{ .set = copy_mode, .once = false },
+        }, copy_mode),
+    );
+}
+
+test "copy mode remains active while a duplicate table is still stacked" {
+    var sets: [2]input.Binding.Set = .{ .{}, .{} };
+    const copy_mode = &sets[0];
+    const other = &sets[1];
+    try std.testing.expect(copyModeStackContains(&.{
+        .{ .set = copy_mode, .once = false },
+        .{ .set = other, .once = false },
+        .{ .set = copy_mode, .once = true },
+    }, copy_mode));
+    try std.testing.expect(!copyModeStackContains(&.{
+        .{ .set = other, .once = false },
+    }, copy_mode));
+}
+
+fn finishCopyMode(self: *Surface) !void {
+    if (!self.copy_mode_active) return;
+    self.copy_mode_active = false;
+    self.renderer_state.mutex.lock();
+    const screens = &self.io.terminal.screens;
+    if (self.copy_mode_screen) |key| {
+        if (screens.get(key)) |screen| screen.clearSelection();
+    } else {
+        screens.active.clearSelection();
+    }
+    self.copy_mode_screen = null;
+    self.renderer_state.mutex.unlock();
+    try self.queueRender();
+}
+
+/// Ensure copy mode owns a selection on the currently active terminal screen.
+/// The terminal can switch primary/alternate screens in response to PTY output
+/// without involving the Surface key-table lifecycle.
+///
+/// The caller must hold `renderer_state.mutex`.
+fn ensureCopyModeSelectionLocked(self: *Surface) !bool {
+    if (!self.copy_mode_active) return false;
+
+    const screens = &self.io.terminal.screens;
+    const screen = screens.active;
+    if (self.copy_mode_screen == screens.active_key and screen.selection != null) {
+        return true;
+    }
+
+    if (self.copy_mode_screen) |key| {
+        if (screens.get(key)) |previous| previous.clearSelection();
+    }
+    const viewport_tl = screen.pages.getTopLeft(.viewport);
+    const viewport_br = screen.pages.getBottomRight(.viewport) orelse return false;
+    const initial = copyModeStartPin(screen.cursor.page_pin.*, viewport_tl, viewport_br);
+    try screen.select(terminal.Selection.init(initial, initial, false));
+    self.copy_mode_screen = screens.active_key;
+    return true;
+}
+
+fn startCopyMode(self: *Surface) anyerror!bool {
+    if (self.copy_mode_active) return false;
+    if (self.config.keybind.tables.getPtr(copy_mode_table_name) == null) return false;
+
+    self.renderer_state.mutex.lock();
+    const screens = &self.io.terminal.screens;
+    const copy_screen_key = screens.active_key;
+    const screen: *terminal.Screen = screens.active;
+    const viewport_tl = screen.pages.getTopLeft(.viewport);
+    const viewport_br = screen.pages.getBottomRight(.viewport) orelse {
+        self.renderer_state.mutex.unlock();
+        return false;
+    };
+    const initial = copyModeStartPin(screen.cursor.page_pin.*, viewport_tl, viewport_br);
+    screen.select(terminal.Selection.init(initial, initial, false)) catch |err| {
+        self.renderer_state.mutex.unlock();
+        return err;
+    };
+    self.copy_mode_screen = copy_screen_key;
+    self.renderer_state.mutex.unlock();
+    errdefer {
+        self.renderer_state.mutex.lock();
+        if (self.io.terminal.screens.get(copy_screen_key)) |copy_screen| {
+            copy_screen.clearSelection();
+        }
+        self.copy_mode_screen = null;
+        self.renderer_state.mutex.unlock();
+        self.queueRender() catch {};
+    }
+    try self.queueRender();
+
+    self.copy_mode_active = true;
+    const activated = self.performBindingAction(.{
+        .activate_key_table = copy_mode_table_name,
+    }) catch |err| {
+        self.finishCopyMode() catch {};
+        return err;
+    };
+    if (!activated) {
+        try self.finishCopyMode();
+        return false;
+    }
+    return true;
+}
+
+fn toggleCopyMode(self: *Surface) anyerror!bool {
+    if (!self.copy_mode_active) return try self.startCopyMode();
+
+    // Pop every table down to and including the outermost copy_mode, not just
+    // one. A user can activate another table from inside copy mode, which
+    // buries copy_mode; popping once would remove only the inner table and
+    // strand copy_mode on the stack with `copy_mode_active` cleared. Its
+    // `catch_all = ignore` then swallows every key — including the binding
+    // that would exit — while `startCopyMode` refuses because the stack is
+    // non-empty, wedging the keyboard until a config reload.
+    var pops: usize = if (self.config.keybind.tables.getPtr(copy_mode_table_name)) |table|
+        copyModePopCount(self.keyboard.table_stack.items, table)
+    else
+        0;
+
+    // The unwind must finish even if one step fails. `deactivate_key_table`
+    // pops the table and only then runs `finishCopyMode`, whose `queueRender`
+    // can fail; propagating there would abort the loop with tables still
+    // stacked, recreating the exact wedge this unwind exists to prevent. Hold
+    // the first error and report it once the stack is clean.
+    var unwind_err: ?anyerror = null;
+    while (pops > 0) : (pops -= 1) {
+        const popped = self.performBindingAction(.deactivate_key_table) catch |err| {
+            if (unwind_err == null) unwind_err = err;
+            continue;
+        };
+        if (!popped) break;
+    }
+
+    // `deactivate_key_table` clears copy mode from its own branch when it pops
+    // the copy-mode table. This covers the case where the table was already
+    // gone from the stack (e.g. cleared out from under us).
+    if (self.copy_mode_active) {
+        self.finishCopyMode() catch |err| {
+            if (unwind_err == null) unwind_err = err;
+        };
+    }
+
+    if (unwind_err) |err| return err;
+    return true;
+}
+
 fn deactivateAllKeyTables(self: *Surface) !bool {
     switch (self.keyboard.table_stack.items.len) {
         // No key table active. This does nothing.
@@ -3400,6 +3832,8 @@ fn deactivateAllKeyTables(self: *Surface) !bool {
         // Clear the entire table stack.
         else => self.keyboard.table_stack.clearAndFree(self.alloc),
     }
+
+    if (self.copy_mode_active) try self.finishCopyMode();
 
     // Notify the UI.
     _ = self.rt_app.performAction(
@@ -4233,17 +4667,31 @@ pub fn mouseButtonCallback(
             // then we do not do a mouse report.
             if (mods.shift and !shift_capture) break :report;
 
-            // In any other mouse button scenario without shift pressed we
-            // clear the selection since the underlying application can handle
-            // that in any way (i.e. "scrolling").
-            try self.setSelection(null);
-
             // We also set the left click count to 0 so that if mouse reporting
             // is disabled in the middle of press (before release) we don't
             // suddenly start selecting text.
             self.mouse.left_click_count = 0;
 
             const pos = try self.rt_surface.getCursorPos();
+
+            if (self.copy_mode_active) {
+                // Mouse reporting still reaches the child in copy mode, but a
+                // left press must also leave the modal selection usable.
+                if (button == .left and action == .press) {
+                    const point = self.posToViewport(pos.x, pos.y);
+                    if (self.io.terminal.screens.active.pages.pin(.{ .viewport = point })) |pin| {
+                        try self.io.terminal.screens.active.select(
+                            terminal.Selection.init(pin, pin, false),
+                        );
+                        self.copy_mode_screen = self.io.terminal.screens.active_key;
+                        try self.queueRender();
+                    }
+                }
+            } else {
+                // Outside copy mode the underlying application owns reported
+                // clicks, so clear terminal selection as before.
+                try self.setSelection(null);
+            }
 
             const report_action: input.MouseAction = switch (action) {
                 .press => .press,
@@ -4345,8 +4793,14 @@ pub fn mouseButtonCallback(
         switch (self.mouse.left_click_count) {
             // Single click
             1 => {
-                // If we have a selection, clear it. This always happens.
-                if (self.io.terminal.screens.active.selection != null) {
+                if (self.copy_mode_active) {
+                    try self.io.terminal.screens.active.select(
+                        terminal.Selection.init(pin.*, pin.*, false),
+                    );
+                    self.copy_mode_screen = self.io.terminal.screens.active_key;
+                    try self.queueRender();
+                } else if (self.io.terminal.screens.active.selection != null) {
+                    // Outside copy mode a single click clears selection.
                     try self.io.terminal.screens.active.select(null);
                     try self.queueRender();
                 }
@@ -4372,6 +4826,9 @@ pub fn mouseButtonCallback(
                 };
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
+                    if (self.copy_mode_active) {
+                        self.copy_mode_screen = self.io.terminal.screens.active_key;
+                    }
                     try self.queueRender();
                 }
             },
@@ -4384,6 +4841,9 @@ pub fn mouseButtonCallback(
                     self.io.terminal.screens.active.selectLine(.{ .pin = pin.* });
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
+                    if (self.copy_mode_active) {
+                        self.copy_mode_screen = self.io.terminal.screens.active_key;
+                    }
                     try self.queueRender();
                 }
             },
@@ -4452,6 +4912,9 @@ pub fn mouseButtonCallback(
                     ) orelse break :sel;
                     try self.setSelection(sel);
                 }
+                if (self.copy_mode_active) {
+                    self.copy_mode_screen = self.io.terminal.screens.active_key;
+                }
                 try self.queueRender();
 
                 // Don't consume so that we show the context menu in apprt.
@@ -4459,7 +4922,7 @@ pub fn mouseButtonCallback(
             },
             .copy => {
                 if (self.io.terminal.screens.active.selection) |sel| {
-                    try self.copySelectionToClipboards(
+                    _ = try self.copySelectionToClipboards(
                         sel,
                         &.{.standard},
                         .mixed,
@@ -4467,15 +4930,17 @@ pub fn mouseButtonCallback(
                 }
 
                 try self.setSelection(null);
+                if (self.copy_mode_active) _ = try self.ensureCopyModeSelectionLocked();
                 try self.queueRender();
             },
             .@"copy-or-paste" => if (self.io.terminal.screens.active.selection) |sel| {
-                try self.copySelectionToClipboards(
+                _ = try self.copySelectionToClipboards(
                     sel,
                     &.{.standard},
                     .mixed,
                 );
                 try self.setSelection(null);
+                if (self.copy_mode_active) _ = try self.ensureCopyModeSelectionLocked();
                 try self.queueRender();
             } else {
                 // Pasting can trigger a lock grab in complete clipboard
@@ -5528,15 +5993,22 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .copy_to_clipboard => |format| {
-            self.renderer_state.mutex.lock();
-            defer self.renderer_state.mutex.unlock();
+            const copied = copied: {
+                self.renderer_state.mutex.lock();
+                defer self.renderer_state.mutex.unlock();
 
-            if (self.io.terminal.screens.active.selection) |sel| {
-                try self.copySelectionToClipboards(
+                if (self.copy_mode_active and
+                    !try self.ensureCopyModeSelectionLocked())
+                {
+                    break :copied false;
+                }
+                const sel = self.io.terminal.screens.active.selection orelse break :copied false;
+                const clipboard_written = try self.copySelectionToClipboards(
                     sel,
                     &.{.standard},
                     format,
                 );
+                if (!clipboard_written) break :copied false;
 
                 // Clear the selection if configured to do so.
                 if (self.config.selection_clear_on_copy) {
@@ -5549,10 +6021,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                     }
                 }
 
-                return true;
-            }
+                break :copied true;
+            };
+            if (!copied) return false;
 
-            return false;
+            // Copy mode promises copy-and-exit, but only after the clipboard
+            // write above succeeds. Keeping this in the action avoids an
+            // unconditional chained toggle after a clipboard failure.
+            if (self.copy_mode_active) _ = try self.toggleCopyMode();
+            return true;
         },
 
         .copy_url_to_clipboard => {
@@ -5976,6 +6453,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .toggle_copy_mode => return try self.toggleCopyMode(),
+
         .toggle_background_opacity => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_background_opacity,
@@ -6021,6 +6500,21 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         inline .activate_key_table,
         .activate_key_table_once,
         => |name, tag| {
+            // `copy_mode` owns selection and lifecycle state in addition to
+            // its key table. Route direct user activation through the same
+            // entry path as `toggle_copy_mode`; once that path sets the flag,
+            // its internal activation recurses here and performs the push.
+            if (std.mem.eql(u8, name, copy_mode_table_name) and
+                !self.copy_mode_active)
+            {
+                // Copy mode is an explicit modal lifecycle, so silently
+                // converting one-shot activation into a persistent mode would
+                // violate the requested key-table semantics. Users should
+                // bind `toggle_copy_mode` (or persistent activation) instead.
+                if (tag == .activate_key_table_once) return false;
+                return try self.startCopyMode();
+            }
+
             // Look up the table in our config
             const set = self.config.keybind.tables.getPtr(name) orelse {
                 log.debug("key table not found: {s}", .{name});
@@ -6069,6 +6563,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .deactivate_key_table => {
+            const leaving_copy_mode = self.copyModeTableIsActive();
             switch (self.keyboard.table_stack.items.len) {
                 // No key table active. This does nothing.
                 0 => return false,
@@ -6081,6 +6576,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 // we finish our key table.
                 else => _ = self.keyboard.table_stack.pop(),
             }
+
+            const copy_mode_remains = if (self.config.keybind.tables.getPtr(copy_mode_table_name)) |table|
+                copyModeStackContains(self.keyboard.table_stack.items, table)
+            else
+                false;
+            if (leaving_copy_mode and !copy_mode_remains) try self.finishCopyMode();
 
             // Notify the UI.
             _ = self.rt_app.performAction(
@@ -6126,6 +6627,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             defer self.renderer_state.mutex.unlock();
 
             const screen: *terminal.Screen = self.io.terminal.screens.active;
+            if (self.copy_mode_active and
+                !try self.ensureCopyModeSelectionLocked())
+            {
+                return false;
+            }
             const sel = if (screen.selection) |*sel| sel else {
                 // If we don't have a selection we do not perform this
                 // action, allowing the keybind to fall through to the
