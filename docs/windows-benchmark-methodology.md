@@ -246,10 +246,9 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   destroyed. The parser partitions such records at `surface_begin`, keeps the
   exact globally unique `surface_id` as evidence identity, and rejects token
   sharing within the current cycle or mixed IDs inside one incarnation.
-  Evidence records the cycle count, every diagnostic-control flag, per-cycle
-  swap-suppression state, target-strategy override, and exact suppression scope
-  so these A/B collections cannot be mistaken for product defaults or budget
-  certification.
+  Evidence records the cycle count and `memory_diagnostic_only`; repeated-cycle
+  collections cannot be combined with `-Gate`, so they cannot certify the
+  product memory budget.
 - Idle children explicitly request the steady DECSCUSR cursor (`CSI 2 SP q`).
   The harness establishes foreground ownership before the baseline and records
   exact terminal-surface focus transitions. Any transition during the timed

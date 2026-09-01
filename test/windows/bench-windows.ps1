@@ -66,6 +66,9 @@ if (-not $env:NOCTTY_BENCH_WINDOWS_BOOTSTRAPPED) {
 if ($Gate -and $ProfileThroughput) {
     throw '-ProfileThroughput is diagnostic-only and cannot be combined with -Gate'
 }
+if ($Gate -and $MemoryCycles -ne 1) {
+    throw '-MemoryCycles values other than 1 are diagnostic-only and cannot be combined with -Gate'
+}
 
 $script:BenchWindowsReadBufferKib = 64
 
