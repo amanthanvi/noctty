@@ -53,6 +53,8 @@ Win32-validated VT protocol coverage is tracked in
   PowerShell, `cmd`, Git Bash, and WSL distributions when WSL responds.
 - Concrete aliases from `%USERPROFILE%\.ssh\config` appear in the profile
   picker and universal palette and launch through the system `ssh.exe`.
+- Native taskbar jump list with recent working directories and detected
+  shell profiles.
 - Per-monitor DPI scaling.
 - DWM dark title bar that follows the app theme.
 - High-contrast mode detection and palette switching.

@@ -56,6 +56,7 @@ Last reviewed: 2026-08-21.
 | Power-aware rendering                                                             | `unfocused-render-fps` caps visible background presentation; `power-saver-rendering` controls saver pacing; minimized and DWM-cloaked windows do not present. See [power and battery](windows.md#power-and-battery). |
 | SSH host discovery                                                                | Concrete aliases from `%USERPROFILE%\.ssh\config` appear as system `ssh.exe` launch entries in the picker and palette.    |
 | Windows default terminal                                                          | `+register-default-terminal` selects noctty per user through the Windows Terminal 1.24-or-newer OpenConsole handoff; see [windows.md](windows.md#default-terminal). |
+| Taskbar jump lists                                                                | Recent working directories and detected shell profiles launch from the pinned or running taskbar button. See [taskbar jump list](windows.md#taskbar-jump-list). |
 
 ## Notes
 
