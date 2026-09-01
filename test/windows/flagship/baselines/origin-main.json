@@ -1,18 +1,18 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-08-31T23:43:00.0000000Z",
-  "git_commit": "6c0e698587d92b9f3c3db3d02f466bb313833d3a",
+  "captured_at": "2026-08-31T23:55:48.5887325Z",
+  "git_commit": "1b2dbffa57efcffa3b8a5923b1a735e94bd7d362",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the session parser changes. The parser keeps the reviewed .allocate = .alloc_always ownership fix and adds a layout-only parse path that strips window placement before validation; the on-disk schema remains unchanged at v1. Hashes reflect checkout normalization. This git_commit exists only on the PR branch: after a squash-merge it becomes unreachable and Test-VerificationContracts.ps1 skips the git-diff cross-check while the sha256 check still runs, so re-point it at the merge commit on main (see RECONCILE-SESSION-STATE.md)."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the session parser changes. The parser keeps the reviewed .allocate = .alloc_always ownership fix and decodes layout placement as opaque JSON before constructing the strict placement-free shape; the on-disk schema remains unchanged at v1. Hashes reflect checkout normalization. This git_commit exists only on the PR branch: after a squash-merge it becomes unreachable and Test-VerificationContracts.ps1 skips the git-diff cross-check while the sha256 check still runs, so re-point it at the merge commit on main (see RECONCILE-SESSION-STATE.md)."
   },
   "artifacts": [
     {
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "799a284fd4f6b383c3595604e2742c8da30b1eac969beff83dd5fdd6e56dc1cb",
+      "sha256": "69ff5a127d0bfb4eb5b19f2786ff602c611831a4e16c8d07d81f03ecc5b4ecbb",
       "scenario_id": null
     },
     {
