@@ -17368,12 +17368,14 @@ const startsWithIgnoreCase = labels.startsWithIgnoreCase;
 const resolveProfileSelection = labels.resolveProfileSelection;
 
 const profileIndexByKey = labels.profileIndexByKey;
+const profileKeyEquals = labels.profileKeyEquals;
 
 fn applyProfileConfigByKey(
     config: *configpkg.Config,
     profiles: []const windows_shell.Profile,
     key: []const u8,
 ) !bool {
+    if (startsWithIgnoreCase(key, "ssh:")) return false;
     const index = profileIndexByKey(profiles, key) orelse return false;
     const profile = &profiles[index];
     if (!isSessionRestorableProfile(profile)) return false;
@@ -17384,10 +17386,9 @@ fn applyProfileConfigByKey(
 /// Session restore relaunches a pane's profile unattended at startup. An SSH
 /// profile would dial out with no interaction, so it is refused here.
 ///
-/// The decision is made on the resolved profile rather than on the key text,
-/// so it cannot drift from the case-insensitive comparison `profileIndexByKey`
-/// uses: a state file naming `SSH:prod` resolves to the same profile as
-/// `ssh:prod` and is refused identically.
+/// The key prefix is rejected before lookup so case variants in a persisted
+/// state file cannot bypass the guard. Live SSH profile lookup remains
+/// case-sensitive because OpenSSH host aliases are case-sensitive.
 fn isSessionRestorableProfile(profile: *const windows_shell.Profile) bool {
     return profile.kind != .ssh;
 }
@@ -19341,7 +19342,7 @@ fn applyQuickSlotPreferenceOrder(
         const key = key_opt orelse continue;
         var found: ?usize = null;
         for (profiles, 0..) |profile, index| {
-            if (std.ascii.eqlIgnoreCase(profile.key, key)) {
+            if (profileKeyEquals(profile, key)) {
                 found = index;
                 break;
             }
@@ -28200,14 +28201,18 @@ test "win32 session restore refuses ssh profiles regardless of key case" {
     };
     defer for (&profiles) |*profile| profile.deinit(alloc);
 
-    // profileIndexByKey matches case-insensitively, so a state file naming
-    // "SSH:prod" still resolves the ssh profile. The refusal must key on the
-    // resolved kind, not on the key text, or the guard is bypassed and noctty
-    // dials out at startup with no interaction.
+    // Live SSH profile lookup is case-sensitive, so a state file naming
+    // "SSH:prod" does not resolve `ssh:prod`. The refusal must key on the
+    // prefix before lookup, or a case
+    // variant could bypass the guard and dial out at startup with no interaction.
     for ([_][]const u8{ "ssh:prod", "SSH:prod", "Ssh:PROD" }) |key| {
         var clone = base.shallowClone(alloc);
         defer clone.deinit();
-        try std.testing.expect(profileIndexByKey(&profiles, key) != null);
+        if (std.mem.eql(u8, key, "ssh:prod")) {
+            try std.testing.expect(profileIndexByKey(&profiles, key) != null);
+        } else {
+            try std.testing.expect(profileIndexByKey(&profiles, key) == null);
+        }
         try std.testing.expect(!(try applyProfileConfigByKey(&clone, &profiles, key)));
         try std.testing.expect(clone.command == null);
     }

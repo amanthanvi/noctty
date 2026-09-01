@@ -292,7 +292,7 @@ fn sshCommentStart(line: []const u8) ?usize {
 
 fn containsAlias(hosts: []const Host, alias: []const u8) bool {
     for (hosts) |host| {
-        if (std.ascii.eqlIgnoreCase(host.alias, alias)) return true;
+        if (std.mem.eql(u8, host.alias, alias)) return true;
     }
     return false;
 }
@@ -560,7 +560,7 @@ test "ssh config rejects shell metacharacter and overlong aliases" {
     try testing.expectEqualStrings("safe", hosts[0].alias);
 }
 
-test "ssh config deduplicates repeated aliases case-insensitively" {
+test "ssh config preserves case-distinct aliases and deduplicates exact repeats" {
     const testing = std.testing;
     const alloc = testing.allocator;
     const hosts = try parse(
@@ -569,9 +569,10 @@ test "ssh config deduplicates repeated aliases case-insensitively" {
     );
     defer deinitHosts(alloc, hosts);
 
-    try testing.expectEqual(@as(usize, 2), hosts.len);
+    try testing.expectEqual(@as(usize, 3), hosts.len);
     try testing.expectEqualStrings("prod", hosts[0].alias);
-    try testing.expectEqualStrings("staging", hosts[1].alias);
+    try testing.expectEqualStrings("PROD", hosts[1].alias);
+    try testing.expectEqualStrings("staging", hosts[2].alias);
 }
 
 test "ssh config caps total concrete aliases" {
