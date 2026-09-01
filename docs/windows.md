@@ -278,9 +278,10 @@ verbs automatically and never writes them to `HKLM`.
 A per-user verb wins over a per-machine one, because `HKCU\Software\Classes`
 overrides `HKLM` in the merged `HKCR` view. So if you registered the verbs from
 a portable build and later install noctty per-machine, the per-user copy keeps
-pointing at the portable executable until you remove it. Uninstalling sweeps
-the per-user copies as well as its own, so a leftover verb cannot outlive the
-app it points at.
+pointing at the portable executable until you remove it. Before deleting a
+portable copy, run `.\noctty.com +unregister-shell-menu` as the same user that
+registered the verbs. The installer uninstaller removes only its own
+registration; it does not remove portable per-user registrations.
 
 On Windows 11, these classic verbs appear under **Show more options**.
 `Shift+F10` opens the classic menu directly. A top-level modern command is
