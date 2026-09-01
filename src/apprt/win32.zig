@@ -4818,6 +4818,9 @@ pub const App = struct {
                             }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
                         }
+                        if (jump_list_profiles_pending) {
+                            self.jump_list.?.requestProfileDiscovery();
+                        }
                         self.scheduleGlobalHotkeySync();
                         self.reconfigureTheme();
                         for (self.windows.items) |surface| {

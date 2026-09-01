@@ -890,7 +890,10 @@ pub const JumpList = struct {
     pub fn init(alloc: Allocator, state_path: []const u8) !JumpList {
         const owned_state_path = try alloc.dupe(u8, state_path);
         errdefer alloc.free(owned_state_path);
-        const loaded = loadStateAlloc(alloc, state_path);
+        // Do not publish an empty taskbar list when an existing state file is
+        // temporarily unreadable or invalid. Failing initialization preserves
+        // the Shell's last committed list; a later process can retry safely.
+        const loaded = try loadStateForMergeAlloc(alloc, state_path);
         return .{
             .alloc = alloc,
             .state_path = owned_state_path,
@@ -944,6 +947,12 @@ pub const JumpList = struct {
     pub fn completeStartupProfileDiscovery(self: *JumpList) void {
         self.startup_profile_discovery_pending = false;
         self.startup_profile_discovery_retry_count = 0;
+    }
+
+    pub fn requestProfileDiscovery(self: *JumpList) void {
+        self.startup_profile_discovery_pending = true;
+        self.startup_profile_discovery_retry_count = 0;
+        self.schedule();
     }
 
     pub fn retryStartupProfileDiscovery(self: *JumpList) void {
@@ -1776,6 +1785,10 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
         error.SyntaxError,
         loadStateForMergeAlloc(std.testing.allocator, corrupt_path),
     );
+    try std.testing.expectError(
+        error.SyntaxError,
+        JumpList.init(std.testing.allocator, corrupt_path),
+    );
 
     {
         var file = try tmp.dir.createFile("oversized.json", .{});
@@ -1794,6 +1807,10 @@ test "jump_list JSON round trips and corrupt or oversized state starts empty" {
     defer oversized.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), oversized.recents.items.items.len);
     try std.testing.expectEqual(@as(usize, 0), oversized.hidden_profiles.items.items.len);
+    try std.testing.expectError(
+        error.FileTooBig,
+        JumpList.init(std.testing.allocator, oversized_path),
+    );
 
     const oversized_key = try std.testing.allocator.alloc(u8, max_state_bytes);
     defer std.testing.allocator.free(oversized_key);
