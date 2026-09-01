@@ -11664,7 +11664,12 @@ const Host = struct {
         );
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
-        if (self.app.jump_list) |*jump_list| jump_list.updateProfiles(next_profiles);
+        if (self.app.jump_list) |*jump_list| {
+            // A later user-initiated load recovers startup discovery after its
+            // bounded transient-failure retry budget has been exhausted.
+            jump_list.completeStartupProfileDiscovery();
+            jump_list.updateProfiles(next_profiles);
+        }
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
         self.app.applyLauncherQuickSlotPreferences(self.profiles.?);
         const profiles = self.profiles.?;

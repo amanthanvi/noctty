@@ -36,6 +36,7 @@ const max_profile_tombstones: usize = 128;
 const max_profile_events: usize = max_profile_tombstones * 2;
 const max_rebuild_retries: u8 = 3;
 const max_shell_link_chars: usize = 32_768;
+const profile_description_prefix = "noctty-profile:";
 
 const CLSCTX_INPROC_SERVER: DWORD = 0x1;
 const CO_E_NOTINITIALIZED: HRESULT = @bitCast(@as(u32, 0x800401F0));
@@ -795,11 +796,13 @@ fn nextRebuildRetryCount(current: u8) ?u8 {
 
 const RemovedArguments = struct {
     items: std.ArrayListUnmanaged([]u8) = .empty,
+    profile_keys: ProfileTombstones = .{},
     complete: bool = true,
 
     fn deinit(self: *RemovedArguments, alloc: Allocator) void {
         for (self.items.items) |item| alloc.free(item);
         self.items.deinit(alloc);
+        self.profile_keys.deinit(alloc);
         self.* = .{};
     }
 };
@@ -1324,7 +1327,8 @@ pub const JumpList = struct {
             self.persist_dirty = true;
         }
         for (self.profiles.items) |item| {
-            if (!containsArguments(removed_arguments.items.items, item.arguments)) continue;
+            if (!removed_arguments.profile_keys.contains(item.key) and
+                !containsArguments(removed_arguments.items.items, item.arguments)) continue;
             if (self.pending_profile_uses.contains(item.key)) continue;
             if (try self.hidden_profiles.insert(self.alloc, item.key)) {
                 _ = try self.pending_profile_hides.insert(self.alloc, item.key);
@@ -1377,7 +1381,7 @@ pub const JumpList = struct {
             defer self.alloc.free(title);
             const arguments = try buildWorkingDirectoryArgumentsAlloc(self.alloc, path);
             defer self.alloc.free(arguments);
-            const link = try self.createShellLink(exe_w, arguments, title, path);
+            const link = try self.createShellLink(exe_w, arguments, title, path, null);
             defer link.release();
             if (collection.addObject(link.asRaw()) < 0) return error.AddRecentLinkFailed;
         }
@@ -1401,7 +1405,7 @@ pub const JumpList = struct {
         for (self.profiles.items) |item| {
             if (self.hidden_profiles.contains(item.key)) continue;
             if (appended == count) break;
-            const link = try self.createShellLink(exe_w, item.arguments, item.title, null);
+            const link = try self.createShellLink(exe_w, item.arguments, item.title, null, item.key);
             defer link.release();
             if (collection.addObject(link.asRaw()) < 0) return error.AddProfileLinkFailed;
             appended += 1;
@@ -1477,6 +1481,27 @@ pub const JumpList = struct {
             };
             errdefer self.alloc.free(arguments);
             try result.items.append(self.alloc, arguments);
+
+            @memset(arguments_buffer, 0);
+            if (link.vtbl.GetDescription(
+                link.asRaw(),
+                arguments_buffer.ptr,
+                @intCast(arguments_buffer.len),
+            ) >= 0) {
+                const description_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse continue;
+                const description = std.unicode.utf16LeToUtf8Alloc(
+                    self.alloc,
+                    arguments_buffer[0..description_len],
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => continue,
+                };
+                defer self.alloc.free(description);
+                if (std.mem.startsWith(u8, description, profile_description_prefix)) {
+                    const key = description[profile_description_prefix.len..];
+                    _ = try result.profile_keys.insert(self.alloc, key);
+                }
+            }
         }
         return result;
     }
@@ -1487,6 +1512,7 @@ pub const JumpList = struct {
         arguments: []const u8,
         title: []const u8,
         working_directory: ?[]const u8,
+        profile_key: ?[]const u8,
     ) !*IShellLinkW {
         var raw_link: ?*anyopaque = null;
         const create_hr = CoCreateInstance(
@@ -1509,6 +1535,20 @@ pub const JumpList = struct {
         if (link.vtbl.SetPath(link.asRaw(), exe_w.ptr) < 0) return error.SetLinkPathFailed;
         if (link.vtbl.SetArguments(link.asRaw(), arguments_w.ptr) < 0) return error.SetLinkArgumentsFailed;
         if (link.vtbl.SetIconLocation(link.asRaw(), exe_w.ptr, 0) < 0) return error.SetLinkIconFailed;
+
+        if (profile_key) |key| {
+            const description = try std.fmt.allocPrint(
+                self.alloc,
+                "{s}{s}",
+                .{ profile_description_prefix, key },
+            );
+            defer self.alloc.free(description);
+            const description_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, description);
+            defer self.alloc.free(description_w);
+            if (link.vtbl.SetDescription(link.asRaw(), description_w.ptr) < 0) {
+                return error.SetLinkDescriptionFailed;
+            }
+        }
 
         if (working_directory) |path| {
             const path_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, path);
