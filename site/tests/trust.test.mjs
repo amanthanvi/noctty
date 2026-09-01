@@ -485,6 +485,15 @@ test("trust page states its limits without hedging", () => {
   );
 });
 
+test("trust page scopes updater network controls precisely", () => {
+  assert.match(
+    trustHtml,
+    /auto-update = off<\/code> disables automatic release checks and downloads/,
+  );
+  assert.match(trustHtml, /manual update checks remain available/);
+  assert.doesNotMatch(trustHtml, /update check is the only outbound request/i);
+});
+
 test("trust page hardcodes no performance figure", () => {
   // Benchmark numbers move with the machine state and the build they were
   // taken against. The page cites the methodology doc so a re-measurement
