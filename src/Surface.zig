@@ -3699,7 +3699,6 @@ fn finishCopyMode(self: *Surface) !void {
     const screens = &self.io.terminal.screens;
     if (self.copy_mode_screen) |key| {
         if (screens.get(key)) |screen| screen.clearSelection();
-        if (screens.active_key != key) screens.active.clearSelection();
     } else {
         screens.active.clearSelection();
     }
@@ -3734,7 +3733,7 @@ fn ensureCopyModeSelectionLocked(self: *Surface) !bool {
 }
 
 fn startCopyMode(self: *Surface) anyerror!bool {
-    if (self.copy_mode_active or self.keyboard.table_stack.items.len > 0) return false;
+    if (self.copy_mode_active) return false;
     if (self.config.keybind.tables.getPtr(copy_mode_table_name) == null) return false;
 
     self.renderer_state.mutex.lock();
@@ -4679,6 +4678,7 @@ pub fn mouseButtonCallback(
                         try self.io.terminal.screens.active.select(
                             terminal.Selection.init(pin, pin, false),
                         );
+                        self.copy_mode_screen = self.io.terminal.screens.active_key;
                         try self.queueRender();
                     }
                 }
@@ -4792,6 +4792,7 @@ pub fn mouseButtonCallback(
                     try self.io.terminal.screens.active.select(
                         terminal.Selection.init(pin.*, pin.*, false),
                     );
+                    self.copy_mode_screen = self.io.terminal.screens.active_key;
                     try self.queueRender();
                 } else if (self.io.terminal.screens.active.selection != null) {
                     // Outside copy mode a single click clears selection.
@@ -4820,6 +4821,9 @@ pub fn mouseButtonCallback(
                 };
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
+                    if (self.copy_mode_active) {
+                        self.copy_mode_screen = self.io.terminal.screens.active_key;
+                    }
                     try self.queueRender();
                 }
             },
@@ -4832,6 +4836,9 @@ pub fn mouseButtonCallback(
                     self.io.terminal.screens.active.selectLine(.{ .pin = pin.* });
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
+                    if (self.copy_mode_active) {
+                        self.copy_mode_screen = self.io.terminal.screens.active_key;
+                    }
                     try self.queueRender();
                 }
             },
