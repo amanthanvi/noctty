@@ -275,6 +275,7 @@ public static class NocttyBenchNative {
         int column = 0;
         byte[] pendingAltScreenSequence = null;
         int pendingAltScreenOffset = 0;
+        bool pendingScrollLineFeed = false;
         using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, buffer.Length, FileOptions.SequentialScan)) {
             while (written < length) {
                 int count = (int)Math.Min(buffer.Length, length - written);
@@ -302,9 +303,14 @@ public static class NocttyBenchNative {
                             pendingAltScreenOffset = 0;
                         }
                     }
-                    else if (workload == "scroll" && column >= cols - 1) {
-                        buffer[offset++] = 10;
+                    else if (workload == "scroll" && pendingScrollLineFeed) {
+                        buffer[offset++] = (byte)'\n';
+                        pendingScrollLineFeed = false;
                         column = 0;
+                    }
+                    else if (workload == "scroll" && column >= cols - 2 && length - (written + offset) >= 2) {
+                        buffer[offset++] = (byte)'\r';
+                        pendingScrollLineFeed = true;
                     }
                     else {
                         buffer[offset++] = (byte)(33 + random % 94);
