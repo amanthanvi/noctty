@@ -4524,13 +4524,24 @@ pub const App = struct {
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
         host.recreateTitlebarIconFonts();
-        errdefer _ = sys.DestroyWindow(hwnd);
+        errdefer if (!host_registered) {
+            _ = sys.DestroyWindow(hwnd);
+        };
 
         self.attachShellCompositorWindow(hwnd);
 
         try self.hosts.append(self.core_app.alloc, host);
         host_registered = true;
-        errdefer self.removeHost(host);
+        errdefer {
+            // Keep the registered Host and its GWLP_USERDATA alive through
+            // WM_DESTROY so the normal compositor-detach path can find it.
+            if (sys.DestroyWindow(hwnd) == 0) {
+                // If teardown itself fails, WM_DESTROY did not provide the
+                // normal detach. Do it explicitly before host deinit.
+                self.detachShellCompositorWindow(hwnd);
+            }
+            self.removeHost(host);
+        }
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
