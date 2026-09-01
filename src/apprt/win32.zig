@@ -1120,6 +1120,7 @@ fn sendListWindowsIpc(
     pipe_name: [:0]const u16,
     response_timeout_ms: u64,
 ) !?[]u8 {
+    const request_deadline_ms = automationRequestDeadline(response_timeout_ms);
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
         error.FileNotFound, error.PipeUnreachable => return null,
@@ -1128,7 +1129,7 @@ fn sendListWindowsIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try win32_ipc.encodeListWindowsRequest(alloc);
+    const request = try win32_ipc.encodeListWindowsRequest(alloc, request_deadline_ms);
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
@@ -1146,7 +1147,13 @@ fn sendPerformActionIpc(
     action_text: []const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const request = try win32_ipc.encodePerformActionRequest(alloc, target, action_text);
+    const request_deadline_ms = automationRequestDeadline(response_timeout_ms);
+    const request = try win32_ipc.encodePerformActionRequest(
+        alloc,
+        target,
+        action_text,
+        request_deadline_ms,
+    );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
 }
@@ -1173,7 +1180,11 @@ fn sendFocusIpc(
     target: apprt.ipc.AutomationTarget,
     response_timeout_ms: u64,
 ) !bool {
-    const request = try win32_ipc.encodeFocusRequest(alloc, target);
+    const request = try win32_ipc.encodeFocusRequest(
+        alloc,
+        target,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
 }
@@ -1185,7 +1196,12 @@ fn sendNewTabIpc(
     working_directory: ?[]const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const request = try win32_ipc.encodeNewTabRequest(alloc, target, working_directory);
+    const request = try win32_ipc.encodeNewTabRequest(
+        alloc,
+        target,
+        working_directory,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
 }
@@ -1198,7 +1214,13 @@ fn sendNewSplitIpc(
     working_directory: ?[]const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const request = try win32_ipc.encodeNewSplitRequest(alloc, target, direction, working_directory);
+    const request = try win32_ipc.encodeNewSplitRequest(
+        alloc,
+        target,
+        direction,
+        working_directory,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
 }
@@ -1210,9 +1232,18 @@ fn sendAutomationTextIpc(
     value: []const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const request = try win32_ipc.encodeSendTextRequest(alloc, target, value);
+    const request = try win32_ipc.encodeSendTextRequest(
+        alloc,
+        target,
+        value,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn automationRequestDeadline(response_timeout_ms: u64) u64 {
+    return sys.GetTickCount64() +| response_timeout_ms;
 }
 
 fn automationTextAllowed(text: []const u8) bool {
@@ -1490,7 +1521,11 @@ fn sendLaunchLayoutIpc(
     // Validate before probing the pipe. The caller uses `false` as the cold
     // start fallback, so connecting first would let an invalid name spawn an
     // otherwise ordinary window when no instance is listening.
-    const request = try win32_ipc.encodeLaunchLayoutRequest(alloc, name);
+    const request = try win32_ipc.encodeLaunchLayoutRequest(
+        alloc,
+        name,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
 
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
@@ -2083,7 +2118,12 @@ fn newWindowIpcArgumentsAccepted(arguments: ?[]const [:0]const u8) bool {
 }
 
 fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const json = try requestAutomationWindowListJson(app, app.core_app.alloc);
+    const deadline_ms = try win32_ipc.decodeListWindowsDeadline(pipe);
+    const json = try requestAutomationWindowListJson(
+        app,
+        app.core_app.alloc,
+        deadline_ms,
+    );
     defer app.core_app.alloc.free(json);
     try win32_ipc.writeDataResponse(pipe, true, json);
 }
@@ -2098,7 +2138,12 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     };
     defer app.core_app.alloc.free(payload.action_text);
 
-    requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
+    requestAutomationAction(
+        app,
+        payload.target,
+        payload.action_text,
+        payload.deadline_ms,
+    ) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -2113,22 +2158,27 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
 }
 
 fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const name = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe) catch |err| {
+    const payload = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe) catch |err| {
         log.warn("invalid win32 launch-layout IPC request err={}", .{err});
         try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
         return;
     };
-    defer app.core_app.alloc.free(name);
+    defer app.core_app.alloc.free(payload.name);
 
     // Name validation restricts this to an unambiguous action payload.
     const action_text = try std.fmt.allocPrint(
         app.core_app.alloc,
         "launch_layout:{s}",
-        .{name},
+        .{payload.name},
     );
     defer app.core_app.alloc.free(action_text);
 
-    requestAutomationAction(app, .focused, action_text) catch |err| {
+    requestAutomationAction(
+        app,
+        .focused,
+        action_text,
+        payload.deadline_ms,
+    ) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -2143,14 +2193,18 @@ fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
 }
 
 fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const target = win32_ipc.decodeFocusPayload(pipe) catch |err| switch (err) {
+    const payload = win32_ipc.decodeFocusPayload(pipe) catch |err| switch (err) {
         error.InvalidAutomationTarget => {
             try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
             return;
         },
         else => return err,
     };
-    requestAutomationCommand(app, .{ .focus = target }) catch |err| {
+    requestAutomationCommand(
+        app,
+        .{ .focus = payload.target },
+        payload.deadline_ms,
+    ) catch |err| {
         const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
@@ -2171,10 +2225,14 @@ fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE) !void {
         else => return err,
     };
     defer payload.deinit(app.core_app.alloc);
-    requestAutomationCommand(app, .{ .send_text = .{
-        .target = payload.target,
-        .text = payload.text,
-    } }) catch |err| {
+    requestAutomationCommand(
+        app,
+        .{ .send_text = .{
+            .target = payload.target,
+            .text = payload.text,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
         const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
@@ -2202,10 +2260,14 @@ fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE) !void {
         try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
         return;
     };
-    requestAutomationCommand(app, .{ .new_tab = .{
-        .target = payload.target,
-        .working_directory = payload.working_directory,
-    } }) catch |err| {
+    requestAutomationCommand(
+        app,
+        .{ .new_tab = .{
+            .target = payload.target,
+            .working_directory = payload.working_directory,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
         const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
@@ -2224,11 +2286,15 @@ fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE) !void {
         try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
         return;
     };
-    requestAutomationCommand(app, .{ .new_split = .{
-        .target = payload.target,
-        .direction = payload.direction,
-        .working_directory = payload.working_directory,
-    } }) catch |err| {
+    requestAutomationCommand(
+        app,
+        .{ .new_split = .{
+            .target = payload.target,
+            .direction = payload.direction,
+            .working_directory = payload.working_directory,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
         const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
@@ -2236,8 +2302,16 @@ fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
-    const request = try CoreApp.Message.AutomationWindowListRequest.create(alloc);
+fn requestAutomationWindowListJson(
+    app: *App,
+    alloc: Allocator,
+    client_deadline_ms: u64,
+) ![]u8 {
+    const request = try CoreApp.Message.AutomationWindowListRequest.create(
+        alloc,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
+    );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
@@ -2258,6 +2332,7 @@ fn requestAutomationAction(
     app: *App,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    client_deadline_ms: u64,
 ) !void {
     if (action_text.len == 0 or action_text.len > win32_ipc.max_action_text_len) {
         return error.InvalidAutomationAction;
@@ -2267,6 +2342,8 @@ fn requestAutomationAction(
         app.core_app.alloc,
         target,
         action_text,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
     );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
@@ -2283,8 +2360,17 @@ fn requestAutomationAction(
     if (request.err) |err| return err;
 }
 
-fn requestAutomationCommand(app: *App, command: apprt.ipc.AutomationCommand) !void {
-    const request = try CoreApp.Message.AutomationCommandRequest.create(app.core_app.alloc, command);
+fn requestAutomationCommand(
+    app: *App,
+    command: apprt.ipc.AutomationCommand,
+    client_deadline_ms: u64,
+) !void {
+    const request = try CoreApp.Message.AutomationCommandRequest.create(
+        app.core_app.alloc,
+        command,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
+    );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
@@ -2304,7 +2390,6 @@ fn waitForAutomationCompletion(
     app: *const App,
     lifecycle: *CoreApp.Message.AutomationRequestLifecycle,
 ) !void {
-    const deadline_ms = sys.GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
     while (true) {
         switch (lifecycle.load()) {
             .completed => return,
@@ -2312,7 +2397,7 @@ fn waitForAutomationCompletion(
             .pending => {
                 if (app.ipc_stop_requested.load(.acquire)) {
                     if (lifecycle.cancel()) return error.IPCFailed;
-                } else if (sys.GetTickCount64() >= deadline_ms) {
+                } else if (automationNowMs() >= lifecycle.deadline_ms) {
                     if (lifecycle.cancel()) return error.IpcTimeout;
                 }
             },
@@ -2323,6 +2408,17 @@ fn waitForAutomationCompletion(
         }
         std.Thread.sleep(std.time.ns_per_ms);
     }
+}
+
+fn automationNowMs() u64 {
+    return sys.GetTickCount64();
+}
+
+fn serverAutomationDeadline(client_deadline_ms: u64) u64 {
+    return @min(
+        client_deadline_ms,
+        automationNowMs() +| win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -30871,6 +30967,8 @@ test "win32 timed out automation request stays owned and cannot be claimed" {
         std.testing.allocator,
         .focused,
         "new_tab",
+        std.math.maxInt(u64),
+        automationNowMs,
     );
     request.retain();
     try std.testing.expect(request.lifecycle.cancel());
@@ -31962,16 +32060,20 @@ test "win32 IPC silent synchronous client read is bounded" {
     );
 }
 
-test "win32 win32_ipc.encodeListWindowsRequest preserves legacy zero-argc trailer" {
+test "win32 win32_ipc.encodeListWindowsRequest carries the response deadline" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try win32_ipc.encodeListWindowsRequest(std.testing.allocator);
+    const deadline_ms: u64 = 0x0102030405060708;
+    const request = try win32_ipc.encodeListWindowsRequest(
+        std.testing.allocator,
+        deadline_ms,
+    );
     defer std.testing.allocator.free(request);
 
-    try std.testing.expectEqual(@as(usize, 9), request.len);
+    try std.testing.expectEqual(@as(usize, 13), request.len);
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
     try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows), request[4]);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, request[5..9], .little));
+    try std.testing.expectEqual(deadline_ms, std.mem.readInt(u64, request[5..13], .little));
 }
 
 test "automation-action win32 ipc encodes focused action request" {
@@ -31981,15 +32083,17 @@ test "automation-action win32 ipc encodes focused action request" {
         std.testing.allocator,
         .focused,
         "new_tab",
+        0x0102030405060708,
     );
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
     try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
-    try std.testing.expectEqual(@as(u8, 0), request[5]);
-    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[6..14], .little));
-    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[14..18], .little));
-    try std.testing.expectEqualStrings("new_tab", request[18..]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
+    try std.testing.expectEqual(@as(u8, 0), request[13]);
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[14..22], .little));
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[22..26], .little));
+    try std.testing.expectEqualStrings("new_tab", request[26..]);
 }
 
 test "win32 launch-layout IPC argument scan isolates the layout name" {
@@ -32061,15 +32165,17 @@ test "automation-action win32 ipc encodes surface action request" {
         std.testing.allocator,
         .{ .surface_id = 42 },
         "toggle_fullscreen",
+        0x0102030405060708,
     );
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
     try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
-    try std.testing.expectEqual(@as(u8, 1), request[5]);
-    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[6..14], .little));
-    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[14..18], .little));
-    try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
+    try std.testing.expectEqual(@as(u8, 1), request[13]);
+    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[14..22], .little));
+    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[22..26], .little));
+    try std.testing.expectEqualStrings("toggle_fullscreen", request[26..]);
 }
 
 test "automation-action win32 ipc rejects oversized action before encode" {
@@ -32081,7 +32187,12 @@ test "automation-action win32 ipc rejects oversized action before encode" {
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        win32_ipc.encodePerformActionRequest(std.testing.allocator, .focused, action_text),
+        win32_ipc.encodePerformActionRequest(
+            std.testing.allocator,
+            .focused,
+            action_text,
+            0x0102030405060708,
+        ),
     );
 }
 
@@ -32097,10 +32208,11 @@ test "automation-action win32 ipc rejects oversized decoded action" {
     });
     defer file.close();
 
-    var header: [13]u8 = undefined;
-    header[0] = 0;
-    std.mem.writeInt(u64, header[1..9], 0, .little);
-    std.mem.writeInt(u32, header[9..13], win32_ipc.max_action_text_len + 1, .little);
+    var header: [21]u8 = undefined;
+    std.mem.writeInt(u64, header[0..8], std.math.maxInt(u64), .little);
+    header[8] = 0;
+    std.mem.writeInt(u64, header[9..17], 0, .little);
+    std.mem.writeInt(u32, header[17..21], win32_ipc.max_action_text_len + 1, .little);
     try file.writeAll(&header);
     try file.seekTo(0);
 

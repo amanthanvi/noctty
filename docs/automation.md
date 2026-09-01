@@ -24,6 +24,11 @@ Every verb accepts `--class=<name>` and `--timeout=<ms>`. The class selects
 an instance namespace. The timeout is only the response timeout, accepts
 `0..10000`, and defaults to `10000` milliseconds; it does not extend the
 server's fixed 10-second wait or change connection and wire I/O limits.
+Automation request kinds 2 through 8 carry that caller deadline as an absolute
+system-uptime tick. The app thread atomically claims only unexpired requests;
+if the deadline wins first, queued work is cancelled and cannot run later.
+Once work is claimed before the deadline, the server waits for and reports its
+actual outcome instead of returning an ambiguous timeout.
 
 | Verb | Target and arguments | Exit codes |
 | --- | --- | --- |

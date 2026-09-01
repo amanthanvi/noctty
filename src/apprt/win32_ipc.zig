@@ -41,11 +41,18 @@ pub const RequestKind = enum(u8) {
 };
 
 pub const PerformActionPayload = struct {
+    deadline_ms: u64,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []u8,
 };
 
+pub const FocusPayload = struct {
+    deadline_ms: u64,
+    target: apprt.ipc.AutomationTarget,
+};
+
 pub const SendTextPayload = struct {
+    deadline_ms: u64,
     target: apprt.ipc.AutomationTarget,
     text: []u8,
 
@@ -56,6 +63,7 @@ pub const SendTextPayload = struct {
 };
 
 pub const NewTabPayload = struct {
+    deadline_ms: u64,
     target: apprt.ipc.AutomationTarget,
     working_directory: ?[]u8,
     pub fn deinit(self: *@This(), alloc: Allocator) void {
@@ -64,6 +72,7 @@ pub const NewTabPayload = struct {
     }
 };
 pub const NewSplitPayload = struct {
+    deadline_ms: u64,
     target: apprt.ipc.AutomationTarget,
     direction: apprt.ipc.AutomationSplitDirection,
     working_directory: ?[]u8,
@@ -191,13 +200,13 @@ pub fn encodeNewWindowRequest(
     return try encoded.toOwnedSlice(alloc);
 }
 
-pub fn encodeListWindowsRequest(alloc: Allocator) ![]u8 {
+pub fn encodeListWindowsRequest(alloc: Allocator, deadline_ms: u64) ![]u8 {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, wire_version);
     try encoded.append(alloc, @intFromEnum(RequestKind.list_windows));
-    try appendU32(&encoded, alloc, 0);
+    try appendU64(&encoded, alloc, deadline_ms);
 
     return try encoded.toOwnedSlice(alloc);
 }
@@ -206,6 +215,7 @@ pub fn encodePerformActionRequest(
     alloc: Allocator,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    deadline_ms: u64,
 ) ![]u8 {
     if (action_text.len == 0 or action_text.len > max_action_text_len) {
         return error.InvalidAutomationAction;
@@ -216,6 +226,7 @@ pub fn encodePerformActionRequest(
 
     try appendU32(&encoded, alloc, wire_version);
     try encoded.append(alloc, @intFromEnum(RequestKind.perform_action));
+    try appendU64(&encoded, alloc, deadline_ms);
     try encoded.append(alloc, switch (target) {
         .focused => 0,
         .surface_id => 1,
@@ -233,6 +244,7 @@ pub fn encodePerformActionRequest(
 pub fn encodeLaunchLayoutRequest(
     alloc: Allocator,
     name: []const u8,
+    deadline_ms: u64,
 ) ![]u8 {
     try validateLaunchLayoutName(name);
 
@@ -241,6 +253,7 @@ pub fn encodeLaunchLayoutRequest(
 
     try appendU32(&encoded, alloc, wire_version);
     try encoded.append(alloc, @intFromEnum(RequestKind.launch_layout));
+    try appendU64(&encoded, alloc, deadline_ms);
     try appendU32(&encoded, alloc, @intCast(name.len));
     try encoded.appendSlice(alloc, name);
     return try encoded.toOwnedSlice(alloc);
@@ -252,11 +265,13 @@ fn encodeLaunchRequest(
     target: apprt.ipc.AutomationTarget,
     direction: ?apprt.ipc.AutomationSplitDirection,
     working_directory: ?[]const u8,
+    deadline_ms: u64,
 ) ![]u8 {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
     try appendU32(&encoded, alloc, wire_version);
     try encoded.append(alloc, @intFromEnum(kind));
+    try appendU64(&encoded, alloc, deadline_ms);
     try appendAutomationTarget(&encoded, alloc, target);
     if (direction) |value| try encoded.append(alloc, switch (value) {
         .left => 1,
@@ -268,9 +283,14 @@ fn encodeLaunchRequest(
     return try encoded.toOwnedSlice(alloc);
 }
 
-pub fn encodeNewTabRequest(alloc: Allocator, target: apprt.ipc.AutomationTarget, cwd: ?[]const u8) ![]u8 {
+pub fn encodeNewTabRequest(
+    alloc: Allocator,
+    target: apprt.ipc.AutomationTarget,
+    cwd: ?[]const u8,
+    deadline_ms: u64,
+) ![]u8 {
     try validateLaunchTarget(target, true);
-    return encodeLaunchRequest(alloc, .new_tab, target, null, cwd);
+    return encodeLaunchRequest(alloc, .new_tab, target, null, cwd, deadline_ms);
 }
 
 pub fn encodeNewSplitRequest(
@@ -278,19 +298,22 @@ pub fn encodeNewSplitRequest(
     target: apprt.ipc.AutomationTarget,
     direction: apprt.ipc.AutomationSplitDirection,
     cwd: ?[]const u8,
+    deadline_ms: u64,
 ) ![]u8 {
     try validateLaunchTarget(target, false);
-    return encodeLaunchRequest(alloc, .new_split, target, direction, cwd);
+    return encodeLaunchRequest(alloc, .new_split, target, direction, cwd, deadline_ms);
 }
 
 pub fn encodeFocusRequest(
     alloc: Allocator,
     target: apprt.ipc.AutomationTarget,
+    deadline_ms: u64,
 ) ![]u8 {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
     try appendU32(&encoded, alloc, wire_version);
     try encoded.append(alloc, @intFromEnum(RequestKind.focus));
+    try appendU64(&encoded, alloc, deadline_ms);
     try appendAutomationTarget(&encoded, alloc, target);
     return try encoded.toOwnedSlice(alloc);
 }
@@ -299,6 +322,7 @@ pub fn encodeSendTextRequest(
     alloc: Allocator,
     target: apprt.ipc.AutomationTarget,
     text: []const u8,
+    deadline_ms: u64,
 ) ![]u8 {
     if (text.len == 0 or text.len > max_action_text_len or
         !std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null)
@@ -310,6 +334,7 @@ pub fn encodeSendTextRequest(
     errdefer encoded.deinit(alloc);
     try appendU32(&encoded, alloc, wire_version);
     try encoded.append(alloc, @intFromEnum(RequestKind.send_text));
+    try appendU64(&encoded, alloc, deadline_ms);
     try appendAutomationTarget(&encoded, alloc, target);
     try appendU32(&encoded, alloc, @intCast(text.len));
     try encoded.appendSlice(alloc, text);
@@ -364,20 +389,26 @@ pub fn decodeNewWindowPayload(
     return argv;
 }
 
+pub fn decodeListWindowsDeadline(pipe: windows.HANDLE) !u64 {
+    var encoded: [8]u8 = undefined;
+    try readExactUntil(pipe, &encoded, deadline());
+    return readU64(&encoded);
+}
+
 pub fn decodePerformActionPayload(
     alloc: Allocator,
     pipe: windows.HANDLE,
 ) !PerformActionPayload {
     const deadline_ms = deadline();
-    var header: [13]u8 = undefined;
+    var header: [21]u8 = undefined;
     try readExactUntil(pipe, &header, deadline_ms);
 
-    const target: apprt.ipc.AutomationActionTarget = switch (header[0]) {
+    const target: apprt.ipc.AutomationActionTarget = switch (header[8]) {
         0 => .focused,
-        1 => .{ .surface_id = readU64(header[1..9]) },
+        1 => .{ .surface_id = readU64(header[9..17]) },
         else => return error.InvalidIpcRequest,
     };
-    const len = readU32(header[9..13]);
+    const len = readU32(header[17..21]);
     if (len == 0 or len > max_action_text_len) {
         return error.InvalidAutomationAction;
     }
@@ -386,6 +417,7 @@ pub fn decodePerformActionPayload(
     errdefer alloc.free(action_text);
     try readExactUntil(pipe, action_text, deadline_ms);
     return .{
+        .deadline_ms = readU64(header[0..8]),
         .target = target,
         .action_text = action_text,
     };
@@ -394,12 +426,12 @@ pub fn decodePerformActionPayload(
 pub fn decodeLaunchLayoutPayload(
     alloc: Allocator,
     pipe: windows.HANDLE,
-) ![]u8 {
+) !struct { deadline_ms: u64, name: []u8 } {
     const deadline_ms = deadline();
-    var len_buf: [4]u8 = undefined;
-    try readExactUntil(pipe, &len_buf, deadline_ms);
+    var header: [12]u8 = undefined;
+    try readExactUntil(pipe, &header, deadline_ms);
 
-    const len = readU32(&len_buf);
+    const len = readU32(header[8..12]);
     if (len == 0 or len > max_layout_name_len) {
         return error.InvalidAutomationAction;
     }
@@ -408,7 +440,7 @@ pub fn decodeLaunchLayoutPayload(
     errdefer alloc.free(name);
     try readExactUntil(pipe, name, deadline_ms);
     try validateLaunchLayoutName(name);
-    return name;
+    return .{ .deadline_ms = readU64(header[0..8]), .name = name };
 }
 
 fn validateLaunchLayoutName(name: []const u8) !void {
@@ -422,20 +454,24 @@ fn validateLaunchLayoutName(name: []const u8) !void {
 
 pub fn decodeNewTabPayload(alloc: Allocator, pipe: windows.HANDLE) !NewTabPayload {
     const deadline_ms = deadline();
-    var encoded: [9]u8 = undefined;
+    var encoded: [17]u8 = undefined;
     try readExactUntil(pipe, &encoded, deadline_ms);
-    const target = try decodeAutomationTarget(&encoded);
+    const target = try decodeAutomationTarget(encoded[8..17]);
     try validateLaunchTarget(target, true);
-    return .{ .target = target, .working_directory = try decodeWorkingDirectory(alloc, pipe, deadline_ms) };
+    return .{
+        .deadline_ms = readU64(encoded[0..8]),
+        .target = target,
+        .working_directory = try decodeWorkingDirectory(alloc, pipe, deadline_ms),
+    };
 }
 
 pub fn decodeNewSplitPayload(alloc: Allocator, pipe: windows.HANDLE) !NewSplitPayload {
     const deadline_ms = deadline();
-    var encoded: [10]u8 = undefined;
+    var encoded: [18]u8 = undefined;
     try readExactUntil(pipe, &encoded, deadline_ms);
-    const target = try decodeAutomationTarget(encoded[0..9]);
+    const target = try decodeAutomationTarget(encoded[8..17]);
     try validateLaunchTarget(target, false);
-    const direction: apprt.ipc.AutomationSplitDirection = switch (encoded[9]) {
+    const direction: apprt.ipc.AutomationSplitDirection = switch (encoded[17]) {
         1 => .left,
         2 => .right,
         3 => .up,
@@ -443,13 +479,21 @@ pub fn decodeNewSplitPayload(alloc: Allocator, pipe: windows.HANDLE) !NewSplitPa
         else => return error.InvalidAutomationDirection,
     };
     const cwd = try decodeWorkingDirectory(alloc, pipe, deadline_ms);
-    return .{ .target = target, .direction = direction, .working_directory = cwd };
+    return .{
+        .deadline_ms = readU64(encoded[0..8]),
+        .target = target,
+        .direction = direction,
+        .working_directory = cwd,
+    };
 }
 
-pub fn decodeFocusPayload(pipe: windows.HANDLE) !apprt.ipc.AutomationTarget {
-    var encoded: [9]u8 = undefined;
+pub fn decodeFocusPayload(pipe: windows.HANDLE) !FocusPayload {
+    var encoded: [17]u8 = undefined;
     try readExactUntil(pipe, &encoded, deadline());
-    return try decodeAutomationTarget(&encoded);
+    return .{
+        .deadline_ms = readU64(encoded[0..8]),
+        .target = try decodeAutomationTarget(encoded[8..17]),
+    };
 }
 
 pub fn decodeSendTextPayload(
@@ -457,10 +501,10 @@ pub fn decodeSendTextPayload(
     pipe: windows.HANDLE,
 ) !SendTextPayload {
     const deadline_ms = deadline();
-    var header: [13]u8 = undefined;
+    var header: [21]u8 = undefined;
     try readExactUntil(pipe, &header, deadline_ms);
-    const target = try decodeAutomationTarget(header[0..9]);
-    const len = readU32(header[9..13]);
+    const target = try decodeAutomationTarget(header[8..17]);
+    const len = readU32(header[17..21]);
     if (len == 0 or len > max_action_text_len) return error.InvalidAutomationText;
 
     const text = try alloc.alloc(u8, len);
@@ -469,7 +513,11 @@ pub fn decodeSendTextPayload(
     if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) {
         return error.InvalidAutomationText;
     }
-    return .{ .target = target, .text = text };
+    return .{
+        .deadline_ms = readU64(header[0..8]),
+        .target = target,
+        .text = text,
+    };
 }
 
 pub fn writeAck(pipe: windows.HANDLE, success: bool) !void {
@@ -680,6 +728,9 @@ fn writeAutomationSizedPayload(
 ) !void {
     try file.setEndPos(0);
     try file.seekTo(0);
+    var deadline_buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
+    try file.writeAll(&deadline_buf);
     try file.writeAll(&target);
     try file.writeAll(extra);
     var len_buf: [4]u8 = undefined;
@@ -688,6 +739,8 @@ fn writeAutomationSizedPayload(
     try file.writeAll(body);
     try file.seekTo(0);
 }
+
+const test_deadline_ms: u64 = 0x0102030405060708;
 
 fn writeAutomationBytes(file: *std.fs.File, bytes: []const u8) !void {
     try file.setEndPos(0);
@@ -705,9 +758,15 @@ test "win32 automation numeric pins" {
     for (acks, 0..) |ack, value| try std.testing.expectEqual(@as(u8, @intCast(value)), ack);
     for ([_]apprt.ipc.AutomationSplitDirection{ .left, .right, .up, .down }, 1..) |direction, value| {
         try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(direction));
-        const request = try encodeNewSplitRequest(std.testing.allocator, .focused, direction, null);
+        const request = try encodeNewSplitRequest(
+            std.testing.allocator,
+            .focused,
+            direction,
+            null,
+            test_deadline_ms,
+        );
         defer std.testing.allocator.free(request);
-        try std.testing.expectEqual(@as(u8, @intCast(value)), request[14]);
+        try std.testing.expectEqual(@as(u8, @intCast(value)), request[22]);
     }
 }
 
@@ -719,40 +778,61 @@ test "win32 automation request and ack round trips" {
     defer file.close();
 
     for ([_]apprt.ipc.AutomationTarget{ .{ .surface_id = 42 }, .{ .window_id = 17 } }) |target| {
-        const request = try encodeFocusRequest(std.testing.allocator, target);
+        const request = try encodeFocusRequest(std.testing.allocator, target, test_deadline_ms);
         defer std.testing.allocator.free(request);
         try writeAutomationBytes(&file, request);
         try std.testing.expectEqual(RequestKind.focus, try decodeRequestKind(file.handle));
-        try std.testing.expectEqual(target, try decodeFocusPayload(file.handle));
+        const payload = try decodeFocusPayload(file.handle);
+        try std.testing.expectEqual(test_deadline_ms, payload.deadline_ms);
+        try std.testing.expectEqual(target, payload.target);
     }
 
     const text = "printable £ ✓ ; | $(allowed) https://example.com mixed";
-    const send = try encodeSendTextRequest(std.testing.allocator, .{ .surface_id = 0x1234 }, text);
+    const send = try encodeSendTextRequest(
+        std.testing.allocator,
+        .{ .surface_id = 0x1234 },
+        text,
+        test_deadline_ms,
+    );
     defer std.testing.allocator.free(send);
     try writeAutomationBytes(&file, send);
     try std.testing.expectEqual(RequestKind.send_text, try decodeRequestKind(file.handle));
     var sent = try decodeSendTextPayload(std.testing.allocator, file.handle);
     defer sent.deinit(std.testing.allocator);
+    try std.testing.expectEqual(test_deadline_ms, sent.deadline_ms);
     try std.testing.expectEqualStrings(text, sent.text);
 
     const cwd = try std.testing.allocator.alloc(u8, max_new_window_arg_len);
     defer std.testing.allocator.free(cwd);
     @memset(cwd, 'x');
-    const tab = try encodeNewTabRequest(std.testing.allocator, .{ .window_id = std.math.maxInt(u32) }, cwd);
+    const tab = try encodeNewTabRequest(
+        std.testing.allocator,
+        .{ .window_id = std.math.maxInt(u32) },
+        cwd,
+        test_deadline_ms,
+    );
     defer std.testing.allocator.free(tab);
     try writeAutomationBytes(&file, tab);
     try std.testing.expectEqual(RequestKind.new_tab, try decodeRequestKind(file.handle));
     var tab_payload = try decodeNewTabPayload(std.testing.allocator, file.handle);
     defer tab_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(test_deadline_ms, tab_payload.deadline_ms);
     try std.testing.expectEqual(apprt.ipc.AutomationTarget{ .window_id = std.math.maxInt(u32) }, tab_payload.target);
     try std.testing.expectEqual(@as(usize, max_new_window_arg_len), tab_payload.working_directory.?.len);
 
-    const split = try encodeNewSplitRequest(std.testing.allocator, .{ .surface_id = 42 }, .down, "C:\\x");
+    const split = try encodeNewSplitRequest(
+        std.testing.allocator,
+        .{ .surface_id = 42 },
+        .down,
+        "C:\\x",
+        test_deadline_ms,
+    );
     defer std.testing.allocator.free(split);
     try writeAutomationBytes(&file, split);
     try std.testing.expectEqual(RequestKind.new_split, try decodeRequestKind(file.handle));
     var split_payload = try decodeNewSplitPayload(std.testing.allocator, file.handle);
     defer split_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(test_deadline_ms, split_payload.deadline_ms);
     try std.testing.expectEqual(apprt.ipc.AutomationTarget{ .surface_id = 42 }, split_payload.target);
     try std.testing.expectEqual(apprt.ipc.AutomationSplitDirection.down, split_payload.direction);
     try std.testing.expectEqualStrings("C:\\x", split_payload.working_directory.?);
@@ -777,21 +857,21 @@ test "win32 automation malformed codecs free allocations" {
     for ([_][9]u8{ automationTargetBytes(0, 1), automationTargetBytes(1, 0), automationTargetBytes(2, 0), automationTargetBytes(2, @as(u64, std.math.maxInt(u32)) + 1), automationTargetBytes(3, 1) }) |encoded| {
         try std.testing.expectError(error.InvalidAutomationTarget, decodeAutomationTarget(&encoded));
     }
-    try std.testing.expectError(error.InvalidAutomationTarget, encodeFocusRequest(alloc, .{ .surface_id = 0 }));
-    try std.testing.expectError(error.InvalidAutomationTarget, encodeFocusRequest(alloc, .{ .window_id = 0 }));
-    try std.testing.expectError(error.InvalidAutomationTarget, encodeNewTabRequest(alloc, .{ .surface_id = 1 }, null));
-    try std.testing.expectError(error.InvalidAutomationTarget, encodeNewSplitRequest(alloc, .{ .window_id = 1 }, .right, null));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeFocusRequest(alloc, .{ .surface_id = 0 }, test_deadline_ms));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeFocusRequest(alloc, .{ .window_id = 0 }, test_deadline_ms));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeNewTabRequest(alloc, .{ .surface_id = 1 }, null, test_deadline_ms));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeNewSplitRequest(alloc, .{ .window_id = 1 }, .right, null, test_deadline_ms));
     for ([_][]const u8{ "", &.{0xFF}, "x\x00y" }) |value| {
-        try std.testing.expectError(error.InvalidAutomationText, encodeSendTextRequest(alloc, .{ .surface_id = 1 }, value));
-        try std.testing.expectError(error.InvalidAutomationWorkingDirectory, encodeNewTabRequest(alloc, .focused, value));
+        try std.testing.expectError(error.InvalidAutomationText, encodeSendTextRequest(alloc, .{ .surface_id = 1 }, value, test_deadline_ms));
+        try std.testing.expectError(error.InvalidAutomationWorkingDirectory, encodeNewTabRequest(alloc, .focused, value, test_deadline_ms));
     }
     const oversized = try alloc.alloc(u8, max_new_window_arg_len + 1);
     defer alloc.free(oversized);
     @memset(oversized, 'x');
-    try std.testing.expectError(error.InvalidAutomationText, encodeSendTextRequest(alloc, .{ .surface_id = 1 }, oversized[0 .. max_action_text_len + 1]));
-    try std.testing.expectError(error.InvalidAutomationWorkingDirectory, encodeNewTabRequest(alloc, .focused, oversized));
+    try std.testing.expectError(error.InvalidAutomationText, encodeSendTextRequest(alloc, .{ .surface_id = 1 }, oversized[0 .. max_action_text_len + 1], test_deadline_ms));
+    try std.testing.expectError(error.InvalidAutomationWorkingDirectory, encodeNewTabRequest(alloc, .focused, oversized, test_deadline_ms));
 
-    const max_send = try encodeSendTextRequest(alloc, .{ .surface_id = 42 }, oversized[0..max_action_text_len]);
+    const max_send = try encodeSendTextRequest(alloc, .{ .surface_id = 42 }, oversized[0..max_action_text_len], test_deadline_ms);
     defer alloc.free(max_send);
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
@@ -908,7 +988,11 @@ test "win32 IPC request kind values remain stable" {
 test "win32 launch-layout IPC encode decode round trip" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try encodeLaunchLayoutRequest(std.testing.allocator, "Project Alpha");
+    const request = try encodeLaunchLayoutRequest(
+        std.testing.allocator,
+        "Project Alpha",
+        test_deadline_ms,
+    );
     defer std.testing.allocator.free(request);
 
     var tmp = std.testing.tmpDir(.{});
@@ -923,8 +1007,9 @@ test "win32 launch-layout IPC encode decode round trip" {
 
     try std.testing.expectEqual(RequestKind.launch_layout, try decodeRequestKind(file.handle));
     const decoded = try decodeLaunchLayoutPayload(std.testing.allocator, file.handle);
-    defer std.testing.allocator.free(decoded);
-    try std.testing.expectEqualStrings("Project Alpha", decoded);
+    defer std.testing.allocator.free(decoded.name);
+    try std.testing.expectEqual(test_deadline_ms, decoded.deadline_ms);
+    try std.testing.expectEqualStrings("Project Alpha", decoded.name);
 }
 
 test "win32 launch-layout IPC encoder rejects invalid names" {
@@ -945,7 +1030,7 @@ test "win32 launch-layout IPC encoder rejects invalid names" {
     };
     for (invalid_names) |name| try std.testing.expectError(
         error.InvalidAutomationAction,
-        encodeLaunchLayoutRequest(std.testing.allocator, name),
+        encodeLaunchLayoutRequest(std.testing.allocator, name, test_deadline_ms),
     );
 }
 
@@ -982,6 +1067,9 @@ test "win32 launch-layout IPC decoder rejects invalid names without leaks" {
         });
         defer file.close();
 
+        var deadline_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
+        try file.writeAll(&deadline_buf);
         var len_buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &len_buf, @intCast(name.len), .little);
         try file.writeAll(&len_buf);
@@ -1005,6 +1093,9 @@ test "win32 launch-layout IPC decoder cleans up on partial EOF" {
     });
     defer file.close();
 
+    var deadline_buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &deadline_buf, test_deadline_ms, .little);
+    try file.writeAll(&deadline_buf);
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, 4, .little);
     try file.writeAll(&len_buf);
@@ -1016,16 +1107,16 @@ test "win32 launch-layout IPC decoder cleans up on partial EOF" {
     );
 }
 
-test "win32 encodeListWindowsRequest preserves legacy zero-argc trailer" {
+test "win32 encodeListWindowsRequest carries the response deadline" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try encodeListWindowsRequest(std.testing.allocator);
+    const request = try encodeListWindowsRequest(std.testing.allocator, test_deadline_ms);
     defer std.testing.allocator.free(request);
 
-    try std.testing.expectEqual(@as(usize, 9), request.len);
+    try std.testing.expectEqual(@as(usize, 13), request.len);
     try std.testing.expectEqual(wire_version, readU32(request[0..4]));
     try std.testing.expectEqual(@intFromEnum(RequestKind.list_windows), request[4]);
-    try std.testing.expectEqual(@as(u32, 0), readU32(request[5..9]));
+    try std.testing.expectEqual(test_deadline_ms, readU64(request[5..13]));
 }
 
 test "win32 decodeNewWindowPayload rejects oversized argument length before allocation" {

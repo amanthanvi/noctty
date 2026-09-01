@@ -932,13 +932,27 @@ pub const Message = union(enum) {
             cancelled,
         };
 
-        state: std.atomic.Value(u8) = .init(@intFromEnum(State.pending)),
+        state: std.atomic.Value(u8),
+        deadline_ms: u64,
+        now_ms: *const fn () u64,
+
+        pub fn init(deadline_ms: u64, now_ms: *const fn () u64) @This() {
+            return .{
+                .state = .init(@intFromEnum(State.pending)),
+                .deadline_ms = deadline_ms,
+                .now_ms = now_ms,
+            };
+        }
 
         pub fn load(self: *const @This()) State {
             return @enumFromInt(self.state.load(.acquire));
         }
 
         pub fn claim(self: *@This()) bool {
+            if (self.now_ms() >= self.deadline_ms) {
+                _ = self.cancel();
+                return false;
+            }
             return self.state.cmpxchgStrong(
                 @intFromEnum(State.pending),
                 @intFromEnum(State.claimed),
@@ -965,13 +979,20 @@ pub const Message = union(enum) {
     pub const AutomationWindowListRequest = struct {
         alloc: Allocator,
         refs: std.atomic.Value(u32) = .init(1),
-        lifecycle: AutomationRequestLifecycle = .{},
+        lifecycle: AutomationRequestLifecycle,
         result: ?[]u8 = null,
         err: ?anyerror = null,
 
-        pub fn create(alloc: Allocator) !*@This() {
+        pub fn create(
+            alloc: Allocator,
+            deadline_ms: u64,
+            now_ms: *const fn () u64,
+        ) !*@This() {
             const request = try alloc.create(@This());
-            request.* = .{ .alloc = alloc };
+            request.* = .{
+                .alloc = alloc,
+                .lifecycle = .init(deadline_ms, now_ms),
+            };
             return request;
         }
 
@@ -997,13 +1018,15 @@ pub const Message = union(enum) {
         refs: std.atomic.Value(u32) = .init(1),
         target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
-        lifecycle: AutomationRequestLifecycle = .{},
+        lifecycle: AutomationRequestLifecycle,
         err: ?anyerror = null,
 
         pub fn create(
             alloc: Allocator,
             target: apprt.ipc.AutomationActionTarget,
             action_text: []const u8,
+            deadline_ms: u64,
+            now_ms: *const fn () u64,
         ) !*@This() {
             const request = try alloc.create(@This());
             errdefer alloc.destroy(request);
@@ -1011,6 +1034,7 @@ pub const Message = union(enum) {
                 .alloc = alloc,
                 .target = target,
                 .action_text = try alloc.dupe(u8, action_text),
+                .lifecycle = .init(deadline_ms, now_ms),
             };
             return request;
         }
@@ -1030,10 +1054,15 @@ pub const Message = union(enum) {
         alloc: Allocator,
         refs: std.atomic.Value(u32) = .init(1),
         command: apprt.ipc.AutomationCommand,
-        lifecycle: AutomationRequestLifecycle = .{},
+        lifecycle: AutomationRequestLifecycle,
         err: ?anyerror = null,
 
-        pub fn create(alloc: Allocator, command: apprt.ipc.AutomationCommand) !*@This() {
+        pub fn create(
+            alloc: Allocator,
+            command: apprt.ipc.AutomationCommand,
+            deadline_ms: u64,
+            now_ms: *const fn () u64,
+        ) !*@This() {
             const request = try alloc.create(@This());
             errdefer alloc.destroy(request);
             const owned: apprt.ipc.AutomationCommand = switch (command) {
@@ -1052,7 +1081,11 @@ pub const Message = union(enum) {
                     .text = try alloc.dupe(u8, value.text),
                 } },
             };
-            request.* = .{ .alloc = alloc, .command = owned };
+            request.* = .{
+                .alloc = alloc,
+                .command = owned,
+                .lifecycle = .init(deadline_ms, now_ms),
+            };
             return request;
         }
 
@@ -1093,12 +1126,18 @@ test "queued automation messages release consumer ownership during teardown" {
         std.testing.allocator,
         .focused,
         "new_tab",
+        std.math.maxInt(u64),
+        automationTestNow,
     );
     action_request.retain();
     action_request.release();
     (Message{ .automation_action = action_request }).deinit(std.testing.allocator);
 
-    const list_request = try Message.AutomationWindowListRequest.create(std.testing.allocator);
+    const list_request = try Message.AutomationWindowListRequest.create(
+        std.testing.allocator,
+        std.math.maxInt(u64),
+        automationTestNow,
+    );
     list_request.retain();
     list_request.release();
     (Message{ .automation_window_list = list_request }).deinit(std.testing.allocator);
@@ -1106,6 +1145,8 @@ test "queued automation messages release consumer ownership during teardown" {
     const focus_request = try Message.AutomationCommandRequest.create(
         std.testing.allocator,
         .{ .focus = .{ .surface_id = 42 } },
+        std.math.maxInt(u64),
+        automationTestNow,
     );
     focus_request.retain();
     focus_request.release();
@@ -1114,14 +1155,22 @@ test "queued automation messages release consumer ownership during teardown" {
     const text_request = try Message.AutomationCommandRequest.create(
         std.testing.allocator,
         .{ .send_text = .{ .target = .{ .surface_id = 42 }, .text = "hello" } },
+        std.math.maxInt(u64),
+        automationTestNow,
     );
     text_request.retain();
     text_request.release();
     (Message{ .automation_command = text_request }).deinit(std.testing.allocator);
 }
 
+var automation_test_now_ms: u64 = 0;
+
+fn automationTestNow() u64 {
+    return automation_test_now_ms;
+}
+
 test "automation request cancellation prevents late consumer execution" {
-    var lifecycle: Message.AutomationRequestLifecycle = .{};
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
     try std.testing.expect(lifecycle.cancel());
     try std.testing.expect(!lifecycle.claim());
     try std.testing.expectEqual(
@@ -1131,7 +1180,7 @@ test "automation request cancellation prevents late consumer execution" {
 }
 
 test "claimed automation request cannot report an ambiguous timeout" {
-    var lifecycle: Message.AutomationRequestLifecycle = .{};
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
     try std.testing.expect(lifecycle.claim());
     try std.testing.expect(!lifecycle.cancel());
     try std.testing.expectEqual(
@@ -1141,6 +1190,17 @@ test "claimed automation request cannot report an ambiguous timeout" {
     lifecycle.complete();
     try std.testing.expectEqual(
         Message.AutomationRequestLifecycle.State.completed,
+        lifecycle.load(),
+    );
+}
+
+test "expired automation request cannot be claimed" {
+    automation_test_now_ms = 100;
+    defer automation_test_now_ms = 0;
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
+    try std.testing.expect(!lifecycle.claim());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.cancelled,
         lifecycle.load(),
     );
 }
