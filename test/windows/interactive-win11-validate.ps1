@@ -232,6 +232,7 @@ Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -Ti
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-escape') -ScenarioSlug 'control-escape'
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-ime-candidate.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-new-tab.ps1' -TimeoutSeconds 20
+Invoke-HarnessWithPassSentinel -ScriptName 'cli-automation.ps1' -TimeoutSeconds 35
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-resize.ps1' -TimeoutSeconds 15
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-undo.ps1' -TimeoutSeconds 35
 

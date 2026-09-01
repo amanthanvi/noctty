@@ -69,6 +69,18 @@ pub const Action = enum {
     /// Restore the default-terminal selection saved by noctty.
     @"unregister-default-terminal",
 
+    // Focus a specific window or surface in the running noctty instance.
+    focus,
+
+    // Send policy-bounded printable text to a surface in the running instance.
+    @"send-text",
+
+    // Create a tab in a running noctty instance.
+    @"new-tab",
+
+    // Create a split in a running noctty instance.
+    @"new-split",
+
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
         // we are done looking for commands. This special case enables
@@ -99,6 +111,9 @@ pub const Action = enum {
     /// path from the root src/ directory.
     pub fn file(comptime self: Action) []const u8 {
         comptime {
+            // This conversion is instantiated once per action by helpgen.
+            // Keep enough quota as the Windows-only action set grows.
+            @setEvalBranchQuota(2_000);
             const filename = filename: {
                 const tag = @tagName(self);
                 var filename: [tag.len]u8 = undefined;

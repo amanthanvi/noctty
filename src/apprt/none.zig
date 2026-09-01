@@ -12,6 +12,7 @@ pub const App = struct {
         _: apprt.ipc.Target,
         comptime action: apprt.ipc.Action.Key,
         _: apprt.ipc.Action.Value(action),
+        _: u64,
     ) !bool {
         return false;
     }
@@ -19,6 +20,7 @@ pub const App = struct {
     pub fn queryAutomationWindowList(
         _: Allocator,
         _: apprt.ipc.Target,
+        _: u64,
     ) !?[]u8 {
         return null;
     }
@@ -28,9 +30,52 @@ pub const App = struct {
         _: apprt.ipc.Target,
         _: apprt.ipc.AutomationActionTarget,
         _: []const u8,
+        _: u64,
     ) !bool {
         return false;
     }
+
+    pub fn focusAutomationTarget(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationTarget,
+        _: u64,
+    ) !bool {
+        return false;
+    }
+
+    pub fn newAutomationTab(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationTarget,
+        _: ?[]const u8,
+        _: u64,
+    ) !bool {
+        return false;
+    }
+
+    pub fn newAutomationSplit(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationTarget,
+        _: apprt.ipc.AutomationSplitDirection,
+        _: ?[]const u8,
+        _: u64,
+    ) !bool {
+        return false;
+    }
+
+    pub fn sendAutomationText(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationTarget,
+        _: []const u8,
+        _: u64,
+    ) !bool {
+        return false;
+    }
+
+    pub fn performAutomationCommand(_: *App, _: apprt.ipc.AutomationCommand) !void {}
 
     pub fn buildAutomationWindowListJson(
         _: *App,

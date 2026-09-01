@@ -230,10 +230,9 @@ crash-report details, and diagnostic bundles are covered in
 ## 9. Automate it
 
 noctty has a local automation surface: `noctty +list-windows`
-reports windows, tabs, and panes as JSON, and
-`noctty +perform-action` invokes keybinding actions over IPC. The
-full surface, including the actions it blocks, is documented in
-[windows.md](windows.md#automation).
+reports versioned JSON state, and targeted verbs can create, split,
+focus, act on, and send control-free text to panes. The stable contract
+is documented in [automation.md](automation.md).
 
 ## 10. Uninstall
 
@@ -251,6 +250,8 @@ clean slate.
   caveats
 - [docs/windows.md](windows.md): the Windows behavior reference; paths,
   shells, updates, automation, and troubleshooting
+- [docs/automation.md](automation.md): CLI verbs, JSON schema, exit codes,
+  and local-channel policy
 - [docs/windows-capability-matrix.md](windows-capability-matrix.md):
   row-by-row mapping against upstream Ghostty docs
 - [HACKING.md](../HACKING.md): build, test, and runtime notes for

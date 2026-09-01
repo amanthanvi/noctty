@@ -506,7 +506,7 @@ inferred. From a medium-integrity process, `CreateFileW` on the elevated
 instance's pipe fails with `win32=5` for both
 `GENERIC_READ | GENERIC_WRITE` and `GENERIC_WRITE` alone — the refusal
 happens at `CreateFileW`, not as a timeout or a missing acknowledgement.
-At the command line `+perform-action` and `+list-windows` exit 1 with
+At the command line `+perform-action` and `+list-windows` exit 2 with
 "No matching noctty instance is listening", and `+new-window` exits 0
 having quietly started its **own** local instance rather than driving the
 elevated one. From an elevated shell `+perform-action new_tab` still
@@ -576,16 +576,21 @@ List windows, tabs, and panes:
 noctty +list-windows
 ```
 
-The JSON schema is `noctty.windows.v2`. It exposes local window, tab,
-and pane IDs, focus/active state, and structural counts only. It never
-includes terminal text, shell input, working directories, or file paths.
+The JSON schema is `noctty.windows.v3`. It exposes instance, window, tab,
+and pane metadata, including nullable pane titles and working directories. It
+never includes terminal grid text, scrollback, selection, clipboard contents,
+pending shell input, or pane process IDs.
 
-Invoke a keybinding action on the focused surface, or on a specific pane
-from `+list-windows`:
+The CLI can invoke a keybinding action, create tabs or splits, focus a target,
+and deliver policy-checked printable text. For example:
 
 ```powershell
 noctty +perform-action new_tab
 noctty +perform-action --surface-id=<surface_id> toggle_fullscreen
+noctty +new-tab --window-id=<window_id>
+noctty +new-split --surface-id=<surface_id> --direction=right
+noctty +focus --surface-id=<surface_id>
+noctty +send-text --surface-id=<surface_id> -- "hello"
 ```
 
 Actions use the same names as `keybind` values. `--surface-id` is only
@@ -623,7 +628,7 @@ release — is refused by default rather than allowed by omission. The
 whole request is refused rather than the key being dropped.
 
 `--working-directory` is allowed as `home`, `inherit`, `~/...`, or a
-local drive-letter absolute path. UNC *syntax* (`\\host\share`) is
+drive-letter absolute path. UNC *syntax* (`\\host\share`) is
 refused so the running instance is not made to authenticate to a remote
 SMB host. Note this is a check on syntax only: a mapped or `subst`
 drive, or a junction under a local drive, still resolves off-box.
@@ -640,6 +645,11 @@ request. Saving is the one automation action that writes a file: it is
 limited to a validated layout name under `%LOCALAPPDATA%\noctty\layouts\`,
 writes atomically, and **replaces an existing layout of the same name without
 prompting**. It only accepts the focused target, so `--surface-id` is rejected.
+
+noctty exposes a local, current-user CLI surface for versioned JSON state
+and policy-bounded window, tab, split, focus, action, and text operations.
+The stable verb, schema, exit-code, trust, and privacy contract is in
+[automation.md](automation.md).
 
 ## Crash reports and diagnostics
 

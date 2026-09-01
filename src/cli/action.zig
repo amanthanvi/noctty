@@ -37,6 +37,11 @@ pub fn detectIter(
     var fallback: ?E = null;
     var pending: ?E = null;
     while (iter.next()) |arg| {
+        // Everything after the conventional delimiter belongs to the
+        // selected action or child command and must not be reinterpreted as
+        // another top-level action.
+        if (std.mem.eql(u8, arg, "--")) break;
+
         // Allow handling of special cases.
         if (@hasDecl(E, "detectSpecialCase")) special: {
             const special = E.detectSpecialCase(arg) orelse break :special;
@@ -125,6 +130,21 @@ test "detect multiple actions" {
         DetectError.MultipleActions,
         detectIter(Enum, &iter),
     );
+}
+
+test "detect stops at literal argument delimiter" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Enum = enum { foo, bar, version };
+
+    for ([_][]const u8{
+        "+foo -- +bar",
+        "+foo -- --version",
+    }) |args_text| {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(alloc, args_text);
+        defer iter.deinit();
+        try testing.expectEqual(Enum.foo, (try detectIter(Enum, &iter)).?);
+    }
 }
 
 test "detect no match" {

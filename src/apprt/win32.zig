@@ -649,6 +649,10 @@ fn applyProfileLaunchConfig(
     try applyProfileCommandConfig(config, profile);
     if (profile.kind != .ssh) return;
 
+    try applySshLaunchHardening(config);
+}
+
+fn applySshLaunchHardening(config: *configpkg.Config) !void {
     // Shell integration injection rewrites the two-element ssh argv into a
     // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
     // it anyway: the integration scripts run locally.
@@ -717,6 +721,7 @@ fn shouldTreatWslSplitPwdAsStartupFallback(
 }
 
 fn applySplitWorkingDirectoryFromSource(
+    app: *App,
     config: *configpkg.Config,
     source: *Surface,
     startup_cwd: ?[]const u8,
@@ -724,7 +729,10 @@ fn applySplitWorkingDirectoryFromSource(
     if (!config.@"split-inherit-working-directory") return false;
 
     const alloc = config._arena.?.allocator();
-    const live_pwd = source.core().pwd(alloc) catch |err| blk: {
+    const live_pwd = (if (app.test_automation_pwd) |query|
+        query(alloc, source)
+    else
+        source.core().pwd(alloc)) catch |err| blk: {
         log.warn("win32 split cwd inheritance could not query live cwd err={}", .{err});
         break :blk null;
     };
@@ -756,6 +764,14 @@ fn applySplitWorkingDirectoryFromSource(
 
 fn shouldInheritSplitWorkingDirectory(source_launched_ssh: bool) bool {
     return !source_launched_ssh;
+}
+
+fn shouldResetNewTabWorkingDirectory(
+    explicit_window_target: bool,
+    inherit_launch_config: bool,
+    source_launched_ssh: bool,
+) bool {
+    return explicit_window_target or (inherit_launch_config and source_launched_ssh);
 }
 
 fn defaultIpcNamespace() []const u8 {
@@ -1031,6 +1047,10 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
                 );
                 return error.PipeUnreachable;
             }
+            setIpcClientNonblocking(handle) catch |err| {
+                _ = windows.CloseHandle(handle);
+                return err;
+            };
             return handle;
         }
 
@@ -1059,10 +1079,18 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
     }
 }
 
+fn setIpcClientNonblocking(pipe: windows.HANDLE) !void {
+    var mode: u32 = c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait;
+    if (sys.SetNamedPipeHandleState(pipe, &mode, null, null) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+}
+
 fn sendNewWindowIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
     arguments: ?[]const [:0]const u8,
+    response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -1084,12 +1112,13 @@ fn sendNewWindowIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAck(pipe);
+    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
 
 fn sendListWindowsIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    response_timeout_ms: u64,
 ) !?[]u8 {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
@@ -1099,14 +1128,17 @@ fn sendListWindowsIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try win32_ipc.encodeListWindowsRequest(alloc);
+    const request = try win32_ipc.encodeListWindowsRequest(
+        alloc,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
     return try win32_ipc.readDataResponseWithTimeout(
         alloc,
         pipe,
-        win32_ipc.automation_response_timeout_ms,
+        std.math.maxInt(u64),
     );
 }
 
@@ -1115,6 +1147,22 @@ fn sendPerformActionIpc(
     pipe_name: [:0]const u16,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodePerformActionRequest(
+        alloc,
+        target,
+        action_text,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendAutomationAckRequest(
+    pipe_name: [:0]const u16,
+    request: []u8,
+    response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
@@ -1123,12 +1171,94 @@ fn sendPerformActionIpc(
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
-
-    const request = try win32_ipc.encodePerformActionRequest(alloc, target, action_text);
-    defer alloc.free(request);
-
+    try win32_ipc.setAutomationRequestDeadline(
+        request,
+        automationRequestDeadline(response_timeout_ms),
+    );
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+    return win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
+}
+
+fn sendFocusIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeFocusRequest(
+        alloc,
+        target,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendNewTabIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    working_directory: ?[]const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeNewTabRequest(
+        alloc,
+        target,
+        working_directory,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendNewSplitIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    direction: apprt.ipc.AutomationSplitDirection,
+    working_directory: ?[]const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeNewSplitRequest(
+        alloc,
+        target,
+        direction,
+        working_directory,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendAutomationTextIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    value: []const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeSendTextRequest(
+        alloc,
+        target,
+        value,
+        0,
+    );
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn automationRequestDeadline(response_timeout_ms: u64) u64 {
+    return sys.GetTickCount64() +| response_timeout_ms;
+}
+
+fn automationTextAllowed(text: []const u8) bool {
+    if (text.len == 0 or text.len > win32_ipc.max_action_text_len) return false;
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp <= 0x1F or cp == 0x7F or (cp >= 0x80 and cp <= 0x9F)) return false;
+    }
+    return win32_paste_protection.inspect(text).severity != .control_chars;
 }
 
 /// Configuration keys a forwarded `new_window` argv is allowed to set.
@@ -1391,11 +1521,16 @@ fn sendLaunchLayoutIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
     name: []const u8,
+    response_timeout_ms: u64,
 ) !bool {
     // Validate before probing the pipe. The caller uses `false` as the cold
     // start fallback, so connecting first would let an invalid name spawn an
     // otherwise ordinary window when no instance is listening.
-    const request = try win32_ipc.encodeLaunchLayoutRequest(alloc, name);
+    const request = try win32_ipc.encodeLaunchLayoutRequest(
+        alloc,
+        name,
+        0,
+    );
     defer alloc.free(request);
 
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
@@ -1405,8 +1540,12 @@ fn sendLaunchLayoutIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
+    try win32_ipc.setAutomationRequestDeadline(
+        request,
+        automationRequestDeadline(response_timeout_ms),
+    );
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
+    return try win32_ipc.readAckWithTimeout(pipe, std.math.maxInt(u64));
 }
 
 fn trySendStartupLaunchLayoutIpc(
@@ -1415,7 +1554,12 @@ fn trySendStartupLaunchLayoutIpc(
     name: ?[]const u8,
 ) !?bool {
     const layout_name = name orelse return null;
-    return try sendLaunchLayoutIpc(alloc, pipe_name, layout_name);
+    return try sendLaunchLayoutIpc(
+        alloc,
+        pipe_name,
+        layout_name,
+        win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 const LaunchLayoutIpcArgument = union(enum) {
@@ -1455,6 +1599,45 @@ fn scanLaunchLayoutIpcArgument(
 ///
 /// This function does not log, so that it stays a pure predicate over argv
 /// and can be unit tested; every caller logs the rejection it handles.
+fn automationWorkingDirectoryValue(value: []const u8) []const u8 {
+    var result = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (result.len >= 2 and result[0] == '"' and result[result.len - 1] == '"') {
+        result = std.mem.trim(u8, result[1 .. result.len - 1], &std.ascii.whitespace);
+    }
+    return result;
+}
+
+/// Mirrors #185's `forwardedWorkingDirectoryAllowed` on the receiver.
+fn automationWorkingDirectoryAllowed(value: []const u8) bool {
+    const path = automationWorkingDirectoryValue(value);
+    if (std.mem.eql(u8, path, "home") or std.mem.eql(u8, path, "inherit") or
+        std.mem.eql(u8, path, "~")) return true;
+    if (path.len >= 2 and path[0] == '~' and (path[1] == '/' or path[1] == '\\')) return true;
+    return path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and
+        (path[2] == '/' or path[2] == '\\');
+}
+
+fn applyAutomationWorkingDirectory(config: *configpkg.Config, value: []const u8) !void {
+    if (!automationWorkingDirectoryAllowed(value)) return error.AutomationPolicyRefused;
+    const alloc = config._arena.?.allocator();
+    const path = automationWorkingDirectoryValue(value);
+    if (std.mem.eql(u8, path, "~")) {
+        config.@"working-directory" = .home;
+        return;
+    }
+    var working_directory: configpkg.WorkingDirectory = undefined;
+    if (path.len >= 2 and path[0] == '~' and path[1] == '\\') {
+        const normalized = try alloc.dupe(u8, path);
+        normalized[1] = '/';
+        working_directory = .{ .path = normalized };
+    } else {
+        working_directory = .home;
+        try working_directory.parseCLI(alloc, path);
+    }
+    try working_directory.finalize(alloc);
+    config.@"working-directory" = working_directory;
+}
+
 fn applyNewWindowArguments(
     alloc_gpa: Allocator,
     config: *configpkg.Config,
@@ -1875,16 +2058,60 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 new-window IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .list_windows => handleListWindowsIpcClient(app, pipe) catch |err| {
+        .list_windows, .list_windows_timed => handleListWindowsIpcClient(
+            app,
+            pipe,
+            kind == .list_windows_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation list IPC request err={}", .{err});
             try win32_ipc.writeDataResponse(pipe, false, "");
         },
-        .perform_action => handlePerformActionIpcClient(app, pipe) catch |err| {
+        .perform_action, .perform_action_timed => handlePerformActionIpcClient(
+            app,
+            pipe,
+            kind == .perform_action_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation action IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .launch_layout => handleLaunchLayoutIpcClient(app, pipe) catch |err| {
+        .launch_layout, .launch_layout_timed => handleLaunchLayoutIpcClient(
+            app,
+            pipe,
+            kind == .launch_layout_timed,
+        ) catch |err| {
             log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .new_tab, .new_tab_timed => handleNewTabIpcClient(
+            app,
+            pipe,
+            kind == .new_tab_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation new-tab IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .new_split, .new_split_timed => handleNewSplitIpcClient(
+            app,
+            pipe,
+            kind == .new_split_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation new-split IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .focus, .focus_timed => handleFocusIpcClient(
+            app,
+            pipe,
+            kind == .focus_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation focus IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .send_text, .send_text_timed => handleSendTextIpcClient(
+            app,
+            pipe,
+            kind == .send_text_timed,
+        ) catch |err| {
+            log.warn("failed to process win32 automation send-text IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
     }
@@ -1927,14 +2154,19 @@ fn newWindowIpcArgumentsAccepted(arguments: ?[]const [:0]const u8) bool {
     };
 }
 
-fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const json = try requestAutomationWindowListJson(app, app.core_app.alloc);
+fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const deadline_ms = try win32_ipc.decodeListWindowsDeadline(pipe, timed);
+    const json = try requestAutomationWindowListJson(
+        app,
+        app.core_app.alloc,
+        deadline_ms,
+    );
     defer app.core_app.alloc.free(json);
     try win32_ipc.writeDataResponse(pipe, true, json);
 }
 
-fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe, timed) catch |err| switch (err) {
         error.InvalidAutomationAction => {
             try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
             return;
@@ -1943,7 +2175,12 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     };
     defer app.core_app.alloc.free(payload.action_text);
 
-    requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
+    requestAutomationAction(
+        app,
+        payload.target,
+        payload.action_text,
+        payload.deadline_ms,
+    ) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -1957,23 +2194,28 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const name = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe) catch |err| {
+fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe, timed) catch |err| {
         log.warn("invalid win32 launch-layout IPC request err={}", .{err});
         try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
         return;
     };
-    defer app.core_app.alloc.free(name);
+    defer app.core_app.alloc.free(payload.name);
 
     // Name validation restricts this to an unambiguous action payload.
     const action_text = try std.fmt.allocPrint(
         app.core_app.alloc,
         "launch_layout:{s}",
-        .{name},
+        .{payload.name},
     );
     defer app.core_app.alloc.free(action_text);
 
-    requestAutomationAction(app, .focused, action_text) catch |err| {
+    requestAutomationAction(
+        app,
+        .focused,
+        action_text,
+        payload.deadline_ms,
+    ) catch |err| {
         const status: u8 = switch (err) {
             error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
             error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
@@ -1987,8 +2229,126 @@ fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
-    const request = try CoreApp.Message.AutomationWindowListRequest.create(alloc);
+fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodeFocusPayload(pipe, timed) catch |err| switch (err) {
+        error.InvalidAutomationTarget => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
+            return;
+        },
+        else => return err,
+    };
+    requestAutomationCommand(
+        app,
+        .{ .focus = payload.target },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeSendTextPayload(app.core_app.alloc, pipe, timed) catch |err| switch (err) {
+        error.InvalidAutomationText => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+            return;
+        },
+        error.InvalidAutomationTarget => {
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
+            return;
+        },
+        else => return err,
+    };
+    defer payload.deinit(app.core_app.alloc);
+    requestAutomationCommand(
+        app,
+        .{ .send_text = .{
+            .target = payload.target,
+            .text = payload.text,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn automationCommandAckStatus(err: anyerror) ?u8 {
+    return switch (err) {
+        error.InvalidAutomationTarget, error.InvalidAutomationDirection => win32_ipc.ack_invalid_automation_target,
+        error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
+        error.AutomationPolicyRefused, error.InvalidAutomationWorkingDirectory => win32_ipc.ack_automation_policy_refused,
+        else => null,
+    };
+}
+
+fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeNewTabPayload(app.core_app.alloc, pipe, timed) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    defer payload.deinit(app.core_app.alloc);
+    if (payload.working_directory) |cwd| if (!automationWorkingDirectoryAllowed(cwd)) {
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+        return;
+    };
+    requestAutomationCommand(
+        app,
+        .{ .new_tab = .{
+            .target = payload.target,
+            .working_directory = payload.working_directory,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeNewSplitPayload(app.core_app.alloc, pipe, timed) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    defer payload.deinit(app.core_app.alloc);
+    if (payload.working_directory) |cwd| if (!automationWorkingDirectoryAllowed(cwd)) {
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+        return;
+    };
+    requestAutomationCommand(
+        app,
+        .{ .new_split = .{
+            .target = payload.target,
+            .direction = payload.direction,
+            .working_directory = payload.working_directory,
+        } },
+        payload.deadline_ms,
+    ) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn requestAutomationWindowListJson(
+    app: *App,
+    alloc: Allocator,
+    client_deadline_ms: u64,
+) ![]u8 {
+    const request = try CoreApp.Message.AutomationWindowListRequest.create(
+        alloc,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
+    );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
@@ -2000,7 +2360,7 @@ fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
     return request.takeResult() orelse error.IPCFailed;
 }
@@ -2009,6 +2369,7 @@ fn requestAutomationAction(
     app: *App,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
+    client_deadline_ms: u64,
 ) !void {
     if (action_text.len == 0 or action_text.len > win32_ipc.max_action_text_len) {
         return error.InvalidAutomationAction;
@@ -2018,6 +2379,8 @@ fn requestAutomationAction(
         app.core_app.alloc,
         target,
         action_text,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
     );
     defer request.release();
     request.retain(); // Mailbox-consumer ownership.
@@ -2030,17 +2393,69 @@ fn requestAutomationAction(
         return error.IPCFailed;
     }
 
-    try waitForAutomationCompletion(app, &request.completed);
+    try waitForAutomationCompletion(app, &request.lifecycle);
     if (request.err) |err| return err;
 }
 
-fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
-    const deadline_ms = sys.GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
-    while (!completed.load(.acquire)) {
-        if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
-        if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+fn requestAutomationCommand(
+    app: *App,
+    command: apprt.ipc.AutomationCommand,
+    client_deadline_ms: u64,
+) !void {
+    const request = try CoreApp.Message.AutomationCommandRequest.create(
+        app.core_app.alloc,
+        command,
+        serverAutomationDeadline(client_deadline_ms),
+        automationNowMs,
+    );
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
+    const mailbox: CoreApp.Mailbox = .{
+        .rt_app = app,
+        .mailbox = &app.core_app.mailbox,
+    };
+    if (mailbox.push(.{ .automation_command = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
+        return error.IPCFailed;
+    }
+
+    try waitForAutomationCompletion(app, &request.lifecycle);
+    if (request.err) |err| return err;
+}
+
+fn waitForAutomationCompletion(
+    app: *const App,
+    lifecycle: *CoreApp.Message.AutomationRequestLifecycle,
+) !void {
+    while (true) {
+        switch (lifecycle.load()) {
+            .completed => return,
+            .cancelled => return error.IPCFailed,
+            .pending => {
+                if (app.ipc_stop_requested.load(.acquire)) {
+                    if (lifecycle.cancel()) return error.IPCFailed;
+                } else if (automationNowMs() > lifecycle.deadline_ms) {
+                    if (lifecycle.cancel()) return error.IpcTimeout;
+                }
+            },
+            // Once the app thread has claimed a mutating request, the client
+            // waits for its actual outcome instead of reporting a timeout that
+            // could encourage a duplicate retry.
+            .claimed => {},
+        }
         std.Thread.sleep(std.time.ns_per_ms);
     }
+}
+
+fn automationNowMs() u64 {
+    return sys.GetTickCount64();
+}
+
+fn serverAutomationDeadline(client_deadline_ms: u64) u64 {
+    return @min(
+        client_deadline_ms,
+        automationNowMs() +| win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -2366,6 +2781,16 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) anyerror!*Surface = null,
+    /// Test-only seam for automation snapshots built without a live core
+    /// surface. Returned strings are owned by the caller.
+    test_automation_pwd: ?*const fn (Allocator, *Surface) anyerror!?[]const u8 = null,
+    /// Test-only seam proving automation uses the protected paste encoder.
+    test_automation_paste: ?*const fn (
+        surface: *Surface,
+        state: apprt.ClipboardRequest,
+        text: [:0]const u8,
+        confirmed: bool,
+    ) anyerror!void = null,
     /// Test-only interleaving seam for the focus revision race between a
     /// structural split-close prepare and commit.
     test_before_split_undo_shell_commit: ?*const fn (
@@ -2382,6 +2807,8 @@ pub const App = struct {
     wheel_settings: SystemWheelSettings = .{},
     system_dynamic_scrollbars: bool = true,
     ipc_pipe_name: ?[:0]const u16 = null,
+    /// Effective sanitized namespace captured when the IPC server starts.
+    ipc_namespace: ?[]const u8 = null,
     ipc_thread: ?std.Thread = null,
     ipc_stop_requested: std.atomic.Value(bool) = .init(false),
     global_hotkeys: std.ArrayListUnmanaged(RegisteredGlobalHotkey) = .empty,
@@ -3976,6 +4403,7 @@ pub const App = struct {
             self.core_app.alloc,
             pipe_name,
             arguments,
+            win32_ipc.automation_response_timeout_ms,
         );
     }
 
@@ -3983,7 +4411,13 @@ pub const App = struct {
         if (self.config.@"single-instance" != .true) return;
         if (self.ipc_thread != null) return;
 
-        self.ipc_pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
+        self.ipc_namespace = try sanitizeIpcNamespace(self.core_app.alloc, self.config.class);
+        errdefer {
+            if (self.ipc_namespace) |namespace| self.core_app.alloc.free(namespace);
+            self.ipc_namespace = null;
+        }
+
+        self.ipc_pipe_name = try allocIpcPipeName(self.core_app.alloc, self.ipc_namespace);
         errdefer {
             if (self.ipc_pipe_name) |pipe_name| self.core_app.alloc.free(pipe_name);
             self.ipc_pipe_name = null;
@@ -4012,6 +4446,10 @@ pub const App = struct {
         if (self.ipc_pipe_name) |pipe_name| {
             self.core_app.alloc.free(pipe_name);
             self.ipc_pipe_name = null;
+        }
+        if (self.ipc_namespace) |namespace| {
+            self.core_app.alloc.free(namespace);
+            self.ipc_namespace = null;
         }
         self.ipc_stop_requested.store(false, .release);
     }
@@ -4624,67 +5062,14 @@ pub const App = struct {
             },
 
             .new_tab => {
-                var config = try apprt.surface.newConfig(
-                    self.core_app,
-                    &self.config,
-                    .tab,
-                );
-                defer config.deinit();
                 const source = self.findSurfaceForTarget(target);
-                const surface = try self.createWindowSurface(&config, default_title, .{
-                    .host_id = if (source) |v| v.host_id else null,
-                    .tab_insert_index = if (source) |v| if (v.host) |host|
-                        windowNewTabInsertIndex(host, self.config.@"window-new-tab-position")
-                    else
-                        null else null,
-                    .clone_state_from = source,
-                });
-                if (source) |v| {
-                    v.invalidateRedoForUnsupportedTabStructuralAction();
-                }
-                self.activateSurface(surface);
+                _ = try self.createNewTab(source, null, false, false);
                 return true;
             },
 
             .new_split => {
-                var config = try apprt.surface.newConfig(
-                    self.core_app,
-                    &self.config,
-                    .split,
-                );
-                defer config.deinit();
                 const source = self.findSurfaceForTarget(target) orelse return false;
-                const tab_info = self.findTabForSurface(source) orelse return false;
-                const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
-                if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
-                    _ = try applySplitWorkingDirectoryFromSource(&config, source, self.startup_cwd);
-                }
-                const split_direction = splitDirectionFromAction(value);
-                const surface = try self.createWindowSurface(&config, default_title, .{
-                    .host_id = source.host_id,
-                    .tab_id = tab_info.tab.id,
-                    .clone_state_from = source,
-                    .split_direction = split_direction,
-                });
-                if (inherited_profile_key) |key| {
-                    try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
-                    surface.launched_ssh = source.launched_ssh;
-                }
-                tab_info.tab.clearRedoHistory();
-                if (tab_info.host.pushStructuralUndo(.{
-                    .kind = .split_create,
-                    .timestamp_ms = sys.GetTickCount64(),
-                    .sequence_id = self.nextUndoSequence(),
-                    .payload = .{ .split_create = .{
-                        .source_surface = source,
-                        .created_surface = surface,
-                        .direction = split_direction,
-                    } },
-                })) |_| {} else |err| {
-                    log.warn("new_split undo snapshot failed err={}", .{err});
-                    _ = tab_info.host.clearStructuralRedo();
-                }
-                self.activateSurface(surface);
+                _ = try self.createNewSplit(source, splitDirectionFromAction(value), null, false);
                 return true;
             },
 
@@ -5342,6 +5727,7 @@ pub const App = struct {
         target: apprt.ipc.Target,
         comptime action: apprt.ipc.Action.Key,
         value: apprt.ipc.Action.Value(action),
+        response_timeout_ms: u64,
     ) !bool {
         switch (action) {
             .new_window => {
@@ -5353,8 +5739,8 @@ pub const App = struct {
                 const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
                 defer alloc.free(pipe_name);
                 const forwarded = switch (launch_layout) {
-                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments),
-                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name),
+                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments, response_timeout_ms),
+                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name, response_timeout_ms),
                 };
                 if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
@@ -5365,10 +5751,11 @@ pub const App = struct {
     pub fn queryAutomationWindowList(
         alloc: Allocator,
         target: apprt.ipc.Target,
+        response_timeout_ms: u64,
     ) !?[]u8 {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
-        return try sendListWindowsIpc(alloc, pipe_name);
+        return try sendListWindowsIpc(alloc, pipe_name, response_timeout_ms);
     }
 
     pub fn performAutomationAction(
@@ -5376,10 +5763,155 @@ pub const App = struct {
         target: apprt.ipc.Target,
         action_target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
+        response_timeout_ms: u64,
     ) !bool {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
-        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text);
+        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text, response_timeout_ms);
+    }
+
+    pub fn focusAutomationTarget(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendFocusIpc(alloc, pipe_name, automation_target, response_timeout_ms);
+    }
+
+    pub fn newAutomationTab(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        working_directory: ?[]const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendNewTabIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            working_directory,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn newAutomationSplit(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        direction: apprt.ipc.AutomationSplitDirection,
+        working_directory: ?[]const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendNewSplitIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            direction,
+            working_directory,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn sendAutomationText(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        text: []const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendAutomationTextIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            text,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn performAutomationCommand(self: *App, command: apprt.ipc.AutomationCommand) !void {
+        switch (command) {
+            .new_tab => |value| {
+                if (value.working_directory) |cwd| {
+                    if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
+                }
+                const resolved: struct {
+                    source: ?*Surface,
+                    explicit_window_target: bool,
+                } = switch (value.target) {
+                    .focused => .{
+                        .source = self.automationDefaultSurface(),
+                        .explicit_window_target = false,
+                    },
+                    .window_id => |id| .{
+                        .source = self.activeSurfaceForHost(id),
+                        .explicit_window_target = true,
+                    },
+                    .surface_id => return error.InvalidAutomationTarget,
+                };
+                const source = resolved.source orelse return error.AutomationTargetNotFound;
+                _ = try self.createNewTab(
+                    source,
+                    value.working_directory,
+                    resolved.explicit_window_target,
+                    true,
+                );
+            },
+            .new_split => |value| {
+                if (value.working_directory) |cwd| {
+                    if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
+                }
+                const source = switch (value.target) {
+                    .focused => self.automationDefaultSurface(),
+                    .surface_id => |id| self.findSurfaceById(id),
+                    .window_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                const direction: SplitTreeSurface.Split.Direction = switch (value.direction) {
+                    .left => .left,
+                    .right => .right,
+                    .up => .up,
+                    .down => .down,
+                };
+                _ = try self.createNewSplit(source, direction, value.working_directory, true);
+            },
+            .focus => |target| {
+                const surface = switch (target) {
+                    .surface_id => |id| self.findLiveSurfaceById(id),
+                    .window_id => |id| self.activeSurfaceForHost(id),
+                    .focused => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                self.activateSurface(surface);
+            },
+            .send_text => |value| {
+                const surface = switch (value.target) {
+                    .surface_id => |id| self.findLiveSurfaceById(id),
+                    .focused, .window_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                if (!automationTextAllowed(value.text)) return error.AutomationPolicyRefused;
+
+                const text_z = try self.core_app.alloc.dupeZ(u8, value.text);
+                defer self.core_app.alloc.free(text_z);
+                if (self.test_automation_paste) |paste| {
+                    paste(surface, .paste, text_z, false) catch |err| switch (err) {
+                        error.UnsafePaste => return error.AutomationPolicyRefused,
+                        else => return err,
+                    };
+                } else {
+                    surface.core().completeClipboardRequest(.paste, text_z, false) catch |err| switch (err) {
+                        error.UnsafePaste => return error.AutomationPolicyRefused,
+                        else => return err,
+                    };
+                }
+            },
+        }
     }
 
     pub fn buildAutomationWindowListJson(
@@ -5399,6 +5931,19 @@ pub const App = struct {
         self: *App,
         alloc: Allocator,
     ) !apprt.ipc.AutomationWindowList {
+        const namespace = self.ipc_namespace orelse return error.IpcServerNotStarted;
+        var instance: apprt.ipc.AutomationInstance = instance: {
+            const version = try alloc.dupe(u8, build_config.version_string);
+            errdefer alloc.free(version);
+            const namespace_copy = try alloc.dupe(u8, namespace);
+            break :instance .{
+                .pid = sys.GetCurrentProcessId(),
+                .version = version,
+                .class = namespace_copy,
+            };
+        };
+        errdefer instance.deinit(alloc);
+
         const window_entries = try alloc.alloc(apprt.ipc.AutomationWindow, self.automationWindowCount());
         var built: usize = 0;
         errdefer {
@@ -5408,11 +5953,11 @@ pub const App = struct {
 
         for (self.hosts.items) |host| {
             if (host.tabs.items.len == 0) continue;
-            window_entries[built] = try buildAutomationWindow(alloc, host);
+            window_entries[built] = try self.buildAutomationWindow(alloc, host);
             built += 1;
         }
 
-        return .{ .windows = window_entries };
+        return .{ .instance = instance, .windows = window_entries };
     }
 
     fn automationWindowCount(self: *const App) usize {
@@ -5425,6 +5970,7 @@ pub const App = struct {
     }
 
     fn buildAutomationWindow(
+        self: *App,
         alloc: Allocator,
         host: *Host,
     ) !apprt.ipc.AutomationWindow {
@@ -5438,14 +5984,24 @@ pub const App = struct {
         var active_tab_id: ?u32 = null;
         for (host.tabs.items, 0..) |*tab, i| {
             const active = i == host.active_tab;
-            tabs[i] = try buildAutomationTab(alloc, tab, active);
+            tabs[i] = try self.buildAutomationTab(alloc, tab, active);
             if (active) active_tab_id = tab.id;
             built += 1;
         }
 
+        const title = try alloc.dupe(u8, host.cached_window_title orelse "noctty");
+
         return .{
             .window_id = host.id,
-            .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
+            .title = title,
+            // `GetForegroundWindow` returns the top-level host even when the
+            // keyboard focus is in one of its child controls. Surface focus
+            // alone would incorrectly report every host as unfocused then.
+            .focused = automationHostFocused(
+                host.hwnd,
+                sys.GetForegroundWindow(),
+                if (host.activeSurface()) |surface| surface.window_focused else false,
+            ),
             .active_tab_id = active_tab_id,
             .tab_count = @intCast(tabs.len),
             .pane_count = automationPaneCount(tabs),
@@ -5454,18 +6010,36 @@ pub const App = struct {
     }
 
     fn buildAutomationTab(
+        self: *App,
         alloc: Allocator,
         tab: *const Tab,
         active: bool,
     ) !apprt.ipc.AutomationTab {
         var panes: std.ArrayList(apprt.ipc.AutomationPane) = .empty;
+        // Registration order matters: `defer` and `errdefer` run LIFO, so the
+        // per-pane string cleanup must be registered AFTER the list teardown
+        // in order to run BEFORE it. The reverse order reads `panes.items`
+        // after `deinit` has freed the backing buffer.
         defer panes.deinit(alloc);
+        errdefer for (panes.items) |*pane| pane.deinit(alloc);
 
         const focused_surface = tab.focusedSurface();
         var it = tab.tree.iterator();
         while (it.next()) |entry| {
+            const title = if (entry.view.effectiveTitle()) |value|
+                try alloc.dupe(u8, value)
+            else
+                null;
+            errdefer if (title) |value| alloc.free(value);
+            const working_directory = if (self.test_automation_pwd) |query|
+                try query(alloc, entry.view)
+            else
+                try entry.view.core().pwd(alloc);
+            errdefer if (working_directory) |value| alloc.free(value);
             try panes.append(alloc, .{
                 .surface_id = entry.view.core().id,
+                .title = title,
+                .working_directory = working_directory,
                 .focused = if (focused_surface) |surface| surface == entry.view else false,
                 // True only for the focused pane in the active tab, not every
                 // tab-local focused pane.
@@ -5628,6 +6202,137 @@ pub const App = struct {
         try surface.init(self, title, config, opts);
         if (opts.host_id == null) self.consumePendingToastActivation();
         return surface;
+    }
+
+    fn createNewTab(
+        self: *App,
+        source: ?*Surface,
+        working_directory: ?[]const u8,
+        explicit_window_target: bool,
+        inherit_launch_config: bool,
+    ) !*Surface {
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
+        defer config.deinit();
+        var inherited_profile_key: ?[]const u8 = null;
+
+        if (shouldResetNewTabWorkingDirectory(
+            explicit_window_target,
+            inherit_launch_config,
+            if (source) |surface| surface.launched_ssh else false,
+        )) {
+            // `newConfig(.tab)` consults the globally focused surface. Reset
+            // and inherit from the explicitly requested host instead. An SSH
+            // source also needs the reset because its live cwd is remote.
+            config.@"working-directory" = self.config.@"working-directory";
+        }
+        if (source) |surface| {
+            // newConfig inherits only the focused surface's working directory;
+            // Launch command selection is app-runtime state and must be
+            // inherited from the source snapshot rather than re-resolved from
+            // mutable global/profile configuration.
+            if (inherit_launch_config) {
+                inherited_profile_key = try applyLaunchConfigFromSource(&config, surface);
+            }
+            if (explicit_window_target and shouldInheritSplitWorkingDirectory(surface.launched_ssh)) {
+                const split_inherit = config.@"split-inherit-working-directory";
+                {
+                    defer config.@"split-inherit-working-directory" = split_inherit;
+                    config.@"split-inherit-working-directory" = config.@"tab-inherit-working-directory";
+                    _ = try applySplitWorkingDirectoryFromSource(self, &config, surface, self.startup_cwd);
+                }
+            }
+        }
+
+        if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = if (source) |value| value.host_id else null,
+            .tab_insert_index = if (source) |value| if (value.host) |host|
+                windowNewTabInsertIndex(host, self.config.@"window-new-tab-position")
+            else
+                null else null,
+            .clone_state_from = source,
+        });
+        if (inherited_profile_key) |key| try appendOwnedString(
+            self.core_app.alloc,
+            &surface.launch_profile_key,
+            key,
+        );
+        if (inherit_launch_config) {
+            if (source) |value| surface.launched_ssh = value.launched_ssh;
+        }
+        if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
+        self.activateSurface(surface);
+        return surface;
+    }
+
+    fn createNewSplit(
+        self: *App,
+        source: *Surface,
+        direction: SplitTreeSurface.Split.Direction,
+        working_directory: ?[]const u8,
+        inherit_launch_config: bool,
+    ) !*Surface {
+        const tab_info = self.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
+        defer config.deinit();
+        config.@"working-directory" = self.config.@"working-directory";
+        const inherited_profile_key = if (inherit_launch_config)
+            try applyLaunchConfigFromSource(&config, source)
+        else
+            try applySplitProfileConfigFromSource(&config, source);
+        if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
+            _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
+        }
+        if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = source.host_id,
+            .tab_id = tab_info.tab.id,
+            .clone_state_from = source,
+            .split_direction = direction,
+        });
+        if (inherited_profile_key) |key| try appendOwnedString(
+            self.core_app.alloc,
+            &surface.launch_profile_key,
+            key,
+        );
+        if (inherit_launch_config or inherited_profile_key != null) {
+            surface.launched_ssh = source.launched_ssh;
+        }
+        tab_info.tab.clearRedoHistory();
+        if (tab_info.host.pushStructuralUndo(.{
+            .kind = .split_create,
+            .timestamp_ms = sys.GetTickCount64(),
+            .sequence_id = self.nextUndoSequence(),
+            .payload = .{ .split_create = .{
+                .source_surface = source,
+                .created_surface = surface,
+                .direction = direction,
+            } },
+        })) |_| {} else |err| {
+            log.warn("new_split undo snapshot failed err={}", .{err});
+            _ = tab_info.host.clearStructuralRedo();
+        }
+        self.activateSurface(surface);
+        return surface;
+    }
+
+    fn applyLaunchConfigFromSource(
+        config: *configpkg.Config,
+        source: *Surface,
+    ) !?[]const u8 {
+        if (source.launch_command) |command| {
+            config.command = try command.clone(config._arena.?.allocator());
+            if (source.launched_ssh) try applySshLaunchHardening(config);
+            return source.launch_profile_key;
+        }
+
+        // Headless fixtures may not have a captured command. Preserve the
+        // previous profile fallback for those tests.
+        const key = source.launch_profile_key orelse return null;
+        const host = source.host orelse return null;
+        const profile = (try host.profileForKey(key)) orelse return null;
+        try applyProfileLaunchConfig(config, profile);
+        return profile.key;
     }
 
     fn applySplitProfileConfigFromSource(
@@ -6172,6 +6877,12 @@ pub const App = struct {
         return null;
     }
 
+    fn findLiveSurfaceById(self: *App, surface_id: u64) ?*Surface {
+        const surface = self.findSurfaceById(surface_id) orelse return null;
+        _ = self.findTabForSurface(surface) orelse return null;
+        return surface;
+    }
+
     fn inheritHostWindowState(_: *App, destination: *Host, source: *Host) !void {
         const dst_hwnd = destination.hwnd orelse return;
         const src_hwnd = source.hwnd orelse return;
@@ -6211,6 +6922,13 @@ pub const App = struct {
         }
 
         return null;
+    }
+
+    fn automationDefaultSurface(self: *App) ?*Surface {
+        if (self.core_app.focusedSurface()) |core_surface| {
+            if (self.findSurfaceByCore(core_surface)) |surface| return surface;
+        }
+        return self.focusedSurfaceForUndoRedo() orelse self.primarySurface();
     }
 
     fn undoRedoSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
@@ -7809,6 +8527,15 @@ fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) bool 
         return true;
     }
     return false;
+}
+
+fn automationHostFocused(
+    host_hwnd: ?HWND,
+    foreground_hwnd: ?HWND,
+    surface_focused_fallback: bool,
+) bool {
+    const hwnd = host_hwnd orelse return surface_focused_fallback;
+    return foreground_hwnd == hwnd;
 }
 
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
@@ -22130,6 +22857,7 @@ pub const Surface = struct {
     /// Recorded from the resolved profile kind at launch, so nothing downstream
     /// has to re-derive "is this SSH?" from the key text.
     launched_ssh: bool = false,
+    launch_command: ?configpkg.Command = null,
     mouse_shape: terminal.MouseShape = .text,
     mouse_visible: bool = true,
     hovered_link: ?[:0]const u8 = null,
@@ -22453,6 +23181,15 @@ pub const Surface = struct {
             session.pty.deinit();
             _ = windows.CloseHandle(session.client_process);
             self.adopted_session = null;
+        };
+        const launch_command = if (app.core_app.first)
+            config.@"initial-command" orelse config.command
+        else
+            config.command;
+        if (launch_command) |command| self.launch_command = try command.clone(app.core_app.alloc);
+        errdefer if (self.launch_command) |*command| {
+            command.deinit(app.core_app.alloc);
+            self.launch_command = null;
         };
         // The DropTarget's surface_ctx must be `self`, but we can't
         // initialise it until `self.*` has been fully assigned above
@@ -25875,6 +26612,10 @@ pub const Surface = struct {
             alloc.free(value);
             self.launch_profile_key = null;
         }
+        if (self.launch_command) |*command| {
+            command.deinit(alloc);
+            self.launch_command = null;
+        }
         if (self.key_table_name) |value| {
             alloc.free(value);
             self.key_table_name = null;
@@ -27109,6 +27850,191 @@ test "win32 structural redo invalidation clears affected tab redo only" {
     try std.testing.expectEqual(@as(usize, 0), surface_b.undo_stack.redoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_c.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_c.undo_stack.redoDepth());
+}
+
+test "automation in-app new_tab action does not query source pwd" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var source: Surface = undefined;
+    var created: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+        .surfaces = &.{
+            .{
+                .storage = &source,
+                .host = &host,
+                .register = true,
+                .free_launch_profile_key_on_deinit = true,
+            },
+            .{
+                .storage = &created,
+                .host = &host,
+                .window_visible = false,
+                .host_active = false,
+                .free_launch_profile_key_on_deinit = true,
+            },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
+
+    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    var profiles = [_]windows_shell.Profile{.{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &command },
+    }};
+    host.profiles = &profiles;
+    source.launch_profile_key = try core_app.alloc.dupeZ(u8, "pwsh");
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_ref: *Surface = undefined;
+        var pwd_calls: usize = 0;
+
+        fn queryPwd(_: Allocator, _: *Surface) !?[]const u8 {
+            pwd_calls += 1;
+            return error.UnexpectedPwdQuery;
+        }
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            // Ordinary in-app tabs retain the configured default rather than
+            // inheriting the source profile command used by automation.
+            try std.testing.expect(config.command == null);
+            created_ref.app = hook_app;
+            created_ref.host = host_ref;
+            created_ref.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index orelse host_ref.tabs.items.len,
+                try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created_ref),
+            );
+            return created_ref;
+        }
+    };
+
+    Hook.host_ref = &host;
+    Hook.created_ref = &created;
+    Hook.pwd_calls = 0;
+    app.test_automation_pwd = &Hook.queryPwd;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    try std.testing.expect(try app.performAction(.app, .new_tab, {}));
+    try std.testing.expectEqual(@as(usize, 0), Hook.pwd_calls);
+    try std.testing.expect(created.launch_profile_key == null);
+}
+
+test "automation explicit-window new_tab reanchors inactive host cwd and override wins" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var inherited: Surface = undefined;
+    var overridden: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 11, .register = true, .next_tab_id = 2 },
+            .{ .storage = &host_b, .id = 12, .register = true, .next_tab_id = 2 },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a, .register = true, .window_focused = true },
+            .{ .storage = &surface_b, .host = &host_b, .register = true, .host_active = false },
+            .{ .storage = &inherited, .host = &host_b, .window_visible = false, .host_active = false },
+            .{ .storage = &overridden, .host = &host_b, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 1 },
+            .{ .host = &host_b, .surface = &surface_b, .id = 1 },
+        },
+    });
+    defer session.deinit();
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_refs: [2]*Surface = undefined;
+        var create_calls: usize = 0;
+        var pwd_calls: usize = 0;
+
+        fn queryPwd(alloc: Allocator, source: *Surface) !?[]const u8 {
+            try std.testing.expectEqual(@as(u32, 12), source.host_id);
+            pwd_calls += 1;
+            return try alloc.dupe(u8, "C:\\inactive-host");
+        }
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            const call_index = create_calls;
+            create_calls += 1;
+            try std.testing.expect(call_index < created_refs.len);
+            try std.testing.expectEqual(@as(?u32, host_ref.id), opts.host_id);
+            try std.testing.expect(opts.clone_state_from != null);
+            try std.testing.expectEqual(host_ref.id, opts.clone_state_from.?.host_id);
+
+            const expected = if (call_index == 0) "C:\\inactive-host" else "D:\\explicit-override";
+            const working_directory = config.@"working-directory" orelse
+                return error.MissingWorkingDirectory;
+            switch (working_directory) {
+                .path => |path| try std.testing.expectEqualStrings(expected, path),
+                .home, .inherit => return error.UnexpectedWorkingDirectory,
+            }
+
+            const created = created_refs[call_index];
+            created.app = hook_app;
+            created.host = host_ref;
+            created.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created);
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index.?,
+                try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created),
+            );
+            return created;
+        }
+    };
+
+    Hook.host_ref = &host_b;
+    Hook.created_refs = .{ &inherited, &overridden };
+    Hook.create_calls = 0;
+    Hook.pwd_calls = 0;
+    app.test_automation_pwd = &Hook.queryPwd;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    try std.testing.expect(!surface_b.host_active);
+    try app.performAutomationCommand(.{ .new_tab = .{
+        .target = .{ .window_id = host_b.id },
+        .working_directory = null,
+    } });
+    try app.performAutomationCommand(.{ .new_tab = .{
+        .target = .{ .window_id = host_b.id },
+        .working_directory = "D:\\explicit-override",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 2), Hook.create_calls);
+    try std.testing.expectEqual(@as(usize, 2), Hook.pwd_calls);
 }
 
 test "win32 new_tab action inserts after the active tab by default, clears current tab redo, and activates the created tab" {
@@ -29863,13 +30789,26 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     var app: App = undefined;
     app.windows = .empty;
     app.hosts = .empty;
+    app.ipc_namespace = "lane_9";
+    app.test_automation_pwd = &struct {
+        fn query(alloc: Allocator, surface: *Surface) !?[]const u8 {
+            return switch (surface.core().id) {
+                701 => null,
+                702 => try alloc.dupe(u8, "C:\\work\\\"quote\"\t\r\n"),
+                703 => try alloc.dupe(u8, "home"),
+                else => error.UnexpectedSurface,
+            };
+        }
+    }.query;
     defer app.windows.deinit(std.testing.allocator);
     defer app.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 17;
+    host.hwnd = null;
     host.tabs = .empty;
     host.active_tab = 1;
+    host.cached_window_title = "host \"quote\"\\slash\t\r\n";
     defer {
         for (host.tabs.items) |*tab| tab.deinit();
         host.tabs.deinit(std.testing.allocator);
@@ -29880,6 +30819,9 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     tab0_surface.core_surface.id = 701;
     tab0_surface.host = &host;
     tab0_surface.host_id = host.id;
+    tab0_surface.title = null;
+    tab0_surface.title_override = null;
+    tab0_surface.tab_title_override = null;
 
     var tab1_primary: Surface = undefined;
     tab1_primary.core_surface = undefined;
@@ -29887,12 +30829,18 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     tab1_primary.host = &host;
     tab1_primary.host_id = host.id;
     tab1_primary.window_focused = true;
+    tab1_primary.title = "terminal title";
+    tab1_primary.title_override = "surface title";
+    tab1_primary.tab_title_override = "tab \"title\"\\\t\r\n";
 
     var tab1_split: Surface = undefined;
     tab1_split.core_surface = undefined;
     tab1_split.core_surface.id = 703;
     tab1_split.host = &host;
     tab1_split.host_id = host.id;
+    tab1_split.title = "split title";
+    tab1_split.title_override = null;
+    tab1_split.tab_title_override = null;
 
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &tab0_surface));
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 4, &tab1_primary));
@@ -29921,10 +30869,70 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tab_count\":2,\"pane_count\":3,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"pane_count\":1,\"panes\":[{\"surface_id\":701,\"focused\":true,\"active\":false}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"pane_count\":2,\"panes\":[{\"surface_id\":703,\"focused\":false,\"active\":false},{\"surface_id\":702,\"focused\":true,\"active\":true}]}]}]}",
-        json,
-    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("noctty.windows.v3", apprt.ipc.automation_window_list_schema);
+    try std.testing.expectEqual(@as(u32, 3), apprt.ipc.automation_window_list_api_version);
+    try std.testing.expectEqualStrings("noctty.windows.v3", root.get("schema").?.string);
+    try std.testing.expectEqual(@as(i64, 3), root.get("api_version").?.integer);
+    const instance = root.get("instance").?.object;
+    try std.testing.expectEqual(@as(i64, sys.GetCurrentProcessId()), instance.get("pid").?.integer);
+    try std.testing.expectEqualStrings(build_config.version_string, instance.get("version").?.string);
+    try std.testing.expectEqualStrings("lane_9", instance.get("class").?.string);
+
+    const windows_json = root.get("windows").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), windows_json.len);
+    const window = windows_json[0].object;
+    try std.testing.expectEqual(@as(i64, 17), window.get("window_id").?.integer);
+    try std.testing.expectEqualStrings("host \"quote\"\\slash\t\r\n", window.get("title").?.string);
+    try std.testing.expect(window.get("focused").?.bool);
+    try std.testing.expectEqual(@as(i64, 4), window.get("active_tab_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), window.get("tab_count").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), window.get("pane_count").?.integer);
+    const tabs = window.get("tabs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), tabs.len);
+    try std.testing.expectEqual(@as(i64, 3), tabs[0].object.get("tab_id").?.integer);
+    try std.testing.expect(!tabs[0].object.get("active").?.bool);
+    try std.testing.expectEqual(@as(i64, 701), tabs[0].object.get("focused_surface_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), tabs[0].object.get("pane_count").?.integer);
+    const null_pane = tabs[0].object.get("panes").?.array.items[0].object;
+    try std.testing.expectEqual(@as(i64, 701), null_pane.get("surface_id").?.integer);
+    try std.testing.expect(null_pane.get("focused").?.bool);
+    try std.testing.expect(!null_pane.get("active").?.bool);
+    try std.testing.expect(null_pane.get("title").? == .null);
+    try std.testing.expect(null_pane.get("working_directory").? == .null);
+    const active_panes = tabs[1].object.get("panes").?.array.items;
+    try std.testing.expectEqual(@as(i64, 4), tabs[1].object.get("tab_id").?.integer);
+    try std.testing.expect(tabs[1].object.get("active").?.bool);
+    try std.testing.expectEqual(@as(i64, 702), tabs[1].object.get("focused_surface_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), tabs[1].object.get("pane_count").?.integer);
+    try std.testing.expectEqual(@as(usize, 2), active_panes.len);
+    try std.testing.expectEqual(@as(i64, 703), active_panes[0].object.get("surface_id").?.integer);
+    try std.testing.expectEqualStrings("split title", active_panes[0].object.get("title").?.string);
+    try std.testing.expectEqualStrings("home", active_panes[0].object.get("working_directory").?.string);
+    try std.testing.expectEqual(@as(i64, 702), active_panes[1].object.get("surface_id").?.integer);
+    try std.testing.expectEqualStrings("tab \"title\"\\\t\r\n", active_panes[1].object.get("title").?.string);
+    try std.testing.expectEqualStrings("C:\\work\\\"quote\"\t\r\n", active_panes[1].object.get("working_directory").?.string);
+    try std.testing.expect(active_panes[1].object.get("focused").?.bool);
+    try std.testing.expect(active_panes[1].object.get("active").?.bool);
+    try std.testing.expect(active_panes[1].object.get("pid") == null);
+
+    for ([_][]const u8{ "grid", "scrollback", "selection", "clipboard", "shell_input" }) |key| {
+        try std.testing.expect(std.mem.indexOf(u8, json, key) == null);
+    }
+}
+
+test "automation-window-list host focus follows the foreground host" {
+    const host: HWND = @ptrFromInt(1);
+    const other: HWND = @ptrFromInt(2);
+
+    // Child-control focus still presents its top-level host as foreground.
+    try std.testing.expect(automationHostFocused(host, host, false));
+    try std.testing.expect(!automationHostFocused(host, other, true));
+    try std.testing.expect(!automationHostFocused(host, null, true));
+    // HWND-free unit fixtures retain the existing surface-state fallback.
+    try std.testing.expect(automationHostFocused(null, null, true));
 }
 
 test "automation-window-list win32 json skips empty hosts kept alive for undo history" {
@@ -29933,6 +30941,12 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     var app: App = undefined;
     app.windows = .empty;
     app.hosts = .empty;
+    app.ipc_namespace = "empty-host-test";
+    app.test_automation_pwd = &struct {
+        fn query(_: Allocator, _: *Surface) !?[]const u8 {
+            return null;
+        }
+    }.query;
     defer app.windows.deinit(std.testing.allocator);
     defer app.hosts.deinit(std.testing.allocator);
 
@@ -29949,6 +30963,7 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     live_host.id = 17;
     live_host.tabs = .empty;
     live_host.active_tab = 0;
+    live_host.cached_window_title = null;
     defer {
         for (live_host.tabs.items) |*tab| tab.deinit();
         live_host.tabs.deinit(std.testing.allocator);
@@ -29960,6 +30975,9 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     surface.host = &live_host;
     surface.host_id = live_host.id;
     surface.window_focused = true;
+    surface.title = null;
+    surface.title_override = null;
+    surface.tab_title_override = null;
 
     try live_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 5, &surface));
     try app.hosts.append(std.testing.allocator, &empty_host);
@@ -29969,22 +30987,31 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tab_count\":1,\"pane_count\":1,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"pane_count\":1,\"panes\":[{\"surface_id\":801,\"focused\":true,\"active\":true}]}]}]}",
-        json,
-    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const windows_json = parsed.value.object.get("windows").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), windows_json.len);
+    const window = windows_json[0].object;
+    try std.testing.expectEqual(@as(i64, 17), window.get("window_id").?.integer);
+    try std.testing.expectEqualStrings("noctty", window.get("title").?.string);
+    const pane = window.get("tabs").?.array.items[0].object.get("panes").?.array.items[0].object;
+    try std.testing.expect(pane.get("title").? == .null);
+    try std.testing.expect(pane.get("working_directory").? == .null);
 }
 
-test "win32 timed out automation request remains owned until consumption" {
+test "win32 timed out automation request stays owned and cannot be claimed" {
     const request = try CoreApp.Message.AutomationActionRequest.create(
         std.testing.allocator,
         .focused,
         "new_tab",
+        std.math.maxInt(u64),
+        automationNowMs,
     );
     request.retain();
+    try std.testing.expect(request.lifecycle.cancel());
     request.release(); // Producer times out and drops its ownership.
     try std.testing.expectEqualStrings("new_tab", request.action_text);
-    request.completed.store(true, .release);
+    try std.testing.expect(!request.lifecycle.claim());
     request.release(); // Delayed mailbox consumer owns the final reference.
 }
 
@@ -30841,7 +31868,179 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     // final comparison is `server_rid >= own_rid`), not observed.
 }
 
-test "win32 IPC silent client read is bounded" {
+test "automation focus selects exact targets without fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    var detached_surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 11, .register = true },
+            .{ .storage = &host_b, .id = 12, .register = true },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a },
+            .{ .storage = &surface_b, .host = &host_a },
+            .{ .storage = &surface_c, .host = &host_b },
+            .{ .storage = &detached_surface, .host = &host_a, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 1 },
+            .{ .host = &host_a, .surface = &surface_b, .id = 2 },
+            .{ .host = &host_b, .surface = &surface_c, .id = 3 },
+        },
+    });
+    defer session.deinit();
+    surface_a.core_surface.id = 101;
+    surface_b.core_surface.id = 102;
+    surface_c.core_surface.id = 103;
+    detached_surface.core_surface.id = 104;
+
+    try std.testing.expectEqual(@as(?*Surface, &surface_a), app.findLiveSurfaceById(101));
+    try std.testing.expect(app.findLiveSurfaceById(104) == null);
+
+    try app.performAutomationCommand(.{ .focus = .{ .surface_id = 102 } });
+    try std.testing.expectEqual(@as(usize, 1), host_a.active_tab);
+    try app.performAutomationCommand(.{ .focus = .{ .window_id = 12 } });
+    try std.testing.expectEqual(&surface_c, host_b.activeSurface().?);
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .focus = .{ .surface_id = 999 } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .focus = .{ .surface_id = 104 } }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .focus = .focused }),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .new_tab = .{
+            .target = .{ .surface_id = 102 },
+            .working_directory = null,
+        } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .new_split = .{
+            .target = .{ .surface_id = 999 },
+            .direction = .right,
+            .working_directory = null,
+        } }),
+    );
+}
+
+test "automation working directory receiver policy mirrors forwarded syntax" {
+    for ([_][]const u8{ "home", "inherit", "~", "~/x", "~\\x", "C:\\x" }) |value| {
+        try std.testing.expect(automationWorkingDirectoryAllowed(value));
+    }
+    for ([_][]const u8{ "", "relative", "C:relative", "\\\\host\\share", "//host/share", "\\\\?\\C:\\x", "\\\\.\\x" }) |value| {
+        try std.testing.expect(!automationWorkingDirectoryAllowed(value));
+    }
+}
+
+test "automation send text enforces receiver policy and protected paste path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Hook = struct {
+        var calls: usize = 0;
+        var expected: []const u8 = "";
+        var unsafe = false;
+        fn paste(
+            surface: *Surface,
+            state: apprt.ClipboardRequest,
+            text: [:0]const u8,
+            confirmed: bool,
+        ) !void {
+            try std.testing.expectEqual(@as(u64, 201), surface.core().id);
+            try std.testing.expectEqual(apprt.ClipboardRequest.paste, state);
+            try std.testing.expectEqualStrings(expected, text);
+            try std.testing.expect(!confirmed);
+            calls += 1;
+            if (unsafe) return error.UnsafePaste;
+        }
+    };
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    surface.core_surface.id = 201;
+    app.test_automation_paste = &Hook.paste;
+    Hook.calls = 0;
+
+    for ([_][]const u8{ "printable UTF-8: \xcf\x80", "$HOME && echo ok | more" }) |text| {
+        Hook.expected = text;
+        try app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 201 },
+            .text = text,
+        } });
+    }
+    try std.testing.expectEqual(@as(usize, 2), Hook.calls);
+    Hook.expected = "unsafe";
+    Hook.unsafe = true;
+    try std.testing.expectError(
+        error.AutomationPolicyRefused,
+        app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 201 },
+            .text = "unsafe",
+        } }),
+    );
+    Hook.unsafe = false;
+
+    const refused = [_][]const u8{
+        "\r",
+        "\n",
+        "\t",
+        "\x00",
+        "\x1b",
+        "\x7f",
+        "\xc2\x80",
+    };
+    for (refused) |text| {
+        try std.testing.expectError(
+            error.AutomationPolicyRefused,
+            app.performAutomationCommand(.{ .send_text = .{
+                .target = .{ .surface_id = 201 },
+                .text = text,
+            } }),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 3), Hook.calls);
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .send_text = .{ .target = .focused, .text = "ok" } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .send_text = .{
+            .target = .{ .surface_id = 999 },
+            .text = "ok",
+        } }),
+    );
+}
+
+test "win32 IPC silent synchronous client read is bounded" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
@@ -30884,6 +32083,7 @@ test "win32 IPC silent client read is bounded" {
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(client);
+    try setIpcClientNonblocking(client);
 
     const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
@@ -30893,20 +32093,24 @@ test "win32 IPC silent client read is bounded" {
     var byte: [1]u8 = undefined;
     try std.testing.expectError(
         error.IpcTimeout,
-        win32_ipc.readExactWithTimeout(server, &byte, 10),
+        win32_ipc.readExactWithTimeout(client, &byte, 10),
     );
 }
 
-test "win32 win32_ipc.encodeListWindowsRequest preserves legacy zero-argc trailer" {
+test "win32 win32_ipc.encodeListWindowsRequest carries the response deadline" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try win32_ipc.encodeListWindowsRequest(std.testing.allocator);
+    const deadline_ms: u64 = 0x0102030405060708;
+    const request = try win32_ipc.encodeListWindowsRequest(
+        std.testing.allocator,
+        deadline_ms,
+    );
     defer std.testing.allocator.free(request);
 
-    try std.testing.expectEqual(@as(usize, 9), request.len);
+    try std.testing.expectEqual(@as(usize, 13), request.len);
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows), request[4]);
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, request[5..9], .little));
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows_timed), request[4]);
+    try std.testing.expectEqual(deadline_ms, std.mem.readInt(u64, request[5..13], .little));
 }
 
 test "automation-action win32 ipc encodes focused action request" {
@@ -30916,15 +32120,17 @@ test "automation-action win32 ipc encodes focused action request" {
         std.testing.allocator,
         .focused,
         "new_tab",
+        0x0102030405060708,
     );
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
-    try std.testing.expectEqual(@as(u8, 0), request[5]);
-    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[6..14], .little));
-    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[14..18], .little));
-    try std.testing.expectEqualStrings("new_tab", request[18..]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action_timed), request[4]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
+    try std.testing.expectEqual(@as(u8, 0), request[13]);
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[14..22], .little));
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[22..26], .little));
+    try std.testing.expectEqualStrings("new_tab", request[26..]);
 }
 
 test "win32 launch-layout IPC argument scan isolates the layout name" {
@@ -30961,7 +32167,12 @@ test "win32 launch-layout IPC validates names before cold fallback" {
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        sendLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+        sendLaunchLayoutIpc(
+            std.testing.allocator,
+            pipe_name,
+            "CON",
+            win32_ipc.automation_response_timeout_ms,
+        ),
     );
 }
 
@@ -30991,15 +32202,17 @@ test "automation-action win32 ipc encodes surface action request" {
         std.testing.allocator,
         .{ .surface_id = 42 },
         "toggle_fullscreen",
+        0x0102030405060708,
     );
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
-    try std.testing.expectEqual(@as(u8, 1), request[5]);
-    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[6..14], .little));
-    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[14..18], .little));
-    try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action_timed), request[4]);
+    try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
+    try std.testing.expectEqual(@as(u8, 1), request[13]);
+    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[14..22], .little));
+    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[22..26], .little));
+    try std.testing.expectEqualStrings("toggle_fullscreen", request[26..]);
 }
 
 test "automation-action win32 ipc rejects oversized action before encode" {
@@ -31011,7 +32224,12 @@ test "automation-action win32 ipc rejects oversized action before encode" {
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        win32_ipc.encodePerformActionRequest(std.testing.allocator, .focused, action_text),
+        win32_ipc.encodePerformActionRequest(
+            std.testing.allocator,
+            .focused,
+            action_text,
+            0x0102030405060708,
+        ),
     );
 }
 
@@ -31027,16 +32245,17 @@ test "automation-action win32 ipc rejects oversized decoded action" {
     });
     defer file.close();
 
-    var header: [13]u8 = undefined;
-    header[0] = 0;
-    std.mem.writeInt(u64, header[1..9], 0, .little);
-    std.mem.writeInt(u32, header[9..13], win32_ipc.max_action_text_len + 1, .little);
+    var header: [21]u8 = undefined;
+    std.mem.writeInt(u64, header[0..8], std.math.maxInt(u64), .little);
+    header[8] = 0;
+    std.mem.writeInt(u64, header[9..17], 0, .little);
+    std.mem.writeInt(u32, header[17..21], win32_ipc.max_action_text_len + 1, .little);
     try file.writeAll(&header);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle),
+        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle, true),
     );
 }
 
@@ -31407,6 +32626,9 @@ test "win32 ssh split and session state drop remote cwd" {
 
     try std.testing.expect(!shouldInheritSplitWorkingDirectory(true));
     try std.testing.expect(shouldInheritSplitWorkingDirectory(false));
+    try std.testing.expect(shouldResetNewTabWorkingDirectory(false, true, true));
+    try std.testing.expect(shouldResetNewTabWorkingDirectory(true, true, false));
+    try std.testing.expect(!shouldResetNewTabWorkingDirectory(false, false, true));
 
     var surface: Surface = undefined;
     surface.pwd = "C:\\remote-controlled";
@@ -31485,6 +32707,89 @@ test "win32 session restore refuses ssh profiles regardless of key case" {
     defer clone.deinit();
     try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "CMD.EXE"));
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
+}
+
+test "win32 automation tab inheritance preserves the captured source command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const command = [_][:0]const u8{ "pwsh.exe", "-NoLogo" };
+    const reloaded_command = [_][:0]const u8{"cmd.exe"};
+    var profiles = [_]windows_shell.Profile{.{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &reloaded_command },
+    }};
+    var host: Host = undefined;
+    host.profiles = &profiles;
+    var source: Surface = undefined;
+    source.host = &host;
+    source.launch_profile_key = "pwsh";
+    source.launch_command = .{ .direct = &command };
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
+
+    try std.testing.expectEqualStrings("pwsh", inherited.?);
+    const direct = config.command.?.direct;
+    try std.testing.expectEqual(@as(usize, 2), direct.len);
+    try std.testing.expectEqualStrings("pwsh.exe", direct[0]);
+    try std.testing.expectEqualStrings("-NoLogo", direct[1]);
+}
+
+test "win32 automation ssh inheritance preserves command and hardening" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const command = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "production" };
+    var source: Surface = undefined;
+    source.launch_command = .{ .direct = &command };
+    source.launch_profile_key = "ssh:production";
+    source.launched_ssh = true;
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    config.@"shell-integration" = .bash;
+    const inherited = try App.applyLaunchConfigFromSource(&config, &source);
+
+    try std.testing.expectEqualStrings("ssh:production", inherited.?);
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
+    try std.testing.expectEqualStrings(command[0], config.command.?.direct[0]);
+    try std.testing.expectEqualStrings(command[1], config.command.?.direct[1]);
+}
+
+test "win32 ordinary split ignores a captured one-shot command" {
+    const one_shot = [_][:0]const u8{ "cmd.exe", "/c", "one-shot.cmd" };
+    var source: Surface = undefined;
+    source.launch_command = .{ .direct = &one_shot };
+    source.launch_profile_key = null;
+    source.host = null;
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    try std.testing.expect((try App.applySplitProfileConfigFromSource(&config, &source)) == null);
+    try std.testing.expect(config.command == null);
+}
+
+test "win32 automation omitted target falls back to the active surface" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+
+    try std.testing.expect(!surface.window_focused);
+    try std.testing.expectEqual(@as(?*Surface, &surface), app.automationDefaultSurface());
 }
 
 test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {

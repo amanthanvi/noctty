@@ -463,6 +463,22 @@ pub extern "kernel32" fn ConnectNamedPipe(
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn SetNamedPipeHandleState(
+    hNamedPipe: windows.HANDLE,
+    lpMode: ?*DWORD,
+    lpMaxCollectionCount: ?*DWORD,
+    lpCollectDataTimeout: ?*DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn PeekNamedPipe(
+    hNamedPipe: windows.HANDLE,
+    lpBuffer: ?*anyopaque,
+    nBufferSize: DWORD,
+    lpBytesRead: ?*DWORD,
+    lpTotalBytesAvail: ?*DWORD,
+    lpBytesLeftThisMessage: ?*DWORD,
+) callconv(.winapi) BOOL;
+
 /// `SID_AND_ATTRIBUTES`/`TOKEN_USER` as returned by `GetTokenInformation`
 /// with `TokenUser`. Only the SID pointer is used; the SID itself lives in
 /// the caller-provided buffer.
@@ -641,6 +657,8 @@ pub extern "shell32" fn DragFinish(hDrop: *anyopaque) callconv(.winapi) void;
 pub extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi) BOOL;
 
 pub extern "user32" fn GetParent(hWnd: HWND) callconv(.winapi) ?HWND;
+
+pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
 
 pub extern "user32" fn IsChild(hWndParent: HWND, hWnd: HWND) callconv(.winapi) BOOL;
 
