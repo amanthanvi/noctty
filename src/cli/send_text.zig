@@ -146,7 +146,8 @@ fn runArgsWithSend(
         value,
         opts.timeout,
     ) catch |err| switch (err) {
-        error.InvalidAutomationTarget, error.InvalidAutomationText => return report(stderr, 1, "Invalid automation text request.\n"),
+        error.InvalidAutomationTarget => return report(stderr, 1, "Invalid automation target.\n"),
+        error.InvalidAutomationText => return report(stderr, 1, "Invalid automation text request.\n"),
         error.AutomationTargetNotFound, error.NoAutomationTarget => return report(stderr, 3, "Automation target not found.\n"),
         error.AutomationPolicyRefused => return report(stderr, 4, "Automation text refused.\n"),
         else => return report(stderr, 5, "Automation text IPC failed.\n"),
@@ -299,5 +300,34 @@ test "automation send-text cli contract and policy" {
     for ([_]u8{ 0, 1, 2, 3, 4, 5 }) |code| {
         Hook.outcome = code;
         try testing.expectEqual(code, try test_support.testRun(runArgsWithSend, &.{ "--surface-id=42", "text" }, &Hook.call));
+    }
+
+    const ErrorHook = struct {
+        var outcome: anyerror = error.InvalidAutomationTarget;
+
+        fn call(
+            _: Allocator,
+            _: apprt.ipc.Target,
+            _: apprt.ipc.AutomationTarget,
+            _: []const u8,
+            _: u64,
+        ) !bool {
+            return outcome;
+        }
+    };
+    for ([_]struct { outcome: anyerror, message: []const u8 }{
+        .{ .outcome = error.InvalidAutomationTarget, .message = "Invalid automation target.\n" },
+        .{ .outcome = error.InvalidAutomationText, .message = "Invalid automation text request.\n" },
+    }) |case| {
+        var iter: test_support.TestArgs = .{ .items = &.{ "--surface-id=42", "text" } };
+        var stderr = std.Io.Writer.Allocating.init(testing.allocator);
+        defer stderr.deinit();
+        ErrorHook.outcome = case.outcome;
+
+        try testing.expectEqual(
+            @as(u8, 1),
+            try runArgsWithSend(testing.allocator, &iter, &stderr.writer, &ErrorHook.call),
+        );
+        try testing.expectEqualStrings(case.message, stderr.written());
     }
 }
