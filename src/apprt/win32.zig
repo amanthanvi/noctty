@@ -19823,7 +19823,12 @@ fn terminalAccessibilityCapture(
     const surface: *Surface = @ptrCast(@alignCast(ctx));
     if (!surface.core_initialized) return error.SurfaceNotInitialized;
 
-    surface.core_surface.renderer_state.mutex.lock();
+    // This runs on the UI thread, reached from `windowProc` via WM_GETOBJECT,
+    // and UIA can re-enter `windowProc` while the UI thread already holds the
+    // renderer lock. Blocking here stops the message loop for as long as the
+    // lock is held -- indefinitely in the re-entrant case. Take the lock only
+    // if it is free and let the caller keep its cached snapshot otherwise.
+    if (!surface.core_surface.renderer_state.mutex.tryLock()) return error.WouldBlock;
     const snapshot = win32_uia.snapshotTerminalAccessiblePlainText(
         alloc,
         surface.core_surface.renderer_state.terminal,

@@ -131,11 +131,20 @@ pub const TerminalAccessibilitySession = struct {
     }
 
     pub fn acquireProvider(self: *TerminalAccessibilitySession) !*win32_uia.TerminalProvider {
+        // Refreshing here only freshens the cache. `error.WouldBlock` means the
+        // renderer lock is held, and this runs on the UI thread, so hand back
+        // the provider with the snapshot we already have rather than block.
         if (self.provider) |provider| {
-            _ = try self.refresh(.discard, false);
+            _ = self.refresh(.discard, false) catch |err| switch (err) {
+                error.WouldBlock => RefreshResult{ .change = .unchanged },
+                else => return err,
+            };
             return provider;
         }
-        _ = try self.refresh(.discard, false);
+        _ = self.refresh(.discard, false) catch |err| switch (err) {
+            error.WouldBlock => RefreshResult{ .change = .unchanged },
+            else => return err,
+        };
         const hwnd = self.ops.hwnd(self.ops.ctx) orelse return error.NoWindow;
         self.provider = try win32_uia.TerminalProvider.create(
             self.alloc,
@@ -349,6 +358,16 @@ pub const TerminalAccessibilitySession = struct {
             std.log.warn("win32 terminal UIA snapshot slow elapsed_ms={d}", .{completed_ms -| started_ms});
         }
         const refresh_result = result catch |err| {
+            // The renderer lock was held. Skipping is the correct outcome on
+            // the UI thread: keep the cached snapshot and retry from the timer.
+            if (err == error.WouldBlock) {
+                if (self.refresh_timer_active) return;
+                const hwnd = self.ops.hwnd(self.ops.ctx) orelse return;
+                if (sys.SetTimer(hwnd, self.timer_id, refresh_interval_ms, null) != 0) {
+                    self.refresh_timer_active = true;
+                }
+                return;
+            }
             std.log.warn("win32 terminal UIA snapshot refresh failed err={}", .{err});
             return;
         };
