@@ -1120,7 +1120,6 @@ fn sendListWindowsIpc(
     pipe_name: [:0]const u16,
     response_timeout_ms: u64,
 ) !?[]u8 {
-    const request_deadline_ms = automationRequestDeadline(response_timeout_ms);
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
         error.FileNotFound, error.PipeUnreachable => return null,
@@ -1129,7 +1128,10 @@ fn sendListWindowsIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try win32_ipc.encodeListWindowsRequest(alloc, request_deadline_ms);
+    const request = try win32_ipc.encodeListWindowsRequest(
+        alloc,
+        automationRequestDeadline(response_timeout_ms),
+    );
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
@@ -1147,12 +1149,11 @@ fn sendPerformActionIpc(
     action_text: []const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const request_deadline_ms = automationRequestDeadline(response_timeout_ms);
     const request = try win32_ipc.encodePerformActionRequest(
         alloc,
         target,
         action_text,
-        request_deadline_ms,
+        0,
     );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
@@ -1160,7 +1161,7 @@ fn sendPerformActionIpc(
 
 fn sendAutomationAckRequest(
     pipe_name: [:0]const u16,
-    request: []const u8,
+    request: []u8,
     response_timeout_ms: u64,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
@@ -1170,6 +1171,13 @@ fn sendAutomationAckRequest(
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
+    if (request.len < 13) return error.InvalidIpcRequest;
+    std.mem.writeInt(
+        u64,
+        request[5..13],
+        automationRequestDeadline(response_timeout_ms),
+        .little,
+    );
     try win32_ipc.writeAll(pipe, request);
     return win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
@@ -1183,7 +1191,7 @@ fn sendFocusIpc(
     const request = try win32_ipc.encodeFocusRequest(
         alloc,
         target,
-        automationRequestDeadline(response_timeout_ms),
+        0,
     );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
@@ -1200,7 +1208,7 @@ fn sendNewTabIpc(
         alloc,
         target,
         working_directory,
-        automationRequestDeadline(response_timeout_ms),
+        0,
     );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
@@ -1219,7 +1227,7 @@ fn sendNewSplitIpc(
         target,
         direction,
         working_directory,
-        automationRequestDeadline(response_timeout_ms),
+        0,
     );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
@@ -1236,7 +1244,7 @@ fn sendAutomationTextIpc(
         alloc,
         target,
         value,
-        automationRequestDeadline(response_timeout_ms),
+        0,
     );
     defer alloc.free(request);
     return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
@@ -1524,7 +1532,7 @@ fn sendLaunchLayoutIpc(
     const request = try win32_ipc.encodeLaunchLayoutRequest(
         alloc,
         name,
-        automationRequestDeadline(response_timeout_ms),
+        0,
     );
     defer alloc.free(request);
 
@@ -1535,6 +1543,12 @@ fn sendLaunchLayoutIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
+    std.mem.writeInt(
+        u64,
+        request[5..13],
+        automationRequestDeadline(response_timeout_ms),
+        .little,
+    );
     try win32_ipc.writeAll(pipe, request);
     return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
@@ -2049,31 +2063,59 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 new-window IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .list_windows => handleListWindowsIpcClient(app, pipe) catch |err| {
+        .list_windows, .list_windows_timed => handleListWindowsIpcClient(
+            app,
+            pipe,
+            kind == .list_windows_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation list IPC request err={}", .{err});
             try win32_ipc.writeDataResponse(pipe, false, "");
         },
-        .perform_action => handlePerformActionIpcClient(app, pipe) catch |err| {
+        .perform_action, .perform_action_timed => handlePerformActionIpcClient(
+            app,
+            pipe,
+            kind == .perform_action_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation action IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .launch_layout => handleLaunchLayoutIpcClient(app, pipe) catch |err| {
+        .launch_layout, .launch_layout_timed => handleLaunchLayoutIpcClient(
+            app,
+            pipe,
+            kind == .launch_layout_timed,
+        ) catch |err| {
             log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .new_tab => handleNewTabIpcClient(app, pipe) catch |err| {
+        .new_tab, .new_tab_timed => handleNewTabIpcClient(
+            app,
+            pipe,
+            kind == .new_tab_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation new-tab IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .new_split => handleNewSplitIpcClient(app, pipe) catch |err| {
+        .new_split, .new_split_timed => handleNewSplitIpcClient(
+            app,
+            pipe,
+            kind == .new_split_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation new-split IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .focus => handleFocusIpcClient(app, pipe) catch |err| {
+        .focus, .focus_timed => handleFocusIpcClient(
+            app,
+            pipe,
+            kind == .focus_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation focus IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
-        .send_text => handleSendTextIpcClient(app, pipe) catch |err| {
+        .send_text, .send_text_timed => handleSendTextIpcClient(
+            app,
+            pipe,
+            kind == .send_text_timed,
+        ) catch |err| {
             log.warn("failed to process win32 automation send-text IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
@@ -2117,8 +2159,8 @@ fn newWindowIpcArgumentsAccepted(arguments: ?[]const [:0]const u8) bool {
     };
 }
 
-fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const deadline_ms = try win32_ipc.decodeListWindowsDeadline(pipe);
+fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const deadline_ms = try win32_ipc.decodeListWindowsDeadline(pipe, timed);
     const json = try requestAutomationWindowListJson(
         app,
         app.core_app.alloc,
@@ -2128,8 +2170,8 @@ fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeDataResponse(pipe, true, json);
 }
 
-fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe, timed) catch |err| switch (err) {
         error.InvalidAutomationAction => {
             try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
             return;
@@ -2157,8 +2199,8 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe) catch |err| {
+fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodeLaunchLayoutPayload(app.core_app.alloc, pipe, timed) catch |err| {
         log.warn("invalid win32 launch-layout IPC request err={}", .{err});
         try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
         return;
@@ -2192,8 +2234,8 @@ fn handleLaunchLayoutIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = win32_ipc.decodeFocusPayload(pipe) catch |err| switch (err) {
+fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    const payload = win32_ipc.decodeFocusPayload(pipe, timed) catch |err| switch (err) {
         error.InvalidAutomationTarget => {
             try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_target);
             return;
@@ -2212,8 +2254,8 @@ fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    var payload = win32_ipc.decodeSendTextPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeSendTextPayload(app.core_app.alloc, pipe, timed) catch |err| switch (err) {
         error.InvalidAutomationText => {
             try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
             return;
@@ -2249,8 +2291,8 @@ fn automationCommandAckStatus(err: anyerror) ?u8 {
     };
 }
 
-fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    var payload = win32_ipc.decodeNewTabPayload(app.core_app.alloc, pipe) catch |err| {
+fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeNewTabPayload(app.core_app.alloc, pipe, timed) catch |err| {
         const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
@@ -2275,8 +2317,8 @@ fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try win32_ipc.writeAck(pipe, true);
 }
 
-fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    var payload = win32_ipc.decodeNewSplitPayload(app.core_app.alloc, pipe) catch |err| {
+fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE, timed: bool) !void {
+    var payload = win32_ipc.decodeNewSplitPayload(app.core_app.alloc, pipe, timed) catch |err| {
         const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
@@ -2397,7 +2439,7 @@ fn waitForAutomationCompletion(
             .pending => {
                 if (app.ipc_stop_requested.load(.acquire)) {
                     if (lifecycle.cancel()) return error.IPCFailed;
-                } else if (automationNowMs() >= lifecycle.deadline_ms) {
+                } else if (automationNowMs() > lifecycle.deadline_ms) {
                     if (lifecycle.cancel()) return error.IpcTimeout;
                 }
             },
@@ -32072,7 +32114,7 @@ test "win32 win32_ipc.encodeListWindowsRequest carries the response deadline" {
 
     try std.testing.expectEqual(@as(usize, 13), request.len);
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows), request[4]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows_timed), request[4]);
     try std.testing.expectEqual(deadline_ms, std.mem.readInt(u64, request[5..13], .little));
 }
 
@@ -32088,7 +32130,7 @@ test "automation-action win32 ipc encodes focused action request" {
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action_timed), request[4]);
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
     try std.testing.expectEqual(@as(u8, 0), request[13]);
     try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[14..22], .little));
@@ -32170,7 +32212,7 @@ test "automation-action win32 ipc encodes surface action request" {
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
-    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action_timed), request[4]);
     try std.testing.expectEqual(@as(u64, 0x0102030405060708), std.mem.readInt(u64, request[5..13], .little));
     try std.testing.expectEqual(@as(u8, 1), request[13]);
     try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[14..22], .little));
@@ -32218,7 +32260,7 @@ test "automation-action win32 ipc rejects oversized decoded action" {
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle),
+        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle, true),
     );
 }
 

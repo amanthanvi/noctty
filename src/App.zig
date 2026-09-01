@@ -949,16 +949,25 @@ pub const Message = union(enum) {
         }
 
         pub fn claim(self: *@This()) bool {
-            if (self.now_ms() >= self.deadline_ms) {
-                _ = self.cancel();
-                return false;
-            }
-            return self.state.cmpxchgStrong(
+            if (self.state.cmpxchgStrong(
                 @intFromEnum(State.pending),
                 @intFromEnum(State.claimed),
                 .acq_rel,
                 .acquire,
-            ) == null;
+            ) != null) return false;
+
+            // Recheck only after winning the claim. Checking first leaves a
+            // preemption window where the deadline can pass before the CAS.
+            // Equality is the documented zero-timeout one-attempt window.
+            if (self.now_ms() <= self.deadline_ms) return true;
+            const observed = self.state.cmpxchgStrong(
+                @intFromEnum(State.claimed),
+                @intFromEnum(State.cancelled),
+                .acq_rel,
+                .acquire,
+            );
+            std.debug.assert(observed == null);
+            return false;
         }
 
         pub fn cancel(self: *@This()) bool {
@@ -1194,8 +1203,19 @@ test "claimed automation request cannot report an ambiguous timeout" {
     );
 }
 
-test "expired automation request cannot be claimed" {
+test "automation request can be claimed on the exact deadline tick" {
     automation_test_now_ms = 100;
+    defer automation_test_now_ms = 0;
+    var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
+    try std.testing.expect(lifecycle.claim());
+    try std.testing.expectEqual(
+        Message.AutomationRequestLifecycle.State.claimed,
+        lifecycle.load(),
+    );
+}
+
+test "automation request cannot be claimed after the deadline tick" {
+    automation_test_now_ms = 101;
     defer automation_test_now_ms = 0;
     var lifecycle: Message.AutomationRequestLifecycle = .init(100, automationTestNow);
     try std.testing.expect(!lifecycle.claim());

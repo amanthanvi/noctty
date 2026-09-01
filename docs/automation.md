@@ -24,11 +24,15 @@ Every verb accepts `--class=<name>` and `--timeout=<ms>`. The class selects
 an instance namespace. The timeout is only the response timeout, accepts
 `0..10000`, and defaults to `10000` milliseconds; it does not extend the
 server's fixed 10-second wait or change connection and wire I/O limits.
-Automation request kinds 2 through 8 carry that caller deadline as an absolute
-system-uptime tick. The app thread atomically claims only unexpired requests;
-if the deadline wins first, queued work is cancelled and cannot run later.
-Once work is claimed before the deadline, the server waits for and reports its
-actual outcome instead of returning an ambiguous timeout.
+Deadline-capable request kinds 9 through 15 carry that caller deadline as an
+absolute system-uptime tick. The app thread atomically claims only unexpired
+requests; if the deadline wins first, queued work is cancelled and cannot run
+later. Equality permits the documented zero-timeout one-attempt poll. Once
+work is claimed by the deadline, the server waits for and reports its actual
+outcome instead of returning an ambiguous timeout. The original wire-v1 kinds
+2 through 8 remain accepted for older clients under the server's fixed
+10-second bound; new clients use the deadline-capable kinds, which older
+servers reject generically rather than misparsing a changed v1 payload.
 
 | Verb | Target and arguments | Exit codes |
 | --- | --- | --- |
