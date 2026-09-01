@@ -1394,6 +1394,15 @@ fn sendLaunchLayoutIpc(
     return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
 }
 
+fn trySendStartupLaunchLayoutIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    name: ?[]const u8,
+) !?bool {
+    const layout_name = name orelse return null;
+    return try sendLaunchLayoutIpc(alloc, pipe_name, layout_name);
+}
+
 const LaunchLayoutIpcArgument = union(enum) {
     none,
     name: []const u8,
@@ -3838,11 +3847,17 @@ pub const App = struct {
     fn tryForwardStartupToExistingInstance(self: *App) !bool {
         if (self.config.@"single-instance" != .true) return false;
 
-        const arguments = try collectStartupForwardArguments(self.core_app.alloc);
-        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
-
         const pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
         defer self.core_app.alloc.free(pipe_name);
+
+        if (try trySendStartupLaunchLayoutIpc(
+            self.core_app.alloc,
+            pipe_name,
+            self.config.@"launch-layout",
+        )) |forwarded| return forwarded;
+
+        const arguments = try collectStartupForwardArguments(self.core_app.alloc);
+        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
 
         return try sendNewWindowIpc(
             self.core_app.alloc,
@@ -30058,6 +30073,25 @@ test "win32 launch-layout IPC validates names before cold fallback" {
     try std.testing.expectError(
         error.InvalidAutomationAction,
         sendLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+    );
+}
+
+test "win32 startup layout forwarding intercepts before generic argv" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty.test.startup-layout-invalid-name",
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    try std.testing.expectEqual(
+        @as(?bool, null),
+        try trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, null),
+    );
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
     );
 }
 
