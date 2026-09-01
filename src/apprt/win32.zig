@@ -3094,7 +3094,10 @@ pub const App = struct {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
         // session when the diagnostic run exits.
-        return self.sessionRestoreEligible();
+        return sessionStatePolicyAllows(
+            self.safe_mode,
+            self.config.@"window-save-state",
+        );
     }
 
     fn sessionRestoreEligible(self: *const App) bool {
@@ -31764,6 +31767,9 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true, true));
+
+    // Startup-only restore bypasses must not disable later session saves.
+    try std.testing.expect(sessionStatePolicyAllows(false, .default));
 }
 
 test "win32 session restore transaction preserves first surface state" {

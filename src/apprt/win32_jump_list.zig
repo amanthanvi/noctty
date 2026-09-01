@@ -1073,11 +1073,12 @@ pub const JumpList = struct {
             log.warn("jump list recent event snapshot failed err={}", .{err});
             return;
         };
-        if (!changed and !reinstated and !recorded) return;
         self.persist_dirty = true;
         self.persist_retry_count = 0;
-        self.rebuild_retry_count = 0;
-        self.rebuild_dirty = true;
+        if (changed or reinstated or recorded) {
+            self.rebuild_retry_count = 0;
+            self.rebuild_dirty = true;
+        }
         self.schedule();
     }
 
@@ -2087,6 +2088,17 @@ test "jump_list unchanged recent directory still records a use event" {
     try std.testing.expect(jump.persist_dirty);
     try std.testing.expect(try jump.pending_recent_additions.contains(alloc, "D:\\same-head"));
     try std.testing.expect(try jump.pending_recent_uses.contains(alloc, "D:\\same-head"));
+
+    // A repeated use refreshes its event timestamp and must restart bounded
+    // persistence even when the visible MRU model is unchanged.
+    jump.persist_dirty = false;
+    jump.persist_retry_count = max_rebuild_retries;
+    jump.rebuild_dirty = false;
+    jump.noteRecent("D:\\same-head");
+    try std.testing.expect(jump.persist_dirty);
+    try std.testing.expectEqual(@as(u8, 0), jump.persist_retry_count);
+    try std.testing.expect(!jump.rebuild_dirty);
+    try std.testing.expect(jump.timer_id != null);
 }
 
 test "jump_list rejects invalid recent use before queuing events" {
