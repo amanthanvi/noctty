@@ -3077,15 +3077,13 @@ pub const TerminalProvider = struct {
         out.* = com.SupportedTextSelection_None;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
 
-        // This is a capability, not a snapshot of the current selection.
-        // Clients query it once, cache the answer and use it to decide whether
-        // GetSelection is worth calling at all, so answering `None` because
-        // nothing is selected right now permanently hides every later
-        // selection -- copy mode and mouse drags both -- from them. Both roles
-        // support exactly one selection, always: an edit box a mutable one, a
-        // terminal a read-only one.
+        // UIA selection support describes whether a client can mutate the
+        // control selection through ITextRangeProvider.Select. Edit controls
+        // support one mutable selection; the PTY-owned terminal selection is
+        // observable through GetSelection but cannot be changed by UIA.
         out.* = switch (self.state.role) {
-            .edit, .terminal => com.SupportedTextSelection_Single,
+            .edit => com.SupportedTextSelection_Single,
+            .terminal => com.SupportedTextSelection_None,
         };
         return com.S_OK;
     }
@@ -5074,13 +5072,12 @@ test "TerminalProvider GetSelection reports the caret range and real selections"
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
 
-    // The capability does not depend on there being a selection right now.
-    // Clients cache this answer, so it has to describe the control, not the
-    // current snapshot.
+    // The terminal selection is PTY-owned and observable but not mutable by
+    // UIA clients.
     var selection: i32 = -1;
     const hr = TerminalProvider.get_SupportedTextSelection(&p.text_iface, &selection);
     try std.testing.expectEqual(com.S_OK, hr);
-    try std.testing.expectEqual(com.SupportedTextSelection_Single, selection);
+    try std.testing.expectEqual(com.SupportedTextSelection_None, selection);
 
     // No user selection: the documented contract is a degenerate range at
     // the insertion point, not an empty array. The terminal always has one.
@@ -6323,14 +6320,14 @@ test "terminal provider exposes an active read-only selection" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    // A terminal always advertises that it supports one selection; clients
-    // honoring `None` never call GetSelection.
+    // The active terminal selection remains observable through GetSelection,
+    // but UIA cannot mutate it through Select.
     var supported: i32 = com.SupportedTextSelection_None;
     try std.testing.expectEqual(
         com.S_OK,
         TerminalProvider.get_SupportedTextSelection(&provider.text_iface, &supported),
     );
-    try std.testing.expectEqual(com.SupportedTextSelection_Single, supported);
+    try std.testing.expectEqual(com.SupportedTextSelection_None, supported);
 
     var selections: ?*com.SAFEARRAY = null;
     try std.testing.expectEqual(
