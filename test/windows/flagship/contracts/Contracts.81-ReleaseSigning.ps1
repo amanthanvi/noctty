@@ -280,6 +280,25 @@ Invoke-ContractTable -Contracts @(
         Kind = 'Text'
         Description = 'local release verification checks both architecture checksum sets and all installer and portable PE signatures'
     }
+    @{
+        File = $windowsPackager
+        Content = { $windowsPackagerText }
+        Pattern = 'Get-ChildItem -LiteralPath \$PayloadRoot -Recurse -File -Force'
+        Kind = 'Text'
+        Description = 'portable manifest generation includes hidden and system payload files'
+    }
+)
+
+$portableManifestVerifier = Join-Path $repoRoot 'scripts\portable-manifest-verification.ps1'
+$portableManifestVerifierText = Get-Content -LiteralPath $portableManifestVerifier -Raw
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $portableManifestVerifier
+        Content = { $portableManifestVerifierText }
+        Pattern = 'Get-ChildItem -LiteralPath \$PayloadRoot -Recurse -File -Force'
+        Kind = 'Text'
+        Description = 'portable manifest verification includes hidden and system payload files'
+    }
 )
 
 $signingBehaviorOutputs = @(

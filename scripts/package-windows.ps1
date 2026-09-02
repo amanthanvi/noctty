@@ -408,7 +408,7 @@ function Write-PortablePayloadManifest {
     $payloadRootFull = [System.IO.Path]::GetFullPath($PayloadRoot).TrimEnd('\', '/') +
         [System.IO.Path]::DirectorySeparatorChar
     $relativePaths = [System.Collections.Generic.List[string]]::new()
-    foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File -Force)) {
         $fullPath = [System.IO.Path]::GetFullPath($file.FullName)
         if (-not $fullPath.StartsWith($payloadRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Portable payload file resolved outside the payload root: $fullPath"

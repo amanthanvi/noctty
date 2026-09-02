@@ -43,7 +43,7 @@ function Assert-PortableManifestMatchesPayload {
     $payloadFiles = [System.Collections.Generic.Dictionary[string,string]]::new(
         [System.StringComparer]::Ordinal
     )
-    foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File -Force)) {
         $name = [System.IO.Path]::GetRelativePath($PayloadRoot, $file.FullName).Replace('\', '/')
         if (-not $managedRootFiles.Contains($name) -and
             -not $name.StartsWith('share/', [System.StringComparison]::Ordinal)) {
