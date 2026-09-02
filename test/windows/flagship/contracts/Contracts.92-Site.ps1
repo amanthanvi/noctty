@@ -735,6 +735,23 @@ foreach ($expectedWrapper in $expectedPublicVerificationWrappers) {
             "-StaticOnly:`$StaticOnly to $($expectedWrapper.Inner)."
     }
 }
+$publicAssetUriFunction = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+New-PublicAssetUri(?=\s|\{)'
+$publicAssetUriProbe = & ([scriptblock]::Create(
+        $publicAssetUriFunction + @'
+New-PublicAssetUri `
+    -Origin ([Uri]'https://11111111.noctty.pages.dev/') `
+    -RelativePath 'why-noctty.html' `
+    -Id '11111111-1d01-4095-9774-6f8cfe7d7d1e' `
+    -Commit '0123456789abcdef0123456789abcdef01234567'
+'@
+    ))
+if ($publicAssetUriProbe.AbsolutePath -cne '/why-noctty' -or
+    $publicAssetUriProbe.Query -cne
+        '?noctty_deployment=11111111-1d01-4095-9774-6f8cfe7d7d1e') {
+    throw 'Pages public HTML asset URLs must use the extensionless canonical route.'
+}
 Invoke-ContractTable -Contracts @(
     @{
         File = "$cloudflarePagesVerifier :: Test-PublicPayloadOnce"
