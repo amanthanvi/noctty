@@ -210,7 +210,8 @@ Recommended order:
 6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
-   - signed portable manifest
+   - `noctty-<version>-windows-x64-portable.manifest.ps1`
+   - `noctty-<version>-windows-arm64-portable.manifest.ps1`
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
@@ -233,9 +234,11 @@ on first publish and `gh release upload --clobber` on reruns.
 
 The new WinGet package identifier is `AmanThanvi.noctty`; its bootstrap is
 pending in `microsoft/winget-pkgs`.
-Release preflight verifies that
-`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists before the
-release workflow can claim package-manager readiness. Keep CI on the
+During the transitional prerelease, preflight still checks the live repository
+variable, which remains `AmanThanvi.winghostty`; that is not proof that the new
+identifier is ready. Before stable promotion, set `WINGET_PACKAGE_IDENTIFIER`
+to `AmanThanvi.noctty`. Stable preflight then verifies that
+`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists. Keep CI on the
 truthful `update` path; do not switch to `wingetcreate new` for automated
 releases.
 
