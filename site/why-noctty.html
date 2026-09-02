@@ -97,12 +97,12 @@
           <a class="nc-button nc-button--secondary" href="#migrate">Plan a migration</a>
         </div>
         <p class="nc-proof-hero__cadence">
-          Latest stable: <strong id="nc-version">v1.3.123</strong>.
-          Twenty-two stable releases shipped between 2026-04-16 and 2026-08-06.
+          Latest stable: <strong id="nc-version">v1.3.124</strong>.
+          Twenty-three stable releases shipped between 2026-04-16 and 2026-09-02.
           No cadence is promised;
           <a href="https://github.com/amanthanvi/noctty/releases" target="_blank" rel="noopener noreferrer">the dated release history</a>
           is the whole record.
-          <span class="nc-sr-only" id="nc-version-summary">Version 1.3.123, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
+          <span class="nc-sr-only" id="nc-version-summary">Version 1.3.124, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
         </p>
       </div>
     </section>
@@ -335,9 +335,10 @@ try {
               verifier downloads every asset, checks
               every GitHub digest and checksum entry, validates every embedded
               PE signature, and requires a single signer whose SPKI matches the
-              key pinned into the updater. Releases do not currently publish
-              build-provenance attestations, so this verifier does not claim to
-              check one. The environment variable is what makes it accept
+              key pinned into the updater. Starting with v1.3.124, it also
+              verifies GitHub build-provenance attestations for every published
+              asset except the static icon, bound to the canonical release
+              workflow. The environment variable is what makes it accept
               today's self-signed certificate; without it, the script fails
               closed.
             </p>
@@ -525,6 +526,6 @@ pwsh .\scripts\verify-published-release.ps1 `
   </footer>
 
   <script type="module" src="/app.js?v=98916ae44c47820a7a796236e272181592d780769a90b706acea8eeb8eead2d1"></script>
-  <script type="module" src="/version.js?v=4206bafa9ec172e9587f7680d7513c3978241edb007057348890eb2e51396cee"></script>
+  <script type="module" src="/version.js?v=9c98ba6d2242f28da78ce39427ce30506dfa38c1a79372c598faa62159f5742f"></script>
 </body>
 </html>

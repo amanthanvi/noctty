@@ -383,13 +383,9 @@ test("claims guards read rendered text without blocking operational rates", () =
 
 test("trust page carries every implemented release verification layer", () => {
   assert.match(trustHtml, /Get-FileHash/);
-  assert.doesNotMatch(
-    trustHtml,
-    /gh attestation verify|every published asset carries\s+a GitHub\s+build-provenance attestation/i,
-  );
   assert.match(
     trustHtml,
-    /do not currently publish\s+build-provenance attestations/i,
+    /verifies GitHub build-provenance attestations[\s\S]*?every published[\s\S]*?asset except the static icon/i,
   );
   assert.match(trustHtml, /Assert-ReleaseSignature/);
   assert.match(

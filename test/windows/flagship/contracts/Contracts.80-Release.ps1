@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '7ca3ff5add29e1da961f6daf6a0f845f68f9284bdd7cfed059248d04d1467e4e'
+    '908ff971221435538b6e4148507bdc6241b6b4f481d488f1f662337bf62da74a'
 $readinessWorkflowSha256 =
     '7c66f756a0219af4e791bccef9824c7373050e41aa753836f6f95577a5a1edc5'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1380,6 +1380,40 @@ Invoke-ContractTable -Contracts @(
         Description = 'GitHub release publication passes exact metadata through environment-bound script parameters'
     }
 )
+
+$releaseAttestationStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Attest published release artifacts' `
+    -Source $releaseWorkflow
+$expectedAttestationSubjects = @(
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-setup.exe',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.zip',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.manifest.ps1',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS-windows-x64.txt',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.manifest.ps1',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/SHA256SUMS-windows-arm64.txt',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS.txt'
+)
+$attestationSubjectBlock = [regex]::Match(
+    $releaseAttestationStep,
+    '(?ms)^        with:\s*\r?\n          subject-path: \|\s*\r?\n(?<body>(?:^            .+\r?\n)+)'
+)
+if (-not $attestationSubjectBlock.Success) {
+    throw 'Release attestation step must declare with.subject-path.'
+}
+$actualAttestationSubjects = @(
+    $attestationSubjectBlock.Groups['body'].Value -split '\r?\n' |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
+if ($actualAttestationSubjects.Count -ne 9 -or
+    @($expectedAttestationSubjects | Where-Object { $_ -notin $actualAttestationSubjects }).Count -gt 0 -or
+    @($actualAttestationSubjects | Where-Object { $_ -notin $expectedAttestationSubjects }).Count -gt 0 -or
+    $releaseAttestationStep.Contains('noctty-icon.svg', [StringComparison]::Ordinal)) {
+    throw 'Release attestation subjects must be exactly the nine non-icon published assets.'
+}
 $releaseGithubPublisher = Join-Path $repoRoot 'scripts\release-publish-github.ps1'
 $releaseGithubPublisherText = Get-Content -LiteralPath $releaseGithubPublisher -Raw
 $releaseScoopPublisher = Join-Path $repoRoot 'scripts\release-publish-scoop.ps1'
@@ -1412,7 +1446,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '6ce232e8332d32aa61a9c1f6730e6188f2696e1bb6a82a0c9151e7fa01c9c3f5'
+            'bdd1d01feac86ee799f2d0292e342dfc00e87e95a07ff6eb25f87e0e1c68efb6'
         CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
     }
     [pscustomobject] @{
@@ -1845,9 +1879,23 @@ Invoke-ContractTable -Contracts @(
 )
 $signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
 $defenderScanStepIndex = $releaseWorkflowText.IndexOf('      - name: Scan Windows release artifacts with Microsoft Defender')
+$attestationGuardStepIndex = $releaseWorkflowText.IndexOf('      - name: Prepare build provenance attestation')
+$attestationStepIndex = $releaseWorkflowText.IndexOf('      - name: Attest published release artifacts')
 $publishReleaseStepIndex = $releaseWorkflowText.IndexOf('      - name: Publish GitHub Release')
 if ($signedArtifactStepIndex -lt 0 -or
     $defenderScanStepIndex -le $signedArtifactStepIndex -or
-    $publishReleaseStepIndex -le $defenderScanStepIndex) {
-    throw 'Microsoft Defender scanning must run after artifact verification and before release publication.'
+    $attestationGuardStepIndex -le $defenderScanStepIndex -or
+    $attestationStepIndex -le $attestationGuardStepIndex -or
+    $publishReleaseStepIndex -le $attestationStepIndex) {
+    throw 'Artifact verification, Defender scanning, provenance attestation, and publication are ordered incorrectly.'
 }
+
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $releaseWorkflow
+        Content = { $releaseWorkflowText }
+        Pattern = '(?ms)^    permissions:.*?contents: write.*?actions: read.*?id-token: write.*?attestations: write.*?Prepare build provenance attestation.*?ATTEST_REPOSITORY.*?amanthanvi/noctty.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?Attest published release artifacts.*?actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8.*?portable\.manifest\.ps1.*?SHA256SUMS\.txt'
+        Kind = 'Text'
+        Description = 'release provenance is job-scoped, canonical-repository guarded, pinned, and covers the nine non-icon assets'
+    }
+)

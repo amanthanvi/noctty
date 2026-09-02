@@ -5,8 +5,10 @@ Releases. The public packaging targets are:
 
 - `noctty-<version>-windows-x64-setup.exe`
 - `noctty-<version>-windows-x64-portable.zip`
+- `noctty-<version>-windows-x64-portable.manifest.ps1`
 - `noctty-<version>-windows-arm64-setup.exe`
 - `noctty-<version>-windows-arm64-portable.zip`
+- `noctty-<version>-windows-arm64-portable.manifest.ps1`
 - `SHA256SUMS-windows-x64.txt`
 - `SHA256SUMS-windows-arm64.txt`
 - `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
@@ -34,18 +36,21 @@ then produces:
 
 1. An Inno Setup installer
 2. A portable ZIP
-3. SHA256 checksums for published assets
-4. A release icon asset
-5. Generated package-manager metadata
+3. An Authenticode-signed manifest covering every portable payload file
+4. SHA256 checksums for published assets
+5. A release icon asset
+6. Generated package-manager metadata
 
 Local unsigned packaging is allowed for smoke validation, but the GitHub
 Release workflow requires signing and fails closed when signing is absent.
-The release installer and Windows PE files inside the portable ZIP are
-Authenticode-signed; the ZIP container itself is checksummed, not
-Authenticode-signed.
+The release installer, portable payload manifest, and Windows PE files inside
+the portable ZIP are Authenticode-signed. The ZIP container itself is
+checksummed and bound to the canonical release workflow by a GitHub build
+provenance attestation. Every published asset except the static icon is
+attested.
 
 Before publication, the Release workflow updates Microsoft Defender
-signatures and scans both setup artifacts plus the six PE files extracted from
+signatures and scans both setup artifacts plus the eight PE files extracted from
 the portable ZIPs, with remediation disabled. A missing or inactive scanner,
 update or scan error, or detection fails the release. This is a current-engine
 regression gate for the published Windows executable bytes; it does not replace
@@ -205,10 +210,13 @@ Recommended order:
 6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
+   - `noctty-<version>-windows-x64-portable.manifest.ps1`
+   - `noctty-<version>-windows-arm64-portable.manifest.ps1`
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
-7. Confirm follow-on publishes:
+7. Confirm build provenance for the nine non-icon assets.
+8. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
 
@@ -224,10 +232,13 @@ on first publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-The official WinGet package is bootstrapped as `AmanThanvi.noctty`.
-Release preflight verifies that
-`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists before the
-release workflow can claim package-manager readiness. Keep CI on the
+The new WinGet package identifier is `AmanThanvi.noctty`; its bootstrap is
+pending in `microsoft/winget-pkgs`.
+During the transitional prerelease, preflight still checks the live repository
+variable, which remains `AmanThanvi.winghostty`; that is not proof that the new
+identifier is ready. Before stable promotion, set `WINGET_PACKAGE_IDENTIFIER`
+to `AmanThanvi.noctty`. Stable preflight then verifies that
+`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists. Keep CI on the
 truthful `update` path; do not switch to `wingetcreate new` for automated
 releases.
 

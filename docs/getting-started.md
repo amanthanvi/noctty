@@ -5,32 +5,26 @@ or 11 on x64 or ARM64 and a GPU driver with OpenGL 4.3 or newer.
 
 ## 1. Install with a package manager
 
-The quickest path. With WinGet:
-
-```powershell
-winget install AmanThanvi.noctty
-```
-
-Or with Scoop, from the project's own bucket:
+The `AmanThanvi.noctty` WinGet package is pending bootstrap. Until it merges,
+use Scoop from the project's own bucket:
 
 ```powershell
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
-Both tracks point at the same GitHub Release assets and checksums.
-Scoop also puts `noctty` on your PATH; WinGet does not, so the PATH
-note at the end of step 2 applies to WinGet installs too. Either way,
-you can continue at step 3.
+Scoop points at the same GitHub Release assets and checksums and puts `noctty`
+on your PATH. Continue at step 3.
 
 ## 2. Or download and install manually
 
 Go to [Releases](https://github.com/amanthanvi/noctty/releases). The
-current stable release is `1.3.123`, and `<arch>` is `x64` or `arm64`;
+current stable release is `1.3.124`, and `<arch>` is `x64` or `arm64`;
 both architectures ship every asset:
 
 - Installer: `noctty-<version>-windows-<arch>-setup.exe`
 - Portable ZIP: `noctty-<version>-windows-<arch>-portable.zip`
+- Signed portable manifest: `noctty-<version>-windows-<arch>-portable.manifest.ps1`
 - Checksums: `SHA256SUMS-windows-<arch>.txt`
 
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
@@ -52,6 +46,21 @@ Get-FileHash .\noctty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
 Compare the result against the matching line in
 `SHA256SUMS-windows-<arch>.txt`. If it doesn't match, stop. Don't install
 or extract that file; delete it and download it again.
+
+For v1.3.124 and later, GitHub also publishes build provenance for every
+release asset except the static icon. Bind the check to this repository and
+the canonical release workflow:
+
+```powershell
+gh attestation verify .\noctty-<version>-windows-<arch>-portable.zip `
+  --repo amanthanvi/noctty `
+  --signer-workflow amanthanvi/noctty/.github/workflows/release.yml
+```
+
+The matching signed manifest covers the exact files inside the portable ZIP.
+`scripts/verify-published-release.ps1` verifies the asset set, GitHub digests,
+provenance, manifest signature and payload hashes, and every embedded PE
+signature against the updater's pinned publisher key.
 
 ### Installer
 
@@ -80,9 +89,10 @@ that folder.
 
 ### About the SmartScreen warning
 
-Release installers and the Windows binaries inside the portable ZIP are
-Authenticode-signed, but the current signing certificate is self-signed.
-The ZIP container itself is checksummed, not signed.
+Release installers, portable payload manifests, and the Windows binaries
+inside the portable ZIP are Authenticode-signed, but the current signing
+certificate is self-signed. The ZIP container is checksummed and provenance
+attested rather than Authenticode-signed.
 
 A self-signed certificate carries no third-party publisher identity, so
 it earns no SmartScreen reputation. The warning won't fade with time;

@@ -61,14 +61,11 @@ first install.
 
 noctty runs on Windows 10 and 11, x64 and ARM64, and needs a GPU
 driver with OpenGL 4.3 or newer. Latest stable release:
-[noctty 1.3.123](https://github.com/amanthanvi/noctty/releases/tag/v1.3.123),
-published 2026-08-06.
+[noctty 1.3.124](https://github.com/amanthanvi/noctty/releases/tag/v1.3.124),
+published 2026-09-02.
 
-```powershell
-winget install AmanThanvi.noctty
-```
-
-Or with Scoop:
+The `AmanThanvi.noctty` WinGet package is pending bootstrap. Until it merges,
+install with Scoop:
 
 ```powershell
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
@@ -82,20 +79,22 @@ folder:
 
 | File                                                                                                                                                                 | What it is      |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| [`noctty-1.3.123-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-x64-setup.exe)           | x64 installer   |
-| [`noctty-1.3.123-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-setup.exe)       | ARM64 installer |
-| [`noctty-1.3.123-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-x64-portable.zip)     | x64 portable    |
-| [`noctty-1.3.123-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-portable.zip) | ARM64 portable  |
-| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS-windows-x64.txt)                                       | x64 checksums   |
-| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS-windows-arm64.txt)                                   | ARM64 checksums |
+| [`noctty-1.3.124-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-x64-setup.exe)           | x64 installer   |
+| [`noctty-1.3.124-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-arm64-setup.exe)       | ARM64 installer |
+| [`noctty-1.3.124-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-x64-portable.zip)     | x64 portable    |
+| [`noctty-1.3.124-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-arm64-portable.zip) | ARM64 portable  |
+| [`noctty-1.3.124-windows-x64-portable.manifest.ps1`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-x64-portable.manifest.ps1) | x64 signed manifest |
+| [`noctty-1.3.124-windows-arm64-portable.manifest.ps1`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-arm64-portable.manifest.ps1) | ARM64 signed manifest |
+| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/SHA256SUMS-windows-x64.txt)                                       | x64 checksums   |
+| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/SHA256SUMS-windows-arm64.txt)                                   | ARM64 checksums |
 
 The older
-[`SHA256SUMS.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS.txt)
+[`SHA256SUMS.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/SHA256SUMS.txt)
 is still published as an x64 auto-update compatibility alias.
 
-The installers and the binaries inside the portable ZIP are
-Authenticode-signed with a self-signed certificate; the ZIP container
-itself is checksummed, not signed. SmartScreen warns on first run
+The installers, portable manifests, and binaries inside the portable ZIP are
+Authenticode-signed with a self-signed certificate. The ZIP container is
+checksummed and carries GitHub build provenance. SmartScreen warns on first run
 because that certificate carries no publisher reputation, so check the
 download against its checksum file before you run it.
 [docs/getting-started.md](docs/getting-started.md) explains the warning

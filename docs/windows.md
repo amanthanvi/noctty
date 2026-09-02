@@ -23,11 +23,14 @@ Each release publishes signed Windows artifacts for x64 and ARM64:
   with Start menu shortcuts and app identity metadata.
 - `noctty-<version>-windows-<arch>-portable.zip`: portable use
   without an installer.
+- `noctty-<version>-windows-<arch>-portable.manifest.ps1`: signed hashes for
+  the exact portable payload.
 - `SHA256SUMS-windows-<arch>.txt`: architecture-specific checksums.
 
-The installer and the binaries inside the portable ZIP are
-Authenticode-signed with a self-signed certificate; the ZIP container
-itself is checksummed, not signed.
+The installer, portable manifest, and binaries inside the portable ZIP are
+Authenticode-signed with a self-signed certificate. The ZIP container is
+checksummed and bound to the canonical release workflow by GitHub build
+provenance.
 The legacy `SHA256SUMS.txt` file remains an x64 auto-update compatibility
 alias.
 

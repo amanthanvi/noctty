@@ -15,8 +15,51 @@ $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
 } else {
     $env:GITHUB_REPOSITORY
 }
+$firstAttestedVersion = [version]'1.3.124'
+$firstPortableManifestVersion = [version]'1.3.124'
+$minimumGhAttestationVersion = [version]'2.93.0'
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
+. (Join-Path $PSScriptRoot 'portable-manifest-verification.ps1')
+
+function Test-GhAttestationAvailable {
+    $versionOutput = @(& gh --version 2>&1)
+    if ($LASTEXITCODE -ne 0 -or
+        $versionOutput.Count -eq 0 -or
+        [string]$versionOutput[0] -notmatch '^gh version (?<version>\d+\.\d+\.\d+)(?:\s|$)') {
+        throw 'Cannot determine the installed GitHub CLI version required for safe attestation verification.'
+    }
+
+    $ghVersion = [version]$Matches['version']
+    if ($ghVersion -lt $minimumGhAttestationVersion) {
+        throw "GitHub CLI $ghVersion is unsafe for attestation verification. Upgrade to $minimumGhAttestationVersion or later."
+    }
+
+    & gh attestation verify --help *> $null
+    if ($LASTEXITCODE -eq 0) { return $true }
+
+    $message = 'the installed GitHub CLI does not provide the gh attestation verify subcommand'
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        throw "Cannot verify build provenance attestations: $message. Upgrade gh on the runner."
+    }
+    Write-Warning "Skipping build provenance attestation verification: $message. Upgrade gh to verify provenance."
+    return $false
+}
+
+function Assert-PublishedAttestation {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Label,
+        [Parameter(Mandatory)] [string]$Repository
+    )
+
+    & gh attestation verify $Path `
+        --repo $Repository `
+        --signer-workflow "$Repository/.github/workflows/release.yml"
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label build provenance attestation is missing or invalid: $Path"
+    }
+}
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'GitHub CLI (gh) is required to verify a published release.'
@@ -58,17 +101,31 @@ $release = $releaseJson | ConvertFrom-Json
 if ($release.tagName -ne $tag -or $release.isDraft -or $release.isPrerelease) {
     throw "Published release $tag must exist as a stable, non-draft release."
 }
+$releaseVersion = [version]$Version
+$requiresAttestation = ($releaseVersion -ge $firstAttestedVersion)
+$requiresPortableManifests = ($releaseVersion -ge $firstPortableManifestVersion)
+$verifyAttestations = if ($requiresAttestation) {
+    Test-GhAttestationAvailable
+} else {
+    Write-Host "Skipping build provenance attestation verification: $tag predates the v$firstAttestedVersion attestation requirement."
+    $false
+}
 
 $expectedNames = [System.Collections.Generic.List[string]]::new()
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup))
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable))
+    if ($requiresPortableManifests) {
+        $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest))
+    }
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
 }
 $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
 $expectedNames.Add('noctty-icon.svg')
-if ($expectedNames.Count -ne 8) {
-    throw "Published release contract must require exactly eight assets; generated $($expectedNames.Count)."
+$expectedAttestationNames = @($expectedNames | Where-Object { $_ -ne 'noctty-icon.svg' })
+$expectedAssetCount = if ($requiresPortableManifests) { 10 } else { 8 }
+if ($expectedNames.Count -ne $expectedAssetCount) {
+    throw "Published release contract must require exactly $expectedAssetCount assets; generated $($expectedNames.Count)."
 }
 
 $assets = @($release.assets)
@@ -103,6 +160,7 @@ try {
     if ($allowedPins.Count -eq 0) { throw 'Updater publisher-pin allowlist is empty.' }
     $trustSelfSigned = ([string]$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
 
+    $attestationEvidenceCount = 0
     foreach ($asset in $assets) {
         $path = Join-Path $DownloadDirectory ([string]$asset.name)
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -116,6 +174,18 @@ try {
         if ($actualHash -ne $digest.Substring(7).ToLowerInvariant()) {
             throw "GitHub digest mismatch for asset $($asset.name)."
         }
+        if ($verifyAttestations -and $expectedAttestationNames -contains [string]$asset.name) {
+            Assert-PublishedAttestation `
+                -Path $path `
+                -Label ([string]$asset.name) `
+                -Repository $repository
+            $attestationEvidenceCount += 1
+        }
+    }
+    if ($verifyAttestations -and
+        ($expectedAttestationNames.Count -ne 9 -or
+         $attestationEvidenceCount -ne $expectedAttestationNames.Count)) {
+        throw "Published release must contain exactly nine verified build provenance attestations; found $attestationEvidenceCount."
     }
 
     $legacyPath = Join-Path $DownloadDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums)
@@ -131,6 +201,7 @@ try {
     foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         $setupName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind setup
         $portableName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind portable
+        $manifestName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind manifest
         $checksumsName = New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums
         $checksums = Get-ChecksumEntries -Path (Join-Path $DownloadDirectory $checksumsName)
         $expectedChecksumNames = @($setupName, $portableName)
@@ -150,9 +221,22 @@ try {
             -Label "Setup $architecture" `
             -AllowedPins $allowedPins `
             -TrustSelfSigned $trustSelfSigned))
+        if ($requiresPortableManifests) {
+            $signatureEvidence.Add((Assert-ReleaseSignature `
+                -Path (Join-Path $DownloadDirectory $manifestName) `
+                -Label "Portable manifest $architecture" `
+                -AllowedPins $allowedPins `
+                -TrustSelfSigned $trustSelfSigned))
+        }
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
+        if ($requiresPortableManifests) {
+            Assert-PortableManifestMatchesPayload `
+                -ManifestPath (Join-Path $DownloadDirectory $manifestName) `
+                -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+                -Label "Portable manifest $architecture"
+        }
         $expectedPortablePePaths = @(
             'noctty/noctty.com',
             'noctty/noctty.exe',
@@ -175,17 +259,25 @@ try {
         }
     }
 
-    if ($signatureEvidence.Count -ne 10) {
-        throw "Published release must contain exactly ten verified PE signatures; found $($signatureEvidence.Count)."
+    $expectedSignatureCount = if ($requiresPortableManifests) { 12 } else { 10 }
+    if ($signatureEvidence.Count -ne $expectedSignatureCount) {
+        throw "Published release must contain exactly $expectedSignatureCount verified Authenticode signatures; found $($signatureEvidence.Count)."
     }
 
     $thumbprints = @($signatureEvidence | ForEach-Object { $_.Thumbprint } | Sort-Object -Unique)
     $pins = @($signatureEvidence | ForEach-Object { $_.SpkiSha256 } | Sort-Object -Unique)
     if ($thumbprints.Count -ne 1 -or $pins.Count -ne 1) {
-        throw "Published release binaries are not signed by one consistent certificate (thumbprints=$($thumbprints -join ', '); pins=$($pins -join ', '))."
+        throw "Published release files are not signed by one consistent certificate (thumbprints=$($thumbprints -join ', '); pins=$($pins -join ', '))."
     }
 
-    Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $($signatureEvidence.Count) signed PE files, SPKI $($pins[0]))" -ForegroundColor Green
+    $attestationSummary = if ($verifyAttestations) {
+        "$attestationEvidenceCount provenance attestations"
+    } elseif ($requiresAttestation) {
+        'provenance skipped because gh attestation verify is unavailable'
+    } else {
+        "provenance not required before v$firstAttestedVersion"
+    }
+    Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $attestationSummary, $($signatureEvidence.Count) signed files, SPKI $($pins[0]))" -ForegroundColor Green
 }
 finally {
     if ($createdTempDirectory -and (Test-Path -LiteralPath $DownloadDirectory)) {
