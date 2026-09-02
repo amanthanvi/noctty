@@ -118,6 +118,8 @@ export function getHeaderContract(directory = siteRoot) {
     )
     .join("; ");
   const cacheControl = "public, max-age=0, must-revalidate";
+  // Cloudflare Pages overrides custom 404 responses with this stricter policy.
+  const notFoundCacheControl = "no-store";
   const permissionsPolicy =
     "accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), " +
     "magnetometer=(), microphone=(), payment=(), usb=()";
@@ -145,7 +147,7 @@ export function getHeaderContract(directory = siteRoot) {
       referrer_policy: "strict-origin-when-cross-origin",
       permissions_policy: permissionsPolicy,
     },
-    not_found: { cache_control: cacheControl },
+    not_found: { cache_control: notFoundCacheControl },
   };
 }
 
