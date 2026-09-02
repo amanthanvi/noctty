@@ -71,8 +71,10 @@ Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $aumid = 'io.github.amanthanvi.noctty'
 $toastMgr = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
 $notifier = $toastMgr::CreateToastNotifier($aumid)
-$settingValue = [int] $notifier.Setting
-$settingText = $notifier.Setting.ToString()
+$setting = $notifier.Setting
+$settingAvailable = $null -ne $setting
+$settingValue = if ($settingAvailable) { [int] $setting } else { -1 }
+$settingText = if ($settingAvailable) { $setting.ToString() } else { 'Unavailable' }
 $notificationsEnabled = $settingText -eq 'Enabled'
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
@@ -124,13 +126,17 @@ try {
             $failureReason = "unexpected WinRT toast failure while notifier setting is Enabled ($settingText)"
             break
         }
+        if ($toastFailure -and -not $notifierDisabledFallback) {
+            $failureReason = "unexpected WinRT toast failure while notifier setting is $settingText"
+            break
+        }
 
         if ($process.HasExited) {
             $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
 
             if ($launchStopwatch.ElapsedMilliseconds -lt $minimumRuntimeMs) {
                 $failureReason = "noctty exited too early for command-finish validation (exit code $exitCode, runtime $($launchStopwatch.ElapsedMilliseconds)ms)"
-            } elseif ($notificationsEnabled) {
+            } elseif ($notificationsEnabled -or (-not $settingAvailable -and -not $toastFailure)) {
                 $validated = $true
             } elseif ($notifierDisabledFallback) {
                 $validated = $true

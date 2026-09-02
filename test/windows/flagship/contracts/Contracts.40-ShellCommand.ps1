@@ -211,3 +211,15 @@ Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Cont
     '& $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"'
     '& $powershellExe -NoProfile -Command "(Get-Command noctty).Source"'
 )
+
+$commandFinishHarness = Join-Path $repoRoot 'test\windows\interactive-win11-command-finish.ps1'
+$commandFinishHarnessText = Get-Content -LiteralPath $commandFinishHarness -Raw
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $commandFinishHarness
+        Content = { $commandFinishHarnessText }
+        Pattern = '(?ms)\$setting = \$notifier\.Setting.*?\$settingAvailable = \$null -ne \$setting.*?Unavailable.*?\$toastFailure -and -not \$notifierDisabledFallback.*?-not \$settingAvailable -and -not \$toastFailure'
+        Kind = 'Text'
+        Description = 'command-finish validation handles unavailable WinRT settings while rejecting unexpected toast failures'
+    }
+)
