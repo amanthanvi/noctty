@@ -7,10 +7,6 @@ const INSTALL_METHODS = {
     cmd: 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty; scoop install noctty/noctty',
     copy: 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty\r\nscoop install noctty/noctty',
   },
-  winget: {
-    cmd: 'winget install AmanThanvi.noctty',
-    copy: 'winget install AmanThanvi.noctty',
-  },
 };
 
 function writeClipboardTextFallback(text) {
@@ -49,7 +45,7 @@ const status = document.getElementById('nc-install-status');
 const radios = Array.from(document.querySelectorAll('input[name="install-method"]'));
 
 if (command && copyButton && status && radios.length) {
-  let method = radios.find((radio) => radio.checked)?.value || 'winget';
+  let method = radios.find((radio) => radio.checked)?.value || 'scoop';
   let copyTimer = null;
 
   function clearCopyTimer() {
@@ -76,7 +72,7 @@ if (command && copyButton && status && radios.length) {
   }
 
   function applyMethod(next) {
-    method = next in INSTALL_METHODS ? next : 'winget';
+    method = next in INSTALL_METHODS ? next : 'scoop';
     const active = INSTALL_METHODS[method];
     command.textContent = active.cmd;
     command.setAttribute('title', active.cmd);

@@ -122,6 +122,7 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
 }
 $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
 $expectedNames.Add('noctty-icon.svg')
+$expectedAttestationNames = @($expectedNames | Where-Object { $_ -ne 'noctty-icon.svg' })
 $expectedAssetCount = if ($requiresPortableManifests) { 10 } else { 8 }
 if ($expectedNames.Count -ne $expectedAssetCount) {
     throw "Published release contract must require exactly $expectedAssetCount assets; generated $($expectedNames.Count)."
@@ -173,7 +174,7 @@ try {
         if ($actualHash -ne $digest.Substring(7).ToLowerInvariant()) {
             throw "GitHub digest mismatch for asset $($asset.name)."
         }
-        if ($verifyAttestations -and [string]$asset.name -ne 'noctty-icon.svg') {
+        if ($verifyAttestations -and $expectedAttestationNames -contains [string]$asset.name) {
             Assert-PublishedAttestation `
                 -Path $path `
                 -Label ([string]$asset.name) `
@@ -181,7 +182,9 @@ try {
             $attestationEvidenceCount += 1
         }
     }
-    if ($verifyAttestations -and $attestationEvidenceCount -ne 9) {
+    if ($verifyAttestations -and
+        ($expectedAttestationNames.Count -ne 9 -or
+         $attestationEvidenceCount -ne $expectedAttestationNames.Count)) {
         throw "Published release must contain exactly nine verified build provenance attestations; found $attestationEvidenceCount."
     }
 

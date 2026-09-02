@@ -5,23 +5,16 @@ or 11 on x64 or ARM64 and a GPU driver with OpenGL 4.3 or newer.
 
 ## 1. Install with a package manager
 
-The quickest path. With WinGet:
-
-```powershell
-winget install AmanThanvi.noctty
-```
-
-Or with Scoop, from the project's own bucket:
+The `AmanThanvi.noctty` WinGet package is pending bootstrap. Until it merges,
+use Scoop from the project's own bucket:
 
 ```powershell
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
-Both tracks point at the same GitHub Release assets and checksums.
-Scoop also puts `noctty` on your PATH; WinGet does not, so the PATH
-note at the end of step 2 applies to WinGet installs too. Either way,
-you can continue at step 3.
+Scoop points at the same GitHub Release assets and checksums and puts `noctty`
+on your PATH. Continue at step 3.
 
 ## 2. Or download and install manually
 

@@ -20,12 +20,11 @@ is; Noctty never reads it.
 ## 2. Install and verify Noctty
 
 ```powershell
-winget install AmanThanvi.noctty
-
-# Or:
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
+
+The `AmanThanvi.noctty` WinGet package is pending bootstrap.
 
 For a direct download, run the checksum and signature checks on the
 [Why Noctty and verification page](https://noctty.com/why-noctty.html#verify).

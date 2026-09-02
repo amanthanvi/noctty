@@ -1396,11 +1396,17 @@ $expectedAttestationSubjects = @(
     'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/SHA256SUMS-windows-arm64.txt',
     'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS.txt'
 )
+$attestationSubjectBlock = [regex]::Match(
+    $releaseAttestationStep,
+    '(?ms)^        with:\s*\r?\n          subject-path: \|\s*\r?\n(?<body>(?:^            .+\r?\n)+)'
+)
+if (-not $attestationSubjectBlock.Success) {
+    throw 'Release attestation step must declare with.subject-path.'
+}
 $actualAttestationSubjects = @(
-    [regex]::Matches(
-        $releaseAttestationStep,
-        '(?m)^            (?<path>dist/artifacts/.+)$'
-    ) | ForEach-Object { $_.Groups['path'].Value }
+    $attestationSubjectBlock.Groups['body'].Value -split '\r?\n' |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 )
 if ($actualAttestationSubjects.Count -ne 9 -or
     @($expectedAttestationSubjects | Where-Object { $_ -notin $actualAttestationSubjects }).Count -gt 0 -or

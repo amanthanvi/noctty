@@ -64,11 +64,8 @@ driver with OpenGL 4.3 or newer. Latest stable release:
 [noctty 1.3.124](https://github.com/amanthanvi/noctty/releases/tag/v1.3.124),
 published 2026-09-02.
 
-```powershell
-winget install AmanThanvi.noctty
-```
-
-Or with Scoop:
+The `AmanThanvi.noctty` WinGet package is pending bootstrap. Until it merges,
+install with Scoop:
 
 ```powershell
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
