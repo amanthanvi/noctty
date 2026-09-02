@@ -326,7 +326,15 @@ function New-PublicAssetUri {
     } elseif ($RelativePath -ceq '404.html') {
         $path = "/__noctty_missing_$($Commit.Substring(0, 12))/nested/page"
     } else {
-        $escapedSegments = $RelativePath.Split('/') |
+        $publicPath = if ($RelativePath.EndsWith(
+                '.html',
+                [StringComparison]::Ordinal
+            )) {
+            $RelativePath.Substring(0, $RelativePath.Length - '.html'.Length)
+        } else {
+            $RelativePath
+        }
+        $escapedSegments = $publicPath.Split('/') |
             ForEach-Object { [Uri]::EscapeDataString($_) }
         $path = '/' + ($escapedSegments -join '/')
     }
