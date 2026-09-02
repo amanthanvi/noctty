@@ -863,8 +863,8 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
 }
 $siteCacheControl = [string]$siteHeaderContractObject.root.cache_control
 if ($siteCacheControl -cne 'public, max-age=0, must-revalidate' -or
-    [string]$siteHeaderContractObject.not_found.cache_control -cne $siteCacheControl) {
-    throw 'Central site header contract must apply the emitted catch-all revalidation policy to root and generated 404 responses.'
+    [string]$siteHeaderContractObject.not_found.cache_control -cne 'no-store') {
+    throw 'Central site header contract must record the emitted root policy and the Pages 404 override.'
 }
 Invoke-ContractTable -Contracts @(
     @{
@@ -1224,7 +1224,7 @@ Invoke-ContractTable -Contracts @(
         }
         Pattern = '(?ms)ExpectedStatus = 404.*?ExpectedCache = \[string\]\$Contract\.not_found\.cache_control.*?Test-EquivalentCacheControl.*?-Actual \$cacheControl.*?-Expected \$probe\.ExpectedCache'
         Kind = 'Text'
-        Description = 'published headers compare exact cache directive sets and apply the catch-all revalidation policy to generated 404 responses'
+        Description = 'published headers compare exact cache directive sets and apply the Pages no-store policy to generated 404 responses'
     }
     @{
         File = "$cloudflarePagesVerifier :: Assert-PublicHeaderContract"
