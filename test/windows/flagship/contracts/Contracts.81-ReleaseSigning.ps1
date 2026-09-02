@@ -269,7 +269,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $windowsPackager
         Content = { $windowsPackagerText }
-        Pattern = '(?ms)^\. \(Join-Path \$PSScriptRoot "signing-trust\.ps1"\).*?function Assert-ValidSignature.*?Get-AuthenticodeSignature -LiteralPath \$PathToCheck.*?SignerCertificate\.Thumbprint -ne \$SigningConfig\.CertificateThumbprint.*?Test-SelfSignedTrustStatus -Signature \$signature -Path \$PathToCheck'
+        Pattern = '(?ms)^\. \(Join-Path \$PSScriptRoot "signing-trust\.ps1"\).*?Certificate = \$signingCert.*?function Assert-ValidSignature.*?Get-AuthenticodeSignature -LiteralPath \$PathToCheck.*?SignerCertificate\.Thumbprint -ne \$SigningConfig\.CertificateThumbprint.*?Test-SelfSignedTrustStatus -Signature \$signature -Path \$PathToCheck'
         Kind = 'Text'
         Description = 'packaging imports shared self-signed classification while retaining the active signing-certificate thumbprint gate'
     }
@@ -335,14 +335,14 @@ foreach ($requiredPin in $requiredSigningPolicyTestPins) {
 # The exact published asset/checksum/signature set below is retained because it
 # is release-evidence topology, not incidental implementation cardinality.
 foreach ($contract in @(
-    @{ Pattern = '\$firstPortableManifestVersion = \[version\]''1\.3\.124'''; Description = 'published verifier starts the signed-manifest contract at v1.3.124' },
+    @{ Pattern = '(?s)\$firstPortableManifestVersion = \[version\]''1\.3\.124''.*?\$requiresPortableManifests = \(\$releaseVersion -ge \$firstPortableManifestVersion\)'; Description = 'published verifier executes the signed-manifest boundary at v1.3.124' },
     @{ Pattern = '\$expectedAssetCount = if \(\$requiresPortableManifests\) \{ 10 \} else \{ 8 \}'; Description = 'published verifier preserves the historical asset set and requires ten assets from v1.3.124' },
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
     @{ Pattern = '(?s)Get-FileSha256Lower.*?\$digest = .*?\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
-    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$expectedSignatureCount = if \(\$requiresPortableManifests\) \{ 12 \} else \{ 10 \}'; Description = 'published verifier validates two manifests plus every current portable PE while preserving pre-manifest releases' },
-    @{ Pattern = '(?s)gh attestation verify.*?--repo \$Repository.*?--signer-workflow.*?release\.yml.*?\$verifyAttestations.*?asset\.name -ne ''noctty-icon\.svg''.*?\$attestationEvidenceCount \+= 1'; Description = 'published verifier binds nine non-icon attestations to the canonical release workflow' },
+    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$expectedSignatureCount = if \(\$requiresPortableManifests\) \{ 12 \} else \{ 10 \}.*?\$signatureEvidence\.Count -ne \$expectedSignatureCount'; Description = 'published verifier validates two manifests plus every current portable PE while preserving pre-manifest releases' },
+    @{ Pattern = '(?s)gh attestation verify.*?--repo \$Repository.*?--signer-workflow.*?release\.yml.*?\$verifyAttestations.*?asset\.name -ne ''noctty-icon\.svg''.*?\$attestationEvidenceCount \+= 1.*?\$attestationEvidenceCount -ne 9'; Description = 'published verifier binds exactly nine non-icon attestations to the canonical release workflow' },
     @{ Pattern = '(?s)\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1.*?one consistent certificate'; Description = 'published verifier requires one consistent signer after shared updater-pin verification' },
     @{ Pattern = "(?s)noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'.*?noctty/noctty-terminal-handoff-proxy\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }

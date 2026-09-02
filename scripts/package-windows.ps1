@@ -317,6 +317,7 @@ function Get-SigningConfig {
         Description = $signingDescription
         Url = $signingUrl
         TemporaryPfxPath = if ($hasBase64) { $resolvedPfxPath } else { $null }
+        Certificate = $signingCert
         CertificateThumbprint = $signingCert.Thumbprint
         IsSelfSigned = $isSelfSigned
         TrustSelfSigned = $trustSelfSigned

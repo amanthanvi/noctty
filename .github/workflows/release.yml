@@ -293,9 +293,7 @@ jobs:
         run: |
           if ($env:ATTEST_REPOSITORY -ne "amanthanvi/noctty" -or
               $env:ATTEST_SERVER_URL -ne "https://github.com") {
-            Write-Host "Skipping build provenance attestation outside the canonical GitHub repository."
-            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-            return
+            throw "Release publication is restricted to amanthanvi/noctty on https://github.com."
           }
           if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL -or
               -not $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN) {

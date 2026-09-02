@@ -210,10 +210,12 @@ Recommended order:
 6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
+   - signed portable manifest
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
-7. Confirm follow-on publishes:
+7. Confirm build provenance for the nine non-icon assets.
+8. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
 

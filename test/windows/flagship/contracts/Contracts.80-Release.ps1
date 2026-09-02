@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    'c69ab9f843623ffd8210e18a809c0050694e51d69b22b1a6094a4e48b0980266'
+    '908ff971221435538b6e4148507bdc6241b6b4f481d488f1f662337bf62da74a'
 $readinessWorkflowSha256 =
     '7c66f756a0219af4e791bccef9824c7373050e41aa753836f6f95577a5a1edc5'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1380,6 +1380,34 @@ Invoke-ContractTable -Contracts @(
         Description = 'GitHub release publication passes exact metadata through environment-bound script parameters'
     }
 )
+
+$releaseAttestationStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Attest published release artifacts' `
+    -Source $releaseWorkflow
+$expectedAttestationSubjects = @(
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-setup.exe',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.zip',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.manifest.ps1',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS-windows-x64.txt',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.manifest.ps1',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/SHA256SUMS-windows-arm64.txt',
+    'dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS.txt'
+)
+$actualAttestationSubjects = @(
+    [regex]::Matches(
+        $releaseAttestationStep,
+        '(?m)^            (?<path>dist/artifacts/.+)$'
+    ) | ForEach-Object { $_.Groups['path'].Value }
+)
+if ($actualAttestationSubjects.Count -ne 9 -or
+    @($expectedAttestationSubjects | Where-Object { $_ -notin $actualAttestationSubjects }).Count -gt 0 -or
+    @($actualAttestationSubjects | Where-Object { $_ -notin $expectedAttestationSubjects }).Count -gt 0 -or
+    $releaseAttestationStep.Contains('noctty-icon.svg', [StringComparison]::Ordinal)) {
+    throw 'Release attestation subjects must be exactly the nine non-icon published assets.'
+}
 $releaseGithubPublisher = Join-Path $repoRoot 'scripts\release-publish-github.ps1'
 $releaseGithubPublisherText = Get-Content -LiteralPath $releaseGithubPublisher -Raw
 $releaseScoopPublisher = Join-Path $repoRoot 'scripts\release-publish-scoop.ps1'

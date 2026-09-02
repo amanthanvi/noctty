@@ -181,6 +181,9 @@ try {
             $attestationEvidenceCount += 1
         }
     }
+    if ($verifyAttestations -and $attestationEvidenceCount -ne 9) {
+        throw "Published release must contain exactly nine verified build provenance attestations; found $attestationEvidenceCount."
+    }
 
     $legacyPath = Join-Path $DownloadDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums)
     $x64ChecksumsPath = Join-Path $DownloadDirectory (New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind checksums)
