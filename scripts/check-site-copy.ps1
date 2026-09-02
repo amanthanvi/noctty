@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "common.ps1")
 $siteRoot = Join-Path (Get-RepoRoot) "site"
+$verifyDoc = Join-Path (Get-RepoRoot) "docs/verify-release.md"
 
 if (-not (Test-Path $siteRoot)) {
     throw "Site root not found: $siteRoot"
@@ -69,14 +70,15 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-noctty.html"; Reason = "The landing page should expose the identity and trust page." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = '$PSVersionTable.PSVersion.Major -lt 7'; Reason = "The manual signature verifier should fail before side effects when it is pasted into Windows PowerShell 5.1." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10"; Reason = "The manual v1.3.123 path should use a content-pinned verifier implementation that defines the signature helper." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = 'noctty-release-verification-" + [Guid]::NewGuid()'; Reason = "The manual portable verifier should extract into a fresh workspace rather than reuse stale files." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.com"; Reason = "The manual legacy-release path should verify the console shim extracted from the portable ZIP." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\winghostty.exe"; Reason = "The manual legacy-release path should verify the application binary extracted from the portable ZIP." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "winghostty\ghostty-vt.dll"; Reason = "The manual legacy-release path should verify the library extracted from the portable ZIP." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = '-AllowedPins @($expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
+    @{ Path = $verifyDoc; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
+    @{ Path = $verifyDoc; Pattern = '$PSVersionTable.PSVersion.Major -lt 7'; Reason = "The manual signature verifier should fail before side effects when it is pasted into Windows PowerShell 5.1." }
+    @{ Path = $verifyDoc; Pattern = "checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10"; Reason = "The manual v1.3.123 path should use a content-pinned verifier implementation that defines the signature helper." }
+    @{ Path = $verifyDoc; Pattern = 'noctty-release-verification-" + [Guid]::NewGuid()'; Reason = "The manual portable verifier should extract into a fresh workspace rather than reuse stale files." }
+    @{ Path = $verifyDoc; Pattern = "winghostty\winghostty.com"; Reason = "The manual legacy-release path should verify the console shim extracted from the portable ZIP." }
+    @{ Path = $verifyDoc; Pattern = "winghostty\winghostty.exe"; Reason = "The manual legacy-release path should verify the application binary extracted from the portable ZIP." }
+    @{ Path = $verifyDoc; Pattern = "winghostty\ghostty-vt.dll"; Reason = "The manual legacy-release path should verify the library extracted from the portable ZIP." }
+    @{ Path = $verifyDoc; Pattern = '-AllowedPins @($expectedSpki)'; Reason = "The manual legacy-release path should fail closed when the signer does not match the publisher-key pin." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/verify-release.md"; Reason = "The trust page should link the verification guide that carries the legacy v1.3.123 procedure." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }

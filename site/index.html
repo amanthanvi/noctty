@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Noctty, a native Windows terminal</title>
-  <meta name="description" content="Noctty is a native Windows terminal built on Ghostty's terminal core: tabs, splits, session restoration, a keyboard-driven palette, and Authenticode-signed x64 and ARM64 releases." />
+  <meta name="description" content="Noctty is a native Windows terminal built on Ghostty's terminal core: tabs, splits, session restoration, a keyboard-driven palette, and signed x64 and ARM64 releases." />
   <meta name="robots" content="index, follow" />
   <meta name="theme-color" content="#05060d" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#f7f5ed" media="(prefers-color-scheme: light)" />
@@ -26,7 +26,7 @@
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="assets/fonts/space-grotesk.woff2" crossorigin />
-  <link rel="stylesheet" href="styles.css?v=5cb6be82344a0a3375983f77f64c8f9ffd4843b799658e27742354acbda6f5f2" />
+  <link rel="stylesheet" href="styles.css?v=67e570429f43f1b89d85e63b728067cb880df76d4dfee3e08a03b896a8e7d147" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -65,7 +65,7 @@
 
       <nav class="nc-nav" aria-label="Primary">
         <a class="nc-nav__link nc-nav__link--optional" href="#capabilities">Features</a>
-        <a class="nc-nav__link nc-nav__link--optional" href="#upstream">How it's built</a>
+        <a class="nc-nav__link nc-nav__link--optional" href="#install">Install</a>
         <a class="nc-nav__link" href="/why-noctty.html">Trust</a>
         <a class="nc-nav__link" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
         <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
@@ -88,8 +88,8 @@
           <h1 class="nc-hero__title" id="hero-title">A native terminal for Windows.</h1>
 
           <p class="nc-hero__lede">
-            Noctty runs Ghostty's terminal core inside a Win32 app. Tabs,
-            splits, the whole shebang.
+            Ghostty's terminal core in a real Win32 app: tabs, splits, a
+            fuzzy command palette, and a layout that survives restarts.
           </p>
 
           <div class="nc-hero__actions">
@@ -105,7 +105,8 @@
           <div class="nc-install">
             <div class="nc-install__row">
               <span class="nc-install__sigil" aria-hidden="true">$</span>
-              <code class="nc-install__command" id="nc-install-command">scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty; scoop install noctty/noctty</code>
+              <code class="nc-install__command" id="nc-install-command">scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
+scoop install noctty/noctty</code>
               <button type="button" class="nc-install__copy" id="nc-install-copy" aria-label="Copy install command">
                 <svg class="nc-install__copy-icon nc-install__copy-icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.25" />
@@ -117,13 +118,7 @@
               </button>
               <span class="nc-sr-only" aria-live="polite" id="nc-install-status"></span>
             </div>
-            <div class="nc-install__methods" role="radiogroup" aria-label="Install method">
-              <span class="nc-method">
-                <input class="nc-method__input" type="radio" name="install-method" id="method-scoop" value="scoop" checked />
-                <label class="nc-method__label" for="method-scoop">Scoop</label>
-              </span>
-              <span class="nc-method__label">WinGet: bootstrap pending</span>
-            </div>
+            <p class="nc-install__note">Scoop, or the signed installer below. WinGet: bootstrap pending.</p>
           </div>
         </div>
 
@@ -156,14 +151,14 @@
           <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <path d="M10 2.5 16 5v4.6c0 3.7-2.4 6.9-6 7.9-3.6-1-6-4.2-6-7.9V5l6-2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
-          Authenticode signed, with a self-signed certificate.
+          Signed releases, self-signed certificate.
         </li>
         <li class="nc-facts__item">
           <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5" />
             <path d="M3.2 3.2 16.8 16.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
           </svg>
-          One update check per launch, switchable off. No telemetry.
+          No telemetry. One update check per launch, switchable off.
         </li>
         <li class="nc-facts__item">
           <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -176,10 +171,10 @@
     </section>
 
     <section class="nc-shell nc-section" id="capabilities" aria-labelledby="capabilities-title">
-      <h2 class="nc-section__title" id="capabilities-title">Using it</h2>
+      <h2 class="nc-section__title" id="capabilities-title">What you get</h2>
 
       <figure class="nc-figure">
-        <img class="nc-shot nc-specimen" src="assets/app-window.webp" width="1600" height="290" loading="lazy" decoding="async"
+        <img class="nc-shot nc-specimen" src="assets/app-window.webp" width="1592" height="290" loading="lazy" decoding="async"
              alt="Noctty running on Windows with two tabs and a vertical split, each pane showing a PowerShell session listing project directories." />
         <figcaption class="nc-figure__caption">Two tabs, one vertical split. Both come back on the next launch.</figcaption>
       </figure>
@@ -188,29 +183,26 @@
         <div>
           <h3>Session restoration</h3>
           <p>
-            Close Noctty and open it again to the same windows, tabs, and split
-            layout. Working directories, profiles, and the titles you set
-            explicitly come back with them.
-            Panes can each run their own shell: PowerShell, cmd, Git Bash,
-            or WSL if you opt in.
+            Close Noctty and reopen it to the same windows, tabs, and splits,
+            with their working directories, profiles, and titles. Each pane can
+            run its own shell: PowerShell, cmd, Git Bash, or WSL.
           </p>
         </div>
         <div>
           <h3>Universal palette</h3>
           <p>
-            One shortcut opens a fuzzy list of actions, tabs,
-            panes, profiles, themes, settings. Matching is fuzzy, so a partial
-            name finds the entry, and nothing in the list needs the mouse.
+            One shortcut lists actions, tabs, panes, profiles, themes, and
+            settings. Type part of a name, press Enter. Nothing in it needs
+            the mouse.
           </p>
         </div>
         <div>
           <h3>Native settings</h3>
           <p>
-            A settings window for appearance, shells, keybindings, privacy, and
-            updates. It writes only the lines you touched, so your comments and
-            ordering survive. The file is at
-            <code>%LOCALAPPDATA%\noctty\config.ghostty</code> if you would
-            rather edit it directly.
+            A settings window for appearance, shells, keybindings, privacy,
+            and updates. It writes only the lines you changed, so your
+            comments and ordering survive. Or edit
+            <code>%LOCALAPPDATA%\noctty\config.ghostty</code> directly.
           </p>
         </div>
       </div>
@@ -231,28 +223,29 @@
       <div class="nc-columns">
         <div>
           <p>
-            Ghostty does not ship a Windows app today, so Noctty builds one
-            around Ghostty's terminal core. Parsing, fonts, rendering, input,
-            and shell integration are shared with upstream and track it closely.
+            Ghostty has no Windows app, so Noctty builds one around Ghostty's
+            terminal core. Parsing, fonts, rendering, input, and shell
+            integration are shared with upstream and track it closely. The
+            Win32 runtime, windowing, tabs and splits, the settings window,
+            and the updater are this project's own work.
           </p>
           <p>
-            The Win32 runtime, windowing, tab and split management, the settings
-            window, and the updater are this fork's own work. Noctty is an
-            independent project and is not affiliated with the Ghostty
-            non-profit.
+            Noctty is independent and not affiliated with the Ghostty
+            project. Its identity, measurements, verification steps, and
+            standing boundaries are on the
+            <a href="/why-noctty.html">trust page</a>.
           </p>
         </div>
         <div>
           <p>
-            The project moves quickly, so the release notes are worth reading
-            before you update. An update is staged only after its signature and
-            checksum are verified, and then it waits for you.
+            Updates are staged only after checksum and signature
+            verification, and installed only when you start them. The project
+            moves quickly, so read the release notes before you update.
           </p>
           <p class="nc-note">
             Accessibility is partial, not complete. Terminal text, focus,
-            selection, the command palette, and native settings controls have UI
-            Automation coverage today. Broader per-widget and screen-reader
-            validation is still in progress.
+            selection, the command palette, and settings controls have UI
+            Automation coverage. Screen-reader validation is still in progress.
           </p>
         </div>
       </div>
@@ -264,17 +257,17 @@
         <pre class="nc-code"><code>scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty</code></pre>
         <p class="nc-close__note">
-          The <code>AmanThanvi.noctty</code> WinGet package is pending bootstrap.
-          Or take the signed installer straight from the
+          Or take the signed installer or portable ZIP from the
           <a href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a>.
-          A portable zip ships with every release, and
-          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/getting-started.md" target="_blank" rel="noopener noreferrer">the setup guide</a>
-          covers first run.
+          WinGet is pending bootstrap.
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/getting-started.md" target="_blank" rel="noopener noreferrer">Getting started</a>
+          covers first run;
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/verify-release.md" target="_blank" rel="noopener noreferrer">verifying a release</a>
+          covers checksums and signatures.
         </p>
       </div>
     </section>
   </main>
-
 
   <footer class="nc-footer">
     <div class="nc-shell">
@@ -301,14 +294,14 @@ scoop install noctty/noctty</code></pre>
       <p class="nc-footer__fine">
         Built on Ghostty's terminal core by Mitchell Hashimoto and contributors.
         Win32 runtime by <a href="https://github.com/amanthanvi" target="_blank" rel="noopener noreferrer">@amanthanvi</a>.
-        MIT licensed. Not affiliated with upstream Ghostty. Formerly winghostty.
+        MIT licensed. Not affiliated with the Ghostty project. Formerly winghostty.
       </p>
     </div>
   </footer>
 
   <script type="module" src="app.js?v=98916ae44c47820a7a796236e272181592d780769a90b706acea8eeb8eead2d1"></script>
   <script type="module" src="version.js?v=9c98ba6d2242f28da78ce39427ce30506dfa38c1a79372c598faa62159f5742f"></script>
-  <script type="module" src="install.js?v=2d0a4d57f0e5bd4d6c365eadbf1215a9e7a32b6515c78aa439f13e425d60e9b1"></script>
+  <script type="module" src="install.js?v=7d814eb53693cfdd38356f41fca1fbbe1111beccbae7eb87aa2f8c3e82527ca5"></script>
   <script type="module" src="terminal.js?v=a55e658f1ec05d001bc84be193a95c35dfd7c4f21d3b3a275fe72848729eca89"></script>
 </body>
 </html>

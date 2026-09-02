@@ -6,15 +6,13 @@
 </p>
 
 <p align="center">
-  <strong>Noctty</strong> (formerly winghostty) — <em>Ghostty's terminal core in a fast, native Windows app.</em>
+  <strong>Noctty</strong> is Ghostty's terminal core in a native Windows app.
   <br />
-  Tabs, splits, and session restore · Native Win32, OpenGL renderer · No telemetry
+  Tabs, splits, session restore · Win32 and OpenGL · No telemetry
 </p>
 
 <p align="center">
-  <sub>winghostty was renamed to Noctty in August 2026 following a
-  <a href="https://github.com/amanthanvi/noctty/issues/119">trademark request from the Ghostty team</a>;
-  same project, same maintainer.</sub>
+  <sub>winghostty was renamed to Noctty in August 2026 after a <a href="https://github.com/amanthanvi/noctty/issues/119">trademark request from the Ghostty team</a>.</sub>
 </p>
 
 <p align="center">
@@ -35,192 +33,113 @@
 
 ---
 
-## What is noctty?
+noctty is a terminal emulator for Windows. The terminal core comes from
+[Ghostty](https://github.com/ghostty-org/ghostty); the Win32 app around it was
+written for this fork. You get native tabs, splits, and context menus, session
+restore, a command palette, a shell picker for PowerShell, cmd, Git Bash, and
+WSL, per-monitor DPI scaling, IME input, and most Ghostty config options and
+themes.
 
-noctty is a terminal emulator for Windows, built on the terminal
-core of [Ghostty](https://github.com/ghostty-org/ghostty) and wrapped in
-a Win32 app written for this fork. That gets you:
-
-- Native tabs, splits, and right-click context menus
-- Session restore that brings back your tabs, splits, and working
-  directories
-- A fuzzy-searched palette for actions, tabs, panes, profiles, and
-  settings
-- A shell picker for PowerShell, cmd, Git Bash, and WSL
-- Dark title bar, per-monitor DPI scaling, IME input, and file
-  drag-and-drop
-- Ghostty's engine underneath: true color, Kitty graphics, shell
-  integration, and most Ghostty config options and themes
-- No telemetry, and crash dumps are never uploaded
-
-noctty is built for developers who are comfortable editing a
-plain-text config file and clicking through a SmartScreen warning on
-first install.
+The project is young and has one maintainer. It installs as its own app, so
+keep your current terminal while you try it. macOS and Linux are not planned.
+[docs/status.md](docs/status.md) tracks what works and what is experimental;
+[docs/windows-capability-matrix.md](docs/windows-capability-matrix.md)
+compares it feature by feature with upstream Ghostty.
 
 ## Install
 
-noctty runs on Windows 10 and 11, x64 and ARM64, and needs a GPU
-driver with OpenGL 4.3 or newer. Latest stable release:
+You need Windows 10 or 11, x64 or ARM64, and a GPU driver with OpenGL 4.3 or
+newer. Latest release:
 [noctty 1.3.124](https://github.com/amanthanvi/noctty/releases/tag/v1.3.124),
 published 2026-09-02.
 
-The `AmanThanvi.noctty` WinGet package is pending bootstrap. Until it merges,
-install with Scoop:
+With Scoop (the WinGet package is pending bootstrap):
 
 ```powershell
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
-Or download directly from
-[Releases](https://github.com/amanthanvi/noctty/releases). The
-installers add a Start menu entry; the portable ZIPs run from any
-folder:
+Or download from the release page. The installers add a Start menu entry; the
+portable ZIPs run from any folder.
 
-| File                                                                                                                                                                 | What it is      |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| File                                                                                                                                                     | What it is      |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
 | [`noctty-1.3.124-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-x64-setup.exe)           | x64 installer   |
 | [`noctty-1.3.124-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-arm64-setup.exe)       | ARM64 installer |
 | [`noctty-1.3.124-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-x64-portable.zip)     | x64 portable    |
 | [`noctty-1.3.124-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-arm64-portable.zip) | ARM64 portable  |
-| [`noctty-1.3.124-windows-x64-portable.manifest.ps1`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-x64-portable.manifest.ps1) | x64 signed manifest |
-| [`noctty-1.3.124-windows-arm64-portable.manifest.ps1`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/noctty-1.3.124-windows-arm64-portable.manifest.ps1) | ARM64 signed manifest |
-| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/SHA256SUMS-windows-x64.txt)                                       | x64 checksums   |
-| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/SHA256SUMS-windows-arm64.txt)                                   | ARM64 checksums |
 
-The older
-[`SHA256SUMS.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.124/SHA256SUMS.txt)
-is still published as an x64 auto-update compatibility alias.
+Each release also ships signed manifests of the portable ZIP contents
+(`noctty-1.3.124-windows-x64-portable.manifest.ps1`,
+`noctty-1.3.124-windows-arm64-portable.manifest.ps1`) and checksums
+(`SHA256SUMS-windows-x64.txt`, `SHA256SUMS-windows-arm64.txt`, plus
+`SHA256SUMS.txt`, an x64 alias kept for older auto-update clients).
 
-The installers, portable manifests, and binaries inside the portable ZIP are
-Authenticode-signed with a self-signed certificate. The ZIP container is
-checksummed and carries GitHub build provenance. SmartScreen warns on first run
-because that certificate carries no publisher reputation, so check the
-download against its checksum file before you run it.
-[docs/getting-started.md](docs/getting-started.md) explains the warning
-and walks through install, portable use, and uninstall.
+Releases are signed with a self-signed certificate, so SmartScreen warns on
+first run. Check the download against its checksum file before running it;
+[docs/verify-release.md](docs/verify-release.md) covers that and the stronger
+checks. Install steps, portable use, and uninstall are in
+[docs/getting-started.md](docs/getting-started.md). Guides for moving from
+[Windows Terminal](docs/migrate-from-windows-terminal.md) and
+[Git Bash/mintty](docs/migrate-from-git-bash.md) are also available.
 
-Before switching, read [why Noctty exists and how its releases are
-verified](https://noctty.com/why-noctty.html). Focused guides cover
-[moving from Windows Terminal](docs/migrate-from-windows-terminal.md) and
-[moving from Git Bash/mintty](docs/migrate-from-git-bash.md); both keep the
-old terminal installed while you test Noctty side by side.
+## Configure
 
-## First launch
+On first launch noctty writes a config template to
+`%LOCALAPPDATA%\noctty\config.ghostty`. Defaults live in the binary, so the
+template sets nothing. Set `font-family`, `font-size`, and `theme` there and
+press `Ctrl+Shift+,` to reload.
 
-On first launch, noctty writes a config template to
-`%LOCALAPPDATA%\noctty\config.ghostty`. The template sets no options;
-defaults live in the binary. A minimal config:
+`Ctrl+Shift+T` opens a tab, `Ctrl+Shift+\` and `Ctrl+Shift+E` split,
+`Alt+Arrow` moves between panes, and `Ctrl+Shift+P` opens the command palette.
+The full table and how to rebind are in
+[docs/getting-started.md](docs/getting-started.md#keybindings). Scripting
+noctty from the CLI is covered in [docs/automation.md](docs/automation.md).
 
-```ini
-font-family = JetBrains Mono
-font-size   = 12
-# Pick a theme from: noctty +list-themes
-# Theme files are config files; only use themes from sources you trust.
-theme       = Dracula
-```
+## Updates, crashes, and privacy
 
-Reload config without restarting: `Ctrl+Shift+,`
-
-A few keybindings to get moving: `Ctrl+Shift+T` opens a tab,
-`Ctrl+Shift+\` and `Ctrl+Shift+E` split, `Alt+Arrow` moves between
-panes, `Ctrl+Shift+P` opens the command palette, and `Ctrl+Shift+C` /
-`Ctrl+Shift+V` copy and paste. The full table, plus how to rebind, is in
-[docs/getting-started.md](docs/getting-started.md#5-keybindings).
-
-Local CLI automation is documented in
-[docs/automation.md](docs/automation.md).
-
-## Status
-
-noctty is young: it has a single maintainer, and its first public
-release was April 2026. It installs as its own top-level app, so you can
-keep Windows Terminal, WezTerm, or Alacritty next to it while you try
-it. macOS and Linux app runtimes are not planned.
-
-What works, what's experimental, and what's out of scope is tracked in
-[docs/status.md](docs/status.md). For a feature-by-feature comparison
-with upstream Ghostty, see
-[docs/windows-capability-matrix.md](docs/windows-capability-matrix.md).
-The "fast" claim above is measured, not asserted: the methodology, the
-current headless baseline, and what is still a proxy are in
-[docs/windows-benchmark-methodology.md](docs/windows-benchmark-methodology.md).
-The interactive figures there are quarantined pending re-measurement.
-
-Questions and feedback go to
-[Discussions](https://github.com/amanthanvi/noctty/discussions).
-GitHub Issues are reserved for reproducible bugs.
-
-## Privacy, updates, and crashes
-
-noctty sends no telemetry and no analytics. The only outbound
-network activity is the GitHub Releases updater, which runs once per
-launch unless you set `auto-update = off`. It checks at most once every 24 hours, can stage a
-verified installer in `download` mode, and never installs anything
-without you starting it.
-
-Crash dumps are never uploaded; they stay under
-`%LOCALAPPDATA%\noctty\crash`, readable with
-`noctty +crash-report`. If a broken config or saved session state
-blocks launch, `noctty --safe-mode` starts once with built-in
-defaults.
-
-Updater verification, crash-report details, and diagnostic bundles are
-documented in [docs/windows.md](docs/windows.md).
+noctty sends no telemetry. Its only outbound network activity is the update
+check against GitHub Releases, which runs on launch (at most once every 24
+hours) unless you set `auto-update = off`. An update is never installed until
+you start it. Crash dumps stay under `%LOCALAPPDATA%\noctty\crash` and are
+never uploaded; read them with `noctty +crash-report`. If a broken config or
+saved session blocks launch, `noctty --safe-mode` starts once with built-in
+defaults. Details are in [docs/windows.md](docs/windows.md).
 
 ## Build from source
 
-Most users should install from Releases. Building needs Windows 10/11 on
-x64 or ARM64, Zig 0.15.x (patch ≥ 2), Visual Studio 2022 with the MSVC
-toolchain on PATH, and Git for Windows. Then build:
+You need Zig 0.15.x (patch 2 or later), Visual Studio 2022 with the MSVC
+toolchain on PATH, and Git for Windows.
 
 ```powershell
 zig build -Demit-exe=true
 ```
 
-Output lands at `zig-out\bin\noctty.exe`. Toolchain details,
-dependency cache seeding, the pre-configured dev shell, and test commands
-are in [HACKING.md](HACKING.md). Building the installer and portable ZIP
-yourself is covered in [PACKAGING.md](PACKAGING.md).
+The binary lands at `zig-out\bin\noctty.exe`. [HACKING.md](HACKING.md) covers
+the dev shell and tests; [PACKAGING.md](PACKAGING.md) covers building the
+installer and portable ZIP.
 
 ## Relationship to Ghostty
 
-noctty is a fork of Ghostty: upstream is tracked as the `upstream`
-Git remote, and the fork relationship is visible in full Git history.
-
-Shared with upstream: the terminal core (`src/terminal/`), fonts
-(`src/font/`), the renderer (`src/renderer/`), input, config, termio,
-crash handling, shell integration, the inspector (`src/inspector/`), and
-`libghostty-vt`, the Ghostty VT library, which still builds here for Zig
-and C projects.
-
-New in this fork: the Win32 runtime (`src/apprt/win32.zig`,
-`src/apprt/win32_theme.zig`), the D3D11/DirectComposition window-chrome
-pipeline, the updater (`src/update/github_releases.zig`), and the
-Windows packaging (`dist/windows/`, `scripts/package-windows.ps1`).
-
-Removed: the upstream `macos/` Xcode project, the `src/apprt/gtk/`
-runtime, and Flatpak, Snap, and other Linux desktop packaging.
-
-Because the core is shared, most Ghostty configuration options, themes,
-and shell-integration behavior apply here directly. When Windows-native
-behavior conflicts with upstream cross-platform behavior, this fork
-prefers the Windows-native result.
+noctty is a fork of Ghostty and tracks it as the `upstream` Git remote. The
+terminal core, fonts, renderer, input, config, shell integration, and
+`libghostty-vt` are shared. The Win32 runtime, updater, and Windows packaging
+are new here; the macOS and GTK runtimes are removed. Where Windows-native
+behavior conflicts with upstream's, this fork picks the Windows-native result.
+noctty is not affiliated with the Ghostty project.
 
 ## Contributing
 
-Bug reports, reproducible issues, and focused PRs are welcome. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) and [AI_POLICY.md](AI_POLICY.md)
-first. For usage questions and design discussion, use
-[Discussions](https://github.com/amanthanvi/noctty/discussions).
-Pull requests get automated review from Greptile:
+Bug reports and focused PRs are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+and [AI_POLICY.md](AI_POLICY.md) first. Questions go to
+[Discussions](https://github.com/amanthanvi/noctty/discussions); Issues are for
+reproducible bugs. Pull requests get automated review from Greptile:
 
 [![Greptile: The War on Bugs](https://www.greptile.com/badge.svg)](https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source)
 
 ## License
 
 MIT. Copyright © 2024 Mitchell Hashimoto, Ghostty contributors. See
-[LICENSE](LICENSE).
-
-Fork-specific changes are contributed under the same license by the
-fork's maintainer and contributors.
+[LICENSE](LICENSE). Fork-specific changes are contributed under the same
+license.

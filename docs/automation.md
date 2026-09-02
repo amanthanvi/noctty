@@ -40,15 +40,15 @@ wire-v1 kinds 2 through 8 remain accepted for older clients under the server's f
 10-second bound; new clients use the deadline-capable kinds, which older
 servers reject generically rather than misparsing a changed v1 payload.
 
-| Verb | Target and arguments | Exit codes |
-| --- | --- | --- |
-| `+new-window` | No target. Existing forwarded window arguments remain subject to the receiver policy described below. | 0, 1, 5 |
-| `+list-windows` | `--format=json`; JSON is the default and only accepted format. | 0, 1, 2, 5 |
-| `+perform-action` | Optional `--surface-id=<id>` and exactly one action string. Omission targets the focused surface for surface-scoped actions or the app for app-scoped actions. | 0, 1, 2, 3, 4, 5 |
-| `+new-tab` | Optional `--window-id=<id>` (default: focused window) and optional `--working-directory=<dir>`. | 0, 1, 2, 3, 4, 5 |
-| `+new-split` | Optional `--surface-id=<id>` (default: focused pane), optional `--direction=left\|right\|up\|down` (default: `right`), and optional `--working-directory=<dir>`. | 0, 1, 2, 3, 4, 5 |
-| `+focus` | Exactly one required `--surface-id=<id>` or `--window-id=<id>`. Selects the target and requests foreground activation, including across another application's window. | 0, 1, 2, 3, 5 |
-| `+send-text` | Required `--surface-id=<id>` and exactly one text argument. | 0, 1, 2, 3, 4, 5 |
+| Verb              | Target and arguments                                                                                                                                                  | Exit codes       |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `+new-window`     | No target. Existing forwarded window arguments remain subject to the receiver policy described below.                                                                 | 0, 1, 5          |
+| `+list-windows`   | `--format=json`; JSON is the default and only accepted format.                                                                                                        | 0, 1, 2, 5       |
+| `+perform-action` | Optional `--surface-id=<id>` and exactly one action string. Omission targets the focused surface for surface-scoped actions or the app for app-scoped actions.        | 0, 1, 2, 3, 4, 5 |
+| `+new-tab`        | Optional `--window-id=<id>` (default: focused window) and optional `--working-directory=<dir>`.                                                                       | 0, 1, 2, 3, 4, 5 |
+| `+new-split`      | Optional `--surface-id=<id>` (default: focused pane), optional `--direction=left\|right\|up\|down` (default: `right`), and optional `--working-directory=<dir>`.      | 0, 1, 2, 3, 4, 5 |
+| `+focus`          | Exactly one required `--surface-id=<id>` or `--window-id=<id>`. Selects the target and requests foreground activation, including across another application's window. | 0, 1, 2, 3, 5    |
+| `+send-text`      | Required `--surface-id=<id>` and exactly one text argument.                                                                                                           | 0, 1, 2, 3, 4, 5 |
 
 Explicit IDs are opaque, nonzero decimal unsigned integers. Window IDs must
 fit `u32`; surface IDs must fit `u64`. An unknown ID in a live instance is a
@@ -142,17 +142,16 @@ there is no text format.
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Success. |
-| 1 | Usage or argument error. |
-| 2 | No matching running instance. |
-| 3 | Live instance, but the requested target was not found. |
-| 4 | Refused by automation policy. |
-| 5 | IPC transport failure or automation claim-deadline expiry; for `+new-window`, also response timeout or fallback process-launch failure. |
+| Code | Meaning                                                                                                                                 |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | Success.                                                                                                                                |
+| 1    | Usage or argument error.                                                                                                                |
+| 2    | No matching running instance.                                                                                                           |
+| 3    | Live instance, but the requested target was not found.                                                                                  |
+| 4    | Refused by automation policy.                                                                                                           |
+| 5    | IPC transport failure or automation claim-deadline expiry; for `+new-window`, also response timeout or fallback process-launch failure. |
 
-`+new-window` retains its process-launch fallback and therefore never returns
-2. New verbs used against an older server that does not know their request
+`+new-window` retains its process-launch fallback and therefore never returns 2. New verbs used against an older server that does not know their request
 kinds fail generically with 5; there is no capability negotiation.
 
 ## Automation policy
@@ -174,7 +173,7 @@ NUL is refused by the same check as the other `Cc` code points, but it cannot
 actually be delivered through the command line to begin with: a Win32 command
 line is a NUL-terminated string, so an embedded NUL truncates the argument and
 the verb only ever receives the printable prefix. The rejection is therefore
-unreachable over argv by construction rather than untested — it still guards
+unreachable over argv by construction rather than untested. It still guards
 the app-thread check against a direct pipe client, which is not bound by that
 argv limitation.
 
@@ -185,11 +184,11 @@ confirmation prompt. There is no raw or bypass mode.
 
 ## Trust and privacy
 
-The channel protections land in PR #185, and this automation work depends on
-that PR merging first. They are a current-user DACL,
-`PIPE_REJECT_REMOTE_CLIENTS`, a `NO_WRITE_UP` mandatory-integrity label when
-elevated, and a deny-by-default allowlist for forwarded `+new-window`
-arguments. This work does not duplicate or widen those protections.
+The channel is protected by a current-user DACL,
+`PIPE_REJECT_REMOTE_CLIENTS`, a `NO_WRITE_UP` mandatory-integrity label, and
+a deny-by-default allowlist for forwarded `+new-window` arguments. The
+details, including how clients authenticate the server, are in
+[windows.md](windows.md#pipe-security).
 
 The pipe is not a privilege boundary against code already running as your
 user. No verb can select a program to run. `--working-directory` is the only

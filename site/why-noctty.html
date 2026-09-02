@@ -3,16 +3,16 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Why Noctty, trust and release verification</title>
-  <meta name="description" content="Why Noctty exists, how this independent Windows fork differs, how to verify its signed releases, what it will not become, and how to migrate." />
+  <title>About Noctty: verification and measurements</title>
+  <meta name="description" content="What Noctty is, what has been measured, how to verify a signed release, and how to move over from Windows Terminal or Git Bash." />
   <meta name="robots" content="index, follow" />
   <meta name="theme-color" content="#05060d" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#f7f5ed" media="(prefers-color-scheme: light)" />
   <link rel="canonical" href="https://noctty.com/why-noctty.html" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Noctty" />
-  <meta property="og:title" content="Why Noctty, trust and release verification" />
-  <meta property="og:description" content="An inspectable Windows terminal: project boundaries, release verification, non-goals, and migration guides." />
+  <meta property="og:title" content="About Noctty: verification and measurements" />
+  <meta property="og:description" content="What Noctty is, what has been measured, and how to verify a release." />
   <meta property="og:url" content="https://noctty.com/why-noctty.html" />
   <meta property="og:image" content="https://noctty.com/assets/noctty-social.jpg" />
   <meta property="og:image:type" content="image/jpeg" />
@@ -20,13 +20,13 @@
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="The Noctty crescent mark under a night sky." />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Why Noctty, trust and release verification" />
-  <meta name="twitter:description" content="Project boundaries, release verification, non-goals, and migration guides for Noctty." />
+  <meta name="twitter:title" content="About Noctty: verification and measurements" />
+  <meta name="twitter:description" content="What Noctty is, what has been measured, and how to verify a release." />
   <meta name="twitter:image" content="https://noctty.com/assets/noctty-social.jpg" />
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="/assets/fonts/space-grotesk.woff2" crossorigin />
-  <link rel="stylesheet" href="/styles.css?v=5cb6be82344a0a3375983f77f64c8f9ffd4843b799658e27742354acbda6f5f2" />
+  <link rel="stylesheet" href="/styles.css?v=67e570429f43f1b89d85e63b728067cb880df76d4dfee3e08a03b896a8e7d147" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -64,10 +64,9 @@
       </a>
 
       <nav class="nc-nav" aria-label="Primary">
-        <a class="nc-nav__link nc-nav__link--optional" href="#why">Why</a>
-        <a class="nc-nav__link nc-nav__link--optional" href="#evidence">Evidence</a>
+        <a class="nc-nav__link nc-nav__link--optional" href="#why">About</a>
+        <a class="nc-nav__link nc-nav__link--optional" href="#evidence">Measurements</a>
         <a class="nc-nav__link" href="#verify">Verify</a>
-        <a class="nc-nav__link nc-nav__link--optional" href="#non-goals">Boundaries</a>
         <a class="nc-nav__link nc-nav__link--optional" href="#migrate">Migrate</a>
         <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
           <svg width="16" height="16" viewBox="0 0 32 32" fill="none" aria-hidden="true">
@@ -80,292 +79,194 @@
   </header>
 
   <main id="main-content">
-    <section class="nc-proof-hero" aria-labelledby="proof-title">
-      <img class="nc-proof-hero__sky" src="/assets/hero-sky.webp" alt="" aria-hidden="true" decoding="async" fetchpriority="high" />
-      <div class="nc-proof-hero__veil" aria-hidden="true"></div>
-      <div class="nc-shell nc-proof-hero__inner">
-        <p class="nc-kicker">Why Noctty</p>
-        <h1 class="nc-proof-hero__title" id="proof-title">Trust should be inspectable.</h1>
-        <p class="nc-proof-hero__lede">
-          Noctty is an independent native Windows terminal built around
-          Ghostty's terminal core. The source, release machinery, boundaries,
-          and current trust limits are public so you can check the project
-          before you run it.
+    <section class="nc-hero nc-hero--page" aria-labelledby="proof-title">
+      <img class="nc-hero__sky" src="/assets/hero-sky.webp" alt="" aria-hidden="true" decoding="async" fetchpriority="high" />
+      <div class="nc-hero__veil" aria-hidden="true"></div>
+      <div class="nc-shell">
+      <div class="nc-hero__page">
+        <h1 class="nc-hero__title" id="proof-title">About Noctty</h1>
+        <p class="nc-hero__lede">
+          Noctty is a Windows terminal built on Ghostty's terminal core and
+          maintained by one person. This page covers what the project is, what
+          has been measured, how to verify a release before you run it, and
+          how to move over from another terminal.
         </p>
-        <div class="nc-proof-hero__actions">
+        <div class="nc-hero__actions">
           <a class="nc-button nc-button--primary" href="#verify">Verify a release</a>
-          <a class="nc-button nc-button--secondary" href="#migrate">Plan a migration</a>
+          <a class="nc-button nc-button--secondary" href="#migrate">Migration guides</a>
         </div>
-        <p class="nc-proof-hero__cadence">
-          Latest stable: <strong id="nc-version">v1.3.124</strong>.
-          Twenty-three stable releases shipped between 2026-04-16 and 2026-09-02.
-          No cadence is promised;
-          <a href="https://github.com/amanthanvi/noctty/releases" target="_blank" rel="noopener noreferrer">the dated release history</a>
-          is the whole record.
+        <p class="nc-hero__meta">
+          Latest stable release: <strong id="nc-version">v1.3.124</strong>.
+          Releases ship when they are ready;
+          <a href="https://github.com/amanthanvi/noctty/releases" target="_blank" rel="noopener noreferrer">the release history</a>
+          has the dates.
           <span class="nc-sr-only" id="nc-version-summary">Version 1.3.124, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
         </p>
       </div>
+      </div>
     </section>
 
-    <section class="nc-shell nc-section nc-proof-section" id="why" aria-labelledby="why-title">
-      <p class="nc-kicker">The project</p>
-      <h2 class="nc-section__title" id="why-title">A Windows product, not a repackaged build.</h2>
+    <section class="nc-shell nc-section" id="why" aria-labelledby="why-title">
+      <h2 class="nc-section__title" id="why-title">What Noctty is</h2>
       <div class="nc-proof-grid">
-        <div class="nc-proof-copy">
+        <div class="nc-prose">
           <p>
-            Ghostty supplies the shared terminal, font, renderer, input,
-            configuration, shell-integration, and VT-library foundations.
-            Noctty owns the Win32 runtime around them: native windows, tabs and
-            splits, settings, session restoration, Windows shell profiles,
-            packaging, and updates.
+            Ghostty provides the terminal emulation, fonts, renderer, input
+            handling, configuration, shell integration, and VT library. Noctty
+            adds the Windows parts: the Win32 runtime, tabs and splits, session
+            restore, shell profiles, a native settings window, packaging, and
+            updates. It is a separate project and is not affiliated with
+            Ghostty.
           </p>
           <p>
-            Other Windows ports of Ghostty exist. Noctty's claim is narrower:
-            this repository publishes a maintained Windows application and its
-            distribution path, rather than claiming to be the official Ghostty
-            app. Noctty is not affiliated with the Ghostty non-profit.
+            Other Windows ports of Ghostty exist. Noctty is one maintained
+            application with a public release process: the history is never
+            rewritten, the build and release workflows are on GitHub, and the
+            verifier below ties every release to a single signing key.
           </p>
           <p>
-            The current project has one maintainer. What separates it from a
-            personal build uploaded as a release is checkable rather than
-            asserted: release history that is not rewritten or force-pushed,
-            public build and release workflows, an exact verifier contract for
-            current Noctty release assets, and the standing boundaries below.
-          </p>
-          <p>
-            Source history, CI, packaging scripts, release notes, and issue
-            tracking are all public. That visibility is useful evidence. It is
-            not a substitute for checking a binary's origin yourself, which is
-            what the next two sections are for.
+            Known gaps are listed in
+            <a href="https://github.com/amanthanvi/noctty/blob/main/docs/status.md" target="_blank" rel="noopener noreferrer">Status</a>
+            and the
+            <a href="https://github.com/amanthanvi/noctty/blob/main/docs/windows-capability-matrix.md" target="_blank" rel="noopener noreferrer">capability matrix</a>.
           </p>
         </div>
-        <dl class="nc-proof-facts">
+        <dl class="nc-facts-table">
           <div>
             <dt>Architectures</dt>
             <dd>x64 and ARM64</dd>
           </div>
           <div>
             <dt>Distribution</dt>
-            <dd>Installer, portable ZIP, WinGet, and Scoop</dd>
+            <dd>Installer, portable ZIP, Scoop. WinGet pending.</dd>
           </div>
           <div>
-            <dt>Release inputs</dt>
-            <dd>Public workflows, packaging scripts, checksums, and notes</dd>
+            <dt>Release process</dt>
+            <dd>Public workflows, packaging scripts, checksums, provenance</dd>
           </div>
           <div>
-            <dt>Data posture</dt>
-            <dd>No telemetry or analytics; <code>auto-update = off</code> disables automatic release checks and downloads, while manual update checks remain available</dd>
+            <dt>Network</dt>
+            <dd>The update check is the only outbound traffic; there is no telemetry or analytics. <code>auto-update = off</code> disables automatic release checks and downloads; manual update checks remain available.</dd>
           </div>
           <div>
             <dt>Accessibility</dt>
-            <dd>UI Automation providers for most chrome and terminal text; no release-build screen-reader measurement yet</dd>
+            <dd>UI Automation for terminal text and most chrome; screen readers not yet measured on a release build.</dd>
           </div>
           <div>
             <dt>Performance</dt>
-            <dd>One same-machine baseline published, including two results that miss a stated budget</dd>
+            <dd>One same-machine baseline published, including two results that miss their budget.</dd>
           </div>
         </dl>
       </div>
-      <p class="nc-proof-disclosure">
-        Known gaps are listed in
-        <a href="https://github.com/amanthanvi/noctty/blob/main/docs/status.md" target="_blank" rel="noopener noreferrer">Status</a>
-        and the
-        <a href="https://github.com/amanthanvi/noctty/blob/main/docs/windows-capability-matrix.md" target="_blank" rel="noopener noreferrer">Windows capability matrix</a>,
-        which records where this fork's behavior departs from upstream Ghostty's
-        documentation. Nothing here states a roadmap item as a shipped
-        feature. Where something is unfinished, the next section says so.
-      </p>
     </section>
 
-    <section class="nc-shell nc-section nc-proof-section" id="evidence" aria-labelledby="evidence-title">
-      <p class="nc-kicker">Measured and unmeasured</p>
-      <h2 class="nc-section__title" id="evidence-title">What has actually been checked.</h2>
-      <p class="nc-proof-intro">
-        Two claims get made about terminals more than any others: that they
-        are fast, and that they are accessible. Here is what this project can
-        show for each, including the results that fall short.
-      </p>
+    <section class="nc-shell nc-section" id="evidence" aria-labelledby="evidence-title">
+      <h2 class="nc-section__title" id="evidence-title">What has been measured</h2>
       <div class="nc-evidence-grid">
         <article>
           <h3>Performance</h3>
           <p>
-            Throughput, frame time, cold start, per-pane memory, idle cost, and
-            ConPTY round trip are measured on one machine, a Ryzen 9 9900X with
-            an RTX 5070 Ti on Windows build 26200, from ReleaseFast builds. The
-            methodology doc carries each figure with the date, the run count,
-            and the state the machine was in, because a benchmark taken under
-            load is a different measurement.
+            Throughput, frame time, cold start, memory per pane, idle cost,
+            and ConPTY round trip were measured on one machine using
+            ReleaseFast builds. The methodology document records each figure
+            with its date, run count, and the state the machine was in.
           </p>
           <p>
-            Two results miss a budget stated in PRODUCT.md, and they are
-            recorded as measured rather than adjusted: memory per additional
-            pane, and the cold start tail, where the median fits the budget and
-            the p95 does not. Both are currently marked provisional. They came
-            from an older binary and have not been re-measured on the
-            current code, so the figures are not repeated here until that run
-            happens on an idle machine. Key-to-pixel latency is not measured at
-            all; the suite ships a software proxy that cannot certify it.
+            Two results miss a budget stated in PRODUCT.md: memory per
+            additional pane, and the cold-start tail, where the median fits
+            and the p95 does not. Both came from an older binary and have not
+            been re-measured on the current code, so this page does not repeat
+            them. Key-to-pixel latency is not measured at all; the suite has a
+            software proxy that cannot stand in for it.
           </p>
           <p>
             No comparison against another terminal is published, here or
-            anywhere else in the project. Measuring another terminal at the same
-            causal endpoint on the same machine has not been done, so no such
-            claim is made.
+            anywhere else in the project.
           </p>
-          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/windows-benchmark-methodology.md" target="_blank" rel="noopener noreferrer">Method, machine fingerprint, and every figure</a>
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/windows-benchmark-methodology.md" target="_blank" rel="noopener noreferrer">Benchmark methodology and figures</a>
         </article>
         <article>
           <h3>Accessibility</h3>
           <p>
-            Noctty ships UI Automation providers for terminal text and
-            selection, the tab strip, docked search, the command palette, and
-            the settings window. An interactive harness walks that tree on a
-            real Windows desktop and asserts control types, names, patterns, and
-            events.
+            Noctty exposes UI Automation for terminal text and selection, the
+            tab strip, docked search, the command palette, and the settings
+            window. An automated harness walks that tree on a real desktop and
+            checks control types, names, patterns, and events. It does not
+            check what a screen reader says.
           </p>
           <p>
-            No screen reader has been run against a release build. An authorized
+            No screen reader has been run against a release build. An
             NVDA pass against a pre-release Debug build found mixed results:
-            several custom-class providers were spoken, while tabs, search
-            controls, and palette state still had failures or partial
-            announcements. Narrator and JAWS remain unmeasured. The per-widget
-            matrix records the exact build and limitations. A UI Automation tree
-            proves structure, not speech. Window chrome also cannot be reached
-            from the terminal with the keyboard alone.
+            terminal text and live regions were read, while tabs, search
+            controls, and palette state had failures.
+            Narrator and JAWS remain unmeasured. Window chrome also cannot be
+            reached from the terminal with the keyboard alone.
           </p>
-          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/accessibility-matrix.md" target="_blank" rel="noopener noreferrer">The screen-reader matrix, measured and unmeasured rows</a>
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/accessibility-matrix.md" target="_blank" rel="noopener noreferrer">Screen-reader matrix</a>
         </article>
       </div>
     </section>
 
-    <section class="nc-shell nc-section nc-proof-section" id="verify" aria-labelledby="verify-title">
-      <p class="nc-kicker">Release verification</p>
-      <h2 class="nc-section__title" id="verify-title">Check the bytes. Then check the signer.</h2>
-      <p class="nc-proof-intro">
-        Download the installer or portable ZIP and the architecture-specific
-        checksum file from the same GitHub Release. Do these checks before you
-        install or extract anything. Each one answers a different question, and
-        none of them substitutes for another.
+    <section class="nc-shell nc-section" id="verify" aria-labelledby="verify-title">
+      <h2 class="nc-section__title" id="verify-title">How to verify a release</h2>
+      <p class="nc-section__intro">
+        Download the installer or portable ZIP and the checksum file from the
+        same GitHub release, then run these checks before you install.
       </p>
 
       <ol class="nc-verify-steps">
         <li>
           <div>
-            <h3>Match the published checksum</h3>
+            <h3>Compare the checksum</h3>
             <p>
-              Answers: did the bytes arrive intact and unchanged? Compare the
-              hash with the matching line in
-              <code>SHA256SUMS-windows-&lt;arch&gt;.txt</code>. Stop on any mismatch.
+              Compare the hash with the line for your file in
+              <code>SHA256SUMS-windows-&lt;arch&gt;.txt</code>. If it differs,
+              stop. A matching checksum shows the file is the one on the
+              release page. It does not show who published it.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>$asset = ".\winghostty-1.3.123-windows-&lt;arch&gt;-&lt;setup.exe-or-portable.zip&gt;"
-Get-FileHash $asset -Algorithm SHA256</code></pre>
+          <pre class="nc-proof-code" tabindex="0"><code>Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe -Algorithm SHA256</code></pre>
         </li>
         <li>
           <div>
-            <h3>Inspect the embedded signature and match its key</h3>
+            <h3>Run the verifier</h3>
             <p>
-              Answers: which key signed the executable code? The installer and
-              the PE files inside the portable ZIP are Authenticode-signed. The
-              ZIP container is not, so the container is covered only by its
-              checksum. The example accepts the legacy v1.3.123 installer or
-              portable ZIP,
-              requires exactly the three expected PE files when given the
-              portable ZIP, rejects any additional embedded PE, and stops
-              unless every embedded signature is valid and its
-              SubjectPublicKeyInfo hash matches the updater's published pin.
-              Run this block in PowerShell 7 (<code>pwsh</code>); it stops
-              before downloading anything on Windows PowerShell 5.1.
+              The repository
+              verifier accepts v1.3.124 and later, the
+              first release that uses the current Noctty asset contract. It
+              downloads every asset, checks the GitHub digests and checksum
+              entries, and verifies GitHub build-provenance attestations for
+              every published asset except the static icon. It then checks
+              each embedded signature against the key pinned in the updater.
+              The environment variable lets it accept the self-signed
+              certificate; without it, the script fails closed.
             </p>
-          </div>
-          <pre class="nc-proof-code" tabindex="0"><code>if ($PSVersionTable.PSVersion.Major -lt 7) { throw "Run this block in PowerShell 7 (pwsh)." }
-$workRoot = Join-Path ([IO.Path]::GetTempPath()) ("noctty-release-verification-" + [Guid]::NewGuid().ToString("N"))
-[IO.Directory]::CreateDirectory($workRoot) | Out-Null
-try {
-  $setup = ".\winghostty-1.3.123-windows-&lt;arch&gt;-setup.exe"
-  $portable = ".\winghostty-1.3.123-windows-&lt;arch&gt;-portable.zip"
-  $targets = [Collections.Generic.List[string]]::new()
-  if (Test-Path -LiteralPath $setup) { $targets.Add((Resolve-Path -LiteralPath $setup).Path) }
-  if (Test-Path -LiteralPath $portable) {
-    $portableRoot = Join-Path $workRoot "portable"
-    Expand-Archive -LiteralPath $portable -DestinationPath $portableRoot
-    $expectedPortablePe = @("winghostty\winghostty.com", "winghostty\winghostty.exe", "winghostty\ghostty-vt.dll")
-    $portablePe = @(
-      Get-ChildItem -LiteralPath $portableRoot -File -Recurse -Force | Where-Object {
-        $stream = [IO.File]::OpenRead($_.FullName)
-        try { $stream.Length -ge 2 -and $stream.ReadByte() -eq 0x4D -and $stream.ReadByte() -eq 0x5A }
-        finally { $stream.Dispose() }
-      } | ForEach-Object { [IO.Path]::GetRelativePath($portableRoot, $_.FullName) }
-    )
-    $missingPe = @($expectedPortablePe | Where-Object { $_ -notin $portablePe })
-    $unexpectedPe = @($portablePe | Where-Object { $_ -notin $expectedPortablePe })
-    if ($missingPe.Count -gt 0 -or $unexpectedPe.Count -gt 0) {
-      throw "Portable PE inventory mismatch. Missing: $($missingPe -join ', '); unexpected: $($unexpectedPe -join ', ')."
-    }
-    foreach ($relativePath in $expectedPortablePe) {
-      $targets.Add((Resolve-Path -LiteralPath (Join-Path $portableRoot $relativePath)).Path)
-    }
-  }
-  if ($targets.Count -eq 0) { throw "Download an installer or portable ZIP first." }
-  $verifierRoot = Join-Path $workRoot "repository"
-  git clone --no-checkout https://github.com/amanthanvi/noctty.git $verifierRoot
-  git -C $verifierRoot checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10
-  . (Join-Path $verifierRoot "scripts\signing-trust.ps1")
-  $expectedSpki = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"
-  foreach ($target in $targets) {
-    Assert-ReleaseSignature `
-      -Path $target `
-      -Label (Split-Path $target -Leaf) `
-      -AllowedPins @($expectedSpki) `
-      -TrustSelfSigned $true | Format-List
-  }
-} finally {
-  if ([IO.Directory]::Exists($workRoot)) { [IO.Directory]::Delete($workRoot, $true) }
-}</code></pre>
-        </li>
-        <li>
-          <div>
-            <h3>Run the checksum and signature checks at once</h3>
             <p>
-              The repository verifier accepts v1.3.124 and later, starting
-              with the first release that uses the current Noctty asset
-              contract. v1.3.123 uses the legacy
-              <code>winghostty-*</code> asset layout, so use the two manual
-              checks above for that release. For v1.3.124 or later, the
-              verifier downloads every asset, checks
-              every GitHub digest and checksum entry, validates every embedded
-              PE signature, and requires a single signer whose SPKI matches the
-              key pinned into the updater. Starting with v1.3.124, it also
-              verifies GitHub build-provenance attestations for every published
-              asset except the static icon, bound to the canonical release
-              workflow. The environment variable is what makes it accept
-              today's self-signed certificate; without it, the script fails
-              closed.
+              v1.3.123 uses the legacy <code>winghostty-*</code> asset layout.
+              Its manual signature check is in
+              <a href="https://github.com/amanthanvi/noctty/blob/main/docs/verify-release.md" target="_blank" rel="noopener noreferrer">the verification guide</a>.
             </p>
           </div>
           <pre class="nc-proof-code" tabindex="0"><code>$version = "&lt;1.3.124-or-later&gt;"
 git clone --branch "v$version" --depth 1 https://github.com/amanthanvi/noctty.git
 Set-Location .\noctty
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
-pwsh .\scripts\verify-published-release.ps1 `
-  -Version $version</code></pre>
+pwsh .\scripts\verify-published-release.ps1 -Version $version</code></pre>
         </li>
       </ol>
 
       <div class="nc-trust-limit">
-        <h3>The present trust limit</h3>
+        <h3>Signing</h3>
         <p>
           There is no code-signing certificate from a public certificate
           authority. Releases are signed with a self-signed certificate, which
-          gives an embedded cryptographic signature but no third-party Windows
-          publisher identity and no SmartScreen reputation. SmartScreen will
-          warn, and the warning will not fade with time. PowerShell may report
-          the otherwise intact signature as <code>UnknownError</code> because
-          Windows does not trust its root. The repository verifier accepts that
-          case only when the signature is cryptographically valid and the signer
-          matches the compiled key pin.
+          gives a valid cryptographic signature but no Windows publisher
+          identity and no SmartScreen reputation. SmartScreen will warn, and
+          the warning does not go away with time. PowerShell may report the
+          signature as <code>UnknownError</code> because Windows does not
+          trust its root.
         </p>
-        <dl>
+        <dl class="nc-facts-table">
           <div>
             <dt>Certificate subject</dt>
             <dd><code>CN=winghostty Local Dev Signing</code></dd>
@@ -376,122 +277,47 @@ pwsh .\scripts\verify-published-release.ps1 `
           </div>
         </dl>
         <p>
-          The subject name predates the Noctty rename and proves nothing by
-          itself. A checksum published beside a binary proves consistency with
-          that release page, not authorship. The pinned public key is the
-          separate publisher constraint the updater and the verifier enforce;
-          its rotation policy is
+          The subject name predates the rename and means nothing on its own.
+          The pinned public key is what the updater and the verifier check;
+          both refuse an installer signed with any other key. The rules for
+          rotating it are in
           <a href="https://github.com/amanthanvi/noctty/blob/main/docs/adr/0005-pin-updater-publisher-public-keys.md" target="_blank" rel="noopener noreferrer">ADR 0005</a>.
-        </p>
-        <p>
-          Moving to a publicly trusted signer means either an accepted
-          application to a free open-source signing program or a purchased
-          certificate. Neither has happened. Until one does, the honest summary
-          is that the published checksums, embedded signatures, and key pin
-          constrain a release to this repository's publisher key, while Windows
-          itself will keep telling you it does not recognize the publisher.
+          A publicly trusted certificate would need either an accepted
+          open-source signing application or a purchase. Neither has happened
+          yet.
         </p>
       </div>
     </section>
 
-    <section class="nc-shell nc-section nc-proof-section" id="non-goals" aria-labelledby="non-goals-title">
-      <p class="nc-kicker">Standing boundaries</p>
-      <h2 class="nc-section__title" id="non-goals-title">What Noctty will not become.</h2>
-      <p class="nc-proof-intro">
-        These eleven scope rules were ratified after studying how other
-        terminal products and Windows forks failed. Each one is a thing this
-        project has decided not to do, so scope pressure has an answer.
-      </p>
-      <ol class="nc-principles">
-        <li data-no-goal>
-          <h3>No cloud coupling.</h3>
-          <p>No account, telemetry, analytics, or required hosted service.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No product pivot that sidelines terminal fundamentals.</h3>
-          <p>Input, rendering, compatibility, and reliability keep priority over a new product category.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No feature breadth before performance and reliability.</h3>
-          <p>New surface area comes after the published performance budgets, not before them.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No re-platforming onto Electron or a fashionable UI stack.</h3>
-          <p>Zig and native Win32 remain the application boundary.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No workspace or widget drift.</h3>
-          <p>No embedded browser, database client, or general file manager.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No forced or background-applied updates.</h3>
-          <p>Applying an update stays user-initiated after checksum and signature verification.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No in-process plugin runtime or hosted sync.</h3>
-          <p>Automation belongs outside the terminal process through documented interfaces.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No DLL injection or undocumented hooks.</h3>
-          <p>Windows integration uses ConPTY and documented operating-system APIs.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No daily-rebase soft fork.</h3>
-          <p>Upstream changes are adopted deliberately without force-pushed release history.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No shell-editor interception or proprietary output protocol.</h3>
-          <p>PSReadLine, readline, prompts, and terminal applications keep ownership of their normal interfaces.</p>
-        </li>
-        <li data-no-goal>
-          <h3>No chrome-only differentiation.</h3>
-          <p>VT correctness, fluidity, sessions, native behavior, and trust have to justify the project.</p>
-        </li>
-      </ol>
-    </section>
-
-    <section class="nc-shell nc-section nc-proof-section" id="migrate" aria-labelledby="migrate-title">
-      <p class="nc-kicker">Move without a leap of faith</p>
-      <h2 class="nc-section__title" id="migrate-title">Run side by side first.</h2>
-      <p class="nc-proof-intro">
-        Noctty does not overwrite another terminal's settings. Keep the old app,
-        reproduce the shells and shortcuts you use, and test one normal workday
-        before changing habits.
+    <section class="nc-shell nc-section" id="migrate" aria-labelledby="migrate-title">
+      <h2 class="nc-section__title" id="migrate-title">Moving from another terminal</h2>
+      <p class="nc-section__intro">
+        Noctty does not touch another terminal's settings, so keep the old app
+        installed, set up the same shells and shortcuts in Noctty, and use it
+        for a normal working day before you switch. If something does not
+        behave the way this page says,
+        <a href="https://github.com/amanthanvi/noctty/issues/new?template=bug_report.yml" target="_blank" rel="noopener noreferrer">report it</a>.
       </p>
       <div class="nc-migration-grid">
         <article>
-          <p class="nc-migration-grid__number" aria-hidden="true">01</p>
           <h3>From Windows Terminal</h3>
           <p>
-            Translate the default profile, font, theme, starting directory, and
-            only the keybindings you changed. Noctty deliberately does not claim
-            that its config can import <code>settings.json</code>.
+            Carry over the default profile, font, theme, starting directory,
+            and the keybindings you changed. There is no
+            <code>settings.json</code> importer, and none is planned.
           </p>
-          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/migrate-from-windows-terminal.md" target="_blank" rel="noopener noreferrer">Open the Windows Terminal guide</a>
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/migrate-from-windows-terminal.md" target="_blank" rel="noopener noreferrer">Windows Terminal guide</a>
         </article>
         <article>
-          <p class="nc-migration-grid__number" aria-hidden="true">02</p>
           <h3>From Git Bash and mintty</h3>
           <p>
-            Keep Git, Bash, dotfiles, history, and SSH state. Replace only the
-            terminal window, translate the useful parts of <code>.minttyrc</code>,
-            and test the ConPTY boundary with your real CLI tools.
+            Git, Bash, dotfiles, history, and SSH state stay where they are.
+            Only the window changes. Carry over the useful parts of
+            <code>.minttyrc</code> and try your usual tools, since ConPTY
+            behaves differently from mintty's PTY.
           </p>
-          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/migrate-from-git-bash.md" target="_blank" rel="noopener noreferrer">Open the Git Bash and mintty guide</a>
+          <a href="https://github.com/amanthanvi/noctty/blob/main/docs/migrate-from-git-bash.md" target="_blank" rel="noopener noreferrer">Git Bash and mintty guide</a>
         </article>
-      </div>
-    </section>
-
-    <section class="nc-shell nc-section nc-proof-final" aria-labelledby="proof-final-title">
-      <h2 class="nc-section__title" id="proof-final-title">Review the project, then decide.</h2>
-      <p>
-        Read the source and release notes, verify the binary, keep your existing
-        terminal during evaluation, and report behavior that does not match the
-        published boundary.
-      </p>
-      <div class="nc-proof-final__actions">
-        <a class="nc-button nc-button--primary" href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">Open the latest release</a>
-        <a class="nc-button nc-button--secondary" href="https://github.com/amanthanvi/noctty/issues/new?template=bug_report.yml" target="_blank" rel="noopener noreferrer">Report a mismatch</a>
       </div>
     </section>
   </main>
@@ -520,7 +346,7 @@ pwsh .\scripts\verify-published-release.ps1 `
       <p class="nc-footer__fine">
         Built on Ghostty's terminal core by Mitchell Hashimoto and contributors.
         Win32 runtime by <a href="https://github.com/amanthanvi" target="_blank" rel="noopener noreferrer">@amanthanvi</a>.
-        MIT licensed. Not affiliated with upstream Ghostty. Formerly WingHostty.
+        MIT licensed. Not affiliated with the Ghostty project. Formerly winghostty.
       </p>
     </div>
   </footer>
