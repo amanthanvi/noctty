@@ -20,6 +20,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
+. (Join-Path $PSScriptRoot 'portable-manifest-verification.ps1')
 
 $repoRoot = Get-RepoRoot
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
@@ -62,13 +63,19 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
             -Architecture $architecture `
             -Kind portable
     )
+    $manifest = Join-Path $artifactDirectory (
+        New-WindowsPackageArtifactName `
+            -Version $Version `
+            -Architecture $architecture `
+            -Kind manifest
+    )
     $checksums = Join-Path $artifactDirectory (
         New-WindowsPackageArtifactName `
             -Version $Version `
             -Architecture $architecture `
             -Kind checksums
     )
-    foreach ($path in @($setup, $portable, $checksums)) {
+    foreach ($path in @($setup, $portable, $manifest, $checksums)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Missing required release asset: $path"
         }
@@ -99,12 +106,21 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         -Label "Setup $architecture" `
         -AllowedPins $allowedPins `
         -TrustSelfSigned $TrustSelfSigned)
+    [void](Assert-ReleaseSignature `
+        -Path $manifest `
+        -Label "Portable manifest $architecture" `
+        -AllowedPins $allowedPins `
+        -TrustSelfSigned $TrustSelfSigned)
 
     $extractDirectory = Join-Path $ExtractionRoot "noctty-release-verify-$architecture"
     if (Test-Path -LiteralPath $extractDirectory) {
         Remove-Item -LiteralPath $extractDirectory -Recurse -Force
     }
     Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
+    Assert-PortableManifestMatchesPayload `
+        -ManifestPath $manifest `
+        -PayloadRoot (Join-Path $extractDirectory 'noctty') `
+        -Label "Portable manifest $architecture"
     foreach ($relativePath in @(
         'noctty/noctty.com',
         'noctty/noctty.exe',

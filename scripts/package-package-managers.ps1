@@ -17,7 +17,7 @@ param(
 
     [int]$FirstForkPatch = 0,
 
-    [string]$WingetPackageIdentifier = "AmanThanvi.noctty",
+    [string]$WingetPackageIdentifier = "AmanThanvi.winghostty",
 
     [string]$ScoopPackageName = "noctty"
 )

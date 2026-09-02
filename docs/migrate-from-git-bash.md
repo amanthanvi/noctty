@@ -11,7 +11,7 @@ shell history.
 ## 1. Install and verify Noctty
 
 ```powershell
-winget install AmanThanvi.noctty
+winget install AmanThanvi.winghostty
 
 # Or:
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty

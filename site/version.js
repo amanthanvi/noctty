@@ -2,7 +2,7 @@
 // refreshes from GitHub Releases when the browser is idle. Never downgrades
 // below the compiled version.
 
-const DEFAULT_NC_VERSION = '1.3.123';
+const DEFAULT_NC_VERSION = '1.3.124';
 const NC_REPO = 'amanthanvi/noctty';
 const CACHE_KEY = 'nc-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;

@@ -42,6 +42,7 @@ $zigTarget = $archInfo.ZigTarget
 $stageBase = Join-Path $outputRootPath "noctty-$Version-windows-$Architecture"
 $portableRoot = Join-Path $stageBase "noctty"
 $zipPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind portable)
+$manifestPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind manifest)
 $installerPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind setup)
 $checksumsPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind checksums)
 $releaseIconPath = Join-Path $stageBase "noctty-icon.svg"
@@ -380,6 +381,63 @@ function Assert-ValidSignature {
     }
 }
 
+function Write-PortablePayloadManifest {
+    param(
+        [string]$PayloadRoot,
+        [string]$OutputPath
+    )
+
+    $managedRootFiles = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($name in @(
+        "noctty.com",
+        "noctty.exe",
+        "ghostty-vt.dll",
+        "noctty-terminal-handoff-proxy.dll",
+        "LICENSE",
+        "config-template.ghostty",
+        "README.md",
+        "noctty.ico",
+        "share"
+    )) {
+        [void]$managedRootFiles.Add($name)
+    }
+
+    # Windows PowerShell 5.1 lacks System.IO.Path.GetRelativePath.
+    $payloadRootFull = [System.IO.Path]::GetFullPath($PayloadRoot).TrimEnd('\', '/') +
+        [System.IO.Path]::DirectorySeparatorChar
+    $relativePaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($file in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File)) {
+        $fullPath = [System.IO.Path]::GetFullPath($file.FullName)
+        if (-not $fullPath.StartsWith($payloadRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Portable payload file resolved outside the payload root: $fullPath"
+        }
+        $relativePath = $fullPath.Substring($payloadRootFull.Length).Replace("\", "/")
+        if (-not $managedRootFiles.Contains($relativePath) -and
+            -not $relativePath.StartsWith("share/", [System.StringComparison]::Ordinal)) {
+            throw "Portable payload contains an unmanaged file: $relativePath"
+        }
+        $relativePaths.Add($relativePath)
+    }
+    $relativePaths.Sort([System.StringComparer]::Ordinal)
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("# noctty portable payload manifest")
+    foreach ($relativePath in $relativePaths) {
+        $payloadPath = Join-Path $PayloadRoot $relativePath.Replace("/", "\")
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()
+        $lines.Add("$hash *$relativePath")
+    }
+
+    $content = [string]::Join("`r`n", $lines) + "`r`n"
+    [System.IO.File]::WriteAllText(
+        $OutputPath,
+        $content,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
 $signingConfig = $null
 $temporarySigningPfxPath = $null
 
@@ -497,6 +555,22 @@ try {
         $true
     )
 
+    Write-Host "Packaging phase: create portable payload manifest"
+    Write-PortablePayloadManifest -PayloadRoot $portableRoot -OutputPath $manifestPath
+    if ($signingConfig) {
+        $manifestSigningParameters = @{
+            LiteralPath = $manifestPath
+            Certificate = $signingConfig.Certificate
+            HashAlgorithm = "SHA256"
+            IncludeChain = "NotRoot"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($signingConfig.TimestampUrl)) {
+            $manifestSigningParameters.TimestampServer = $signingConfig.TimestampUrl
+        }
+        Set-AuthenticodeSignature @manifestSigningParameters | Out-Null
+        Assert-ValidSignature -PathToCheck $manifestPath -SigningConfig $signingConfig
+    }
+
     Write-Host "Packaging phase: build installer"
     $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if (-not $iscc) {
@@ -564,6 +638,7 @@ try {
     Set-Content -LiteralPath $checksumsPath -Value $hashLines
 
     Write-Host "Portable ZIP: $zipPath"
+    Write-Host "Manifest    : $manifestPath"
     if (Test-Path -LiteralPath $installerPath) {
         Write-Host "Installer    : $installerPath"
     }

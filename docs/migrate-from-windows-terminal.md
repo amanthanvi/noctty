@@ -20,7 +20,7 @@ is; Noctty never reads it.
 ## 2. Install and verify Noctty
 
 ```powershell
-winget install AmanThanvi.noctty
+winget install AmanThanvi.winghostty
 
 # Or:
 scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty

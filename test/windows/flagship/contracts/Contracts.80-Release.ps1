@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '7ca3ff5add29e1da961f6daf6a0f845f68f9284bdd7cfed059248d04d1467e4e'
+    'c69ab9f843623ffd8210e18a809c0050694e51d69b22b1a6094a4e48b0980266'
 $readinessWorkflowSha256 =
     '7c66f756a0219af4e791bccef9824c7373050e41aa753836f6f95577a5a1edc5'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1412,7 +1412,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '6ce232e8332d32aa61a9c1f6730e6188f2696e1bb6a82a0c9151e7fa01c9c3f5'
+            'bdd1d01feac86ee799f2d0292e342dfc00e87e95a07ff6eb25f87e0e1c68efb6'
         CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
     }
     [pscustomobject] @{
@@ -1845,9 +1845,23 @@ Invoke-ContractTable -Contracts @(
 )
 $signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
 $defenderScanStepIndex = $releaseWorkflowText.IndexOf('      - name: Scan Windows release artifacts with Microsoft Defender')
+$attestationGuardStepIndex = $releaseWorkflowText.IndexOf('      - name: Prepare build provenance attestation')
+$attestationStepIndex = $releaseWorkflowText.IndexOf('      - name: Attest published release artifacts')
 $publishReleaseStepIndex = $releaseWorkflowText.IndexOf('      - name: Publish GitHub Release')
 if ($signedArtifactStepIndex -lt 0 -or
     $defenderScanStepIndex -le $signedArtifactStepIndex -or
-    $publishReleaseStepIndex -le $defenderScanStepIndex) {
-    throw 'Microsoft Defender scanning must run after artifact verification and before release publication.'
+    $attestationGuardStepIndex -le $defenderScanStepIndex -or
+    $attestationStepIndex -le $attestationGuardStepIndex -or
+    $publishReleaseStepIndex -le $attestationStepIndex) {
+    throw 'Artifact verification, Defender scanning, provenance attestation, and publication are ordered incorrectly.'
 }
+
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $releaseWorkflow
+        Content = { $releaseWorkflowText }
+        Pattern = '(?ms)^    permissions:.*?contents: write.*?actions: read.*?id-token: write.*?attestations: write.*?Prepare build provenance attestation.*?ATTEST_REPOSITORY.*?amanthanvi/noctty.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?Attest published release artifacts.*?actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8.*?portable\.manifest\.ps1.*?SHA256SUMS\.txt'
+        Kind = 'Text'
+        Description = 'release provenance is job-scoped, canonical-repository guarded, pinned, and covers the nine non-icon assets'
+    }
+)
