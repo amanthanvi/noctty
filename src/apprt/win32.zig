@@ -10035,6 +10035,7 @@ const Host = struct {
         // assistive clients receive the event from a live provider.
         self.prepareActiveTabVisibility(self.active_tab);
         self.layout() catch |err| log.warn("tab restore layout sync failed err={}", .{err});
+        self.refreshChrome() catch |err| log.warn("tab restore chrome sync failed err={}", .{err});
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.app.auditShellNativeMapping("tab-restore");
         return self.activeSurface() != null;
