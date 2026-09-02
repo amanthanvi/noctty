@@ -65,7 +65,7 @@ driver with OpenGL 4.3 or newer. Latest stable release:
 published 2026-09-02.
 
 ```powershell
-winget install AmanThanvi.winghostty
+winget install AmanThanvi.noctty
 ```
 
 Or with Scoop:

@@ -8,8 +8,8 @@ const INSTALL_METHODS = {
     copy: 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty\r\nscoop install noctty/noctty',
   },
   winget: {
-    cmd: 'winget install AmanThanvi.winghostty',
-    copy: 'winget install AmanThanvi.winghostty',
+    cmd: 'winget install AmanThanvi.noctty',
+    copy: 'winget install AmanThanvi.noctty',
   },
 };
 

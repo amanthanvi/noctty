@@ -16,7 +16,7 @@ $textFiles = Get-ChildItem -Path $siteRoot -Recurse -File | Where-Object {
 
 $forbiddenRules = @(
     @{ Pattern = "(?i)\bscoop install noctty\b(?!/)"; Regex = $true; Reason = "Official Scoop installs should use the bucket-qualified command: scoop install noctty/noctty." },
-    @{ Pattern = "winget install noctty"; Reason = "Official WinGet installs should use the bootstrapped package id: winget install AmanThanvi.winghostty." },
+    @{ Pattern = "winget install noctty"; Reason = "Official WinGet installs should use the package id: winget install AmanThanvi.noctty." },
     @{ Pattern = "D3D11"; Reason = "The shipping Windows renderer is OpenGL 4.3 via WGL." },
     @{ Pattern = "DirectX 11"; Reason = "The shipping Windows renderer is OpenGL 4.3 via WGL." },
     @{ Pattern = "%APPDATA%\noctty\config"; Reason = "Windows docs use %LOCALAPPDATA%\\noctty\\config.ghostty." },
@@ -53,7 +53,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/releases/latest"; Reason = "Primary download CTA should point to latest release." },
     @{ Path = Join-Path $siteRoot "terminal.js"; Pattern = "%LOCALAPPDATA%\\noctty\\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty"; Reason = "Landing page should keep a repo link." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install AmanThanvi.winghostty"; Reason = "Hero copy should surface the official WinGet install command." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install AmanThanvi.noctty"; Reason = "Hero copy should surface the intended WinGet package id." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Formerly winghostty"; CaseSensitive = $true; Reason = "Footer should keep the rename note so former winghostty users recognize the project." },
     @{ Path = Join-Path $siteRoot "install.js"; Pattern = "scoop install noctty/noctty"; Reason = "Copied install text should include the official Scoop install command." },
     @{ Path = Join-Path $siteRoot "install.js"; Pattern = "https://github.com/amanthanvi/scoop-noctty"; Reason = "Copied Scoop install text should include the official bucket source." },

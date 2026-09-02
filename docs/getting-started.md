@@ -8,7 +8,7 @@ or 11 on x64 or ARM64 and a GPU driver with OpenGL 4.3 or newer.
 The quickest path. With WinGet:
 
 ```powershell
-winget install AmanThanvi.winghostty
+winget install AmanThanvi.noctty
 ```
 
 Or with Scoop, from the project's own bucket:

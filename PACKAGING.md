@@ -229,7 +229,8 @@ on first publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-The official WinGet package remains bootstrapped as `AmanThanvi.winghostty`.
+The new WinGet package identifier is `AmanThanvi.noctty`; its bootstrap is
+pending in `microsoft/winget-pkgs`.
 Release preflight verifies that
 `microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists before the
 release workflow can claim package-manager readiness. Keep CI on the
