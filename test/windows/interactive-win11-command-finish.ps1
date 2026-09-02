@@ -1,6 +1,7 @@
 param(
     [switch] $Rebuild,
     [switch] $ResetState,
+    [switch] $PolicySelfTest,
     [int] $TimeoutSeconds = 12
 )
 
@@ -10,6 +11,54 @@ $script:COMMAND_FINISH_POLL_MS = 250
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
+}
+
+function Get-CommandFinishValidationDecision {
+    param(
+        [Parameter(Mandatory)] [bool] $SettingAvailable,
+        [Parameter(Mandatory)] [bool] $NotificationsEnabled,
+        [Parameter(Mandatory)] [bool] $NotifierDisabledFallback,
+        [Parameter(Mandatory)] [int] $UnexpectedToastFailureCount,
+        [Parameter(Mandatory)] [int] $ExitCode,
+        [Parameter(Mandatory)] [long] $RuntimeMs,
+        [Parameter(Mandatory)] [long] $MinimumRuntimeMs,
+        [Parameter(Mandatory)] [string] $SettingText
+    )
+
+    if ($RuntimeMs -lt $MinimumRuntimeMs) {
+        return [pscustomobject]@{ Valid = $false; Reason = "noctty exited too early for command-finish validation (exit code $ExitCode, runtime $($RuntimeMs)ms)" }
+    }
+    if ($ExitCode -ne 0) {
+        return [pscustomobject]@{ Valid = $false; Reason = "noctty exited with code $ExitCode during command-finish validation" }
+    }
+    if ($UnexpectedToastFailureCount -gt 0) {
+        return [pscustomobject]@{ Valid = $false; Reason = "unexpected WinRT toast failure while notifier setting is $SettingText" }
+    }
+    if ($NotificationsEnabled -or $NotifierDisabledFallback -or -not $SettingAvailable) {
+        return [pscustomobject]@{ Valid = $true; Reason = $null }
+    }
+    return [pscustomobject]@{ Valid = $false; Reason = "expected explicit NotifierDisabled fallback while notifier setting is $SettingText" }
+}
+
+if ($PolicySelfTest) {
+    $cases = @(
+        @{ Label = 'unavailable clean'; Expected = $true; Args = @{ SettingAvailable = $false; NotificationsEnabled = $false; NotifierDisabledFallback = $false; UnexpectedToastFailureCount = 0; ExitCode = 0; RuntimeMs = 5000; MinimumRuntimeMs = 5000; SettingText = 'Unavailable' } },
+        @{ Label = 'disabled fallback'; Expected = $true; Args = @{ SettingAvailable = $true; NotificationsEnabled = $false; NotifierDisabledFallback = $true; UnexpectedToastFailureCount = 0; ExitCode = 0; RuntimeMs = 5000; MinimumRuntimeMs = 5000; SettingText = 'DisabledForApplication' } },
+        @{ Label = 'enabled clean'; Expected = $true; Args = @{ SettingAvailable = $true; NotificationsEnabled = $true; NotifierDisabledFallback = $false; UnexpectedToastFailureCount = 0; ExitCode = 0; RuntimeMs = 5000; MinimumRuntimeMs = 5000; SettingText = 'Enabled' } },
+        @{ Label = 'mixed failures'; Expected = $false; Args = @{ SettingAvailable = $true; NotificationsEnabled = $false; NotifierDisabledFallback = $true; UnexpectedToastFailureCount = 1; ExitCode = 0; RuntimeMs = 5000; MinimumRuntimeMs = 5000; SettingText = 'DisabledForApplication' } },
+        @{ Label = 'nonzero exit'; Expected = $false; Args = @{ SettingAvailable = $false; NotificationsEnabled = $false; NotifierDisabledFallback = $false; UnexpectedToastFailureCount = 0; ExitCode = 1; RuntimeMs = 5000; MinimumRuntimeMs = 5000; SettingText = 'Unavailable' } },
+        @{ Label = 'disabled no fallback'; Expected = $false; Args = @{ SettingAvailable = $true; NotificationsEnabled = $false; NotifierDisabledFallback = $false; UnexpectedToastFailureCount = 0; ExitCode = 0; RuntimeMs = 5000; MinimumRuntimeMs = 5000; SettingText = 'DisabledForApplication' } },
+        @{ Label = 'short runtime'; Expected = $false; Args = @{ SettingAvailable = $false; NotificationsEnabled = $false; NotifierDisabledFallback = $false; UnexpectedToastFailureCount = 0; ExitCode = 0; RuntimeMs = 4999; MinimumRuntimeMs = 5000; SettingText = 'Unavailable' } }
+    )
+    foreach ($case in $cases) {
+        $caseArgs = $case.Args
+        $decision = Get-CommandFinishValidationDecision @caseArgs
+        if ($decision.Valid -ne $case.Expected) {
+            throw "Command-finish policy case failed: $($case.Label)"
+        }
+    }
+    Write-Host 'command-finish validation policy tests: PASS'
+    return
 }
 
 $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
@@ -71,8 +120,10 @@ Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $aumid = 'io.github.amanthanvi.noctty'
 $toastMgr = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
 $notifier = $toastMgr::CreateToastNotifier($aumid)
-$settingValue = [int] $notifier.Setting
-$settingText = $notifier.Setting.ToString()
+$setting = $notifier.Setting
+$settingAvailable = $null -ne $setting
+$settingValue = if ($settingAvailable) { [int] $setting } else { -1 }
+$settingText = if ($settingAvailable) { $setting.ToString() } else { 'Unavailable' }
 $notificationsEnabled = $settingText -eq 'Enabled'
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
@@ -112,8 +163,10 @@ try {
         Start-Sleep -Milliseconds $script:COMMAND_FINISH_POLL_MS
 
         $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
-        $notifierDisabledFallback = $stderr -match 'winrt toast show failed err=.*NotifierDisabled; falling back to banner'
-        $toastFailure = $stderr -match 'winrt toast show failed'
+        $toastFailureLines = @($stderr -split '\r?\n' | Where-Object { $_ -match 'winrt toast show failed' })
+        $notifierDisabledFallback = @($toastFailureLines | Where-Object { $_ -match 'NotifierDisabled; falling back to banner' }).Count -gt 0
+        $unexpectedToastFailureCount = @($toastFailureLines | Where-Object { $_ -notmatch 'NotifierDisabled; falling back to banner' }).Count
+        $toastFailure = $toastFailureLines.Count -gt 0
 
         if ($stderr -match 'taskbar progress init failed|taskbar progress sync failed|panic: reached unreachable code') {
             $failureReason = 'unexpected runtime failure reported in stderr'
@@ -124,19 +177,25 @@ try {
             $failureReason = "unexpected WinRT toast failure while notifier setting is Enabled ($settingText)"
             break
         }
+        if ($unexpectedToastFailureCount -gt 0) {
+            $failureReason = "unexpected WinRT toast failure while notifier setting is $settingText"
+            break
+        }
 
         if ($process.HasExited) {
             $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
 
-            if ($launchStopwatch.ElapsedMilliseconds -lt $minimumRuntimeMs) {
-                $failureReason = "noctty exited too early for command-finish validation (exit code $exitCode, runtime $($launchStopwatch.ElapsedMilliseconds)ms)"
-            } elseif ($notificationsEnabled) {
-                $validated = $true
-            } elseif ($notifierDisabledFallback) {
-                $validated = $true
-            } else {
-                $failureReason = "expected explicit NotifierDisabled fallback while notifier setting is $settingText"
-            }
+            $decision = Get-CommandFinishValidationDecision `
+                -SettingAvailable $settingAvailable `
+                -NotificationsEnabled $notificationsEnabled `
+                -NotifierDisabledFallback $notifierDisabledFallback `
+                -UnexpectedToastFailureCount $unexpectedToastFailureCount `
+                -ExitCode $exitCode `
+                -RuntimeMs $launchStopwatch.ElapsedMilliseconds `
+                -MinimumRuntimeMs $minimumRuntimeMs `
+                -SettingText $settingText
+            $validated = $decision.Valid
+            $failureReason = $decision.Reason
 
             break
         }

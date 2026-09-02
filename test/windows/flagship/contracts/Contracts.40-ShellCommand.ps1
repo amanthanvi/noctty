@@ -211,3 +211,22 @@ Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Cont
     '& $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"'
     '& $powershellExe -NoProfile -Command "(Get-Command noctty).Source"'
 )
+
+$commandFinishHarness = Join-Path $repoRoot 'test\windows\interactive-win11-command-finish.ps1'
+$commandFinishHarnessText = Get-Content -LiteralPath $commandFinishHarness -Raw
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $commandFinishHarness
+        Content = { $commandFinishHarnessText }
+        Pattern = '(?ms)function Get-CommandFinishValidationDecision.*?\$ExitCode -ne 0.*?\$UnexpectedToastFailureCount -gt 0.*?\$NotificationsEnabled -or \$NotifierDisabledFallback -or -not \$SettingAvailable.*?Get-CommandFinishValidationDecision `'
+        Kind = 'Text'
+        Description = 'command-finish harness routes live results through the reviewed validation policy'
+    }
+)
+$commandFinishPolicyOutput = @(
+    & pwsh -NoProfile -File $commandFinishHarness -PolicySelfTest 2>&1
+)
+if ($LASTEXITCODE -ne 0 -or
+    @($commandFinishPolicyOutput | Where-Object { [string]$_ -eq 'command-finish validation policy tests: PASS' }).Count -ne 1) {
+    throw "Command-finish validation policy tests failed: $($commandFinishPolicyOutput -join [Environment]::NewLine)"
+}
