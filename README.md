@@ -48,8 +48,8 @@ compares it feature by feature with upstream Ghostty.
 
 ## Install
 
-You need Windows 10 or 11, x64 or ARM64, and a GPU driver with OpenGL 4.3 or
-newer. Latest release:
+You need Windows 10 version 1809 (build 17763) or newer, or Windows 11, on
+x64 or ARM64, and a GPU driver with OpenGL 4.3 or newer. Latest release:
 [noctty 1.3.124](https://github.com/amanthanvi/noctty/releases/tag/v1.3.124),
 published 2026-09-02.
 
@@ -110,7 +110,9 @@ defaults. Details are in [docs/windows.md](docs/windows.md).
 ## Build from source
 
 You need Zig 0.15.x (patch 2 or later), Visual Studio 2022 with the MSVC
-toolchain on PATH, and Git for Windows.
+toolchain on PATH, and Git for Windows. Compiling has no build-number
+requirement of its own; running what you build still needs Windows 10 1809
+(build 17763) or newer.
 
 ```powershell
 zig build -Demit-exe=true

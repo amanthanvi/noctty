@@ -1,7 +1,7 @@
 # Getting started
 
-noctty runs on Windows 10 and 11, x64 and ARM64, and needs a GPU driver with
-OpenGL 4.3 or newer.
+noctty runs on Windows 10 version 1809 (build 17763) or newer and Windows 11,
+x64 and ARM64, and needs a GPU driver with OpenGL 4.3 or newer.
 
 ## Install with Scoop
 

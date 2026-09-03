@@ -8,7 +8,10 @@ protocol coverage validated on the Win32 runtime, see
 
 ## Supported systems
 
-- Windows 10 and Windows 11 on x64 and ARM64.
+- Windows 10 version 1809 (build 17763) or newer, and Windows 11, on x64
+  and ARM64. 1809 is a hard floor: `CreatePseudoConsole` is a static
+  `kernel32` import, so an earlier build refuses to start the process rather
+  than degrading.
 - Native Win32 application runtime.
 - OpenGL 4.3 or newer through WGL.
 - `libghostty-vt` stays portable as a library. This repository does not
@@ -271,10 +274,17 @@ package.
 
 Desktop notifications use WinRT toasts when available and fall back to
 in-app banners when Windows notification policy, Focus Assist, app identity,
-or runtime availability prevents a toast. Terminal progress reports map to
-Windows taskbar progress for the active surface in each host window.
-Terminal apps can also set in-terminal progress state through Ghostty's
-shared VT/OSC support.
+or runtime availability prevents a toast. `desktop-notifications` gates every
+toast, including command-finish toasts, which additionally need
+`notify-on-command-finish` and a `notify-on-command-finish-action` that
+includes `notify`. Only command-finish toasts focus the originating pane when
+clicked; OSC 9 and OSC 777 toasts are display-only.
+
+Terminal progress reports map to Windows taskbar progress for the active
+surface in each host window when `progress-style` is enabled; with
+`progress-style = false` the sequences are silently ignored. Terminal apps
+can also set in-terminal progress state through Ghostty's shared VT/OSC
+support.
 
 ## Power and battery
 
@@ -379,9 +389,17 @@ are not part of the cycle.
 The native Win32 host window provides a tab bar with overflow handling,
 same-window drag reorder, and exact-pane drag-to-split with reversible
 subtree transfer; horizontal and vertical splits; per-monitor DPI handling;
-DWM dark title bar integration; high-contrast palette switching; IME
-support; drag-and-drop of files into the terminal; and native right-click
-context menus.
+a DWM dark caption; high-contrast palette switching; IME support;
+drag-and-drop of files, plain text, URLs, and HTML into a pane; and native
+right-click context menus.
+
+The dark caption is chosen at runtime, not by build number:
+`DWMWA_USE_IMMERSIVE_DARK_MODE` (20) is tried first and the legacy attribute
+(19) is used when DWM rejects it. Windows 11 additionally gets an integrated
+title bar (app-owned caption with native caption actions and Snap Layout
+hover) while the tab bar and window decorations are visible;
+`window-show-tab-bar = never` or hidden decorations fall back to the stock
+caption, as do older builds.
 
 The universal palette puts actions, live tabs, panes, Windows profiles,
 named layouts, and native settings in one fuzzy-ranked, keyboard-driven
