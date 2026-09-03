@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
+const log = std.log.scoped(.update_portable_apply);
 
 pub const StagedKind = enum {
     installer,
@@ -308,6 +309,15 @@ fn copyPath(alloc: Allocator, source: []const u8, destination: []const u8) !void
     try syncDirectory(alloc, destination);
 }
 
+/// Best-effort on Windows, and deliberately so: `FlushFileBuffers` is
+/// documented for files, volumes, and communication devices, not for
+/// directory handles, and it reports ERROR_ACCESS_DENIED on filesystems and
+/// SMB shares that refuse the `GENERIC_WRITE` directory open. Windows offers
+/// no equivalent of POSIX fsync-on-a-directory, so propagating that refusal
+/// would abort a portable apply on a working machine over an operation that
+/// was never guaranteed. Every file's own contents are still flushed through
+/// its file handle before this runs, which is the durability that matters.
+/// Non-Windows keeps the real `fsync` and its error.
 fn syncDirectory(alloc: Allocator, path: []const u8) !void {
     if (builtin.os.tag != .windows) {
         var dir = try std.fs.openDirAbsolute(path, .{});
@@ -326,11 +336,18 @@ fn syncDirectory(alloc: Allocator, path: []const u8) !void {
         null,
     );
     if (handle == std.os.windows.INVALID_HANDLE_VALUE) {
-        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+        log.debug("directory sync open unsupported path={s} err={}", .{
+            path,
+            std.os.windows.kernel32.GetLastError(),
+        });
+        return;
     }
     defer std.os.windows.CloseHandle(handle);
     if (std.os.windows.kernel32.FlushFileBuffers(handle) == 0) {
-        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+        log.debug("directory sync unsupported path={s} err={}", .{
+            path,
+            std.os.windows.kernel32.GetLastError(),
+        });
     }
 }
 

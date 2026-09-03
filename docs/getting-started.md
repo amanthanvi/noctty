@@ -75,13 +75,15 @@ pins, are in [verify-release.md](verify-release.md).
 ## First launch
 
 noctty creates `%LOCALAPPDATA%\noctty\` and writes a config template to
-`%LOCALAPPDATA%\noctty\config.ghostty`. It picks a default shell for you; see
-[Shell](#shell) to change it.
+`%LOCALAPPDATA%\noctty\config.ghostty`. In portable mode it uses
+`config.ghostty` beside `noctty.exe` instead, and the `%LOCALAPPDATA%` copy is
+ignored. It picks a default shell for you; see [Shell](#shell) to change it.
 
 ## Font and theme
 
-Open the config with `notepad "$env:LOCALAPPDATA\noctty\config.ghostty"` and
-add a few options:
+Open the config with `notepad "$env:LOCALAPPDATA\noctty\config.ghostty"` (or
+the `config.ghostty` beside `noctty.exe` in portable mode) and add a few
+options:
 
 ```ini
 font-family = JetBrains Mono

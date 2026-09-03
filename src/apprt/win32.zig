@@ -3946,10 +3946,26 @@ pub const App = struct {
         // Initial window creation must not start a check until the swapped
         // build is healthy and authoritative. Later windows retain the usual
         // scheduling path through update_startup_ready.
-        try updatepkg.confirmPortableUpdateStartup(self.core_app.alloc, build_config.version_string);
+        //
+        // Updater bookkeeping must not be able to stop the terminal from
+        // opening. Every failure here is about the state file, the stage
+        // directory, or a lock — none of it says the running build is
+        // unusable, and returning would exit before the message loop with no
+        // window ever shown. Log it and continue; staging and apply both
+        // re-check the transaction phase and fail closed on their own.
+        updatepkg.confirmPortableUpdateStartup(
+            self.core_app.alloc,
+            build_config.version_string,
+        ) catch |err| {
+            log.warn("portable update startup confirmation failed err={}", .{err});
+        };
         self.update_startup_ready = true;
         if (self.windows.items.len > 0) self.maybeScheduleAutomaticUpdateCheck();
-        if (try updatepkg.takePortableUpdateFailure(self.core_app.alloc)) |message| {
+        const portable_failure = updatepkg.takePortableUpdateFailure(self.core_app.alloc) catch |err| failure: {
+            log.warn("failed to read portable update failure err={}", .{err});
+            break :failure null;
+        };
+        if (portable_failure) |message| {
             defer self.core_app.alloc.free(message);
             self.showUpdateInfo(message) catch |err| {
                 log.warn("failed to surface portable update failure err={}", .{err});
@@ -5846,7 +5862,7 @@ pub const App = struct {
             self.stopQuitTimer();
             self.running = false;
             self.destroyAllWindows();
-            if (self.windows.items.len == 0) PostQuitMessage(0);
+            if (self.windows.items.len == 0) sys.PostQuitMessage(0);
             return;
         }
 

@@ -696,6 +696,7 @@ pub fn stageWindowsInstall(
     return stageWindowsInstallWithDownloader(
         alloc,
         state_path,
+        release_feed_url,
         release,
         kind,
         downloadUrlToFile,
@@ -705,6 +706,7 @@ pub fn stageWindowsInstall(
 fn stageWindowsInstallWithDownloader(
     alloc: Allocator,
     state_path: []const u8,
+    release_feed_url: []const u8,
     release: *const Release,
     kind: portable_apply.StagedKind,
     comptime download: anytype,
@@ -1500,7 +1502,16 @@ fn runPortableUpdateHelper(
             const backup_path = state.portable_backup_path orelse return error.NoStagedPortableInstall;
             const confirmation_token = state.portable_confirmation_token orelse return error.NoStagedPortableInstall;
 
-            var staged = try verifyStagedWindowsInstall(alloc, state_path, .portable);
+            // The helper runs inside a transaction the app already decided
+            // to start, so the feed check here is a self-comparison by
+            // design: refusing mid-swap would strand a half-applied
+            // install. The feed gate lives in `applyStagedUpdate`.
+            var staged = try verifyStagedWindowsInstall(
+                alloc,
+                state_path,
+                state.stagedFeedUrl(),
+                .portable,
+            );
             var staged_open = true;
             defer if (staged_open) staged.deinit(alloc);
             const payload_path = staged.payload_path orelse return error.IncompletePortablePayload;
@@ -1987,23 +1998,39 @@ fn fetchHttps(
 
 fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !void {
     if (!std.fs.path.isAbsolute(dest_path)) return error.InvalidDownloadPath;
+    const dir_path = std.fs.path.dirname(dest_path) orelse return error.InvalidDownloadPath;
+    const leaf = std.fs.path.basename(dest_path);
+    if (leaf.len == 0) return error.InvalidDownloadPath;
+    try std.fs.cwd().makePath(dir_path);
 
-    const temp_path = try std.fmt.allocPrint(alloc, "{s}.part", .{dest_path});
-    defer alloc.free(temp_path);
+    // Every child below is created, replaced, and renamed relative to this
+    // one handle. Holding the stage directory keeps that directory from
+    // being renamed, but it does not protect a child resolved by absolute
+    // pathname: between the delete and the create, a same-user process can
+    // plant a hard link or reparse point at the leaf and the write lands
+    // outside the stage tree. A handle-relative open cannot be redirected
+    // above the directory whose identity we just confirmed.
+    var dir = try std.fs.openDirAbsolute(dir_path, .{});
+    defer dir.close();
+    if (!try lockedHandleMatchesPath(alloc, dir_path, dir.fd)) {
+        return error.InvalidUpdateStageRoot;
+    }
+
+    const temp_leaf = try std.fmt.allocPrint(alloc, "{s}.part", .{leaf});
+    defer alloc.free(temp_leaf);
+
     var committed = false;
     defer if (!committed) {
-        std.fs.deleteFileAbsolute(temp_path) catch {};
+        dir.deleteFile(temp_leaf) catch {};
     };
-    std.fs.deleteFileAbsolute(temp_path) catch |err| switch (err) {
+    // `Dir.deleteFile` opens with FILE_OPEN_REPARSE_POINT, so a planted link
+    // is unlinked rather than followed to its target.
+    dir.deleteFile(temp_leaf) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
 
-    if (std.fs.path.dirname(dest_path)) |dir_path| {
-        try std.fs.cwd().makePath(dir_path);
-    }
-
-    var file = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true });
+    var file = try createStageChild(alloc, dir, dir_path, temp_leaf);
     var file_open = true;
     errdefer if (file_open) file.close();
 
@@ -2024,12 +2051,80 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     file.close();
     file_open = false;
 
-    std.fs.deleteFileAbsolute(dest_path) catch |err| switch (err) {
+    dir.deleteFile(leaf) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    try std.fs.renameAbsolute(temp_path, dest_path);
+    try dir.rename(temp_leaf, leaf);
     committed = true;
+}
+
+/// Create `leaf` inside `dir` so that the returned handle can only be the
+/// child we named.
+///
+/// `.exclusive` maps to `FILE_CREATE`, so anything already sitting at the
+/// leaf — including the hard link an unprivileged same-user process can
+/// plant — is a collision rather than a write. `FILE_CREATE` still traverses
+/// a reparse point at the leaf whose target does not exist yet, so the
+/// handle is then checked: it must not be a reparse point, and its final
+/// path must be exactly `<dir_path>\<leaf>`. Both checks read the handle we
+/// hold, not the name, so nothing can be swapped underneath them afterwards.
+///
+/// Residual, stated plainly: if a same-user process wins the window between
+/// the unlink and this create and plants a symlink to a path that does not
+/// exist, `FILE_CREATE` creates that path as an empty file before the check
+/// below rejects the handle. No response byte is ever written to it, and a
+/// process running as this user could have created that file directly. What
+/// this closes is the escape of downloaded content out of the stage tree.
+/// The handle is not opened with `FILE_OPEN_REPARSE_POINT`, which would
+/// refuse the link outright, because Zig's `OpenFile` drops
+/// `FILE_SYNCHRONOUS_IO_NONALERT` in that mode and the resulting
+/// asynchronous handle is not usable with `std.fs.File.write`.
+fn createStageChild(
+    alloc: Allocator,
+    dir: std.fs.Dir,
+    dir_path: []const u8,
+    leaf: []const u8,
+) !std.fs.File {
+    // `.read` only for the access right: `GENERIC_WRITE` alone does not
+    // carry FILE_READ_ATTRIBUTES, and the reparse-point check below queries
+    // the handle's attributes.
+    const file = try dir.createFile(leaf, .{ .exclusive = true, .read = true });
+    errdefer file.close();
+    try requireStageChildHandle(alloc, dir_path, leaf, file.handle);
+    return file;
+}
+
+fn requireStageChildHandle(
+    alloc: Allocator,
+    dir_path: []const u8,
+    leaf: []const u8,
+    handle: std.os.windows.HANDLE,
+) !void {
+    if (builtin.os.tag != .windows) return;
+    if (try handleIsReparsePoint(handle)) return error.InvalidUpdateStagePath;
+    const expected = try std.fs.path.join(alloc, &.{ dir_path, leaf });
+    defer alloc.free(expected);
+    if (!try lockedHandleMatchesPath(alloc, expected, handle)) {
+        return error.InvalidUpdateStagePath;
+    }
+}
+
+fn handleIsReparsePoint(handle: std.os.windows.HANDLE) !bool {
+    const windows = std.os.windows;
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    var info: windows.FILE_BASIC_INFORMATION = undefined;
+    const rc = windows.ntdll.NtQueryInformationFile(
+        handle,
+        &io,
+        &info,
+        @sizeOf(windows.FILE_BASIC_INFORMATION),
+        .FileBasicInformation,
+    );
+    return switch (rc) {
+        .SUCCESS => info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        else => error.InvalidUpdateStagePath,
+    };
 }
 
 fn requireOkHttpStatus(context: []const u8, url: []const u8, status: std.http.Status) !void {
@@ -2150,9 +2245,17 @@ fn extractAndVerifyPortableZip(
     errdefer portable_apply.cleanupUpdatePath(partial_root) catch {};
     try std.fs.cwd().makePath(partial_root);
 
+    // `std.zip.extract` creates every entry relative to this handle, so the
+    // archive cannot escape it. The handle itself is still resolved by
+    // pathname, so confirm it is the directory we asked for before anything
+    // is written through it: a junction planted at `payload.partial` between
+    // the makePath and this open would otherwise redirect the whole payload.
     var destination = try std.fs.openDirAbsolute(partial_root, .{});
     var destination_open = true;
     defer if (destination_open) destination.close();
+    if (!try lockedHandleMatchesPath(alloc, partial_root, destination.fd)) {
+        return error.InvalidPortableUpdatePath;
+    }
     var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
     defer zip_file.close();
     var reader_buffer: [64 * 1024]u8 = undefined;
@@ -3448,7 +3551,7 @@ test "staged install from another feed is refused at apply time" {
 
     try std.testing.expectError(
         error.StagedInstallFeedMismatch,
-        verifyStagedWindowsInstall(alloc, state_path, "https://updates.example/feed-b"),
+        verifyStagedWindowsInstall(alloc, state_path, "https://updates.example/feed-b", .installer),
     );
 }
 
@@ -4107,7 +4210,7 @@ test "update staging pruning rejects an updates directory reparse point" {
     };
     try std.testing.expectError(
         error.InvalidUpdateStageRoot,
-        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/staging-work.lock", .{}));
     try std.testing.expectError(
@@ -4155,9 +4258,84 @@ test "update staging rejects a reparse-point state directory before creating upd
 
     try std.testing.expectError(
         error.InvalidUpdateStageRoot,
-        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/updates", .{}));
+}
+
+test "stage children are created only where they were named" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("stage");
+    try tmp.dir.makePath("outside");
+    const stage_root = try tmp.dir.realpathAlloc(alloc, "stage");
+    defer alloc.free(stage_root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+
+    var stage = try std.fs.openDirAbsolute(stage_root, .{});
+    defer stage.close();
+
+    // The ordinary path: the handle lands on the child we named and is not
+    // a reparse point.
+    {
+        var file = try createStageChild(alloc, stage, stage_root, "setup.exe.part");
+        defer file.close();
+        try std.testing.expect(!try handleIsReparsePoint(file.handle));
+    }
+
+    // A leaf that already exists is a collision, not a write. This is what
+    // a planted hard link becomes, and it is why the download cannot be
+    // redirected into an existing file the attacker chose.
+    try std.testing.expectError(
+        error.PathAlreadyExists,
+        createStageChild(alloc, stage, stage_root, "setup.exe.part"),
+    );
+
+    // A leaf that resolves outside the directory is refused, so no response
+    // byte is written through it.
+    const link_path = try std.fs.path.join(alloc, &.{ stage_root, "escape.part" });
+    defer alloc.free(link_path);
+    const link_target = try std.fs.path.join(alloc, &.{ outside_root, "victim.bin" });
+    defer alloc.free(link_target);
+    std.fs.symLinkAbsolute(link_target, link_path, .{}) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+    try std.testing.expectError(
+        error.InvalidUpdateStagePath,
+        createStageChild(alloc, stage, stage_root, "escape.part"),
+    );
+}
+
+test "download refuses a stage directory that is not the directory it named" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("outside");
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const stage_link = try std.fs.path.join(alloc, &.{ root, "stage" });
+    defer alloc.free(stage_link);
+    std.fs.symLinkAbsolute(outside_root, stage_link, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+    const dest = try std.fs.path.join(alloc, &.{ stage_link, "setup.exe" });
+    defer alloc.free(dest);
+
+    // Fails on the directory identity check, before any request is made.
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        downloadUrlToFile(alloc, "https://example.invalid/setup.exe", dest),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe.part", .{}));
 }
 
 test "installer staging rejects a reparse-point target before download" {
@@ -4206,7 +4384,7 @@ test "installer staging rejects a reparse-point target before download" {
 
     try std.testing.expectError(
         error.InvalidUpdateStageRoot,
-        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
     );
     const outside = try tmp.dir.readFileAlloc(alloc, "outside/keep.txt", 32);
     defer alloc.free(outside);
@@ -4256,7 +4434,7 @@ test "failed update staging removes attempts and preserves the prior staged vers
         defer release.deinit(alloc);
         try std.testing.expectError(
             error.TestDownloadStopped,
-            stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+            stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
         );
         const failed_path = try std.fs.path.join(alloc, &.{ "updates", version });
         defer alloc.free(failed_path);
@@ -4319,7 +4497,7 @@ test "update staging refuses a new target when obsolete pruning is blocked" {
 
     try std.testing.expectError(
         error.FileBusy,
-        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Guarded.download),
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Guarded.download),
     );
     try std.testing.expect(!Guarded.called);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.200", .{}));
@@ -4514,6 +4692,7 @@ test "update staging leaves state lock available during stalled download" {
             var staged = stageWindowsInstallWithDownloader(
                 std.heap.page_allocator,
                 self.state_path,
+                latest_stable_api_url,
                 self.release,
                 .installer,
                 Stall.download,
@@ -4601,7 +4780,7 @@ test "portable staging fails closed before download without signed manifest asse
 
     try std.testing.expectError(
         error.PortablePayloadManifestUnavailable,
-        stageWindowsInstall(alloc, state_path, &release, .portable),
+        stageWindowsInstall(alloc, state_path, latest_stable_api_url, &release, .portable),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates", .{}));
 }
@@ -4630,7 +4809,7 @@ test "portable staging refuses every active apply phase" {
         try saveState(state_path, &state);
         try std.testing.expectError(
             error.PortableUpdateTransactionActive,
-            stageWindowsInstall(alloc, state_path, &release, .installer),
+            stageWindowsInstall(alloc, state_path, latest_stable_api_url, &release, .installer),
         );
     }
 }
