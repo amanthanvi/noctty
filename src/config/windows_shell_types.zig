@@ -12,3 +12,9 @@ pub const ProfileKind = enum {
     cmd,
     ssh,
 };
+
+pub const Utf8Console = enum {
+    auto,
+    always,
+    never,
+};

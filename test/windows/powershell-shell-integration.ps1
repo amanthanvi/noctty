@@ -17,6 +17,7 @@ function Assert-True {
 $script:OriginalPrompt = $function:global:prompt
 $script:OriginalOut = [Console]::Out
 $script:OriginalFeatures = $env:GHOSTTY_SHELL_FEATURES
+$script:IntegrationPath = Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1'
 $script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ps-si-" + [guid]::NewGuid().ToString('n'))
 
 try {
@@ -27,7 +28,18 @@ try {
 
     function global:prompt { 'PS> ' }
 
-    . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+    # The UTF-8 console decision must never travel in the child environment.
+    # A PowerShell profile runs before noctty's injected -Command, so an
+    # environment variable would already have leaked to anything the profile
+    # spawned by the time this script could clear it.
+    $integrationSource = Get-Content -LiteralPath $script:IntegrationPath -Raw
+    Assert-True (-not ($integrationSource -match 'env:GHOSTTY_UTF8_CONSOLE')) "UTF-8 console decision must not travel through a child environment variable"
+    Assert-True ($integrationSource -match '__ghostty_utf8_console') "UTF-8 console decision must be read from the injected launch variable"
+
+    # Dot-sourcing without the launch variable set is the manual-integration
+    # path: Get-Variable must resolve to nothing instead of erroring.
+    . $script:IntegrationPath
+    Assert-True ($null -eq (Get-Variable -Name '__ghostty_utf8_console' -ValueOnly -ErrorAction SilentlyContinue)) "Manual dot-sourcing must not define the launch variable"
 
     $cwdUri = __ghostty_encode_cwd_uri
     Assert-True ($cwdUri.StartsWith('file://')) "OSC 7 cwd URI must include file:// scheme"

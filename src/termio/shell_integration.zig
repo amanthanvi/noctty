@@ -46,12 +46,16 @@ pub const ShellIntegration = struct {
 /// The allocator is used for temporary values and to allocate values
 /// in the ShellIntegration result. It is expected to be an arena to
 /// simplify cleanup.
+///
+/// `utf8_console` is Windows-only and only reaches PowerShell: it asks the
+/// injected integration script to force UTF-8 console encodings.
 pub fn setup(
     alloc_arena: Allocator,
     resource_dir: []const u8,
     command: config.Command,
     env: *EnvMap,
     force_shell: ?Shell,
+    utf8_console: bool,
 ) !?ShellIntegration {
     const shell: Shell = force_shell orelse
         try detectShell(alloc_arena, command) orelse
@@ -84,7 +88,12 @@ pub fn setup(
             break :xdg try command.clone(alloc_arena);
         },
 
-        .powershell => try setupPowerShell(alloc_arena, command, resource_dir),
+        .powershell => try setupPowerShell(
+            alloc_arena,
+            command,
+            resource_dir,
+            utf8_console,
+        ),
     } orelse return null;
 
     return .{
@@ -120,6 +129,7 @@ test "force shell" {
             command,
             &env,
             shell,
+            false,
         );
         if (shell == .powershell and builtin.os.tag != .windows) {
             try testing.expect(result == null);
@@ -145,6 +155,7 @@ test "shell integration failure" {
         .{ .shell = "sh" },
         &env,
         null,
+        false,
     );
 
     try testing.expect(result == null);
@@ -243,13 +254,13 @@ test "setup powershell: interactive direct command auto injects" {
     defer res.deinit();
 
     const command: config.Command = .{ .direct = &.{ "pwsh.exe", "-NoProfile" } };
-    const result = (try setup(alloc, res.path, command, &env, .powershell)).?;
+    const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
 
     const expected_path = try std.fs.path.join(alloc, &.{ res.path, "shell-integration", "powershell", "integration.ps1" });
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -280,13 +291,13 @@ test "setup powershell: interactive shell command auto injects" {
     defer res.deinit();
 
     const command: config.Command = .{ .shell = "powershell.exe -NoProfile" };
-    const result = (try setup(alloc, res.path, command, &env, .powershell)).?;
+    const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
 
     const expected_path = try std.fs.path.join(alloc, &.{ res.path, "shell-integration", "powershell", "integration.ps1" });
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -317,13 +328,13 @@ test "setup powershell: interactive shell command with quoted exe path auto inje
     defer res.deinit();
 
     const command: config.Command = .{ .shell = "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile" };
-    const result = (try setup(alloc, res.path, command, &env, .powershell)).?;
+    const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
 
     const expected_path = try std.fs.path.join(alloc, &.{ res.path, "shell-integration", "powershell", "integration.ps1" });
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -359,6 +370,7 @@ test "setup powershell: explicit command launch is not wrapped" {
         .{ .direct = &.{ "pwsh.exe", "-Command", "Get-Date" } },
         &env,
         .powershell,
+        false,
     );
 
     try testing.expect(result == null);
@@ -385,6 +397,7 @@ test "setup powershell: explicit short command launch is not wrapped" {
         .{ .shell = "pwsh.exe -c Get-Date" },
         &env,
         .powershell,
+        false,
     );
 
     try testing.expect(result == null);
@@ -411,6 +424,7 @@ test "setup powershell: explicit command prefix launch is not wrapped" {
         .{ .shell = "powershell.exe -Com Get-Date" },
         &env,
         .powershell,
+        false,
     );
 
     try testing.expect(result == null);
@@ -432,13 +446,13 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
     defer res.deinit();
 
     const command: config.Command = .{ .shell = "pwsh.exe /NoProfile" };
-    const result = (try setup(alloc, res.path, command, &env, .powershell)).?;
+    const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
 
     const expected_path = try std.fs.path.join(alloc, &.{ res.path, "shell-integration", "powershell", "integration.ps1" });
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -474,6 +488,7 @@ test "setup powershell: slash version launch is not wrapped" {
         .{ .shell = "powershell.exe /Version" },
         &env,
         .powershell,
+        false,
     );
 
     try testing.expect(result == null);
@@ -483,6 +498,7 @@ fn setupPowerShell(
     alloc: Allocator,
     command: config.Command,
     resource_dir: []const u8,
+    utf8_console: bool,
 ) !?config.Command {
     if (builtin.os.tag != .windows) return null;
 
@@ -507,6 +523,7 @@ fn setupPowerShell(
         alloc,
         argv.items,
         integration_path,
+        utf8_console,
     )) orelse return null;
 
     return .{ .direct = injected };

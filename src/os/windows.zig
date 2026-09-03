@@ -34,6 +34,9 @@ pub const TRUE = windows.TRUE;
 pub const FOLDERID_Profile = windows.GUID.parse("{5E6C858F-0E22-4760-9AFE-EA3317B67173}");
 pub const FOLDERID_LocalAppData = windows.FOLDERID_LocalAppData;
 
+pub extern "kernel32" fn GetACP() callconv(.winapi) windows.UINT;
+pub extern "kernel32" fn GetOEMCP() callconv(.winapi) windows.UINT;
+
 pub const KnownFolderPathError = error{
     BufferTooSmall,
 };

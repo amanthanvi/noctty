@@ -860,6 +860,7 @@ pub fn init(
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
             .shell_integration_features = config.@"shell-integration-features",
+            .utf8_console = config.@"utf8-console",
             .cursor_blink = config.@"cursor-style-blink",
             .working_directory = if (config.@"working-directory") |wd| wd.value() else null,
             .working_directory_home = if (config.@"working-directory") |wd| wd == .home else false,

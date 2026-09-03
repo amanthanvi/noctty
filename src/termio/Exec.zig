@@ -676,6 +676,7 @@ pub const Config = struct {
     env_override: configpkg.RepeatableStringMap = .{},
     shell_integration: configpkg.Config.ShellIntegration = .detect,
     shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
+    utf8_console: configpkg.Utf8Console = .auto,
     cursor_blink: ?bool = null,
     working_directory: ?[]const u8 = null,
     working_directory_home: bool = false,
@@ -873,6 +874,11 @@ const Subprocess = struct {
         // This is not apprt-specific, so we do it here.
         env.remove("VTE_VERSION");
 
+        const utf8_console = if (builtin.os.tag == .windows)
+            windows_shell.shouldApplyUtf8ConsoleForCurrentSystem(cfg.utf8_console)
+        else
+            false;
+
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
@@ -917,6 +923,7 @@ const Subprocess = struct {
                 default_shell_command,
                 &env,
                 force,
+                utf8_console,
             ) orelse {
                 log.info("automatic shell integration not injected", .{});
                 break :shell default_shell_command;
@@ -936,6 +943,7 @@ const Subprocess = struct {
                 shell_command,
                 cfg.working_directory,
                 cfg.working_directory_home,
+                utf8_console,
             )
         else
             shell_command;
