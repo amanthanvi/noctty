@@ -359,6 +359,17 @@ console key record. `[Console]::ReadKey()` therefore reports less than the
 terminal sent; applications that read the byte stream directly see
 everything.
 
+`F6` and `Shift+F6` run `cycle_focus_region` and move keyboard focus
+between the terminal pane, the tab strip, the docked search query, and the
+host banner, skipping whatever is not on screen. `Esc` returns to the
+terminal. In the tab strip, Left/Right/Home/End move between tabs,
+Enter or Space activates one, `Delete` closes one, `F2` renames, and Ctrl
+with an arrow or Home/End moves the tab. These chrome keys are fixed:
+chrome controls are native windows that never reach the keybind path, so
+rebinding `cycle_focus_region` changes only the terminal end of the cycle.
+The command palette and other overlays keep their own focus handling and
+are not part of the cycle.
+
 ## Windows, tabs, and splits
 
 The native Win32 host window provides a tab bar with overflow handling,

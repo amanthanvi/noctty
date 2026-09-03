@@ -356,6 +356,10 @@ pub const Action = union(Key) {
     /// Toggle quick select for the target terminal surface.
     toggle_quick_select,
 
+    /// Move keyboard focus between the terminal pane and the window
+    /// chrome regions (tab strip, docked search, host banner).
+    cycle_focus_region: CycleFocusRegion,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -427,6 +431,7 @@ pub const Action = union(Key) {
         save_layout,
         launch_layout,
         toggle_quick_select,
+        cycle_focus_region,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -543,6 +548,13 @@ pub const GotoWindow = enum(c_int) {
     test "ghostty.h GotoWindow" {
         try lib.checkGhosttyHEnum(GotoWindow, "GHOSTTY_GOTO_WINDOW_");
     }
+};
+
+/// The direction to move keyboard focus around the window's focus
+/// regions. Extern for the same interop reason as `GotoWindow`.
+pub const CycleFocusRegion = enum(c_int) {
+    previous,
+    next,
 };
 
 /// The amount to resize the split by and the direction to resize it in.

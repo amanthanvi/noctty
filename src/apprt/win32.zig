@@ -76,6 +76,7 @@ const chrome_layout = @import("win32/chrome_layout.zig");
 const gdi = @import("win32/gdi.zig");
 const c = @import("win32/consts.zig");
 const sys = @import("win32/sys.zig");
+const focus_region = @import("win32/focus_region.zig");
 
 test {
     _ = @import("win32/render_trace.zig");
@@ -86,6 +87,7 @@ test {
     _ = @import("win32/input.zig");
     _ = @import("win32/chrome_layout.zig");
     _ = @import("win32/gdi.zig");
+    _ = @import("win32/focus_region.zig");
 }
 
 const ThemeColors = win32_theme.ThemeColors;
@@ -6229,6 +6231,15 @@ pub const App = struct {
                     return try surface.toggleTabOverview();
                 }
                 return false;
+            },
+
+            .cycle_focus_region => {
+                const surface = self.findSurfaceForTarget(target) orelse return false;
+                const host = surface.host orelse return false;
+                return host.cycleFocusRegionFromCurrentFocus(switch (value) {
+                    .previous => .previous,
+                    .next => .next,
+                });
             },
 
             .toggle_quick_terminal => {
@@ -14370,6 +14381,9 @@ const Host = struct {
                 .ctx = @ptrCast(self),
                 .role = .live_text,
                 .name = &bannerUiaName,
+                // The focus-region cycle can land on the banner, so it is
+                // keyboard focusable even though it is not interactive.
+                .keyboard_focusable = true,
             });
         }
     }
@@ -15347,6 +15361,132 @@ const Host = struct {
         } orelse return false;
         _ = sys.SetFocus(target);
         return sys.GetFocus() == target;
+    }
+
+    /// Which focus regions of this host can take keyboard focus right
+    /// now. Availability is read from live window visibility, so the
+    /// cycle never lands on a region the user cannot see — a closed
+    /// docked search and an absent banner are simply skipped.
+    fn focusRegionAvailability(self: *const Host) focus_region.Availability {
+        const terminal_available = if (self.activeSurface()) |surface| surface.hwnd != null else false;
+        return .{
+            .terminal = terminal_available,
+            .tab_strip = self.tabStripFocusHwnd() != null,
+            .search = self.searchFocusHwnd() != null,
+            .banner = focusableHwnd(self.banner_hwnd) != null,
+        };
+    }
+
+    /// The tab-strip HWND that takes focus: the active tab's button when
+    /// it is on screen, otherwise the first visible tab button, otherwise
+    /// the new-tab button. Tabs scrolled out of the strip by overflow have
+    /// hidden buttons and cannot be focus targets.
+    fn tabStripFocusHwnd(self: *const Host) ?HWND {
+        if (self.active_tab < self.tabs.items.len) {
+            if (focusableHwnd(self.tabs.items[self.active_tab].button_hwnd)) |hwnd| return hwnd;
+        }
+        for (self.tabs.items) |tab| {
+            if (focusableHwnd(tab.button_hwnd)) |hwnd| return hwnd;
+        }
+        return focusableHwnd(self.new_tab_hwnd);
+    }
+
+    fn searchFocusHwnd(self: *const Host) ?HWND {
+        const surface = self.activeSurface() orelse return null;
+        return focusableHwnd(surface.search_bar_edit_hwnd);
+    }
+
+    fn focusRegionHwnd(self: *const Host, region: focus_region.Region) ?HWND {
+        return switch (region) {
+            .terminal => if (self.activeSurface()) |surface| surface.hwnd else null,
+            .tab_strip => self.tabStripFocusHwnd(),
+            .search => self.searchFocusHwnd(),
+            .banner => focusableHwnd(self.banner_hwnd),
+        };
+    }
+
+    /// The region a focused HWND belongs to, or null when focus is
+    /// somewhere this cycle does not own (an overlay, the palette, a
+    /// settings window). The tab-strip action buttons count as the tab
+    /// strip so F6 from them continues the cycle instead of dead-ending.
+    fn focusRegionForHwnd(self: *Host, child: HWND) ?focus_region.Region {
+        for (self.app.windows.items) |surface| {
+            if (surface.host != self) continue;
+            if (surface.hwnd) |surface_hwnd| {
+                if (surface_hwnd == child) return .terminal;
+            }
+        }
+        if (self.tabIndexForButton(child) != null) return .tab_strip;
+        if (self.new_tab_hwnd) |hwnd| if (hwnd == child) return .tab_strip;
+        if (self.overflow_hwnd) |hwnd| if (hwnd == child) return .tab_strip;
+        if (self.banner_hwnd) |hwnd| if (hwnd == child) return .banner;
+        if (self.searchControlSurface(child) != null) return .search;
+        return null;
+    }
+
+    /// Move real Win32 focus onto a region. Real focus is the point: each
+    /// landing HWND raises its own UIA focus-changed event from
+    /// `WM_SETFOCUS`, so a screen reader announces what focus landed on.
+    fn moveFocusToRegion(self: *Host, region: focus_region.Region) bool {
+        const target = self.focusRegionHwnd(region) orelse return false;
+        if (sys.GetFocus() == target) return true;
+        _ = sys.SetFocus(target);
+        return sys.GetFocus() == target;
+    }
+
+    fn cycleFocusRegion(
+        self: *Host,
+        direction: focus_region.Direction,
+        current: ?focus_region.Region,
+    ) bool {
+        const target = focus_region.next(
+            self.focusRegionAvailability(),
+            current,
+            direction,
+        ) orelse return false;
+        return self.moveFocusToRegion(target);
+    }
+
+    /// Entry point for the `cycle_focus_region` keybind action, which only
+    /// reaches us while the terminal owns focus. The current region is
+    /// resolved from live focus rather than assumed, so a binding invoked
+    /// through automation while chrome holds focus still moves correctly.
+    fn cycleFocusRegionFromCurrentFocus(self: *Host, direction: focus_region.Direction) bool {
+        const current = if (sys.GetFocus()) |hwnd| self.focusRegionForHwnd(hwnd) else null;
+        return self.cycleFocusRegion(direction, current);
+    }
+
+    /// F6 / Shift+F6 and Escape while a chrome region holds focus.
+    ///
+    /// Chrome controls are native HWNDs that never reach the core keybind
+    /// path, so these keys are fixed here rather than rebindable; the
+    /// terminal end of the cycle goes through the `cycle_focus_region`
+    /// keybind action instead. `allow_escape` is false where the control
+    /// already owns Escape (the docked search dismisses itself).
+    fn handleFocusRegionKey(self: *Host, child: HWND, vk: WPARAM, allow_escape: bool) bool {
+        const current = self.focusRegionForHwnd(child) orelse return false;
+        switch (vk) {
+            c.VK_F6 => return self.cycleFocusRegion(
+                if (keyPressed(c.VK_SHIFT)) .previous else .next,
+                current,
+            ),
+            c.VK_ESCAPE => {
+                if (!allow_escape) return false;
+                const target = focus_region.escapeTarget(
+                    self.focusRegionAvailability(),
+                    current,
+                ) orelse return false;
+                return self.moveFocusToRegion(target);
+            },
+            else => return false,
+        }
+    }
+
+    /// Put focus back on the tab strip after an activation moved it to the
+    /// newly active terminal. Without this, one Left/Right press would
+    /// leave the strip and the next one would go to the PTY.
+    fn restoreTabStripFocus(self: *Host) void {
+        _ = self.moveFocusToRegion(.tab_strip);
     }
 
     fn searchControlSurface(self: *const Host, child: HWND) ?*Surface {
@@ -22227,6 +22367,15 @@ fn onHostCloakEvent(hwnd: HWND, cloaked: bool) void {
     }
 }
 
+/// A child window that can take keyboard focus right now. Hidden chrome
+/// is not a focus target: focusing it would move focus somewhere the user
+/// cannot see and make a screen reader announce an off-screen element.
+fn focusableHwnd(hwnd: ?HWND) ?HWND {
+    const value = hwnd orelse return null;
+    if (sys.IsWindowVisible(value) == 0) return null;
+    return value;
+}
+
 fn refocusActiveSurface(host: *Host) void {
     if (host.activeSurface()) |surface| {
         if (surface.hwnd) |surface_hwnd| _ = sys.SetFocus(surface_hwnd);
@@ -22528,6 +22677,12 @@ fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             }
         }
         if (msg == c.WM_NCHITTEST) return c.HTTRANSPARENT;
+        // The banner is hit-transparent and painted by the host, so it
+        // only ever receives keys through the focus-region cycle.
+        if (msg == c.WM_SETFOCUS) {
+            if (host.banner_uia_provider) |provider| provider.raiseFocusChanged();
+        }
+        if (msg == c.WM_KEYDOWN and host.handleFocusRegionKey(hwnd, wParam, true)) return 0;
         if (host.banner_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -22540,6 +22695,16 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
                 if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
             }
+        }
+        // Focus-region keys for the tab-strip action buttons and the
+        // docked search controls. Overlay buttons are deliberately
+        // excluded: they belong to a modal overlay, not to the window's
+        // focus-region cycle.
+        if (msg == c.WM_KEYDOWN and !v.isOverlayButton(hwnd)) {
+            // The docked search buttons already own Escape (it dismisses
+            // the search), so only F6 is taken from them here.
+            const allow_escape = v.searchControlSurface(hwnd) == null;
+            if (v.handleFocusRegionKey(hwnd, wParam, allow_escape)) return 0;
         }
         // Keyboard routing for the overlay accept/cancel pair. In
         // confirm mode the EDIT control is hidden and focus lands on
@@ -22781,22 +22946,37 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     if (v.isHoveredButton(hwnd)) v.setHoveredButton(null);
                 },
                 c.WM_KEYDOWN => {
+                    if (v.handleFocusRegionKey(hwnd, wParam, true)) return 0;
                     if (tabButtonKeyAction(wParam, keyPressed(c.VK_CONTROL))) |action| {
                         switch (action) {
+                            // Activating a tab moves focus into its
+                            // terminal, which is what Enter on a tab
+                            // should do. Arrow/Home/End navigation must
+                            // not: it activates as it moves, so focus is
+                            // pulled back to the strip afterwards or the
+                            // next arrow press would go to the PTY.
+                            .activate => {
+                                _ = v.activateTabIndex(index);
+                                return 0;
+                            },
                             .previous => {
                                 _ = v.activateTabByDirection(.previous);
+                                v.restoreTabStripFocus();
                                 return 0;
                             },
                             .next => {
                                 _ = v.activateTabByDirection(.next);
+                                v.restoreTabStripFocus();
                                 return 0;
                             },
                             .first => {
                                 _ = v.activateTabByDirection(@enumFromInt(0));
+                                v.restoreTabStripFocus();
                                 return 0;
                             },
                             .last => {
                                 _ = v.activateTabByDirection(.last);
+                                v.restoreTabStripFocus();
                                 return 0;
                             },
                             .move_previous => {
@@ -22937,6 +23117,10 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 if (wParam == c.VK_RETURN or wParam == c.VK_ESCAPE) return 0;
             },
             c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+                // Escape stays with the search bar, which dismisses
+                // itself and returns focus to the terminal; only F6
+                // is taken for the focus-region cycle.
+                if (v.handleFocusRegionKey(hwnd, wParam, false)) return 0;
                 if (wParam == c.VK_RETURN) {
                     _ = surface.navigateDockedSearch(dockedSearchEnterDirection(keyPressed(c.VK_SHIFT))) catch |err| {
                         logUiActionError("docked search enter navigation failed", err);

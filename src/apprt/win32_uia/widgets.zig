@@ -2042,6 +2042,12 @@ pub const ChromeControlState = struct {
     selection_container: ?*const fn (*anyopaque) ?*ChromeControlProvider = null,
     toggled: ?*const fn (*anyopaque, usize) bool = null,
     range_value: ?*const fn (*anyopaque) ChromeRangeValue = null,
+    /// Overrides the role's default keyboard focusability. The host
+    /// banner opts in: it is not interactive, but the window's
+    /// focus-region cycle can land real Win32 focus on it, and
+    /// `IsKeyboardFocusable` must say so rather than contradict the
+    /// focus-changed event a reader just received.
+    keyboard_focusable: ?bool = null,
     use_com_threading: bool = false,
 };
 
@@ -2356,10 +2362,12 @@ pub const ChromeControlProvider = struct {
             => out.* = com.VARIANT.fromBool(self.state.role != .decorative),
             constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
             constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(IsWindowVisible(self.hwnd) == 0),
-            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(switch (self.state.role) {
-                .tab_item, .button, .toggle => true,
-                else => false,
-            }),
+            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(
+                self.state.keyboard_focusable orelse switch (self.state.role) {
+                    .tab_item, .button, .toggle => true,
+                    else => false,
+                },
+            ),
             constants.UIA_HasKeyboardFocusPropertyId => out.* = com.VARIANT.fromBool(hwndHasKeyboardFocus(self.hwnd)),
             constants.UIA_SelectionItemIsSelectedPropertyId => if (self.state.role == .tab_item) {
                 const selected = self.state.selected orelse return com.E_NOTIMPL;
@@ -6743,6 +6751,76 @@ test "uia ChromeControlProvider exposes live chrome patterns and detaches safely
         ChromeControlProvider.GetPropertyValue(&item.base, constants.UIA_NamePropertyId, &value),
     );
     try std.testing.expectEqual(calls_before_detach, context.name_calls);
+}
+
+test "ChromeControlProvider keyboard focusability follows the role unless overridden" {
+    const Context = struct {
+        fn name(_: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "chrome {d}", .{tag}) catch "";
+        }
+    };
+
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
+    }.GetDesktopWindow;
+    const hwnd = GetDesktopWindow();
+    var context: u8 = 0;
+    const context_ptr: *anyopaque = @ptrCast(&context);
+
+    // A live-region text element is not focusable by role.
+    const notice = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .live_text,
+        .name = Context.name,
+    });
+    defer _ = ChromeControlProvider.Release(&notice.base);
+    defer notice.detach();
+
+    // The host banner is the same role but is a focus-region landing
+    // site, so it must not claim to be unfocusable while the cycle
+    // parks real keyboard focus on it.
+    const banner = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .live_text,
+        .name = Context.name,
+        .keyboard_focusable = true,
+    });
+    defer _ = ChromeControlProvider.Release(&banner.base);
+    defer banner.detach();
+
+    // An override can also take focusability away from an interactive role.
+    const inert_button = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = context_ptr,
+        .role = .button,
+        .name = Context.name,
+        .keyboard_focusable = false,
+    });
+    defer _ = ChromeControlProvider.Release(&inert_button.base);
+    defer inert_button.detach();
+
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetPropertyValue(
+        &notice.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &value,
+    ));
+    try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
+
+    value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetPropertyValue(
+        &banner.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &value,
+    ));
+    try std.testing.expectEqual(com.VARIANT_TRUE, value.value.bool_val);
+
+    value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetPropertyValue(
+        &inert_button.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &value,
+    ));
+    try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
 }
 
 test "ChromeControlProvider tab items enforce required single selection" {

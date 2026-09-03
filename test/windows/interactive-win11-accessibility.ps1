@@ -1794,6 +1794,125 @@ function Wait-AccessibilityCondition(
     }
 }
 
+# Waits for one keyboard focus move made by the focus-region cycle. Real
+# Win32 focus is the assertion: it is what raises the UIA focus-changed
+# event a screen reader announces, so a painted highlight would not pass.
+function Wait-AccessibilityFocusRegionLanding(
+    [System.Diagnostics.Process] $Process,
+    [IntPtr] $Expected,
+    [IntPtr] $TerminalHwnd,
+    [IntPtr] $TabStripHwnd,
+    [string] $Description
+) {
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(3)) `
+        -Description $Description `
+        -Condition {
+            [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq $Expected
+        } `
+        -Diagnostic {
+            $observed = [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+            "Focused HWND=$observed; expected=$Expected; terminal=$TerminalHwnd; tab strip=$TabStripHwnd."
+        }
+}
+
+# Drives the keyboard focus-region cycle (F6 / Shift+F6 / Escape) over the
+# regions this scenario actually has on screen: the terminal pane and the
+# tab strip. Leaves focus back on $TerminalHwnd.
+function Invoke-AccessibilityFocusRegionCycle(
+    [System.Diagnostics.Process] $Process,
+    [IntPtr] $TerminalHwnd,
+    [IntPtr] $TabStripHwnd
+) {
+    if ($TerminalHwnd -eq [IntPtr]::Zero) {
+        throw 'Focus-region cycle needs a resolved terminal HWND.'
+    }
+    if ($TabStripHwnd -eq [IntPtr]::Zero) {
+        throw 'Focus-region cycle needs a resolved tab-strip HWND.'
+    }
+    if ($TerminalHwnd -eq $TabStripHwnd) {
+        throw 'Focus-region cycle terminal and tab-strip HWNDs are the same window.'
+    }
+
+    # Forward: terminal -> tab strip.
+    Send-AccessibilityChord `
+        -Keys @([uint16]0x75) `
+        -Description 'F6 focus-region cycle into the tab strip' `
+        -Process $Process
+    Wait-AccessibilityFocusRegionLanding `
+        -Process $Process `
+        -Expected $TabStripHwnd `
+        -TerminalHwnd $TerminalHwnd `
+        -TabStripHwnd $TabStripHwnd `
+        -Description 'F6 to move keyboard focus onto the tab strip'
+
+    # The landed element must not contradict the focus-changed event a
+    # reader just received.
+    $landed = [System.Windows.Automation.AutomationElement]::FromHandle($TabStripHwnd)
+    if ($null -eq $landed) {
+        throw 'No UIA element for the focused tab-strip HWND.'
+    }
+    if ($landed.Current.ControlType -ne [System.Windows.Automation.ControlType]::TabItem) {
+        throw "Focus-region cycle landed on '$($landed.Current.ControlType.ProgrammaticName)'; expected TabItem."
+    }
+    if (-not $landed.Current.IsKeyboardFocusable) {
+        throw "Focused tab item '$($landed.Current.Name)' reports IsKeyboardFocusable=false."
+    }
+    if (-not $landed.Current.HasKeyboardFocus) {
+        throw "Focused tab item '$($landed.Current.Name)' reports HasKeyboardFocus=false while it owns Win32 focus."
+    }
+
+    # Escape returns to the terminal.
+    Send-AccessibilityChord `
+        -Keys @([uint16]0x1B) `
+        -Description 'Escape out of the tab strip' `
+        -Process $Process
+    Wait-AccessibilityFocusRegionLanding `
+        -Process $Process `
+        -Expected $TerminalHwnd `
+        -TerminalHwnd $TerminalHwnd `
+        -TabStripHwnd $TabStripHwnd `
+        -Description 'Escape to return keyboard focus to the terminal'
+
+    # Backward: Shift+F6 reaches the chrome from the other end. With no
+    # docked search open and no banner up, the tab strip is the only other
+    # region, so both directions land there.
+    Send-AccessibilityChord `
+        -Keys @([uint16]0x10, [uint16]0x75) `
+        -Description 'Shift+F6 focus-region cycle into the tab strip' `
+        -Process $Process
+    Wait-AccessibilityFocusRegionLanding `
+        -Process $Process `
+        -Expected $TabStripHwnd `
+        -TerminalHwnd $TerminalHwnd `
+        -TabStripHwnd $TabStripHwnd `
+        -Description 'Shift+F6 to move keyboard focus onto the tab strip'
+
+    # F6 from the only chrome region wraps back to the terminal.
+    Send-AccessibilityChord `
+        -Keys @([uint16]0x75) `
+        -Description 'F6 wrap from the tab strip back to the terminal' `
+        -Process $Process
+    Wait-AccessibilityFocusRegionLanding `
+        -Process $Process `
+        -Expected $TerminalHwnd `
+        -TerminalHwnd $TerminalHwnd `
+        -TabStripHwnd $TabStripHwnd `
+        -Description 'F6 to wrap keyboard focus back to the terminal'
+
+    return [ordered]@{
+        terminal_hwnd = $TerminalHwnd.ToInt64()
+        tab_strip_hwnd = $TabStripHwnd.ToInt64()
+        landed_control_type = $landed.Current.ControlType.ProgrammaticName
+        landed_name = $landed.Current.Name
+        landed_keyboard_focusable = [bool]$landed.Current.IsKeyboardFocusable
+        landed_has_keyboard_focus = $true
+        escape_returns_to_terminal = $true
+        reverse_reaches_chrome = $true
+        forward_wraps_to_terminal = $true
+    }
+}
+
 # One-line description of what the harness actually saw, for a timeout whose
 # cause is the shape of the window rather than the timing of an event.
 function Get-AccessibilityWindowShape([IntPtr] $Hwnd) {
@@ -3899,6 +4018,14 @@ try {
         }
         throw "Keyboard focus did not resolve to a noctty HWND (attempts=$focusActivationAttempts/$focusActivationMaxAttempts; SetCursorPos Win32 error=$lastSetCursorPosError; GetCursorPos Win32 error=$lastGetCursorPosError actual=($lastActualCursorX,$lastActualCursorY); click Win32 error=$lastClickError; foreground HWND=$foregroundHwnd owner=$foregroundOwner; focused HWND=$focusedHwnd owner=$focusedProcessId; target HWND=$lastTargetHwnd owner=$lastTargetOwner; expected owner=$($process.Id); UIA focused=$focusedSummary; Document.SetFocus error='$documentFocusError'; clicked document=$clickedDocument)."
     }
+
+    # Keyboard focus-region cycle. Runs here because $focusedHwnd is now a
+    # confirmed terminal pane HWND, and before the TextChanged counters are
+    # armed so focus motion cannot be charged against the output budget.
+    $focusRegionCycle = Invoke-AccessibilityFocusRegionCycle `
+        -Process $process `
+        -TerminalHwnd $focusedHwnd `
+        -TabStripHwnd ([IntPtr]$selectedTabItems[0].Current.NativeWindowHandle)
 
     [NocttyAccessibilityNative]::ResetTextChangedCount()
     [NocttyAccessibilityNative]::ResetNotificationCount()
@@ -6720,6 +6847,7 @@ try {
             tabs = $tabChromeEvidence
             actions = $tabActionEvidence
             scrollbars = $scrollbarRanges
+            focus_region_cycle = $focusRegionCycle
         }
         settings = $settingsLifecycle
         settings_owner_lifecycle = $settingsOwnerLifecycle

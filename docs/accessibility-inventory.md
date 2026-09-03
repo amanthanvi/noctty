@@ -30,9 +30,20 @@ there is no text-bearing selected extent.
 
 Surfaces with no provider yet: custom-painted caption buttons, profile
 picker and tab-overview overlay rows, context menus, WinRT toasts, the
-tab drag preview, and quick-terminal chrome. There is no keyboard
-focus-region cycle, so chrome is not reachable from the terminal with
-the keyboard alone.
+tab drag preview, and quick-terminal chrome.
+
+Keyboard reachability is a focus-region cycle: `cycle_focus_region`
+(F6 / Shift+F6 by default) moves real Win32 focus between the terminal
+pane, the tab strip, the docked search query, and the host banner,
+skipping regions that are not on screen; Escape returns to the terminal.
+The order and the skip rule live in `src/apprt/win32/focus_region.zig`
+as a pure model with unit tests; `win32.zig` maps a region to the HWND
+that takes focus. Real focus is the contract, because each landing HWND
+raises its own UIA focus-changed event from `WM_SETFOCUS`. The host
+banner is not interactive but is a landing site, so its provider
+declares `IsKeyboardFocusable` explicitly rather than inheriting the
+role default. The cycle does not reach the individual docked-search
+buttons, the caption buttons, or overlay rows.
 
 Automated acceptance is `test/windows/interactive-win11-accessibility.ps1`.
 It emits exact-source/binary provenance with the UIA tree and requires
