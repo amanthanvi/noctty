@@ -886,7 +886,11 @@ pub fn init(
         try termio.Termio.init(&self.io, alloc, .{
             .size = size,
             .full_config = config,
-            .config = try termio.Termio.DerivedConfig.init(alloc, config),
+            .config = try termio.Termio.DerivedConfig.init(
+                alloc,
+                config,
+                app.config_conditional_state,
+            ),
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
@@ -2013,18 +2017,6 @@ fn updateScrollbar(self: *Surface, scrollbar: terminal.Scrollbar) void {
     };
 }
 
-/// This should be called anytime `config_conditional_state` changes
-/// so that the apprt can reload the configuration.
-fn notifyConfigConditionalState(self: *Surface) void {
-    _ = self.rt_app.performAction(
-        .{ .surface = self },
-        .reload_config,
-        .{ .soft = true },
-    ) catch |err| {
-        log.warn("failed to notify app of config state change err={}", .{err});
-    };
-}
-
 /// Update our configuration at runtime. This can be called by the apprt
 /// to set a surface-specific configuration that differs from the app
 /// or other surfaces.
@@ -2116,7 +2108,11 @@ pub fn updateConfig(
         errdefer renderer_message.deinit();
         var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
         errdefer self.alloc.destroy(termio_config_ptr);
-        termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
+        termio_config_ptr.* = try termio.Termio.DerivedConfig.init(
+            self.alloc,
+            config,
+            self.config_conditional_state,
+        );
         errdefer termio_config_ptr.deinit();
 
         self.renderer_thread.send(renderer_message);
@@ -5869,8 +5865,9 @@ fn mouseSelection(
 }
 
 /// Call to notify Ghostty that the color scheme for the terminal has
-/// changed.
-pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
+/// changed. The apprt batches configuration reload until every surface has
+/// received the new conditional state.
+pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) void {
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -5885,10 +5882,6 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 
     // Setup our conditional state which has the current color theme.
     self.config_conditional_state.theme = new_scheme;
-    self.notifyConfigConditionalState();
-
-    // If mode 2031 is on, then we report the change live.
-    self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {

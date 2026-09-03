@@ -449,6 +449,7 @@ pub const DerivedConfig = struct {
     pub fn init(
         alloc_gpa: Allocator,
         config: *const configpkg.Config,
+        conditional_state: configpkg.ConditionalState,
     ) !DerivedConfig {
         var arena = ArenaAllocator.init(alloc_gpa);
         errdefer arena.deinit();
@@ -480,7 +481,10 @@ pub const DerivedConfig = struct {
             .osc_color_report_format = config.@"osc-color-report-format",
             .clipboard_write = config.@"clipboard-write",
             .enquiry_response = try alloc.dupe(u8, config.@"enquiry-response"),
-            .conditional_state = config._conditional_state,
+            // Config.changeConditionalState intentionally skips replay when no
+            // config field uses the changed condition. The terminal still
+            // needs the live state for color-scheme reports in that case.
+            .conditional_state = conditional_state,
 
             // This has to be last so that we copy AFTER the arena allocations
             // above happen (Zig assigns in order).
@@ -719,8 +723,14 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
 
     // Deinit our old config. We do this in the lock because the
     // stream handler may be referencing the old config (i.e. enquiry resp)
-    self.config.deinit();
-    self.config = config.*;
+    //
+    // This must happen before `StreamHandler.changeConfig` below: that queues
+    // the mode 2031 report, and the queued message is drained against
+    // `self.config`. Installing after it would answer with the outgoing
+    // scheme. There is deliberately no direct write here — the queued report
+    // is the single source of these bytes, so an OS scheme flip produces
+    // exactly one report.
+    installDerivedConfig(&self.config, config);
 
     // Update our stream handler. The stream handler uses the same
     // renderer mutex so this is safe to do despite being executed
@@ -756,6 +766,14 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
             config.image_storage_limit,
         );
     }
+}
+
+/// Replace the live derived config. Split out so the ordering contract with
+/// the queued mode 2031 report is testable: whatever is installed here is what
+/// `colorSchemeReportLocked` will report.
+fn installDerivedConfig(current: *DerivedConfig, replacement: *DerivedConfig) void {
+    current.deinit();
+    current.* = replacement.*;
 }
 
 /// Resize the terminal.
@@ -1174,11 +1192,18 @@ pub fn colorSchemeReportLocked(self: *Termio, td: *ThreadData, force: bool) !voi
     if (!force and !self.renderer_state.terminal.modes.get(.report_color_scheme)) {
         return;
     }
-    const output = switch (self.config.conditional_state.theme) {
+    try self.queueWrite(
+        td,
+        colorSchemeReportBytes(self.config.conditional_state.theme),
+        false,
+    );
+}
+
+fn colorSchemeReportBytes(theme: configpkg.ConditionalState.Theme) []const u8 {
+    return switch (theme) {
         .light => "\x1B[?997;2n",
         .dark => "\x1B[?997;1n",
     };
-    try self.queueWrite(td, output, false);
 }
 
 /// ThreadData is the data created and stored in the termio thread
@@ -1290,4 +1315,84 @@ test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pen
         false,
         false,
     ));
+}
+
+test "issue149 explicit config colors reach derived config and terminal colors" {
+    const testing = std.testing;
+
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+    config.background = .{ .r = 0x13, .g = 0x27, .b = 0x38 };
+    config.foreground = .{ .r = 0xFE, .g = 0xDC, .b = 0xBA };
+    try config.palette.parseCLI("5=#123456");
+
+    const conditional_state: configpkg.ConditionalState = .{ .theme = .dark };
+    var derived = try DerivedConfig.init(testing.allocator, &config, conditional_state);
+    defer derived.deinit();
+    try testing.expectEqual(config.background, derived.background);
+    try testing.expectEqual(config.foreground, derived.foreground);
+    try testing.expectEqual(config.palette.value[5], derived.palette[5]);
+    try testing.expectEqual(conditional_state, derived.conditional_state);
+
+    var terminal = try terminalpkg.Terminal.init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .colors = .{
+            .background = .init(derived.background.toTerminalRGB()),
+            .foreground = .init(derived.foreground.toTerminalRGB()),
+            .cursor = .unset,
+            .palette = .init(derived.palette),
+        },
+    });
+    defer terminal.deinit(testing.allocator);
+    try testing.expectEqual(config.background.toTerminalRGB(), terminal.colors.background.get().?);
+    try testing.expectEqual(config.foreground.toTerminalRGB(), terminal.colors.foreground.get().?);
+    try testing.expectEqual(config.palette.value[5], terminal.colors.palette.current[5]);
+
+    // The renderer consumes terminal.RenderState rather than Config directly.
+    // Keep the final public handoff in this regression so a future break
+    // between terminal color defaults and the retained renderer state is
+    // detected before a GUI-only failure ships.
+    var render_state = terminalpkg.RenderState.empty;
+    defer render_state.deinit(testing.allocator);
+    try render_state.update(testing.allocator, &terminal);
+    try testing.expectEqual(
+        terminalpkg.color.RGB{ .r = 0x13, .g = 0x27, .b = 0x38 },
+        render_state.colors.background,
+    );
+    try testing.expectEqual(
+        terminalpkg.color.RGB{ .r = 0xFE, .g = 0xDC, .b = 0xBA },
+        render_state.colors.foreground,
+    );
+    try testing.expectEqual(
+        terminalpkg.color.RGB{ .r = 0x12, .g = 0x34, .b = 0x56 },
+        render_state.colors.palette[5],
+    );
+}
+
+test "issue149 color scheme report bytes distinguish dark and light" {
+    try std.testing.expectEqualStrings("\x1B[?997;1n", colorSchemeReportBytes(.dark));
+    try std.testing.expectEqualStrings("\x1B[?997;2n", colorSchemeReportBytes(.light));
+}
+
+test "issue149 OS scheme flip reports only the newly installed scheme" {
+    const testing = std.testing;
+
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+
+    var installed = try DerivedConfig.init(testing.allocator, &config, .{ .theme = .light });
+    defer installed.deinit();
+    var replacement = try DerivedConfig.init(testing.allocator, &config, .{ .theme = .dark });
+
+    // `changeConfig` installs before `StreamHandler.changeConfig` queues the
+    // mode 2031 report, and that queued message is drained against the live
+    // config. So whatever this leaves installed is exactly what gets reported:
+    // the incoming scheme, never the outgoing one.
+    installDerivedConfig(&installed, &replacement);
+
+    try testing.expectEqual(configpkg.ConditionalState.Theme.dark, installed.conditional_state.theme);
+    const report = colorSchemeReportBytes(installed.conditional_state.theme);
+    try testing.expectEqualStrings(colorSchemeReportBytes(.dark), report);
+    try testing.expect(!std.mem.eql(u8, colorSchemeReportBytes(.light), report));
 }

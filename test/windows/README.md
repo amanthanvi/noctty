@@ -315,6 +315,27 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-palette-theme.ps1 -ResetState
 ```
 
+## interactive-win11-issue149-colors.ps1
+
+Validates issue #149 through the real default config discovery path and the
+retained WGL presentation path. It first verifies foreground, background, and
+palette index 1 through the public `+show-config --changes-only=false` API. It
+then uses `PrintWindow` client-framebuffer readback rather than desktop
+screenshots, and verifies default colors, bundled `Cobalt2`, explicit overrides
+after the theme, live config reload, new-tab and new-split inheritance. The
+configured payload paints independent bands for the default foreground and
+palette index 1. `-MinimumDpi 144` makes a high-DPI run mandatory when that
+desktop is available.
+
+Run with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-issue149-colors.ps1 -ResetState -MinimumDpi 144
+```
+
+The harness is intentionally red-capable: supplying a wrong literal such as
+`-ExpectedThemeBackground 010203` must fail on the Cobalt2 framebuffer phase.
+
 ## interactive-win11-session-restore.ps1
 
 Validates a three-tab session save/restart restore with the second tab selected,

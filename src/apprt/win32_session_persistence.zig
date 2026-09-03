@@ -105,8 +105,70 @@ pub fn writeFileAtomic(absolute_path: []const u8, temporary_path: []const u8, by
         try file.sync();
     }
 
-    try replaceFileAtomic(absolute_path, temporary_path);
+    if (try replaceFileAtomic(absolute_path, temporary_path)) |failure| {
+        std.log.warn(
+            "win32 atomic replace failed replace_win32_error={d} move_win32_error={d}",
+            .{ failure.replace_error, failure.move_error },
+        );
+        return std.os.windows.unexpectedError(@enumFromInt(failure.move_error));
+    }
     temporary_created = false;
+}
+
+pub const AtomicReplaceFailure = struct {
+    replace_error: u32,
+    move_error: u32,
+};
+
+pub const WriteDisposition = union(enum) {
+    atomic,
+    in_place: AtomicReplaceFailure,
+};
+
+/// Recovery-ledger persistence is allowed to trade atomicity for progress.
+/// Saved-session callers continue to use `writeFileAtomic` and fail closed.
+pub fn writeFileAtomicOrInPlace(
+    absolute_path: []const u8,
+    temporary_path: []const u8,
+    bytes: []const u8,
+    atomic_failure: *?AtomicReplaceFailure,
+) !WriteDisposition {
+    atomic_failure.* = null;
+    var temporary_created = false;
+    // Once replacement fails, retain the unique temporary record if the
+    // in-place fallback also fails. Recovery folds it into the next append.
+    errdefer if (temporary_created and atomic_failure.* == null) {
+        deleteFileIfPresent(temporary_path) catch {};
+    };
+
+    {
+        var file = try std.fs.createFileAbsolute(temporary_path, .{ .truncate = true });
+        temporary_created = true;
+        defer file.close();
+        try file.writeAll(bytes);
+        try file.sync();
+    }
+
+    const failure = (try replaceFileAtomic(absolute_path, temporary_path)) orelse {
+        temporary_created = false;
+        return .atomic;
+    };
+    atomic_failure.* = failure;
+    std.log.warn(
+        "win32 recovery atomic replace failed replace_win32_error={d} move_win32_error={d}; falling back to in-place write",
+        .{ failure.replace_error, failure.move_error },
+    );
+    try writeFileInPlace(absolute_path, bytes);
+    try deleteFileIfPresent(temporary_path);
+    temporary_created = false;
+    return .{ .in_place = failure };
+}
+
+pub fn writeFileInPlace(absolute_path: []const u8, bytes: []const u8) !void {
+    var file = try std.fs.createFileAbsolute(absolute_path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(bytes);
+    try file.sync();
 }
 
 pub fn readFileBoundedAlloc(alloc: Allocator, absolute_path: []const u8, max_bytes: usize) ![]u8 {
@@ -117,25 +179,34 @@ pub fn readFileBoundedAlloc(alloc: Allocator, absolute_path: []const u8, max_byt
     return try file.readToEndAlloc(alloc, max_bytes);
 }
 
-fn replaceFileAtomic(absolute_path: []const u8, temporary_path: []const u8) !void {
+fn replaceFileAtomic(absolute_path: []const u8, temporary_path: []const u8) !?AtomicReplaceFailure {
     if (@import("builtin").os.tag == .windows) return replaceFileAtomicWindows(absolute_path, temporary_path);
-    return std.fs.renameAbsolute(temporary_path, absolute_path);
+    try std.fs.renameAbsolute(temporary_path, absolute_path);
+    return null;
 }
 
-fn replaceFileAtomicWindows(absolute_path: []const u8, temporary_path: []const u8) !void {
-    const windows = std.os.windows;
+fn replaceFileAtomicWindows(absolute_path: []const u8, temporary_path: []const u8) !?AtomicReplaceFailure {
     const target_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, absolute_path);
     defer std.heap.page_allocator.free(target_w);
     const temporary_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, temporary_path);
     defer std.heap.page_allocator.free(temporary_w);
 
-    if (sys.ReplaceFileW(target_w.ptr, temporary_w.ptr, null, 0, null, null) == 0 and
-        sys.MoveFileExW(temporary_w.ptr, target_w.ptr, MOVEFILE_REPLACE_EXISTING) == 0)
-    {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
-    }
+    if (sys.ReplaceFileW(target_w.ptr, temporary_w.ptr, null, 0, null, null) != 0) return null;
+    const replace_error: u32 = @intFromEnum(std.os.windows.kernel32.GetLastError());
+    if (sys.MoveFileExW(temporary_w.ptr, target_w.ptr, MOVEFILE_REPLACE_EXISTING) != 0) return null;
+    const move_error: u32 = @intFromEnum(std.os.windows.kernel32.GetLastError());
+    return .{
+        .replace_error = replace_error,
+        .move_error = move_error,
+    };
 }
 
+const GENERIC_READ: u32 = 0x80000000;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+const OPEN_EXISTING: u32 = 3;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
+const ERROR_SHARING_VIOLATION: u32 = 32;
 const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
 test "win32 session persistence load distinguishes missing corrupt oversized and transient reads" {
     var tmp = std.testing.tmpDir(.{});
@@ -199,6 +270,71 @@ test "win32 session persistence atomic write replaces existing file and delete i
     try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(temporary, .{}));
     try deleteFileIfPresent(path);
     try deleteFileIfPresent(path);
+}
+
+test "win32 recovery persistence falls back in place when delete sharing blocks replace" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile("startup-attempts.json", .{});
+        defer file.close();
+        try file.writeAll("old");
+    }
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "startup-attempts.json");
+    defer std.testing.allocator.free(path);
+    const temporary = try std.mem.concat(std.testing.allocator, u8, &.{ path, ".tmp" });
+    defer std.testing.allocator.free(temporary);
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(path_w);
+
+    const held = std.os.windows.kernel32.CreateFileW(
+        path_w.ptr,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        null,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (held == std.os.windows.INVALID_HANDLE_VALUE) return error.TestUnexpectedResult;
+    defer _ = std.os.windows.CloseHandle(held);
+
+    var atomic_failure: ?AtomicReplaceFailure = null;
+    const disposition = try writeFileAtomicOrInPlace(path, temporary, "new", &atomic_failure);
+    switch (disposition) {
+        .atomic => return error.TestExpectedFallback,
+        .in_place => |failure| {
+            try std.testing.expectEqual(@as(u32, ERROR_SHARING_VIOLATION), failure.replace_error);
+            try std.testing.expectEqual(@as(u32, 5), failure.move_error);
+        },
+    }
+    const contents = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 16);
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("new", contents);
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(temporary, .{}));
+}
+
+test "win32 recovery persistence retains temp evidence when fallback also fails" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("startup-attempts.json");
+    const target = try tmp.dir.realpathAlloc(std.testing.allocator, "startup-attempts.json");
+    defer std.testing.allocator.free(target);
+    const temporary = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".tmp" });
+    defer std.testing.allocator.free(temporary);
+
+    var atomic_failure: ?AtomicReplaceFailure = null;
+    if (writeFileAtomicOrInPlace(target, temporary, "diagnosis", &atomic_failure)) |_| {
+        return error.TestExpectedError;
+    } else |_| {}
+    try std.testing.expect(atomic_failure != null);
+    const contents = try std.fs.cwd().readFileAlloc(std.testing.allocator, temporary, 32);
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("diagnosis", contents);
 }
 
 test "win32 session persistence quarantine preserves existing collision" {

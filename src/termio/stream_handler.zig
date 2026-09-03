@@ -1732,6 +1732,169 @@ test "semantic output capture follows real stream handler parser" {
     try std.testing.expectEqual(@as(usize, 0), combining_noop.len);
 }
 
+fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {
+    const message = switch (mailbox.*) {
+        .spsc => |*value| value.queue.pop() orelse return error.TestExpectedEqual,
+    };
+    switch (message) {
+        .write_small => |value| try std.testing.expectEqualStrings(
+            expected,
+            value.data[0..value.len],
+        ),
+        .write_alloc => |value| {
+            defer value.alloc.free(value.data);
+            try std.testing.expectEqualStrings(expected, value.data);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+fn countIssue149ColorSchemeReports(mailbox: *termio.Mailbox) usize {
+    var count: usize = 0;
+    switch (mailbox.*) {
+        .spsc => |*value| while (value.queue.pop()) |message| {
+            if (message == .color_scheme_report) count += 1;
+        },
+    }
+    return count;
+}
+
+test "issue149 config change queues exactly one color scheme report" {
+    // `Termio.changeConfig` installs the new derived config and then calls
+    // this, which queues the mode 2031 report. That queued message is the
+    // single source of the report bytes: a second direct write here would
+    // deliver every OS scheme flip twice.
+    var term = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .colors = .{
+            .foreground = .init(.{ .r = 0x12, .g = 0x34, .b = 0x56 }),
+            .background = .init(.{ .r = 0xAB, .g = 0xCD, .b = 0xEF }),
+            .cursor = .unset,
+            .palette = .default,
+        },
+    });
+    defer term.deinit(std.testing.allocator);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+    defer termio_mailbox.deinit(std.testing.allocator);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
+    defer app_queue.destroy(std.testing.allocator);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+        .alloc = std.testing.allocator,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .@"16-bit",
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+    _ = countIssue149ColorSchemeReports(&termio_mailbox);
+
+    var config = try configpkg.Config.default(std.testing.allocator);
+    defer config.deinit();
+    var dark = try termio.DerivedConfig.init(std.testing.allocator, &config, .{ .theme = .dark });
+    defer dark.deinit();
+
+    stream.handler.changeConfig(&dark);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countIssue149ColorSchemeReports(&termio_mailbox),
+    );
+
+    // An unrelated reload still reports once, not zero and not twice. This is
+    // deliberate and predates issue #149: any config change can move the
+    // palette, so mode 2031 subscribers are re-notified. See `changeConfig`.
+    var light = try termio.DerivedConfig.init(std.testing.allocator, &config, .{ .theme = .light });
+    defer light.deinit();
+    stream.handler.changeConfig(&light);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countIssue149ColorSchemeReports(&termio_mailbox),
+    );
+}
+
+test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
+    var term = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .colors = .{
+            .foreground = .init(.{ .r = 0x12, .g = 0x34, .b = 0x56 }),
+            .background = .init(.{ .r = 0xAB, .g = 0xCD, .b = 0xEF }),
+            .cursor = .unset,
+            .palette = .default,
+        },
+    });
+    defer term.deinit(std.testing.allocator);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+    defer termio_mailbox.deinit(std.testing.allocator);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
+    defer app_queue.destroy(std.testing.allocator);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+        .alloc = std.testing.allocator,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .@"16-bit",
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]10;?\x07");
+    try expectIssue149Write(&termio_mailbox, "\x1b]10;rgb:1212/3434/5656\x07");
+
+    stream.handler.osc_color_report_format = .@"8-bit";
+    stream.nextSlice("\x1b]11;?\x1b\\");
+    try expectIssue149Write(&termio_mailbox, "\x1b]11;rgb:ab/cd/ef\x1b\\");
+}
+
 test "decodeOsc7PathForPwd handles Windows file URI with a single fallback allocator" {
     const uri = try internal_os.uri.parse("file://localhost/C:/Users/test/project", .{
         .mac_address = false,
