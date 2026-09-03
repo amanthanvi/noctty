@@ -17,7 +17,7 @@ Use the standard Zig workflow from the repository root:
 | Command                                | Description                                |
 | -------------------------------------- | ------------------------------------------ |
 | `zig build`                            | Build the Win32 app and bundled resources  |
-| `zig build -Demit-exe=true`            | Force-install `zig-out/bin/noctty.exe` |
+| `zig build -Demit-exe=true`            | Force-install `zig-out/bin/noctty.exe`     |
 | `zig build test -Dtest-filter=<name>`  | Run targeted tests (preferred)             |
 | `zig build test -Demit-test-exe=true`  | Run the full test suite (slow)             |
 | `zig build test -Dtest-filter=win32`   | Run Win32-focused tests                    |
@@ -111,6 +111,9 @@ manually verify:
 Upstream-derived areas intentionally left alone in day-to-day fork work
 include `src/terminal/`, `src/font/`, `src/input/`, `src/termio/`,
 `src/shell-integration/`, `src/crash/`, and `libghostty-vt` surfaces.
+
+Before importing changes from those areas, read the
+[upstream merge policy](docs/upstream-merge-policy.md).
 
 ## Logging
 

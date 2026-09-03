@@ -346,6 +346,7 @@ cadence is also a trust signal (frozen forks decay publicly).
 **Shape:** merge upstream main incrementally now (kitty key-release,
 UTF-8/VT fixes, renderer work); document the drift/merge policy in
 docs. Evidence: synthesis C33; up §10.2, forks §10, wintty §1.
+**Published 2026-08-22:** [merge policy](../docs/upstream-merge-policy.md) and [dated drift report](upstream-drift-2026-08.md).
 
 ## Wave 3 — Depth
 

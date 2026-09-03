@@ -11,6 +11,12 @@ implementation detail this page leaves out, see
 paths, shells, updates, automation, and troubleshooting, see
 [windows.md](windows.md).
 
+## Upstream
+
+noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
+2026-04-05). It is a hard fork with scheduled merge windows; see the
+[upstream merge policy](upstream-merge-policy.md).
+
 ## Supported platform
 
 - Windows 10 and Windows 11, on x64 and ARM64.
