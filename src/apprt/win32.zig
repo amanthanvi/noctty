@@ -22494,6 +22494,19 @@ fn runUiActionOrLog(comptime context: []const u8, action: anytype) void {
     _ = action catch |err| logUiActionError(context, err);
 }
 
+/// Run a chrome sync that reports "this changed", treating a failure as "no
+/// change". The sync helpers work on terminal-controlled data and can fail on
+/// it, and every `refreshChrome` call site already logs instead of
+/// propagating. Paths reached from `App.tick` need the same containment: the
+/// Win32 message loop calls `tick` with `try`, so an escaping error unwinds
+/// `App.run` and exits the process rather than dropping one chrome update.
+fn chromeSyncOrLog(comptime context: []const u8, sync: anytype) bool {
+    return sync catch |err| {
+        logUiActionError(context, err);
+        return false;
+    };
+}
+
 fn tabContainerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (getHost(hwnd)) |host| {
         if (msg == c.WM_GETOBJECT) {
@@ -28516,10 +28529,28 @@ pub const Surface = struct {
     }
 
     fn refreshWindowTitle(self: *Surface) !void {
-        if (self.host) |host| {
-            if (try host.syncWindowTitle()) host.invalidateTopChromeText();
-            return;
-        }
+        const host = self.host orelse return;
+
+        // Two chrome elements show a surface title: the window caption,
+        // synced by `syncWindowTitle`, and the tab strip, synced by
+        // `syncTabButtons`. The latter is otherwise only reachable through
+        // `refreshChrome`, which no title path calls, so a tab label kept
+        // whatever title the shell emitted first until an unrelated event
+        // (tab activation, focus change, tab reorder, split undo) refreshed
+        // the whole chrome.
+        //
+        // Neither sync propagates: see `chromeSyncOrLog`. Both are reachable
+        // only from title setters, which run under `App.tick`.
+        const caption_changed = chromeSyncOrLog(
+            "title window caption sync failed",
+            host.syncWindowTitle(),
+        );
+        const tabs_changed = chromeSyncOrLog(
+            "title tab label sync failed",
+            host.syncTabButtons(),
+        );
+
+        if (caption_changed or tabs_changed) host.invalidateTopChromeText();
     }
 
     fn invalidateStatusBarState(self: *Surface) void {
