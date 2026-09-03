@@ -28343,10 +28343,28 @@ pub const Surface = struct {
     }
 
     fn refreshWindowTitle(self: *Surface) !void {
-        if (self.host) |host| {
-            if (try host.syncWindowTitle()) host.invalidateTopChromeText();
-            return;
-        }
+        const host = self.host orelse return;
+
+        // Two chrome elements show a surface title: the window caption,
+        // synced by `syncWindowTitle`, and the tab strip, synced by
+        // `syncTabButtons`. The latter is otherwise only reachable through
+        // `refreshChrome`, which no title path calls, so a tab label kept
+        // whatever title the shell emitted first until an unrelated event
+        // (tab activation, focus change, tab reorder, split undo) refreshed
+        // the whole chrome.
+        var invalidate = try host.syncWindowTitle();
+
+        // Log rather than propagate, the way every `refreshChrome` caller
+        // already does. Chrome sync works on terminal-controlled data and
+        // can fail on it; a title path runs under `App.tick`, whose errors
+        // unwind the Win32 message loop and tear the process down.
+        const tabs_changed = host.syncTabButtons() catch |err| tabs: {
+            logUiActionError("title tab label sync failed", err);
+            break :tabs false;
+        };
+        invalidate = tabs_changed or invalidate;
+
+        if (invalidate) host.invalidateTopChromeText();
     }
 
     fn invalidateStatusBarState(self: *Surface) void {
