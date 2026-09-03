@@ -14,6 +14,26 @@ requires `X509CertificateLoader` (.NET 9) and refuses to run without it. Never
 paste a PFX, a PFX password, or a signing account credential into a file, a
 log, or a commit.
 
+## Scope
+
+This is the procedure for the signing backend the repository has today: a
+PFX loaded from `WINDOWS_CODESIGN_PFX_BASE64`, a leaf-SPKI pin, and the
+`signtool /f /p` path in `scripts/package-windows.ps1`. It carries a rotation
+to any replacement key that is also delivered as a PFX — which, since
+2023-06-01, means a self-signed key or an existing certificate, not a newly
+issued OV one.
+
+It is **not**, on its own, the migration to
+[ADR 0006](adr/0006-code-signing-certificate-decision.md)'s recommendation.
+Azure Artifact Signing has no PFX to load, no stable leaf public key to pin,
+and no `/f` argument. Steps 1, 2, and the `release`-secret commands in step 5
+do not apply to it. Migrating there needs three repository changes to land
+first — the `/dlib` + `/dmdf` signing mode, OIDC credentials in place of the
+PFX secrets, and the pin rule rewritten to require the issuing PCA plus the
+subscriber's custom EKU — and then steps 3, 4, 6, and 7 carry the rollout, with
+"the new pin" meaning that PCA-plus-EKU rule rather than an SPKI hash. ADR 0006
+lists those changes; none of them exist yet.
+
 ## 0. Before you start
 
 You need the new certificate, and you need the old one to keep working. Do not
@@ -124,12 +144,15 @@ it at all.
 
 ## 5. Switch the `release` environment to the new key
 
-Set the new secrets and clear the self-signed escape hatch:
+Set the new secrets and clear the self-signed escape hatch. These commands are
+the PFX-backed form, and only that form. A hardware-token or
+cloud-signing backend has no PFX to encode; under Azure Artifact Signing these
+two secrets are deleted rather than replaced, and the endpoint, account name,
+certificate profile name, and OIDC federation described in ADR 0006 are set
+instead.
 
 ```powershell
 $repo = "amanthanvi/noctty"
-# PFX-backed certificate only. A hardware-token or cloud-signing backend needs
-# the packaging change described in ADR 0006 instead of these two secrets.
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\secure\noctty-next.pfx")) |
   gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
 gh secret set WINDOWS_CODESIGN_PFX_PASSWORD --repo $repo --env release
