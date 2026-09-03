@@ -38,7 +38,7 @@ Last reviewed: 2026-09-02.
 
 | Ghostty docs surface                                                                         | noctty note                                                                                                                                                                                                                                                                                        |
 | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; PowerShell injection is added on Windows, `cmd.exe` stays a plain fallback. See [shell integration notes](#shell-integration).                                                                                                                                          |
+| [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; Windows adds PowerShell injection and `cmd.exe` prompt/cwd marks. Clink is required for cmd command-finish marks and exit codes. See [shell integration notes](#shell-integration).                                                                                     |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream mixes in macOS/Linux behavior. For Windows truth, prefer `+show-config --default --docs` plus `+list-keybinds`.                                                                                                                                      |
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                                      |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates).              |
@@ -102,7 +102,13 @@ that:
 - PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
   does not auto-install remote terminfo; uncached hosts use
   `xterm-256color`.
-- `cmd.exe` remains a plain fallback shell without automatic integration.
+- Automatic `cmd.exe` integration wraps the existing `PROMPT` (or cmd's
+  `$P$G` default) to emit OSC 133 A/B prompt marks and OSC 9;9 cwd reports.
+  When Clink is detected, noctty prepends its shipped Lua directory to
+  `CLINK_PATH`; an already-active Clink can then load it and emit OSC 133 C/D
+  command marks and exit codes. Noctty does not activate Clink. Without the
+  loaded Clink script, prompt/cwd marks still work but command-finish marks and
+  exit codes are unavailable.
 
 ### Keyboard input
 

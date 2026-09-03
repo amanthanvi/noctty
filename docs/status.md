@@ -40,9 +40,10 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
 - Kitty graphics protocol and inline image display.
 - Kitty keyboard protocol with press, repeat, and release events, Caps Lock
   and Num Lock state, and left/right modifier identity.
-- Shell integration for bash, zsh, fish, elvish, nushell, and PowerShell
-  (PowerShell through `shell-integration = detect`). `cmd.exe` is a plain
-  fallback without prompt/cwd/command-finish integration.
+- Shell integration for bash, zsh, fish, elvish, nushell, PowerShell, and
+  `cmd.exe` through automatic detection. Command Prompt gets prompt/cwd marks
+  from `PROMPT`; an active Clink adds command-finish marks and exit codes when
+  it loads the shipped script.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained for Zig and C consumers.
 

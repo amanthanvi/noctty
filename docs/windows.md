@@ -71,8 +71,30 @@ The profile picker detects:
 Shell integration is automatic for PowerShell and for directly launched
 Unix-like shells such as Git Bash. WSL sessions manage their own
 integration inside the distribution. PowerShell integration emits OSC 7
-working-directory updates and OSC 133 prompt markers. `cmd.exe` is a plain
-fallback shell with no automatic prompt, cwd, or command-finish integration.
+working-directory updates and OSC 133 prompt markers.
+
+For `cmd.exe`, noctty wraps the inherited `PROMPT` (or cmd's `$P$G` default)
+so the shell emits OSC 133 A/B prompt marks and an OSC 9;9 working-directory
+report; a `PROMPT` set through `env = PROMPT=...` is applied afterward and
+replaces the wrapper. If `clink.bat` or `clink_x64.exe` is found under
+`%LOCALAPPDATA%\clink` or on a local, mounted, drive-qualified `PATH` entry
+(remote, UNC, and relative entries are skipped so a dead network path cannot
+stall a new tab), noctty prepends its shipped Lua directory to `CLINK_PATH`.
+That only makes the script discoverable once Clink is already active through
+autorun, `clink inject`, or an explicit Clink launch; noctty never injects or
+launches Clink. When loaded, the script adds OSC 133 C/D command marks and the
+exit code before the next prompt, truthful only while Clink's
+`cmd.get_errorlevel` setting is enabled (its default). Without it, prompt
+navigation and cwd reporting still work, but there are no command-finish marks
+or exit codes.
+
+Caveats: on a UNC working directory `$P` yields `\\server\share\dir`, which
+noctty reports unchanged, but cmd.exe itself cannot use a UNC cwd (it warns and
+falls back), so a new cmd tab or split will generally not land on the share. A
+`PROMPT` ending in an odd number of `$` gets a `$S` (one space) inserted before
+the closing mark so cmd does not pair the dangling `$` with the mark's `$E`.
+`PROMPT` is session-wide, so `echo on` batch runs and `cmd /c` children can
+echo the wrapped value and emit spurious OSC 133 marks.
 
 `utf8-console` (`auto`, `always`, `never`) controls UTF-8 setup for bare
 interactive `cmd.exe` launches and for Windows PowerShell 5.1 and PowerShell 7

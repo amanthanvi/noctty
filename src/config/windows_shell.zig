@@ -218,9 +218,8 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .summary = "Git Bash profile with automatic shell integration",
         },
         .cmd => .{
-            .support = .unavailable,
-            .summary = "Command Prompt profile; shell integration unavailable",
-            .next_step = "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+            .support = .automatic,
+            .summary = "Command Prompt profile with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
         },
         .ssh => .{
             .support = .unavailable,
@@ -534,6 +533,14 @@ pub fn isWslPath(path: []const u8) bool {
 /// WSL paths stay WSL-style so they can be inherited into later WSL shells.
 pub fn osc7PathToLocal(alloc: Allocator, path: []const u8) ![]const u8 {
     if (isWindowsUriPath(path)) return try uriPathToWindows(alloc, path);
+    // A UNC path carried in a URI keeps the URI's leading `/`. Strip it before
+    // the WSL check below, which would otherwise treat the whole string as a
+    // POSIX path and hand back an unusable `/\\server\share` cwd.
+    if (isUncUriPath(path)) {
+        const unc = path[1..];
+        if (isWslPath(unc)) return try normalizeWslPath(alloc, unc);
+        return try alloc.dupe(u8, unc);
+    }
     if (isWslPath(path)) return try normalizeWslPath(alloc, path);
     return try alloc.dupe(u8, path);
 }
@@ -543,6 +550,7 @@ pub fn osc7PathToLocal(alloc: Allocator, path: []const u8) ![]const u8 {
 pub fn pathToWsl(alloc: Allocator, path: []const u8) !?[]const u8 {
     if (path.len == 0) return null;
     if (isWindowsUriPath(path)) return try pathToWsl(alloc, path[1..]);
+    if (isUncUriPath(path)) return try pathToWsl(alloc, path[1..]);
     if (isWslPath(path)) return try normalizeWslPath(alloc, path);
 
     if (!isDriveAbsolutePath(path)) return null;
@@ -1293,6 +1301,35 @@ fn isWindowsUriPath(path: []const u8) bool {
         isSeparator(path[3]);
 }
 
+/// True for a UNC path that still carries the leading `/` of the URI it came
+/// from, e.g. `/\\server\share\dir`. cmd's `$P` expands to a raw UNC path, so
+/// `kitty-shell-cwd://localhost/$P` yields exactly this shape.
+/// A `kitty-shell-cwd` path whose body is a Windows UNC path, i.e. the URI
+/// separator followed by `\\server\share...`.
+///
+/// The remainder must be backslash-separated. Backslashes are legal in POSIX
+/// filenames, so a WSL or POSIX shell could in principle report a directory
+/// such as `/\\server/share`; requiring that no forward slash appears after
+/// the URI separator keeps that case on the WSL path where it belongs, while
+/// still matching everything cmd's `$P` can produce (cmd always emits
+/// backslashes).
+fn isUncUriPath(path: []const u8) bool {
+    if (path.len < 4) return false;
+    if (path[0] != '/' or path[1] != '\\' or path[2] != '\\') return false;
+    if (isSeparator(path[3])) return false;
+
+    // Must be backslash-separated throughout: a forward slash proves this is a
+    // POSIX path that merely begins with backslashes, not the form cmd's `$P`
+    // produces.
+    if (std.mem.indexOfScalar(u8, path[3..], '/') != null) return false;
+
+    // A UNC path needs both a host and a non-empty share (`\\server\share`).
+    // `/\\server` alone is a legal POSIX filename, never a usable UNC path.
+    const host = path[3..];
+    const sep = std.mem.indexOfScalar(u8, host, '\\') orelse return false;
+    return sep + 1 < host.len;
+}
+
 pub fn isDriveAbsolutePath(path: []const u8) bool {
     return path.len >= 3 and
         std.ascii.isAlphabetic(path[0]) and
@@ -1807,6 +1844,67 @@ test "osc7PathToLocal converts windows file uri path" {
     try testing.expectEqualStrings("C:\\Users\\aman\\src", result);
 }
 
+test "osc7PathToLocal strips the uri slash from a unc path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const share = try osc7PathToLocal(alloc, "/\\\\server\\share\\dir");
+    defer alloc.free(share);
+    try testing.expectEqualStrings("\\\\server\\share\\dir", share);
+
+    const root = try osc7PathToLocal(alloc, "/\\\\server\\share");
+    defer alloc.free(root);
+    try testing.expectEqualStrings("\\\\server\\share", root);
+
+    // A UNC path pointing back into WSL is still normalized to a WSL path.
+    const wsl = try osc7PathToLocal(alloc, "/\\\\wsl.localhost\\Ubuntu\\home\\aman");
+    defer alloc.free(wsl);
+    try testing.expectEqualStrings("/home/aman", wsl);
+
+    // Real POSIX paths must not be mistaken for UNC.
+    const posix = try osc7PathToLocal(alloc, "/home/aman/src");
+    defer alloc.free(posix);
+    try testing.expectEqualStrings("/home/aman/src", posix);
+
+    // Backslashes are legal in POSIX filenames, so a POSIX cwd can start with
+    // two of them. A forward slash later in the path proves it is not the
+    // backslash-separated UNC form cmd's `$P` produces, so it stays POSIX.
+    const posix_backslashes = try osc7PathToLocal(alloc, "/\\\\server/share");
+    defer alloc.free(posix_backslashes);
+    try testing.expectEqualStrings("/\\\\server/share", posix_backslashes);
+
+    // A host with no share is not a usable UNC path, so it is a POSIX name.
+    for ([_][]const u8{ "/\\\\server", "/\\\\server\\" }) |path| {
+        const kept = try osc7PathToLocal(alloc, path);
+        defer alloc.free(kept);
+        try testing.expectEqualStrings(path, kept);
+    }
+}
+
+test "isUncUriPath only matches uri-carried unc paths" {
+    const testing = std.testing;
+
+    try testing.expect(isUncUriPath("/\\\\server\\share"));
+    try testing.expect(isUncUriPath("/\\\\s\\a"));
+    try testing.expect(!isUncUriPath("/home/aman"));
+    try testing.expect(!isUncUriPath("//server/share"));
+    try testing.expect(!isUncUriPath("\\\\server\\share"));
+    try testing.expect(!isUncUriPath("/\\\\"));
+    try testing.expect(!isUncUriPath("/\\\\\\share"));
+    try testing.expect(!isUncUriPath("/C:/Users"));
+}
+
+test "pathToWsl rejects a uri-carried unc path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    try testing.expect(try pathToWsl(alloc, "/\\\\server\\share\\dir") == null);
+
+    const wsl = (try pathToWsl(alloc, "/\\\\wsl.localhost\\Ubuntu\\home\\aman")).?;
+    defer alloc.free(wsl);
+    try testing.expectEqualStrings("/home/aman", wsl);
+}
+
 test "shellPwd drops invalid non-wsl cwd roots" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -2091,12 +2189,12 @@ test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd support" {
     try testing.expectEqual(@as(?[]const u8, null), git_bash.next_step);
 
     const cmd = shellIntegrationDiagnostic(.cmd);
-    try testing.expectEqual(ShellIntegrationSupport.unavailable, cmd.support);
+    try testing.expectEqual(ShellIntegrationSupport.automatic, cmd.support);
     try testing.expectEqualStrings(
-        "Command Prompt profile; shell integration unavailable",
+        "Command Prompt profile with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
         cmd.summary,
     );
-    try testing.expect(cmd.next_step != null);
+    try testing.expectEqual(@as(?[]const u8, null), cmd.next_step);
 }
 
 test "utf8-console decision covers modes and guarded code pages" {
