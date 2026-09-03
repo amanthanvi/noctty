@@ -132,10 +132,10 @@ Explorer or clear the icon cache before assuming the build is broken.
 ## Default terminal
 
 > [!WARNING]
-> Default-terminal registration is experimental and not ready for normal use.
-> Live validation of this revision reaches the handoff server, but the adopted
-> session closes before a visible noctty window appears. Register only on a
-> disposable test account or machine, and unregister immediately after testing.
+> Default-terminal registration is experimental. A delegated console
+> application is now adopted into a visible noctty window, but noctty cannot
+> appear in the Windows Settings picker and ships no console half of its own.
+> Register only on a machine you can restore, and unregister after testing.
 
 ```powershell
 noctty +register-default-terminal
@@ -171,13 +171,16 @@ window.
 
 noctty is an unpackaged application, so it does not appear in the Windows
 Settings default-terminal picker; the registration command writes the
-per-user registry values directly. Delegated applications do not yet survive
-adoption into a visible noctty window.
+per-user registry values directly. Candidate enumeration accepts a console
+and terminal pair only when both come from the same package, and selecting
+anything in the picker overwrites noctty's pair. Package identity would be
+required to fix this.
 
-For a one-run handoff failure trace, set `NOCTTY_HANDOFF_TRACE=1` before
-launching the delegated console application. noctty appends the rejection
-reason and HRESULT to `%LOCALAPPDATA%\noctty\handoff.log`. The opt-in file is
-truncated before an append would exceed 1 MiB.
+For a handoff trace, set `NOCTTY_HANDOFF_TRACE=1` before launching the
+delegated console application. noctty appends `event=` milestone lines and
+`reason=`/HRESULT rejection lines to `%LOCALAPPDATA%\noctty\handoff.log`,
+which distinguishes "never activated" from "adopted, then lost on the way to
+a window". The opt-in file is truncated before an append would exceed 1 MiB.
 
 ### Security properties of registration
 
@@ -202,13 +205,14 @@ access-control boundary. A same-user medium-integrity process can create an
 equivalent HKCU mapping to the installer-published proxy class and activate
 the handoff class directly, even before the registration command has run.
 
-The handoff class is registered in a single-threaded apartment, and that is
-load-bearing. `EstablishPtyHandoff` returns raw pty-side handles and the UI
-thread closes noctty's copies later, which is safe only because the STA stub
-marshals the `[out]` handles on the same thread before returning to the
-message pump. Moving the class to an MTA, or running a nested modal loop
-while a handoff message is dispatched, would close the handles before
-conhost duplicates them and silently break every console launch.
+`EstablishPtyHandoff` returns the two OpenConsole-side pipe ends as
+`[out] system_handle(sh_pipe)` parameters, and that marshaling transfers
+ownership: once the method returns `S_OK` the RPC stub duplicates each handle
+into the client and closes noctty's original. noctty therefore drops those
+two handles at the point of return and never closes them again. Closing them
+afterwards is a double close, and `std.os.windows.CloseHandle` asserts that
+`NtClose` succeeded, so it aborts the process before the adopted session can
+become a window.
 
 ## Taskbar jump list
 

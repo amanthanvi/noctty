@@ -226,10 +226,6 @@ pub const PendingSession = struct {
     adopted: ?ptypkg.AdoptedSession,
     title: []u8,
 
-    pub fn closeMarshaledPipeCopies(self: *PendingSession) void {
-        if (self.adopted) |*session| session.pty.closeHandoffPipeCopies();
-    }
-
     pub fn takeAdopted(self: *PendingSession) ptypkg.AdoptedSession {
         const result = self.adopted.?;
         self.adopted = null;
@@ -646,7 +642,20 @@ const TerminalHandoff = struct {
             self.server.alloc.destroy(pending);
             return self.fail("adopted_pty_handles_unavailable", E_FAIL);
         };
+        // Returning S_OK hands both pipe ends to the RPC stub, which
+        // duplicates them into the client and closes this process's originals.
+        // Drop them from the Pty before the session becomes reachable from any
+        // other thread: after `queue_session` the UI thread owns `pending`, and
+        // a close from there would be a double close that aborts the process
+        // (`std.os.windows.CloseHandle` asserts `NtClose` succeeded) before the
+        // adopted session can become a window.
+        pending.adopted.?.pty.releaseHandoffPipeCopies();
+
         if (!self.server.queue_session(self.server.queue_ctx, pending)) {
+            // This call fails, so nothing is marshaled and the two released
+            // ends are still ours to close.
+            _ = windows.CloseHandle(handles.input);
+            _ = windows.CloseHandle(handles.output);
             pending.deinit();
             self.server.alloc.destroy(pending);
             return self.fail("queue_pending_session_failed", E_FAIL);
@@ -654,6 +663,7 @@ const TerminalHandoff = struct {
 
         input.* = handles.input;
         output.* = handles.output;
+        appendHandoffMilestone(self.server.alloc, "handoff_accepted");
         return com.S_OK;
     }
 
@@ -868,6 +878,26 @@ fn handoffIntegrityFailureReason(authorization: HandoffIntegrityAuthorization) [
 const handoff_trace_max_bytes: u64 = 1024 * 1024;
 
 fn appendHandoffFailureTrace(alloc: Allocator, reason: []const u8, hr: HRESULT) void {
+    var line_buffer: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "reason={s} hr=0x{x:0>8}",
+        .{ reason, @as(u32, @bitCast(hr)) },
+    ) catch return;
+    appendHandoffTrace(alloc, line);
+}
+
+/// Record a milestone the handoff reached. Only failures used to be traced,
+/// which cannot distinguish "never activated" from "activated, adopted, then
+/// lost on the way to a window" - the shape of the defect this trace was added
+/// to find. Milestones make that difference visible without a debugger.
+pub fn appendHandoffMilestone(alloc: Allocator, event: []const u8) void {
+    var line_buffer: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buffer, "event={s}", .{event}) catch return;
+    appendHandoffTrace(alloc, line);
+}
+
+fn appendHandoffTrace(alloc: Allocator, line: []const u8) void {
     if (!std.process.hasNonEmptyEnvVarConstant("NOCTTY_HANDOFF_TRACE")) return;
 
     const local_app_data = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return;
@@ -878,26 +908,21 @@ fn appendHandoffFailureTrace(alloc: Allocator, reason: []const u8, hr: HRESULT) 
     const log_path = std.fs.path.join(alloc, &.{ dir_path, "handoff.log" }) catch return;
     defer alloc.free(log_path);
 
-    appendHandoffFailureTraceAtPath(log_path, reason, hr) catch return;
+    appendHandoffTraceAtPath(log_path, line) catch return;
 }
 
-fn appendHandoffFailureTraceAtPath(log_path: []const u8, reason: []const u8, hr: HRESULT) !void {
+fn appendHandoffTraceAtPath(log_path: []const u8, line: []const u8) !void {
     const file = try std.fs.createFileAbsolute(log_path, .{ .truncate = false });
     defer file.close();
-    var line_buffer: [256]u8 = undefined;
-    const line = try std.fmt.bufPrint(
-        &line_buffer,
-        "reason={s} hr=0x{x:0>8}\r\n",
-        .{ reason, @as(u32, @bitCast(hr)) },
-    );
     const current_size = try file.getEndPos();
-    if (current_size + line.len > handoff_trace_max_bytes) {
+    if (current_size + line.len + 2 > handoff_trace_max_bytes) {
         try file.setEndPos(0);
         try file.seekTo(0);
     } else {
         try file.seekTo(current_size);
     }
     try file.writeAll(line);
+    try file.writeAll("\r\n");
     try file.sync();
 }
 
@@ -2080,7 +2105,7 @@ test "handoff failure trace stays within its byte budget" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "handoff.log");
     defer std.testing.allocator.free(path);
 
-    try appendHandoffFailureTraceAtPath(path, "bounded_failure", E_FAIL);
+    try appendHandoffTraceAtPath(path, "reason=bounded_failure hr=0x80004005");
     const stat = try std.fs.cwd().statFile(path);
     try std.testing.expect(stat.size <= handoff_trace_max_bytes);
     const contents = try std.fs.cwd().readFileAlloc(

@@ -377,19 +377,6 @@ fn windowData(comptime T: type, hwnd: HWND) ?*T {
 
 const RTL_OSVERSIONINFOW = sys.RTL_OSVERSIONINFOW;
 
-/// True when the calling thread is in a single-threaded apartment.
-///
-/// The terminal handoff depends on this: the STA stub marshals the returned
-/// system handles to the caller before returning to the message pump, which is
-/// what makes it safe to close noctty's copies when the queued handoff message
-/// is later dispatched on this same thread.
-fn currentApartmentIsSta() bool {
-    var apartment: sys.APTTYPE = sys.APTTYPE_CURRENT;
-    var qualifier: sys.APTTYPEQUALIFIER = 0;
-    if (sys.CoGetApartmentType(&apartment, &qualifier) < 0) return false;
-    return apartment == sys.APTTYPE_STA or apartment == sys.APTTYPE_MAINSTA;
-}
-
 /// Probe the Windows build number once; cache on `App.os_build`. Build
 /// 22000+ is Win11 (integrated titlebar / Snap Layouts); 22621+ supports
 /// `DWMWA_SYSTEMBACKDROP_TYPE`. Failure returns 0 so downstream gates
@@ -3748,6 +3735,7 @@ pub const App = struct {
             // reachable from the very first handoff.
             self.terminal_handoff_server = &terminal_handoff_server.?;
             try terminal_handoff_server.?.register();
+            win32_terminal_handoff.appendHandoffMilestone(self.core_app.alloc, "server_registered");
             self.startTerminalHandoffIdleTimer();
         }
 
@@ -3874,21 +3862,12 @@ pub const App = struct {
                     self.core_app.alloc.destroy(pending);
                 }
                 self.stopTerminalHandoffIdleTimer();
-                // This same-STA message runs only after the COM stub has
-                // marshaled the returned system handles into OpenConsole.
-                //
-                // That ordering is the entire reason closing here is safe, and
-                // it holds only while the handoff class lives in an STA. Under
-                // an MTA the stub can still be marshaling when this runs, and
-                // closing would break every console launch in a way that looks
-                // like an unrelated pipe bug. Refuse to close rather than
-                // silently corrupt the handoff.
-                if (currentApartmentIsSta()) {
-                    pending.closeMarshaledPipeCopies();
-                } else {
-                    log.err("terminal handoff dispatched outside an STA; leaving marshaled pipe copies open", .{});
-                }
+                // Nothing to close here: `EstablishPtyHandoff` already released
+                // the two OpenConsole-side pipe ends, because returning S_OK
+                // transfers them to the RPC stub. See
+                // `Pty.releaseHandoffPipeCopies`.
                 self.createAdoptedWindow(pending) catch |err| {
+                    win32_terminal_handoff.appendHandoffMilestone(self.core_app.alloc, "adopted_window_failed");
                     log.err("terminal handoff surface creation failed err={}", .{err});
                     if (self.embedding_mode and self.windows.items.len == 0) {
                         if (self.exitEmbeddingServerIfIdle()) {
@@ -7376,6 +7355,7 @@ pub const App = struct {
         const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, pending.title);
         defer self.core_app.alloc.free(title_w);
         _ = try self.createWindowSurface(&config, title_w.ptr, .{ .adopted_session = pending });
+        win32_terminal_handoff.appendHandoffMilestone(self.core_app.alloc, "adopted_window_created");
     }
 
     fn refreshSystemWheelSettings(self: *App) void {

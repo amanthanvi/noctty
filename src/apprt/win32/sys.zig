@@ -409,16 +409,6 @@ pub extern "ole32" fn CoInitializeEx(pvReserved: ?*anyopaque, dwCoInit: u32) cal
 
 pub extern "ole32" fn CoUninitialize() callconv(.winapi) void;
 
-pub const APTTYPE = i32;
-pub const APTTYPEQUALIFIER = i32;
-pub const APTTYPE_CURRENT: APTTYPE = -1;
-pub const APTTYPE_STA: APTTYPE = 0;
-pub const APTTYPE_MTA: APTTYPE = 1;
-pub const APTTYPE_NA: APTTYPE = 2;
-pub const APTTYPE_MAINSTA: APTTYPE = 3;
-
-pub extern "ole32" fn CoGetApartmentType(pAptType: *APTTYPE, pAptQualifier: *APTTYPEQUALIFIER) callconv(.winapi) i32;
-
 pub extern "ntdll" fn RtlGetVersion(lpVersionInformation: *RTL_OSVERSIONINFOW) callconv(.winapi) i32;
 
 /// Atomic replace of an existing file. Used by the settings save path

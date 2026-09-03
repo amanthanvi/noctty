@@ -516,19 +516,21 @@ const WindowsPty = struct {
         };
     }
 
-    /// The COM proxy duplicates these into OpenConsole after the handoff
-    /// method returns. The embedding UI posts session adoption to itself, so
-    /// this runs only after COM has finished marshaling the returned handles.
-    pub fn closeHandoffPipeCopies(self: *Pty) void {
+    /// Give up the OpenConsole-side ends of an adopted session's pipes without
+    /// closing them, because this process no longer owns them.
+    ///
+    /// `ITerminalHandoff3::EstablishPtyHandoff` returns those two ends as
+    /// `[out] system_handle(sh_pipe)` parameters. That marshaling transfers
+    /// ownership: once the method returns `S_OK` the RPC stub duplicates each
+    /// handle into the client and closes this process's original. Closing them
+    /// again afterwards is not a leak fix, it is a double close, and
+    /// `std.os.windows.CloseHandle` asserts that `NtClose` succeeded, so the
+    /// second close aborts the process before the adopted session can ever
+    /// become a window.
+    pub fn releaseHandoffPipeCopies(self: *Pty) void {
         if (!self.isAdopted()) return;
-        if (self.in_pipe_pty) |handle| {
-            _ = windows.CloseHandle(handle);
-            self.in_pipe_pty = null;
-        }
-        if (self.out_pipe_pty) |handle| {
-            _ = windows.CloseHandle(handle);
-            self.out_pipe_pty = null;
-        }
+        self.in_pipe_pty = null;
+        self.out_pipe_pty = null;
     }
 
     /// Closing the signal pipe asks OpenConsole to begin orderly shutdown.
@@ -546,11 +548,24 @@ const WindowsPty = struct {
         }
     }
 
+    /// Close a pipe handle that a caller may already have taken from this
+    /// process.
+    ///
+    /// `std.os.windows.CloseHandle` asserts that `NtClose` succeeded, which
+    /// turns an ownership mistake into an abort of the whole terminal. A pty's
+    /// pipe ends are reachable by COM handle marshaling, so an external caller
+    /// must not be able to decide whether this process lives. Report instead.
+    fn closePipeHandle(handle: windows.HANDLE) void {
+        if (std.os.windows.ntdll.NtClose(handle) != .SUCCESS) {
+            log.warn("pty pipe handle was not owned by this process", .{});
+        }
+    }
+
     fn closePipes(self: *Pty) void {
-        if (self.in_pipe_pty) |handle| _ = windows.CloseHandle(handle);
-        _ = windows.CloseHandle(self.in_pipe);
-        if (self.out_pipe_pty) |handle| _ = windows.CloseHandle(handle);
-        _ = windows.CloseHandle(self.out_pipe);
+        if (self.in_pipe_pty) |handle| closePipeHandle(handle);
+        closePipeHandle(self.in_pipe);
+        if (self.out_pipe_pty) |handle| closePipeHandle(handle);
+        closePipeHandle(self.out_pipe);
         self.in_pipe_pty = null;
         self.out_pipe_pty = null;
     }
@@ -618,6 +633,56 @@ const WindowsPty = struct {
         return null;
     }
 };
+
+test "handoff release drops the marshaled pipe ends without closing them" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const process = std.os.windows.GetCurrentProcess();
+    var signal_read: windows.HANDLE = undefined;
+    var signal_write: windows.HANDLE = undefined;
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    defer _ = windows.CloseHandle(signal_read);
+
+    // `openAdopted` takes ownership of all three control handles, and `deinit`
+    // closes them, so they have to be real closable handles.
+    var server_process: windows.HANDLE = undefined;
+    var reference: windows.HANDLE = undefined;
+    for ([_]*windows.HANDLE{ &server_process, &reference }) |slot| {
+        try std.testing.expect(windows.kernel32.DuplicateHandle(
+            process,
+            process,
+            process,
+            slot,
+            0,
+            windows.FALSE,
+            std.os.windows.DUPLICATE_SAME_ACCESS,
+        ) != 0);
+    }
+
+    var pty = try Pty.openAdopted(.{}, signal_write, server_process, reference);
+    const handles = pty.handoffHandles().?;
+
+    // Returning S_OK from `EstablishPtyHandoff` transfers these two ends to the
+    // RPC stub, which duplicates them into the client and closes our originals.
+    // Releasing must therefore only forget them.
+    pty.releaseHandoffPipeCopies();
+    try std.testing.expect(pty.handoffHandles() == null);
+    pty.deinit();
+
+    // Standing in for the stub: the ends are still live after the pty is gone,
+    // so exactly one close each succeeds. When the pty closed them itself, the
+    // stub's close was the second one, and `std.os.windows.CloseHandle` asserts
+    // `NtClose` succeeded, which aborted the process before the adopted session
+    // could become a window.
+    try std.testing.expectEqual(
+        std.os.windows.NTSTATUS.SUCCESS,
+        std.os.windows.ntdll.NtClose(handles.input),
+    );
+    try std.testing.expectEqual(
+        std.os.windows.NTSTATUS.SUCCESS,
+        std.os.windows.ntdll.NtClose(handles.output),
+    );
+}
 
 test "handoff resize writes one exact signal packet" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
