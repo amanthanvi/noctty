@@ -219,13 +219,15 @@
           <div>
             <h3>Compare the checksum</h3>
             <p>
-              Compare the hash with the line for your file in
+              Hash the file you downloaded, installer or portable ZIP, and
+              compare it with the line for that file in
               <code>SHA256SUMS-windows-&lt;arch&gt;.txt</code>. If it differs,
               stop. A matching checksum shows the file is the one on the
               release page. It does not show who published it.
             </p>
           </div>
-          <pre class="nc-proof-code" tabindex="0"><code>Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe -Algorithm SHA256</code></pre>
+          <pre class="nc-proof-code" tabindex="0"><code>Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe -Algorithm SHA256
+Get-FileHash .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-portable.zip -Algorithm SHA256</code></pre>
         </li>
         <li>
           <div>

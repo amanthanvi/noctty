@@ -27,10 +27,11 @@ The current stable release is `1.3.124`. Every release ships these files for
 | `noctty-<version>-windows-<arch>-portable.manifest.ps1` | Signed hashes of the ZIP contents |
 | `SHA256SUMS-windows-<arch>.txt`                         | Checksums for the files above     |
 
-Hash the file you downloaded before you run it:
+Hash the file you downloaded before you run it, whichever one that is:
 
 ```powershell
 Get-FileHash .\noctty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
+Get-FileHash .\noctty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
 ```
 
 Compare the result with the matching line in `SHA256SUMS-windows-<arch>.txt`.

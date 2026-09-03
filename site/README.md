@@ -60,30 +60,35 @@ social card are generated images, cropped and darkened locally.
 
 ## Deployment
 
-`.github/workflows/deploy-site.yml` owns production. It runs on every push
-to `main`, on published stable releases, and on manual dispatch. Pull
-requests never deploy. The workflow:
+The Pages project is a Direct Upload project: there is no `wrangler.toml`
+and no Git-integrated build. `.github/workflows/deploy-site.yml` owns
+production. It runs on every push to `main`, on published stable releases,
+and on manual dispatch; pull requests do not deploy. The workflow:
 
 1. Runs the copy checks and the asset determinism check.
 2. Builds the payload twice from an exact file allowlist
    (`scripts/build-site-payload.ps1`) and requires identical SHA-256
    manifests.
-3. Deploys the payload to a canary branch, verifies Cloudflare's metadata,
-   commit provenance, and every served byte, and checks the zone-level
-   `www` redirect.
+3. Deploys the payload to a canary branch and verifies Cloudflare's
+   metadata, commit provenance, and every served byte. The
+   zone-owned `www` redirect is preflighted here, before anything reaches
+   production.
 4. Deploys the same payload to `main` and verifies it again at the
    deployment URL and at `noctty.com`.
 
 It needs the `cloudflare-pages-production` environment with
 `CLOUDFLARE_API_TOKEN` (Account / Cloudflare Pages / Edit) and
-`CLOUDFLARE_ACCOUNT_ID`. The Pages project is a Direct Upload project; there
-is no `wrangler.toml`. The `www` to apex redirect is a zone-level rule, not a
-`_redirects` file, because Pages cannot express a domain-level redirect there.
+`CLOUDFLARE_ACCOUNT_ID`.
 
-A failed production verification is not rolled back automatically, because
-the Pages API has no compare-and-swap rollback. The run keeps redacted
-evidence as an artifact; pick a known-good deployment in the Cloudflare
-dashboard.
+A failed production verification does not automatically roll back, because
+the Pages API has no compare-and-swap rollback and an automated one could
+overwrite a newer deployment. The run keeps redacted evidence as an
+artifact; pick a known-good deployment in the Cloudflare dashboard.
+
+The `www` to apex redirect is configured at the zone level (a Bulk Redirect
+or Redirect Rule with path and query preserved), not in a `_redirects` file,
+because Pages cannot express a domain-level redirect there. The
+workflow verifies the zone-level 301.
 
 To build the payload locally:
 
@@ -94,4 +99,5 @@ pwsh -File scripts/build-site-payload.ps1 `
   -ManifestPath (Join-Path $root payload.sha256)
 ```
 
-The deployment scripts require PowerShell 7.3 or newer.
+The deployment-only scripts require PowerShell 7.3 or newer and are
+outside the Windows PowerShell 5.1 harness compatibility scope.

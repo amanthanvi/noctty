@@ -603,8 +603,7 @@ that inject terminal input or touch arbitrary files (`text`, `csi`, `esc`,
 captured action, and leaves new action variants disabled until reviewed.
 `launch_layout:<name>` and `save_layout:<name>` are allowed; saving is the
 one action that writes a file, limited to a validated name under
-`%LOCALAPPDATA%
-octty\layouts\`, written atomically, replacing an existing
+`%LOCALAPPDATA%\noctty\layouts\`, written atomically, replacing an existing
 layout without prompting, and only for the focused target.
 
 ### Forwarded arguments

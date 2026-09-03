@@ -16,11 +16,12 @@ Three checks answer three different questions. None replaces another.
 
 ## 1. Did the bytes arrive intact?
 
-Download the asset and its checksum file from the same release page, then
-hash what you actually downloaded:
+Download the installer or the portable ZIP and the checksum file from the
+same release page, then hash the file you downloaded:
 
 ```powershell
 Get-FileHash .\noctty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
+Get-FileHash .\noctty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
 ```
 
 Compare the result with the matching line in `SHA256SUMS-windows-<arch>.txt`.
