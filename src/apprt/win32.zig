@@ -274,7 +274,6 @@ fn hostCompositionRedrawFlags() UINT {
 const default_metrics: win32_theme.ThemeMetrics = .{};
 const host_tab_height: i32 = default_metrics.height_tab;
 const host_tab_height_integrated: i32 = default_metrics.height_tab_integrated;
-const host_caption_button_w: i32 = default_metrics.caption_button_w;
 const host_caption_button_h: i32 = default_metrics.caption_button_h;
 const host_overlay_height: i32 = default_metrics.height_overlay;
 const host_inspector_panel_height: i32 = default_metrics.height_inspector;
@@ -7842,6 +7841,7 @@ pub const App = struct {
                         c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                     );
                     runUiActionOrLog("theme update layout failed", host.layout());
+                    host.syncCaptionUiaState();
                 }
                 // Theme resource replacement always invalidates the full host
                 // chrome plus native child controls. A System->Dark swap does
@@ -10517,6 +10517,24 @@ const CaptionButtonRects = struct {
     }
 };
 
+fn ncRectToWin32(rect: win32_nc_layout.Rect) RECT {
+    return .{
+        .left = rect.left,
+        .top = rect.top,
+        .right = rect.right,
+        .bottom = rect.bottom,
+    };
+}
+
+fn win32RectToNc(rect: RECT) win32_nc_layout.Rect {
+    return .{
+        .left = rect.left,
+        .top = rect.top,
+        .right = rect.right,
+        .bottom = rect.bottom,
+    };
+}
+
 fn titlebarSubtleFill(parent_bg: u32, is_dark: bool, pressed: bool) u32 {
     const overlay = if (is_dark) rgb(0xFF, 0xFF, 0xFF) else rgb(0x00, 0x00, 0x00);
     const alpha: f32 = if (pressed) 0.04 else 0.06;
@@ -10886,6 +10904,11 @@ const Host = struct {
     /// middle button's UIA name is "Maximize" or "Restore", so a flip has
     /// to raise a Name property-changed event.
     caption_zoomed: bool = false,
+    /// Last painted state the caption children were announced with. The
+    /// UIA root exposes them only while they are painted, so a client
+    /// that cached the fragment tree needs a structure-changed event
+    /// whenever this flips.
+    caption_painted: bool = false,
     /// Registered for WM_NCMOUSELEAVE via `TrackMouseEvent(TME_NONCLIENT
     /// | TME_LEAVE)` so we can clear `caption_hover` when the cursor
     /// exits the non-client area. Only re-armed when it becomes false.
@@ -12046,17 +12069,27 @@ const Host = struct {
         var win_rect: RECT = undefined;
         if (sys.GetWindowRect(hwnd, &win_rect) == 0) return null;
 
-        const window_rect: win32_nc_layout.Rect = .{
-            .left = win_rect.left,
-            .top = win_rect.top,
-            .right = win_rect.right,
-            .bottom = win_rect.bottom,
+        // The caption row is painted inside the client area, and on Win11
+        // the window rect also covers an invisible resize margin. Measure
+        // the caption zones from the real client rect in screen space, or
+        // every button responds a frame width away from where it is drawn.
+        var client_rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) return null;
+        var client_origin: POINT = .{ .x = client_rect.left, .y = client_rect.top };
+        if (sys.ClientToScreen(hwnd, &client_origin) == 0) return null;
+
+        const window_rect = win32RectToNc(win_rect);
+        const client_screen_rect: win32_nc_layout.Rect = .{
+            .left = client_origin.x,
+            .top = client_origin.y,
+            .right = client_origin.x + (client_rect.right - client_rect.left),
+            .bottom = client_origin.y + (client_rect.bottom - client_rect.top),
         };
         const cursor: win32_nc_layout.Point = .{ .x = cx, .y = cy };
         const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState =
             if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
-        const ht = win32_nc_layout.hitTest(window_rect, cursor, metrics, state);
+        const ht = win32_nc_layout.hitTest(window_rect, client_screen_rect, cursor, metrics, state);
         return switch (ht) {
             .nowhere => c.HTNOWHERE,
             .client => c.HTCLIENT,
@@ -16965,13 +16998,14 @@ const Host = struct {
     /// the [+][▾] cluster and tab strip from colliding with them.
     fn captionButtonsWidth(self: *const Host) i32 {
         if (!self.usingIntegratedTitlebar()) return 0;
-        return self.scaled(host_caption_button_w) * 3;
+        return self.ncMetrics().caption_button_w * 3;
     }
 
     /// Client-space rects of the three painted caption buttons, flush
-    /// against the top-right of the client area. `paintCaptionButtons`
-    /// and the UIA bounding rectangles both come from here so a reader
-    /// cannot be told about a rect that is not the one painted.
+    /// against the top-right of the client area. Painting, the UIA
+    /// bounding rectangles and `WM_NCHITTEST` all resolve through
+    /// `win32_nc_layout.captionButtonsRect`, so a reader cannot be told
+    /// about a rect that is neither painted nor clickable.
     /// Null when the integrated titlebar is off or the row has no area,
     /// which is also when UIA must not expose the buttons at all.
     fn captionButtonRects(self: *const Host, client_rect: RECT) ?CaptionButtonRects {
@@ -16979,14 +17013,13 @@ const Host = struct {
         // A collapsed client area (a minimized window reports one) has no
         // painted row, so there is no rect to hand out.
         if (client_rect.right <= client_rect.left or client_rect.bottom <= client_rect.top) return null;
-        const w = self.scaled(host_caption_button_w);
-        const h = self.ncMetrics().caption_button_h;
-        if (w <= 0 or h <= 0) return null;
-        const right = client_rect.right;
+        const metrics = self.ncMetrics();
+        if (metrics.caption_button_w <= 0 or metrics.caption_button_h <= 0) return null;
+        const rects = win32_nc_layout.captionButtonsRect(win32RectToNc(client_rect), metrics);
         return .{
-            .minimize = .{ .left = right - 3 * w, .top = 0, .right = right - 2 * w, .bottom = h },
-            .maximize = .{ .left = right - 2 * w, .top = 0, .right = right - w, .bottom = h },
-            .close = .{ .left = right - w, .top = 0, .right = right, .bottom = h },
+            .minimize = ncRectToWin32(rects.min),
+            .maximize = ncRectToWin32(rects.max),
+            .close = ncRectToWin32(rects.close),
         };
     }
 
@@ -17004,19 +17037,26 @@ const Host = struct {
         };
     }
 
-    /// Raise a Name property-changed event on the maximize button when
-    /// the window's zoomed state flips, so a reader parked on it is not
-    /// left saying "Maximize" for a button that now restores.
-    fn syncCaptionZoomedState(self: *Host) void {
+    /// Keep UIA in step with the caption row. Two things move: the whole
+    /// child set appears and disappears with the integrated titlebar (and
+    /// with minimize / hide), and the middle button's name follows the
+    /// zoomed state. Cheap enough to call from every transition that can
+    /// move either.
+    fn syncCaptionUiaState(self: *Host) void {
+        const provider = self.root_uia_provider orelse return;
+        const painted = captionButtonsPaintedThunk(@ptrCast(self));
+        if (self.caption_painted != painted) {
+            self.caption_painted = painted;
+            provider.raiseCaptionStructureChanged();
+        }
+        // Nothing is painted, so there is no name to correct, and a
+        // minimized window reports not-zoomed while its restore target is
+        // still maximized — announcing that would be a lie to take back.
+        if (!painted) return;
         const hwnd = self.hwnd orelse return;
-        // A minimized window reports not-zoomed while its restore target
-        // is still maximized; announcing that would be a lie that also
-        // has to be taken back on restore.
-        if (sys.IsIconic(hwnd) != 0) return;
         const zoomed = sys.IsZoomed(hwnd) != 0;
         if (self.caption_zoomed == zoomed) return;
         self.caption_zoomed = zoomed;
-        const provider = self.root_uia_provider orelse return;
         provider.raiseCaptionButtonNameChanged(.maximize);
     }
 
@@ -24407,7 +24447,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     }
                 }
                 runUiActionOrLog("window resize layout failed", v.layout());
-                v.syncCaptionZoomedState();
+                v.syncCaptionUiaState();
                 v.app.resizeShellCompositorWindow(hwnd);
                 if (size_kind == c.SIZE_MAXIMIZED or
                     (size_kind == c.SIZE_RESTORED and !v.is_live_resize.load(.acquire)))
@@ -29545,6 +29585,7 @@ pub const Surface = struct {
                 return err;
             };
             value.cached_decorations_visible = visible;
+            value.syncCaptionUiaState();
         }
     }
 
@@ -29568,6 +29609,7 @@ pub const Surface = struct {
             value.refreshChrome() catch |err| {
                 log.warn("win32 decoration rollback chrome refresh failed err={}", .{err});
             };
+            value.syncCaptionUiaState();
         }
     }
 

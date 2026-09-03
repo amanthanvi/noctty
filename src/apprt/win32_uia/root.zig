@@ -196,6 +196,17 @@ pub const RootProvider = struct {
     /// The child raised on is a fresh COM object; UIA matches it to the
     /// element a client already holds by runtime id, which is stable per
     /// kind.
+    /// Tell listening clients that the root's child set changed. The
+    /// caption children exist only while the integrated titlebar paints
+    /// them, so a client that cached the fragment tree across a titlebar
+    /// toggle, a minimize, or a hide would otherwise keep children that
+    /// `Navigate` no longer returns.
+    pub fn raiseCaptionStructureChanged(self: *RootProvider) void {
+        if (self.detached.load(.acquire)) return;
+        if (self.caption == null) return;
+        events.raiseStructureChanged(&self.base, .children_invalidated, null);
+    }
+
     pub fn raiseCaptionButtonNameChanged(self: *RootProvider, kind: CaptionButtonKind) void {
         if (!self.captionPainted()) return;
         if (!events.clientsAreListening()) return;
@@ -843,6 +854,13 @@ pub const CaptionButtonProvider = struct {
         const self = fromInvoke(p);
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         const caption = self.parent.caption orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+        // No `Invoked` event is raised here. This provider is COM-threaded,
+        // so `Invoke` runs on the window's own STA while a UIA client is
+        // blocked inside the call; raising an event from there makes the
+        // provider call back into a client that cannot answer until we
+        // return, and the window stops pumping messages long enough to
+        // lose the very command we just posted. Every other event in this
+        // module is raised from a message handler for that reason.
         return if (caption.invoke(caption.ctx, self.kind))
             com.S_OK
         else

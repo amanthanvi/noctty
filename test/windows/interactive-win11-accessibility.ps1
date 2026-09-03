@@ -4022,6 +4022,19 @@ try {
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
         -Description 'caption Minimize invoke to minimize the window' `
         -Condition { return [NocttyAccessibilityNative]::IsIconic($process.MainWindowHandle) }
+    # A minimized window paints no caption row, so the buttons have to be
+    # gone from the tree. Asserted before the restore: a provider that
+    # kept stale fragments would otherwise pass the round trip unnoticed.
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'caption buttons to leave the UIA tree while minimized' `
+        -Condition {
+            $script:captionWhileMinimized =
+                Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+            return $script:captionWhileMinimized.Count -eq 0
+        } -Diagnostic {
+            "Expected no caption Buttons under the host root while minimized; found: $(($script:captionWhileMinimized.Keys) -join ', ')."
+        }
     [void][InteractiveWin11WindowNative]::ShowWindow($process.MainWindowHandle, 9) # SW_RESTORE
     Wait-AccessibilityCondition `
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
@@ -4030,8 +4043,23 @@ try {
     [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_TREE_SETTLE_MS
     Assert-AccessibilityInputOwner -Process $process -Description 'caption minimize round trip'
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'caption buttons to return to the UIA tree after restore' `
+        -Condition {
+            $script:captionAfterRestore =
+                Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+            if ($script:captionAfterRestore.Count -eq 0) { return $false }
+            $middle = Get-AccessibilityCaptionMiddleName -Buttons $script:captionAfterRestore
+            return $script:captionAfterRestore.Contains('Minimize') -and
+                $script:captionAfterRestore.Contains($middle) -and
+                $script:captionAfterRestore.Contains('Close')
+        } -Diagnostic {
+            "Expected Minimize, the middle button and Close back under the host root after restore; found: $(($script:captionAfterRestore.Keys) -join ', ')."
+        }
     $captionEvidence['middle_name_transitions'] = ($captionToggleEvidence -join ', ')
-    $captionEvidence['minimize_round_trip'] = 'invoked, restored with ShowWindow'
+    $captionEvidence['minimize_round_trip'] =
+        'invoked; buttons left the tree while minimized; restored with ShowWindow and all three returned'
 
     $document = $documents[0]
     $textPattern = $null
