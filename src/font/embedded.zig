@@ -27,8 +27,15 @@ pub const emoji_text = @embedFile("res/NotoEmoji-Regular.ttf");
 /// Fonts with general properties
 pub const arabic = @embedFile("res/KawkabMono-Regular.ttf");
 
-/// A font for testing which is patched with nerd font symbols.
+/// A font for testing which is patched with nerd font symbols. The four
+/// faces are a Nerd Fonts v3 family: their legacy family (name ID 1) is
+/// "JetBrainsMono NF" but the typographic family (name ID 16) that every
+/// Nerd Fonts guide tells users to configure is "JetBrainsMono Nerd Font",
+/// which is what makes them the fixture for Windows style selection.
 pub const test_nerd_font = @embedFile("res/JetBrainsMonoNerdFont-Regular.ttf");
+pub const test_nerd_font_bold = @embedFile("res/JetBrainsMonoNerdFont-Bold.ttf");
+pub const test_nerd_font_italic = @embedFile("res/JetBrainsMonoNerdFont-Italic.ttf");
+pub const test_nerd_font_bold_italic = @embedFile("res/JetBrainsMonoNerdFont-BoldItalic.ttf");
 
 /// Specific font families below:
 pub const code_new_roman = @embedFile("res/CodeNewRoman-Regular.otf");

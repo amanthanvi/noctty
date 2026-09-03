@@ -55,6 +55,14 @@ pub const Windows = struct {
         /// the Windows Fonts UI shows for weight-split families, so users
         /// copy it into their config.
         typographic_family: ?[:0]const u8,
+        /// Typographic subfamily (OpenType name ID 17), when present. For
+        /// weight-split families the legacy subfamily flattens to
+        /// "Regular" and this carries the real style ("Light", "SemiBold").
+        typographic_style: ?[:0]const u8,
+        /// OS/2 usWeightClass (100-1000), or 0 when the face has no usable
+        /// OS/2 table. Nerd Fonts and other weight-split families rely on
+        /// this to distinguish faces that share a style name.
+        weight: u16,
         monospace: bool,
         bold: bool,
         italic: bool,
@@ -68,6 +76,7 @@ pub const Windows = struct {
         fn deinit(self: *Record, alloc: Allocator) void {
             if (self.charset) |charset| alloc.free(charset);
             if (self.typographic_family) |name| alloc.free(name);
+            if (self.typographic_style) |name| alloc.free(name);
             alloc.free(self.path);
             alloc.free(self.family_name);
             alloc.free(self.style_name);
@@ -155,7 +164,9 @@ pub const Windows = struct {
             alloc.free(filtered);
         }
 
-        std.mem.sortUnstable(Record, filtered, desc, struct {
+        // Stable so that faces the scan saw in a fixed order keep that
+        // order when they score identically.
+        std.mem.sort(Record, filtered, desc, struct {
             fn lessThan(desc_inner: Descriptor, lhs: Record, rhs: Record) bool {
                 return score(desc_inner, lhs) > score(desc_inner, rhs);
             }
@@ -212,9 +223,9 @@ pub const Windows = struct {
             const variations = try self.alloc.dupe(Variation, self.variations);
 
             // Transfer the record's allocations into the face (same
-            // allocator, no second copy). The typographic family has no
+            // allocator, no second copy). The typographic subfamily has no
             // destination field, so it is released here.
-            if (record.typographic_family) |name| self.alloc.free(name);
+            if (record.typographic_style) |name| self.alloc.free(name);
             const face: DeferredFace = .{
                 .win = .{
                     .alloc = self.alloc,
@@ -223,6 +234,7 @@ pub const Windows = struct {
                     .family_name = record.family_name,
                     .style_name = record.style_name,
                     .full_name = record.full_name,
+                    .typographic_family = record.typographic_family,
                     .variations = variations,
                     .color = record.color,
                     // Filtered records always carry a materialized charset
@@ -491,8 +503,19 @@ pub const Windows = struct {
         const full_name = try buildFullName(alloc, family_name, style_name);
         errdefer alloc.free(full_name);
 
-        const typographic_family = try typographicFamilyName(alloc, face);
+        const typographic_family = try typographicName(
+            alloc,
+            face,
+            name_id_typographic_family,
+        );
         errdefer if (typographic_family) |name| alloc.free(name);
+
+        const typographic_style = try typographicName(
+            alloc,
+            face,
+            name_id_typographic_subfamily,
+        );
+        errdefer if (typographic_style) |name| alloc.free(name);
 
         const style_flags = face.handle.*.style_flags;
         const face_flags = face.handle.*.face_flags;
@@ -504,6 +527,8 @@ pub const Windows = struct {
             .style_name = style_name,
             .full_name = full_name,
             .typographic_family = typographic_family,
+            .typographic_style = typographic_style,
+            .weight = weightClass(face),
             .monospace = face_flags & freetype.c.FT_FACE_FLAG_FIXED_WIDTH != 0,
             .bold = style_flags & freetype.c.FT_STYLE_FLAG_BOLD != 0,
             .italic = style_flags & freetype.c.FT_STYLE_FLAG_ITALIC != 0 or
@@ -516,7 +541,7 @@ pub const Windows = struct {
     }
 
     //-------------------------------------------------------------------
-    // Typographic family (OpenType name ID 16)
+    // Typographic names (OpenType name IDs 16/17) and weight
 
     /// A name-table entry, decoupled from FreeType so the selection logic
     /// is testable with injected data.
@@ -529,6 +554,7 @@ pub const Windows = struct {
 
     // OpenType name-table constants.
     const name_id_typographic_family = 16;
+    const name_id_typographic_subfamily = 17;
     const platform_unicode = 0;
     const platform_macintosh = 1;
     const platform_microsoft = 3;
@@ -537,10 +563,12 @@ pub const Windows = struct {
     const mac_encoding_roman = 0;
     const ms_lang_en_us = 0x0409;
 
-    /// Read the typographic family from the face's name table, if present.
-    fn typographicFamilyName(
+    /// Read a typographic name (ID 16 or 17) from the face's name table,
+    /// if present.
+    fn typographicName(
         alloc: Allocator,
         face: freetype.Face,
+        name_id: u16,
     ) error{OutOfMemory}!?[:0]const u8 {
         const count = face.getSfntNameCount();
         if (count == 0) return null;
@@ -550,7 +578,7 @@ pub const Windows = struct {
         for (0..count) |i| {
             if (entries_len >= entries_buf.len) break;
             const name = face.getSfntName(i) catch continue;
-            if (name.name_id != name_id_typographic_family) continue;
+            if (name.name_id != name_id) continue;
             if (name.string == null) continue;
             entries_buf[entries_len] = .{
                 .platform_id = @intCast(name.platform_id),
@@ -561,13 +589,13 @@ pub const Windows = struct {
             entries_len += 1;
         }
 
-        return try pickTypographicFamily(alloc, entries_buf[0..entries_len]);
+        return try pickSfntName(alloc, entries_buf[0..entries_len]);
     }
 
-    /// Pick and decode the best typographic family candidate. Preference:
+    /// Pick and decode the best name-table candidate. Preference:
     /// Microsoft/Unicode en-US, then any-English, then any language, then
     /// Unicode platform, then Mac Roman (ASCII only).
-    fn pickTypographicFamily(
+    fn pickSfntName(
         alloc: Allocator,
         entries: []const SfntNameEntry,
     ) error{OutOfMemory}!?[:0]const u8 {
@@ -590,6 +618,19 @@ pub const Windows = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf16 => return null,
         };
+    }
+
+    /// OS/2 usWeightClass for the face, or 0 when there is no usable OS/2
+    /// table (FreeType reports version 0xFFFF for a synthesized one).
+    fn weightClass(face: freetype.Face) u16 {
+        const os2 = face.getSfntTable(.os2) orelse return 0;
+        if (os2.version == 0xFFFF) return 0;
+        const raw: u16 = os2.usWeightClass;
+        // Pre-OpenType fonts use the 1-9 scale from the original TrueType
+        // spec; normalize it to the 100-1000 scale.
+        if (raw >= 1 and raw <= 9) return raw * 100;
+        if (raw < 100 or raw > 1000) return 0;
+        return raw;
     }
 
     /// Rank a name-table entry for family-name selection; null means the
@@ -785,6 +826,11 @@ pub const Windows = struct {
         else
             null;
         errdefer if (typographic_family) |name| alloc.free(name);
+        const typographic_style: ?[:0]const u8 = if (record.typographic_style) |name|
+            try alloc.dupeZ(u8, name)
+        else
+            null;
+        errdefer if (typographic_style) |name| alloc.free(name);
         const charset = try alloc.dupe(u32, record.charset orelse &.{});
 
         var copy = record;
@@ -793,6 +839,7 @@ pub const Windows = struct {
         copy.style_name = style_name;
         copy.full_name = full_name;
         copy.typographic_family = typographic_family;
+        copy.typographic_style = typographic_style;
         copy.charset = charset;
         return copy;
     }
@@ -812,18 +859,46 @@ pub const Windows = struct {
 
         if (desc.style) |style| {
             if (!containsIgnoreCase(record.style_name, style) and
-                !containsIgnoreCase(record.full_name, style))
+                !containsIgnoreCase(record.full_name, style) and
+                !(record.typographic_style != null and
+                    containsIgnoreCase(record.typographic_style.?, style)))
             {
                 return false;
             }
         }
 
-        if (desc.bold and !record.bold) return false;
+        if (desc.bold and !isBold(record)) return false;
         if (desc.italic and !record.italic) return false;
         if (desc.monospace and !record.monospace) return false;
 
         return true;
     }
+
+    /// Whether the face is a bold face. Weight-split families (Nerd Fonts
+    /// among them) ship the heavy weights as separate families whose
+    /// subfamily is "Regular", so the style flag alone misses them; the
+    /// OS/2 weight class is the reliable signal. 600 is SemiBold, the
+    /// lightest weight worth substituting for a bold request.
+    fn isBold(record: Record) bool {
+        return record.bold or record.weight >= 600;
+    }
+
+    /// Distance from the weight the descriptor asks for, as a small
+    /// "higher is better" score. Faces with no OS/2 table fall back to
+    /// their style flag.
+    fn weightRank(desc: Descriptor, record: Record) u32 {
+        const want: u16 = if (desc.bold) 700 else 400;
+        const have: u16 = if (record.weight != 0)
+            record.weight
+        else if (record.bold) 700 else 400;
+        const diff = if (have > want) have - want else want - have;
+        const steps = diff / 50;
+        return if (steps >= weight_rank_max) 0 else weight_rank_max - steps;
+    }
+
+    /// Maximum value of `weightRank`, i.e. an exact weight match. Four
+    /// bits wide so the rank fits the score field reserved for it.
+    const weight_rank_max: u32 = 15;
 
     fn score(desc: Descriptor, record: Record) u32 {
         var result: u32 = 0;
@@ -843,13 +918,29 @@ pub const Windows = struct {
         if (desc.style) |style| {
             if (std.ascii.eqlIgnoreCase(record.style_name, style)) result |= 1 << 16;
             if (containsIgnoreCase(record.style_name, style)) result |= 1 << 15;
+            if (record.typographic_style) |typographic| {
+                if (std.ascii.eqlIgnoreCase(typographic, style)) result |= 1 << 16;
+                if (containsIgnoreCase(typographic, style)) result |= 1 << 15;
+            }
         }
 
         if (desc.monospace and record.monospace) result |= 1 << 14;
-        if (desc.bold and record.bold) result |= 1 << 13;
-        if (desc.italic and record.italic) result |= 1 << 12;
-        if (desc.variations.len > 0 and record.variable) result |= 1 << 11;
-        if (record.color) result |= 1 << 10;
+
+        // Style agreement, not just style reward: a request with no bold
+        // or italic asked for the Regular face, so a bold face has to
+        // score *below* it. Otherwise every face of a family that shares
+        // one family name (Nerd Fonts v3, where the typographic family is
+        // the only name the user is told to configure) ties on the family
+        // bits above and the winner is whichever the scan saw first.
+        if (desc.bold == isBold(record)) result |= 1 << 13;
+        if (desc.italic == record.italic) result |= 1 << 12;
+
+        // Weight proximity breaks ties inside the winning style bucket,
+        // e.g. Regular (400) over Medium (500) for an unstyled request.
+        result |= weightRank(desc, record) << 8;
+
+        if (desc.variations.len > 0 and record.variable) result |= 1 << 7;
+        if (record.color) result |= 1 << 6;
 
         return result;
     }
@@ -1027,6 +1118,8 @@ fn testRecord() Windows.Record {
         .style_name = "Bold Italic",
         .full_name = "Cascadia Mono Bold Italic",
         .typographic_family = null,
+        .typographic_style = null,
+        .weight = 700,
         .monospace = true,
         .bold = true,
         .italic = true,
@@ -1073,6 +1166,224 @@ test "windowsTypographicFamilyMatching" {
     const legacy_score = Windows.score(.{ .family = "cascadia mono" }, record);
     try testing.expect(typographic_score & (1 << 19) != 0);
     try testing.expect(legacy_score & (1 << 19) != 0);
+}
+
+/// The four faces of a Nerd Fonts v3 family as the Windows scan sees
+/// them: one legacy family name (name ID 1) shared by every face, one
+/// typographic family (name ID 16) shared by every face, and the style
+/// carried only by the subfamily name, the style flags and OS/2 weight.
+fn nerdFontRecords() [4]Windows.Record {
+    const base: Windows.Record = .{
+        .path = undefined,
+        .face_index = 0,
+        .family_name = "JetBrainsMono NFM",
+        .style_name = "Regular",
+        .full_name = "JetBrainsMono NFM",
+        .typographic_family = "JetBrainsMono Nerd Font Mono",
+        .typographic_style = null,
+        .weight = 400,
+        .monospace = true,
+        .bold = false,
+        .italic = false,
+        .color = false,
+        .variable = false,
+        .has_codepoint = false,
+        .charset = null,
+    };
+
+    var bold = base;
+    bold.style_name = "Bold";
+    bold.full_name = "JetBrainsMono NFM Bold";
+    bold.weight = 700;
+    bold.bold = true;
+
+    var italic = base;
+    italic.style_name = "Italic";
+    italic.full_name = "JetBrainsMono NFM Italic";
+    italic.italic = true;
+
+    var bold_italic = base;
+    bold_italic.style_name = "Bold Italic";
+    bold_italic.full_name = "JetBrainsMono NFM Bold Italic";
+    bold_italic.weight = 700;
+    bold_italic.bold = true;
+    bold_italic.italic = true;
+
+    // Scan order is directory order, which puts Bold ahead of Regular.
+    return .{ bold, bold_italic, italic, base };
+}
+
+/// Mirror of discover(): filter, then take the highest score, the first
+/// of equal scores winning as it does under the stable sort.
+fn bestRecord(records: []const Windows.Record, desc: Descriptor) ?Windows.Record {
+    var best: ?Windows.Record = null;
+    var best_score: u32 = 0;
+    for (records) |record| {
+        if (!Windows.matchesDescriptor(record, desc)) continue;
+        const current = Windows.score(desc, record);
+        if (best == null or current > best_score) {
+            best = record;
+            best_score = current;
+        }
+    }
+    return best;
+}
+
+fn bestStyleName(records: []const Windows.Record, desc: Descriptor) ?[]const u8 {
+    const record = bestRecord(records, desc) orelse return null;
+    return record.style_name;
+}
+
+fn bestFamilyName(records: []const Windows.Record, desc: Descriptor) ?[]const u8 {
+    const record = bestRecord(records, desc) orelse return null;
+    return record.family_name;
+}
+
+test "windowsStyleSelectionByTypographicFamily" {
+    const records = nerdFontRecords();
+    const typographic = "JetBrainsMono Nerd Font Mono";
+    const legacy = "JetBrainsMono NFM";
+
+    // The regression: every face shares the typographic family, so the
+    // family bits tie and the unstyled request used to take whichever
+    // face the scan saw first, which is Bold.
+    try testing.expectEqualStrings("Regular", bestStyleName(&records, .{
+        .family = typographic,
+    }).?);
+    try testing.expectEqualStrings("Bold", bestStyleName(&records, .{
+        .family = typographic,
+        .bold = true,
+    }).?);
+    try testing.expectEqualStrings("Italic", bestStyleName(&records, .{
+        .family = typographic,
+        .italic = true,
+    }).?);
+    try testing.expectEqualStrings("Bold Italic", bestStyleName(&records, .{
+        .family = typographic,
+        .bold = true,
+        .italic = true,
+    }).?);
+
+    // The legacy-name path resolved correctly before this change, because
+    // the Regular face's full name equals the family name and broke the
+    // tie. It must keep doing so.
+    try testing.expectEqualStrings("Regular", bestStyleName(&records, .{
+        .family = legacy,
+    }).?);
+    try testing.expectEqualStrings("Bold", bestStyleName(&records, .{
+        .family = legacy,
+        .bold = true,
+    }).?);
+    try testing.expectEqualStrings("Bold Italic", bestStyleName(&records, .{
+        .family = legacy,
+        .bold = true,
+        .italic = true,
+    }).?);
+
+    // An explicit style string still outranks the style flags, so
+    // font-style can name a face the flags would rank lower.
+    try testing.expectEqualStrings("Bold", bestStyleName(&records, .{
+        .family = typographic,
+        .style = "Bold",
+    }).?);
+}
+
+test "windowsStyleSelectionWeightSplitFamily" {
+    // Weight-split faces: the legacy family carries the weight and the
+    // subfamily is "Regular", so only the OS/2 weight tells them apart.
+    var light = nerdFontRecords()[3];
+    light.family_name = "JetBrainsMono NFM Light";
+    light.full_name = "JetBrainsMono NFM Light";
+    light.typographic_style = "Light";
+    light.weight = 300;
+
+    var medium = light;
+    medium.family_name = "JetBrainsMono NFM Medium";
+    medium.full_name = "JetBrainsMono NFM Medium";
+    medium.typographic_style = "Medium";
+    medium.weight = 500;
+
+    var extra_bold = light;
+    extra_bold.family_name = "JetBrainsMono NFM ExtraBold";
+    extra_bold.full_name = "JetBrainsMono NFM ExtraBold";
+    extra_bold.typographic_style = "ExtraBold";
+    extra_bold.weight = 800;
+
+    const regular = nerdFontRecords()[3];
+    const records = [_]Windows.Record{ light, medium, extra_bold, regular };
+    const family = "JetBrainsMono Nerd Font Mono";
+
+    // Every candidate here has style name "Regular", so the weight class
+    // is the only discriminator for an unstyled request.
+    try testing.expectEqualStrings("JetBrainsMono NFM", bestFamilyName(&records, .{
+        .family = family,
+    }).?);
+
+    // A bold request has no bold-flagged face to take, so it falls to the
+    // heaviest weight instead of being filtered down to nothing.
+    try testing.expectEqualStrings("JetBrainsMono NFM ExtraBold", bestFamilyName(&records, .{
+        .family = family,
+        .bold = true,
+    }).?);
+
+    // The typographic subfamily is matchable as a style string even
+    // though the legacy subfamily says "Regular".
+    try testing.expectEqualStrings("JetBrainsMono NFM Medium", bestFamilyName(&records, .{
+        .family = family,
+        .style = "Medium",
+    }).?);
+}
+
+test "windowsInspectFaceNerdFontFixture" {
+    // End to end over the real Nerd Fonts v3 faces the repo vendors: the
+    // names, style flags and weights come out of FreeType rather than out
+    // of a fixture struct, and the unstyled request must land on Regular.
+    const alloc = testing.allocator;
+    const embedded = @import("embedded.zig");
+
+    var lib = try freetype.Library.init();
+    defer lib.deinit();
+
+    const files = [_]struct { path: [:0]const u8, data: []const u8 }{
+        .{ .path = "\\fixture\\JetBrainsMonoNerdFont-Bold.ttf", .data = embedded.test_nerd_font_bold },
+        .{ .path = "\\fixture\\JetBrainsMonoNerdFont-BoldItalic.ttf", .data = embedded.test_nerd_font_bold_italic },
+        .{ .path = "\\fixture\\JetBrainsMonoNerdFont-Italic.ttf", .data = embedded.test_nerd_font_italic },
+        .{ .path = "\\fixture\\JetBrainsMonoNerdFont-Regular.ttf", .data = embedded.test_nerd_font },
+    };
+
+    var records: [files.len]Windows.Record = undefined;
+    var built: usize = 0;
+    defer for (records[0..built]) |*record| record.deinit(alloc);
+    for (files, 0..) |file, i| {
+        const face = try lib.initMemoryFace(file.data, 0);
+        defer face.deinit();
+        records[i] = try Windows.inspectFace(alloc, file.path, face, 0);
+        built += 1;
+    }
+
+    // What the scan reads off the files.
+    try testing.expectEqualStrings("JetBrainsMono NF", records[3].family_name);
+    try testing.expectEqualStrings("JetBrainsMono Nerd Font", records[3].typographic_family.?);
+    try testing.expectEqual(@as(u16, 400), records[3].weight);
+    try testing.expectEqual(@as(u16, 700), records[0].weight);
+    try testing.expect(records[0].bold);
+    try testing.expect(!records[3].bold);
+
+    const family = "JetBrainsMono Nerd Font";
+    try testing.expectEqualStrings("Regular", bestStyleName(&records, .{ .family = family }).?);
+    try testing.expectEqualStrings("Bold", bestStyleName(&records, .{
+        .family = family,
+        .bold = true,
+    }).?);
+    try testing.expectEqualStrings("Italic", bestStyleName(&records, .{
+        .family = family,
+        .italic = true,
+    }).?);
+    try testing.expectEqualStrings("Bold Italic", bestStyleName(&records, .{
+        .family = family,
+        .bold = true,
+        .italic = true,
+    }).?);
 }
 
 test "windowsRegistryFontPathResolve" {
@@ -1183,7 +1494,7 @@ test "windowsSfntNamePick" {
 
     // Microsoft en-US beats Mac Roman.
     {
-        const got = (try Windows.pickTypographicFamily(alloc, &.{
+        const got = (try Windows.pickSfntName(alloc, &.{
             .{ .platform_id = 1, .encoding_id = 0, .language_id = 0, .string = "MacName" },
             .{ .platform_id = 3, .encoding_id = 1, .language_id = 0x0409, .string = be.best },
         })).?;
@@ -1193,7 +1504,7 @@ test "windowsSfntNamePick" {
 
     // Any-English beats non-English.
     {
-        const got = (try Windows.pickTypographicFamily(alloc, &.{
+        const got = (try Windows.pickSfntName(alloc, &.{
             .{ .platform_id = 3, .encoding_id = 1, .language_id = 0x0407, .string = be.other },
             .{ .platform_id = 3, .encoding_id = 1, .language_id = 0x0809, .string = be.best },
         })).?;
@@ -1203,7 +1514,7 @@ test "windowsSfntNamePick" {
 
     // Mac Roman ASCII works as a last resort.
     {
-        const got = (try Windows.pickTypographicFamily(alloc, &.{
+        const got = (try Windows.pickSfntName(alloc, &.{
             .{ .platform_id = 1, .encoding_id = 0, .language_id = 0, .string = "MacName" },
         })).?;
         defer alloc.free(got);
@@ -1211,10 +1522,10 @@ test "windowsSfntNamePick" {
     }
 
     // Mac Roman with high bytes is not decodable; nothing usable → null.
-    try testing.expect((try Windows.pickTypographicFamily(alloc, &.{
+    try testing.expect((try Windows.pickSfntName(alloc, &.{
         .{ .platform_id = 1, .encoding_id = 0, .language_id = 0, .string = "Caf\xe9" },
     })) == null);
-    try testing.expect((try Windows.pickTypographicFamily(alloc, &.{})) == null);
+    try testing.expect((try Windows.pickSfntName(alloc, &.{})) == null);
 }
 
 test "windowsCharsetHasCodepoint" {
