@@ -275,7 +275,7 @@ pub const DynamicRGB = struct {
     }
 
     pub fn reset(self: *DynamicRGB) void {
-        self.override = self.default;
+        self.override = null;
     }
 };
 
