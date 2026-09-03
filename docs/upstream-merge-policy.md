@@ -161,8 +161,9 @@ pwsh -NoProfile -File scripts/upstream-drift.ps1
 ```
 
 `upstream-drift.ps1` itself never fetches and never writes. If the tracking ref
-is absent — the expected state on a fresh clone — it says so, prints the two
-commands above, and exits 1 rather than reaching for the network.
+is absent — the expected state on a fresh clone — it says so, prints the setup
+and fetch commands for the remote and branch it was asked to check, and exits 1
+rather than reaching for the network.
 
 Use `-Remote` and `-Branch` only when checking another local tracking-ref pair.
 The equivalent raw Git inputs are:

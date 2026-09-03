@@ -16,10 +16,17 @@ $head = "$head".Trim()
 # Say what to do about it instead of failing deep inside a git plumbing call.
 & git -C $repoRoot rev-parse --verify --quiet "$upstreamRef^{commit}" > $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "No local ref '$upstreamRef'. This script never fetches; create the read-only remote and refresh it first:" -ForegroundColor Yellow
-    Write-Host '  git remote add upstream https://github.com/ghostty-org/ghostty.git'
-    Write-Host '  git remote set-url --push upstream DISABLED'
-    Write-Host '  git fetch upstream'
+    & git -C $repoRoot remote get-url $Remote > $null 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $remoteUrl = if ($Remote -eq 'upstream') { 'https://github.com/ghostty-org/ghostty.git' } else { '<url>' }
+        Write-Host "No local ref '$upstreamRef' and no remote '$Remote'. This script never fetches; create the read-only remote and refresh it first:" -ForegroundColor Yellow
+        Write-Host "  git remote add $Remote $remoteUrl"
+        Write-Host "  git remote set-url --push $Remote DISABLED"
+    } else {
+        Write-Host "No local ref '$upstreamRef'. This script never fetches; refresh remote '$Remote' first:" -ForegroundColor Yellow
+    }
+    Write-Host "  git fetch $Remote"
+    Write-Host "Then confirm '$upstreamRef' exists with: git rev-parse --verify $upstreamRef"
     exit 1
 }
 
