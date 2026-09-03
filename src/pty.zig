@@ -407,7 +407,11 @@ const WindowsConPty = struct {
     var bundled_functions: Functions = inbox_functions;
     var selected = std.atomic.Value(*const Functions).init(&inbox_functions);
     var resolver_once = std.once(initialize);
-    var bundled_hpc_created = std.atomic.Value(bool).init(false);
+    /// Number of bundled pseudo consoles currently open in this process.
+    /// Incremented under `backend_lock` when a bundled creation succeeds and
+    /// decremented by `WindowsPty.deinit` after the handle is closed, so a
+    /// zero here means no live handle would be split from the selection.
+    var live_bundled_hpcons = std.atomic.Value(u32).init(0);
     var fallback_banner_pending = std.atomic.Value(bool).init(false);
 
     fn functions() *const Functions {
@@ -418,8 +422,8 @@ const WindowsConPty = struct {
     /// Serializes backend selection, pseudo console creation, and the
     /// demotion decision into one critical section. Without it a bundled
     /// creation that already succeeded can be preempted before it records
-    /// `bundled_hpc_created`; a concurrent open whose bundled creation failed
-    /// then reads the stale `false`, demotes the process-wide selection, and
+    /// itself in `live_bundled_hpcons`; a concurrent open whose bundled
+    /// creation failed then reads a stale zero, demotes the selection, and
     /// leaves a live bundled HPCON behind an in-box selection that
     /// `conPtyInfo` and the fallback banner both misreport. Opens happen once
     /// per surface and already spawn OpenConsole.exe, so the contention cost
@@ -432,23 +436,32 @@ const WindowsConPty = struct {
     /// returning whether it succeeded; `WindowsPty.open` calls
     /// `CreatePseudoConsole` there and the concurrency test injects a
     /// deterministic outcome. Returns the backend that owns the pseudo
-    /// console, or `null` when the open must fail.
+    /// console.
     ///
     /// A failed bundled creation demotes the whole process to the in-box
     /// conhost and retries there, but only while no bundled HPCON is live:
     /// demoting past a live one would split the process across two ConPTY
-    /// implementations, so such an open fails instead.
-    fn selectBackend(context: anytype) ?*const Functions {
+    /// implementations, so such an open fails with
+    /// `error.BundledConptyInconsistent` instead. Once the last bundled
+    /// handle closes the count returns to zero and demotion is allowed again.
+    fn selectBackend(context: anytype) SelectError!*const Functions {
         backend_lock.lock();
         defer backend_lock.unlock();
 
         const initial = functions();
         if (context.attempt(initial)) {
-            if (initial.source == .bundled) bundled_hpc_created.store(true, .release);
+            if (initial.source == .bundled) _ = live_bundled_hpcons.fetchAdd(1, .acq_rel);
             return initial;
         }
-        if (initial.source != .bundled) return null;
-        if (bundled_hpc_created.load(.acquire)) return null;
+        if (initial.source != .bundled) return error.CreatePseudoConsoleFailed;
+        const live = live_bundled_hpcons.load(.acquire);
+        if (live != 0) {
+            log.warn(
+                "bundled ConPTY failed to create a pseudo console while {d} bundled pseudo console(s) are still open; refusing to mix ConPTY implementations in one process",
+                .{live},
+            );
+            return error.BundledConptyInconsistent;
+        }
 
         if (selected.cmpxchgStrong(
             initial,
@@ -462,8 +475,20 @@ const WindowsConPty = struct {
             );
             signalFallbackBanner();
         }
-        if (!context.attempt(&inbox_functions)) return null;
+        if (!context.attempt(&inbox_functions)) return error.CreatePseudoConsoleFailed;
         return &inbox_functions;
+    }
+
+    const SelectError = error{
+        CreatePseudoConsoleFailed,
+        BundledConptyInconsistent,
+    };
+
+    /// Called by `WindowsPty.deinit` after a bundled pseudo console has been
+    /// closed through the implementation that created it.
+    fn releaseBundledHpcon() void {
+        const previous = live_bundled_hpcons.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
     }
 
     fn initialize() void {
@@ -614,7 +639,7 @@ const WindowsConPty = struct {
         if (bundled_functions.bundled_path) |path| std.heap.page_allocator.free(path);
         bundled_functions = inbox_functions;
         resolver_once = std.once(initialize);
-        bundled_hpc_created.store(false, .release);
+        live_bundled_hpcons.store(0, .release);
         fallback_banner_pending.store(false, .release);
     }
 };
@@ -661,7 +686,15 @@ const WindowsPty = struct {
         output: windows.HANDLE,
     };
 
-    pub const OpenError = error{Unexpected};
+    pub const OpenError = error{
+        Unexpected,
+        /// The bundled ConPTY could not create a pseudo console while other
+        /// bundled pseudo consoles are still open in this process, so falling
+        /// back to the in-box conhost was refused rather than mixing two
+        /// ConPTY implementations. Closing the other terminals allows the
+        /// fallback.
+        BundledConptyInconsistent,
+    };
 
     fn openPipes(size: winsize) OpenError!Pty {
         var pty: Pty = undefined;
@@ -792,8 +825,10 @@ const WindowsPty = struct {
             .size = size,
             .pseudo_console = &pseudo_console,
         };
-        const conpty = WindowsConPty.selectBackend(&creation) orelse
-            return error.Unexpected;
+        const conpty = WindowsConPty.selectBackend(&creation) catch |err| switch (err) {
+            error.CreatePseudoConsoleFailed => return error.Unexpected,
+            error.BundledConptyInconsistent => return error.BundledConptyInconsistent,
+        };
 
         pty.control = .{ .pseudo_console = .{
             .handle = pseudo_console,
@@ -882,7 +917,11 @@ const WindowsPty = struct {
         self.closeAdoptedSignal();
         self.closePipes();
         switch (self.control) {
-            .pseudo_console => |pc| pc.conpty.close(pc.handle),
+            .pseudo_console => |pc| {
+                pc.conpty.close(pc.handle);
+                // Only after the close: a zero count promises no live handle.
+                if (pc.conpty.source == .bundled) WindowsConPty.releaseBundledHpcon();
+            },
             .handoff => |handoff| {
                 _ = windows.CloseHandle(handoff.server_process);
                 _ = windows.CloseHandle(handoff.reference);
@@ -1065,6 +1104,7 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
         succeeds_on_bundled: bool,
         ready: ?*std.atomic.Value(u32) = null,
         chosen: ?ConPtySource = null,
+        failure: ?WindowsConPty.SelectError = null,
 
         fn attempt(
             self: *const @This(),
@@ -1082,6 +1122,8 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
             }
             if (WindowsConPty.selectBackend(self)) |backend| {
                 self.chosen = backend.source;
+            } else |err| {
+                self.failure = err;
             }
         }
     };
@@ -1096,8 +1138,22 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
     late.run();
     try testing.expectEqual(ConPtySource.bundled, winner.chosen.?);
     try testing.expect(late.chosen == null);
+    try testing.expectEqual(error.BundledConptyInconsistent, late.failure.?);
     try testing.expectEqual(
         ConPtySource.bundled,
+        WindowsConPty.selected.load(.acquire).source,
+    );
+    try testing.expectEqual(@as(u32, 1), WindowsConPty.live_bundled_hpcons.load(.acquire));
+
+    // Once the winner's pseudo console is closed no live handle remains, so
+    // the very same failure now demotes the process instead of refusing.
+    WindowsConPty.releaseBundledHpcon();
+    try testing.expectEqual(@as(u32, 0), WindowsConPty.live_bundled_hpcons.load(.acquire));
+    var after_close: Creation = .{ .succeeds_on_bundled = false };
+    after_close.run();
+    try testing.expectEqual(ConPtySource.inbox, after_close.chosen.?);
+    try testing.expectEqual(
+        ConPtySource.inbox,
         WindowsConPty.selected.load(.acquire).source,
     );
 
@@ -1112,7 +1168,7 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
     after_demotion.run();
     try testing.expectEqual(ConPtySource.inbox, first_failure.chosen.?);
     try testing.expectEqual(ConPtySource.inbox, after_demotion.chosen.?);
-    try testing.expect(!WindowsConPty.bundled_hpc_created.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), WindowsConPty.live_bundled_hpcons.load(.acquire));
 
     // Racing opens must land on one of those two consistent outcomes; a live
     // bundled HPCON alongside an in-box selection is the state the lock
@@ -1128,15 +1184,86 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
     failure_thread.join();
 
     const selection = WindowsConPty.selected.load(.acquire).source;
-    if (WindowsConPty.bundled_hpc_created.load(.acquire)) {
+    if (WindowsConPty.live_bundled_hpcons.load(.acquire) != 0) {
         try testing.expectEqual(ConPtySource.bundled, selection);
         try testing.expectEqual(ConPtySource.bundled, racing_success.chosen.?);
         try testing.expect(racing_failure.chosen == null);
+        try testing.expectEqual(error.BundledConptyInconsistent, racing_failure.failure.?);
     } else {
         try testing.expectEqual(ConPtySource.inbox, selection);
         try testing.expectEqual(ConPtySource.inbox, racing_success.chosen.?);
         try testing.expectEqual(ConPtySource.inbox, racing_failure.chosen.?);
     }
+}
+
+test "Windows ConPTY live bundled count follows real pseudo console open and close" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const original_raw = std.process.getEnvVarOwned(
+        testing.allocator,
+        "NOCTTY_CONPTY",
+    ) catch null;
+    defer if (original_raw) |value| testing.allocator.free(value);
+    const original = if (original_raw) |value|
+        try testing.allocator.dupeZ(u8, value)
+    else
+        null;
+    defer if (original) |value| testing.allocator.free(value);
+    defer {
+        WindowsConPty.resetForTest();
+        if (original) |value| {
+            _ = internal_os.setenv("NOCTTY_CONPTY", value);
+        } else {
+            _ = internal_os.unsetenv("NOCTTY_CONPTY");
+        }
+    }
+
+    // The fake bundled backend creates real pseudo consoles through kernel32
+    // while reporting as bundled, so `open` and `deinit` exercise the exact
+    // counting paths a real conpty.dll would.
+    WindowsConPty.resetForTest();
+    installFakeBundledBackendForTest();
+    try testing.expectEqual(@as(u32, 0), WindowsConPty.live_bundled_hpcons.load(.acquire));
+
+    var first = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
+    try testing.expectEqual(ConPtySource.bundled, first.control.pseudo_console.conpty.source);
+    try testing.expectEqual(@as(u32, 1), WindowsConPty.live_bundled_hpcons.load(.acquire));
+    var second = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
+    try testing.expectEqual(@as(u32, 2), WindowsConPty.live_bundled_hpcons.load(.acquire));
+
+    first.deinit();
+    try testing.expectEqual(@as(u32, 1), WindowsConPty.live_bundled_hpcons.load(.acquire));
+    second.deinit();
+    try testing.expectEqual(@as(u32, 0), WindowsConPty.live_bundled_hpcons.load(.acquire));
+
+    // An adopted session owns no HPCON and must not touch the count.
+    var signal_read: windows.HANDLE = undefined;
+    var signal_write: windows.HANDLE = undefined;
+    try testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    defer _ = windows.CloseHandle(signal_read);
+    const duplicate = struct {
+        fn handle(source: windows.HANDLE) !windows.HANDLE {
+            var result: windows.HANDLE = undefined;
+            const current = std.os.windows.GetCurrentProcess();
+            if (windows.kernel32.DuplicateHandle(
+                current,
+                source,
+                current,
+                &result,
+                0,
+                std.os.windows.FALSE,
+                std.os.windows.DUPLICATE_SAME_ACCESS,
+            ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+            return result;
+        }
+    }.handle;
+    const current = std.os.windows.GetCurrentProcess();
+    const server_process = try duplicate(current);
+    const reference = try duplicate(current);
+    var adopted = try WindowsPty.openAdopted(.{}, signal_write, server_process, reference);
+    adopted.deinit();
+    try testing.expectEqual(@as(u32, 0), WindowsConPty.live_bundled_hpcons.load(.acquire));
 }
 
 test "Windows ConPTY bundled loader rejects a DLL without create symbol" {

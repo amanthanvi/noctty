@@ -44,7 +44,7 @@ Assert-WorkflowContract `
     -Description 'ConPTY selection is one atomic pointer and each PTY captures its creating implementation'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
-    -Pattern '(?ms)\.pseudo_console => \|pc\| pc\.conpty\.close\(pc\.handle\).*?pc\.conpty\.resize\(\s*pc\.handle,' `
+    -Pattern '(?ms)\.pseudo_console => \|pc\| \{\s*pc\.conpty\.close\(pc\.handle\);.*?WindowsConPty\.releaseBundledHpcon\(\).*?pc\.conpty\.resize\(\s*pc\.handle,' `
     -Description 'an HPCON is only ever closed or resized by the implementation that created it'
 Assert-WorkflowContract `
     -Path $diagnosticBundle `
