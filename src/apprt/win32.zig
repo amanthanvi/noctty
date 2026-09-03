@@ -10909,6 +10909,11 @@ const Host = struct {
     /// that cached the fragment tree needs a structure-changed event
     /// whenever this flips.
     caption_painted: bool = false,
+    /// One `WM_WINHOSTTY_UIA_CAPTION_SYNC` in flight is enough: the
+    /// handler re-reads the live state, so a second post would only make
+    /// the same comparison again. Keeps the frequent callers (every
+    /// `WM_WINDOWPOSCHANGED`) from queueing a message per event.
+    caption_sync_pending: bool = false,
     /// Registered for WM_NCMOUSELEAVE via `TrackMouseEvent(TME_NONCLIENT
     /// | TME_LEAVE)` so we can clear `caption_hover` when the cursor
     /// exits the non-client area. Only re-armed when it becomes false.
@@ -17046,10 +17051,13 @@ const Host = struct {
     /// the loop is free.
     fn scheduleCaptionUiaSync(self: *Host) void {
         const hwnd = self.hwnd orelse return;
+        if (self.caption_sync_pending) return;
+        self.caption_sync_pending = true;
         if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_UIA_CAPTION_SYNC, 0, 0) == 0) {
             // The queue is full or the window is going away. Falling back
             // to an inline raise is worse than skipping it: the next
             // transition re-checks the same state from scratch.
+            self.caption_sync_pending = false;
             log.warn("win32 caption UIA sync post failed", .{});
         }
     }
@@ -17059,6 +17067,7 @@ const Host = struct {
     /// with minimize / hide), and the middle button's name follows the
     /// zoomed state. Always reached through `scheduleCaptionUiaSync`.
     fn syncCaptionUiaState(self: *Host) void {
+        self.caption_sync_pending = false;
         const provider = self.root_uia_provider orelse return;
         const painted = captionButtonsPaintedThunk(@ptrCast(self));
         if (self.caption_painted != painted) {
@@ -23114,11 +23123,18 @@ test "win32 deferred UIA disconnect drain retries and releases once" {
 /// buttons in the tree there would hand a reader a full-size rect at the
 /// minimized window's off-screen origin, with `IsOffscreen = false`
 /// alongside it.
+fn captionButtonsPainted(integrated: bool, window_visible: bool, iconic: bool) bool {
+    return integrated and window_visible and !iconic;
+}
+
 fn captionButtonsPaintedThunk(ctx: *anyopaque) bool {
     const host: *Host = @ptrCast(@alignCast(ctx));
     const hwnd = host.hwnd orelse return false;
-    if (sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) return false;
-    return host.usingIntegratedTitlebar();
+    return captionButtonsPainted(
+        host.usingIntegratedTitlebar(),
+        sys.IsWindowVisible(hwnd) != 0,
+        sys.IsIconic(hwnd) != 0,
+    );
 }
 
 fn captionButtonZoomedThunk(ctx: *anyopaque) bool {
@@ -24492,7 +24508,13 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
         c.WM_SHOWWINDOW => {
             const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-            if (host) |v| v.refreshSurfaceVisibility();
+            if (host) |v| {
+                v.refreshSurfaceVisibility();
+                // Hiding or showing a window changes no size, so WM_SIZE
+                // never fires and this is the only notice that the caption
+                // children just appeared or disappeared.
+                v.scheduleCaptionUiaSync();
+            }
             return result;
         },
 
@@ -24505,7 +24527,12 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             // BEFORE WM_EXITSIZEMOVE, so that one is skipped too and the
             // WM_EXITSIZEMOVE arm does the catch-up refresh.
             if (host) |v| {
-                if (!v.is_live_resize.load(.acquire)) v.refreshSurfaceVisibility();
+                if (!v.is_live_resize.load(.acquire)) {
+                    v.refreshSurfaceVisibility();
+                    // Covers the SetWindowPos show/hide flags, which do not
+                    // always produce a WM_SHOWWINDOW. The post coalesces.
+                    v.scheduleCaptionUiaSync();
+                }
             }
             return result;
         },
@@ -40030,6 +40057,20 @@ test "win32 tab button mouse-up only closes when released in close zone" {
         TabButtonMouseUpAction.none,
         tabButtonMouseUpAction(null, false, 40, 100, 3),
     );
+}
+
+test "win32 caption buttons are painted only while the window is on screen" {
+    // The UIA children exist exactly when the buttons are painted. A
+    // hidden window is the case that has no WM_SIZE to notice it, so the
+    // rule has to hold on visibility alone.
+    try std.testing.expect(captionButtonsPainted(true, true, false));
+    try std.testing.expect(!captionButtonsPainted(true, false, false));
+    try std.testing.expect(!captionButtonsPainted(true, true, true));
+    try std.testing.expect(!captionButtonsPainted(true, false, true));
+    // Without the integrated titlebar the stock caption is the system's,
+    // and we expose nothing however visible the window is.
+    try std.testing.expect(!captionButtonsPainted(false, true, false));
+    try std.testing.expect(!captionButtonsPainted(false, false, true));
 }
 
 test "win32 caption button UIA invoke reuses the mouse path commands" {
