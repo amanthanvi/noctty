@@ -1220,7 +1220,8 @@ const Subprocess = struct {
             // `cmd` is a stack local that is about to go away, so lift the
             // "did Windows create a child?" answer onto the Subprocess before
             // unwinding. Without this the caller cannot distinguish a launch
-            // that never happened from one torn down during setup.
+            // that never happened from one that failed during setup after
+            // the child was created (cleanup only attempts to stop it).
             if (comptime builtin.os.tag == .windows) {
                 self.windows_process_created = cmd.windows_process_created;
             }

@@ -1316,9 +1316,10 @@ test "Command: windows job object plan attaches to local child process" {
 }
 
 // `windows_process_created` is what lets termio tell "the command never
-// launched" apart from "the command launched and setup failed, so we killed
-// it". Those two produce different reports, so the flag has to be false for
-// every failure before CreateProcessW and true the moment it succeeds.
+// launched" apart from "the command launched and setup failed, so cleanup
+// attempted to stop it". Those two produce different reports, so the flag has
+// to be false for every failure before CreateProcessW and true the moment it
+// succeeds.
 test "Command: windows_process_created discriminates pre- and post-creation failures" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 

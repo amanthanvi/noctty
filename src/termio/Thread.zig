@@ -286,8 +286,8 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     \\The child process was created, but noctty could not
                     \\finish launching it. Depending on the cause above, the
                     \\child either exited on its own during launch setup or
-                    \\was stopped during cleanup, so no exit code is reported
-                    \\for it here.
+                    \\cleanup attempted to stop it, so no exit code is
+                    \\reported for it here.
                     \\
                     \\This happens during the post-creation launch steps, so a
                     \\common cause is the optional Windows Job Object limits
