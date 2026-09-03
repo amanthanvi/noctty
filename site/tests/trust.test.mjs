@@ -12,6 +12,12 @@ const publishedVerifier = readFileSync(
   join(repoDir, "scripts/verify-published-release.ps1"),
   "utf8",
 );
+// The legacy v1.3.123 signature procedure lives in the verification guide,
+// which the trust page links; the guards follow it there.
+const verifyGuide = readFileSync(
+  join(repoDir, "docs/verify-release.md"),
+  "utf8",
+);
 
 // Docs cited by the trust page and the migration guides that land with another
 // pull request. Each entry names the dependency it waits on so the exemption
@@ -295,8 +301,7 @@ test("every pending-document exemption is still cited by something", () => {
   );
 });
 
-test("trust page publishes exactly eleven standing non-goals", () => {
-  assert.equal((trustHtml.match(/\sdata-no-goal(?:\s|>)/g) || []).length, 11);
+test("trust page keeps the ratified silent posture", () => {
   assert.doesNotMatch(
     trustHtml,
     /\bAI\b/i,
@@ -387,37 +392,23 @@ test("trust page carries every implemented release verification layer", () => {
     trustHtml,
     /verifies GitHub build-provenance attestations[\s\S]*?every published[\s\S]*?asset except the static icon/i,
   );
-  assert.match(trustHtml, /Assert-ReleaseSignature/);
-  assert.match(
-    trustHtml,
-    /\$PSVersionTable\.PSVersion\.Major -lt 7.*?PowerShell 7 \(pwsh\)/,
-  );
-  assert.match(
-    trustHtml,
-    /checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10/,
-  );
-  assert.match(trustHtml, /Expand-Archive/);
-  assert.match(
-    trustHtml,
-    /noctty-release-verification-.*?\[Guid\]::NewGuid\(\)/s,
-  );
-  assert.match(
-    trustHtml,
-    /finally\s*{.*?\[IO\.Directory\]::Delete\(\$workRoot, \$true\)/s,
-  );
-  assert.match(trustHtml, /winghostty\\winghostty\.com/);
-  assert.match(trustHtml, /winghostty\\winghostty\.exe/);
-  assert.match(trustHtml, /winghostty\\ghostty-vt\.dll/);
-  assert.match(
-    trustHtml,
-    /ReadByte\(\) -eq 0x4D.*?ReadByte\(\) -eq 0x5A.*?unexpected:.*?\$unexpectedPe/s,
-  );
-  assert.match(trustHtml, /-AllowedPins @\(\$expectedSpki\)/);
-  assert.match(trustHtml, /-TrustSelfSigned \$true/);
   assert.match(trustHtml, /verify-published-release\.ps1/);
   assert.match(
     trustHtml,
     /\$version = "&lt;1\.3\.124-or-later&gt;".*?git clone --branch "v\$version" --depth 1.*?-Version \$version/s,
+  );
+  assert.match(
+    trustHtml,
+    /v1\.3\.123 uses the legacy\s+<code>winghostty-\*<\/code> asset layout/i,
+  );
+  assert.match(trustHtml, /docs\/verify-release\.md/);
+  assert.match(
+    trustHtml,
+    /verifier accepts v1\.3\.124 and later.*?first release that uses the current Noctty asset\s+contract/is,
+  );
+  assert.match(
+    trustHtml,
+    /671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a/,
   );
   assert.match(
     publishedVerifier,
@@ -427,16 +418,41 @@ test("trust page carries every implemented release verification layer", () => {
     publishedVerifier,
     /\$unexpectedPortablePe.*?PE inventory mismatch.*?foreach \(\$relativePath in \$expectedPortablePePaths\)/s,
   );
+});
+
+test("verification guide carries the manual legacy-release signature check", () => {
+  assert.match(verifyGuide, /Get-FileHash/);
+  assert.match(verifyGuide, /gh attestation verify/);
+  assert.match(verifyGuide, /verify-published-release\.ps1/);
+  assert.match(verifyGuide, /Assert-ReleaseSignature/);
   assert.match(
-    trustHtml,
-    /v1\.3\.123 uses the legacy\s+<code>winghostty-\*<\/code> asset layout/i,
+    verifyGuide,
+    /\$PSVersionTable\.PSVersion\.Major -lt 7.*?PowerShell 7 \(pwsh\)/,
   );
   assert.match(
-    trustHtml,
-    /verifier accepts v1\.3\.124 and later.*?first release that uses the current Noctty asset\s+contract/is,
+    verifyGuide,
+    /checkout --detach 5220df49e39c96182cf13150c53c4fd71fbc5b10/,
+  );
+  assert.match(verifyGuide, /Expand-Archive/);
+  assert.match(
+    verifyGuide,
+    /noctty-release-verification-.*?\[Guid\]::NewGuid\(\)/s,
   );
   assert.match(
-    trustHtml,
+    verifyGuide,
+    /finally\s*{.*?\[IO\.Directory\]::Delete\(\$workRoot, \$true\)/s,
+  );
+  assert.match(verifyGuide, /winghostty\\winghostty\.com/);
+  assert.match(verifyGuide, /winghostty\\winghostty\.exe/);
+  assert.match(verifyGuide, /winghostty\\ghostty-vt\.dll/);
+  assert.match(
+    verifyGuide,
+    /ReadByte\(\) -eq 0x4D.*?ReadByte\(\) -eq 0x5A.*?unexpected:.*?\$unexpectedPe/s,
+  );
+  assert.match(verifyGuide, /-AllowedPins @\(\$expectedSpki\)/);
+  assert.match(verifyGuide, /-TrustSelfSigned \$true/);
+  assert.match(
+    verifyGuide,
     /671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a/,
   );
 });

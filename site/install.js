@@ -1,13 +1,8 @@
-// Install command switcher and clipboard copy.
+// Copies the Scoop install command from the hero.
 
 const COPY_RESET_MS = 1400;
-
-const INSTALL_METHODS = {
-  scoop: {
-    cmd: 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty; scoop install noctty/noctty',
-    copy: 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty\r\nscoop install noctty/noctty',
-  },
-};
+const INSTALL_COMMAND =
+  'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty\r\nscoop install noctty/noctty';
 
 function writeClipboardTextFallback(text) {
   const textarea = document.createElement('textarea');
@@ -39,30 +34,23 @@ function writeClipboardText(text) {
   return writeClipboardTextFallback(text);
 }
 
-const command = document.getElementById('nc-install-command');
 const copyButton = document.getElementById('nc-install-copy');
 const status = document.getElementById('nc-install-status');
-const radios = Array.from(document.querySelectorAll('input[name="install-method"]'));
 
-if (command && copyButton && status && radios.length) {
-  let method = radios.find((radio) => radio.checked)?.value || 'scoop';
+if (copyButton && status) {
   let copyTimer = null;
 
-  function clearCopyTimer() {
-    if (copyTimer === null) return;
-    clearTimeout(copyTimer);
-    copyTimer = null;
-  }
-
   function setCopyState(state) {
-    clearCopyTimer();
+    if (copyTimer !== null) {
+      clearTimeout(copyTimer);
+      copyTimer = null;
+    }
     copyButton.classList.toggle('is-copied', state === 'copied');
     copyButton.classList.toggle('is-failed', state === 'failed');
-    copyButton.setAttribute(
-      'aria-label',
-      state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy install command',
-    );
-    status.textContent = state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : '';
+    const label =
+      state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy install command';
+    copyButton.setAttribute('aria-label', label);
+    status.textContent = state === 'idle' ? '' : label;
     if (state !== 'idle') {
       copyTimer = setTimeout(() => {
         copyTimer = null;
@@ -71,25 +59,9 @@ if (command && copyButton && status && radios.length) {
     }
   }
 
-  function applyMethod(next) {
-    method = next in INSTALL_METHODS ? next : 'scoop';
-    const active = INSTALL_METHODS[method];
-    command.textContent = active.cmd;
-    command.setAttribute('title', active.cmd);
-    setCopyState('idle');
-  }
-
-  radios.forEach((radio) => {
-    radio.addEventListener('change', () => {
-      if (radio.checked) applyMethod(radio.value);
-    });
-  });
-
   copyButton.addEventListener('click', () => {
-    writeClipboardText(INSTALL_METHODS[method].copy)
+    writeClipboardText(INSTALL_COMMAND)
       .then(() => setCopyState('copied'))
       .catch(() => setCopyState('failed'));
   });
-
-  applyMethod(method);
 }
