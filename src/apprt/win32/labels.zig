@@ -804,6 +804,11 @@ pub fn buildHostAwareBaseTitle(
     );
 }
 
+/// Compact `value` to `max_len` bytes, ending in an ellipsis when it had to
+/// cut. The budget is bytes, not codepoints: callers derive it from a pixel
+/// width at roughly one byte per drawn cell (see `hostTabLabelMaxLen`), so
+/// counting codepoints would let a CJK label overrun the space reserved for
+/// it. `compactHostLabelLen` reports the same length without allocating.
 fn compactHostLabel(
     alloc: Allocator,
     value: []const u8,
@@ -831,7 +836,11 @@ fn utf8BoundaryFloor(value: []const u8, len: usize) usize {
 
 fn compactHostLabelLen(value: []const u8, max_len: usize) usize {
     if (value.len <= max_len) return value.len;
-    return if (max_len <= 3) 3 else max_len;
+    if (max_len <= 3) return 3;
+    // Must track `compactHostLabel` exactly: `profileStatusBadgeTextLen`
+    // reserves chip width from this, and a cut rounded back off a multi-byte
+    // codepoint makes the real label shorter than the byte budget.
+    return utf8BoundaryFloor(value, max_len - 3) + 3;
 }
 
 pub fn hostTabLabelMaxLen(button_width: i32) usize {
@@ -2434,6 +2443,15 @@ test "win32 compactHostLabel keeps the cut on a codepoint boundary" {
     defer std.testing.allocator.free(label);
     try std.testing.expect(std.unicode.utf8ValidateSlice(label));
     try std.testing.expectEqualStrings("\u{3042}\u{3044}...", label);
+}
+
+test "win32 compactHostLabelLen matches the compacted label on a multi-byte cut" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const value = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}";
+    const label = try compactHostLabel(std.testing.allocator, value, 11);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqual(label.len, compactHostLabelLen(value, 11));
 }
 
 test "win32 buildTabButtonLabel keeps narrow CJK titles valid UTF-8" {
