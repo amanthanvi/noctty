@@ -2786,7 +2786,16 @@ fn verifyPinnedPublisherIdentityFromState(
 }
 
 fn publisherSpkiHashAllowed(spki_hash: *const [Sha256.digest_length]u8) bool {
-    for (pinned_publisher_spki_sha256) |pinned| {
+    return spkiHashInPinSet(&pinned_publisher_spki_sha256, spki_hash);
+}
+
+/// Membership test over an arbitrary pin set so rotation-sized allowlists
+/// (old key plus next key) are testable without editing the compiled pins.
+fn spkiHashInPinSet(
+    pins: []const [Sha256.digest_length]u8,
+    spki_hash: *const [Sha256.digest_length]u8,
+) bool {
+    for (pins) |pinned| {
         if (std.mem.eql(u8, &pinned, spki_hash)) return true;
     }
     return false;
@@ -5183,6 +5192,32 @@ test "windows updater publisher SPKI pin allowlist is fail closed" {
     var rejected = allowed;
     rejected[0] ^= 0xff;
     try std.testing.expect(!publisherSpkiHashAllowed(&rejected));
+}
+
+test "windows updater publisher SPKI pin allowlist accepts every rotation pin" {
+    // ADR-0005 rotation ships the next publisher key as a second pin before
+    // release signing moves to it, so both entries must be accepted at once.
+    var pins = [_][Sha256.digest_length]u8{
+        pinned_publisher_spki_sha256[0],
+        pinned_publisher_spki_sha256[0],
+    };
+    pins[1][0] ^= 0xff;
+    try std.testing.expect(!std.mem.eql(u8, &pins[0], &pins[1]));
+
+    for (&pins) |*pin| {
+        try std.testing.expect(spkiHashInPinSet(&pins, pin));
+    }
+
+    var outsider = pins[0];
+    outsider[Sha256.digest_length - 1] ^= 0xff;
+    try std.testing.expect(!spkiHashInPinSet(&pins, &outsider));
+
+    // Retiring the old pin must stop accepting it, and an empty allowlist
+    // must accept nothing.
+    try std.testing.expect(spkiHashInPinSet(pins[1..], &pins[1]));
+    try std.testing.expect(!spkiHashInPinSet(pins[1..], &pins[0]));
+    const empty: []const [Sha256.digest_length]u8 = &.{};
+    try std.testing.expect(!spkiHashInPinSet(empty, &pins[0]));
 }
 
 test "WinTrust certificate chain entry matches SDK ABI" {
