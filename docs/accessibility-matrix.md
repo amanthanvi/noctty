@@ -19,7 +19,7 @@ so a stale claim cannot outlive the record.
 
 - Release: unreleased, branch `issues/145-caption-buttons-uia`
 - Windows build: 10.0.26200.9168 (Windows 11 25H2)
-- Automated UIA harness: **executed and passing** at `be3b2b3ac` — the run now
+- Automated UIA harness: **executed and passing** at `303de5552` — the run now
   also asserts the integrated-titlebar caption buttons and drives their
   Invoke
 - Narrator: **not yet measured**
