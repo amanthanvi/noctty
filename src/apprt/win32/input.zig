@@ -47,12 +47,23 @@ pub const RegisteredGlobalHotkey = struct {
     binding: *const input.Binding.Set.Value,
 };
 
+/// `ToUnicode` is given a four-unit buffer, so the most text one key can
+/// produce is four BMP characters (12 bytes of UTF-8) or two supplementary
+/// ones (8 bytes). 16 bytes covers either.
+const text_capacity = 16;
+
 const KeyText = struct {
-    utf8: [8]u8 = [_]u8{0} ** 8,
+    /// UTF-8 for every code unit the layout produced for this key, not just
+    /// the first one: an accent that cannot combine with the key that
+    /// follows it yields both characters in one translation.
+    utf8: [text_capacity]u8 = [_]u8{0} ** text_capacity,
     len: usize = 0,
     consumed_mods: input.Mods = .{},
     unshifted_codepoint: u21 = 0,
     deferred_utf16_units: usize = 0,
+    /// The layout reported a dead key. There is no text yet; the composed
+    /// character arrives with the next key.
+    dead_key: bool = false,
 };
 
 pub const DeferredCharState = struct {
@@ -115,9 +126,25 @@ pub const DeferredCharState = struct {
     }
 };
 
-const Win32KeyMessage = struct {
+pub const Win32KeyMessage = struct {
     event: input.KeyEvent,
     deferred_utf16_units: usize = 0,
+
+    /// Translated key text travels inline, not as a slice. `event.utf8` is a
+    /// borrowed slice and `keyEventFromWin32Message` returns its message by
+    /// value, so a slice into the `KeyText` local it translated from dangles
+    /// the instant it returns. The bytes are carried here instead and the
+    /// slice is rebased by `bindText` once the value has landed in the frame
+    /// that actually uses it.
+    text: [text_capacity]u8 = [_]u8{0} ** text_capacity,
+    text_len: usize = 0,
+
+    /// Point `event.utf8` at this value's own storage. Must be called on the
+    /// caller's copy, after the message has been returned, and that copy must
+    /// outlive every use of `event.utf8`.
+    pub fn bindText(self: *Win32KeyMessage) void {
+        self.event.utf8 = self.text[0..self.text_len];
+    }
 };
 
 pub fn lParamBits(lParam: LPARAM) usize {
@@ -673,13 +700,26 @@ fn utf16CodeUnitCount(codepoint: u21) usize {
     return if (codepoint <= std.math.maxInt(u16)) 1 else 2;
 }
 
+/// Whether plain typed text should be committed by the following `WM_CHAR`
+/// instead of travelling on the physical key event.
+///
+/// `allow_defer` is false while a Kitty `report_all` client is active. The
+/// synthetic `WM_CHAR` commit event carries no physical key and no modifiers,
+/// so deferring would split one keystroke into a press with identity but no
+/// text and a commit with text but no identity, and the release would never
+/// pair with either. AltGr needs no exception here: the synthetic Ctrl+Alt pair
+/// has already been collapsed by `normalizeAltGrMods` on layouts that have an
+/// AltGr, so the physical event carries the layout text (`@` for German
+/// `AltGr+Q`) with empty modifiers and the same key identity as its release.
 fn shouldDeferTextToCharMessage(
     action: input.Action,
     key: input.Key,
     mods: input.Mods,
     translated: KeyText,
+    allow_defer: bool,
 ) bool {
     if (action == .release) return false;
+    if (!allow_defer) return false;
     // AltGr has already been normalized for layouts that use it. Any
     // modifiers still present here describe a terminal chord.
     if (mods.super or mods.ctrl or mods.alt) return false;
@@ -696,14 +736,40 @@ fn shouldDeferTextToCharMessage(
     return !isControlCodepoint(translated.unshifted_codepoint);
 }
 
-fn deferTextToCharMessage(
+/// Plain text is committed by `WM_CHAR` unless a Kitty `report_all` client is
+/// active. IME composition keeps deferring either way: its commit is text
+/// without a physical key by design.
+pub fn deferPlainTextToCharMessage(kitty_report_all: bool, ime_composing: bool) bool {
+    return !kitty_report_all or ime_composing;
+}
+
+fn applyTranslatedKeyText(
     result: *Win32KeyMessage,
     translated: KeyText,
+    defer_text: bool,
 ) void {
+    // Copy the bytes rather than slicing `translated`: it is a by-value
+    // parameter whose storage does not outlive this call, and `result` is
+    // about to be returned by value anyway. `event.utf8` is left empty here
+    // and bound to the caller's own copy via `bindText`.
+    @memcpy(result.text[0..translated.len], translated.utf8[0..translated.len]);
+    result.text_len = translated.len;
     result.event.utf8 = "";
-    result.event.consumed_mods = .{};
-    result.event.composing = true;
-    result.deferred_utf16_units = translated.deferred_utf16_units;
+    result.event.consumed_mods = translated.consumed_mods;
+    if (defer_text) {
+        // Keep the physical-key event visible to bindings/modifier state
+        // but defer text emission to WM_CHAR so plain typing doesn't rely
+        // on ToUnicode/GetKeyboardState timing.
+        result.text_len = 0;
+        result.event.consumed_mods = .{};
+    }
+    // A dead key is composing whether or not text is deferred: without the
+    // flag the encoder would emit a bare `CSI <unshifted> u` for the accent
+    // press before the composed character arrives.
+    if (defer_text or translated.dead_key) {
+        result.event.composing = true;
+        result.deferred_utf16_units = translated.deferred_utf16_units;
+    }
 }
 
 pub fn shouldAuthorizeDeferredCharMessage(effect: CoreSurface.InputEffect) bool {
@@ -793,6 +859,35 @@ fn printableCodepoint(units: []const u16) ?u21 {
     return codepoint;
 }
 
+/// Decode every UTF-16 unit the layout produced into `buf` and return the
+/// UTF-8 length. The whole result is rejected (0) when any codepoint is a
+/// control character, because the core encoder derives C0 bytes itself from
+/// the key and modifiers, or when a surrogate is unpaired.
+fn printableText(units: []const u16, buf: *[text_capacity]u8) usize {
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < units.len) {
+        const codepoint: u21 = cp: {
+            if (i + 1 < units.len and
+                std.unicode.utf16IsHighSurrogate(units[i]) and
+                std.unicode.utf16IsLowSurrogate(units[i + 1]))
+            {
+                const pair = std.unicode.utf16DecodeSurrogatePair(
+                    &.{ units[i], units[i + 1] },
+                ) catch return 0;
+                i += 2;
+                break :cp pair;
+            }
+            const unit = units[i];
+            i += 1;
+            break :cp unit;
+        };
+        if (isControlCodepoint(codepoint)) return 0;
+        len += std.unicode.utf8Encode(codepoint, buf[len..]) catch return 0;
+    }
+    return len;
+}
+
 /// Translate `vk` against a masked copy of the keyboard state and return the
 /// printable codepoint it produces, if any.
 fn translatePrintableCodepoint(
@@ -855,6 +950,7 @@ fn translateKeyText(
     if (count < 0) {
         // Dead key. The composed text arrives later as WM_CHAR.
         result.deferred_utf16_units = 1;
+        result.dead_key = true;
         return result;
     }
     if (count > 0) result.deferred_utf16_units = @intCast(count);
@@ -869,22 +965,27 @@ fn translateKeyText(
     // Caps Lock is masked with Ctrl but Shift is not: in a Ctrl chord Shift is
     // part of the chord the user typed, while Caps Lock is ambient state that
     // must not change which key the chord reports.
-    const codepoint: ?u21 = if (mods.ctrl)
-        translatePrintableCodepoint(vk, scan_code, state, .{
+    if (mods.ctrl) {
+        if (translatePrintableCodepoint(vk, scan_code, state, .{
             .control = true,
             .caps_lock = true,
-        })
-    else
-        printableCodepoint(utf16[0..@min(@as(usize, @intCast(count)), utf16.len)]);
-
-    if (codepoint) |cp| {
-        result.len = std.unicode.utf8Encode(cp, &result.utf8) catch 0;
-        // Shift is only consumed when the layout used it to produce the text.
-        // In a Ctrl chord shift is part of the chord, so it stays live.
-        if (result.len > 0 and !mods.ctrl) {
-            result.consumed_mods = .{ .shift = mods.shift };
+        })) |cp| {
+            result.len = std.unicode.utf8Encode(cp, &result.utf8) catch 0;
         }
+        return result;
     }
+
+    // Keep every unit the layout produced. A dead key that cannot combine with
+    // this key yields the accent and the key together (`´x`); when the text
+    // rides on the physical event instead of `WM_CHAR`, dropping the second
+    // character would lose the key that was actually pressed.
+    result.len = printableText(
+        utf16[0..@min(@as(usize, @intCast(count)), utf16.len)],
+        &result.utf8,
+    );
+    // Shift is only consumed when the layout used it to produce the text.
+    // In a Ctrl chord shift is part of the chord, so it stays live.
+    if (result.len > 0) result.consumed_mods = .{ .shift = mods.shift };
 
     return result;
 }
@@ -905,10 +1006,15 @@ fn packetKeyMessage(action: input.Action) Win32KeyMessage {
     };
 }
 
+/// Build the key event for a `WM_(SYS)KEYDOWN` / `WM_(SYS)KEYUP` message.
+/// The returned value owns its text; call `bindText` on the copy that will
+/// outlive every read of `event.utf8`. `defer_plain_text` comes from
+/// `deferPlainTextToCharMessage`.
 pub fn keyEventFromWin32Message(
     msg: UINT,
     wParam: WPARAM,
     lParam: LPARAM,
+    defer_plain_text: bool,
 ) ?Win32KeyMessage {
     const action: input.Action = switch (msg) {
         c.WM_KEYUP, c.WM_SYSKEYUP => .release,
@@ -950,14 +1056,11 @@ pub fn keyEventFromWin32Message(
 
     if (action != .release) {
         const translated = translateKeyText(vk, lParam, mods, keyboard_state);
-        result.event.utf8 = translated.utf8[0..translated.len];
-        result.event.consumed_mods = translated.consumed_mods;
-        if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
-            // Keep the physical-key event visible to bindings/modifier state
-            // but defer text emission to WM_CHAR so plain typing doesn't rely
-            // on ToUnicode/GetKeyboardState timing.
-            deferTextToCharMessage(&result, translated);
-        }
+        applyTranslatedKeyText(
+            &result,
+            translated,
+            shouldDeferTextToCharMessage(action, key, mods, translated, defer_plain_text),
+        );
     }
 
     return result;
@@ -1039,8 +1142,8 @@ test "win32 unshifted codepoint agrees across press and release" {
     const keys = [_]UINT{ c.VK_DIVIDE, c.VK_MULTIPLY, c.VK_ADD, c.VK_A, c.VK_OEM_COMMA };
     for (keys) |vk| {
         const lParam = testingScanCode(vk);
-        const press = keyEventFromWin32Message(c.WM_KEYDOWN, vk, lParam).?;
-        const release = keyEventFromWin32Message(c.WM_KEYUP, vk, lParam).?;
+        const press = keyEventFromWin32Message(c.WM_KEYDOWN, vk, lParam, true).?;
+        const release = keyEventFromWin32Message(c.WM_KEYUP, vk, lParam, true).?;
         try std.testing.expectEqual(
             press.event.unshifted_codepoint,
             release.event.unshifted_codepoint,
@@ -1053,6 +1156,7 @@ test "win32 unshifted codepoint agrees across press and release" {
         c.WM_KEYUP,
         c.VK_DIVIDE,
         testingScanCode(c.VK_DIVIDE),
+        true,
     ).?;
     try std.testing.expectEqual(@as(u21, '/'), divide.event.unshifted_codepoint);
     try std.testing.expectEqual(@as(u21, 0), unshiftedCodepointForVirtualKey(c.VK_DIVIDE));
@@ -1266,24 +1370,28 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .key_a,
         .{},
         .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .repeat,
         .space,
         .{},
         .{ .len = 1, .unshifted_codepoint = ' ', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .quote,
         .{},
         .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .digit_2,
         .{ .ctrl = true, .alt = true },
         .{ .unshifted_codepoint = '2', .deferred_utf16_units = 1 },
+        true,
     ));
     const raw_alt_gr: input.Mods = .{
         .ctrl = true,
@@ -1295,18 +1403,21 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .equal,
         raw_alt_gr,
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .equal,
         withoutSyntheticAltGr(raw_alt_gr),
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .equal,
         .{ .alt = true, .sides = .{ .alt = .right } },
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
@@ -1317,13 +1428,194 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
             .sides = .{ .ctrl = .right, .alt = .right },
         },
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .enter,
         .{},
         .{ .unshifted_codepoint = 0x0D },
+        true,
     ));
+}
+
+test "win32 kitty-report-all skips WM_CHAR deferral" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(deferPlainTextToCharMessage(false, false));
+    try std.testing.expect(!deferPlainTextToCharMessage(true, false));
+    try std.testing.expect(deferPlainTextToCharMessage(true, true));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .key_a,
+        .{ .shift = true, .caps_lock = true },
+        .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
+        false,
+    ));
+}
+
+// A dead key produces no text yet, so its press must stay `composing` even
+// when plain text is no longer deferred: otherwise the encoder emits a bare
+// `CSI <unshifted> u` for the accent before the composed character arrives.
+test "win32 kitty-report-all dead key remains composing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var message: Win32KeyMessage = .{ .event = .{
+        .action = .press,
+        .key = .quote,
+        .unshifted_codepoint = '\'',
+    } };
+    applyTranslatedKeyText(
+        &message,
+        .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1, .dead_key = true },
+        false,
+    );
+    message.bindText();
+
+    try std.testing.expect(message.event.composing);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
+}
+
+// Under kitty `report_all` the translated text is no longer suppressed, so it
+// is read on the ordinary typing path. `event.utf8` is a borrowed slice and
+// `keyEventFromWin32Message` returns its message by value, so the bytes must
+// live in the message itself: a slice into the `KeyText` local would dangle
+// before `keyCallback` ever saw it.
+test "win32 translated key text is owned by the message it travels in" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var translated: KeyText = .{
+        .len = 1,
+        .unshifted_codepoint = 'a',
+        .deferred_utf16_units = 1,
+    };
+    translated.utf8[0] = 'a';
+
+    var message: Win32KeyMessage = .{ .event = .{
+        .action = .press,
+        .key = .key_a,
+    } };
+    applyTranslatedKeyText(&message, translated, false);
+
+    // Nothing points at `translated`; the bytes were copied out.
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expectEqual(@as(usize, 1), message.text_len);
+
+    message.bindText();
+    try std.testing.expectEqualStrings("a", message.event.utf8);
+    try std.testing.expectEqual(
+        @intFromPtr(&message.text),
+        @intFromPtr(message.event.utf8.ptr),
+    );
+
+    // A copy, which is what every caller of `keyEventFromWin32Message` gets,
+    // must rebase onto its own storage, not keep pointing at the original.
+    var copy = message;
+    copy.bindText();
+    try std.testing.expectEqualStrings("a", copy.event.utf8);
+    try std.testing.expectEqual(
+        @intFromPtr(&copy.text),
+        @intFromPtr(copy.event.utf8.ptr),
+    );
+
+    // Deferral to WM_CHAR still suppresses the text after binding.
+    var deferred: Win32KeyMessage = .{ .event = .{
+        .action = .press,
+        .key = .key_a,
+    } };
+    applyTranslatedKeyText(&deferred, translated, true);
+    deferred.bindText();
+    try std.testing.expectEqualStrings("", deferred.event.utf8);
+    try std.testing.expect(deferred.event.composing);
+}
+
+// ToUnicode returns more than one unit when a dead key cannot combine with the
+// key that follows it (acute accent then `x` on US-International yields both).
+// When the text rides on the physical event, every unit has to survive,
+// because the WM_CHARs that would otherwise have carried them are no longer
+// authorized.
+test "win32 translated key text keeps every unit ToUnicode returned" {
+    var buf: [text_capacity]u8 = undefined;
+
+    const accent_then_x = [_]u16{ 0x00B4, 'x' };
+    try std.testing.expectEqualStrings("\u{B4}x", buf[0..printableText(&accent_then_x, &buf)]);
+
+    const pair = [_]u16{ 0xD83D, 0xDE42 };
+    try std.testing.expectEqualStrings("\u{1F642}", buf[0..printableText(&pair, &buf)]);
+
+    const four = [_]u16{ 'a', 'b', 'c', 'd' };
+    try std.testing.expectEqualStrings("abcd", buf[0..printableText(&four, &buf)]);
+
+    // Control characters and unpaired surrogates reject the whole result; the
+    // encoder derives C0 bytes from the key and modifiers itself.
+    const control = [_]u16{ 'a', 0x01 };
+    try std.testing.expectEqual(@as(usize, 0), printableText(&control, &buf));
+    const lone_high = [_]u16{0xD83D};
+    try std.testing.expectEqual(@as(usize, 0), printableText(&lone_high, &buf));
+    try std.testing.expectEqual(@as(usize, 0), printableText(&.{}, &buf));
+}
+
+// German AltGr+Q under `report_all`: the physical press carries "@" with the
+// synthetic Ctrl+Alt collapsed, and the release hashes to the same binding
+// identity, so a client pairing press and release sees one key.
+test "win32 kitty-report-all AltGr press carries text on the physical event" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const raw_alt_gr: input.Mods = .{
+        .ctrl = true,
+        .alt = true,
+        .sides = .{ .ctrl = .left, .alt = .right },
+    };
+    const mods = withoutSyntheticAltGr(raw_alt_gr);
+    var translated: KeyText = .{
+        .len = 1,
+        .unshifted_codepoint = 'q',
+        .deferred_utf16_units = 1,
+    };
+    translated.utf8[0] = '@';
+
+    try std.testing.expect(!shouldDeferTextToCharMessage(.press, .key_q, mods, translated, false));
+
+    var press: Win32KeyMessage = .{ .event = .{
+        .action = .press,
+        .key = .key_q,
+        .mods = mods,
+        .binding_mods = bindingModsOverride(raw_alt_gr, mods),
+        .unshifted_codepoint = 'q',
+    } };
+    applyTranslatedKeyText(&press, translated, false);
+    press.bindText();
+    const release: input.KeyEvent = .{
+        .action = .release,
+        .key = .key_q,
+        .mods = mods,
+        .binding_mods = bindingModsOverride(raw_alt_gr, mods),
+        .unshifted_codepoint = 'q',
+    };
+
+    try std.testing.expect(!press.event.composing);
+    try std.testing.expectEqualStrings("@", press.event.utf8);
+    try std.testing.expectEqual(@as(usize, 0), press.deferred_utf16_units);
+    try std.testing.expectEqual(press.event.bindingHash(), release.bindingHash());
+
+    const flags: @import("../../terminal/kitty/key.zig").Flags = .{
+        .disambiguate = true,
+        .report_events = true,
+        .report_alternates = true,
+        .report_all = true,
+        .report_associated = true,
+    };
+    var press_buf: [64]u8 = undefined;
+    var press_writer: std.Io.Writer = .fixed(&press_buf);
+    try input.key_encode.encode(&press_writer, press.event, .{ .kitty_flags = flags });
+    // Key code is the unshifted `q`; no modifiers; associated text is `@`.
+    try std.testing.expectEqualStrings("\x1b[113;;64u", press_writer.buffered());
+
+    var release_buf: [64]u8 = undefined;
+    var release_writer: std.Io.Writer = .fixed(&release_buf);
+    try input.key_encode.encode(&release_writer, release, .{ .kitty_flags = flags });
+    try std.testing.expectEqualStrings("\x1b[113;1:3u", release_writer.buffered());
 }
 
 test "win32 deferred char authorization respects key handling effect" {
@@ -1354,7 +1646,7 @@ test "win32 AltGr binding identity agrees across deferred press and release" {
         .unshifted_codepoint = 'a',
     };
 
-    deferTextToCharMessage(&press, .{ .deferred_utf16_units = 1 });
+    applyTranslatedKeyText(&press, .{ .deferred_utf16_units = 1 }, true);
 
     try std.testing.expect(std.meta.eql(normalized, press.event.mods));
     try std.testing.expect(std.meta.eql(raw_alt_gr, press.event.bindingMods()));
@@ -1385,7 +1677,7 @@ test "win32 AltGr binding identity agrees across deferred press and release" {
 }
 
 test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
-    const message = keyEventFromWin32Message(c.WM_KEYDOWN, c.VK_PACKET, 0).?;
+    const message = keyEventFromWin32Message(c.WM_KEYDOWN, c.VK_PACKET, 0, true).?;
     try std.testing.expectEqual(input.Action.press, message.event.action);
     try std.testing.expectEqual(input.Key.unidentified, message.event.key);
     try std.testing.expectEqualStrings("", message.event.utf8);
@@ -1397,7 +1689,7 @@ test "win32 VK_PACKET key down authorizes one unit without direct text or modifi
 }
 
 test "win32 VK_PACKET key up authorizes no units or text" {
-    const message = keyEventFromWin32Message(c.WM_KEYUP, c.VK_PACKET, 0).?;
+    const message = keyEventFromWin32Message(c.WM_KEYUP, c.VK_PACKET, 0, true).?;
     try std.testing.expectEqual(input.Action.release, message.event.action);
     try std.testing.expectEqual(input.Key.unidentified, message.event.key);
     try std.testing.expectEqualStrings("", message.event.utf8);

@@ -38,6 +38,8 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
   OSC 52 selectors target the single native Windows clipboard).
 - Bidi, combining marks, grapheme cluster rendering.
 - Kitty graphics protocol and inline image display.
+- Kitty keyboard protocol with press, repeat, and release events, Caps Lock
+  and Num Lock state, and left/right modifier identity.
 - Shell integration for bash, zsh, fish, elvish, nushell, and PowerShell
   (PowerShell through `shell-integration = detect`). `cmd.exe` is a plain
   fallback without prompt/cwd/command-finish integration.
@@ -90,7 +92,9 @@ Win32-validated VT protocol coverage is tracked in
   scrolling.
 - Clipboard paste confirmation for risky content, including dropped
   payloads, gated by `clipboard-paste-protection`. HTML copy writes both
-  CF_HTML and a plain-text fallback.
+  CF_HTML and a plain-text fallback. `clipboard-codepoint-map` applies to
+  plain, VT, and HTML selection copies; clipboard reads, URL copies, OSC 52
+  writes, and `write_screen_file` exports are not mapped.
 - A configurable quick terminal on an edge or the center of the selected
   monitor. It has no default binding; `global:` keybinds use
   `RegisterHotKey`. `exclusive` keyboard interactivity falls back to focused
@@ -99,7 +103,8 @@ Win32-validated VT protocol coverage is tracked in
   gated by `desktop-notifications`. Command-finish toasts also need
   `notify-on-command-finish` and a `notify` action, and are the only toasts
   that focus the originating pane when clicked; OSC 9 / OSC 777 toasts are
-  display-only.
+  display-only. Command-finish toasts depend on OSC 133 command marks, which
+  `cmd.exe` does not supply.
 - Taskbar progress for the active pane in each host window, driven by
   terminal progress reports when `progress-style` is enabled.
 - Session restore via `window-save-state`: windows, tabs, splits, profiles,
@@ -112,6 +117,8 @@ Win32-validated VT protocol coverage is tracked in
 - Ctrl-based default keybindings, mostly shared with Ghostty's non-macOS
   defaults. Windows-specific exceptions include `Alt+Arrow` pane focus and
   `Alt+F4` to close the window.
+- `key-remap` applies to focused and in-app keybinds and to terminal
+  encoding, but not to `global:` hotkeys, which register the literal chord.
 - Native settings window (Appearance, Terminal, Shell, Privacy, Updates,
   Keybindings, Advanced) that stages edits until Save and patches your
   config without rewriting unrelated text.

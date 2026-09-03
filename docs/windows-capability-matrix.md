@@ -24,9 +24,12 @@ Last reviewed: 2026-09-02.
 | [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; defaults are the shared non-macOS set with Windows-specific exceptions.                                                                                  |
 | [Color Theme](https://ghostty.org/docs/features/theme)                                                             | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows.                                                                                                                             |
 | [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference)                                   | Transparent terminal backgrounds work on Windows and can be toggled live.                                                                                                                                                   |
-| [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC surface; child-to-terminal delivery also depends on the selected ConPTY. See [ConPTY transport](#conpty-transport).                                          |
+| [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface. Win32-validated coverage: [windows-vt-conformance.md](windows-vt-conformance.md).                                                             |
+| [Kitty keyboard protocol](https://ghostty.org/docs/vt)                                                             | Win32 supplies press, repeat, release, lock, and sided modifier state to the shared encoder. See [keyboard input](#keyboard-input).                                                                                         |
 | [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in noctty.                                                                                                                                                                |
 | [Configuration: `scrollbar`](https://ghostty.org/docs/config/reference)                                            | Per-pane graphical scrollbars honor `system` (Windows dynamic-scrollbar preference) or `never`; search matches appear as markers. See [search and scrollbars](#search-and-scrollbars).                                      |
+| [Configuration: `notify-on-command-finish`](https://ghostty.org/docs/config/reference)                             | Focus policy, duration threshold, and bell/`notify` actions are applied; `notify` also needs `desktop-notifications`. See [notifications and progress](#notifications-and-progress).                                        |
+| [Configuration: `clipboard-codepoint-map`](https://ghostty.org/docs/config/reference)                              | Selection copies apply the map before the clipboard write. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                         |
 | [Configuration: `clipboard-paste-protection`](https://ghostty.org/docs/config/reference)                           | Risky clipboard and dropped-content pastes use a native confirmation. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                              |
 | [Action reference: `copy_to_clipboard:html`](https://ghostty.org/docs/config/keybind/reference)                    | HTML copy writes CF_HTML and a plain-text fallback in one clipboard transaction.                                                                                                                                            |
 | Kitty graphics protocol                                                                                            | Parser and renderer support ship, but child APC delivery depends on ConPTY. The bundled source passed the measured payload byte-exactly; the tested in-box fallback stripped it. See [ConPTY transport](#conpty-transport). |
@@ -44,6 +47,7 @@ Last reviewed: 2026-09-02.
 | [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial: UI Automation covers the daily chrome and terminal text, but caption buttons, overlay rows, and menus are uncovered. Only NVDA has been measured, with mixed results. See [accessibility notes](#accessibility) and the [screen-reader matrix](accessibility-matrix.md). |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                                           |
 | [Configuration: `link-previews`](https://ghostty.org/docs/config/reference)                  | Link matching, highlighting, and opening work, but the Win32 runtime does not render the preview tooltip.                                                                                                                                                                                          |
+| [Configuration: `key-remap`](https://ghostty.org/docs/config/reference)                      | Focused and in-app keybinds plus terminal encoding honor remaps; `global:` hotkeys keep the literal configured chord. See [keyboard input](#keyboard-input).                                                                                                                                       |
 
 ## Windows-Specific
 
@@ -98,6 +102,23 @@ that:
   does not auto-install remote terminfo; uncached hosts use
   `xterm-256color`.
 - `cmd.exe` remains a plain fallback shell without automatic integration.
+
+### Keyboard input
+
+The Win32 path supplies press, repeat, and release events to the shared Kitty
+encoder, with Caps Lock, Num Lock, and left/right modifier state on every
+physical event. While a client has Kitty `report_all` enabled, ordinary keys
+carry their text on the physical event instead of the `WM_CHAR` commit, so
+press and release keep one identity; AltGr chords ride the same path with the
+synthetic Ctrl+Alt collapsed, a dead key stays composing until its composed
+character arrives, and a dead key that cannot combine delivers both
+characters. IME commits remain text without a physical key. These paths have
+unit coverage but have not been exercised on a real non-US keyboard.
+
+`key-remap` changes modifier state before focused or in-app keybind matching
+and terminal encoding; it does not change physical key identity. `global:`
+bindings register the literal configured chord through `RegisterHotKey`, so
+remaps do not retarget system-wide hotkeys.
 
 ### Accessibility
 
@@ -171,6 +192,9 @@ a `notify-on-command-finish-action` that includes `notify`; they are the only
 toasts that carry a launch argument, so only they focus the originating pane
 when clicked. OSC 9 / OSC 777 toasts are display-only. Reliable cold-start
 activation depends on the installed Start menu shortcut.
+`notify-on-command-finish-after` and the focus policy are applied before the
+bell or toast; command marks come from shell integration or OSC 133, which
+`cmd.exe` does not supply.
 
 With `progress-style = true`, terminal progress reports map to normal, paused,
 error, or indeterminate taskbar states for the active pane in each host. If
@@ -180,8 +204,8 @@ the taskbar COM interface fails, noctty disables the native indicator.
 
 `Ctrl+Shift+F` opens search for the focused pane. Search state and controls
 are per pane; results can mark the graphical scrollbar. `scrollbar = system`
-respects Windows' dynamic-scrollbar preference; `never` removes only the
-visual widget.
+respects Windows' dynamic-scrollbar preference and stays visible in High
+Contrast; `never` removes only the visual widget.
 
 ### Clipboard and drag-drop
 
@@ -190,6 +214,10 @@ pastes and the stricter dropped-payload classifier. CF_HTML copies also place
 a plain-text fallback on the clipboard. Dropped files, text, URLs, and HTML
 are converted to terminal input. Shift changes file/text handling, Ctrl
 suppresses file-path quoting, and Alt is reserved.
+
+`clipboard-codepoint-map` is applied by the shared selection formatter before
+plain, VT, or HTML bytes reach the clipboard. Clipboard reads, URL copies,
+OSC 52 writes, and `write_screen_file` exports are not mapped.
 
 ### Child-process limits
 

@@ -13095,8 +13095,12 @@ const Host = struct {
         lParam: LPARAM,
     ) bool {
         if (self.activeSurface() != null) return false;
-        const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
-        return self.app.core_app.keyEvent(self.app, message.event);
+        var message = keyEventFromWin32Message(msg, wParam, lParam, true) orelse return false;
+        message.bindText();
+        // `App.keyEvent` does not apply `key-remap` itself; only
+        // `Surface.keyCallback` does, and there is no surface here.
+        const event = remapWin32KeyEvent(message.event, &self.app.config.@"key-remap");
+        return self.app.core_app.keyEvent(self.app, event);
     }
 
     fn prepareActiveTabVisibility(self: *Host, active_index: usize) void {
@@ -13519,13 +13523,13 @@ const Host = struct {
         lParam: LPARAM,
     ) bool {
         if (self.overlay_mode != .command_palette) return false;
-        const event = (keyEventFromWin32Message(msg, wParam, lParam) orelse return false).event;
-        const entry = self.app.config.keybind.set.getEvent(event) orelse return false;
-        const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
-            .leader => return false,
-            inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
-        };
-        return bindingActionsToggleCommandPalette(actions);
+        var message = keyEventFromWin32Message(msg, wParam, lParam, true) orelse return false;
+        message.bindText();
+        return keyEventTogglesCommandPalette(
+            message.event,
+            &self.app.config.keybind.set,
+            &self.app.config.@"key-remap",
+        );
     }
 
     fn reloadProfiles(self: *Host) !bool {
@@ -21999,6 +22003,8 @@ const windowTitleSyncChanged = labels.windowTitleSyncChanged;
 const scrollStatusTextChanged = labels.scrollStatusTextChanged;
 
 const bindingActionsToggleCommandPalette = labels.bindingActionsToggleCommandPalette;
+const remapWin32KeyEvent = labels.remapWin32KeyEvent;
+const keyEventTogglesCommandPalette = labels.keyEventTogglesCommandPalette;
 
 const profileShortcutIndexFromKey = labels.profileShortcutIndexFromKey;
 
@@ -29348,7 +29354,24 @@ pub const Surface = struct {
     fn handleKeyMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
 
-        const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
+        // Under Kitty `report_all` the text must ride on the physical key
+        // event so press and release keep one identity; see
+        // `win32_input.deferPlainTextToCharMessage`.
+        const kitty_report_all = kitty_report_all: {
+            self.core_surface.renderer_state.mutex.lock();
+            defer self.core_surface.renderer_state.mutex.unlock();
+            break :kitty_report_all self.core_surface.renderer_state.terminal.screens.active.kitty_keyboard.current().report_all;
+        };
+        var message = keyEventFromWin32Message(
+            msg,
+            wParam,
+            lParam,
+            win32_input.deferPlainTextToCharMessage(kitty_report_all, self.ime_composing),
+        ) orelse return;
+        // `message` lives for the rest of this function, which covers every
+        // read of `event.utf8` below including the post-`keyCallback`
+        // accessibility notification.
+        message.bindText();
         const event = message.event;
 
         const effect = self.core_surface.keyCallback(event) catch |err| {
