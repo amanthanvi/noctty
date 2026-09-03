@@ -679,7 +679,10 @@
         "display_width_px": { "type": "integer", "minimum": 1 },
         "display_height_px": { "type": "integer", "minimum": 1 },
         "display_refresh_hz": { "type": "number", "exclusiveMinimum": 0 },
-        "display_dpi_scale_percent": { "type": "number", "exclusiveMinimum": 0 },
+        "display_dpi_scale_percent": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "power_state": { "type": "string", "minLength": 1 },
         "font_family": { "type": "string", "minLength": 1 },
         "font_size_pt": { "type": "number", "exclusiveMinimum": 0 },
@@ -1272,7 +1275,13 @@
         },
         "wgl_selection_source": {
           "type": ["string", "null"],
-          "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb", null]
+          "enum": [
+            "classic",
+            "ext_srgb",
+            "arb_ext_colorspace_srgb",
+            "arb_srgb",
+            null
+          ]
         },
         "wgl_srgb_capable": { "type": ["boolean", "null"] },
         "wgl_multisample_query_supported": { "type": ["boolean", "null"] },
@@ -1357,7 +1366,12 @@
               },
               "wgl_selection_source": {
                 "type": "string",
-                "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb", "arb_srgb"]
+                "enum": [
+                  "classic",
+                  "ext_srgb",
+                  "arb_ext_colorspace_srgb",
+                  "arb_srgb"
+                ]
               },
               "wgl_srgb_capable": { "type": "boolean" },
               "wgl_multisample_query_supported": { "type": "boolean" }
@@ -1470,6 +1484,12 @@
         "surface_focus_change_count",
         "surface_focused_before",
         "surface_focused_after",
+        "thread_start_wakeup_count",
+        "core_surface_wakeup_count",
+        "mailbox_wakeup_count",
+        "io_output_wakeup_count",
+        "inspector_wakeup_count",
+        "unattributed_wakeup_count",
         "cursor_timer_wakeup_count",
         "renderer_repaint_retry_wakeup_count",
         "resize_settle_wakeup_count",
@@ -1499,6 +1519,12 @@
         "surface_focus_change_count": { "type": "number", "minimum": 0 },
         "surface_focused_before": { "type": "boolean" },
         "surface_focused_after": { "type": "boolean" },
+        "thread_start_wakeup_count": { "type": "number", "minimum": 0 },
+        "core_surface_wakeup_count": { "type": "number", "minimum": 0 },
+        "mailbox_wakeup_count": { "type": "number", "minimum": 0 },
+        "io_output_wakeup_count": { "type": "number", "minimum": 0 },
+        "inspector_wakeup_count": { "type": "number", "minimum": 0 },
+        "unattributed_wakeup_count": { "type": "number", "minimum": 0 },
         "cursor_timer_wakeup_count": { "type": "number", "minimum": 0 },
         "renderer_repaint_retry_wakeup_count": {
           "type": "number",
