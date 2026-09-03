@@ -1850,7 +1850,7 @@ fn searchCallback_(
 /// The renderer state mutex MUST NOT be held.
 fn modsChanged(self: *Surface, mods: input.Mods) void {
     // The only place we keep track of mods currently is on the mouse.
-    if (!self.mouse.mods.equal(mods)) {
+    if (mouseModsChanged(self.mouse.mods, mods)) {
         // The mouse mods only contain binding modifiers since we don't
         // want caps/num lock or sided modifiers to affect the mouse.
         self.mouse.mods = mods.binding();
@@ -1875,6 +1875,20 @@ fn modsChanged(self: *Surface, mods: input.Mods) void {
             log.warn("failed to notify renderer of mods change err={}", .{err});
         };
     }
+}
+
+/// Whether a mods update changes anything the mouse actually tracks.
+///
+/// `current` is always a `binding()` value, so `incoming` has to be reduced
+/// the same way before the two are compared. Comparing the raw value made
+/// this always report a change whenever a lock key was on — Num Lock is on by
+/// default on most Windows keyboards — so every `WM_MOUSEMOVE` marked the
+/// whole screen dirty and presented a frame identical to the one already on
+/// screen. That is the unexplained idle repaint in #134: Windows delivers
+/// mouse moves for foreground and z-order changes under a stationary cursor,
+/// not only for real motion.
+fn mouseModsChanged(current: input.Mods, incoming: input.Mods) bool {
+    return !current.equal(incoming.binding());
 }
 
 /// Call this whenever the mouse moves or mods changed. The time
@@ -7833,4 +7847,27 @@ test "Surface: rectangle selection logic" {
         9, 2, // expected end
         true, //rectangle selection
     );
+}
+
+test "Surface: lock keys alone do not count as a mouse mods change" {
+    // `Surface.mouse.mods` is stored as a binding()-reduced value, so an
+    // incoming event that only differs in a lock key or a modifier side must
+    // not repaint. Regression test for #134: this branch used to be taken on
+    // every mouse move on any machine with Num Lock on.
+    const stored: input.Mods = (input.Mods{ .ctrl = true }).binding();
+
+    try std.testing.expect(!mouseModsChanged(stored, .{ .ctrl = true }));
+    try std.testing.expect(!mouseModsChanged(stored, .{ .ctrl = true, .num_lock = true }));
+    try std.testing.expect(!mouseModsChanged(stored, .{ .ctrl = true, .caps_lock = true }));
+    try std.testing.expect(!mouseModsChanged(stored, .{
+        .ctrl = true,
+        .num_lock = true,
+        .caps_lock = true,
+        .sides = .{ .ctrl = .right },
+    }));
+
+    // A real binding modifier change still repaints.
+    try std.testing.expect(mouseModsChanged(stored, .{}));
+    try std.testing.expect(mouseModsChanged(stored, .{ .ctrl = true, .shift = true }));
+    try std.testing.expect(mouseModsChanged(.{}, .{ .super = true, .num_lock = true }));
 }

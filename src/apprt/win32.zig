@@ -26589,6 +26589,15 @@ pub const Surface = struct {
         self.render_trace.noteRendererDrawRequest();
     }
 
+    /// `Surface.queueRender` looks for this declaration. Without it the
+    /// `@hasDecl` guard was comptime-false and
+    /// `renderer_core_wakeup_notify_count` could only ever report zero.
+    /// Compared against `core_surface_wakeup_count` it also shows how many
+    /// core notifies the wake primitive coalesced away.
+    pub fn noteRendererCoreWakeupNotify(self: *Surface) void {
+        self.render_trace.noteRendererCoreWakeupNotify();
+    }
+
     pub fn noteRendererWakeupCallback(self: *Surface, wake_sources: u32) void {
         self.render_trace.noteRendererWakeupCallback(wake_sources);
     }
@@ -29338,6 +29347,10 @@ pub const Surface = struct {
 
     fn focusChanged(self: *Surface, focused: bool) void {
         self.window_focused = focused;
+        // The idle benchmark invalidates a sample when focus moves during
+        // the measurement. That guard was reading a counter nothing ever
+        // incremented, so it could never fire.
+        self.render_trace.noteSurfaceFocusChanged(focused);
         const focus_state_changed = if (focused) self.app.noteSurfaceFocused(self) else false;
         if (!self.core_initialized) return;
         if (focused) self.app.core_app.focusSurface(self.core());
