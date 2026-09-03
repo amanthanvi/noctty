@@ -17,6 +17,8 @@
 //!   zig test src/_t.zig && rm src/_t.zig
 
 const std = @import("std");
+const build_config = @import("../build_config.zig");
+const internal_os = @import("../os/main.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.win32_powershell_install);
 
@@ -38,31 +40,34 @@ pub const integration_script_sha256: [32]u8 = blk: {
 
 // ── Path resolution ─────────────────────────────────────────────────
 
-/// Resolve the install path under `%LOCALAPPDATA%`. Creates
-/// intermediate directories if missing. Returned path owned by `alloc`.
+/// Resolve the install path under the portable root or `%LOCALAPPDATA%`.
+/// Creates intermediate directories if missing. Returned path owned by `alloc`.
 pub fn resolveInstallPath(alloc: Allocator) ![]u8 {
-    const local_app_data = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return error.EnvironmentVariableNotFound,
-        else => return err,
-    };
-    defer alloc.free(local_app_data);
-
-    const sub = "noctty" ++ std.fs.path.sep_str ++
-        "shell-integration" ++ std.fs.path.sep_str ++ "powershell";
-
-    const dir_path = try std.fs.path.join(alloc, &.{ local_app_data, sub });
-    defer alloc.free(dir_path);
-
-    std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => {
-            var dir = try std.fs.openDirAbsolute(local_app_data, .{});
-            defer dir.close();
-            try dir.makePath(sub);
-        },
-    };
-
-    return std.fs.path.join(alloc, &.{ dir_path, "integration.ps1" });
+    const portable_root = try internal_os.xdg.portableRoot(alloc);
+    const base = portable_root orelse
+        (std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => known: {
+                var buf: [std.fs.max_path_bytes]u8 = undefined;
+                const path = try internal_os.windows.knownFolderPathUtf8(
+                    &internal_os.windows.FOLDERID_LocalAppData,
+                    &buf,
+                );
+                break :known try alloc.dupe(u8, path orelse return error.EnvironmentVariableNotFound);
+            },
+            else => return err,
+        });
+    defer alloc.free(base);
+    const path = try std.fs.path.join(alloc, &.{
+        base,
+        if (portable_root != null) "" else build_config.data_dir_name,
+        "shell-integration",
+        "powershell",
+        "integration.ps1",
+    });
+    errdefer alloc.free(path);
+    const dir_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
+    try std.fs.cwd().makePath(dir_path);
+    return path;
 }
 
 // ── Install gate ────────────────────────────────────────────────────

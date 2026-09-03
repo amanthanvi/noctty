@@ -196,6 +196,14 @@ fn themeSurface(theme: *const ThemeColors, surface: ThemeSurface) u32 {
 }
 
 const log = std.log.scoped(.win32);
+
+pub fn maybeRunPortableUpdateHelper(alloc: Allocator) !?u8 {
+    return updatepkg.maybeRunPortableUpdateHelper(alloc);
+}
+
+pub fn preflightPortableUpdateStartup(alloc: Allocator) !bool {
+    return updatepkg.preflightPortableUpdateStartup(alloc, build_config.version_string);
+}
 const windows = std.os.windows;
 
 pub const resourcesDir = internal_os.resourcesDir;
@@ -2598,6 +2606,7 @@ const UpdateCheckRequest = struct {
     ignored_feed_source: ?updatepkg.FeedSource,
     respect_dismissal: bool,
     download: bool,
+    staged_kind: updatepkg.portable_apply.StagedKind,
 
     fn deinit(self: *UpdateCheckRequest) void {
         self.alloc.free(self.state_path);
@@ -2974,12 +2983,64 @@ test "win32 settings save rejects files above the read cap" {
     try std.testing.expectError(error.SerializeFailed, settingsFileSize(16 * 1024 * 1024 + 1));
 }
 
+/// One answer to "is this a portable install?" for the call sites that only
+/// need the yes/no, with one error policy: a failed probe is not portable.
+/// Every consumer treats portable as the branch that unlocks portable-only
+/// behavior, so failing to `.installer` keeps those paths closed and lets the
+/// staged-kind check refuse rather than guess.
+///
+/// `localAppDataPathAlloc` and `warnPortableIgnoredLocalData` still call
+/// `portableRoot` directly: they need the root path itself, not the answer.
+fn isPortableModeActive(alloc: Allocator) bool {
+    const root = internal_os.xdg.portableRoot(alloc) catch |err| {
+        log.warn("failed to probe portable mode; treating as non-portable err={}", .{err});
+        return false;
+    } orelse return false;
+    alloc.free(root);
+    return true;
+}
+
 fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
-    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return null;
+    if (internal_os.xdg.portableRoot(alloc) catch null) |root| {
+        defer alloc.free(root);
+        return std.fs.path.join(alloc, &.{ root, name }) catch null;
+    }
+
+    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch known: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = internal_os.windows.knownFolderPathUtf8(
+            &internal_os.windows.FOLDERID_LocalAppData,
+            &buf,
+        ) catch return null;
+        break :known alloc.dupe(u8, path orelse return null) catch return null;
+    };
     defer alloc.free(local);
-    const dir = std.fs.path.join(alloc, &.{ local, "noctty" }) catch return null;
-    defer alloc.free(dir);
-    return std.fs.path.join(alloc, &.{ dir, name }) catch null;
+    return std.fs.path.join(alloc, &.{ local, build_config.data_dir_name, name }) catch null;
+}
+
+fn warnPortableIgnoredLocalData(alloc: Allocator) void {
+    const portable_root = (internal_os.xdg.portableRoot(alloc) catch return) orelse return;
+    defer alloc.free(portable_root);
+    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch known: {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = internal_os.windows.knownFolderPathUtf8(
+            &internal_os.windows.FOLDERID_LocalAppData,
+            &buf,
+        ) catch return;
+        break :known alloc.dupe(u8, path orelse return) catch return;
+    };
+    defer alloc.free(local);
+    const ignored_path = std.fs.path.join(alloc, &.{ local, build_config.data_dir_name }) catch return;
+    defer alloc.free(ignored_path);
+    if (std.ascii.eqlIgnoreCase(portable_root, ignored_path)) return;
+    var ignored_dir = std.fs.openDirAbsolute(ignored_path, .{ .iterate = true }) catch return;
+    defer ignored_dir.close();
+    var iter = ignored_dir.iterate();
+    if ((iter.next() catch return) == null) return;
+    log.warn(
+        "portable mode active root={s}; existing data under {s} is not being used",
+        .{ portable_root, ignored_path },
+    );
 }
 
 fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
@@ -3444,6 +3505,7 @@ pub const App = struct {
     update_check_running: std.atomic.Value(bool) = .init(false),
     update_notice: ?UpdateNotice = null,
     update_auto_check_started: bool = false,
+    update_startup_ready: bool = false,
     /// Most-recently-used command palette actions; newest first. Strings
     /// are owned by `core_app.alloc` and freed in `App.deinit`. Surfaced
     /// by `commandPaletteBannerText` when the query is empty so users
@@ -3597,6 +3659,7 @@ pub const App = struct {
                 .{},
             );
         }
+        warnPortableIgnoredLocalData(core_app.alloc);
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
@@ -3879,6 +3942,35 @@ pub const App = struct {
             };
         }
         if (!self.embedding_mode and self.windows.items.len == 0) self.startQuitTimer();
+
+        // Initial window creation must not start a check until the swapped
+        // build is healthy and authoritative. Later windows retain the usual
+        // scheduling path through update_startup_ready.
+        //
+        // Updater bookkeeping must not be able to stop the terminal from
+        // opening. Every failure here is about the state file, the stage
+        // directory, or a lock — none of it says the running build is
+        // unusable, and returning would exit before the message loop with no
+        // window ever shown. Log it and continue; staging and apply both
+        // re-check the transaction phase and fail closed on their own.
+        updatepkg.confirmPortableUpdateStartup(
+            self.core_app.alloc,
+            build_config.version_string,
+        ) catch |err| {
+            log.warn("portable update startup confirmation failed err={}", .{err});
+        };
+        self.update_startup_ready = true;
+        if (self.windows.items.len > 0) self.maybeScheduleAutomaticUpdateCheck();
+        const portable_failure = updatepkg.takePortableUpdateFailure(self.core_app.alloc) catch |err| failure: {
+            log.warn("failed to read portable update failure err={}", .{err});
+            break :failure null;
+        };
+        if (portable_failure) |message| {
+            defer self.core_app.alloc.free(message);
+            self.showUpdateInfo(message) catch |err| {
+                log.warn("failed to surface portable update failure err={}", .{err});
+            };
+        }
 
         // Guarantee the loop reaches at least one tick. Resolving this launch
         // in the ledger and releasing the safe-mode notice both hang off
@@ -5605,6 +5697,8 @@ pub const App = struct {
         );
         const release_feed_url = resolved_feed.url;
         errdefer self.core_app.alloc.free(release_feed_url);
+        const staged_kind: updatepkg.portable_apply.StagedKind =
+            if (isPortableModeActive(self.core_app.alloc)) .portable else .installer;
 
         request.* = .{
             .alloc = self.core_app.alloc,
@@ -5618,6 +5712,7 @@ pub const App = struct {
             .ignored_feed_source = resolved_feed.ignored_non_https,
             .respect_dismissal = opts.respect_dismissal,
             .download = self.config.@"auto-update" == .download,
+            .staged_kind = staged_kind,
         };
 
         const thread = try std.Thread.spawn(.{}, updateCheckThreadMain, .{request});
@@ -5680,6 +5775,10 @@ pub const App = struct {
         const notice = self.update_notice orelse return;
         if (notice.staged) {
             if (!self.canApplyStagedUpdate()) {
+                if (isPortableModeActive(self.core_app.alloc)) {
+                    try self.showUpdateInfo(updateApplyFailureMessage(error.NoStagedPortableInstall));
+                    return;
+                }
                 if (notice.release_url) |url| {
                     try self.openUrl(url);
                     return;
@@ -5729,10 +5828,14 @@ pub const App = struct {
         );
         defer self.core_app.alloc.free(release_feed_url);
 
+        const expected_kind: updatepkg.portable_apply.StagedKind =
+            if (isPortableModeActive(self.core_app.alloc)) .portable else .installer;
+
         var staged = updatepkg.verifyStagedWindowsInstall(
             self.core_app.alloc,
             state_path,
             release_feed_url,
+            expected_kind,
         ) catch |err| {
             self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
                 log.warn("failed to show updater apply failure err={}", .{banner_err});
@@ -5749,14 +5852,28 @@ pub const App = struct {
         };
         defer self.core_app.alloc.free(install_dir);
 
-        if (!isInstallerManagedInstallDir(install_dir)) {
-            self.showUpdateInfo(updateApplyFailureMessage(error.PortableInstallUpdateApplyUnsupported)) catch |banner_err| {
-                log.warn("failed to show updater apply failure err={}", .{banner_err});
+        if (staged.kind == .portable) {
+            updatepkg.recordPortableApplyPending(self.core_app.alloc, state_path, 0) catch |err| {
+                self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
+                    log.warn("failed to show updater apply failure err={}", .{banner_err});
+                };
+                return err;
             };
-            return error.PortableInstallUpdateApplyUnsupported;
+            self.stopQuitTimer();
+            self.running = false;
+            self.destroyAllWindows();
+            if (self.windows.items.len == 0) sys.PostQuitMessage(0);
+            return;
         }
 
-        const stage_dir = std.fs.path.dirname(staged.installer_path) orelse return error.InvalidStagedInstallerPath;
+        if (!internal_os.windows.isInstallerManagedInstallDir(install_dir)) {
+            self.showUpdateInfo(updateApplyFailureMessage(error.InvalidInstallPath)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return error.InvalidInstallPath;
+        }
+
+        const stage_dir = std.fs.path.dirname(staged.artifact_path) orelse return error.InvalidStagedInstallerPath;
         const logs_dir = try std.fs.path.join(self.core_app.alloc, &.{ stage_dir, "logs" });
         defer self.core_app.alloc.free(logs_dir);
         try std.fs.cwd().makePath(logs_dir);
@@ -5767,7 +5884,7 @@ pub const App = struct {
         const params = try buildInstallerApplyArgs(self.core_app.alloc, install_dir, log_path);
         defer self.core_app.alloc.free(params);
 
-        const installer_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, staged.installer_path);
+        const installer_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, staged.artifact_path);
         defer self.core_app.alloc.free(installer_w);
         const params_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, params);
         defer self.core_app.alloc.free(params_w);
@@ -5800,9 +5917,15 @@ pub const App = struct {
     }
 
     fn canApplyStagedUpdate(self: *App) bool {
+        const state_path = updatepkg.defaultStatePath(self.core_app.alloc) catch return false;
+        defer self.core_app.alloc.free(state_path);
+        if (isPortableModeActive(self.core_app.alloc)) {
+            return updatepkg.hasStagedWindowsInstall(self.core_app.alloc, state_path, .portable);
+        }
         const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
         defer self.core_app.alloc.free(install_dir);
-        return isInstallerManagedInstallDir(install_dir);
+        return internal_os.windows.isInstallerManagedInstallDir(install_dir) and
+            updatepkg.hasStagedWindowsInstall(self.core_app.alloc, state_path, .installer);
     }
 
     fn showUpdateInfo(self: *App, message: []const u8) !void {
@@ -9971,6 +10094,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
                         request.state_path,
                         request.release_feed_url,
                         &release,
+                        request.staged_kind,
                     ) catch |err| {
                         log.warn("failed to stage verified updater download err={}", .{err});
                         if (request.manual) {
@@ -10052,12 +10176,27 @@ fn appendConfiguredFeedIgnoredNote(
 fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
     const detail = switch (err) {
         error.WindowsInstallNotEligible => "the release is missing a Windows installer or SHA256SUMS.txt",
-        error.InstallerChecksumMissing => "SHA256SUMS.txt does not include the Windows installer",
+        error.PortableInstallNotEligible => "the release is missing the portable ZIP",
+        error.PortablePayloadManifestUnavailable => "the release is missing the signed portable payload manifest; use the release page",
+        error.InvalidPortablePayloadManifest => "the signed portable payload manifest is invalid",
+        error.PortablePayloadManifestEntryMissing,
+        error.PortablePayloadManifestEntryDuplicate,
+        error.PortablePayloadManifestFileSetMismatch,
+        => "the signed portable payload manifest does not cover exactly the extracted files",
+        error.PortablePayloadManifestMismatch => "a portable payload file did not match the signed manifest",
+        error.PortableUpdateTransactionActive => "another portable apply or rollback transaction is active",
+        error.InstallerChecksumMissing => "SHA256SUMS.txt does not include the selected Windows asset",
         error.InvalidChecksum => "SHA256SUMS.txt contains an invalid checksum",
-        error.InstallerChecksumMismatch => "the downloaded installer did not match SHA256SUMS.txt",
-        error.InvalidAuthenticodeSignature => "the installer Authenticode signature could not be trusted",
         error.InstallerVersionInfoUnavailable => "the installer VersionInfo block was missing or unreadable",
         error.InstallerVersionOlderThanRelease => "the installer version was older than the release feed version",
+        error.InstallerChecksumMismatch => "the downloaded Windows asset did not match SHA256SUMS.txt",
+        error.InvalidAuthenticodeSignature => "an executable Authenticode signature could not be trusted",
+        error.UnsafePortableArchiveEntry => "the portable ZIP contains an unsafe path",
+        error.DuplicatePortableArchiveEntry => "the portable ZIP contains duplicate paths",
+        error.InvalidPortableArchive, error.InvalidPortableArchiveRoot => "the portable ZIP layout is invalid",
+        error.UnsupportedPortableArchive => "the portable ZIP uses an unsupported format",
+        error.PortableArchiveTooLarge => "the portable ZIP exceeds safe extraction limits",
+        error.IncompletePortablePayload => "the portable ZIP payload is incomplete",
         error.AuthenticodeRequiresWindows => "Authenticode verification is only available on Windows",
         error.SignatureVerifierUnavailable => "Windows signature verification is unavailable",
         error.InvalidStatePath => "the updater state directory could not be resolved",
@@ -10089,13 +10228,21 @@ fn updateApplyFailureMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.NoStagedWindowsInstall => "No verified staged update is available. Run Check for Updates again.",
         error.StagedInstallFeedMismatch => "The staged update came from a different update feed. Run Check for Updates again.",
+        error.NoStagedPortableInstall => "No verified staged portable ZIP is available. Run Check for Updates again.",
         error.InvalidStagedInstallerPath => "The staged update path is invalid. Run Check for Updates again.",
         error.InvalidInstallPath => "The current install path is invalid. The staged update was not launched.",
         error.InstallerChecksumMismatch => "The staged update no longer matches its verified checksum. Run Check for Updates again.",
         error.InvalidAuthenticodeSignature => "The staged update signature is no longer trusted. Run Check for Updates again.",
+        error.PortablePayloadManifestUnavailable => "The staged portable update has no signed payload manifest. Open its release page to update manually.",
+        error.InvalidPortablePayloadManifest,
+        error.PortablePayloadManifestEntryMissing,
+        error.PortablePayloadManifestEntryDuplicate,
+        error.PortablePayloadManifestFileSetMismatch,
+        error.PortablePayloadManifestMismatch,
+        => "The staged portable payload no longer matches its signed manifest. Open its release page to update manually.",
         error.AuthenticodeRequiresWindows => "The staged update can only be applied on Windows.",
         error.SignatureVerifierUnavailable => "Windows signature verification is unavailable. The staged update was not launched.",
-        error.PortableInstallUpdateApplyUnsupported => "This portable install cannot launch the staged installer automatically. Download and run the installer manually.",
+        error.StagedKindMismatch => "The staged update does not match this install type. Run Check for Updates again.",
         error.UpdateApplyLaunchFailed => "Windows could not launch the staged installer. The update was not applied.",
         else => "The staged update could not be verified. Run Check for Updates again.",
     };
@@ -10106,29 +10253,6 @@ fn currentInstallDir(alloc: Allocator) ![]u8 {
     errdefer alloc.free(exe_path);
     const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidInstallPath;
     return alloc.realloc(exe_path, dir.len);
-}
-
-fn isInstallerManagedInstallDir(install_dir: []const u8) bool {
-    var dir = std.fs.openDirAbsolute(install_dir, .{ .iterate = true }) catch return false;
-    defer dir.close();
-
-    var has_uninstaller_exe = false;
-    var has_uninstaller_dat = false;
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        has_uninstaller_exe = has_uninstaller_exe or isInnoUninstallerFileName(entry.name, ".exe");
-        has_uninstaller_dat = has_uninstaller_dat or isInnoUninstallerFileName(entry.name, ".dat");
-        if (has_uninstaller_exe and has_uninstaller_dat) return true;
-    }
-
-    return false;
-}
-
-fn isInnoUninstallerFileName(name: []const u8, extension: []const u8) bool {
-    return std.ascii.startsWithIgnoreCase(name, "unins") and
-        name.len > "unins".len + extension.len and
-        std.ascii.eqlIgnoreCase(name[name.len - extension.len ..], extension);
 }
 
 fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: []const u8) ![]u8 {
@@ -25933,7 +26057,7 @@ pub const Surface = struct {
             } else {
                 self.presentWindow();
             }
-            app.maybeScheduleAutomaticUpdateCheck();
+            if (app.update_startup_ready) app.maybeScheduleAutomaticUpdateCheck();
             try self.requestRepaint();
         }
 
@@ -38913,13 +39037,6 @@ test "win32 installer apply args double embedded quotes" {
     defer alloc.free(args);
 
     try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\wing\"\"hostty\"") != null);
-}
-
-test "win32 installer apply guard recognizes Inno uninstaller markers" {
-    try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
-    try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
-    try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
-    try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
 }
 
 test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {

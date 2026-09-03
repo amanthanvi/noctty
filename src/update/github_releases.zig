@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
+pub const portable_apply = @import("portable_apply.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -10,14 +11,22 @@ const log = std.log.scoped(.update_github_releases);
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/noctty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/noctty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
+// Microsoft PE/COFF Machine values, mirrored by
+// scripts/windows-architecture.ps1.
+const pe_machine_amd64: u16 = 0x8664;
+const pe_machine_arm64: u16 = 0xaa64;
+// Microsoft PE/COFF places the PE-header file pointer at DOS offset 0x3c.
+const pe_header_pointer_offset: u64 = 0x3c;
 const windows_asset_metadata = switch (builtin.cpu.arch) {
     .aarch64 => .{
         .arch = "arm64",
         .checksums_asset_name = "SHA256SUMS-windows-arm64.txt",
+        .pe_machine = pe_machine_arm64,
     },
     .x86_64 => .{
         .arch = "x64",
         .checksums_asset_name = "SHA256SUMS-windows-x64.txt",
+        .pe_machine = pe_machine_amd64,
     },
     else => @compileError("unsupported Windows architecture for installer assets"),
 };
@@ -43,7 +52,10 @@ pub const State = struct {
     release_url: ?[]u8 = null,
     dismissed_version: ?[]u8 = null,
     staged_version: ?[]u8 = null,
+    staged_kind: ?portable_apply.StagedKind = null,
     staged_installer_path: ?[]u8 = null,
+    staged_portable_path: ?[]u8 = null,
+    staged_payload_path: ?[]u8 = null,
     staged_sha256: ?[]u8 = null,
     /// Feed URL the staged installer came from. State written before this
     /// field existed has no value; that state can only have come from the
@@ -51,6 +63,9 @@ pub const State = struct {
     staged_feed_url: ?[]u8 = null,
     staged_at: i64 = 0,
     apply_requested_at: i64 = 0,
+    portable_apply_phase: ?portable_apply.Phase = null,
+    portable_backup_path: ?[]u8 = null,
+    portable_confirmation_token: ?[]u8 = null,
 
     pub fn stagedFeedUrl(self: *const State) []const u8 {
         return self.staged_feed_url orelse latest_stable_api_url;
@@ -61,12 +76,23 @@ pub const State = struct {
     /// any live update notice for that staged install is now stale.
     pub fn clearStagedInstall(self: *State, alloc: Allocator) bool {
         var cleared = false;
-        inline for (.{ "staged_version", "staged_installer_path", "staged_sha256", "staged_feed_url" }) |field| {
+        inline for (.{
+            "staged_version",
+            "staged_installer_path",
+            "staged_portable_path",
+            "staged_payload_path",
+            "staged_sha256",
+            "staged_feed_url",
+        }) |field| {
             if (@field(self, field)) |value| {
                 alloc.free(value);
                 @field(self, field) = null;
                 cleared = true;
             }
+        }
+        if (self.staged_kind != null) {
+            self.staged_kind = null;
+            cleared = true;
         }
         if (self.staged_at != 0) {
             self.staged_at = 0;
@@ -86,8 +112,12 @@ pub const State = struct {
         if (self.dismissed_version) |value| alloc.free(value);
         if (self.staged_version) |value| alloc.free(value);
         if (self.staged_installer_path) |value| alloc.free(value);
+        if (self.staged_portable_path) |value| alloc.free(value);
+        if (self.staged_payload_path) |value| alloc.free(value);
         if (self.staged_sha256) |value| alloc.free(value);
         if (self.staged_feed_url) |value| alloc.free(value);
+        if (self.portable_backup_path) |value| alloc.free(value);
+        if (self.portable_confirmation_token) |value| alloc.free(value);
         self.* = undefined;
     }
 };
@@ -108,19 +138,29 @@ pub const Release = struct {
 pub const WindowsInstallCandidate = struct {
     installer_name: []u8,
     installer_url: []u8,
+    portable_name: ?[]u8 = null,
+    portable_url: ?[]u8 = null,
+    portable_manifest_name: ?[]u8 = null,
+    portable_manifest_url: ?[]u8 = null,
     checksums_url: []u8,
 
     pub fn deinit(self: *WindowsInstallCandidate, alloc: Allocator) void {
         alloc.free(self.installer_name);
         alloc.free(self.installer_url);
+        if (self.portable_name) |value| alloc.free(value);
+        if (self.portable_url) |value| alloc.free(value);
+        if (self.portable_manifest_name) |value| alloc.free(value);
+        if (self.portable_manifest_url) |value| alloc.free(value);
         alloc.free(self.checksums_url);
         self.* = undefined;
     }
 };
 
 pub const StagedWindowsInstall = struct {
+    kind: portable_apply.StagedKind,
     version_text: []u8,
-    installer_path: []u8,
+    artifact_path: []u8,
+    payload_path: ?[]u8 = null,
     sha256_hex: []u8,
     locked_stage_dir: ?std.fs.File = null,
     locked_file: ?std.fs.File = null,
@@ -129,7 +169,8 @@ pub const StagedWindowsInstall = struct {
         if (self.locked_file) |file| file.close();
         if (self.locked_stage_dir) |file| file.close();
         alloc.free(self.version_text);
-        alloc.free(self.installer_path);
+        alloc.free(self.artifact_path);
+        if (self.payload_path) |value| alloc.free(value);
         alloc.free(self.sha256_hex);
         self.* = undefined;
     }
@@ -247,6 +288,88 @@ pub fn defaultStatePath(alloc: Allocator) ![]u8 {
     });
 }
 
+fn openStateLock(path: []const u8) !std.fs.File {
+    if (std.fs.path.dirname(path)) |dir_path| try std.fs.cwd().makePath(dir_path);
+    var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{path});
+    return std.fs.createFileAbsolute(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+    });
+}
+
+const StagingWorkLock = struct {
+    state_root: std.fs.File,
+    updates_root: std.fs.File,
+    work: std.fs.File,
+
+    fn close(self: *@This()) void {
+        self.work.close();
+        self.updates_root.close();
+        self.state_root.close();
+    }
+};
+
+fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !StagingWorkLock {
+    const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
+    var state_root = try openLockedStageDirectory(state_dir);
+    errdefer state_root.close();
+    if (!try lockedHandleMatchesPath(alloc, state_dir, state_root.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
+    const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
+    defer alloc.free(updates_dir);
+    try std.fs.cwd().makePath(updates_dir);
+    var updates_root = try openLockedStageDirectory(updates_dir);
+    errdefer updates_root.close();
+    if (!try lockedHandleMatchesPath(alloc, updates_dir, updates_root.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
+    const lock_path = try std.fs.path.join(alloc, &.{ updates_dir, "staging-work.lock" });
+    defer alloc.free(lock_path);
+    const work = try std.fs.createFileAbsolute(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+    });
+    return .{ .state_root = state_root, .updates_root = updates_root, .work = work };
+}
+
+fn pruneObsoleteStageDirectories(
+    alloc: Allocator,
+    state_path: []const u8,
+    keep_version: ?[]const u8,
+) !void {
+    const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
+    const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
+    defer alloc.free(updates_dir);
+    var locked_updates = try openLockedStageDirectory(updates_dir);
+    defer locked_updates.close();
+    if (!try lockedHandleMatchesPath(alloc, updates_dir, locked_updates.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
+    var updates = std.fs.openDirAbsolute(updates_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer updates.close();
+
+    var iterator = updates.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .directory) continue;
+        if (keep_version) |keep| {
+            if (windowsPathEqual(entry.name, keep)) continue;
+        }
+        _ = std.SemanticVersion.parse(entry.name) catch continue;
+        {
+            const stage_path = try std.fs.path.join(alloc, &.{ updates_dir, entry.name });
+            defer alloc.free(stage_path);
+            try portable_apply.cleanupUpdatePath(stage_path);
+        }
+    }
+}
+
 pub fn loadState(alloc: Allocator, path: []const u8) !State {
     const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .{},
@@ -306,9 +429,27 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
             else => {},
         }
     }
+    if (root.get("staged_kind")) |value| {
+        switch (value) {
+            .string => |text| state.staged_kind = std.meta.stringToEnum(portable_apply.StagedKind, text),
+            else => {},
+        }
+    }
     if (root.get("staged_installer_path")) |value| {
         switch (value) {
             .string => |text| state.staged_installer_path = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
+    if (root.get("staged_portable_path")) |value| {
+        switch (value) {
+            .string => |text| state.staged_portable_path = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
+    if (root.get("staged_payload_path")) |value| {
+        switch (value) {
+            .string => |text| state.staged_payload_path = try alloc.dupe(u8, text),
             else => {},
         }
     }
@@ -336,7 +477,24 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
             else => {},
         }
     }
-
+    if (root.get("portable_apply_phase")) |value| {
+        switch (value) {
+            .string => |text| state.portable_apply_phase = std.meta.stringToEnum(portable_apply.Phase, text),
+            else => {},
+        }
+    }
+    if (root.get("portable_backup_path")) |value| {
+        switch (value) {
+            .string => |text| state.portable_backup_path = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
+    if (root.get("portable_confirmation_token")) |value| {
+        switch (value) {
+            .string => |text| state.portable_confirmation_token = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
     return state;
 }
 
@@ -345,40 +503,62 @@ pub fn saveState(path: []const u8, state: *const State) !void {
         try std.fs.cwd().makePath(dir_path);
     }
 
-    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
-    defer file.close();
+    var temp_path_buf: [std.fs.max_path_bytes + ".tmp".len]u8 = undefined;
+    const temp_path = try std.fmt.bufPrint(&temp_path_buf, "{s}.tmp", .{path});
+    errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
 
-    var buf: [1024]u8 = undefined;
-    var file_writer = file.writer(&buf);
-    const writer = &file_writer.interface;
+    {
+        const file = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true });
+        defer file.close();
 
-    try writer.writeAll("{\"last_checked_at\":");
-    try writer.print("{d}", .{state.last_checked_at});
-    try writer.writeAll(",\"last_seen_version\":");
-    try writeOptionalJsonString(writer, state.last_seen_version);
-    try writer.writeAll(",\"release_feed_url\":");
-    try writeOptionalJsonString(writer, state.release_feed_url);
-    try writer.writeAll(",\"release_url\":");
-    try writeOptionalJsonString(writer, state.release_url);
-    try writer.writeAll(",\"dismissed_version\":");
-    try writeOptionalJsonString(writer, state.dismissed_version);
-    try writer.writeAll(",\"staged_version\":");
-    try writeOptionalJsonString(writer, state.staged_version);
-    try writer.writeAll(",\"staged_installer_path\":");
-    try writeOptionalJsonString(writer, state.staged_installer_path);
-    try writer.writeAll(",\"staged_sha256\":");
-    try writeOptionalJsonString(writer, state.staged_sha256);
-    try writer.writeAll(",\"staged_feed_url\":");
-    try writeOptionalJsonString(writer, state.staged_feed_url);
-    try writer.writeAll(",\"staged_at\":");
-    try writer.print("{d}", .{state.staged_at});
-    try writer.writeAll(",\"apply_requested_at\":");
-    try writer.print("{d}", .{state.apply_requested_at});
-    try writer.writeAll("}");
-    try writer.flush();
+        var buf: [1024]u8 = undefined;
+        var file_writer = file.writer(&buf);
+        const writer = &file_writer.interface;
+
+        try writer.writeAll("{\"last_checked_at\":");
+        try writer.print("{d}", .{state.last_checked_at});
+        try writer.writeAll(",\"last_seen_version\":");
+        try writeOptionalJsonString(writer, state.last_seen_version);
+        try writer.writeAll(",\"release_feed_url\":");
+        try writeOptionalJsonString(writer, state.release_feed_url);
+        try writer.writeAll(",\"release_url\":");
+        try writeOptionalJsonString(writer, state.release_url);
+        try writer.writeAll(",\"dismissed_version\":");
+        try writeOptionalJsonString(writer, state.dismissed_version);
+        try writer.writeAll(",\"staged_version\":");
+        try writeOptionalJsonString(writer, state.staged_version);
+        try writer.writeAll(",\"staged_kind\":");
+        try writeOptionalEnum(writer, state.staged_kind);
+        try writer.writeAll(",\"staged_installer_path\":");
+        try writeOptionalJsonString(writer, state.staged_installer_path);
+        try writer.writeAll(",\"staged_portable_path\":");
+        try writeOptionalJsonString(writer, state.staged_portable_path);
+        try writer.writeAll(",\"staged_payload_path\":");
+        try writeOptionalJsonString(writer, state.staged_payload_path);
+        try writer.writeAll(",\"staged_sha256\":");
+        try writeOptionalJsonString(writer, state.staged_sha256);
+        try writer.writeAll(",\"staged_feed_url\":");
+        try writeOptionalJsonString(writer, state.staged_feed_url);
+        try writer.writeAll(",\"staged_at\":");
+        try writer.print("{d}", .{state.staged_at});
+        try writer.writeAll(",\"apply_requested_at\":");
+        try writer.print("{d}", .{state.apply_requested_at});
+        try writer.writeAll(",\"portable_apply_phase\":");
+        try writeOptionalEnum(writer, state.portable_apply_phase);
+        try writer.writeAll(",\"portable_backup_path\":");
+        try writeOptionalJsonString(writer, state.portable_backup_path);
+        try writer.writeAll(",\"portable_confirmation_token\":");
+        try writeOptionalJsonString(writer, state.portable_confirmation_token);
+        try writer.writeAll("}");
+        try writer.flush();
+        try file.sync();
+    }
+    try std.fs.renameAbsolute(temp_path, path);
 }
 
 pub fn recordDismissal(alloc: Allocator, path: []const u8, version_text: []const u8) !void {
+    const state_lock = try openStateLock(path);
+    defer state_lock.close();
     var state = try loadState(alloc, path);
     defer state.deinit(alloc);
     if (state.dismissed_version) |value| alloc.free(value);
@@ -387,6 +567,8 @@ pub fn recordDismissal(alloc: Allocator, path: []const u8, version_text: []const
 }
 
 pub fn clearDismissal(alloc: Allocator, path: []const u8) !void {
+    const state_lock = try openStateLock(path);
+    defer state_lock.close();
     var state = try loadState(alloc, path);
     defer state.deinit(alloc);
     if (state.dismissed_version) |value| {
@@ -427,11 +609,19 @@ pub fn checkLatestStableRelease(
     var release = try fetchLatestStableRelease(alloc, options.release_feed_url);
     errdefer release.deinit(alloc);
 
-    state.last_checked_at = now;
-    replaceOptionalOwned(alloc, &state.last_seen_version, try alloc.dupe(u8, release.version_text));
-    replaceOptionalOwned(alloc, &state.release_feed_url, try alloc.dupe(u8, options.release_feed_url));
-    replaceOptionalOwned(alloc, &state.release_url, try alloc.dupe(u8, release.release_url));
-    try saveState(state_path, &state);
+    {
+        const state_lock = try openStateLock(state_path);
+        defer state_lock.close();
+        var fresh = try loadState(alloc, state_path);
+        errdefer fresh.deinit(alloc);
+        fresh.last_checked_at = now;
+        replaceOptionalOwned(alloc, &fresh.last_seen_version, try alloc.dupe(u8, release.version_text));
+        replaceOptionalOwned(alloc, &fresh.release_feed_url, try alloc.dupe(u8, options.release_feed_url));
+        replaceOptionalOwned(alloc, &fresh.release_url, try alloc.dupe(u8, release.release_url));
+        try saveState(state_path, &fresh);
+        state.deinit(alloc);
+        state = fresh;
+    }
 
     const latest_version = try parseVersionText(release.version_text);
     if (options.current_version.order(latest_version) != .lt) {
@@ -501,37 +691,115 @@ pub fn stageWindowsInstall(
     state_path: []const u8,
     release_feed_url: []const u8,
     release: *const Release,
+    kind: portable_apply.StagedKind,
+) !StagedWindowsInstall {
+    return stageWindowsInstallWithDownloader(
+        alloc,
+        state_path,
+        release_feed_url,
+        release,
+        kind,
+        downloadUrlToFile,
+    );
+}
+
+fn stageWindowsInstallWithDownloader(
+    alloc: Allocator,
+    state_path: []const u8,
+    release_feed_url: []const u8,
+    release: *const Release,
+    kind: portable_apply.StagedKind,
+    comptime download: anytype,
 ) !StagedWindowsInstall {
     const candidate = release.windows_install orelse return error.WindowsInstallNotEligible;
     if (!std.fs.path.isAbsolute(state_path)) return error.InvalidStatePath;
+
+    const asset_name, const asset_url = switch (kind) {
+        .installer => .{ candidate.installer_name, candidate.installer_url },
+        .portable => .{
+            candidate.portable_name orelse return error.PortableInstallNotEligible,
+            candidate.portable_url orelse return error.PortableInstallNotEligible,
+        },
+    };
+    if (kind == .portable and
+        (candidate.portable_manifest_name == null or candidate.portable_manifest_url == null))
+    {
+        return error.PortablePayloadManifestUnavailable;
+    }
+
+    var staging_lock = try openStagingWorkLock(alloc, state_path);
+    defer staging_lock.close();
+    var baseline = try loadState(alloc, state_path);
+    defer baseline.deinit(alloc);
+    if (baseline.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
+    try pruneObsoleteStageDirectories(alloc, state_path, baseline.staged_version);
 
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
     defer alloc.free(stage_dir);
     try std.fs.cwd().makePath(stage_dir);
+    var cleanup_stage_on_error = if (baseline.staged_version) |version|
+        !windowsPathEqual(version, release.version_text)
+    else
+        true;
+    errdefer if (cleanup_stage_on_error) {
+        portable_apply.cleanupUpdatePath(stage_dir) catch |err| {
+            log.warn("failed update stage cleanup failed path={s} err={}", .{ stage_dir, err });
+        };
+    };
+    var locked_stage_dir = try openLockedStageDirectory(stage_dir);
+    defer locked_stage_dir.close();
+    if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
 
-    const installer_path = try std.fs.path.join(alloc, &.{ stage_dir, candidate.installer_name });
-    errdefer alloc.free(installer_path);
+    const artifact_path = try std.fs.path.join(alloc, &.{ stage_dir, asset_name });
+    errdefer alloc.free(artifact_path);
     const checksums_path = try std.fs.path.join(alloc, &.{ stage_dir, windowsChecksumsAssetName() });
     defer alloc.free(checksums_path);
+    const manifest_path = if (kind == .portable) manifest: {
+        const manifest_name = candidate.portable_manifest_name.?;
+        break :manifest try std.fs.path.join(alloc, &.{ stage_dir, manifest_name });
+    } else null;
+    defer if (manifest_path) |value| alloc.free(value);
 
-    try downloadUrlToFile(alloc, candidate.checksums_url, checksums_path);
-    try downloadUrlToFile(alloc, candidate.installer_url, installer_path);
+    try download(alloc, candidate.checksums_url, checksums_path);
+    if (manifest_path) |path| {
+        try download(alloc, candidate.portable_manifest_url.?, path);
+        try verifyPortablePayloadManifest(path);
+    }
+    try download(alloc, asset_url, artifact_path);
 
     const checksums = try std.fs.cwd().readFileAlloc(alloc, checksums_path, 1024 * 1024);
     defer alloc.free(checksums);
-    const expected_digest = try parseExpectedSha256(checksums, candidate.installer_name);
+    const expected_digest = try parseExpectedSha256(checksums, asset_name);
 
-    const actual_digest = try sha256File(installer_path);
+    const actual_digest = try sha256File(artifact_path);
     if (!std.mem.eql(u8, &expected_digest, &actual_digest)) return error.InstallerChecksumMismatch;
 
-    if (builtin.os.tag == .windows) {
-        try verifyAuthenticodeSignature(installer_path, null);
-    } else {
-        return error.AuthenticodeRequiresWindows;
-    }
+    const payload_path = switch (kind) {
+        .installer => installer: {
+            if (builtin.os.tag == .windows) {
+                try verifyAuthenticodeSignature(artifact_path, null);
+            } else {
+                return error.AuthenticodeRequiresWindows;
+            }
+            break :installer null;
+        },
+        .portable => try extractAndVerifyPortableZip(alloc, artifact_path, stage_dir, manifest_path.?),
+    };
+    errdefer if (payload_path) |value| alloc.free(value);
 
-    const installer_version = try readWindowsFileVersion(alloc, installer_path);
+    // Downgrade guard: a feed can claim any tag while serving an older but
+    // legitimately signed build, so the binary's own version must be at least
+    // the version the feed claimed. For the portable channel the version-bearing
+    // binary is the extracted noctty.exe.
+    const version_check_path = switch (kind) {
+        .installer => try alloc.dupe(u8, artifact_path),
+        .portable => try std.fs.path.join(alloc, &.{ payload_path.?, "noctty.exe" }),
+    };
+    defer alloc.free(version_check_path);
+    const installer_version = try readWindowsFileVersion(alloc, version_check_path);
     const claimed_version = try parseVersionText(release.version_text);
     if (!installerVersionAtLeastClaim(installer_version, claimed_version)) {
         return error.InstallerVersionOlderThanRelease;
@@ -540,21 +808,69 @@ pub fn stageWindowsInstall(
     const sha256_hex = try alloc.dupe(u8, &std.fmt.bytesToHex(actual_digest, .lower));
     errdefer alloc.free(sha256_hex);
 
-    var state = try loadState(alloc, state_path);
-    defer state.deinit(alloc);
-    replaceOptionalOwned(alloc, &state.staged_version, try alloc.dupe(u8, release.version_text));
-    replaceOptionalOwned(alloc, &state.staged_installer_path, try alloc.dupe(u8, installer_path));
-    replaceOptionalOwned(alloc, &state.staged_sha256, try alloc.dupe(u8, sha256_hex));
-    replaceOptionalOwned(alloc, &state.staged_feed_url, try alloc.dupe(u8, release_feed_url));
-    state.staged_at = std.time.timestamp();
-    state.apply_requested_at = 0;
-    try saveState(state_path, &state);
+    {
+        const state_lock = try openStateLock(state_path);
+        defer state_lock.close();
+        var fresh = try loadState(alloc, state_path);
+        defer fresh.deinit(alloc);
+        if (fresh.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
+        if (!stagedTransactionEqual(&baseline, &fresh)) {
+            return error.UpdateStateChangedDuringStaging;
+        }
+
+        replaceOptionalOwned(alloc, &fresh.staged_version, try alloc.dupe(u8, release.version_text));
+        fresh.staged_kind = kind;
+        clearOptionalOwned(alloc, &fresh.staged_installer_path);
+        clearOptionalOwned(alloc, &fresh.staged_portable_path);
+        clearOptionalOwned(alloc, &fresh.staged_payload_path);
+        switch (kind) {
+            .installer => replaceOptionalOwned(alloc, &fresh.staged_installer_path, try alloc.dupe(u8, artifact_path)),
+            .portable => {
+                replaceOptionalOwned(alloc, &fresh.staged_portable_path, try alloc.dupe(u8, artifact_path));
+                replaceOptionalOwned(alloc, &fresh.staged_payload_path, try alloc.dupe(u8, payload_path.?));
+            },
+        }
+        replaceOptionalOwned(alloc, &fresh.staged_sha256, try alloc.dupe(u8, sha256_hex));
+        replaceOptionalOwned(alloc, &fresh.staged_feed_url, try alloc.dupe(u8, release_feed_url));
+        fresh.staged_at = std.time.timestamp();
+        fresh.apply_requested_at = 0;
+        fresh.portable_apply_phase = null;
+        clearOptionalOwned(alloc, &fresh.portable_backup_path);
+        clearOptionalOwned(alloc, &fresh.portable_confirmation_token);
+        try saveState(state_path, &fresh);
+    }
+    cleanup_stage_on_error = false;
 
     return .{
+        .kind = kind,
         .version_text = try alloc.dupe(u8, release.version_text),
-        .installer_path = installer_path,
+        .artifact_path = artifact_path,
+        .payload_path = payload_path,
         .sha256_hex = sha256_hex,
     };
+}
+
+fn stagedTransactionEqual(a: *const State, b: *const State) bool {
+    return optionalStringEqual(a.staged_version, b.staged_version) and
+        a.staged_kind == b.staged_kind and
+        optionalStringEqual(a.staged_installer_path, b.staged_installer_path) and
+        optionalStringEqual(a.staged_portable_path, b.staged_portable_path) and
+        optionalStringEqual(a.staged_payload_path, b.staged_payload_path) and
+        optionalStringEqual(a.staged_sha256, b.staged_sha256) and
+        optionalStringEqual(a.staged_feed_url, b.staged_feed_url) and
+        a.staged_at == b.staged_at and
+        a.apply_requested_at == b.apply_requested_at and
+        a.portable_apply_phase == b.portable_apply_phase and
+        optionalStringEqual(a.portable_backup_path, b.portable_backup_path) and
+        optionalStringEqual(a.portable_confirmation_token, b.portable_confirmation_token);
+}
+
+fn optionalStringEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a) |a_value| {
+        const b_value = b orelse return false;
+        return std.mem.eql(u8, a_value, b_value);
+    }
+    return b == null;
 }
 
 /// `release_feed_url` is the feed in effect right now. A staged installer
@@ -565,6 +881,7 @@ pub fn verifyStagedWindowsInstall(
     alloc: Allocator,
     state_path: []const u8,
     release_feed_url: []const u8,
+    expected_kind: portable_apply.StagedKind,
 ) !StagedWindowsInstall {
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
@@ -574,20 +891,33 @@ pub fn verifyStagedWindowsInstall(
     }
 
     const version_text = state.staged_version orelse return error.NoStagedWindowsInstall;
-    const installer_path = state.staged_installer_path orelse return error.NoStagedWindowsInstall;
+    const kind = state.staged_kind orelse return error.StagedKindMismatch;
+    if (kind != expected_kind) return error.StagedKindMismatch;
+    var portable_layout: ?PortableStageLayout = null;
+    defer if (portable_layout) |*layout| layout.deinit(alloc);
+    if (kind == .portable) {
+        portable_layout = try portableStageLayout(alloc, state_path, &state);
+    }
+    const artifact_path = switch (kind) {
+        .installer => state.staged_installer_path orelse return error.NoStagedWindowsInstall,
+        .portable => portable_layout.?.artifact_path,
+    };
     const sha256_hex = state.staged_sha256 orelse return error.NoStagedWindowsInstall;
-    if (!std.fs.path.isAbsolute(installer_path)) return error.InvalidStagedInstallerPath;
+    if (!std.fs.path.isAbsolute(artifact_path)) return error.InvalidStagedInstallerPath;
 
-    const stage_dir = std.fs.path.dirname(installer_path) orelse return error.InvalidStagedInstallerPath;
+    const stage_dir = switch (kind) {
+        .installer => std.fs.path.dirname(artifact_path) orelse return error.InvalidStagedInstallerPath,
+        .portable => portable_layout.?.stage_dir,
+    };
     var locked_stage_dir = try openLockedStageDirectory(stage_dir);
     errdefer locked_stage_dir.close();
     if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
         return error.InvalidStagedInstallerPath;
     }
 
-    var locked_file = try openLockedInstaller(installer_path);
+    var locked_file = try openLockedInstaller(artifact_path);
     errdefer locked_file.close();
-    if (!try lockedHandleMatchesPath(alloc, installer_path, locked_file.handle)) {
+    if (!try lockedHandleMatchesPath(alloc, artifact_path, locked_file.handle)) {
         return error.InvalidStagedInstallerPath;
     }
 
@@ -595,15 +925,29 @@ pub fn verifyStagedWindowsInstall(
     const actual_digest = try sha256OpenFile(&locked_file);
     if (!std.mem.eql(u8, &expected_digest, &actual_digest)) return error.InstallerChecksumMismatch;
 
-    if (builtin.os.tag == .windows) {
-        try verifyAuthenticodeSignature(installer_path, locked_file.handle);
-    } else {
-        return error.AuthenticodeRequiresWindows;
-    }
+    const payload_path = switch (kind) {
+        .installer => installer: {
+            if (builtin.os.tag == .windows) {
+                try verifyAuthenticodeSignature(artifact_path, locked_file.handle);
+            } else {
+                return error.AuthenticodeRequiresWindows;
+            }
+            break :installer null;
+        },
+        .portable => try extractAndVerifyPortableZip(
+            alloc,
+            artifact_path,
+            stage_dir,
+            portable_layout.?.manifest_path,
+        ),
+    };
+    errdefer if (payload_path) |value| alloc.free(value);
 
     return .{
+        .kind = kind,
         .version_text = try alloc.dupe(u8, version_text),
-        .installer_path = try alloc.dupe(u8, installer_path),
+        .artifact_path = try alloc.dupe(u8, artifact_path),
+        .payload_path = payload_path,
         .sha256_hex = try alloc.dupe(u8, sha256_hex),
         .locked_stage_dir = locked_stage_dir,
         .locked_file = locked_file,
@@ -611,10 +955,13 @@ pub fn verifyStagedWindowsInstall(
 }
 
 pub fn recordStagedApplyRequested(alloc: Allocator, state_path: []const u8, now: i64) !void {
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
 
-    if (state.staged_version == null or
+    if (state.staged_kind != .installer or
+        state.staged_version == null or
         state.staged_installer_path == null or
         state.staged_sha256 == null)
     {
@@ -624,6 +971,849 @@ pub fn recordStagedApplyRequested(alloc: Allocator, state_path: []const u8, now:
     state.apply_requested_at = if (now > 0) now else std.time.timestamp();
     try saveState(state_path, &state);
 }
+
+pub fn hasStagedWindowsInstall(
+    alloc: Allocator,
+    state_path: []const u8,
+    expected_kind: portable_apply.StagedKind,
+) bool {
+    var state = loadState(alloc, state_path) catch return false;
+    defer state.deinit(alloc);
+    if (state.staged_kind != expected_kind or
+        state.staged_version == null or
+        state.staged_sha256 == null) return false;
+    return switch (expected_kind) {
+        .installer => state.staged_installer_path != null,
+        .portable => portable: {
+            if (state.staged_portable_path == null or state.staged_payload_path == null) break :portable false;
+            var layout = portableStageLayout(alloc, state_path, &state) catch break :portable false;
+            defer layout.deinit(alloc);
+            const stat = std.fs.cwd().statFile(layout.manifest_path) catch break :portable false;
+            break :portable stat.kind == .file;
+        },
+    };
+}
+
+const PortableStageLayout = struct {
+    stage_dir: []u8,
+    artifact_path: []u8,
+    payload_path: []u8,
+    manifest_path: []u8,
+    backup_path: []u8,
+    displaced_path: []u8,
+    helper_path: []u8,
+    launch_lock_path: []u8,
+
+    fn deinit(self: *PortableStageLayout, alloc: Allocator) void {
+        alloc.free(self.stage_dir);
+        alloc.free(self.artifact_path);
+        alloc.free(self.payload_path);
+        alloc.free(self.manifest_path);
+        alloc.free(self.backup_path);
+        alloc.free(self.displaced_path);
+        alloc.free(self.helper_path);
+        alloc.free(self.launch_lock_path);
+        self.* = undefined;
+    }
+};
+
+fn portableStageLayout(
+    alloc: Allocator,
+    state_path: []const u8,
+    state: *const State,
+) !PortableStageLayout {
+    if (!std.fs.path.isAbsolute(state_path)) return error.InvalidStatePath;
+    const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
+    const version_text = state.staged_version orelse return error.NoStagedPortableInstall;
+    if (std.mem.indexOfScalar(u8, version_text, '/') != null or
+        std.mem.indexOfScalar(u8, version_text, '\\') != null or
+        std.mem.indexOfScalar(u8, version_text, ':') != null or
+        !std.mem.eql(u8, std.fs.path.basename(version_text), version_text))
+    {
+        return error.InvalidStagedVersion;
+    }
+    _ = parseVersionText(version_text) catch return error.InvalidStagedVersion;
+
+    const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", version_text });
+    errdefer alloc.free(stage_dir);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-{s}-windows-{s}-portable.zip",
+        .{ version_text, windowsInstallerArch() },
+    );
+    defer alloc.free(artifact_name);
+    const artifact_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name });
+    errdefer alloc.free(artifact_path);
+    const payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" });
+    errdefer alloc.free(payload_path);
+    const manifest_name = try portableManifestNameAlloc(alloc, version_text);
+    defer alloc.free(manifest_name);
+    const manifest_path = try std.fs.path.join(alloc, &.{ stage_dir, manifest_name });
+    errdefer alloc.free(manifest_path);
+    const backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" });
+    errdefer alloc.free(backup_path);
+    const displaced_path = try std.fs.path.join(alloc, &.{ stage_dir, "displaced" });
+    errdefer alloc.free(displaced_path);
+    const helper_path = try std.fs.path.join(alloc, &.{ stage_dir, "portable-update-helper.exe" });
+    errdefer alloc.free(helper_path);
+    const launch_lock_path = try std.fs.path.join(alloc, &.{ stage_dir, "portable-update-launch.lock" });
+    errdefer alloc.free(launch_lock_path);
+
+    if (!windowsPathEqual(state.staged_portable_path orelse return error.NoStagedPortableInstall, artifact_path) or
+        !windowsPathEqual(state.staged_payload_path orelse return error.NoStagedPortableInstall, payload_path) or
+        (state.portable_backup_path != null and
+            !windowsPathEqual(state.portable_backup_path.?, backup_path)))
+    {
+        return error.InvalidPortableUpdatePath;
+    }
+
+    return .{
+        .stage_dir = stage_dir,
+        .artifact_path = artifact_path,
+        .payload_path = payload_path,
+        .manifest_path = manifest_path,
+        .backup_path = backup_path,
+        .displaced_path = displaced_path,
+        .helper_path = helper_path,
+        .launch_lock_path = launch_lock_path,
+    };
+}
+
+fn windowsPathEqual(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+fn validatePortableStageDirectory(alloc: Allocator, stage_dir: []const u8) !void {
+    var locked = try openLockedStageDirectory(stage_dir);
+    defer locked.close();
+    if (!try lockedHandleMatchesPath(alloc, stage_dir, locked.handle)) {
+        return error.InvalidPortableUpdatePath;
+    }
+}
+
+fn validatePortableInstallAndStateRoots(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+) !void {
+    if (!std.fs.path.isAbsolute(state_path) or !std.fs.path.isAbsolute(install_root)) {
+        return error.InvalidPortableUpdatePath;
+    }
+    const expected_state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
+    defer alloc.free(expected_state_path);
+    if (!windowsPathEqual(state_path, expected_state_path)) {
+        return error.InvalidPortableUpdatePath;
+    }
+}
+
+pub fn recordPortableApplyPending(alloc: Allocator, state_path: []const u8, now: i64) !void {
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    if (state.staged_kind != .portable or
+        state.staged_version == null or
+        state.staged_portable_path == null or
+        state.staged_payload_path == null or
+        state.staged_sha256 == null)
+    {
+        return error.NoStagedPortableInstall;
+    }
+    if (state.portable_apply_phase != null) return error.InvalidPortableApplyTransition;
+
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
+    try validatePortableStageDirectory(alloc, layout.stage_dir);
+    try portable_apply.cleanupBackup(layout.backup_path);
+    try portable_apply.cleanupUpdatePath(layout.displaced_path);
+    var token_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&token_bytes);
+    const token = try alloc.dupe(u8, &std.fmt.bytesToHex(token_bytes, .lower));
+    var token_owned = true;
+    errdefer if (token_owned) alloc.free(token);
+
+    replaceOptionalOwned(alloc, &state.portable_backup_path, try alloc.dupe(u8, layout.backup_path));
+    replaceOptionalOwned(alloc, &state.portable_confirmation_token, token);
+    token_owned = false;
+    state.portable_apply_phase = .pending;
+    state.apply_requested_at = if (now > 0) now else std.time.timestamp();
+    try saveState(state_path, &state);
+}
+
+const portable_helper_arg = "--noctty-portable-update-helper";
+const portable_confirmation_env = "NOCTTY_PORTABLE_UPDATE_CONFIRM";
+const portable_failure_env = "NOCTTY_PORTABLE_UPDATE_FAILURE";
+const portable_bypass_env = "NOCTTY_PORTABLE_UPDATE_BYPASS";
+
+pub fn maybeRunPortableUpdateHelper(alloc: Allocator) !?u8 {
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
+    if (args.len < 2 or !std.mem.eql(u8, args[1], portable_helper_arg)) return null;
+    if (args.len < 6) return 1;
+
+    const parent_pid = std.fmt.parseInt(u32, args[5], 10) catch return 1;
+    const mode = std.meta.stringToEnum(PortableHelperMode, args[4]) orelse return 1;
+    const original_args = args[6..];
+    var launch_lock = claimPortableHelperLaunchLock(alloc, args[2], args[3], mode) catch |err|
+        return try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
+    defer launch_lock.close();
+    waitForProcessExit(parent_pid, 30_000) catch |err|
+        return try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
+    return runPortableUpdateHelper(alloc, args[2], args[3], mode, original_args) catch |err|
+        try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
+}
+
+pub fn preflightPortableUpdateStartup(
+    alloc: Allocator,
+    running_version: []const u8,
+) !bool {
+    if (builtin.os.tag != .windows) return false;
+    if (std.process.getEnvVarOwned(alloc, portable_bypass_env)) |value| {
+        alloc.free(value);
+        _ = internal_os.unsetenv(portable_bypass_env);
+        return false;
+    } else |_| {}
+    const portable_root = try internal_os.xdg.portableRoot(alloc) orelse return false;
+    defer alloc.free(portable_root);
+    const state_path = try defaultStatePath(alloc);
+    defer alloc.free(state_path);
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    const phase = state.portable_apply_phase orelse return false;
+    const target_version = state.staged_version orelse {
+        if (phase != .pending) return error.NoStagedPortableInstall;
+        _ = abandonPendingPortableApply(alloc, state_path, portable_root) catch false;
+        setPortableFailureEnvironment(alloc, error.NoStagedPortableInstall) catch {};
+        return false;
+    };
+    if (state.staged_kind != .portable) {
+        if (phase != .pending) return error.StagedKindMismatch;
+        _ = abandonPendingPortableApply(alloc, state_path, portable_root) catch false;
+        setPortableFailureEnvironment(alloc, error.StagedKindMismatch) catch {};
+        return false;
+    }
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
+
+    const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch null;
+    defer if (env_token) |value| alloc.free(value);
+    const token_matches = if (state.portable_confirmation_token) |expected|
+        if (env_token) |actual| std.mem.eql(u8, expected, actual) else false
+    else
+        false;
+    const installed_payload_matches = matches: {
+        if (phase != .swapped or !std.mem.eql(u8, running_version, target_version)) {
+            break :matches false;
+        }
+        break :matches installedPortablePayloadMatches(
+            alloc,
+            portable_root,
+            layout.manifest_path,
+        );
+    };
+    const helper_active = active: {
+        var probe = openPortableLaunchLock(layout.launch_lock_path, true) catch |err| switch (err) {
+            error.FileNotFound => break :active false,
+            else => return err,
+        };
+        if (probe) |*lock| {
+            lock.close();
+            break :active false;
+        }
+        break :active true;
+    };
+    if (shouldDeferPortableStartupToHelper(
+        phase,
+        helper_active,
+        token_matches,
+        installed_payload_matches,
+    )) {
+        // The helper still owns the bounded failure window. Concurrent starts
+        // must not clean or roll back its backup while it is watching.
+        return true;
+    }
+
+    const decision = switch (phase) {
+        .pending => try portable_apply.decide(.portable, phase, .next_launch),
+        .swapped => try portable_apply.decide(.portable, phase, .{ .startup = .{
+            .running_version = running_version,
+            .target_version = target_version,
+            .confirmation_token_matches = token_matches,
+            .installed_payload_matches = installed_payload_matches,
+        } }),
+        .confirmed => try portable_apply.decide(.portable, phase, .next_launch),
+        .rollback => try portable_apply.decide(.portable, phase, .next_launch),
+    };
+    return switch (decision) {
+        .continue_for_confirmation => false,
+        .swap => launchPortableHelper(alloc, state_path, portable_root, .swap) catch |err| {
+            _ = abandonPendingPortableApply(alloc, state_path, portable_root) catch false;
+            setPortableFailureEnvironment(alloc, err) catch {};
+            return false;
+        },
+        .rollback => launchPortableHelper(alloc, state_path, portable_root, .rollback),
+        .cleanup => cleanup: {
+            finalizePortableConfirmation(alloc, state_path) catch |err| {
+                log.warn("portable update confirmation cleanup deferred err={}", .{err});
+            };
+            break :cleanup false;
+        },
+        else => error.InvalidPortableApplyTransition,
+    };
+}
+
+fn shouldDeferPortableStartupToHelper(
+    phase: portable_apply.Phase,
+    helper_active: bool,
+    confirmation_token_matches: bool,
+    installed_payload_matches: bool,
+) bool {
+    return helper_active and
+        !(phase == .swapped and
+            (confirmation_token_matches or installed_payload_matches));
+}
+
+pub fn takePortableUpdateFailure(alloc: Allocator) !?[]u8 {
+    const failure = std.process.getEnvVarOwned(alloc, portable_failure_env) catch return null;
+    defer alloc.free(failure);
+    _ = internal_os.unsetenv(portable_failure_env);
+    if (std.mem.eql(u8, failure, @errorName(error.PortableUpdateRecoveryUnavailable))) {
+        const message = try alloc.dupe(
+            u8,
+            "Portable update recovery files are missing. Noctty abandoned automatic rollback and launched the installed build; reinstall or update manually if it does not work correctly.",
+        );
+        return message;
+    }
+    const message = try std.fmt.allocPrint(
+        alloc,
+        "The portable update could not be applied ({s}); the current noctty build is still running. Open the release page to update manually.",
+        .{failure},
+    );
+    return message;
+}
+
+fn setPortableFailureEnvironment(alloc: Allocator, err: anyerror) !void {
+    const value = try alloc.dupeZ(u8, @errorName(err));
+    defer alloc.free(value);
+    if (internal_os.setenv(portable_failure_env, value) < 0) return error.EnvironmentUpdateFailed;
+}
+
+pub fn confirmPortableUpdateStartup(
+    alloc: Allocator,
+    running_version: []const u8,
+) !void {
+    if (builtin.os.tag != .windows) return;
+    const portable_root = try internal_os.xdg.portableRoot(alloc) orelse return;
+    defer alloc.free(portable_root);
+    const state_path = try defaultStatePath(alloc);
+    defer alloc.free(state_path);
+    var baseline = try loadState(alloc, state_path);
+    defer baseline.deinit(alloc);
+    if (baseline.portable_apply_phase != .swapped) return;
+    const target_version = baseline.staged_version orelse return error.NoStagedPortableInstall;
+    var layout = try portableStageLayout(alloc, state_path, &baseline);
+    defer layout.deinit(alloc);
+    const installed_payload_matches = if (std.mem.eql(u8, running_version, target_version))
+        installedPortablePayloadMatches(alloc, portable_root, layout.manifest_path)
+    else
+        false;
+    const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch null;
+    defer if (env_token) |value| alloc.free(value);
+    const token_matches = if (baseline.portable_confirmation_token) |expected|
+        if (env_token) |actual| std.mem.eql(u8, actual, expected) else false
+    else
+        false;
+    const decision = try portable_apply.confirmationDecision(
+        baseline.staged_kind,
+        .swapped,
+        running_version,
+        target_version,
+        token_matches,
+        installed_payload_matches,
+    );
+    if (decision != .confirm) return error.PortableUpdateConfirmationFailed;
+
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var fresh = try loadState(alloc, state_path);
+    defer fresh.deinit(alloc);
+    if (fresh.portable_apply_phase != .swapped) return;
+    if (!stagedTransactionEqual(&baseline, &fresh)) {
+        return error.PortableUpdateConfirmationFailed;
+    }
+    fresh.portable_apply_phase = .confirmed;
+    try saveState(state_path, &fresh);
+}
+
+const PortableHelperMode = enum { swap, rollback };
+
+fn launchPortableHelper(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+    mode: PortableHelperMode,
+) !bool {
+    if (try abandonUnrecoverablePortableApply(alloc, state_path, install_root)) {
+        setPortableFailureEnvironment(alloc, error.PortableUpdateRecoveryUnavailable) catch {};
+        return false;
+    }
+    var initial_state = try loadState(alloc, state_path);
+    defer initial_state.deinit(alloc);
+    var initial_layout = try portableStageLayout(alloc, state_path, &initial_state);
+    defer initial_layout.deinit(alloc);
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    try validatePortableStageDirectory(alloc, initial_layout.stage_dir);
+
+    var launch_lock = (try openPortableLaunchLock(initial_layout.launch_lock_path, true)) orelse
+        return true;
+    defer launch_lock.close();
+
+    // Re-read only after winning the lock. Another launcher may have completed
+    // the handoff between this process's preflight read and lock acquisition.
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
+    const phase = state.portable_apply_phase orelse return false;
+    switch (mode) {
+        .swap => if (phase != .pending) return true,
+        .rollback => if (phase != .swapped and phase != .confirmed and phase != .rollback) return true,
+    }
+
+    const self_path = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(self_path);
+    try verifyAuthenticodeSignature(self_path, null);
+    try std.fs.copyFileAbsolute(self_path, layout.helper_path, .{});
+    try verifyAuthenticodeSignature(layout.helper_path, null);
+
+    const parent_pid = try std.fmt.allocPrint(alloc, "{d}", .{std.os.windows.GetCurrentProcessId()});
+    defer alloc.free(parent_pid);
+    const original_process_args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, original_process_args);
+    var helper_args: std.ArrayList([]const u8) = .empty;
+    defer helper_args.deinit(alloc);
+    try helper_args.appendSlice(alloc, &.{
+        layout.helper_path,
+        portable_helper_arg,
+        state_path,
+        install_root,
+        @tagName(mode),
+        parent_pid,
+    });
+    try helper_args.appendSlice(alloc, original_process_args[1..]);
+    var child = std.process.Child.init(helper_args.items, alloc);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.create_no_window = true;
+    try child.spawn();
+    var child_open = true;
+    errdefer if (child_open) {
+        std.os.windows.TerminateProcess(child.id, 1) catch {};
+        std.os.windows.CloseHandle(child.thread_handle);
+        std.os.windows.CloseHandle(child.id);
+    };
+    std.os.windows.CloseHandle(child.thread_handle);
+    std.os.windows.CloseHandle(child.id);
+    child_open = false;
+    return true;
+}
+
+fn openPortableLaunchLock(path: []const u8, nonblocking: bool) !?std.fs.File {
+    return std.fs.createFileAbsolute(path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = nonblocking,
+    }) catch |err| switch (err) {
+        error.WouldBlock => null,
+        else => return err,
+    };
+}
+
+fn claimPortableHelperLaunchLock(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+    mode: PortableHelperMode,
+) !std.fs.File {
+    var initial_state = try loadState(alloc, state_path);
+    defer initial_state.deinit(alloc);
+    var initial_layout = try portableStageLayout(alloc, state_path, &initial_state);
+    defer initial_layout.deinit(alloc);
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    try validatePortableStageDirectory(alloc, initial_layout.stage_dir);
+
+    var launch_lock = (try openPortableLaunchLock(initial_layout.launch_lock_path, false)) orelse
+        return error.PortableUpdateTransactionOwned;
+    errdefer launch_lock.close();
+
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
+    const phase = state.portable_apply_phase orelse return error.InvalidPortableApplyTransition;
+    switch (mode) {
+        .swap => if (phase != .pending) return error.InvalidPortableApplyTransition,
+        .rollback => if (phase != .swapped and phase != .confirmed and phase != .rollback)
+            return error.InvalidPortableApplyTransition,
+    }
+
+    const self_path = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(self_path);
+    if (!windowsPathEqual(self_path, layout.helper_path)) {
+        return error.InvalidPortableUpdateHelperPath;
+    }
+    return launch_lock;
+}
+
+fn runPortableUpdateHelper(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+    mode: PortableHelperMode,
+    original_args: []const []const u8,
+) !u8 {
+    var invocation_state = try loadState(alloc, state_path);
+    defer invocation_state.deinit(alloc);
+    var invocation_layout = try portableStageLayout(alloc, state_path, &invocation_state);
+    defer invocation_layout.deinit(alloc);
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    try validatePortableStageDirectory(alloc, invocation_layout.stage_dir);
+    const self_path = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(self_path);
+    if (!windowsPathEqual(self_path, invocation_layout.helper_path)) {
+        return error.InvalidPortableUpdateHelperPath;
+    }
+    return switch (mode) {
+        .rollback => try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args),
+        .swap => swap: {
+            const state_lock = try openStateLock(state_path);
+            var state_locked = true;
+            defer if (state_locked) state_lock.close();
+            var state = try loadState(alloc, state_path);
+            defer state.deinit(alloc);
+            if (state.staged_kind != .portable or state.portable_apply_phase != .pending)
+                return error.StagedKindMismatch;
+            const backup_path = state.portable_backup_path orelse return error.NoStagedPortableInstall;
+            const confirmation_token = state.portable_confirmation_token orelse return error.NoStagedPortableInstall;
+
+            // The helper runs inside a transaction the app already decided
+            // to start, so the feed check here is a self-comparison by
+            // design: refusing mid-swap would strand a half-applied
+            // install. The feed gate lives in `applyStagedUpdate`.
+            var staged = try verifyStagedWindowsInstall(
+                alloc,
+                state_path,
+                state.stagedFeedUrl(),
+                .portable,
+            );
+            var staged_open = true;
+            defer if (staged_open) staged.deinit(alloc);
+            const payload_path = staged.payload_path orelse return error.IncompletePortablePayload;
+
+            try portable_apply.prepareBackup(alloc, install_root, backup_path);
+            state.portable_apply_phase = .swapped;
+            try saveState(state_path, &state);
+            state_lock.close();
+            state_locked = false;
+            portable_apply.swapPayload(
+                alloc,
+                install_root,
+                payload_path,
+                backup_path,
+                invocation_layout.displaced_path,
+            ) catch |err| {
+                markPortableRollback(alloc, state_path) catch {};
+                _ = rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args) catch {};
+                return err;
+            };
+            staged.deinit(alloc);
+            staged_open = false;
+
+            var child = spawnInstalledNoctty(
+                alloc,
+                install_root,
+                original_args,
+                confirmation_token,
+                null,
+            ) catch |err| {
+                try markPortableRollback(alloc, state_path);
+                _ = try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args);
+                return err;
+            };
+            std.os.windows.WaitForSingleObject(child.id, 15_000) catch |err| switch (err) {
+                error.WaitTimeOut => {
+                    std.os.windows.CloseHandle(child.thread_handle);
+                    std.os.windows.CloseHandle(child.id);
+                    var after = try loadState(alloc, state_path);
+                    const confirmed = after.portable_apply_phase == .confirmed;
+                    after.deinit(alloc);
+                    if (confirmed) try finalizePortableConfirmation(alloc, state_path);
+                    break :swap 0;
+                },
+                else => return err,
+            };
+            const term = try child.wait();
+            var after = try loadState(alloc, state_path);
+            defer after.deinit(alloc);
+            const failed = switch (term) {
+                .Exited => |code| code != 0,
+                else => true,
+            };
+            if (failed and
+                (after.portable_apply_phase == .swapped or after.portable_apply_phase == .confirmed))
+            {
+                try markPortableRollback(alloc, state_path);
+                break :swap try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args);
+            }
+            if (!failed and after.portable_apply_phase == .confirmed) {
+                try finalizePortableConfirmation(alloc, state_path);
+                break :swap 0;
+            }
+            break :swap 0;
+        },
+    };
+}
+
+fn markPortableRollback(alloc: Allocator, state_path: []const u8) !void {
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    if (state.portable_apply_phase != .swapped and state.portable_apply_phase != .confirmed and
+        state.portable_apply_phase != .rollback)
+    {
+        return error.InvalidPortableApplyTransition;
+    }
+    state.portable_apply_phase = .rollback;
+    try saveState(state_path, &state);
+}
+
+fn abandonPendingPortableApply(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+) !bool {
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    if (state.staged_kind != .portable or state.portable_apply_phase != .pending) return false;
+    state.portable_apply_phase = null;
+    state.apply_requested_at = 0;
+    clearOptionalOwned(alloc, &state.portable_confirmation_token);
+    try saveState(state_path, &state);
+    return true;
+}
+
+fn abandonUnrecoverablePortableApply(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+) !bool {
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    if (state.staged_kind != .portable) return false;
+    const phase = state.portable_apply_phase orelse return false;
+    if (phase != .swapped and phase != .rollback) return false;
+
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
+    portable_apply.validateBackup(alloc, layout.backup_path) catch |err| switch (err) {
+        error.FileNotFound, error.IncompletePortableUpdateBackup => {
+            clearStagedPortableState(alloc, &state);
+            try saveState(state_path, &state);
+            return true;
+        },
+        else => return err,
+    };
+    return false;
+}
+
+fn recoverPendingPortableFailure(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+    original_args: []const []const u8,
+    err: anyerror,
+) !u8 {
+    const pending = abandonPendingPortableApply(alloc, state_path, install_root) catch pending: {
+        var state = loadState(alloc, state_path) catch break :pending false;
+        defer state.deinit(alloc);
+        break :pending state.staged_kind == .portable and state.portable_apply_phase == .pending;
+    };
+    if (!pending) return 1;
+    const child = try spawnInstalledNoctty(
+        alloc,
+        install_root,
+        original_args,
+        null,
+        @errorName(err),
+    );
+    std.os.windows.CloseHandle(child.thread_handle);
+    std.os.windows.CloseHandle(child.id);
+    return 0;
+}
+
+fn rollbackPortableUpdateAndRelaunch(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+    original_args: []const []const u8,
+) !u8 {
+    var layout = layout: {
+        const state_lock = try openStateLock(state_path);
+        defer state_lock.close();
+        var state = try loadState(alloc, state_path);
+        defer state.deinit(alloc);
+        if (state.staged_kind != .portable) return error.StagedKindMismatch;
+        const value = try portableStageLayout(alloc, state_path, &state);
+        state.portable_apply_phase = .rollback;
+        try saveState(state_path, &state);
+        break :layout value;
+    };
+    defer layout.deinit(alloc);
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    try validatePortableStageDirectory(alloc, layout.stage_dir);
+
+    try portable_apply.rollback(
+        alloc,
+        install_root,
+        layout.backup_path,
+        layout.displaced_path,
+    );
+    {
+        const state_lock = try openStateLock(state_path);
+        defer state_lock.close();
+        var state = try loadState(alloc, state_path);
+        defer state.deinit(alloc);
+        if (state.portable_apply_phase != .rollback) return error.InvalidPortableApplyTransition;
+        state.portable_apply_phase = null;
+        state.apply_requested_at = 0;
+        clearOptionalOwned(alloc, &state.portable_confirmation_token);
+        try saveState(state_path, &state);
+    }
+    cleanupPortableRecoveryPaths(layout.backup_path, layout.displaced_path);
+
+    const child = try spawnInstalledNoctty(alloc, install_root, original_args, null, null);
+    std.os.windows.CloseHandle(child.thread_handle);
+    std.os.windows.CloseHandle(child.id);
+    return 0;
+}
+
+fn spawnInstalledNoctty(
+    alloc: Allocator,
+    install_root: []const u8,
+    original_args: []const []const u8,
+    confirmation_token: ?[]const u8,
+    failure_name: ?[]const u8,
+) !std.process.Child {
+    const exe_path = try std.fs.path.join(alloc, &.{ install_root, "noctty.exe" });
+    defer alloc.free(exe_path);
+    var env = try std.process.getEnvMap(alloc);
+    defer env.deinit();
+    if (confirmation_token) |token|
+        try env.put(portable_confirmation_env, token)
+    else
+        env.remove(portable_confirmation_env);
+    if (failure_name) |failure| {
+        try env.put(portable_failure_env, failure);
+        try env.put(portable_bypass_env, "1");
+    } else {
+        env.remove(portable_failure_env);
+        env.remove(portable_bypass_env);
+    }
+    const child_args = try buildInstalledNocttyArgv(alloc, exe_path, original_args);
+    defer alloc.free(child_args);
+    var child = std.process.Child.init(child_args, alloc);
+    child.env_map = &env;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    child.env_map = null;
+    return child;
+}
+
+fn buildInstalledNocttyArgv(
+    alloc: Allocator,
+    exe_path: []const u8,
+    original_args: []const []const u8,
+) ![][]const u8 {
+    const result = try alloc.alloc([]const u8, original_args.len + 1);
+    result[0] = exe_path;
+    @memcpy(result[1..], original_args);
+    return result;
+}
+
+fn waitForProcessExit(pid: u32, timeout_ms: u32) !void {
+    const handle = OpenProcess(std.os.windows.SYNCHRONIZE, 0, pid) orelse return;
+    defer std.os.windows.CloseHandle(handle);
+    return std.os.windows.WaitForSingleObject(handle, timeout_ms);
+}
+
+fn clearStagedPortableState(alloc: Allocator, state: *State) void {
+    clearOptionalOwned(alloc, &state.staged_version);
+    state.staged_kind = null;
+    clearOptionalOwned(alloc, &state.staged_portable_path);
+    clearOptionalOwned(alloc, &state.staged_payload_path);
+    clearOptionalOwned(alloc, &state.staged_sha256);
+    state.staged_at = 0;
+    state.apply_requested_at = 0;
+    state.portable_apply_phase = null;
+    clearOptionalOwned(alloc, &state.portable_backup_path);
+    clearOptionalOwned(alloc, &state.portable_confirmation_token);
+}
+
+fn finalizePortableConfirmation(alloc: Allocator, state_path: []const u8) !void {
+    var cleanup_paths: ?struct { backup: []u8, displaced: []u8 } = null;
+    defer if (cleanup_paths) |paths| {
+        alloc.free(paths.backup);
+        alloc.free(paths.displaced);
+    };
+    {
+        const state_lock = try openStateLock(state_path);
+        defer state_lock.close();
+        var state = try loadState(alloc, state_path);
+        defer state.deinit(alloc);
+        if (state.portable_apply_phase != .confirmed) return;
+        var layout = try portableStageLayout(alloc, state_path, &state);
+        defer layout.deinit(alloc);
+        try validatePortableStageDirectory(alloc, layout.stage_dir);
+        const backup = try alloc.dupe(u8, layout.backup_path);
+        errdefer alloc.free(backup);
+        const displaced = try alloc.dupe(u8, layout.displaced_path);
+        cleanup_paths = .{ .backup = backup, .displaced = displaced };
+        clearStagedPortableState(alloc, &state);
+        try saveState(state_path, &state);
+    }
+    const paths = cleanup_paths.?;
+    cleanupPortableRecoveryPaths(paths.backup, paths.displaced);
+}
+
+fn cleanupPortableRecoveryPaths(backup_path: []const u8, displaced_path: []const u8) void {
+    portable_apply.cleanupBackup(backup_path) catch |err| {
+        log.warn("portable update backup cleanup failed path={s} err={}", .{ backup_path, err });
+    };
+    portable_apply.cleanupUpdatePath(displaced_path) catch |err| {
+        log.warn("portable update displaced cleanup failed path={s} err={}", .{ displaced_path, err });
+    };
+}
+
+extern "kernel32" fn OpenProcess(
+    desired_access: u32,
+    inherit_handle: i32,
+    process_id: u32,
+) callconv(.winapi) ?std.os.windows.HANDLE;
 
 fn writeOptionalJsonString(writer: *std.Io.Writer, value: ?[]const u8) !void {
     if (value) |text| {
@@ -648,6 +1838,11 @@ fn writeOptionalJsonString(writer: *std.Io.Writer, value: ?[]const u8) !void {
     }
 
     try writer.writeAll("null");
+}
+
+fn writeOptionalEnum(writer: *std.Io.Writer, value: anytype) !void {
+    if (value) |tag| return writeOptionalJsonString(writer, @tagName(tag));
+    return writeOptionalJsonString(writer, null);
 }
 
 fn replaceOptionalOwned(alloc: Allocator, slot: *?[]u8, value: []u8) void {
@@ -714,6 +1909,11 @@ fn streamBounded(
         };
         if (streamed > max_bytes) return error.HttpResponseTooLarge;
     }
+}
+
+fn clearOptionalOwned(alloc: Allocator, slot: *?[]u8) void {
+    if (slot.*) |old| alloc.free(old);
+    slot.* = null;
 }
 
 fn fetchHttps(
@@ -798,23 +1998,39 @@ fn fetchHttps(
 
 fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !void {
     if (!std.fs.path.isAbsolute(dest_path)) return error.InvalidDownloadPath;
+    const dir_path = std.fs.path.dirname(dest_path) orelse return error.InvalidDownloadPath;
+    const leaf = std.fs.path.basename(dest_path);
+    if (leaf.len == 0) return error.InvalidDownloadPath;
+    try std.fs.cwd().makePath(dir_path);
 
-    const temp_path = try std.fmt.allocPrint(alloc, "{s}.part", .{dest_path});
-    defer alloc.free(temp_path);
+    // Every child below is created, replaced, and renamed relative to this
+    // one handle. Holding the stage directory keeps that directory from
+    // being renamed, but it does not protect a child resolved by absolute
+    // pathname: between the delete and the create, a same-user process can
+    // plant a hard link or reparse point at the leaf and the write lands
+    // outside the stage tree. A handle-relative open cannot be redirected
+    // above the directory whose identity we just confirmed.
+    var dir = try std.fs.openDirAbsolute(dir_path, .{});
+    defer dir.close();
+    if (!try lockedHandleMatchesPath(alloc, dir_path, dir.fd)) {
+        return error.InvalidUpdateStageRoot;
+    }
+
+    const temp_leaf = try std.fmt.allocPrint(alloc, "{s}.part", .{leaf});
+    defer alloc.free(temp_leaf);
+
     var committed = false;
     defer if (!committed) {
-        std.fs.deleteFileAbsolute(temp_path) catch {};
+        dir.deleteFile(temp_leaf) catch {};
     };
-    std.fs.deleteFileAbsolute(temp_path) catch |err| switch (err) {
+    // `Dir.deleteFile` opens with FILE_OPEN_REPARSE_POINT, so a planted link
+    // is unlinked rather than followed to its target.
+    dir.deleteFile(temp_leaf) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
 
-    if (std.fs.path.dirname(dest_path)) |dir_path| {
-        try std.fs.cwd().makePath(dir_path);
-    }
-
-    var file = try std.fs.createFileAbsolute(temp_path, .{ .truncate = true });
+    var file = try createStageChild(alloc, dir, dir_path, temp_leaf);
     var file_open = true;
     errdefer if (file_open) file.close();
 
@@ -835,12 +2051,80 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     file.close();
     file_open = false;
 
-    std.fs.deleteFileAbsolute(dest_path) catch |err| switch (err) {
+    dir.deleteFile(leaf) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    try std.fs.renameAbsolute(temp_path, dest_path);
+    try dir.rename(temp_leaf, leaf);
     committed = true;
+}
+
+/// Create `leaf` inside `dir` so that the returned handle can only be the
+/// child we named.
+///
+/// `.exclusive` maps to `FILE_CREATE`, so anything already sitting at the
+/// leaf — including the hard link an unprivileged same-user process can
+/// plant — is a collision rather than a write. `FILE_CREATE` still traverses
+/// a reparse point at the leaf whose target does not exist yet, so the
+/// handle is then checked: it must not be a reparse point, and its final
+/// path must be exactly `<dir_path>\<leaf>`. Both checks read the handle we
+/// hold, not the name, so nothing can be swapped underneath them afterwards.
+///
+/// Residual, stated plainly: if a same-user process wins the window between
+/// the unlink and this create and plants a symlink to a path that does not
+/// exist, `FILE_CREATE` creates that path as an empty file before the check
+/// below rejects the handle. No response byte is ever written to it, and a
+/// process running as this user could have created that file directly. What
+/// this closes is the escape of downloaded content out of the stage tree.
+/// The handle is not opened with `FILE_OPEN_REPARSE_POINT`, which would
+/// refuse the link outright, because Zig's `OpenFile` drops
+/// `FILE_SYNCHRONOUS_IO_NONALERT` in that mode and the resulting
+/// asynchronous handle is not usable with `std.fs.File.write`.
+fn createStageChild(
+    alloc: Allocator,
+    dir: std.fs.Dir,
+    dir_path: []const u8,
+    leaf: []const u8,
+) !std.fs.File {
+    // `.read` only for the access right: `GENERIC_WRITE` alone does not
+    // carry FILE_READ_ATTRIBUTES, and the reparse-point check below queries
+    // the handle's attributes.
+    const file = try dir.createFile(leaf, .{ .exclusive = true, .read = true });
+    errdefer file.close();
+    try requireStageChildHandle(alloc, dir_path, leaf, file.handle);
+    return file;
+}
+
+fn requireStageChildHandle(
+    alloc: Allocator,
+    dir_path: []const u8,
+    leaf: []const u8,
+    handle: std.os.windows.HANDLE,
+) !void {
+    if (builtin.os.tag != .windows) return;
+    if (try handleIsReparsePoint(handle)) return error.InvalidUpdateStagePath;
+    const expected = try std.fs.path.join(alloc, &.{ dir_path, leaf });
+    defer alloc.free(expected);
+    if (!try lockedHandleMatchesPath(alloc, expected, handle)) {
+        return error.InvalidUpdateStagePath;
+    }
+}
+
+fn handleIsReparsePoint(handle: std.os.windows.HANDLE) !bool {
+    const windows = std.os.windows;
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    var info: windows.FILE_BASIC_INFORMATION = undefined;
+    const rc = windows.ntdll.NtQueryInformationFile(
+        handle,
+        &io,
+        &info,
+        @sizeOf(windows.FILE_BASIC_INFORMATION),
+        .FileBasicInformation,
+    );
+    return switch (rc) {
+        .SUCCESS => info.FileAttributes & windows.FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        else => error.InvalidUpdateStagePath,
+    };
 }
 
 fn requireOkHttpStatus(context: []const u8, url: []const u8, status: std.http.Status) !void {
@@ -869,20 +2153,28 @@ fn parseExpectedSha256(checksums: []const u8, installer_name: []const u8) ![Sha2
         const line = std.mem.trim(u8, raw_line, " \t\r");
         if (line.len == 0) continue;
 
-        var parts = std.mem.tokenizeAny(u8, line, " \t");
-        const hex = parts.next() orelse continue;
-        const filename_raw = parts.next() orelse continue;
-        const filename = if (filename_raw.len > 0 and filename_raw[0] == '*')
-            filename_raw[1..]
-        else
-            filename_raw;
-
-        if (!std.mem.eql(u8, filename, installer_name)) continue;
+        const checksum = checksumLine(line) orelse continue;
+        if (!std.mem.eql(u8, checksum.filename, installer_name)) continue;
         if (matched != null) return error.InstallerChecksumDuplicate;
-        matched = try parseSha256Hex(hex);
+        matched = try parseSha256Hex(checksum.hex);
     }
 
     return matched orelse error.InstallerChecksumMissing;
+}
+
+const ChecksumLine = struct {
+    hex: []const u8,
+    filename: []const u8,
+};
+
+fn checksumLine(line: []const u8) ?ChecksumLine {
+    const separator = std.mem.indexOfAny(u8, line, " \t") orelse return null;
+    const hex = line[0..separator];
+    const raw_filename = std.mem.trimLeft(u8, line[separator..], " \t");
+    if (raw_filename.len == 0) return null;
+    const filename = if (raw_filename[0] == '*') raw_filename[1..] else raw_filename;
+    if (filename.len == 0) return null;
+    return .{ .hex = hex, .filename = filename };
 }
 
 fn parseSha256Hex(hex: []const u8) ![Sha256.digest_length]u8 {
@@ -925,6 +2217,339 @@ fn sha256OpenFile(file: *std.fs.File) ![Sha256.digest_length]u8 {
     hasher.final(&digest);
     try file.seekTo(0);
     return digest;
+}
+
+const max_portable_zip_bytes: u64 = 128 * 1024 * 1024;
+const max_portable_expanded_bytes: u64 = 256 * 1024 * 1024;
+const max_portable_entry_bytes: u64 = 128 * 1024 * 1024;
+const max_portable_entries: u64 = 4096;
+const max_portable_name_bytes: usize = 4096;
+const max_portable_compression_ratio: u64 = 200;
+const max_portable_manifest_bytes: usize = 2 * 1024 * 1024;
+
+fn extractAndVerifyPortableZip(
+    alloc: Allocator,
+    zip_path: []const u8,
+    stage_dir: []const u8,
+    manifest_path: []const u8,
+) ![]u8 {
+    if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
+    try validatePortableZipEntries(alloc, zip_path);
+
+    const partial_root = try std.fs.path.join(alloc, &.{ stage_dir, "payload.partial" });
+    defer alloc.free(partial_root);
+    const extracted_root = try std.fs.path.join(alloc, &.{ stage_dir, "payload" });
+    defer alloc.free(extracted_root);
+    try portable_apply.cleanupUpdatePath(partial_root);
+    try portable_apply.cleanupUpdatePath(extracted_root);
+    errdefer portable_apply.cleanupUpdatePath(partial_root) catch {};
+    try std.fs.cwd().makePath(partial_root);
+
+    // `std.zip.extract` creates every entry relative to this handle, so the
+    // archive cannot escape it. The handle itself is still resolved by
+    // pathname, so confirm it is the directory we asked for before anything
+    // is written through it: a junction planted at `payload.partial` between
+    // the makePath and this open would otherwise redirect the whole payload.
+    var destination = try std.fs.openDirAbsolute(partial_root, .{});
+    var destination_open = true;
+    defer if (destination_open) destination.close();
+    if (!try lockedHandleMatchesPath(alloc, partial_root, destination.fd)) {
+        return error.InvalidPortableUpdatePath;
+    }
+    var zip_file = try std.fs.openFileAbsolute(zip_path, .{});
+    defer zip_file.close();
+    var reader_buffer: [64 * 1024]u8 = undefined;
+    var zip_reader = zip_file.reader(&reader_buffer);
+    var diagnostics: std.zip.Diagnostics = .{ .allocator = alloc };
+    defer diagnostics.deinit();
+    try std.zip.extract(destination, &zip_reader, .{ .diagnostics = &diagnostics });
+    if (!std.mem.eql(u8, diagnostics.root_dir, "noctty")) return error.InvalidPortableArchiveRoot;
+    destination.close();
+    destination_open = false;
+
+    const partial_payload = try std.fs.path.join(alloc, &.{ partial_root, "noctty" });
+    defer alloc.free(partial_payload);
+    try verifyPortablePayload(alloc, partial_payload, manifest_path);
+    try std.fs.renameAbsolute(partial_root, extracted_root);
+    return std.fs.path.join(alloc, &.{ extracted_root, "noctty" });
+}
+
+fn validatePortableZipEntries(alloc: Allocator, zip_path: []const u8) !void {
+    var file = try std.fs.openFileAbsolute(zip_path, .{});
+    defer file.close();
+    if ((try file.stat()).size > max_portable_zip_bytes) return error.PortableArchiveTooLarge;
+    var reader_buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(&reader_buffer);
+    var iterator = std.zip.Iterator.init(&reader) catch return error.InvalidPortableArchive;
+    if (iterator.cd_record_count == 0) return error.InvalidPortableArchive;
+    if (iterator.cd_record_count > max_portable_entries) return error.PortableArchiveTooLarge;
+
+    var names: std.StringHashMapUnmanaged(void) = .{};
+    defer {
+        var keys = names.keyIterator();
+        while (keys.next()) |key| alloc.free(key.*);
+        names.deinit(alloc);
+    }
+    var expanded_bytes: u64 = 0;
+    while (iterator.next() catch return error.InvalidPortableArchive) |entry| {
+        if (entry.filename_len == 0 or entry.filename_len > max_portable_name_bytes) {
+            return error.UnsafePortableArchiveEntry;
+        }
+        var name_buffer: [max_portable_name_bytes]u8 = undefined;
+        const name = name_buffer[0..entry.filename_len];
+        reader.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader)) catch
+            return error.InvalidPortableArchive;
+        reader.interface.readSliceAll(name) catch return error.InvalidPortableArchive;
+        if (!portable_apply.isSafeZipEntryPath(name)) return error.UnsafePortableArchiveEntry;
+        switch (entry.compression_method) {
+            .store, .deflate => {},
+            else => return error.UnsupportedPortableArchive,
+        }
+        if (entry.uncompressed_size > max_portable_entry_bytes) return error.PortableArchiveTooLarge;
+        if (entry.uncompressed_size > 0) {
+            if (entry.compressed_size == 0) return error.PortableArchiveTooLarge;
+            const ratio_limit = std.math.mul(
+                u64,
+                entry.compressed_size,
+                max_portable_compression_ratio,
+            ) catch std.math.maxInt(u64);
+            if (entry.uncompressed_size > ratio_limit) return error.PortableArchiveTooLarge;
+        }
+        expanded_bytes = std.math.add(u64, expanded_bytes, entry.uncompressed_size) catch
+            return error.PortableArchiveTooLarge;
+        if (expanded_bytes > max_portable_expanded_bytes) return error.PortableArchiveTooLarge;
+        const key = try std.ascii.allocLowerString(alloc, name);
+        const gop = try names.getOrPut(alloc, key);
+        if (gop.found_existing) {
+            alloc.free(key);
+            return error.DuplicatePortableArchiveEntry;
+        }
+    }
+}
+
+fn verifyPortablePayloadManifest(path: []const u8) !void {
+    var locked = try openLockedInstaller(path);
+    defer locked.close();
+    if (!try lockedHandleMatchesPath(std.heap.page_allocator, path, locked.handle)) {
+        return error.InvalidPortablePayloadManifest;
+    }
+    try verifyAuthenticodeSignature(path, locked.handle);
+}
+
+fn verifiedPortablePayloadManifestAlloc(alloc: Allocator, path: []const u8) ![]u8 {
+    var locked = try openLockedInstaller(path);
+    defer locked.close();
+    if (!try lockedHandleMatchesPath(alloc, path, locked.handle)) {
+        return error.InvalidPortablePayloadManifest;
+    }
+    try verifyAuthenticodeSignature(path, locked.handle);
+    try locked.seekTo(0);
+    return locked.readToEndAlloc(alloc, max_portable_manifest_bytes);
+}
+
+fn verifyPortablePayload(
+    alloc: Allocator,
+    payload_root: []const u8,
+    manifest_path: []const u8,
+) !void {
+    const manifest = try verifiedPortablePayloadManifestAlloc(alloc, manifest_path);
+    defer alloc.free(manifest);
+    for (portable_apply.managed_entries) |entry| {
+        const path = try std.fs.path.join(alloc, &.{ payload_root, entry });
+        defer alloc.free(path);
+        std.fs.accessAbsolute(path, .{}) catch return error.IncompletePortablePayload;
+    }
+    try verifyPortablePayloadAgainstManifest(alloc, payload_root, manifest);
+    try verifyPortablePayloadBinaries(alloc, payload_root);
+}
+
+fn verifyPortablePayloadAgainstManifest(
+    alloc: Allocator,
+    payload_root: []const u8,
+    manifest: []const u8,
+) !void {
+    var payload_dir = try std.fs.openDirAbsolute(payload_root, .{ .iterate = true });
+    defer payload_dir.close();
+    var walker = try payload_dir.walk(alloc);
+    defer walker.deinit();
+    var manifest_file_count: usize = 0;
+    var manifest_lines = std.mem.splitScalar(u8, manifest, '\n');
+    while (manifest_lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        const checksum = checksumLine(line) orelse continue;
+        _ = parseSha256Hex(checksum.hex) catch continue;
+        if (!portable_apply.isManagedRelativePath(checksum.filename)) {
+            return error.InvalidPortablePayloadManifest;
+        }
+        manifest_file_count += 1;
+    }
+
+    var payload_file_count: usize = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind == .directory) continue;
+        if (entry.kind != .file) return error.InvalidPortablePayload;
+        const relative = try portableRelativePathAlloc(alloc, entry.path);
+        defer alloc.free(relative);
+        if (!portable_apply.isManagedRelativePath(relative)) return error.InvalidPortablePayload;
+        try verifyPortableManifestFile(alloc, payload_root, entry.path, relative, manifest);
+        payload_file_count += 1;
+    }
+    if (payload_file_count != manifest_file_count) return error.PortablePayloadManifestFileSetMismatch;
+}
+
+fn verifyInstalledPortablePayloadAgainstManifest(
+    alloc: Allocator,
+    install_root: []const u8,
+    manifest: []const u8,
+) !void {
+    var manifest_file_count: usize = 0;
+    var manifest_lines = std.mem.splitScalar(u8, manifest, '\n');
+    while (manifest_lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        const checksum = checksumLine(line) orelse continue;
+        _ = parseSha256Hex(checksum.hex) catch continue;
+        if (!portable_apply.isManagedRelativePath(checksum.filename)) {
+            return error.InvalidPortablePayloadManifest;
+        }
+        manifest_file_count += 1;
+    }
+
+    var installed_file_count: usize = 0;
+    for (portable_apply.managed_entries) |managed_entry| {
+        const managed_path = try std.fs.path.join(alloc, &.{ install_root, managed_entry });
+        defer alloc.free(managed_path);
+        if (!std.mem.eql(u8, managed_entry, "share")) {
+            try verifyPortableManifestFile(
+                alloc,
+                install_root,
+                managed_entry,
+                managed_entry,
+                manifest,
+            );
+            installed_file_count += 1;
+            continue;
+        }
+
+        var managed_dir = try std.fs.openDirAbsolute(managed_path, .{ .iterate = true });
+        defer managed_dir.close();
+        var walker = try managed_dir.walk(alloc);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
+            if (entry.kind == .directory) continue;
+            if (entry.kind != .file) return error.InvalidPortablePayload;
+            const native_relative = try std.fs.path.join(
+                alloc,
+                &.{ managed_entry, entry.path },
+            );
+            defer alloc.free(native_relative);
+            const portable_relative = try portableRelativePathAlloc(alloc, native_relative);
+            defer alloc.free(portable_relative);
+            try verifyPortableManifestFile(
+                alloc,
+                install_root,
+                native_relative,
+                portable_relative,
+                manifest,
+            );
+            installed_file_count += 1;
+        }
+    }
+    if (installed_file_count != manifest_file_count) {
+        return error.PortablePayloadManifestFileSetMismatch;
+    }
+}
+
+fn verifyPortableManifestFile(
+    alloc: Allocator,
+    root: []const u8,
+    native_relative: []const u8,
+    portable_relative: []const u8,
+    manifest: []const u8,
+) !void {
+    const path = try std.fs.path.join(alloc, &.{ root, native_relative });
+    defer alloc.free(path);
+    const expected = parseExpectedSha256(manifest, portable_relative) catch |err| switch (err) {
+        error.InstallerChecksumMissing => return error.PortablePayloadManifestEntryMissing,
+        error.InstallerChecksumDuplicate => return error.PortablePayloadManifestEntryDuplicate,
+        else => return err,
+    };
+    const actual = try sha256File(path);
+    if (!std.mem.eql(u8, &expected, &actual)) return error.PortablePayloadManifestMismatch;
+}
+
+fn installedPortablePayloadMatches(
+    alloc: Allocator,
+    install_root: []const u8,
+    manifest_path: []const u8,
+) bool {
+    const manifest = verifiedPortablePayloadManifestAlloc(alloc, manifest_path) catch return false;
+    defer alloc.free(manifest);
+    verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest) catch return false;
+    return true;
+}
+
+fn verifyPortablePayloadBinaries(alloc: Allocator, payload_root: []const u8) !void {
+    var payload_dir = try std.fs.openDirAbsolute(payload_root, .{ .iterate = true });
+    defer payload_dir.close();
+    var walker = try payload_dir.walk(alloc);
+    defer walker.deinit();
+    var verified_binary_count: usize = 0;
+    while (try walker.next()) |entry| {
+        if (entry.kind == .directory) continue;
+        if (entry.kind != .file) return error.InvalidPortablePayload;
+        const extension = std.fs.path.extension(entry.basename);
+        if (!std.ascii.eqlIgnoreCase(extension, ".exe") and
+            !std.ascii.eqlIgnoreCase(extension, ".com") and
+            !std.ascii.eqlIgnoreCase(extension, ".dll")) continue;
+        const path = try std.fs.path.join(alloc, &.{ payload_root, entry.path });
+        defer alloc.free(path);
+        try verifyPortablePeMachine(path);
+        try verifyAuthenticodeSignature(path, null);
+        verified_binary_count += 1;
+    }
+    if (verified_binary_count == 0) return error.IncompletePortablePayload;
+}
+
+fn verifyPortablePeMachine(path: []const u8) !void {
+    const actual = try readPeMachine(path);
+    if (actual != windows_asset_metadata.pe_machine) {
+        return error.PortablePayloadArchitectureMismatch;
+    }
+}
+
+fn readPeMachine(path: []const u8) !u16 {
+    const file = try std.fs.openFileAbsolute(path, .{});
+    defer file.close();
+
+    var dos_signature: [2]u8 = undefined;
+    if (try file.preadAll(&dos_signature, 0) != dos_signature.len or
+        !std.mem.eql(u8, &dos_signature, "MZ"))
+    {
+        return error.InvalidPortableExecutable;
+    }
+
+    // Microsoft PE/COFF specifies the PE-header file offset at DOS offset
+    // 0x3c, followed by "PE\0\0" and the two-byte COFF Machine field.
+    var pe_offset_bytes: [4]u8 = undefined;
+    if (try file.preadAll(&pe_offset_bytes, pe_header_pointer_offset) != pe_offset_bytes.len) {
+        return error.InvalidPortableExecutable;
+    }
+    const pe_offset = std.mem.readInt(u32, &pe_offset_bytes, .little);
+    var pe_prefix: [6]u8 = undefined;
+    if (try file.preadAll(&pe_prefix, pe_offset) != pe_prefix.len or
+        !std.mem.eql(u8, pe_prefix[0..4], "PE\x00\x00"))
+    {
+        return error.InvalidPortableExecutable;
+    }
+    return std.mem.readInt(u16, pe_prefix[4..6], .little);
+}
+
+fn portableRelativePathAlloc(alloc: Allocator, path: []const u8) ![]u8 {
+    const result = try alloc.dupe(u8, path);
+    for (result) |*byte| {
+        if (byte.* == '\\') byte.* = '/';
+    }
+    return result;
 }
 
 fn openLockedInstaller(path: []const u8) !std.fs.File {
@@ -1448,9 +3073,19 @@ fn parseWindowsInstallCandidate(
         .{ version_text, windowsInstallerArch() },
     );
     errdefer alloc.free(expected_installer_name);
+    const expected_portable_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-{s}-windows-{s}-portable.zip",
+        .{ version_text, windowsInstallerArch() },
+    );
+    errdefer alloc.free(expected_portable_name);
+    const expected_portable_manifest_name = try portableManifestNameAlloc(alloc, version_text);
+    errdefer alloc.free(expected_portable_manifest_name);
     const expected_checksums_name = windowsChecksumsAssetName();
 
     var installer_url: ?[]const u8 = null;
+    var portable_url: ?[]const u8 = null;
+    var portable_manifest_url: ?[]const u8 = null;
     var checksums_url: ?[]const u8 = null;
 
     for (assets.items) |asset_value| {
@@ -1473,6 +3108,16 @@ fn parseWindowsInstallCandidate(
             installer_url = browser_download_url;
             continue;
         }
+        if (std.mem.eql(u8, name, expected_portable_name)) {
+            _ = try validateHttpsUrl(browser_download_url);
+            portable_url = browser_download_url;
+            continue;
+        }
+        if (std.mem.eql(u8, name, expected_portable_manifest_name)) {
+            _ = try validateHttpsUrl(browser_download_url);
+            portable_manifest_url = browser_download_url;
+            continue;
+        }
         if (std.mem.eql(u8, name, expected_checksums_name)) {
             _ = try validateHttpsUrl(browser_download_url);
             checksums_url = browser_download_url;
@@ -1490,6 +3135,8 @@ fn parseWindowsInstallCandidate(
 
     if (installer_url == null or checksums_url == null) {
         alloc.free(expected_installer_name);
+        alloc.free(expected_portable_name);
+        alloc.free(expected_portable_manifest_name);
         return null;
     }
 
@@ -1497,10 +3144,36 @@ fn parseWindowsInstallCandidate(
     errdefer alloc.free(owned_installer_url);
     const owned_checksums_url = try alloc.dupe(u8, checksums_url.?);
     errdefer alloc.free(owned_checksums_url);
+    const owned_portable_url = if (portable_url) |url|
+        try alloc.dupe(u8, url)
+    else
+        null;
+    errdefer if (owned_portable_url) |value| alloc.free(value);
+    const owned_portable_manifest_url = if (portable_manifest_url) |url|
+        try alloc.dupe(u8, url)
+    else
+        null;
+    errdefer if (owned_portable_manifest_url) |value| alloc.free(value);
+    const owned_portable_name: ?[]u8 = if (owned_portable_url != null)
+        expected_portable_name
+    else blk: {
+        alloc.free(expected_portable_name);
+        break :blk null;
+    };
+    const owned_portable_manifest_name: ?[]u8 = if (owned_portable_manifest_url != null)
+        expected_portable_manifest_name
+    else blk: {
+        alloc.free(expected_portable_manifest_name);
+        break :blk null;
+    };
 
     return .{
         .installer_name = expected_installer_name,
         .installer_url = owned_installer_url,
+        .portable_name = owned_portable_name,
+        .portable_url = owned_portable_url,
+        .portable_manifest_name = owned_portable_manifest_name,
+        .portable_manifest_url = owned_portable_manifest_url,
         .checksums_url = owned_checksums_url,
     };
 }
@@ -1511,6 +3184,14 @@ fn windowsInstallerArch() []const u8 {
 
 fn windowsChecksumsAssetName() []const u8 {
     return windows_asset_metadata.checksums_asset_name;
+}
+
+fn portableManifestNameAlloc(alloc: Allocator, version_text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "noctty-{s}-windows-{s}-portable.manifest.ps1",
+        .{ version_text, windowsInstallerArch() },
+    );
 }
 
 fn canonicalVersionText(alloc: Allocator, raw_tag: []const u8) ![]u8 {
@@ -1734,6 +3415,7 @@ test "state persists staged windows install metadata with escaped path" {
         .release_feed_url = try alloc.dupe(u8, "https://updates.example/latest?channel=\"stable\""),
         .release_url = try alloc.dupe(u8, "https://updates.example/releases/1.3.100"),
         .staged_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_kind = .installer,
         .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\noctty-1.3.101-windows-x64-setup.exe"),
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
         .staged_feed_url = try alloc.dupe(u8, "https://updates.example/latest?channel=\"stable\""),
@@ -1752,6 +3434,7 @@ test "state persists staged windows install metadata with escaped path" {
     try std.testing.expectEqualStrings(state.release_feed_url.?, loaded.release_feed_url.?);
     try std.testing.expectEqualStrings(state.release_url.?, loaded.release_url.?);
     try std.testing.expectEqualStrings("1.3.101", loaded.staged_version.?);
+    try std.testing.expectEqual(portable_apply.StagedKind.installer, loaded.staged_kind.?);
     try std.testing.expectEqualStrings(state.staged_installer_path.?, loaded.staged_installer_path.?);
     try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
     try std.testing.expectEqualStrings(state.staged_feed_url.?, loaded.staged_feed_url.?);
@@ -1868,8 +3551,32 @@ test "staged install from another feed is refused at apply time" {
 
     try std.testing.expectError(
         error.StagedInstallFeedMismatch,
-        verifyStagedWindowsInstall(alloc, state_path, "https://updates.example/feed-b"),
+        verifyStagedWindowsInstall(alloc, state_path, "https://updates.example/feed-b", .installer),
     );
+}
+
+test "state loader ignores retired portable watcher fields" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    try tmp.dir.writeFile(.{
+        .sub_path = "update-state.json",
+        .data =
+        \\{"last_checked_at":123,"portable_watcher_pid":4242,"portable_watcher_started_at":123456789}
+        ,
+    });
+
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 123), state.last_checked_at);
+    try saveState(state_path, &state);
+    const saved = try std.fs.cwd().readFileAlloc(alloc, state_path, 16 * 1024);
+    defer alloc.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "portable_watcher") == null);
 }
 
 test "record staged apply request requires staged installer metadata" {
@@ -1906,6 +3613,7 @@ test "record staged apply request persists timestamp" {
 
     var state: State = .{
         .staged_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_kind = .installer,
         .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\noctty-1.3.101-windows-x64-setup.exe"),
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
     };
@@ -1917,6 +3625,882 @@ test "record staged apply request persists timestamp" {
     var loaded = try loadState(alloc, state_path);
     defer loaded.deinit(alloc);
     try std.testing.expectEqual(@as(i64, 1234), loaded.apply_requested_at);
+}
+
+test "portable update rejects persisted paths outside its stage" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    const stage_dir = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200" });
+    defer alloc.free(stage_dir);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.200-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(artifact_name);
+
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .staged_portable_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name }),
+        .staged_payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .portable_backup_path = try std.fs.path.join(alloc, &.{ root, "unrelated-user-data" }),
+    };
+    defer state.deinit(alloc);
+
+    try std.testing.expectError(
+        error.InvalidPortableUpdatePath,
+        portableStageLayout(alloc, state_path, &state),
+    );
+}
+
+test "portable update ZIP preflight binds EOCD to archive end" {
+    const alloc = std.testing.allocator;
+    const name = "noctty/";
+    const central_len = 46 + name.len;
+    var archive: [central_len + 22]u8 = @splat(0);
+    std.mem.writeInt(u32, archive[0..4], 0x02014b50, .little);
+    std.mem.writeInt(u16, archive[28..30], name.len, .little);
+    @memcpy(archive[46..central_len], name);
+    std.mem.writeInt(u32, archive[central_len..][0..4], 0x06054b50, .little);
+    std.mem.writeInt(u16, archive[central_len + 8 ..][0..2], 1, .little);
+    std.mem.writeInt(u16, archive[central_len + 10 ..][0..2], 1, .little);
+    std.mem.writeInt(u32, archive[central_len + 12 ..][0..4], central_len, .little);
+    std.mem.writeInt(u32, archive[central_len + 16 ..][0..4], 0, .little);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "valid.zip", .data = &archive });
+    const valid_path = try tmp.dir.realpathAlloc(alloc, "valid.zip");
+    defer alloc.free(valid_path);
+    try validatePortableZipEntries(alloc, valid_path);
+
+    var with_trailing_byte: [archive.len + 1]u8 = undefined;
+    @memcpy(with_trailing_byte[0..archive.len], &archive);
+    with_trailing_byte[archive.len] = 0;
+    try tmp.dir.writeFile(.{ .sub_path = "trailing.zip", .data = &with_trailing_byte });
+    const trailing_path = try tmp.dir.realpathAlloc(alloc, "trailing.zip");
+    defer alloc.free(trailing_path);
+    try std.testing.expectError(
+        error.InvalidPortableArchive,
+        validatePortableZipEntries(alloc, trailing_path),
+    );
+}
+
+test "portable update serializes helper launch handoff" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const lock_path = try std.fs.path.join(alloc, &.{ root, "portable-update-launch.lock" });
+    defer alloc.free(lock_path);
+
+    var first = (try openPortableLaunchLock(lock_path, true)).?;
+    defer first.close();
+    try std.testing.expect((try openPortableLaunchLock(lock_path, true)) == null);
+}
+
+test "portable pre-swap failure clears pending intent" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(install_root);
+    const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
+    defer alloc.free(state_path);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .portable_apply_phase = .pending,
+        .portable_confirmation_token = try alloc.dupe(u8, "token"),
+        .apply_requested_at = 123,
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    try std.testing.expect(try abandonPendingPortableApply(alloc, state_path, install_root));
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expect(loaded.portable_apply_phase == null);
+    try std.testing.expect(loaded.portable_confirmation_token == null);
+    try std.testing.expectEqual(@as(i64, 0), loaded.apply_requested_at);
+}
+
+test "portable recovery abandons stranded swapped transaction" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(install_root);
+    const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
+    defer alloc.free(state_path);
+    const stage_dir = try std.fs.path.join(alloc, &.{ install_root, "updates", "1.3.200" });
+    defer alloc.free(stage_dir);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.200-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(artifact_name);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .staged_portable_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name }),
+        .staged_payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .portable_apply_phase = .swapped,
+        .portable_backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" }),
+        .portable_confirmation_token = try alloc.dupe(u8, "token"),
+        .apply_requested_at = 123,
+    };
+    defer state.deinit(alloc);
+    for ([_]portable_apply.Phase{ .swapped, .rollback }) |phase| {
+        if (phase == .rollback) try tmp.dir.makePath("updates/1.3.200");
+        state.portable_apply_phase = phase;
+        try saveState(state_path, &state);
+
+        try std.testing.expect(!(try launchPortableHelper(alloc, state_path, install_root, .rollback)));
+        const message = (try takePortableUpdateFailure(alloc)).?;
+        defer alloc.free(message);
+        try std.testing.expect(std.mem.indexOf(u8, message, "recovery files are missing") != null);
+
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expect(loaded.portable_apply_phase == null);
+        try std.testing.expect(loaded.staged_version == null);
+        try std.testing.expect(loaded.staged_kind == null);
+        try std.testing.expect(loaded.portable_backup_path == null);
+        try std.testing.expect(loaded.portable_confirmation_token == null);
+        try std.testing.expectEqual(@as(i64, 0), loaded.apply_requested_at);
+    }
+
+    try tmp.dir.makePath("updates/1.3.200/backup");
+    try tmp.dir.writeFile(.{
+        .sub_path = "updates/1.3.200/backup/.complete",
+        .data = "locked",
+    });
+    const marker_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup", ".complete" });
+    defer alloc.free(marker_path);
+    const marker_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, marker_path);
+    defer alloc.free(marker_path_w);
+    // dwShareMode=0 denies subsequent opens per the Microsoft CreateFileW
+    // contract, giving this test a deterministic transient access failure.
+    const held = std.os.windows.kernel32.CreateFileW(
+        marker_path_w.ptr,
+        std.os.windows.GENERIC_READ,
+        0,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (held == std.os.windows.INVALID_HANDLE_VALUE) {
+        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+    }
+    defer std.os.windows.CloseHandle(held);
+
+    state.portable_apply_phase = .swapped;
+    try saveState(state_path, &state);
+    try std.testing.expectError(
+        error.AccessDenied,
+        abandonUnrecoverablePortableApply(alloc, state_path, install_root),
+    );
+    {
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expectEqual(portable_apply.Phase.swapped, loaded.portable_apply_phase.?);
+    }
+}
+
+test "portable recovery preserves complete rollback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "noctty.com", .data = "old-build" });
+    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(install_root);
+    const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
+    defer alloc.free(state_path);
+    const stage_dir = try std.fs.path.join(alloc, &.{ install_root, "updates", "1.3.200" });
+    defer alloc.free(stage_dir);
+    const backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" });
+    defer alloc.free(backup_path);
+    const displaced_path = try std.fs.path.join(alloc, &.{ stage_dir, "displaced" });
+    defer alloc.free(displaced_path);
+    try portable_apply.prepareBackup(alloc, install_root, backup_path);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.200-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(artifact_name);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .staged_portable_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name }),
+        .staged_payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .staged_at = 456,
+        .apply_requested_at = 123,
+        .portable_apply_phase = .swapped,
+        .portable_backup_path = try alloc.dupe(u8, backup_path),
+        .portable_confirmation_token = try alloc.dupe(u8, "token"),
+    };
+    defer state.deinit(alloc);
+
+    for ([_]portable_apply.Phase{ .swapped, .rollback }) |phase| {
+        try tmp.dir.writeFile(.{ .sub_path = "noctty.com", .data = "broken-new-build" });
+        state.portable_apply_phase = phase;
+        try saveState(state_path, &state);
+
+        try std.testing.expect(!(try abandonUnrecoverablePortableApply(
+            alloc,
+            state_path,
+            install_root,
+        )));
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expectEqualStrings(state.staged_version.?, loaded.staged_version.?);
+        try std.testing.expectEqual(state.staged_kind.?, loaded.staged_kind.?);
+        try std.testing.expectEqualStrings(state.staged_portable_path.?, loaded.staged_portable_path.?);
+        try std.testing.expectEqualStrings(state.staged_payload_path.?, loaded.staged_payload_path.?);
+        try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
+        try std.testing.expectEqual(state.staged_at, loaded.staged_at);
+        try std.testing.expectEqual(state.apply_requested_at, loaded.apply_requested_at);
+        try std.testing.expectEqual(phase, loaded.portable_apply_phase.?);
+        try std.testing.expectEqualStrings(state.portable_backup_path.?, loaded.portable_backup_path.?);
+        try std.testing.expectEqualStrings(state.portable_confirmation_token.?, loaded.portable_confirmation_token.?);
+
+        try portable_apply.rollback(alloc, install_root, backup_path, displaced_path);
+        const restored = try tmp.dir.readFileAlloc(alloc, "noctty.com", 32);
+        defer alloc.free(restored);
+        try std.testing.expectEqualStrings("old-build", restored);
+    }
+}
+
+test "confirmed portable cleanup failure cannot rearm startup gating" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("updates/1.3.200/backup");
+    try tmp.dir.makePath("updates/1.3.200/displaced");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/backup/held.txt", .data = "held" });
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/displaced/held.txt", .data = "held" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    const stage_dir = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200" });
+    defer alloc.free(stage_dir);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.200-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(artifact_name);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .staged_portable_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name }),
+        .staged_payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" }),
+        .portable_apply_phase = .confirmed,
+        .portable_backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" }),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    const held_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup", "held.txt" });
+    defer alloc.free(held_path);
+    const held = try openLockedInstaller(held_path);
+    defer held.close();
+    const displaced_held_path = try std.fs.path.join(alloc, &.{ stage_dir, "displaced", "held.txt" });
+    defer alloc.free(displaced_held_path);
+    const displaced_held = try openLockedInstaller(displaced_held_path);
+    defer displaced_held.close();
+    try finalizePortableConfirmation(alloc, state_path);
+
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expect(loaded.portable_apply_phase == null);
+    try std.testing.expect(loaded.staged_version == null);
+    try std.testing.expect(loaded.staged_kind == null);
+    try std.fs.accessAbsolute(held_path, .{});
+    try std.fs.accessAbsolute(displaced_held_path, .{});
+}
+
+test "portable relaunch replays original argv" {
+    const alloc = std.testing.allocator;
+    const original = [_][]const u8{
+        "-e",
+        "C:\\Program Files\\Tool\\tool.exe",
+        "argument with spaces",
+        "--working-directory=C:\\work tree",
+        "--window-width=120",
+        "--config-file",
+        "C:\\config files\\noctty.conf",
+    };
+    const argv = try buildInstalledNocttyArgv(alloc, "D:\\portable\\noctty.exe", &original);
+    defer alloc.free(argv);
+    try std.testing.expectEqual(@as(usize, original.len + 1), argv.len);
+    try std.testing.expectEqualStrings("D:\\portable\\noctty.exe", argv[0]);
+    for (original, 0..) |expected, index| {
+        try std.testing.expectEqualStrings(expected, argv[index + 1]);
+    }
+}
+
+test "authenticated portable manifest rejects mismatched non-PE resource" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("payload/share/shell-integration/powershell");
+    try tmp.dir.writeFile(.{
+        .sub_path = "payload/share/shell-integration/powershell/integration.ps1",
+        .data = "malicious replacement",
+    });
+    const payload_root = try tmp.dir.realpathAlloc(alloc, "payload");
+    defer alloc.free(payload_root);
+    try std.testing.expectError(
+        error.PortablePayloadManifestMismatch,
+        verifyPortablePayloadAgainstManifest(
+            alloc,
+            payload_root,
+            "0000000000000000000000000000000000000000000000000000000000000000 *share/shell-integration/powershell/integration.ps1\n",
+        ),
+    );
+}
+
+test "portable concurrent launch content identity verifies the installed managed file set" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("install/share/shell-integration/powershell");
+
+    var manifest: std.ArrayList(u8) = .empty;
+    defer manifest.deinit(alloc);
+    for (portable_apply.managed_entries) |managed_entry| {
+        if (std.mem.eql(u8, managed_entry, "share")) continue;
+        const sub_path = try std.fs.path.join(alloc, &.{ "install", managed_entry });
+        defer alloc.free(sub_path);
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = managed_entry });
+        var digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(managed_entry, &digest, .{});
+        try manifest.writer(alloc).print("{s} *{s}\n", .{
+            std.fmt.bytesToHex(digest, .lower),
+            managed_entry,
+        });
+    }
+    const integration_path = "share/shell-integration/powershell/integration.ps1";
+    const integration_contents = "new integration content";
+    try tmp.dir.writeFile(.{
+        .sub_path = "install/share/shell-integration/powershell/integration.ps1",
+        .data = integration_contents,
+    });
+    var integration_digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(integration_contents, &integration_digest, .{});
+    try manifest.writer(alloc).print("{s} *{s}\n", .{
+        std.fmt.bytesToHex(integration_digest, .lower),
+        integration_path,
+    });
+
+    // User-owned top-level data is outside the managed payload identity.
+    try tmp.dir.writeFile(.{ .sub_path = "install/config.ghostty", .data = "user config" });
+    try tmp.dir.writeFile(.{ .sub_path = "install/user-data.txt", .data = "keep" });
+    const install_root = try tmp.dir.realpathAlloc(alloc, "install");
+    defer alloc.free(install_root);
+    try verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items);
+
+    // A file present only in the new share tree makes the installed set differ.
+    try tmp.dir.writeFile(.{ .sub_path = "install/share/new-only.ps1", .data = "extra" });
+    try std.testing.expectError(
+        error.PortablePayloadManifestEntryMissing,
+        verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+    try tmp.dir.deleteFile("install/share/new-only.ps1");
+
+    // Equal paths with different bytes are not content identity.
+    try tmp.dir.writeFile(.{ .sub_path = "install/noctty.com", .data = "tampered" });
+    try std.testing.expectError(
+        error.PortablePayloadManifestMismatch,
+        verifyInstalledPortablePayloadAgainstManifest(alloc, install_root, manifest.items),
+    );
+}
+
+test "portable concurrent launch inside helper window uses content identity" {
+    try std.testing.expect(!shouldDeferPortableStartupToHelper(
+        .swapped,
+        true,
+        false,
+        true,
+    ));
+    try std.testing.expect(shouldDeferPortableStartupToHelper(
+        .swapped,
+        true,
+        false,
+        false,
+    ));
+}
+
+test "portable update validates PE machine from file bytes" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const PeFixture = struct {
+        fn bytes(machine: u16) [pe_header_pointer_offset + 4 + 6]u8 {
+            var result: [pe_header_pointer_offset + 4 + 6]u8 = @splat(0);
+            @memcpy(result[0..2], "MZ");
+            const pe_offset: u32 = pe_header_pointer_offset + 4;
+            std.mem.writeInt(u32, result[pe_header_pointer_offset..][0..4], pe_offset, .little);
+            @memcpy(result[pe_offset..][0..4], "PE\x00\x00");
+            std.mem.writeInt(u16, result[pe_offset + 4 ..][0..2], machine, .little);
+            return result;
+        }
+    };
+    const matching = PeFixture.bytes(windows_asset_metadata.pe_machine);
+    const mismatched_machine = switch (builtin.cpu.arch) {
+        .x86_64 => pe_machine_arm64,
+        .aarch64 => pe_machine_amd64,
+        else => unreachable,
+    };
+    const mismatched = PeFixture.bytes(mismatched_machine);
+    try tmp.dir.writeFile(.{ .sub_path = "matching.exe", .data = &matching });
+    try tmp.dir.writeFile(.{ .sub_path = "mismatched.exe", .data = &mismatched });
+    try tmp.dir.writeFile(.{ .sub_path = "truncated.exe", .data = "MZ" });
+    var out_of_bounds = matching;
+    std.mem.writeInt(u32, out_of_bounds[pe_header_pointer_offset..][0..4], std.math.maxInt(u32), .little);
+    try tmp.dir.writeFile(.{ .sub_path = "out-of-bounds.exe", .data = &out_of_bounds });
+
+    const matching_path = try tmp.dir.realpathAlloc(alloc, "matching.exe");
+    defer alloc.free(matching_path);
+    const mismatched_path = try tmp.dir.realpathAlloc(alloc, "mismatched.exe");
+    defer alloc.free(mismatched_path);
+    const truncated_path = try tmp.dir.realpathAlloc(alloc, "truncated.exe");
+    defer alloc.free(truncated_path);
+    const out_of_bounds_path = try tmp.dir.realpathAlloc(alloc, "out-of-bounds.exe");
+    defer alloc.free(out_of_bounds_path);
+
+    try verifyPortablePeMachine(matching_path);
+    try std.testing.expectError(
+        error.PortablePayloadArchitectureMismatch,
+        verifyPortablePeMachine(mismatched_path),
+    );
+    try std.testing.expectError(
+        error.InvalidPortableExecutable,
+        verifyPortablePeMachine(truncated_path),
+    );
+    try std.testing.expectError(
+        error.InvalidPortableExecutable,
+        verifyPortablePeMachine(out_of_bounds_path),
+    );
+}
+
+test "update staging transaction comparison uses content" {
+    const alloc = std.testing.allocator;
+    var baseline: State = .{
+        .dismissed_version = try alloc.dupe(u8, "dismissed-before"),
+        .staged_version = try alloc.dupe(u8, "1.3.199"),
+        .staged_kind = .installer,
+        .staged_installer_path = try alloc.dupe(u8, "C:\\stage\\old.exe"),
+        .staged_sha256 = try alloc.dupe(u8, "old-digest"),
+        .staged_at = 100,
+        .apply_requested_at = 200,
+    };
+    defer baseline.deinit(alloc);
+    var fresh: State = .{
+        .dismissed_version = try alloc.dupe(u8, "dismissed-during-download"),
+        .staged_version = try alloc.dupe(u8, "1.3.199"),
+        .staged_kind = .installer,
+        .staged_installer_path = try alloc.dupe(u8, "C:\\stage\\old.exe"),
+        .staged_sha256 = try alloc.dupe(u8, "old-digest"),
+        .staged_at = 100,
+        .apply_requested_at = 200,
+    };
+    defer fresh.deinit(alloc);
+
+    try std.testing.expect(stagedTransactionEqual(&baseline, &fresh));
+    fresh.apply_requested_at += 1;
+    try std.testing.expect(!stagedTransactionEqual(&baseline, &fresh));
+    fresh.apply_requested_at = baseline.apply_requested_at;
+    fresh.staged_version.?[fresh.staged_version.?.len - 1] = '8';
+    try std.testing.expect(!stagedTransactionEqual(&baseline, &fresh));
+}
+
+test "update staging prunes only obsolete semantic version directories" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    try tmp.dir.makePath("updates/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/old.txt", .data = "old-198" });
+    try tmp.dir.makePath("updates/1.3.199");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.199/old.txt", .data = "old-199" });
+    try tmp.dir.makePath("updates/1.3.200-BETA");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200-BETA/current.txt", .data = "current" });
+    try tmp.dir.makePath("updates/manual");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/manual/keep.txt", .data = "manual" });
+    try tmp.dir.makePath("updates/1.3");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3/keep.txt", .data = "not-semver" });
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.197", .data = "not-a-directory" });
+
+    try pruneObsoleteStageDirectories(alloc, state_path, "1.3.200-beta");
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.198", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.199", .{}));
+    const current = try tmp.dir.readFileAlloc(alloc, "updates/1.3.200-BETA/current.txt", 32);
+    defer alloc.free(current);
+    try std.testing.expectEqualStrings("current", current);
+    const manual = try tmp.dir.readFileAlloc(alloc, "updates/manual/keep.txt", 32);
+    defer alloc.free(manual);
+    try std.testing.expectEqualStrings("manual", manual);
+    const non_semver = try tmp.dir.readFileAlloc(alloc, "updates/1.3/keep.txt", 32);
+    defer alloc.free(non_semver);
+    try std.testing.expectEqualStrings("not-semver", non_semver);
+    const regular_file = try tmp.dir.readFileAlloc(alloc, "updates/1.3.197", 32);
+    defer alloc.free(regular_file);
+    try std.testing.expectEqualStrings("not-a-directory", regular_file);
+}
+
+test "update staging pruning rejects an updates directory reparse point" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("state");
+    try tmp.dir.makePath("outside/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "outside/1.3.198/keep.txt", .data = "outside" });
+    const state_root = try tmp.dir.realpathAlloc(alloc, "state");
+    defer alloc.free(state_root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const updates_path = try std.fs.path.join(alloc, &.{ state_root, "updates" });
+    defer alloc.free(updates_path);
+    std.fs.symLinkAbsolute(outside_root, updates_path, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/staging-work.lock", .{}));
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        pruneObsoleteStageDirectories(alloc, state_path, null),
+    );
+    const outside = try tmp.dir.readFileAlloc(alloc, "outside/1.3.198/keep.txt", 32);
+    defer alloc.free(outside);
+    try std.testing.expectEqualStrings("outside", outside);
+}
+
+test "update staging rejects a reparse-point state directory before creating updates" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("outside");
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const state_root = try std.fs.path.join(alloc, &.{ root, "state" });
+    defer alloc.free(state_root);
+    std.fs.symLinkAbsolute(outside_root, state_root, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/updates", .{}));
+}
+
+test "stage children are created only where they were named" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("stage");
+    try tmp.dir.makePath("outside");
+    const stage_root = try tmp.dir.realpathAlloc(alloc, "stage");
+    defer alloc.free(stage_root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+
+    var stage = try std.fs.openDirAbsolute(stage_root, .{});
+    defer stage.close();
+
+    // The ordinary path: the handle lands on the child we named and is not
+    // a reparse point.
+    {
+        var file = try createStageChild(alloc, stage, stage_root, "setup.exe.part");
+        defer file.close();
+        try std.testing.expect(!try handleIsReparsePoint(file.handle));
+    }
+
+    // A leaf that already exists is a collision, not a write. This is what
+    // a planted hard link becomes, and it is why the download cannot be
+    // redirected into an existing file the attacker chose.
+    try std.testing.expectError(
+        error.PathAlreadyExists,
+        createStageChild(alloc, stage, stage_root, "setup.exe.part"),
+    );
+
+    // A leaf that resolves outside the directory is refused, so no response
+    // byte is written through it.
+    const link_path = try std.fs.path.join(alloc, &.{ stage_root, "escape.part" });
+    defer alloc.free(link_path);
+    const link_target = try std.fs.path.join(alloc, &.{ outside_root, "victim.bin" });
+    defer alloc.free(link_target);
+    std.fs.symLinkAbsolute(link_target, link_path, .{}) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+    try std.testing.expectError(
+        error.InvalidUpdateStagePath,
+        createStageChild(alloc, stage, stage_root, "escape.part"),
+    );
+}
+
+test "download refuses a stage directory that is not the directory it named" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("outside");
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const stage_link = try std.fs.path.join(alloc, &.{ root, "stage" });
+    defer alloc.free(stage_link);
+    std.fs.symLinkAbsolute(outside_root, stage_link, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return,
+        else => return err,
+    };
+    const dest = try std.fs.path.join(alloc, &.{ stage_link, "setup.exe" });
+    defer alloc.free(dest);
+
+    // Fails on the directory identity check, before any request is made.
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        downloadUrlToFile(alloc, "https://example.invalid/setup.exe", dest),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe.part", .{}));
+}
+
+test "installer staging rejects a reparse-point target before download" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("state/updates");
+    try tmp.dir.makePath("outside");
+    try tmp.dir.writeFile(.{ .sub_path = "outside/keep.txt", .data = "outside-target" });
+    const state_root = try tmp.dir.realpathAlloc(alloc, "state");
+    defer alloc.free(state_root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const target_stage = try std.fs.path.join(alloc, &.{ state_root, "updates", "1.3.200" });
+    defer alloc.free(target_stage);
+    std.fs.symLinkAbsolute(outside_root, target_stage, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .installer,
+        .staged_installer_path = try std.fs.path.join(alloc, &.{ target_stage, "setup.exe" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
+    );
+    const outside = try tmp.dir.readFileAlloc(alloc, "outside/keep.txt", 32);
+    defer alloc.free(outside);
+    try std.testing.expectEqualStrings("outside-target", outside);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe", .{}));
+    const outside_checksums = try std.fs.path.join(alloc, &.{ "outside", windowsChecksumsAssetName() });
+    defer alloc.free(outside_checksums);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(outside_checksums, .{}));
+}
+
+test "failed update staging removes attempts and preserves the prior staged version" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    try tmp.dir.makePath("updates/1.3.100");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.100/keep.txt", .data = "prior-stage" });
+    try tmp.dir.makePath("updates/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/orphan.txt", .data = "old-failure" });
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.100"),
+        .staged_kind = .installer,
+        .staged_installer_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.100", "setup.exe" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadStopped;
+        }
+    };
+    for ([_][]const u8{ "1.3.199", "1.3.200" }) |version| {
+        var release: Release = .{
+            .version_text = try alloc.dupe(u8, version),
+            .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+            .windows_install = .{
+                .installer_name = try alloc.dupe(u8, "setup.exe"),
+                .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+                .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+            },
+        };
+        defer release.deinit(alloc);
+        try std.testing.expectError(
+            error.TestDownloadStopped,
+            stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Fail.download),
+        );
+        const failed_path = try std.fs.path.join(alloc, &.{ "updates", version });
+        defer alloc.free(failed_path);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(failed_path, .{}));
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.198", .{}));
+    const prior = try tmp.dir.readFileAlloc(alloc, "updates/1.3.100/keep.txt", 32);
+    defer alloc.free(prior);
+    try std.testing.expectEqualStrings("prior-stage", prior);
+}
+
+test "update staging refuses a new target when obsolete pruning is blocked" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("updates/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/locked.txt", .data = "locked-old-stage" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    const locked_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.198", "locked.txt" });
+    defer alloc.free(locked_path);
+    const locked_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, locked_path);
+    defer alloc.free(locked_path_w);
+    const held = std.os.windows.kernel32.CreateFileW(
+        locked_path_w.ptr,
+        std.os.windows.GENERIC_READ,
+        0,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (held == std.os.windows.INVALID_HANDLE_VALUE) {
+        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+    }
+    defer std.os.windows.CloseHandle(held);
+
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Guarded = struct {
+        var called = false;
+
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            called = true;
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+    Guarded.called = false;
+
+    try std.testing.expectError(
+        error.FileBusy,
+        stageWindowsInstallWithDownloader(alloc, state_path, latest_stable_api_url, &release, .installer, Guarded.download),
+    );
+    try std.testing.expect(!Guarded.called);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.200", .{}));
 }
 
 test "state JSON writer escapes ASCII control characters" {
@@ -1955,6 +4539,17 @@ test "checksum parser accepts sha256 star filename lines" {
         \\00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *other.exe
     ,
         "noctty-1.3.100-windows-x64-setup.exe",
+    );
+    try std.testing.expectEqualStrings(
+        "d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d",
+        &std.fmt.bytesToHex(digest, .lower),
+    );
+}
+
+test "checksum parser preserves spaces in manifest paths" {
+    const digest = try parseExpectedSha256(
+        "d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d *share/ghostty/themes/12-bit Rainbow\n",
+        "share/ghostty/themes/12-bit Rainbow",
     );
     try std.testing.expectEqualStrings(
         "d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d",
@@ -2056,6 +4651,93 @@ test "update redirect target resolution refuses garbage target" {
     );
 }
 
+test "update staging leaves state lock available during stalled download" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/releases/1.3.200"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "noctty-1.3.200-windows-x64-setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/stalled-setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/stalled-checksums.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+
+    const Stall = struct {
+        var entered: std.Thread.ResetEvent = .{};
+        var continue_event: std.Thread.ResetEvent = .{};
+
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            entered.set();
+            continue_event.wait();
+            return error.TestDownloadStopped;
+        }
+    };
+    Stall.entered.reset();
+    Stall.continue_event.reset();
+    const StageContext = struct {
+        state_path: []const u8,
+        release: *const Release,
+        unexpected_error: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var staged = stageWindowsInstallWithDownloader(
+                std.heap.page_allocator,
+                self.state_path,
+                latest_stable_api_url,
+                self.release,
+                .installer,
+                Stall.download,
+            ) catch |err| {
+                if (err != error.TestDownloadStopped) {
+                    self.unexpected_error = err;
+                    Stall.entered.set();
+                }
+                return;
+            };
+            staged.deinit(std.heap.page_allocator);
+        }
+    };
+    var context: StageContext = .{ .state_path = state_path, .release = &release };
+    const stage_thread = try std.Thread.spawn(.{}, StageContext.run, .{&context});
+    defer {
+        Stall.continue_event.set();
+        stage_thread.join();
+    }
+    Stall.entered.wait();
+    if (context.unexpected_error) |err| return err;
+
+    var lock_path_buf: [std.fs.max_path_bytes + ".lock".len]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}.lock", .{state_path});
+    const competing_lock = std.fs.createFileAbsolute(lock_path, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }) catch |err| switch (err) {
+        error.WouldBlock => null,
+        else => return err,
+    };
+    const state_lock_available = competing_lock != null;
+    if (competing_lock) |file| {
+        file.close();
+        try recordDismissal(alloc, state_path, "1.3.200");
+    }
+
+    try std.testing.expect(state_lock_available);
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expectEqualStrings("1.3.200", loaded.dismissed_version.?);
+}
+
 test "windows install staging rejects relative state path before download" {
     const alloc = std.testing.allocator;
     var release: Release = .{
@@ -2071,11 +4753,68 @@ test "windows install staging rejects relative state path before download" {
 
     try std.testing.expectError(
         error.InvalidStatePath,
-        stageWindowsInstall(alloc, "relative-update-state.json", latest_stable_api_url, &release),
+        stageWindowsInstall(alloc, "relative-update-state.json", latest_stable_api_url, &release, .installer),
     );
 }
 
-test "release parser accepts checksum metadata without detached signature" {
+test "portable staging fails closed before download without signed manifest asset" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .portable_name = try alloc.dupe(u8, "noctty-1.3.200-windows-x64-portable.zip"),
+            .portable_url = try alloc.dupe(u8, "https://example.invalid/portable.zip"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+
+    try std.testing.expectError(
+        error.PortablePayloadManifestUnavailable,
+        stageWindowsInstall(alloc, state_path, latest_stable_api_url, &release, .portable),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates", .{}));
+}
+
+test "portable staging refuses every active apply phase" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+
+    for (std.enums.values(portable_apply.Phase)) |phase| {
+        var state: State = .{ .portable_apply_phase = phase };
+        try saveState(state_path, &state);
+        try std.testing.expectError(
+            error.PortableUpdateTransactionActive,
+            stageWindowsInstall(alloc, state_path, latest_stable_api_url, &release, .installer),
+        );
+    }
+}
+
+test "release parser does not invent a portable payload manifest" {
     const alloc = std.testing.allocator;
     const installer_name = try std.fmt.allocPrint(
         alloc,
@@ -2083,6 +4822,12 @@ test "release parser accepts checksum metadata without detached signature" {
         .{windowsInstallerArch()},
     );
     defer alloc.free(installer_name);
+    const portable_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.100-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(portable_name);
     const checksum_name = windowsChecksumsAssetName();
     const body = try std.fmt.allocPrint(
         alloc,
@@ -2097,11 +4842,15 @@ test "release parser accepts checksum metadata without detached signature" {
         \\    {{
         \\      "name": "{s}",
         \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }},
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
         \\    }}
         \\  ]
         \\}}
     ,
-        .{ installer_name, installer_name, checksum_name, checksum_name },
+        .{ installer_name, installer_name, portable_name, portable_name, checksum_name, checksum_name },
     );
     defer alloc.free(body);
 
@@ -2109,6 +4858,12 @@ test "release parser accepts checksum metadata without detached signature" {
     defer release.deinit(alloc);
 
     try std.testing.expect(release.windows_install != null);
+    try std.testing.expectEqualStrings(portable_name, release.windows_install.?.portable_name.?);
+    const portable_url = try std.fmt.allocPrint(alloc, "https://example.invalid/{s}", .{portable_name});
+    defer alloc.free(portable_url);
+    try std.testing.expectEqualStrings(portable_url, release.windows_install.?.portable_url.?);
+    try std.testing.expect(release.windows_install.?.portable_manifest_name == null);
+    try std.testing.expect(release.windows_install.?.portable_manifest_url == null);
 }
 
 test "release parser rejects non-HTTPS release URL" {

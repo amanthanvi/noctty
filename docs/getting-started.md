@@ -53,6 +53,14 @@ Keep the folder together: `noctty.exe` needs the `share` folder next to it for
 themes, terminfo, and shell integration. `.\noctty.com +register-shell-menu`
 adds an "Open noctty here" entry to Explorer's right-click menu.
 
+Keep the extracted folder together: `noctty.exe` needs the `share` folder
+beside it for themes, terminfo, and shell integration.
+
+To keep config, state, and cache in that folder too, create an empty
+`noctty.portable` file beside `noctty.exe`; extraction alone does not enable
+portable mode. `portable.txt` and an existing `config.ghostty` regular file
+are also recognized markers; directories are not.
+
 Neither install adds `noctty` to PATH. The `noctty +...` commands below assume
 you added the install folder to PATH or are running from it.
 
@@ -67,13 +75,15 @@ pins, are in [verify-release.md](verify-release.md).
 ## First launch
 
 noctty creates `%LOCALAPPDATA%\noctty\` and writes a config template to
-`%LOCALAPPDATA%\noctty\config.ghostty`. It picks a default shell for you; see
-[Shell](#shell) to change it.
+`%LOCALAPPDATA%\noctty\config.ghostty`. In portable mode it uses
+`config.ghostty` beside `noctty.exe` instead, and the `%LOCALAPPDATA%` copy is
+ignored. It picks a default shell for you; see [Shell](#shell) to change it.
 
 ## Font and theme
 
-Open the config with `notepad "$env:LOCALAPPDATA\noctty\config.ghostty"` and
-add a few options:
+Open the config with `notepad "$env:LOCALAPPDATA\noctty\config.ghostty"` (or
+the `config.ghostty` beside `noctty.exe` in portable mode) and add a few
+options:
 
 ```ini
 font-family = JetBrains Mono
