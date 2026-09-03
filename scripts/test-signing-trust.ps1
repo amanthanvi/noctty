@@ -134,6 +134,60 @@ const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
         Assert-CodeSigningCertificatePolicy -Certificate $certificate -UpdaterSourcePath $updaterSource -MinimumValidityDays 366
     }
 
+    # ADR-0005 overlap: a rotation release compiles the retiring key and the
+    # incoming key at the same time, so the parser must return both, in order.
+    $rotationPin = 'b3' * 32
+    $rotationPinBytes = for ($offset = 0; $offset -lt $rotationPin.Length; $offset += 2) { "0x$($rotationPin.Substring($offset, 2))" }
+    $rotationSource = Join-Path $tempRoot 'rotation.zig'
+    @"
+const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
+    // Retiring key.
+    .{
+        $($pinBytes -join ', '),
+    },
+    // Incoming key.
+    .{
+        $($rotationPinBytes -join ', '),
+    },
+};
+"@ | Set-Content -LiteralPath $rotationSource -Encoding utf8NoBOM
+
+    $rotationPins = @(Get-UpdaterPublisherSpkiPins -SourcePath $rotationSource)
+    if ($rotationPins.Count -ne 2) {
+        throw "Expected a two-element overlap allowlist, got $($rotationPins.Count) pin(s)."
+    }
+    if ($rotationPins[0] -ne $pin -or $rotationPins[1] -ne $rotationPin) {
+        throw "Two-element pin allowlist parsed incorrectly: $($rotationPins -join ', ')."
+    }
+    $rotationPolicy = Assert-CodeSigningCertificatePolicy `
+        -Certificate $certificate `
+        -UpdaterSourcePath $rotationSource `
+        -MinimumValidityDays 180
+    if ($rotationPolicy.SpkiSha256 -ne $pin) {
+        throw 'Overlap allowlist rejected the still-configured signing key.'
+    }
+
+    $shortEntrySource = Join-Path $tempRoot 'short-entry.zig'
+    @"
+const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
+    .{
+        $(($rotationPinBytes | Select-Object -First 31) -join ', '),
+    },
+};
+"@ | Set-Content -LiteralPath $shortEntrySource -Encoding utf8NoBOM
+    Assert-ThrowsLike -Pattern '*exactly 32 bytes*' -Script {
+        Get-UpdaterPublisherSpkiPins -SourcePath $shortEntrySource
+    }
+
+    $emptyAllowlistSource = Join-Path $tempRoot 'empty-allowlist.zig'
+    @"
+const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
+};
+"@ | Set-Content -LiteralPath $emptyAllowlistSource -Encoding utf8NoBOM
+    Assert-ThrowsLike -Pattern '*must not be empty*' -Script {
+        Get-UpdaterPublisherSpkiPins -SourcePath $emptyAllowlistSource
+    }
+
     $signedPath = Join-Path $tempRoot 'signed-host.exe'
     Copy-Item -LiteralPath (Get-Process -Id $PID).Path -Destination $signedPath
     $signedResult = Set-AuthenticodeSignature `

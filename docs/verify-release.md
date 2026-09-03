@@ -79,7 +79,13 @@ fade with time.
 The subject name predates the Noctty rename and proves nothing by itself. The
 pinned public key is the constraint that matters: the in-app updater and the
 verifier both refuse an installer signed by any other key. Its rotation rules
-are in [ADR 0005](adr/0005-pin-updater-publisher-public-keys.md).
+are in [ADR 0005](adr/0005-pin-updater-publisher-public-keys.md), and the
+operator steps that carry a rotation out are in
+[the rotation runbook](signing-rotation-runbook.md).
+
+Who may sign, where the key is held, what is signed, and what would happen if
+the key were compromised are in
+[the code signing policy](code-signing-policy.md).
 
 PowerShell may report an otherwise valid signature as `UnknownError` because
 Windows does not trust the self-signed root. The verifier accepts that case
