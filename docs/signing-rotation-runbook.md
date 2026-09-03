@@ -144,8 +144,18 @@ it at all.
 
 ## 5. Switch the `release` environment to the new key
 
-Set the new secrets and clear the self-signed escape hatch. These commands are
-the PFX-backed form, and only that form. A hardware-token or
+Set the new secrets. What happens to `WINDOWS_CODESIGN_TRUST_SELF_SIGNED`
+depends on which kind of replacement PFX this is:
+
+- **CA-issued replacement:** delete the variable and set the timestamp URL,
+  as the commands below do.
+- **Self-signed replacement** (a renewed local dev key): keep the variable
+  set and skip the `gh variable delete` line. Preflight then keeps reporting
+  `Signer identity: self-signed; updater-pin constrained` and
+  `Timestamp URL: disabled (WINDOWS_CODESIGN_TRUST_SELF_SIGNED is set)`, and
+  the CA-issued expectations in the verify block below do not apply.
+
+These commands are the PFX-backed form, and only that form. A hardware-token or
 cloud-signing backend has no PFX to encode; under Azure Artifact Signing these
 two secrets are deleted rather than replaced, and the endpoint, account name,
 certificate profile name, and OIDC federation described in ADR 0006 are set
@@ -160,8 +170,9 @@ gh variable delete WINDOWS_CODESIGN_TRUST_SELF_SIGNED --repo $repo --env release
 gh variable set WINDOWS_CODESIGN_TIMESTAMP_URL --repo $repo --env release --body "http://timestamp.digicert.com"
 ```
 
-**Verify.** Rerun preflight. `Signer SPKI SHA-256` must now be the new pin,
-`Signer identity` must read `CA-issued; updater-pin constrained`, and
+**Verify (CA-issued replacement).** Rerun preflight. `Signer SPKI SHA-256`
+must now be the new pin, `Signer identity` must read
+`CA-issued; updater-pin constrained`, and
 `Timestamp URL` must print the URL instead of
 `disabled (WINDOWS_CODESIGN_TRUST_SELF_SIGNED is set)`.
 
