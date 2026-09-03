@@ -5,8 +5,10 @@ Research date: 2026-08-19. Resolves ticket
 research (Microsoft console docs, microsoft/terminal source and issues,
 competitor docs/issues) plus local code reading (`src/pty.zig`,
 `src/termio/Exec.zig`, `src/Command.zig`, `src/apprt/win32_session_*.zig`).
-No experiments were run; every load-bearing external claim carries a URL.
-Uncertainty is marked inline.
+The original research sections did not run experiments; every
+load-bearing external claim carries a URL. The dated feasibility
+increment appended below records the later local experiment. Uncertainty
+is marked inline.
 
 ## Executive summary (verdict first)
 
@@ -138,7 +140,8 @@ one seam (`Subprocess.start`), not a rewrite of the IO stack.
 process (same codebase, second exe or `--session-host` mode) owns
 `Pty.open`, `Command` spawn, the Job Object, and a bounded raw-VT ring
 buffer per session; the UI connects over a named pipe (per-user
-namespace, DACL'd to the user), speaking a small protocol:
+access is enforced by an owning-user DACL, not by the pipe-name
+namespace), speaking a small protocol:
 `list/spawn/attach/detach/resize/kill` + raw byte streams. On UI
 restart, the UI reattaches, replays the ring buffer into a fresh
 `Screen`, and resumes. This is exactly VS Code's shipped design: pty
@@ -218,7 +221,8 @@ Changes:
   Terminal's answer is separate elevated windows/process trees — mirror
   it: one broker instance per integrity level, elevated sessions
   explicitly badged; v1 can scope durability to non-elevated only.
-  Pipe DACLs must restrict to the owning user + integrity level.
+  Pipe DACLs must restrict to the owning user; separate broker instances
+  enforce the integrity-level boundary.
 - **Scrollback ownership during detach:** while no UI is attached,
   _someone_ must drain the output pipe (otherwise child output
   backpressures; pre-24H2, close paths can deadlock —
@@ -226,11 +230,11 @@ Changes:
   The broker's ring buffer is therefore mandatory, not an optimization.
   Replay fidelity is bounded: alt-screen TUIs won't replay perfectly
   from a byte ring (VS Code caps restored scrollback and accepts this;
-  [docs](https://code.visualstudio.com/docs/terminal/advanced)); a
-  resize nudge on reattach makes ConPTY repaint the live viewport,
-  which is what makes TUIs usable again (behavior widely relied on;
-  exact repaint guarantees undocumented — uncertain). Full fidelity =
-  option C's cost.
+  [docs](https://code.visualstudio.com/docs/terminal/advanced)). The
+  feasibility increment below shows that a live polling TUI can observe
+  a resize nudge and emit a fresh cursor-addressed redraw; it does not
+  establish a generic ConPTY-driven repaint guarantee for arbitrary
+  TUIs. Full fidelity = option C's cost.
 - **Job objects / orphan control:** the `KILL_ON_JOB_CLOSE` job must be
   owned by the broker, and "close all sessions on real quit" becomes an
   explicit broker verb — otherwise durable sessions become orphan
@@ -250,8 +254,16 @@ shipped art (VS Code), not research risk.
 **Smallest testable increment (M):** a standalone `conpty-host` spike —
 one Zig exe reusing `pty.zig`+`Command.zig` that spawns pwsh under a
 ConPTY it owns, ring-buffers output, and serves one named pipe; plus a
-trivial attach client. Test: attach, run a TUI, hard-kill the client,
-reattach from a new client, confirm the shell and TUI survived and the viewport repaints after a resize nudge. Bounded-buffer acceptance criterion: a fixed-size per-session ring (default 1 MiB, configurable) that overwrites oldest data on overflow, replays its full contents on attach, and is tested by generating more output than the ring holds while detached — reattach must show the newest data with host memory never exceeding the cap. That one artifact retires the
+trivial attach client. Test: attach, run a synthetic alt-screen TUI,
+hard-kill the client, reattach from a new client, confirm the shell and
+TUI survived, and receive a cursor-addressed redraw containing the same
+pre-kill content after a resize nudge. Bounded-buffer acceptance
+criterion: a fixed-size per-session ring (default 1 MiB, configurable)
+that overwrites oldest data on overflow, replays its full contents on
+attach, and is tested by generating more output than the ring holds
+while detached — reattach must show the newest data, retained ring bytes
+must never exceed the cap, and process-private-memory growth is recorded
+as a one-run diagnostic rather than a guarantee. That one artifact retires the
 core risk (lifetime semantics, drain-while-detached, replay adequacy)
 before any noctty integration, and its protocol can be thrown away.
 Second increment: swap `Subprocess.start` to attach mode behind a
@@ -317,3 +329,216 @@ only as an open proposal
 ([#20077](https://github.com/microsoft/terminal/issues/20077)). That is
 the line noctty would be crossing first among native Windows
 terminals.
+
+## Feasibility increment result (2026-08-21)
+
+**Verdict: GREEN.** The broker shape works on the tested Windows 25H2
+build 26200.9168. The opt-in `conpty-host` spike is one console
+executable with `serve` and `attach` modes. The host directly reuses
+`Pty.open` / `WindowsPty` from `src/pty.zig` and the ConPTY launch path
+in `src/Command.zig`, owns one `pwsh.exe`, drains ConPTY output on a
+dedicated thread even with no client, retains raw output in a
+preallocated 1 MiB overwrite ring, and accepts one client at a time on
+a named pipe. Its actual security controls are an explicit protected
+current-user SDDL DACL, `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+`PIPE_REJECT_REMOTE_CLIENTS`, a single pipe instance created before the
+name is advertised and held for the host's lifetime, clients that
+connect at `SECURITY_IDENTIFICATION`, and clients that authenticate the
+server's owner SID before sending any frame. The retained `LOCAL` prefix only affects
+AppContainer name resolution; it is not an access-control property for
+ordinary desktop processes. Its deliberately disposable protocol has
+only attach, detach, resize, input, and output frames.
+
+`test/windows/conpty-host-spike.ps1` asserted the experiment end to
+end. It started and recorded every process it controlled; attached to
+the shell; recorded the shell PID and a shell variable; entered the
+alternate screen with `CSI ?1049h`; and ran a synthetic polling TUI that
+drew a cursor-addressed box containing a unique content token at 80x24.
+It force-killed the exact first client PID while that TUI was active,
+proved the shell PID remained live, attached a fresh client, and resized
+from 80x24 to 100x31. The new client then received a normalized
+cursor-addressed redraw containing the same pre-kill content token and a
+new unique 100x31 redraw token, followed by `CSI ?1049l`. The 100x31
+token did not exist before reattach, so it could not be old ring replay.
+The script then queried and matched the original PID and shell variable,
+detached again, generated more than the 1 MiB ring capacity, and
+reattached to
+prove the detached command's completion sentinel existed before
+reattach, the client received at least the full 1 MiB retained replay,
+the newest marker and completion marker were present, and the oldest
+marker had been overwritten. Before that final attach, it required the
+host's drained-output total to remain unchanged for 750 ms after the
+shell wrote its out-of-band completion file, preventing trailing output
+from satisfying the marker assertions as live traffic instead of replay.
+It also checked every emitted ring stat for `retained <= capacity`,
+sampled host private memory throughout detached overflow, exercised the
+explicit detach frame, and cleaned up only retained process objects for
+recorded PIDs.
+
+The latest hardened green run reported:
+
+```text
+CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":588,"killed_client_pid":47372,"shell_pid":39000,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2575370,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38445056,"observed_host_private_max_detached_bytes":38445056,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote+persistent-instance+client-verifies-server-sid","pipe_security_evidence":"mechanism-inventory-not-derived","pipe_security_execution_verified":"current-user-DACL-accept;server-sid-accept;persistent-instance-reuse","pipe_security_by_construction":"first-instance-collision;reject-remote;cross-user-DACL-denial;untrusted-server-rejection","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
+```
+
+The memory evidence is intentionally precise and observational: total
+process private memory was 38,445,056 bytes before detached overflow, so
+the whole process was not and cannot be under a 1 MiB ring cap. The
+retained-output allocation never exceeded 1,048,576 bytes, and the
+sampled private-memory growth while draining at least 2,575,370 bytes
+detached was 0 bytes. That figure is recorded, not enforced: the harness
+reports `observed_host_private_growth_bytes` and derives
+`observed_private_growth_within_ring_cap` from it, but neither can fail
+the run. `PrivateMemorySize64` is whole-process private memory, so
+unrelated heap or runtime page commits can move it by more than the
+ring capacity while `retained <= capacity` stays true, and sampling
+every 25 ms can miss a transient peak in either direction. The only
+memory gate is the ring's retained-byte bound, checked on every emitted
+`RING_STATS` line. An
+attached client also causes a transient, capacity-sized replay snapshot;
+the snapshot is copied under the ring mutex and sent after unlocking so a
+slow replay cannot stop the continuously running ConPTY drain thread.
+
+The drain thread also performs no diagnostics I/O. The `RING_STATS`
+lines the harness parses are published by a separate thread that samples
+the ring every 20 ms, because a synchronous stderr write on the drain
+thread would block whenever stderr is a pipe whose reader stops
+consuming — which would backpressure ConPTY through the very
+measurement instrument used to prove detached draining.
+
+That sampler is detached and is never joined at teardown. The same
+blocking write that must stay off the drain thread would otherwise stall
+shutdown instead: a thread already inside `WriteFile` cannot observe a
+stop flag, so joining it would hang teardown and leave a broker alive
+after its shell had exited — the one lifetime property this spike
+exists to claim. Teardown therefore signals the sampler and abandons it.
+Abandoning it is only safe because the ring, its backing bytes and the
+sampler's context are allocated from the page allocator and never freed;
+the host is a one-shot process and the OS reclaims them at exit. Keeping
+them out of the GPA also stops its leak report from firing at teardown,
+which would itself be another blocking write to the same stderr.
+
+Residual unknowns remain product-sized: arbitrary third-party and
+complex TUI behavior beyond this synthetic polling alt-screen probe; a
+stalled attached client can still
+monopolize the spike's single connection until it disconnects, although
+it no longer blocks ConPTY draining; multi-session and multi-client
+lifecycle; broker crashes; elevation and integrity-level separation;
+upgrade/protocol migration; long-duration memory behavior; and
+adversarial validation from another user or integrity level. The DACL
+construction was exercised only by the owning user.
+
+An earlier revision described the pipe-name gap as a same-user squat and
+dismissed it as out of scope. That was wrong, and the correction matters.
+The `\\.\pipe` namespace is machine-global, creating a name in it needs
+no privilege, and the namespace is enumerable: from an ordinary process,
+listing `\\.\pipe` returned 542 entries including this spike's randomly
+named instance,
+`\\.\pipe\LOCAL\noctty-conpty-host-probe-52876839e78448b49d07ef7589cebee7`.
+An unguessable name is therefore not a control. The DACL protects the
+object this host creates; it never reserves the name. So a _different,
+lower-privileged_ local user — not merely a same-user process — could
+have claimed the name in any window where no instance existed. This
+host's `FILE_FLAG_FIRST_PIPE_INSTANCE` would fail it closed on the next
+accept, but the client performs no server authentication, so a
+reconnecting client would have disclosed its terminal input to the
+impostor. That is a cross-user disclosure path, and it was outside what
+the stated same-user scope covered.
+
+The host now creates its one instance before advertising the name and
+reuses it across clients via `DisconnectNamedPipe` and a fresh
+`ConnectNamedPipe` on the same handle, so the name is never unowned
+while the host lives. `DisconnectNamedPipe` discards data still buffered
+in the instance, and all per-client state is local to `serveClient`, so
+a new client cannot observe the previous client's bytes. Max instances
+stays 1, preserving one client at a time. Clients also connect with
+`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, which caps the token
+a server can obtain from a connecting client at identification level:
+the server can still obtain such a token and learn who the client is,
+but it cannot act as the client. Without the SQOS flags the default is
+`SecurityImpersonation`, which would let it.
+
+This reuse is not only a design change; it is execution-verified. Every
+green run drives four successive reattaches (clients 2 through 5,
+including one after a hard PID kill) through the
+`DisconnectNamedPipe` → `ConnectNamedPipe` path on the same handle, so
+the reused instance is exercised on the normal path of every run rather
+than reasoned about.
+
+One caveat about the evidence itself, so the verdict line is not read
+for more than it says: `pipe_security` is a hard-coded constant in the
+harness. It is a fair inventory of mechanisms that all exist in the
+code, but it is not derived — deleting `verifyPipeServer` from the
+client would not change the emitted string, and the harness's only
+related assertion regexes the host's own `security=current-user`
+self-report. Of the listed tokens, only the current-user DACL accept
+path, the server-SID accept path and the persistent-instance reuse are
+execution-verified. First-instance collision, reject-remote, cross-user
+DACL denial and the `UntrustedPipeServer` rejection branch hold by
+construction and code review only. The run now emits
+`pipe_security_evidence`, `pipe_security_execution_verified` and
+`pipe_security_by_construction` so this distinction travels with the
+result. If any of this graduates to product, the field must be derived
+from probes rather than asserted.
+
+A second correction is needed, because the revision that introduced the
+persistent instance then claimed the remaining cases were "fail closed,
+no disclosure". That was also wrong. `FILE_FLAG_FIRST_PIPE_INSTANCE`
+fails the _host_ closed; it says nothing about the _client_. When an
+attacker owns the name before the host starts, or when `attach` runs
+with no host at all, the client's open still succeeds against the
+attacker's pipe and the client then sends its attach frame and its
+stdin. Confirmed directly: with no host running and an impostor holding
+`\\.\pipe\LOCAL\noctty-conpty-host-<name>`, the client connected and the
+impostor received the attach frame `01 00 00 00 00`. That is disclosure,
+not denial of service, and `SECURITY_IDENTIFICATION` does not help — it
+stops the server acting as the client; it does nothing about capture.
+
+So the client now authenticates the server before sending any frame:
+`GetNamedPipeServerProcessId` on the opened handle, then `OpenProcess`,
+then a token-user SID comparison against the current user, failing
+closed as `error.UntrustedPipeServer` on any step it cannot positively
+confirm — including an `OpenProcess` that fails because the server
+belongs to another user. The green run below exercised the accepting
+path across all five clients.
+
+What remains is now stated exactly. This closes the cross-user case up
+to a PID-reuse race between the pipe's recorded server PID and
+`OpenProcess`: the check authenticates the process currently holding
+that PID, not the pipe endpoint itself. An attacker can create the
+instance in a short-lived process, `DuplicateHandle` the server end into
+a long-lived one, let the creator exit, and groom PID reuse so a
+victim-user process holds that PID when `OpenProcess` runs. That is
+esoteric and race-dependent, but it is why the claim is bounded rather
+than absolute. There is no TOCTOU _after_ the check — the handle stays
+bound to the verified instance. A same-user impostor still passes
+outright, as does a same-user impostor at a different integrity level;
+integrity-level separation stays on the residual list above.
+
+The accept is cancellable. The host's instance is created with
+`FILE_FLAG_OVERLAPPED`, `ConnectNamedPipe` is issued with an
+`OVERLAPPED` event, and the host waits on that event and the shell's
+process handle together; when the shell exits first the pending accept
+is cancelled with `CancelIoEx`, its completion is awaited, and teardown
+proceeds. An earlier revision used a synchronous accept, so a shell
+that exited with no client attached left the host parked until some
+client happened to connect. The wait/select logic is covered by four
+hermetic Zig tests in `src/conpty_host.zig` (client connected before
+the accept, client connecting during the accept, shell exit cancelling
+a pending accept and leaving the instance reusable, and shell exit
+winning while the accept is pending), using an event in place of the
+process handle. The end-to-end case is asserted by the harness as its
+final stage: a sixth client sends `exit` to the shell and detaches on
+EOF, so the shell dies with no client attached, and the run requires
+the host process to exit on its own with code 0 within ten seconds
+(`shell_exit_released_host`, `host_exit_code`). Because the instance is
+overlapped, every host-side pipe read and write is now issued
+overlapped as well, each awaited on the same event before returning.
+No application integration was attempted.
+
+The ceiling is unchanged and absolute: this design can survive UI
+restarts and crashes only while the broker remains alive in the same
+logon session. It can never survive logoff or reboot, and a broker crash
+still kills its ConPTY and shell. With that ceiling, deferred C16
+durable-session planning may graduate; the XL implementation remains
+unscheduled.
