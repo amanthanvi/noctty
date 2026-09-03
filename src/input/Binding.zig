@@ -617,6 +617,17 @@ pub const Action = union(enum) {
     /// Focus on either the previous window or the next one ('previous', 'next')
     goto_window: GotoWindow,
 
+    /// Move keyboard focus between the focus regions of the window: the
+    /// terminal pane, the tab strip, the docked search controls, and the
+    /// host banner. Regions that are not on screen are skipped.
+    ///
+    /// Valid arguments are `next` and `previous`. This is the Windows F6
+    /// convention, and it is the only way to reach the window chrome
+    /// without a mouse. Escape returns focus to the terminal.
+    ///
+    /// This is only implemented on Windows.
+    cycle_focus_region: FocusRegion,
+
     /// Zoom in or out of the current split.
     ///
     /// When a split is zoomed into, it will take up the entire space in
@@ -1077,6 +1088,11 @@ pub const Action = union(enum) {
         next,
     };
 
+    pub const FocusRegion = enum {
+        previous,
+        next,
+    };
+
     pub const SplitResizeParameter = struct {
         SplitResizeDirection,
         u16,
@@ -1410,6 +1426,7 @@ pub const Action = union(enum) {
             .new_split,
             .goto_split,
             .goto_window,
+            .cycle_focus_region,
             .toggle_split_zoom,
             .toggle_readonly,
             .resize_split,

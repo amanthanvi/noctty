@@ -362,6 +362,7 @@ pub const VK_DIVIDE = 0x6F;
 pub const VK_F1 = 0x70;
 pub const VK_F3 = 0x72;
 pub const VK_F2 = 0x71;
+pub const VK_F6 = 0x75;
 pub const VK_F24 = 0x87;
 pub const VK_NUMLOCK = 0x90;
 pub const VK_SCROLL = 0x91;

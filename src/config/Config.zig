@@ -6640,6 +6640,21 @@ pub const Keybinds = struct {
             .toggle_quick_select,
         );
 
+        // Keyboard focus-region cycle. F6 / Shift+F6 is the Windows
+        // convention for moving focus between the panes of a window, and
+        // it is the only keyboard path into the tab strip, the docked
+        // search controls, and the host banner.
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .physical = .f6 } },
+            .{ .cycle_focus_region = .next },
+        );
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .physical = .f6 }, .mods = .{ .shift = true } },
+            .{ .cycle_focus_region = .previous },
+        );
+
         // Copy mode. The named table is intentionally user-customizable, but
         // its defaults consume every otherwise-unbound key so modal input can
         // never leak into the PTY.

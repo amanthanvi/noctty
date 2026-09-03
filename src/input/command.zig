@@ -531,6 +531,19 @@ fn actionCommands(action: Action.Key) []const Command {
             },
         },
 
+        .cycle_focus_region => comptime &.{
+            .{
+                .action = .{ .cycle_focus_region = .next },
+                .title = "Focus Region: Next",
+                .description = "Move keyboard focus to the next region of the window: terminal, tab strip, docked search, or banner.",
+            },
+            .{
+                .action = .{ .cycle_focus_region = .previous },
+                .title = "Focus Region: Previous",
+                .description = "Move keyboard focus to the previous region of the window.",
+            },
+        },
+
         .toggle_split_zoom => comptime &.{.{
             .action = .toggle_split_zoom,
             .title = "Toggle Split Zoom",

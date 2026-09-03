@@ -105,6 +105,7 @@ pub const HostBannerKind = enum {
 };
 
 const TabButtonKeyAction = enum {
+    activate,
     previous,
     next,
     first,
@@ -221,6 +222,10 @@ pub const SearchBarButtonRole = enum {
 
 pub fn tabButtonKeyAction(vk: WPARAM, ctrl_pressed: bool) ?TabButtonKeyAction {
     return switch (vk) {
+        // Enter and Space activate the focused tab, matching every other
+        // Win32 tab control. Ctrl is ignored here: Ctrl+Enter and
+        // Ctrl+Space have no tab meaning and must not silently activate.
+        c.VK_RETURN, c.VK_SPACE => if (ctrl_pressed) null else .activate,
         c.VK_LEFT => if (ctrl_pressed) .move_previous else .previous,
         c.VK_RIGHT => if (ctrl_pressed) .move_next else .next,
         c.VK_HOME => if (ctrl_pressed) .move_first else .first,
@@ -3442,6 +3447,11 @@ test "win32 profileDirectionFromWheelDelta maps wheel direction to profile navig
 test "win32 tabButtonKeyAction maps focused-tab keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_RETURN, false).?);
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_SPACE, false).?);
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_RETURN, true));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_SPACE, true));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F6, false));
     try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(c.VK_LEFT, false).?);
     try std.testing.expectEqual(TabButtonKeyAction.move_previous, tabButtonKeyAction(c.VK_LEFT, true).?);
     try std.testing.expectEqual(TabButtonKeyAction.next, tabButtonKeyAction(c.VK_RIGHT, false).?);
@@ -3453,7 +3463,7 @@ test "win32 tabButtonKeyAction maps focused-tab keys" {
     try std.testing.expectEqual(TabButtonKeyAction.rename, tabButtonKeyAction(c.VK_F2, false).?);
     try std.testing.expectEqual(TabButtonKeyAction.close, tabButtonKeyAction(c.VK_DELETE, false).?);
     try std.testing.expectEqual(TabButtonKeyAction.overview, tabButtonKeyAction(c.VK_APPS, false).?);
-    try std.testing.expect(tabButtonKeyAction(c.VK_RETURN, false) == null);
+    try std.testing.expect(tabButtonKeyAction(c.VK_TAB, false) == null);
 }
 
 test "win32 moveTabAmountToEdge computes direct host reorder delta" {

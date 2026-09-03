@@ -6479,6 +6479,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             },
         ),
 
+        .cycle_focus_region => |direction| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .cycle_focus_region,
+            switch (direction) {
+                .previous => .previous,
+                .next => .next,
+            },
+        ),
+
         .resize_split => |value| return try self.rt_app.performAction(
             .{ .surface = self },
             .resize_split,
