@@ -398,12 +398,14 @@ pub const utf8_console_variable = "__ghostty_utf8_console";
 
 fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) ![]u8 {
     // Always bind the sentinel, including the `false` case. `integration.ps1`
-    // resolves it with an unscoped `Get-Variable`, which walks the scope chain
-    // up to global — so if we emitted nothing when the decision is "no", a
-    // profile that happens to define `$global:__ghostty_utf8_console = $true`
-    // would be found instead and force UTF-8 against `utf8-console = never`
-    // or against the CJK guard. A local binding shadows any such outer
-    // variable, so the decision we computed is the one that applies.
+    // reads it with `Get-Variable -Scope Local`, which sees only the scope
+    // this script block creates (the dot-sourced script shares it) and never
+    // walks up to a profile-defined `$global:__ghostty_utf8_console`. That
+    // scope pin is what enforces `utf8-console = never` and the CJK guard
+    // against a hostile profile; the explicit `$false` exists so the "no"
+    // decision is a deliberate value rather than an absent variable, and so
+    // the local binding shadows any same-named outer variable if the lookup
+    // is ever loosened again.
     return std.fmt.allocPrint(
         alloc,
         "& {{ ${s} = ${s}; . '{s}' }}",
@@ -507,11 +509,11 @@ test "buildInjectedArgv: utf8 console travels in the command payload" {
 }
 
 test "buildInjectedArgv: a negative utf8 decision is bound explicitly" {
-    // `integration.ps1` resolves the sentinel with an unscoped `Get-Variable`,
-    // which walks the scope chain up to global. Emitting nothing for the
-    // "no" case would let a profile's `$global:__ghostty_utf8_console = $true`
-    // be found instead and override `utf8-console = never` or the CJK guard.
-    // The explicit `$false` binding shadows any such outer variable.
+    // `integration.ps1` reads the sentinel with `Get-Variable -Scope Local`,
+    // so a profile's `$global:__ghostty_utf8_console = $true` is never
+    // consulted. The "no" decision must still be an explicit `$false` binding
+    // in that local scope rather than an absent variable: it keeps the shape
+    // uniform for both outcomes and shadows any same-named outer variable.
     const argv = [_][]const u8{"pwsh.exe"};
     const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
     defer {
