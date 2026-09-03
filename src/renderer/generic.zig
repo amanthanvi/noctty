@@ -2993,8 +2993,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                     // Advance our index until we reach or pass
                     // our current x position in the shaper cells.
+                    //
+                    // A run can shape to fewer cells than it spans, so `x`
+                    // may be past the last shaped cell and this walks off
+                    // the end. Stopping at the end is what the caller
+                    // already expects: the `shaper_cells_i >= len` check
+                    // below picks up the next run for this same cell.
                     const shaper_cells_unwrapped = shaper_cells.?;
-                    while (run.offset + shaper_cells_unwrapped[shaper_cells_i].x < x) {
+                    while (shaper_cells_i < shaper_cells_unwrapped.len and
+                        run.offset + shaper_cells_unwrapped[shaper_cells_i].x < x)
+                    {
                         shaper_cells_i += 1;
                     }
                 }
