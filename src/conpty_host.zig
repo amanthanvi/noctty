@@ -28,7 +28,6 @@ const token_user_class = 1;
 const sddl_revision_1 = 1;
 const error_io_pending = 997;
 const error_file_not_found = 2;
-const error_pipe_connected = 535;
 const error_pipe_busy = 231;
 const still_active = 259;
 const security_sqos_present = 0x00100000;
@@ -60,6 +59,8 @@ extern "kernel32" fn ConnectNamedPipe(
     overlapped: ?*windows.OVERLAPPED,
 ) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn DisconnectNamedPipe(pipe: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn SetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn ResetEvent(event: windows.HANDLE) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn PeekNamedPipe(
     pipe: windows.HANDLE,
     buffer: ?*anyopaque,
@@ -380,7 +381,7 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     var command: Command = .{
         .path = "pwsh.exe",
         .args = &.{ "pwsh.exe", "-NoLogo", "-NoProfile" },
-        .pseudo_console = pty.pseudo_console,
+        .pseudo_console = pty.pseudoConsole(),
         .windows_job_object_plan = .{
             .mode = .always,
             .attach_policy = .hard_fail,
@@ -432,20 +433,11 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     // different-user impostor is rejected while a same-user one would still
     // capture keystrokes. Reusing one instance removes the window for both cases.
     var security_attributes = security.attributes();
-    const pipe = windows.kernel32.CreateNamedPipeW(
-        pipe_name_w.ptr,
-        pipe_access_duplex | file_flag_first_pipe_instance,
-        windows.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
-        1,
-        max_frame_payload,
-        max_frame_payload,
-        0,
-        &security_attributes,
-    );
-    if (pipe == windows.INVALID_HANDLE_VALUE) {
-        return windows.unexpectedError(windows.kernel32.GetLastError());
-    }
+    const pipe = try createHostPipe(pipe_name_w.ptr, &security_attributes);
     defer _ = windows.CloseHandle(pipe);
+    const accept_event = try createManualResetEvent();
+    defer _ = windows.CloseHandle(accept_event);
+    const server = OverlappedPipe{ .handle = pipe, .event = accept_event };
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -456,15 +448,20 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
     try stdout_writer.interface.flush();
 
     while (shellRunning(command.pid.?)) {
-        // Spike limitation: this synchronous accept has no cancellation. If the
-        // shell exits with no client attached, the host waits here until a client
-        // connects. Product code would need an overlapped, cancellable accept.
-        const connected = ConnectNamedPipe(pipe, null);
-        if (connected == 0 and @intFromEnum(windows.kernel32.GetLastError()) != error_pipe_connected) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        }
+        // The accept is overlapped and waits on the shell's process handle as
+        // well, so a shell that exits while no client is attached releases the
+        // host into teardown instead of leaving it parked until some client
+        // happens to connect.
+        const outcome = acceptClientOrShellExit(pipe, accept_event, command.pid.?) catch |err| switch (err) {
+            error.BrokenPipe, error.NoData, error.PipeNotConnected => {
+                _ = DisconnectNamedPipe(pipe);
+                continue;
+            },
+            else => return err,
+        };
+        if (outcome == .shell_exited) break;
 
-        serveClient(alloc, pipe, &pty, ring, command.pid.?) catch |err| switch (err) {
+        serveClient(alloc, server, &pty, ring, command.pid.?) catch |err| switch (err) {
             error.BrokenPipe, error.NoData, error.PipeNotConnected => {},
             else => return err,
         };
@@ -483,7 +480,7 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
 
 fn serveClient(
     alloc: Allocator,
-    pipe: windows.HANDLE,
+    pipe: OverlappedPipe,
     pty: *Pty,
     ring: *Ring,
     shell: windows.HANDLE,
@@ -512,7 +509,7 @@ fn serveClient(
         if (read_len > 0) try sendFrame(pipe, .output, output[0..read_len]);
 
         var available: windows.DWORD = 0;
-        if (PeekNamedPipe(pipe, null, 0, null, &available, null) == 0) {
+        if (PeekNamedPipe(pipe.handle, null, 0, null, &available, null) == 0) {
             return pipeError();
         }
         if (available >= 5) {
@@ -542,9 +539,177 @@ fn serveClient(
     }
 }
 
+// The client's handle is an ordinary synchronous file handle.
+const SyncPipe = struct {
+    handle: windows.HANDLE,
+
+    fn read(self: SyncPipe, dst: []u8) !usize {
+        var read_len: windows.DWORD = 0;
+        if (windows.kernel32.ReadFile(
+            self.handle,
+            dst.ptr,
+            @intCast(dst.len),
+            &read_len,
+            null,
+        ) == 0) return pipeError();
+        return read_len;
+    }
+
+    fn write(self: SyncPipe, src: []const u8) !usize {
+        var write_len: windows.DWORD = 0;
+        if (windows.kernel32.WriteFile(
+            self.handle,
+            src.ptr,
+            @intCast(src.len),
+            &write_len,
+            null,
+        ) == 0) return pipeError();
+        return write_len;
+    }
+};
+
+// The host's instance is FILE_FLAG_OVERLAPPED so that its accept can be
+// cancelled, which means every read and write on it must be issued overlapped
+// too. One thread performs all host-side pipe I/O, so a single manual-reset
+// event is enough to serialise it; each call waits for its own completion
+// before returning, so the OVERLAPPED never outlives the frame that owns it.
+const OverlappedPipe = struct {
+    handle: windows.HANDLE,
+    event: windows.HANDLE,
+
+    fn read(self: OverlappedPipe, dst: []u8) !usize {
+        var request = try self.beginRequest();
+        return self.finish(windows.kernel32.ReadFile(
+            self.handle,
+            dst.ptr,
+            @intCast(dst.len),
+            null,
+            &request,
+        ), &request);
+    }
+
+    fn write(self: OverlappedPipe, src: []const u8) !usize {
+        var request = try self.beginRequest();
+        return self.finish(windows.kernel32.WriteFile(
+            self.handle,
+            src.ptr,
+            @intCast(src.len),
+            null,
+            &request,
+        ), &request);
+    }
+
+    fn beginRequest(self: OverlappedPipe) !windows.OVERLAPPED {
+        if (ResetEvent(self.event) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        var result: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
+        result.hEvent = self.event;
+        return result;
+    }
+
+    fn finish(
+        self: OverlappedPipe,
+        issued: windows.BOOL,
+        overlapped: *windows.OVERLAPPED,
+    ) !usize {
+        if (issued == 0) {
+            const err = windows.kernel32.GetLastError();
+            if (err != .IO_PENDING) return pipeErrorFrom(err);
+        }
+        var transferred: windows.DWORD = 0;
+        if (windows.kernel32.GetOverlappedResult(
+            self.handle,
+            overlapped,
+            &transferred,
+            windows.TRUE,
+        ) == 0) return pipeError();
+        return transferred;
+    }
+};
+
+const AcceptOutcome = enum { client_connected, shell_exited };
+
+// Creates the host's single pipe instance. Overlapped mode is what makes the
+// accept cancellable: a synchronous ConnectNamedPipe has no cancellation path,
+// so a host whose shell exited with no client attached would otherwise sit in
+// the accept until some arbitrary client happened to connect.
+fn createHostPipe(
+    pipe_name_w: [*:0]const u16,
+    security_attributes: ?*windows.SECURITY_ATTRIBUTES,
+) !windows.HANDLE {
+    const pipe = windows.kernel32.CreateNamedPipeW(
+        pipe_name_w,
+        pipe_access_duplex | file_flag_first_pipe_instance | windows.FILE_FLAG_OVERLAPPED,
+        windows.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
+        1,
+        max_frame_payload,
+        max_frame_payload,
+        0,
+        security_attributes,
+    );
+    if (pipe == windows.INVALID_HANDLE_VALUE) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    return pipe;
+}
+
+fn createManualResetEvent() !windows.HANDLE {
+    return windows.CreateEventExW(
+        null,
+        null,
+        windows.CREATE_EVENT_MANUAL_RESET,
+        windows.EVENT_ALL_ACCESS,
+    );
+}
+
+// Waits for whichever happens first: a client connects to `pipe`, or `shell`
+// becomes signalled. A process handle signals when the process exits; the
+// tests pass an event so the select logic is exercised without a shell. When
+// the shell wins, the pending accept is cancelled and its completion is waited
+// for before returning, so the stack OVERLAPPED is never referenced afterwards.
+fn acceptClientOrShellExit(
+    pipe: windows.HANDLE,
+    accept_event: windows.HANDLE,
+    shell: windows.HANDLE,
+) !AcceptOutcome {
+    if (ResetEvent(accept_event) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
+    overlapped.hEvent = accept_event;
+
+    if (ConnectNamedPipe(pipe, &overlapped) != 0) return .client_connected;
+    switch (windows.kernel32.GetLastError()) {
+        .IO_PENDING => {},
+        // A client opened the instance before this accept was issued.
+        .PIPE_CONNECTED => return .client_connected,
+        else => |err| return pipeErrorFrom(err),
+    }
+
+    const handles = [_]windows.HANDLE{ accept_event, shell };
+    const signalled = try windows.WaitForMultipleObjectsEx(&handles, false, windows.INFINITE, false);
+    if (signalled == 0) {
+        var transferred: windows.DWORD = 0;
+        if (windows.kernel32.GetOverlappedResult(pipe, &overlapped, &transferred, windows.FALSE) == 0) {
+            return pipeError();
+        }
+        return .client_connected;
+    }
+
+    // The shell exited first. CancelIoEx reports NOT_FOUND if the accept raced
+    // to completion in the meantime; either way GetOverlappedResult returns
+    // promptly once the request is no longer in flight. Its result is
+    // irrelevant because the host is tearing down.
+    _ = windows.kernel32.CancelIoEx(pipe, &overlapped);
+    var transferred: windows.DWORD = 0;
+    _ = windows.kernel32.GetOverlappedResult(pipe, &overlapped, &transferred, windows.TRUE);
+    return .shell_exited;
+}
+
 const FrameHeader = struct { tag: Tag, len: usize };
 
-fn readHeader(pipe: windows.HANDLE) !FrameHeader {
+fn readHeader(pipe: anytype) !FrameHeader {
     var header: [5]u8 = undefined;
     try readExact(pipe, &header);
     return .{
@@ -553,7 +718,7 @@ fn readHeader(pipe: windows.HANDLE) !FrameHeader {
     };
 }
 
-fn sendFrame(pipe: windows.HANDLE, tag: Tag, payload: []const u8) !void {
+fn sendFrame(pipe: anytype, tag: Tag, payload: []const u8) !void {
     if (payload.len > max_frame_payload) return error.FrameTooLarge;
     var header: [5]u8 = undefined;
     header[0] = @intFromEnum(tag);
@@ -562,33 +727,19 @@ fn sendFrame(pipe: windows.HANDLE, tag: Tag, payload: []const u8) !void {
     try writeAll(pipe, payload);
 }
 
-fn readExact(handle: windows.HANDLE, dst: []u8) !void {
+fn readExact(pipe: anytype, dst: []u8) !void {
     var offset: usize = 0;
     while (offset < dst.len) {
-        var read_len: windows.DWORD = 0;
-        if (windows.kernel32.ReadFile(
-            handle,
-            dst[offset..].ptr,
-            @intCast(dst.len - offset),
-            &read_len,
-            null,
-        ) == 0) return pipeError();
+        const read_len = try pipe.read(dst[offset..]);
         if (read_len == 0) return error.BrokenPipe;
         offset += read_len;
     }
 }
 
-fn writeAll(handle: windows.HANDLE, src: []const u8) !void {
+fn writeAll(pipe: anytype, src: []const u8) !void {
     var offset: usize = 0;
     while (offset < src.len) {
-        var write_len: windows.DWORD = 0;
-        if (windows.kernel32.WriteFile(
-            handle,
-            src[offset..].ptr,
-            @intCast(src.len - offset),
-            &write_len,
-            null,
-        ) == 0) return pipeError();
+        const write_len = try pipe.write(src[offset..]);
         if (write_len == 0) return error.BrokenPipe;
         offset += write_len;
     }
@@ -615,7 +766,11 @@ fn writePtyInput(handle: windows.HANDLE, src: []const u8) !void {
 }
 
 fn pipeError() anyerror {
-    return switch (windows.kernel32.GetLastError()) {
+    return pipeErrorFrom(windows.kernel32.GetLastError());
+}
+
+fn pipeErrorFrom(last_error: windows.Win32Error) anyerror {
+    return switch (last_error) {
         .BROKEN_PIPE => error.BrokenPipe,
         .NO_DATA => error.NoData,
         .PIPE_NOT_CONNECTED => error.PipeNotConnected,
@@ -652,8 +807,9 @@ fn attach(alloc: Allocator, args: []const [:0]u8) !void {
     defer alloc.free(pipe_name);
     const pipe_name_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name);
     defer alloc.free(pipe_name_w);
-    const pipe = try connectClient(alloc, pipe_name_w);
-    defer _ = windows.CloseHandle(pipe);
+    const handle = try connectClient(alloc, pipe_name_w);
+    defer _ = windows.CloseHandle(handle);
+    const pipe = SyncPipe{ .handle = handle };
 
     try sendFrame(pipe, .attach, "");
     if (resize) |size| {
@@ -680,7 +836,7 @@ fn attach(alloc: Allocator, args: []const [:0]u8) !void {
 }
 
 const InputContext = struct {
-    pipe: windows.HANDLE,
+    pipe: SyncPipe,
     detach_on_eof: bool,
 };
 
@@ -785,4 +941,142 @@ fn makePipeName(alloc: Allocator, name: []const u8) ![:0]u8 {
         }
     }
     return std.fmt.allocPrintSentinel(alloc, pipe_prefix ++ "{s}", .{name}, 0);
+}
+
+// Hermetic tests for the accept/select logic: a real overlapped instance under
+// a random name, a real client open, and an event standing in for the shell's
+// process handle. No shell, no ConPTY, no external process.
+const TestPipe = struct {
+    name_w: [:0]u16,
+    security: PipeSecurity,
+    pipe: windows.HANDLE,
+    accept_event: windows.HANDLE,
+    shell_event: windows.HANDLE,
+
+    fn init(alloc: Allocator) !TestPipe {
+        var random: [8]u8 = undefined;
+        std.crypto.random.bytes(&random);
+        const name = try std.fmt.allocPrint(alloc, "test-{x}", .{&random});
+        defer alloc.free(name);
+        const pipe_name = try makePipeName(alloc, name);
+        defer alloc.free(pipe_name);
+        const name_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name);
+        errdefer alloc.free(name_w);
+
+        var security = try PipeSecurity.init(alloc);
+        errdefer security.deinit();
+        var security_attributes = security.attributes();
+        const pipe = try createHostPipe(name_w.ptr, &security_attributes);
+        errdefer _ = windows.CloseHandle(pipe);
+        const accept_event = try createManualResetEvent();
+        errdefer _ = windows.CloseHandle(accept_event);
+        const shell_event = try createManualResetEvent();
+        errdefer _ = windows.CloseHandle(shell_event);
+
+        return .{
+            .name_w = name_w,
+            .security = security,
+            .pipe = pipe,
+            .accept_event = accept_event,
+            .shell_event = shell_event,
+        };
+    }
+
+    fn deinit(self: *TestPipe, alloc: Allocator) void {
+        _ = windows.CloseHandle(self.shell_event);
+        _ = windows.CloseHandle(self.accept_event);
+        _ = windows.CloseHandle(self.pipe);
+        self.security.deinit();
+        alloc.free(self.name_w);
+        self.* = undefined;
+    }
+
+    fn accept(self: *TestPipe) !AcceptOutcome {
+        return acceptClientOrShellExit(self.pipe, self.accept_event, self.shell_event);
+    }
+
+    fn openClient(self: *TestPipe) !windows.HANDLE {
+        const client = windows.kernel32.CreateFileW(
+            self.name_w.ptr,
+            windows.GENERIC_READ | windows.GENERIC_WRITE,
+            0,
+            null,
+            windows.OPEN_EXISTING,
+            windows.FILE_ATTRIBUTE_NORMAL | security_sqos_present | security_identification,
+            null,
+        );
+        if (client == windows.INVALID_HANDLE_VALUE) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        return client;
+    }
+
+    fn openClientAfterDelay(self: *TestPipe, client: *windows.HANDLE) void {
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+        client.* = self.openClient() catch windows.INVALID_HANDLE_VALUE;
+    }
+};
+
+test "conpty-host accept: client already connected before the accept is issued" {
+    const alloc = std.testing.allocator;
+    var fixture = try TestPipe.init(alloc);
+    defer fixture.deinit(alloc);
+
+    const client = try fixture.openClient();
+    defer _ = windows.CloseHandle(client);
+
+    try std.testing.expectEqual(AcceptOutcome.client_connected, try fixture.accept());
+}
+
+test "conpty-host accept: client connecting while the accept is pending" {
+    const alloc = std.testing.allocator;
+    var fixture = try TestPipe.init(alloc);
+    defer fixture.deinit(alloc);
+
+    var client: windows.HANDLE = windows.INVALID_HANDLE_VALUE;
+    const opener = try std.Thread.spawn(.{}, TestPipe.openClientAfterDelay, .{ &fixture, &client });
+    const outcome = try fixture.accept();
+    opener.join();
+    defer if (client != windows.INVALID_HANDLE_VALUE) {
+        _ = windows.CloseHandle(client);
+    };
+
+    try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
+    try std.testing.expectEqual(AcceptOutcome.client_connected, outcome);
+}
+
+test "conpty-host accept: shell exit cancels a pending accept and leaves the instance usable" {
+    const alloc = std.testing.allocator;
+    var fixture = try TestPipe.init(alloc);
+    defer fixture.deinit(alloc);
+
+    // No client will ever connect; the only way out is the shell handle.
+    try std.testing.expect(SetEvent(fixture.shell_event) != 0);
+    try std.testing.expectEqual(AcceptOutcome.shell_exited, try fixture.accept());
+
+    // The cancelled accept must not have wedged the instance: a later client
+    // still connects and a later accept still completes on the same handle.
+    try std.testing.expect(ResetEvent(fixture.shell_event) != 0);
+    const client = try fixture.openClient();
+    defer _ = windows.CloseHandle(client);
+    try std.testing.expectEqual(AcceptOutcome.client_connected, try fixture.accept());
+}
+
+test "conpty-host accept: shell exit wins while the accept is pending" {
+    const alloc = std.testing.allocator;
+    var fixture = try TestPipe.init(alloc);
+    defer fixture.deinit(alloc);
+
+    // Signal the shell while the accept is pending on another thread; the
+    // accept must return shell_exited rather than wait for a client forever.
+    const Signaller = struct {
+        fn run(event: windows.HANDLE) void {
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            _ = SetEvent(event);
+        }
+    };
+    const signaller = try std.Thread.spawn(.{}, Signaller.run, .{fixture.shell_event});
+    defer signaller.join();
+
+    try std.testing.expectEqual(AcceptOutcome.shell_exited, try fixture.accept());
 }

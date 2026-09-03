@@ -338,10 +338,14 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
     if (-not $stableSince -or ([DateTime]::UtcNow - $stableSince).TotalMilliseconds -lt 750) {
         throw 'detached ConPTY drain did not reach a stable output-total barrier before reattach'
     }
+    # Diagnostic only, never a gate. PrivateMemorySize64 is whole-process
+    # private memory: unrelated heap or runtime page commits can move it by
+    # more than the ring capacity while retained <= capacity stays true, and
+    # the 25 ms sampling can miss a transient peak either way. The structural
+    # guarantee is the ring bound asserted above; this number is recorded so a
+    # reader can see what one run observed, not to decide the verdict.
     $privateGrowth = [Math]::Max(0L, $maxPrivate - $privateBaseline)
-    if ($privateGrowth -gt $ringCapacity) {
-        throw "host private-memory growth exceeded ring cap while detached: growth=$privateGrowth cap=$ringCapacity"
-    }
+    $privateGrowthWithinRingCap = $privateGrowth -le $ringCapacity
 
     $stage = 'bounded-ring-replay'
     $client4 = Start-AttachClient `
@@ -390,6 +394,32 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
     $shellProcess.Refresh()
     if ($shellProcess.HasExited) { throw "shell exited after detach frame: pid=$shellPid" }
 
+    # The host must not outlive its shell. This client tells the shell to exit
+    # and then detaches on EOF, so the shell dies while no client is attached
+    # and the host is parked in its accept. A synchronous accept has no
+    # cancellation path and would leave the host alive until some client
+    # happened to connect; the overlapped accept waits on the shell's process
+    # handle too and must release the host into teardown on its own.
+    $stage = 'shell-exit-releases-host'
+    $exitInput = Join-Path $sandbox 'exit.input'
+    [System.IO.File]::WriteAllText($exitInput, "exit`r", [System.Text.UTF8Encoding]::new($false))
+    $client6 = Start-AttachClient `
+        -Name 'client6' `
+        -PipeName $pipeName `
+        -InputPath $exitInput
+    if (-not $client6.Process.WaitForExit(10000)) {
+        throw "exit-sending client did not exit: pid=$($client6.Process.Id)"
+    }
+    if (-not $shellProcess.WaitForExit(10000)) {
+        throw "shell did not exit after receiving exit: pid=$shellPid"
+    }
+    if (-not $hostProcess.WaitForExit(10000)) {
+        throw "host outlived its shell with no client attached: host_pid=$($hostProcess.Id) shell_pid=$shellPid"
+    }
+    if ($hostProcess.ExitCode -ne 0) {
+        throw "host exited with code $($hostProcess.ExitCode) after shell exit; stderr=$(Get-SharedText -Path $hostStderr)"
+    }
+
     $result = [ordered]@{
         result = 'PASS'
         verdict = 'GREEN'
@@ -412,7 +442,7 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
         observed_host_private_baseline_bytes = $privateBaseline
         observed_host_private_max_detached_bytes = $maxPrivate
         observed_host_private_growth_bytes = $privateGrowth
-        observed_private_growth_within_ring_cap = $true
+        observed_private_growth_within_ring_cap = $privateGrowthWithinRingCap
         # Mechanism inventory, NOT a derived test result. This string is a
         # constant: deleting verifyPipeServer from the client, or the
         # reject-remote flag from the host, would not change what is emitted
@@ -424,6 +454,8 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
         pipe_security_execution_verified = 'current-user-DACL-accept;server-sid-accept;persistent-instance-reuse'
         pipe_security_by_construction = 'first-instance-collision;reject-remote;cross-user-DACL-denial;untrusted-server-rejection'
         detach_frame = $true
+        shell_exit_released_host = $true
+        host_exit_code = $hostProcess.ExitCode
         ceiling = 'same-logon-session-only;never-logoff-or-reboot'
     }
 }

@@ -91,6 +91,9 @@ pub const std_options: std.Options = process_shared.std_options;
 test {
     _ = @import("pty.zig");
     _ = @import("Command.zig");
+    // Not part of the app; rooted here only so the spike's hermetic
+    // accept/select tests run with the suite.
+    _ = @import("conpty_host.zig");
     _ = @import("font/main.zig");
     _ = @import("apprt.zig");
     _ = @import("renderer.zig");

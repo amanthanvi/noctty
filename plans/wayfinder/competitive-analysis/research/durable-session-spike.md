@@ -386,13 +386,15 @@ process private memory was 38,445,056 bytes before detached overflow, so
 the whole process was not and cannot be under a 1 MiB ring cap. The
 retained-output allocation never exceeded 1,048,576 bytes, and the
 sampled private-memory growth while draining at least 2,575,370 bytes
-detached was 0 bytes. That figure is not merely observed: the harness
-enforces sampled growth under the ring cap as a hard failure, so a run
-that breached it would fail rather than report. The caveat is narrower
-than "one observation" — sampling every 25 ms can miss a transient peak
-between samples, and neither the check nor the figure is a
-long-duration whole-process memory budget. The structural guarantee
-remains the ring's retained-byte bound. An
+detached was 0 bytes. That figure is recorded, not enforced: the harness
+reports `observed_host_private_growth_bytes` and derives
+`observed_private_growth_within_ring_cap` from it, but neither can fail
+the run. `PrivateMemorySize64` is whole-process private memory, so
+unrelated heap or runtime page commits can move it by more than the
+ring capacity while `retained <= capacity` stays true, and sampling
+every 25 ms can miss a transient peak in either direction. The only
+memory gate is the ring's retained-byte bound, checked on every emitted
+`RING_STATS` line. An
 attached client also causes a transient, capacity-sized replay snapshot;
 the snapshot is copied under the ring mutex and sent after unlocking so a
 slow replay cannot stop the continuously running ConPTY drain thread.
@@ -434,8 +436,8 @@ listing `\\.\pipe` returned 542 entries including this spike's randomly
 named instance,
 `\\.\pipe\LOCAL\noctty-conpty-host-probe-52876839e78448b49d07ef7589cebee7`.
 An unguessable name is therefore not a control. The DACL protects the
-object this host creates; it never reserves the name. So a *different,
-lower-privileged* local user — not merely a same-user process — could
+object this host creates; it never reserves the name. So a _different,
+lower-privileged_ local user — not merely a same-user process — could
 have claimed the name in any window where no instance existed. This
 host's `FILE_FLAG_FIRST_PIPE_INSTANCE` would fail it closed on the next
 accept, but the client performs no server authentication, so a
@@ -450,8 +452,11 @@ while the host lives. `DisconnectNamedPipe` discards data still buffered
 in the instance, and all per-client state is local to `serveClient`, so
 a new client cannot observe the previous client's bytes. Max instances
 stays 1, preserving one client at a time. Clients also connect with
-`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so no server can
-capture an impersonation token from a client that reaches it.
+`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, which caps the token
+a server can obtain from a connecting client at identification level:
+the server can still obtain such a token and learn who the client is,
+but it cannot act as the client. Without the SQOS flags the default is
+`SecurityImpersonation`, which would let it.
 
 This reuse is not only a design change; it is execution-verified. Every
 green run drives four successive reattaches (clients 2 through 5,
@@ -479,7 +484,7 @@ from probes rather than asserted.
 A second correction is needed, because the revision that introduced the
 persistent instance then claimed the remaining cases were "fail closed,
 no disclosure". That was also wrong. `FILE_FLAG_FIRST_PIPE_INSTANCE`
-fails the *host* closed; it says nothing about the *client*. When an
+fails the _host_ closed; it says nothing about the _client_. When an
 attacker owns the name before the host starts, or when `attach` runs
 with no host at all, the client's open still succeeds against the
 attacker's pipe and the client then sends its attach frame and its
@@ -487,7 +492,7 @@ stdin. Confirmed directly: with no host running and an impostor holding
 `\\.\pipe\LOCAL\noctty-conpty-host-<name>`, the client connected and the
 impostor received the attach frame `01 00 00 00 00`. That is disclosure,
 not denial of service, and `SECURITY_IDENTIFICATION` does not help — it
-prevents impersonation, not capture.
+stops the server acting as the client; it does nothing about capture.
 
 So the client now authenticates the server before sending any frame:
 `GetNamedPipeServerProcessId` on the opened handle, then `OpenProcess`,
@@ -505,12 +510,31 @@ instance in a short-lived process, `DuplicateHandle` the server end into
 a long-lived one, let the creator exit, and groom PID reuse so a
 victim-user process holds that PID when `OpenProcess` runs. That is
 esoteric and race-dependent, but it is why the claim is bounded rather
-than absolute. There is no TOCTOU *after* the check — the handle stays
+than absolute. There is no TOCTOU _after_ the check — the handle stays
 bound to the verified instance. A same-user impostor still passes
 outright, as does a same-user impostor at a different integrity level;
-integrity-level separation stays on the residual list above. Synchronous `ConnectNamedPipe`
-also has no timeout, so the host can remain blocked if the shell exits
-while no client is attached. No application integration was attempted.
+integrity-level separation stays on the residual list above.
+
+The accept is cancellable. The host's instance is created with
+`FILE_FLAG_OVERLAPPED`, `ConnectNamedPipe` is issued with an
+`OVERLAPPED` event, and the host waits on that event and the shell's
+process handle together; when the shell exits first the pending accept
+is cancelled with `CancelIoEx`, its completion is awaited, and teardown
+proceeds. An earlier revision used a synchronous accept, so a shell
+that exited with no client attached left the host parked until some
+client happened to connect. The wait/select logic is covered by four
+hermetic Zig tests in `src/conpty_host.zig` (client connected before
+the accept, client connecting during the accept, shell exit cancelling
+a pending accept and leaving the instance reusable, and shell exit
+winning while the accept is pending), using an event in place of the
+process handle. The end-to-end case is asserted by the harness as its
+final stage: a sixth client sends `exit` to the shell and detaches on
+EOF, so the shell dies with no client attached, and the run requires
+the host process to exit on its own with code 0 within ten seconds
+(`shell_exit_released_host`, `host_exit_code`). Because the instance is
+overlapped, every host-side pipe read and write is now issued
+overlapped as well, each awaited on the same event before returning.
+No application integration was attempted.
 
 The ceiling is unchanged and absolute: this design can survive UI
 restarts and crashes only while the broker remains alive in the same
