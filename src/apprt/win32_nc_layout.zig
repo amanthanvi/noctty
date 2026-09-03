@@ -10,6 +10,13 @@
 //!   The close / max / min button rects are pixel-exact so that
 //!   Win11 22H2+ Snap Layouts triggers on HTMAXBUTTON hover.
 //!
+//! The caption row lives inside the client area, so every caption rect
+//! is anchored on the *client* rect, not the outer window rect. On
+//! Win11 the window rect includes an invisible resize margin roughly
+//! `SM_CXSIZEFRAME + SM_CXPADDEDBORDER` wide on each side, and anchoring
+//! the buttons there put every hit region one frame width to the right
+//! of the button actually painted.
+//!
 //! Maximize compensation: when a window is maximized, Win11 adds an
 //! invisible resize margin equal to `SM_CYSIZEFRAME + SM_CXPADDEDBORDER`
 //! above the visible content. `calcNcClientRect` shifts the top edge
@@ -126,39 +133,44 @@ pub const CaptionButtons = struct {
     min: Rect,
 };
 
-fn captionTop(window: Rect, metrics: Metrics, state: WindowState) i32 {
-    return switch (state) {
-        .normal => window.top,
-        .maximized => window.top + metrics.size_frame_y + metrics.padded_border,
-    };
-}
-
-/// Return the three caption-button rects in screen coordinates.
-/// Order is right-to-left: close (rightmost), max, min.
-/// Each button is `caption_button_w x caption_button_h`, flush against
-/// the visible top-right corner of the caption row.
-pub fn captionButtonsRect(window: Rect, metrics: Metrics, state: WindowState) CaptionButtons {
+/// Return the three caption-button rects, right-aligned in `client`.
+/// Order is right-to-left: close (rightmost), max, min. Each button is
+/// `caption_button_w x caption_button_h`.
+///
+/// `client` is the client rect in whatever coordinate space the caller
+/// wants the answer in: pass `GetClientRect`'s rect for client-space
+/// rects to paint with, or that rect mapped to the screen for hit
+/// testing and for UI Automation bounding rectangles. Only `client.right`
+/// and `client.top` are read, and the caption row starts at the top of
+/// the client area in both window states because `calcNcClientRect` put
+/// it there.
+///
+/// This is the single source for the three rects. Painting, hit testing
+/// and the UIA provider all come through here; when they did not, the
+/// painted button and the region that responded to the mouse were a
+/// frame width apart.
+pub fn captionButtonsRect(client: Rect, metrics: Metrics) CaptionButtons {
     const w = metrics.caption_button_w;
     const h = metrics.caption_button_h;
-    const t = captionTop(window, metrics, state);
+    const t = client.top;
 
     return .{
         .close = .{
-            .left = window.right - w,
+            .left = client.right - w,
             .top = t,
-            .right = window.right,
+            .right = client.right,
             .bottom = t + h,
         },
         .max = .{
-            .left = window.right - 2 * w,
+            .left = client.right - 2 * w,
             .top = t,
-            .right = window.right - w,
+            .right = client.right - w,
             .bottom = t + h,
         },
         .min = .{
-            .left = window.right - 3 * w,
+            .left = client.right - 3 * w,
             .top = t,
-            .right = window.right - 2 * w,
+            .right = client.right - 2 * w,
             .bottom = t + h,
         },
     };
@@ -170,15 +182,21 @@ pub fn captionButtonsRect(window: Rect, metrics: Metrics, state: WindowState) Ca
 
 /// Classify a cursor position into the correct hit-test code.
 ///
+/// `window` is the outer window rect (`GetWindowRect`), which the resize
+/// zones are measured from. `client` is the client rect mapped to the
+/// same coordinate space; every caption-row zone is measured from it,
+/// because that is where the caption row is painted.
+///
 /// Zone priority (highest first):
 ///   1. Resize corners (suppressed when maximized)
 ///   2. Close / Max / Min button rects
-///   3. Sysmenu rect (leftmost 40 px of caption row)
+///   3. Sysmenu rect (leftmost caption-row square)
 ///   4. Edge-resize strips (suppressed when maximized)
-///   5. Caption row (top `caption_button_h` pixels)
+///   5. Caption row (top `caption_button_h` pixels of the client area)
 ///   6. Client area
 pub fn hitTest(
     window: Rect,
+    client: Rect,
     cursor: Point,
     metrics: Metrics,
     state: WindowState,
@@ -199,20 +217,18 @@ pub fn hitTest(
     };
 
     // --- 2. Caption buttons ---
-    const btns = captionButtonsRect(window, metrics, state);
+    const btns = captionButtonsRect(client, metrics);
     if (btns.close.contains(cursor.x, cursor.y)) return .close;
     if (btns.max.contains(cursor.x, cursor.y)) return .maxbutton;
     if (btns.min.contains(cursor.x, cursor.y)) return .minbutton;
 
-    // --- 3. Sysmenu (leftmost 40 px of caption row, DPI-unscaled; we
-    //     use the caption_button_h as the sysmenu width for a square
-    //     icon area) ---
-    const caption_top = captionTop(window, metrics, state);
+    // --- 3. Sysmenu (leftmost caption-row square; we use
+    //     caption_button_h as the width so the icon area is square) ---
     const sysmenu_rect = Rect{
-        .left = window.left,
-        .top = caption_top,
-        .right = window.left + metrics.caption_button_h,
-        .bottom = caption_top + metrics.caption_button_h,
+        .left = client.left,
+        .top = client.top,
+        .right = client.left + metrics.caption_button_h,
+        .bottom = client.top + metrics.caption_button_h,
     };
     if (sysmenu_rect.contains(cursor.x, cursor.y)) return .sysmenu;
 
@@ -220,7 +236,7 @@ pub fn hitTest(
     if (edge_hit) |hit| return hit;
 
     // --- 5. Caption row ---
-    if (cursor.y >= caption_top and cursor.y < caption_top + metrics.caption_button_h) return .caption;
+    if (cursor.y >= client.top and cursor.y < client.top + metrics.caption_button_h) return .caption;
 
     // --- 6. Client ---
     return .client;
@@ -278,6 +294,13 @@ fn edgeHitTest(window: Rect, cursor: Point, ew: i32) ?HitTest {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// The client rect a window with this frame actually gets, straight from
+/// the `WM_NCCALCSIZE` math. Every caption zone is measured from it, so
+/// the tests measure from it too rather than from the outer window rect.
+fn testClient(window: Rect, metrics: Metrics, state: WindowState) Rect {
+    return calcNcClientRect(window, metrics, state);
+}
 
 test "metricsDefault: 96 dpi produces base values" {
     const m = metricsDefault(96, 40);
@@ -341,50 +364,50 @@ test "sides preserved in both states" {
 test "top-left corner: resize wins over sysmenu in outer frame" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    try std.testing.expectEqual(HitTest.topleft, hitTest(win, .{ .x = 0, .y = 0 }, m, .normal));
-    try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, .{ .x = 20, .y = 20 }, m, .normal));
+    try std.testing.expectEqual(HitTest.topleft, hitTest(win, testClient(win, m, .normal), .{ .x = 0, .y = 0 }, m, .normal));
+    try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, testClient(win, m, .normal), .{ .x = 20, .y = 20 }, m, .normal));
 }
 
 test "topleft resize at bottom-left corner" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Bottom-left corner is unambiguously bottomleft resize.
-    try std.testing.expectEqual(HitTest.bottomleft, hitTest(win, .{ .x = 0, .y = 799 }, m, .normal));
+    try std.testing.expectEqual(HitTest.bottomleft, hitTest(win, testClient(win, m, .normal), .{ .x = 0, .y = 799 }, m, .normal));
 }
 
 test "top-right corner: resize wins over close in outer frame" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    try std.testing.expectEqual(HitTest.topright, hitTest(win, .{ .x = 1279, .y = 0 }, m, .normal));
-    try std.testing.expectEqual(HitTest.close, hitTest(win, .{ .x = 1257, .y = 20 }, m, .normal));
-    try std.testing.expectEqual(HitTest.bottomright, hitTest(win, .{ .x = 1279, .y = 799 }, m, .normal));
+    try std.testing.expectEqual(HitTest.topright, hitTest(win, testClient(win, m, .normal), .{ .x = 1279, .y = 0 }, m, .normal));
+    try std.testing.expectEqual(HitTest.close, hitTest(win, testClient(win, m, .normal), .{ .x = 1257, .y = 20 }, m, .normal));
+    try std.testing.expectEqual(HitTest.bottomright, hitTest(win, testClient(win, m, .normal), .{ .x = 1279, .y = 799 }, m, .normal));
 }
 
 test "over close button" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    const btns = captionButtonsRect(win, m, .normal);
+    const btns = captionButtonsRect(testClient(win, m, .normal), m);
     const cx = @divTrunc(btns.close.left + btns.close.right, 2);
     const cy = @divTrunc(btns.close.top + btns.close.bottom, 2);
-    try std.testing.expectEqual(HitTest.close, hitTest(win, .{ .x = cx, .y = cy }, m, .normal));
+    try std.testing.expectEqual(HitTest.close, hitTest(win, testClient(win, m, .normal), .{ .x = cx, .y = cy }, m, .normal));
 }
 
 test "over max button" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    const btns = captionButtonsRect(win, m, .normal);
+    const btns = captionButtonsRect(testClient(win, m, .normal), m);
     const cx = @divTrunc(btns.max.left + btns.max.right, 2);
     const cy = @divTrunc(btns.max.top + btns.max.bottom, 2);
-    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, .{ .x = cx, .y = cy }, m, .normal));
+    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, testClient(win, m, .normal), .{ .x = cx, .y = cy }, m, .normal));
 }
 
 test "over min button" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    const btns = captionButtonsRect(win, m, .normal);
+    const btns = captionButtonsRect(testClient(win, m, .normal), m);
     const cx = @divTrunc(btns.min.left + btns.min.right, 2);
     const cy = @divTrunc(btns.min.top + btns.min.bottom, 2);
-    try std.testing.expectEqual(HitTest.minbutton, hitTest(win, .{ .x = cx, .y = cy }, m, .normal));
+    try std.testing.expectEqual(HitTest.minbutton, hitTest(win, testClient(win, m, .normal), .{ .x = cx, .y = cy }, m, .normal));
 }
 
 test "caption area between sysmenu and buttons" {
@@ -393,21 +416,21 @@ test "caption area between sysmenu and buttons" {
     // Pick a point in the caption row, past sysmenu, before buttons.
     // Sysmenu occupies [0, 40) horizontally; buttons start at 1280 - 3*46 = 1142.
     // So x = 200, y = 20 should be caption.
-    try std.testing.expectEqual(HitTest.caption, hitTest(win, .{ .x = 200, .y = 20 }, m, .normal));
+    try std.testing.expectEqual(HitTest.caption, hitTest(win, testClient(win, m, .normal), .{ .x = 200, .y = 20 }, m, .normal));
 }
 
 test "client area below caption" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // y = 200 is well below the caption row (40 px).
-    try std.testing.expectEqual(HitTest.client, hitTest(win, .{ .x = 640, .y = 200 }, m, .normal));
+    try std.testing.expectEqual(HitTest.client, hitTest(win, testClient(win, m, .normal), .{ .x = 640, .y = 200 }, m, .normal));
 }
 
 test "bottom edge strip" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // y = 799 (last row), x in the middle — avoids corner zones.
-    try std.testing.expectEqual(HitTest.bottom, hitTest(win, .{ .x = 640, .y = 799 }, m, .normal));
+    try std.testing.expectEqual(HitTest.bottom, hitTest(win, testClient(win, m, .normal), .{ .x = 640, .y = 799 }, m, .normal));
 }
 
 test "maximized edge resize -> client not bottom" {
@@ -415,29 +438,33 @@ test "maximized edge resize -> client not bottom" {
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Same position as "bottom edge strip" but maximized — edge resize
     // strips are suppressed.
-    try std.testing.expectEqual(HitTest.client, hitTest(win, .{ .x = 640, .y = 799 }, m, .maximized));
+    try std.testing.expectEqual(HitTest.client, hitTest(win, testClient(win, m, .maximized), .{ .x = 640, .y = 799 }, m, .maximized));
 }
 
 test "sysmenu icon rect (leftmost 40px of caption row)" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Centre of the sysmenu rect: x = 20, y = 20.
-    try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, .{ .x = 20, .y = 20 }, m, .normal));
+    try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, testClient(win, m, .normal), .{ .x = 20, .y = 20 }, m, .normal));
 }
 
 // -- captionButtonsRect -----------------------------------------------------
 
-test "buttons flush right" {
+test "buttons flush with the client right edge, not the window rect" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    const btns = captionButtonsRect(win, m, .normal);
-    try std.testing.expectEqual(@as(i32, 1280), btns.close.right);
+    const client = testClient(win, m, .normal);
+    const btns = captionButtonsRect(client, m);
+    try std.testing.expectEqual(client.right, btns.close.right);
+    // The window rect carries the invisible resize margin; anchoring
+    // there would put the buttons a frame width right of the painted ones.
+    try std.testing.expect(btns.close.right < win.right);
 }
 
 test "buttons ordered right-to-left" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    const btns = captionButtonsRect(win, m, .normal);
+    const btns = captionButtonsRect(testClient(win, m, .normal), m);
     try std.testing.expect(btns.close.left < win.right);
     try std.testing.expectEqual(btns.close.left, btns.max.right);
     try std.testing.expectEqual(btns.max.left, btns.min.right);
@@ -446,7 +473,7 @@ test "buttons ordered right-to-left" {
 test "button height == metrics.caption_button_h" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    const btns = captionButtonsRect(win, m, .normal);
+    const btns = captionButtonsRect(testClient(win, m, .normal), m);
     try std.testing.expectEqual(m.caption_button_h, btns.close.height());
     try std.testing.expectEqual(m.caption_button_h, btns.max.height());
     try std.testing.expectEqual(m.caption_button_h, btns.min.height());
@@ -459,7 +486,7 @@ test "button height == metrics.caption_button_h" {
 test "maximized buttons align to visible caption row" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
-    const btns = captionButtonsRect(win, m, .maximized);
+    const btns = captionButtonsRect(testClient(win, m, .maximized), m);
     const expected_top = win.top + m.size_frame_y + m.padded_border;
     try std.testing.expectEqual(expected_top, btns.close.top);
     try std.testing.expectEqual(expected_top, btns.max.top);
@@ -469,13 +496,13 @@ test "maximized buttons align to visible caption row" {
 test "maximized hit test follows shifted caption buttons" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
-    const btns = captionButtonsRect(win, m, .maximized);
+    const btns = captionButtonsRect(testClient(win, m, .maximized), m);
     const max_x = @divTrunc(btns.max.left + btns.max.right, 2);
     const max_y = @divTrunc(btns.max.top + btns.max.bottom, 2);
     const min_x = @divTrunc(btns.min.left + btns.min.right, 2);
     const min_y = @divTrunc(btns.min.top + btns.min.bottom, 2);
-    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, .{ .x = max_x, .y = max_y }, m, .maximized));
-    try std.testing.expectEqual(HitTest.minbutton, hitTest(win, .{ .x = min_x, .y = min_y }, m, .maximized));
+    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, testClient(win, m, .maximized), .{ .x = max_x, .y = max_y }, m, .maximized));
+    try std.testing.expectEqual(HitTest.minbutton, hitTest(win, testClient(win, m, .maximized), .{ .x = min_x, .y = min_y }, m, .maximized));
 }
 
 test "maximized caption row starts below invisible top margin at 150% dpi" {
@@ -483,18 +510,18 @@ test "maximized caption row starts below invisible top margin at 150% dpi" {
     const win = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
     const caption_top = win.top + m.size_frame_y + m.padded_border;
 
-    try std.testing.expectEqual(HitTest.client, hitTest(win, .{ .x = 420, .y = caption_top - 1 }, m, .maximized));
-    try std.testing.expectEqual(HitTest.caption, hitTest(win, .{ .x = 420, .y = caption_top + 1 }, m, .maximized));
+    try std.testing.expectEqual(HitTest.client, hitTest(win, testClient(win, m, .maximized), .{ .x = 420, .y = caption_top - 1 }, m, .maximized));
+    try std.testing.expectEqual(HitTest.caption, hitTest(win, testClient(win, m, .maximized), .{ .x = 420, .y = caption_top + 1 }, m, .maximized));
 }
 
 test "max button hit test scales at 150% dpi for snap hover" {
     const m = metricsDefault(144, 40);
     const win = Rect{ .left = 40, .top = 20, .right = 1480, .bottom = 920 };
-    const btns = captionButtonsRect(win, m, .normal);
+    const btns = captionButtonsRect(testClient(win, m, .normal), m);
     const max_x = @divTrunc(btns.max.left + btns.max.right, 2);
     const max_y = @divTrunc(btns.max.top + btns.max.bottom, 2);
 
-    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, .{ .x = max_x, .y = max_y }, m, .normal));
+    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, testClient(win, m, .normal), .{ .x = max_x, .y = max_y }, m, .normal));
 }
 
 test "Issue150 terminal content clears independently sized integrated caption" {
@@ -511,7 +538,7 @@ test "Issue150 terminal content clears independently sized integrated caption" {
         const metrics = metricsDefault(@intCast(dpi), 40);
         for (states) |state| {
             const client = calcNcClientRect(window, metrics, state);
-            const caption = captionButtonsRect(window, metrics, state);
+            const caption = captionButtonsRect(testClient(window, metrics, state), metrics);
             const bands = contentBands(
                 scaleDim(tab_height_dip, @intCast(dpi)),
                 metrics.caption_button_h,
@@ -531,7 +558,7 @@ test "Issue150 runtime DPI changes recompute integrated content boundary" {
     for (dpi_sequence) |dpi| {
         const metrics = metricsDefault(@intCast(dpi), 40);
         const client = calcNcClientRect(window, metrics, .maximized);
-        const caption = captionButtonsRect(window, metrics, .maximized);
+        const caption = captionButtonsRect(testClient(window, metrics, .maximized), metrics);
         const bands = contentBands(
             scaleDim(32, dpi),
             metrics.caption_button_h,
@@ -570,4 +597,44 @@ test "Issue150 shipped integrated bands start content at tab bottom" {
 
     const bands = contentBands(tab_bottom, metrics.caption_button_h, 0, 0);
     try std.testing.expectEqual(tab_bottom, bands.content_top);
+}
+
+test "caption buttons respond where they are painted, not a frame width right" {
+    // Regression: the hit regions used to anchor at `window.right`, which
+    // includes Win11's invisible resize margin. The leftmost `size_frame_x`
+    // of the painted Close button then reported HTMAXBUTTON, so clicking
+    // the left edge of the drawn X maximized the window instead.
+    const m = metricsDefault(144, 40);
+    const win = Rect{ .left = 38, .top = 38, .right = 1318, .bottom = 838 };
+    const client = calcNcClientRect(win, m, .normal);
+    const btns = captionButtonsRect(client, m);
+    const y = client.top + @divTrunc(m.caption_button_h, 2);
+
+    // Both edges of every painted button classify as that button.
+    try std.testing.expectEqual(HitTest.close, hitTest(win, client, .{ .x = btns.close.left, .y = y }, m, .normal));
+    try std.testing.expectEqual(HitTest.close, hitTest(win, client, .{ .x = btns.close.right - 1, .y = y }, m, .normal));
+    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, client, .{ .x = btns.max.left, .y = y }, m, .normal));
+    try std.testing.expectEqual(HitTest.minbutton, hitTest(win, client, .{ .x = btns.min.left, .y = y }, m, .normal));
+
+    // The invisible margin to the right of the painted Close button is a
+    // resize edge, not a close button.
+    try std.testing.expect(win.right > client.right);
+    try std.testing.expectEqual(
+        HitTest.right,
+        hitTest(win, client, .{ .x = client.right + 1, .y = y }, m, .normal),
+    );
+}
+
+test "caption buttons stay aligned with the painted row when maximized" {
+    const m = metricsDefault(144, 40);
+    const win = Rect{ .left = -11, .top = -11, .right = 1931, .bottom = 1091 };
+    const client = calcNcClientRect(win, m, .maximized);
+    const btns = captionButtonsRect(client, m);
+    const y = client.top + @divTrunc(m.caption_button_h, 2);
+
+    try std.testing.expectEqual(client.top, btns.close.top);
+    try std.testing.expectEqual(client.right, btns.close.right);
+    try std.testing.expectEqual(HitTest.close, hitTest(win, client, .{ .x = btns.close.left, .y = y }, m, .maximized));
+    try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, client, .{ .x = btns.max.left, .y = y }, m, .maximized));
+    try std.testing.expectEqual(HitTest.minbutton, hitTest(win, client, .{ .x = btns.min.left, .y = y }, m, .maximized));
 }

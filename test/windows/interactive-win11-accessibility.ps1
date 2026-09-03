@@ -178,6 +178,8 @@ public static class NocttyAccessibilityNative {
     public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool PostMessageW(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")]
@@ -1983,6 +1985,63 @@ function Get-AccessibilitySearchActionButton(
     }
 }
 
+# The integrated titlebar's caption buttons are painted inside the client
+# area and own no HWND, so they can only reach UIA as fragment children of
+# the host window's root provider. Walking the root's direct children is
+# therefore the assertion: a descendant search would also pass if they were
+# hanging off some other element.
+function Get-AccessibilityCaptionButtons(
+    [Parameter(Mandatory)][System.Windows.Automation.AutomationElement] $Root,
+    [Parameter(Mandatory)][int] $ProcessId
+) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $found = [ordered]@{}
+    $child = $walker.GetFirstChild($Root)
+    $visited = 0
+    while ($null -ne $child -and $visited -lt 64) {
+        $visited++
+        if ($child.Current.ProcessId -eq $ProcessId -and
+            $child.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button) {
+            $captionName = $child.Current.Name
+            if (@('Minimize', 'Maximize', 'Restore', 'Close') -contains $captionName) {
+                if ($found.Contains($captionName)) {
+                    throw "Host root exposes more than one '$captionName' caption Button."
+                }
+                $found[$captionName] = $child
+            }
+        }
+        $child = $walker.GetNextSibling($child)
+    }
+    return $found
+}
+
+# The middle button carries exactly one name, and which one is the whole
+# point: it follows the window's zoomed state.
+function Get-AccessibilityCaptionMiddleName(
+    [Parameter(Mandatory)][System.Collections.Specialized.OrderedDictionary] $Buttons
+) {
+    if ($Buttons.Contains('Maximize') -and $Buttons.Contains('Restore')) {
+        throw 'Host root exposes both Maximize and Restore caption Buttons; the middle button must carry exactly one name.'
+    }
+    if ($Buttons.Contains('Restore')) { return 'Restore' }
+    if ($Buttons.Contains('Maximize')) { return 'Maximize' }
+    throw "Host root exposes neither a Maximize nor a Restore caption Button; found: $(($Buttons.Keys) -join ', ')."
+}
+
+function Get-AccessibilityCaptionInvokePattern(
+    [Parameter(Mandatory)][System.Windows.Automation.AutomationElement] $Element,
+    [Parameter(Mandatory)][string] $Name
+) {
+    $pattern = $null
+    if (-not $Element.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$pattern
+    )) {
+        throw "Caption Button '$Name' does not expose InvokePattern."
+    }
+    return $pattern
+}
+
 function Test-AccessibilityForegroundPrecondition {
     param(
         [Parameter(Mandatory)][IntPtr] $ExpectedHwnd,
@@ -3501,6 +3560,7 @@ $paletteEditEvidence = $null
 $searchEditEvidence = $null
 $searchActionEvidence = $null
 $searchInvokeEvidence = $null
+$captionEvidence = $null
 $paletteUnavailableQuery = "zzzznocttynomatch$([Guid]::NewGuid().ToString('N'))"
 $settingsLifecycle = $null
 $settingsOwnerLifecycle = $null
@@ -3882,6 +3942,125 @@ try {
         }
         $tabActionEvidence[$actionName] = $actionElements[0].Current.ControlType.ProgrammaticName
     }
+
+    # ── Integrated-titlebar caption buttons ──
+    # These have no HWND, so nothing in the tree comes from Windows: every
+    # property below is ours. Close is never invoked here — invoking it
+    # would end the run.
+    $captionButtons = Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+    $captionMiddleName = Get-AccessibilityCaptionMiddleName -Buttons $captionButtons
+    $captionEvidence = [ordered]@{}
+    foreach ($captionName in @('Minimize', $captionMiddleName, 'Close')) {
+        if (-not $captionButtons.Contains($captionName)) {
+            throw "Host root exposes no '$captionName' caption Button; found: $(($captionButtons.Keys) -join ', ')."
+        }
+        $captionElement = $captionButtons[$captionName]
+        $captionBounds = $captionElement.Current.BoundingRectangle
+        if ($captionBounds.Width -le 0 -or $captionBounds.Height -le 0) {
+            throw "Caption Button '$captionName' reports an empty bounding rectangle."
+        }
+        if ($captionElement.Current.IsOffscreen) {
+            throw "Caption Button '$captionName' reports IsOffscreen while the integrated titlebar is painting it."
+        }
+        # Scope of this revision: exposure plus Invoke. The focus-region
+        # cycle does not land here, so the tree must not claim it does.
+        if ($captionElement.Current.IsKeyboardFocusable) {
+            throw "Caption Button '$captionName' claims IsKeyboardFocusable; the focus-region cycle does not reach it."
+        }
+        [void](Get-AccessibilityCaptionInvokePattern -Element $captionElement -Name $captionName)
+        $captionEvidence[$captionName] = [ordered]@{
+            control_type = $captionElement.Current.ControlType.ProgrammaticName
+            bounds = ('{0}x{1}' -f [int]$captionBounds.Width, [int]$captionBounds.Height)
+        }
+    }
+
+    # Invoking the middle button must move the real window state, and the
+    # name must follow it. Both directions are exercised so the window is
+    # left exactly as it was found.
+    $captionZoomedBefore = [InteractiveWin11WindowNative]::IsZoomed($process.MainWindowHandle)
+    $captionExpectedMiddle = @{ $true = 'Restore'; $false = 'Maximize' }
+    if ($captionMiddleName -ne $captionExpectedMiddle[[bool]$captionZoomedBefore]) {
+        throw "Caption middle button is named '$captionMiddleName' while IsZoomed=$captionZoomedBefore."
+    }
+    $captionToggleEvidence = [System.Collections.Generic.List[string]]::new()
+    foreach ($captionPass in @('toggle', 'restore')) {
+        $captionBefore = [InteractiveWin11WindowNative]::IsZoomed($process.MainWindowHandle)
+        $captionCurrent = Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+        $captionCurrentName = Get-AccessibilityCaptionMiddleName -Buttons $captionCurrent
+        $captionPattern = Get-AccessibilityCaptionInvokePattern `
+            -Element $captionCurrent[$captionCurrentName] `
+            -Name $captionCurrentName
+        $captionPattern.Invoke()
+        Wait-AccessibilityCondition `
+            -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+            -Description "caption '$captionCurrentName' invoke ($captionPass) to change the zoomed state" `
+            -Condition {
+                return [InteractiveWin11WindowNative]::IsZoomed($process.MainWindowHandle) -ne $captionBefore
+            }
+        Start-Sleep -Milliseconds $script:ACCESSIBILITY_TREE_SETTLE_MS
+        $captionExpectedName = $captionExpectedMiddle[[bool](-not $captionBefore)]
+        Wait-AccessibilityCondition `
+            -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+            -Description "caption middle button to rename to '$captionExpectedName'" `
+            -Condition {
+                $probe = Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+                return $probe.Contains($captionExpectedName)
+            }
+        $captionToggleEvidence.Add(('{0}->{1}' -f $captionCurrentName, $captionExpectedName))
+    }
+    if ([InteractiveWin11WindowNative]::IsZoomed($process.MainWindowHandle) -ne $captionZoomedBefore) {
+        throw 'Caption maximize round trip did not return the window to its original zoomed state.'
+    }
+
+    # Minimize is invoked and undone with ShowWindow, not with a second
+    # Invoke: a minimized window paints no caption buttons, so there is
+    # nothing left in the tree to invoke.
+    $captionMinimize = (Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id)['Minimize']
+    if ($null -eq $captionMinimize) { throw 'Caption Minimize Button disappeared before invoke.' }
+    (Get-AccessibilityCaptionInvokePattern -Element $captionMinimize -Name 'Minimize').Invoke()
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'caption Minimize invoke to minimize the window' `
+        -Condition { return [NocttyAccessibilityNative]::IsIconic($process.MainWindowHandle) }
+    # A minimized window paints no caption row, so the buttons have to be
+    # gone from the tree. Asserted before the restore: a provider that
+    # kept stale fragments would otherwise pass the round trip unnoticed.
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'caption buttons to leave the UIA tree while minimized' `
+        -Condition {
+            $script:captionWhileMinimized =
+                Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+            return $script:captionWhileMinimized.Count -eq 0
+        } -Diagnostic {
+            "Expected no caption Buttons under the host root while minimized; found: $(($script:captionWhileMinimized.Keys) -join ', ')."
+        }
+    [void][InteractiveWin11WindowNative]::ShowWindow($process.MainWindowHandle, 9) # SW_RESTORE
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'window to restore after the caption Minimize invoke' `
+        -Condition { return -not [NocttyAccessibilityNative]::IsIconic($process.MainWindowHandle) }
+    [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_TREE_SETTLE_MS
+    Assert-AccessibilityInputOwner -Process $process -Description 'caption minimize round trip'
+    Wait-AccessibilityCondition `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Description 'caption buttons to return to the UIA tree after restore' `
+        -Condition {
+            $script:captionAfterRestore =
+                Get-AccessibilityCaptionButtons -Root $root -ProcessId $process.Id
+            if ($script:captionAfterRestore.Count -eq 0) { return $false }
+            $middle = Get-AccessibilityCaptionMiddleName -Buttons $script:captionAfterRestore
+            return $script:captionAfterRestore.Contains('Minimize') -and
+                $script:captionAfterRestore.Contains($middle) -and
+                $script:captionAfterRestore.Contains('Close')
+        } -Diagnostic {
+            "Expected Minimize, the middle button and Close back under the host root after restore; found: $(($script:captionAfterRestore.Keys) -join ', ')."
+        }
+    $captionEvidence['middle_name_transitions'] = ($captionToggleEvidence -join ', ')
+    $captionEvidence['minimize_round_trip'] =
+        'invoked; buttons left the tree while minimized; restored with ShowWindow and all three returned'
+
     $document = $documents[0]
     $textPattern = $null
     if (-not $document.TryGetCurrentPattern(
@@ -5058,12 +5237,25 @@ try {
     )) {
         throw "Focused terminal pane $($script:searchDismissFocusedHwnd) exposes no TextPattern to seed docked search navigation."
     }
-    $searchNavToken = ([regex]::Matches(
-        $searchNavPaneTextPattern.DocumentRange.GetText(-1),
-        '[A-Za-z0-9]{6,}'
-    ) | Select-Object -Last 1).Value
+    $searchNavPaneText = $searchNavPaneTextPattern.DocumentRange.GetText(-1)
+    # Take the longest run the pane is actually showing rather than
+    # demanding a fixed minimum length. Which pane the Escape lands on, and
+    # how long its prompt is, follow the shell's working directory and not
+    # anything under test: a prompt-only pane reading `C:\Users>` is a
+    # legitimate state that failed this assertion outright.
+    $searchNavToken = (@([regex]::Matches($searchNavPaneText, '[A-Za-z0-9]{3,}')) |
+        Sort-Object -Property Length -Descending |
+        Select-Object -First 1).Value
     if ([string]::IsNullOrEmpty($searchNavToken)) {
-        throw 'Focused terminal pane exposes no token long enough to seed docked search navigation.'
+        # Name what the pane actually held: an empty document and a
+        # document of only one- and two-character words are different
+        # defects.
+        $searchNavPreview = ($searchNavPaneText -replace '\s+', ' ').Trim()
+        if ($searchNavPreview.Length -gt 160) {
+            $searchNavPreview = $searchNavPreview.Substring($searchNavPreview.Length - 160)
+        }
+        throw ("Focused terminal pane $($script:searchDismissFocusedHwnd) exposes no token long enough to seed docked search navigation " +
+            "(document_chars=$($searchNavPaneText.Length), tail='$searchNavPreview').")
     }
     $searchReopenValuePattern.SetValue($searchNavToken)
     # A query on its own reports the total with no selection; only navigation
@@ -6846,6 +7038,7 @@ try {
         chrome = [ordered]@{
             tabs = $tabChromeEvidence
             actions = $tabActionEvidence
+            caption_buttons = $captionEvidence
             scrollbars = $scrollbarRanges
             focus_region_cycle = $focusRegionCycle
         }

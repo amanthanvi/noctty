@@ -274,7 +274,6 @@ fn hostCompositionRedrawFlags() UINT {
 const default_metrics: win32_theme.ThemeMetrics = .{};
 const host_tab_height: i32 = default_metrics.height_tab;
 const host_tab_height_integrated: i32 = default_metrics.height_tab_integrated;
-const host_caption_button_w: i32 = default_metrics.caption_button_w;
 const host_caption_button_h: i32 = default_metrics.caption_button_h;
 const host_overlay_height: i32 = default_metrics.height_overlay;
 const host_inspector_panel_height: i32 = default_metrics.height_inspector;
@@ -7842,6 +7841,7 @@ pub const App = struct {
                         c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                     );
                     runUiActionOrLog("theme update layout failed", host.layout());
+                    host.scheduleCaptionUiaSync();
                 }
                 // Theme resource replacement always invalidates the full host
                 // chrome plus native child controls. A System->Dark swap does
@@ -10478,6 +10478,64 @@ fn captionButtonSysCommand(ht: i32, is_zoomed: bool) ?WPARAM {
     };
 }
 
+/// Hit-test code the mouse path produces for a caption button. Lets the
+/// UIA Invoke path reuse `captionButtonSysCommand` instead of restating
+/// the minimize / maximize / restore mapping.
+fn captionButtonHitTest(kind: win32_uia.CaptionButtonKind) i32 {
+    return switch (kind) {
+        .minimize => c.HTMINBUTTON,
+        .maximize => c.HTMAXBUTTON,
+        .close => c.HTCLOSE,
+    };
+}
+
+/// The `WM_SYSCOMMAND` the mouse path sends for a caption button.
+/// `captionButtonSysCommand` owns minimize and maximize, including the
+/// zoomed to restore flip; close comes from the `WM_NCLBUTTONUP` branch,
+/// which sends `SC_CLOSE` on its own.
+fn captionButtonCommand(kind: win32_uia.CaptionButtonKind, is_zoomed: bool) ?WPARAM {
+    return switch (kind) {
+        .close => c.SC_CLOSE,
+        .minimize, .maximize => captionButtonSysCommand(
+            captionButtonHitTest(kind),
+            is_zoomed,
+        ),
+    };
+}
+
+/// Client-space rects of the three painted caption buttons.
+const CaptionButtonRects = struct {
+    minimize: RECT,
+    maximize: RECT,
+    close: RECT,
+
+    fn get(self: CaptionButtonRects, kind: win32_uia.CaptionButtonKind) RECT {
+        return switch (kind) {
+            .minimize => self.minimize,
+            .maximize => self.maximize,
+            .close => self.close,
+        };
+    }
+};
+
+fn ncRectToWin32(rect: win32_nc_layout.Rect) RECT {
+    return .{
+        .left = rect.left,
+        .top = rect.top,
+        .right = rect.right,
+        .bottom = rect.bottom,
+    };
+}
+
+fn win32RectToNc(rect: RECT) win32_nc_layout.Rect {
+    return .{
+        .left = rect.left,
+        .top = rect.top,
+        .right = rect.right,
+        .bottom = rect.bottom,
+    };
+}
+
 fn titlebarSubtleFill(parent_bg: u32, is_dark: bool, pressed: bool) u32 {
     const overlay = if (is_dark) rgb(0xFF, 0xFF, 0xFF) else rgb(0x00, 0x00, 0x00);
     const alpha: f32 = if (pressed) 0.04 else 0.06;
@@ -10843,6 +10901,20 @@ const Host = struct {
     /// `WM_NCMOUSELEAVE`.
     caption_hover: CaptionButton = .none,
     caption_pressed: CaptionButton = .none,
+    /// Last zoomed state the caption buttons were announced with. The
+    /// middle button's UIA name is "Maximize" or "Restore", so a flip has
+    /// to raise a Name property-changed event.
+    caption_zoomed: bool = false,
+    /// Last painted state the caption children were announced with. The
+    /// UIA root exposes them only while they are painted, so a client
+    /// that cached the fragment tree needs a structure-changed event
+    /// whenever this flips.
+    caption_painted: bool = false,
+    /// One `WM_WINHOSTTY_UIA_CAPTION_SYNC` in flight is enough: the
+    /// handler re-reads the live state, so a second post would only make
+    /// the same comparison again. Keeps the frequent callers (every
+    /// `WM_WINDOWPOSCHANGED`) from queueing a message per event.
+    caption_sync_pending: bool = false,
     /// Registered for WM_NCMOUSELEAVE via `TrackMouseEvent(TME_NONCLIENT
     /// | TME_LEAVE)` so we can clear `caption_hover` when the cursor
     /// exits the non-client area. Only re-armed when it becomes false.
@@ -12003,17 +12075,27 @@ const Host = struct {
         var win_rect: RECT = undefined;
         if (sys.GetWindowRect(hwnd, &win_rect) == 0) return null;
 
-        const window_rect: win32_nc_layout.Rect = .{
-            .left = win_rect.left,
-            .top = win_rect.top,
-            .right = win_rect.right,
-            .bottom = win_rect.bottom,
+        // The caption row is painted inside the client area, and on Win11
+        // the window rect also covers an invisible resize margin. Measure
+        // the caption zones from the real client rect in screen space, or
+        // every button responds a frame width away from where it is drawn.
+        var client_rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) return null;
+        var client_origin: POINT = .{ .x = client_rect.left, .y = client_rect.top };
+        if (sys.ClientToScreen(hwnd, &client_origin) == 0) return null;
+
+        const window_rect = win32RectToNc(win_rect);
+        const client_screen_rect: win32_nc_layout.Rect = .{
+            .left = client_origin.x,
+            .top = client_origin.y,
+            .right = client_origin.x + (client_rect.right - client_rect.left),
+            .bottom = client_origin.y + (client_rect.bottom - client_rect.top),
         };
         const cursor: win32_nc_layout.Point = .{ .x = cx, .y = cy };
         const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState =
             if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
-        const ht = win32_nc_layout.hitTest(window_rect, cursor, metrics, state);
+        const ht = win32_nc_layout.hitTest(window_rect, client_screen_rect, cursor, metrics, state);
         return switch (ht) {
             .nowhere => c.HTNOWHERE,
             .client => c.HTCLIENT,
@@ -16922,7 +17004,86 @@ const Host = struct {
     /// the [+][▾] cluster and tab strip from colliding with them.
     fn captionButtonsWidth(self: *const Host) i32 {
         if (!self.usingIntegratedTitlebar()) return 0;
-        return self.scaled(host_caption_button_w) * 3;
+        return self.ncMetrics().caption_button_w * 3;
+    }
+
+    /// Client-space rects of the three painted caption buttons, flush
+    /// against the top-right of the client area. Painting, the UIA
+    /// bounding rectangles and `WM_NCHITTEST` all resolve through
+    /// `win32_nc_layout.captionButtonsRect`, so a reader cannot be told
+    /// about a rect that is neither painted nor clickable.
+    /// Null when the integrated titlebar is off or the row has no area,
+    /// which is also when UIA must not expose the buttons at all.
+    fn captionButtonRects(self: *const Host, client_rect: RECT) ?CaptionButtonRects {
+        if (!self.usingIntegratedTitlebar()) return null;
+        // A collapsed client area (a minimized window reports one) has no
+        // painted row, so there is no rect to hand out.
+        if (client_rect.right <= client_rect.left or client_rect.bottom <= client_rect.top) return null;
+        const metrics = self.ncMetrics();
+        if (metrics.caption_button_w <= 0 or metrics.caption_button_h <= 0) return null;
+        const rects = win32_nc_layout.captionButtonsRect(win32RectToNc(client_rect), metrics);
+        return .{
+            .minimize = ncRectToWin32(rects.min),
+            .maximize = ncRectToWin32(rects.max),
+            .close = ncRectToWin32(rects.close),
+        };
+    }
+
+    /// Live caption-button view handed to the UIA root provider. The
+    /// buttons are painted inside the client area and own no HWND, so
+    /// fragment children of the root are the only way a reader sees them.
+    fn captionButtonsUiaState(self: *Host) win32_uia.CaptionButtonsState {
+        return .{
+            .ctx = @ptrCast(self),
+            .painted = captionButtonsPaintedThunk,
+            .bounds = captionButtonBoundsThunk,
+            .zoomed = captionButtonZoomedThunk,
+            .invoke = captionButtonInvokeThunk,
+            .use_com_threading = self.app.com_initialized,
+        };
+    }
+
+    /// Ask for a caption UIA re-check once the current message is done.
+    ///
+    /// The events below are delivered to listening clients while this
+    /// thread waits, so raising them from inside `WM_SIZE` or a decoration
+    /// change stalls the window's message loop at exactly the moment a
+    /// reader is asking it questions. Posting moves them to a point where
+    /// the loop is free.
+    fn scheduleCaptionUiaSync(self: *Host) void {
+        const hwnd = self.hwnd orelse return;
+        if (self.caption_sync_pending) return;
+        self.caption_sync_pending = true;
+        if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_UIA_CAPTION_SYNC, 0, 0) == 0) {
+            // The queue is full or the window is going away. Falling back
+            // to an inline raise is worse than skipping it: the next
+            // transition re-checks the same state from scratch.
+            self.caption_sync_pending = false;
+            log.warn("win32 caption UIA sync post failed", .{});
+        }
+    }
+
+    /// Keep UIA in step with the caption row. Two things move: the whole
+    /// child set appears and disappears with the integrated titlebar (and
+    /// with minimize / hide), and the middle button's name follows the
+    /// zoomed state. Always reached through `scheduleCaptionUiaSync`.
+    fn syncCaptionUiaState(self: *Host) void {
+        self.caption_sync_pending = false;
+        const provider = self.root_uia_provider orelse return;
+        const painted = captionButtonsPaintedThunk(@ptrCast(self));
+        if (self.caption_painted != painted) {
+            self.caption_painted = painted;
+            provider.raiseCaptionStructureChanged();
+        }
+        // Nothing is painted, so there is no name to correct, and a
+        // minimized window reports not-zoomed while its restore target is
+        // still maximized — announcing that would be a lie to take back.
+        if (!painted) return;
+        const hwnd = self.hwnd orelse return;
+        const zoomed = sys.IsZoomed(hwnd) != 0;
+        if (self.caption_zoomed == zoomed) return;
+        self.caption_zoomed = zoomed;
+        provider.raiseCaptionButtonNameChanged(.maximize);
     }
 
     fn scaled(self: *const Host, base: i32) i32 {
@@ -18118,45 +18279,21 @@ const Host = struct {
         client_rect: RECT,
         theme: *const win32_theme.ThemeColors,
     ) void {
-        const cb_w = self.scaled(host_caption_button_w);
-        const cb_h = self.ncMetrics().caption_button_h;
-        if (cb_w <= 0 or cb_h <= 0) return;
-
+        const rects = self.captionButtonRects(client_rect) orelse return;
         const maximized = if (self.hwnd) |h| sys.IsZoomed(h) != 0 else false;
-        const right = client_rect.right;
-
-        const close_rect: RECT = .{
-            .left = right - cb_w,
-            .top = 0,
-            .right = right,
-            .bottom = cb_h,
-        };
-        const max_rect: RECT = .{
-            .left = right - 2 * cb_w,
-            .top = 0,
-            .right = right - cb_w,
-            .bottom = cb_h,
-        };
-        const min_rect: RECT = .{
-            .left = right - 3 * cb_w,
-            .top = 0,
-            .right = right - 2 * cb_w,
-            .bottom = cb_h,
-        };
-
         const is_hc = isHighContrastActive();
         const now = sys.GetTickCount64();
-        self.paintCaptionButton(hdc, min_rect, .minimize, .minimize, now, is_hc, theme);
+        self.paintCaptionButton(hdc, rects.minimize, .minimize, .minimize, now, is_hc, theme);
         self.paintCaptionButton(
             hdc,
-            max_rect,
+            rects.maximize,
             .maximize,
             if (maximized) .restore else .maximize,
             now,
             is_hc,
             theme,
         );
-        self.paintCaptionButton(hdc, close_rect, .close, .close, now, is_hc, theme);
+        self.paintCaptionButton(hdc, rects.close, .close, .close, now, is_hc, theme);
     }
 
     fn paintChromeTabBar(
@@ -22979,6 +23116,67 @@ test "win32 deferred UIA disconnect drain retries and releases once" {
     try std.testing.expectEqual(@as(usize, 1), exhausted.releases);
 }
 
+/// The integrated titlebar is the only thing that paints caption
+/// buttons; without it the window has a stock DWM caption that the host
+/// provider already describes.
+///
+/// A minimized or hidden window paints nothing either. Leaving the
+/// buttons in the tree there would hand a reader a full-size rect at the
+/// minimized window's off-screen origin, with `IsOffscreen = false`
+/// alongside it.
+fn captionButtonsPainted(integrated: bool, window_visible: bool, iconic: bool) bool {
+    return integrated and window_visible and !iconic;
+}
+
+fn captionButtonsPaintedThunk(ctx: *anyopaque) bool {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.hwnd orelse return false;
+    return captionButtonsPainted(
+        host.usingIntegratedTitlebar(),
+        sys.IsWindowVisible(hwnd) != 0,
+        sys.IsIconic(hwnd) != 0,
+    );
+}
+
+fn captionButtonZoomedThunk(ctx: *anyopaque) bool {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.hwnd orelse return false;
+    return sys.IsZoomed(hwnd) != 0;
+}
+
+fn captionButtonBoundsThunk(
+    ctx: *anyopaque,
+    kind: win32_uia.CaptionButtonKind,
+) ?win32_uia.UiaRect {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.hwnd orelse return null;
+    var client: RECT = undefined;
+    if (sys.GetClientRect(hwnd, &client) == 0) return null;
+    const rect = (host.captionButtonRects(client) orelse return null).get(kind);
+    var origin: POINT = .{ .x = rect.left, .y = rect.top };
+    if (sys.ClientToScreen(hwnd, &origin) == 0) return null;
+    const width = rect.right - rect.left;
+    const height = rect.bottom - rect.top;
+    if (width <= 0 or height <= 0) return null;
+    return .{
+        .left = @floatFromInt(origin.x),
+        .top = @floatFromInt(origin.y),
+        .width = @floatFromInt(width),
+        .height = @floatFromInt(height),
+    };
+}
+
+/// Posts the command the mouse path sends. Posting rather than sending
+/// keeps the UIA caller off the modal loop `SC_MAXIMIZE` / `SC_CLOSE`
+/// can enter on the window's own thread.
+fn captionButtonInvokeThunk(ctx: *anyopaque, kind: win32_uia.CaptionButtonKind) bool {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.hwnd orelse return false;
+    if (!host.usingIntegratedTitlebar()) return false;
+    const command = captionButtonCommand(kind, sys.IsZoomed(hwnd) != 0) orelse return false;
+    return sys.PostMessageW(hwnd, c.WM_SYSCOMMAND, command, 0) != 0;
+}
+
 fn rootDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
     return (@as(*win32_uia.RootProvider, @ptrCast(@alignCast(ctx)))).disconnect();
 }
@@ -23897,6 +24095,10 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
+        c.WM_WINHOSTTY_UIA_CAPTION_SYNC => {
+            if (host) |v| v.syncCaptionUiaState();
+            return 0;
+        },
         // UIA root object request. Screen readers (Narrator, NVDA) call
         // `AccessibleObjectFromWindow` which turns into WM_GETOBJECT on
         // the target HWND. We only handle the UIA root-object ID; MSAA
@@ -23911,6 +24113,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         log.warn("uia: root provider init failed err={}", .{err});
                         return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                     };
+                    created.setCaptionButtons(v.captionButtonsUiaState());
                     v.root_uia_provider = created;
                     break :provider created;
                 };
@@ -24281,6 +24484,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     }
                 }
                 runUiActionOrLog("window resize layout failed", v.layout());
+                v.scheduleCaptionUiaSync();
                 v.app.resizeShellCompositorWindow(hwnd);
                 if (size_kind == c.SIZE_MAXIMIZED or
                     (size_kind == c.SIZE_RESTORED and !v.is_live_resize.load(.acquire)))
@@ -24305,7 +24509,13 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
         c.WM_SHOWWINDOW => {
             const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-            if (host) |v| v.refreshSurfaceVisibility();
+            if (host) |v| {
+                v.refreshSurfaceVisibility();
+                // Hiding or showing a window changes no size, so WM_SIZE
+                // never fires and this is the only notice that the caption
+                // children just appeared or disappeared.
+                v.scheduleCaptionUiaSync();
+            }
             return result;
         },
 
@@ -24318,7 +24528,12 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             // BEFORE WM_EXITSIZEMOVE, so that one is skipped too and the
             // WM_EXITSIZEMOVE arm does the catch-up refresh.
             if (host) |v| {
-                if (!v.is_live_resize.load(.acquire)) v.refreshSurfaceVisibility();
+                if (!v.is_live_resize.load(.acquire)) {
+                    v.refreshSurfaceVisibility();
+                    // Covers the SetWindowPos show/hide flags, which do not
+                    // always produce a WM_SHOWWINDOW. The post coalesces.
+                    v.scheduleCaptionUiaSync();
+                }
             }
             return result;
         },
@@ -29418,6 +29633,7 @@ pub const Surface = struct {
                 return err;
             };
             value.cached_decorations_visible = visible;
+            value.scheduleCaptionUiaSync();
         }
     }
 
@@ -29441,6 +29657,7 @@ pub const Surface = struct {
             value.refreshChrome() catch |err| {
                 log.warn("win32 decoration rollback chrome refresh failed err={}", .{err});
             };
+            value.scheduleCaptionUiaSync();
         }
     }
 
@@ -39841,6 +40058,52 @@ test "win32 tab button mouse-up only closes when released in close zone" {
         TabButtonMouseUpAction.none,
         tabButtonMouseUpAction(null, false, 40, 100, 3),
     );
+}
+
+test "win32 caption buttons are painted only while the window is on screen" {
+    // The UIA children exist exactly when the buttons are painted. A
+    // hidden window is the case that has no WM_SIZE to notice it, so the
+    // rule has to hold on visibility alone.
+    try std.testing.expect(captionButtonsPainted(true, true, false));
+    try std.testing.expect(!captionButtonsPainted(true, false, false));
+    try std.testing.expect(!captionButtonsPainted(true, true, true));
+    try std.testing.expect(!captionButtonsPainted(true, false, true));
+    // Without the integrated titlebar the stock caption is the system's,
+    // and we expose nothing however visible the window is.
+    try std.testing.expect(!captionButtonsPainted(false, true, false));
+    try std.testing.expect(!captionButtonsPainted(false, false, true));
+}
+
+test "win32 caption button UIA invoke reuses the mouse path commands" {
+    // The UIA Invoke path must not restate the mapping: minimize and
+    // maximize come straight from `captionButtonSysCommand`, and only
+    // close is added, because the mouse sends SC_CLOSE from its own
+    // WM_NCLBUTTONUP branch.
+    for ([_]bool{ false, true }) |zoomed| {
+        try std.testing.expectEqual(
+            captionButtonSysCommand(c.HTMINBUTTON, zoomed),
+            captionButtonCommand(.minimize, zoomed),
+        );
+        try std.testing.expectEqual(
+            captionButtonSysCommand(c.HTMAXBUTTON, zoomed),
+            captionButtonCommand(.maximize, zoomed),
+        );
+        try std.testing.expectEqual(
+            @as(?WPARAM, c.SC_CLOSE),
+            captionButtonCommand(.close, zoomed),
+        );
+    }
+    try std.testing.expectEqual(@as(?WPARAM, c.SC_MAXIMIZE), captionButtonCommand(.maximize, false));
+    try std.testing.expectEqual(@as(?WPARAM, c.SC_RESTORE), captionButtonCommand(.maximize, true));
+}
+
+test "win32 caption button UIA names follow the painted glyph" {
+    // `paintCaptionButtons` swaps the middle glyph to `restore` while
+    // zoomed; the announced name has to make the same flip.
+    try std.testing.expectEqualStrings("Minimize", win32_uia.captionButtonName(.minimize, true));
+    try std.testing.expectEqualStrings("Maximize", win32_uia.captionButtonName(.maximize, false));
+    try std.testing.expectEqualStrings("Restore", win32_uia.captionButtonName(.maximize, true));
+    try std.testing.expectEqualStrings("Close", win32_uia.captionButtonName(.close, true));
 }
 
 test "win32 captionButtonSysCommand maps integrated titlebar buttons" {

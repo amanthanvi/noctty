@@ -136,6 +136,10 @@ pub const WM_WINHOSTTY_TERMINAL_HANDOFF = WM_APP + 7;
 // Benchmark-only: drive render-trace snapshots and armed output targets.
 pub const WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT = WM_APP + 8;
 pub const WM_WINHOSTTY_RENDER_TRACE_TARGET = WM_APP + 9;
+/// Re-check the caption row's UIA state and raise any events it owes.
+/// Posted, never sent: the events must not be raised from inside the
+/// handler that changed the state.
+pub const WM_WINHOSTTY_UIA_CAPTION_SYNC = WM_APP + 10;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;

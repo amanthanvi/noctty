@@ -63,6 +63,7 @@ pub const LiveSetting_Assertive: i32 = 2;
 
 // ── Event IDs ──────────────────────────────────────────────────────────
 
+pub const UIA_Invoke_InvokedEventId: i32 = 20009;
 pub const UIA_AutomationFocusChangedEventId: i32 = 20005;
 pub const UIA_StructureChangedEventId: i32 = 20002;
 pub const UIA_Selection_InvalidatedEventId: i32 = 20013;
