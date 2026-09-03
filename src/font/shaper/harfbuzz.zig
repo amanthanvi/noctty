@@ -1513,6 +1513,164 @@ test "shape box glyphs" {
     try testing.expectEqual(@as(usize, 1), count);
 }
 
+test "shape nerd font PUA glyphs without notdef" {
+    const alloc = std.testing.allocator;
+
+    var testdata = try testShaperWithFont(alloc, .nerd_font);
+    defer testdata.deinit();
+
+    const codepoints = [_]u21{
+        'A',    ' ', 0xE0B0,  ' ', 0xE0B1, ' ',
+        0xE0B2, ' ', 0xE0B3,  ' ', 0xE0B4, ' ',
+        0xE0B5, ' ', 0xE0B6,  ' ', 0xF023, ' ',
+        0xE5FF, ' ', 0xF02A2,
+    };
+    var text: [128]u8 = undefined;
+    var text_len: usize = 0;
+    for (codepoints) |cp| {
+        text_len += try std.unicode.utf8Encode(cp, text[text_len..]);
+    }
+
+    var t = try terminal.Terminal.init(alloc, .{
+        .cols = codepoints.len,
+        .rows = 1,
+    });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice(text[0..text_len]);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    _ = try expectNerdFontShaping(
+        alloc,
+        &testdata,
+        state.row_data.get(0).cells.slice(),
+        &codepoints,
+    );
+}
+
+test "shape nerd font PUA boundary cases without notdef" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var testdata = try testShaperWithFont(alloc, .nerd_font);
+    defer testdata.deinit();
+
+    // PUA glyphs immediately adjacent to ASCII and each other.
+    {
+        const codepoints = [_]u21{ 'A', 0xF023, 0xE5FF, 0xE0B0, 'Z' };
+        var text: [32]u8 = undefined;
+        var text_len: usize = 0;
+        for (codepoints) |cp| {
+            text_len += try std.unicode.utf8Encode(cp, text[text_len..]);
+        }
+
+        var t = try terminal.Terminal.init(alloc, .{
+            .cols = codepoints.len,
+            .rows = 1,
+        });
+        defer t.deinit(alloc);
+
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(text[0..text_len]);
+
+        var state: terminal.RenderState = .empty;
+        defer state.deinit(alloc);
+        try state.update(alloc, &t);
+
+        try testing.expectEqual(
+            @as(usize, 3),
+            try expectNerdFontShaping(
+                alloc,
+                &testdata,
+                state.row_data.get(0).cells.slice(),
+                &codepoints,
+            ),
+        );
+    }
+
+    // A PUA glyph followed immediately by VS16 remains on a face that has it.
+    // PUA+VS16 isn't a valid Unicode emoji variation sequence, so the terminal
+    // parser normally drops the selector. Attach it directly to exercise the
+    // shaper boundary with the retained cell state that the shaper accepts.
+    {
+        var text: [8]u8 = undefined;
+        const text_len = try std.unicode.utf8Encode(0xF023, &text);
+
+        var t = try terminal.Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+        defer t.deinit(alloc);
+
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(text[0..text_len]);
+        const list_cell = t.screens.active.pages.getCell(.{
+            .screen = .{ .x = 0, .y = 0 },
+        }).?;
+        try t.screens.active.appendGrapheme(list_cell.cell, 0xFE0F);
+
+        var state: terminal.RenderState = .empty;
+        defer state.deinit(alloc);
+        try state.update(alloc, &t);
+
+        const row = state.row_data.get(0).cells.slice();
+        try testing.expect(row.items(.raw)[0].hasGrapheme());
+        try testing.expectEqualSlices(u21, &.{0xFE0F}, row.items(.grapheme)[0]);
+
+        var shaper = &testdata.shaper;
+        var it = shaper.runIterator(.{
+            .grid = testdata.grid,
+            .cells = row,
+        });
+        const run = (try it.next(alloc)).?;
+        const resolved = (try testdata.grid.getIndex(
+            alloc,
+            0xF023,
+            .regular,
+            .emoji,
+        )).?;
+        try testing.expectEqual(resolved, run.font_index);
+
+        const cells = try shaper.shape(run);
+        try testing.expectEqual(@as(usize, 1), cells.len);
+        try testing.expect(cells[0].glyph_index != 0);
+        try testing.expect(try it.next(alloc) == null);
+    }
+
+    // A foreground-color boundary immediately before a PUA glyph splits the
+    // run without changing the resolver-selected face or producing .notdef.
+    {
+        var pua: [4]u8 = undefined;
+        const pua_len = try std.unicode.utf8Encode(0xF023, &pua);
+
+        var t = try terminal.Terminal.init(alloc, .{ .cols = 2, .rows = 1 });
+        defer t.deinit(alloc);
+
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("A\x1b[38;2;1;2;3m");
+        stream.nextSlice(pua[0..pua_len]);
+
+        var state: terminal.RenderState = .empty;
+        defer state.deinit(alloc);
+        try state.update(alloc, &t);
+
+        try testing.expectEqual(
+            @as(usize, 2),
+            try expectNerdFontShaping(
+                alloc,
+                &testdata,
+                state.row_data.get(0).cells.slice(),
+                &.{ 'A', 0xF023 },
+            ),
+        );
+    }
+}
+
 test "shape selection boundary" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -2021,10 +2179,58 @@ const TestShaper = struct {
     }
 };
 
+fn expectNerdFontShaping(
+    alloc: Allocator,
+    testdata: *TestShaper,
+    row_cells: anytype,
+    codepoints: []const u21,
+) !usize {
+    const testing = std.testing;
+
+    var shaper = &testdata.shaper;
+    var it = shaper.runIterator(.{
+        .grid = testdata.grid,
+        .cells = row_cells,
+    });
+    var run_count: usize = 0;
+    var shaped_count: usize = 0;
+    while (try it.next(alloc)) |run| {
+        run_count += 1;
+        const cells = try shaper.shape(run);
+        for (cells) |cell| {
+            try testing.expect(cell.glyph_index != 0);
+
+            const x: usize = run.offset + cell.x;
+            try testing.expect(x < codepoints.len);
+            const cp: u32 = codepoints[x];
+            const resolved = (try testdata.grid.getIndex(
+                alloc,
+                cp,
+                .regular,
+                null,
+            )).?;
+            try testing.expectEqual(resolved, run.font_index);
+
+            if (cp >= 0xE0B0 and cp <= 0xE0B6) {
+                try testing.expectEqual(font.sprite_index, run.font_index);
+                try testing.expectEqual(cp, cell.glyph_index);
+            } else {
+                try testing.expect(run.font_index.special() == null);
+            }
+
+            shaped_count += 1;
+        }
+    }
+    try testing.expectEqual(codepoints.len, shaped_count);
+
+    return run_count;
+}
+
 const TestFont = enum {
     inconsolata,
     monaspace_neon,
     arabic,
+    nerd_font,
 };
 
 /// Helper to return a fully initialized shaper.
@@ -2039,6 +2245,7 @@ fn testShaperWithFont(alloc: Allocator, font_req: TestFont) !TestShaper {
         .inconsolata => font.embedded.inconsolata,
         .monaspace_neon => font.embedded.monaspace_neon,
         .arabic => font.embedded.arabic,
+        .nerd_font => font.embedded.test_nerd_font,
     };
 
     var lib = try Library.init(alloc);
@@ -2057,6 +2264,28 @@ fn testShaperWithFont(alloc: Allocator, font_req: TestFont) !TestShaper {
         .fallback = false,
         .size_adjustment = .none,
     });
+
+    if (font_req == .nerd_font) {
+        // Match the regular-style built-in fallback order used by SharedGridSet.
+        _ = try c.add(alloc, try .init(
+            lib,
+            font.embedded.variable,
+            .{ .size = .{ .points = 12 } },
+        ), .{
+            .style = .regular,
+            .fallback = true,
+            .size_adjustment = font.default_fallback_adjustment,
+        });
+        _ = try c.add(alloc, try .init(
+            lib,
+            font.embedded.symbols_nerd_font,
+            .{ .size = .{ .points = 12 } },
+        ), .{
+            .style = .regular,
+            .fallback = true,
+            .size_adjustment = .none,
+        });
+    }
 
     if (comptime !font.options.backend.hasCoretext()) {
         // Coretext doesn't support Noto's format
