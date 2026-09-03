@@ -46,9 +46,12 @@ document records:
 - Memory: under 20 MB steady-state per additional pane. Measured
   32.14 MB median of whole-process private bytes, which includes
   OpenGL driver commit and is not apportioned. Target unchanged.
-- Idle: effectively 0% GPU/CPU with no timer wake churn. Measured 0%
-  CPU, 0% GPU, and zero successful swaps over a 10 s idle interval. See
-  [Windows power and battery behavior](docs/windows.md#power-and-battery).
+- Idle: effectively 0% GPU/CPU with no timer wake churn. Re-measured
+  2026-09-03: 0.002% CPU, 0% GPU, and zero presented frames over nine 30 s
+  idle intervals on a desktop on AC. See
+  [Windows power and battery behavior](docs/windows.md#power-and-battery)
+  and the "Power and idle" section of
+  [the benchmark methodology](docs/windows-benchmark-methodology.md).
 
 The benchmark suite (roadmap C01) defines the measurement methodology,
 workload, baseline machine, and tolerances. CI gates the headless
