@@ -18184,7 +18184,10 @@ fn restoreTerminalScrollbackSnapshot(
     //     emit blank linefeeds and still report success;
     //   - a non-default charset remaps the restored text, and a pending
     //     single shift is consumed by the first restored character, so the
-    //     child's next shifted character is then misinterpreted.
+    //     child's next shifted character is then misinterpreted;
+    //   - autowrap off (DECAWM reset) makes `printString` overwrite the last
+    //     column instead of wrapping, so a restored line wider than the pane
+    //     loses its tail instead of being kept in history.
     //
     // Enumerating these is the wrong long-term shape and the list has already
     // grown twice under review. The structural fix is to write the snapshot
@@ -18208,6 +18211,7 @@ fn restoreTerminalScrollbackSnapshot(
     {
         return error.SnapshotNeedsDefaultCharset;
     }
+    if (!terminal_state.modes.get(.wraparound)) return error.SnapshotNeedsAutowrap;
 
     const max_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
     const first_line = snapshot.lines.len - @min(snapshot.lines.len, max_lines);
@@ -35365,6 +35369,9 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
             .{ .bytes = "\x1bN", .want = error.SnapshotNeedsDefaultCharset },
             // SO: a locking shift remaps every restored character.
             .{ .bytes = "\x0e", .want = error.SnapshotNeedsDefaultCharset },
+            // DECAWM reset: a restored line wider than the pane would
+            // overwrite its last column instead of wrapping into history.
+            .{ .bytes = "\x1b[?7l", .want = error.SnapshotNeedsAutowrap },
             // DECSASD. Set directly rather than through the stream: this fork
             // does not parse the sequence, but `Terminal.print` still returns
             // without writing whenever `status_display != .main`, so restore
