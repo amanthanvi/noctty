@@ -2,6 +2,7 @@ const std = @import("std");
 const build_options = @import("terminal_options");
 const testing = std.testing;
 const apc = @import("apc.zig");
+const color = @import("color.zig");
 const csi = @import("csi.zig");
 const device_attributes = @import("device_attributes.zig");
 const device_status = @import("device_status.zig");
@@ -1008,6 +1009,9 @@ test "OSC 11 set and reset background color" {
     var s: Stream = .initAlloc(testing.allocator, .init(&t));
     defer s.deinit();
 
+    const default: color.RGB = .{ .r = 0x10, .g = 0x20, .b = 0x30 };
+    t.colors.background.default = default;
+
     // Set background to green
     s.nextSlice("\x1b]11;rgb:00/ff/00\x1b\\");
     const bg = t.colors.background.get().?;
@@ -1017,7 +1021,13 @@ test "OSC 11 set and reset background color" {
 
     // Reset background
     s.nextSlice("\x1b]111\x1b\\");
-    try testing.expect(t.colors.background.get() == null);
+    try testing.expectEqual(default, t.colors.background.get().?);
+    try testing.expectEqual(null, t.colors.background.override);
+
+    // A reset color continues to follow later configuration changes.
+    const updated: color.RGB = .{ .r = 0x40, .g = 0x50, .b = 0x60 };
+    t.colors.background.default = updated;
+    try testing.expectEqual(updated, t.colors.background.get().?);
 }
 
 test "OSC 12 set and reset cursor color" {
