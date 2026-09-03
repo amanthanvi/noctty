@@ -313,6 +313,7 @@ fn threadMain_(self: *Thread) !void {
     self.draw_now.wait(&self.loop, &self.draw_now_c, Thread, self, drawNowCallback);
 
     // Send an initial wakeup message so that we render right away.
+    self.state.noteWakeSource(.thread_start);
     try self.wakeup.notify();
 
     // Start blinking only when the terminal's cursor mode requests it.
@@ -439,6 +440,7 @@ fn timerNeedsEarlierDeadline(now_ms: u64, due_ms: u64, next_delay_ms: u64) bool 
 /// full. The second covers the case where that notification is processed
 /// before the message is enqueued.
 pub fn send(self: *Thread, msg: rendererpkg.Message) void {
+    self.state.noteWakeSource(.mailbox);
     sendMessage(&self.wakeup, self.mailbox, msg);
 }
 
@@ -883,7 +885,11 @@ fn wakeupCallback(
 
     const t = self_.?;
     if (comptime @hasDecl(apprt.Surface, "noteRendererWakeupCallback")) {
-        t.surface.noteRendererWakeupCallback();
+        // Take the accumulated reasons even when the apprt does not trace
+        // them, so a later wake is never blamed on an earlier notify.
+        t.surface.noteRendererWakeupCallback(t.state.takeWakeSources());
+    } else {
+        _ = t.state.takeWakeSources();
     }
     if (t.renderOnce(true)) {
         t.scheduleRenderFollowup();
@@ -1051,6 +1057,7 @@ fn cursorTimerCallback(
             t.flags.cursor_blink_visible = true;
             t.cursor_blink_reset_at = null;
             if (!was_visible) {
+                t.state.noteWakeSource(.cursor_blink);
                 t.wakeup.notify() catch {};
             }
             return .disarm;
@@ -1063,6 +1070,7 @@ fn cursorTimerCallback(
     }
 
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
+    t.state.noteWakeSource(.cursor_blink);
     t.wakeup.notify() catch {};
 
     t.armCursorTimerIfDead(cursorBlinkInterval());

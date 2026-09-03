@@ -110,6 +110,7 @@ pub const StreamHandler = struct {
     /// practical.
     pub inline fn queueRender(self: *StreamHandler) !void {
         self.renderer_state.noteRenderWakeupNotify();
+        self.renderer_state.noteWakeSource(.io_output);
         try self.renderer_wakeup.notify();
     }
 
@@ -169,6 +170,7 @@ pub const StreamHandler = struct {
         self.renderer_state.mutex.unlock();
         defer self.renderer_state.mutex.lock();
         self.renderer_state.noteRenderWakeupNotify();
+        self.renderer_state.noteWakeSource(.mailbox);
         renderer.Thread.sendMessage(
             self.renderer_wakeup,
             self.renderer_mailbox,

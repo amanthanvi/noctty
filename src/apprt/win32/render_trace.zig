@@ -4,8 +4,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const internal_os = @import("../../os/main.zig");
+const renderer_state = @import("../../renderer/State.zig");
 const sys = @import("sys.zig");
 const bench_trace = @import("bench_trace.zig");
+
+const WakeSource = renderer_state.WakeSource;
 
 const log = std.log.scoped(.win32);
 
@@ -52,12 +55,25 @@ pub const RenderTrace = struct {
     renderer_core_wakeup_notify_count: std.atomic.Value(u64) = .init(0),
     surface_focus_change_count: std.atomic.Value(u64) = .init(0),
     surface_focused: std.atomic.Value(bool) = .init(true),
+    // Wake-source attribution. Each counter records how many renderer wakeup
+    // callbacks carried that source; the wake primitive coalesces, so one
+    // callback can increment several of these, and the sum is therefore >=
+    // `wakeup_callback_count`.
+    thread_start_wakeup_count: std.atomic.Value(u64) = .init(0),
+    core_surface_wakeup_count: std.atomic.Value(u64) = .init(0),
+    mailbox_wakeup_count: std.atomic.Value(u64) = .init(0),
+    io_output_wakeup_count: std.atomic.Value(u64) = .init(0),
     cursor_timer_wakeup_count: std.atomic.Value(u64) = .init(0),
     renderer_repaint_retry_wakeup_count: std.atomic.Value(u64) = .init(0),
     resize_settle_wakeup_count: std.atomic.Value(u64) = .init(0),
     paint_retry_wakeup_count: std.atomic.Value(u64) = .init(0),
     health_recovery_wakeup_count: std.atomic.Value(u64) = .init(0),
     paint_pending_wakeup_count: std.atomic.Value(u64) = .init(0),
+    inspector_wakeup_count: std.atomic.Value(u64) = .init(0),
+    /// A wakeup whose reasons were already consumed by an earlier callback,
+    /// i.e. the wake primitive coalesced two notifies into one callback and
+    /// then delivered a second, redundant one.
+    unattributed_wakeup_count: std.atomic.Value(u64) = .init(0),
     wakeup_callback_count: std.atomic.Value(u64) = .init(0),
     render_callback_count: std.atomic.Value(u64) = .init(0),
     renderer_repaint_accept_count: std.atomic.Value(u64) = .init(0),
@@ -241,39 +257,39 @@ pub const RenderTrace = struct {
         _ = self.surface_focus_change_count.fetchAdd(1, .acq_rel);
     }
 
-    pub fn noteRendererCursorTimerWakeup(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.cursor_timer_wakeup_count.fetchAdd(1, .acq_rel);
+    fn wakeSourceCounter(
+        self: *RenderTrace,
+        source: WakeSource,
+    ) *std.atomic.Value(u64) {
+        return switch (source) {
+            .thread_start => &self.thread_start_wakeup_count,
+            .core_surface => &self.core_surface_wakeup_count,
+            .mailbox => &self.mailbox_wakeup_count,
+            .io_output => &self.io_output_wakeup_count,
+            .cursor_blink => &self.cursor_timer_wakeup_count,
+            .apprt_repaint_retry => &self.renderer_repaint_retry_wakeup_count,
+            .apprt_resize_settle => &self.resize_settle_wakeup_count,
+            .apprt_paint_retry => &self.paint_retry_wakeup_count,
+            .apprt_health_recovery => &self.health_recovery_wakeup_count,
+            .apprt_paint_pending => &self.paint_pending_wakeup_count,
+            .inspector => &self.inspector_wakeup_count,
+        };
     }
 
-    pub fn noteRendererRepaintRetryWakeup(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.renderer_repaint_retry_wakeup_count.fetchAdd(1, .acq_rel);
-    }
-
-    pub fn noteRendererResizeSettleWakeup(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.resize_settle_wakeup_count.fetchAdd(1, .acq_rel);
-    }
-
-    pub fn noteRendererPaintRetryWakeup(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.paint_retry_wakeup_count.fetchAdd(1, .acq_rel);
-    }
-
-    pub fn noteRendererHealthRecoveryWakeup(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.health_recovery_wakeup_count.fetchAdd(1, .acq_rel);
-    }
-
-    pub fn noteRendererPaintPendingWakeup(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.paint_pending_wakeup_count.fetchAdd(1, .acq_rel);
-    }
-
-    pub fn noteRendererWakeupCallback(self: *RenderTrace) void {
+    /// Record a renderer wakeup and the set of `WakeSource` bits that were
+    /// outstanding when the renderer thread picked it up.
+    pub fn noteRendererWakeupCallback(self: *RenderTrace, wake_sources: u32) void {
         if (!self.enabled()) return;
         _ = self.wakeup_callback_count.fetchAdd(1, .acq_rel);
+        if (wake_sources == 0) {
+            _ = self.unattributed_wakeup_count.fetchAdd(1, .acq_rel);
+            return;
+        }
+        inline for (comptime std.enums.values(WakeSource)) |source| {
+            if ((wake_sources & comptime source.bit()) != 0) {
+                _ = self.wakeSourceCounter(source).fetchAdd(1, .acq_rel);
+            }
+        }
     }
 
     pub fn noteRendererFollowupCallback(self: *RenderTrace) void {
@@ -528,12 +544,18 @@ pub const RenderTrace = struct {
             .renderer_core_wakeup_notify_count = self.renderer_core_wakeup_notify_count.load(.acquire),
             .surface_focus_change_count = self.surface_focus_change_count.load(.acquire),
             .surface_focused = self.surface_focused.load(.acquire),
+            .thread_start_wakeup_count = self.thread_start_wakeup_count.load(.acquire),
+            .core_surface_wakeup_count = self.core_surface_wakeup_count.load(.acquire),
+            .mailbox_wakeup_count = self.mailbox_wakeup_count.load(.acquire),
+            .io_output_wakeup_count = self.io_output_wakeup_count.load(.acquire),
             .cursor_timer_wakeup_count = self.cursor_timer_wakeup_count.load(.acquire),
             .renderer_repaint_retry_wakeup_count = self.renderer_repaint_retry_wakeup_count.load(.acquire),
             .resize_settle_wakeup_count = self.resize_settle_wakeup_count.load(.acquire),
             .paint_retry_wakeup_count = self.paint_retry_wakeup_count.load(.acquire),
             .health_recovery_wakeup_count = self.health_recovery_wakeup_count.load(.acquire),
             .paint_pending_wakeup_count = self.paint_pending_wakeup_count.load(.acquire),
+            .inspector_wakeup_count = self.inspector_wakeup_count.load(.acquire),
+            .unattributed_wakeup_count = self.unattributed_wakeup_count.load(.acquire),
             .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),
             .render_callback_count = self.render_callback_count.load(.acquire),
             .renderer_repaint_accept_count = self.renderer_repaint_accept_count.load(.acquire),
@@ -702,26 +724,54 @@ test "win32 render trace counts frame updates without output progress" {
     try std.testing.expectEqual(@as(u64, 0), trace.renderer_process_output_generation.load(.acquire));
 }
 
-test "win32 render trace attributes every renderer wake source" {
+test "win32 render trace gives every renderer wake source its own counter" {
+    // One wake per source, one at a time: each must land in a different
+    // counter, and none may leak into another.
+    inline for (comptime std.enums.values(WakeSource)) |source| {
+        var trace: RenderTrace = .{ .path = "unused" };
+        trace.noteRendererWakeupCallback(source.bit());
+
+        try std.testing.expectEqual(@as(u64, 1), trace.wakeup_callback_count.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 0), trace.unattributed_wakeup_count.load(.acquire));
+        inline for (comptime std.enums.values(WakeSource)) |other| {
+            const expected: u64 = if (other == source) 1 else 0;
+            try std.testing.expectEqual(
+                expected,
+                trace.wakeSourceCounter(other).load(.acquire),
+            );
+        }
+    }
+}
+
+test "win32 render trace attributes a coalesced wake to every contributor" {
+    var trace: RenderTrace = .{ .path = "unused" };
+    trace.noteRendererWakeupCallback(
+        WakeSource.io_output.bit() | WakeSource.cursor_blink.bit(),
+    );
+
+    try std.testing.expectEqual(@as(u64, 1), trace.wakeup_callback_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), trace.io_output_wakeup_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), trace.cursor_timer_wakeup_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), trace.mailbox_wakeup_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), trace.unattributed_wakeup_count.load(.acquire));
+}
+
+test "win32 render trace records a wake with no outstanding reason" {
+    var trace: RenderTrace = .{ .path = "unused" };
+    trace.noteRendererWakeupCallback(0);
+
+    try std.testing.expectEqual(@as(u64, 1), trace.wakeup_callback_count.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), trace.unattributed_wakeup_count.load(.acquire));
+}
+
+test "win32 render trace records core wake notifies and focus transitions" {
     var trace: RenderTrace = .{ .path = "unused" };
     trace.noteRendererCoreWakeupNotify();
     trace.noteSurfaceFocusChanged(false);
-    trace.noteRendererCursorTimerWakeup();
-    trace.noteRendererRepaintRetryWakeup();
-    trace.noteRendererResizeSettleWakeup();
-    trace.noteRendererPaintRetryWakeup();
-    trace.noteRendererHealthRecoveryWakeup();
-    trace.noteRendererPaintPendingWakeup();
 
     try std.testing.expectEqual(@as(u64, 1), trace.renderer_core_wakeup_notify_count.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), trace.surface_focus_change_count.load(.acquire));
     try std.testing.expect(!trace.surface_focused.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), trace.cursor_timer_wakeup_count.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), trace.renderer_repaint_retry_wakeup_count.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), trace.resize_settle_wakeup_count.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), trace.paint_retry_wakeup_count.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), trace.health_recovery_wakeup_count.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), trace.paint_pending_wakeup_count.load(.acquire));
 }
 
 test "win32 render trace scopes successful swap intervals to the armed target" {

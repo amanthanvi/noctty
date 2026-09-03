@@ -17038,7 +17038,7 @@ const Host = struct {
                         entry.view.cancelRendererRepaintRequest();
                         log.err("win32 resize-settle renderer paint request failed err={}", .{err});
                     },
-                    .wake_renderer => entry.view.requestRendererFrameNow(),
+                    .wake_renderer => entry.view.requestRendererFrameNow(.apprt_resize_settle),
                 }
             }
         }
@@ -24846,7 +24846,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                     };
                 } else {
                     v.render_trace.notePaintRetry();
-                    v.requestRendererFrameNow();
+                    v.requestRendererFrameNow(.apprt_paint_retry);
                 }
             }
 
@@ -26445,14 +26445,19 @@ pub const Surface = struct {
     fn finishRendererRepaintRequest(self: *Surface) void {
         self.renderer_repaint_requested.store(false, .release);
         if (self.consumeRendererRepaintRetryPending()) {
+            self.core_surface.renderer_state.noteWakeSource(.apprt_repaint_retry);
             self.core_surface.renderer_thread.wakeup.notify() catch |err| {
                 log.warn("win32 renderer repaint retry wake failed err={}", .{err});
             };
         }
     }
 
-    fn requestRendererFrameNow(self: *Surface) void {
+    fn requestRendererFrameNow(
+        self: *Surface,
+        source: rendererpkg.State.WakeSource,
+    ) void {
         if (!self.core_initialized) return;
+        self.core_surface.renderer_state.noteWakeSource(source);
         self.core_surface.renderer_thread.wakeup.notify() catch |err| {
             log.warn("win32 renderer frame wake failed err={}", .{err});
         };
@@ -26471,7 +26476,7 @@ pub const Surface = struct {
                     log.warn("win32 renderer health repaint request failed err={}", .{err});
                     return false;
                 };
-                self.requestRendererFrameNow();
+                self.requestRendererFrameNow(.apprt_health_recovery);
                 return true;
             },
         }
@@ -26486,7 +26491,7 @@ pub const Surface = struct {
         self.render_trace.noteQueuePaint(update_now);
         if (self.paint_pending) {
             if (update_now) {
-                self.requestRendererFrameNow();
+                self.requestRendererFrameNow(.apprt_paint_pending);
                 try self.forcePaintRequestNow();
             }
             return;
@@ -26584,8 +26589,8 @@ pub const Surface = struct {
         self.render_trace.noteRendererDrawRequest();
     }
 
-    pub fn noteRendererWakeupCallback(self: *Surface) void {
-        self.render_trace.noteRendererWakeupCallback();
+    pub fn noteRendererWakeupCallback(self: *Surface, wake_sources: u32) void {
+        self.render_trace.noteRendererWakeupCallback(wake_sources);
     }
 
     pub fn noteRendererFollowupCallback(self: *Surface) void {

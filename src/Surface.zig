@@ -2963,6 +2963,7 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 /// practical.
 fn queueRender(self: *Surface) !void {
     self.renderer_state.noteRenderWakeupNotify();
+    self.renderer_state.noteWakeSource(.core_surface);
     if (comptime @hasDecl(apprt.Surface, "noteRendererCoreWakeupNotify")) {
         self.rt_surface.noteRendererCoreWakeupNotify();
     }
