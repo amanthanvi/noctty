@@ -104,13 +104,23 @@ pub const SettingsSystemColors = struct {
     button_face: u32,
     button_text: u32,
     gray_text: u32,
+    highlight: u32,
+    highlight_text: u32,
 };
 
 pub const SettingsColors = struct {
     window_bg: u32,
     rail_bg: u32,
     text: u32,
+    secondary_text: u32,
     disabled_text: u32,
+    rail_separator: u32,
+    pane_separator: u32,
+    accent: u32,
+    selection_bg: u32,
+    selection_text: u32,
+    focus_ring: u32,
+    error_text: u32,
     edit_bg: u32,
     edit_text: u32,
     button_bg: u32,
@@ -131,7 +141,17 @@ pub fn settingsColors(
             .window_bg = system.button_face,
             .rail_bg = system.window,
             .text = system.button_text,
+            .secondary_text = system.button_text,
             .disabled_text = system.gray_text,
+            // The rail sits on COLOR_WINDOW while panes sit on COLOR_BTNFACE.
+            // Use each background's matching system text role for contrast.
+            .rail_separator = system.window_text,
+            .pane_separator = system.button_text,
+            .accent = system.highlight,
+            .selection_bg = system.highlight,
+            .selection_text = system.highlight_text,
+            .focus_ring = system.highlight,
+            .error_text = system.button_text,
             .edit_bg = system.window,
             .edit_text = system.window_text,
             .button_bg = system.button_face,
@@ -141,10 +161,18 @@ pub fn settingsColors(
         };
     }
     return .{
-        .window_bg = theme.chrome_bg,
-        .rail_bg = theme.overlay_bg,
+        .window_bg = theme.overlay_bg,
+        .rail_bg = theme.chrome_bg,
         .text = theme.text_primary,
+        .secondary_text = theme.text_secondary,
         .disabled_text = theme.text_disabled,
+        .rail_separator = theme.overlay_border,
+        .pane_separator = theme.overlay_border,
+        .accent = theme.accent,
+        .selection_bg = theme.button_active_bg,
+        .selection_text = theme.button_active_fg,
+        .focus_ring = theme.button_focus_ring,
+        .error_text = theme.error_fg,
         .edit_bg = theme.edit_bg,
         .edit_text = theme.edit_fg,
         .button_bg = theme.button_bg,
@@ -261,6 +289,16 @@ pub const WindowThemeAdapter = struct {
             .explorer_light => std.unicode.utf8ToUtf16LeStringLiteral("Explorer"),
             .explorer_dark => std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_Explorer"),
         };
+        _ = SetWindowTheme(hwnd, theme, null);
+    }
+
+    pub fn applyNativeCombo(hwnd: HWND, colors: SettingsColors) void {
+        const theme: ?[*:0]const u16 = if (colors.high_contrast)
+            null
+        else if (colors.is_dark)
+            std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_CFD")
+        else
+            std.unicode.utf8ToUtf16LeStringLiteral("Explorer");
         _ = SetWindowTheme(hwnd, theme, null);
     }
 
@@ -1025,13 +1063,25 @@ test "settings colors follow explicit light and dark app themes" {
         .button_face = 3,
         .button_text = 4,
         .gray_text = 5,
+        .highlight = 6,
+        .highlight_text = 7,
     };
     const light = settingsColors(lightTheme(), system, false);
     const dark = settingsColors(darkTheme(), system, false);
     try std.testing.expect(!light.is_dark);
     try std.testing.expect(dark.is_dark);
-    try std.testing.expectEqual(lightTheme().chrome_bg, light.window_bg);
-    try std.testing.expectEqual(darkTheme().chrome_bg, dark.window_bg);
+    try std.testing.expectEqual(lightTheme().overlay_bg, light.window_bg);
+    try std.testing.expectEqual(lightTheme().chrome_bg, light.rail_bg);
+    try std.testing.expectEqual(darkTheme().overlay_bg, dark.window_bg);
+    try std.testing.expectEqual(darkTheme().chrome_bg, dark.rail_bg);
+    try std.testing.expectEqual(darkTheme().text_secondary, dark.secondary_text);
+    try std.testing.expectEqual(darkTheme().overlay_border, dark.rail_separator);
+    try std.testing.expectEqual(darkTheme().overlay_border, dark.pane_separator);
+    try std.testing.expectEqual(darkTheme().accent, dark.accent);
+    try std.testing.expectEqual(darkTheme().button_active_bg, dark.selection_bg);
+    try std.testing.expectEqual(darkTheme().button_active_fg, dark.selection_text);
+    try std.testing.expectEqual(darkTheme().button_focus_ring, dark.focus_ring);
+    try std.testing.expectEqual(darkTheme().error_fg, dark.error_text);
     try std.testing.expect(light.window_bg != dark.window_bg);
     try std.testing.expect(light.edit_bg != dark.edit_bg);
 }
@@ -1043,13 +1093,23 @@ test "settings high contrast uses only exact system color roles" {
         .button_face = 13,
         .button_text = 14,
         .gray_text = 15,
+        .highlight = 16,
+        .highlight_text = 17,
     };
     const colors = settingsColors(darkTheme(), system, true);
     try std.testing.expect(colors.high_contrast);
     try std.testing.expectEqual(system.button_face, colors.window_bg);
     try std.testing.expectEqual(system.window, colors.rail_bg);
     try std.testing.expectEqual(system.button_text, colors.text);
+    try std.testing.expectEqual(system.button_text, colors.secondary_text);
     try std.testing.expectEqual(system.gray_text, colors.disabled_text);
+    try std.testing.expectEqual(system.window_text, colors.rail_separator);
+    try std.testing.expectEqual(system.button_text, colors.pane_separator);
+    try std.testing.expectEqual(system.highlight, colors.accent);
+    try std.testing.expectEqual(system.highlight, colors.selection_bg);
+    try std.testing.expectEqual(system.highlight_text, colors.selection_text);
+    try std.testing.expectEqual(system.highlight, colors.focus_ring);
+    try std.testing.expectEqual(system.button_text, colors.error_text);
     try std.testing.expectEqual(system.window, colors.edit_bg);
     try std.testing.expectEqual(system.window_text, colors.edit_text);
     try std.testing.expectEqual(@as(u32, 0), settingsDwmDarkModeValue(colors));
