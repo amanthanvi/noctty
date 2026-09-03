@@ -257,6 +257,9 @@ lands incrementally.
 - GitHub Issues are for reproducible bugs. For questions, feature
   discussion, and feedback, use
   [Discussions](https://github.com/amanthanvi/noctty/discussions).
+- OpenGL 4.3 through WGL is a hard floor with no software fallback renderer.
+  Below it, noctty shows a startup diagnostic with the detected version and
+  does not start; see [windows.md](windows.md#gpu-floor-and-opengl-driver-issues).
 - No supported Linux application packaging. Upstream's Flatpak and Snap
   surfaces are removed; the curated Nix flake supports only `libghostty-vt`.
 - A few generated artifacts still reference upstream: the `libghostty-vt`

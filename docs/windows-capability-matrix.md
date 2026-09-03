@@ -140,7 +140,9 @@ Terminal presentation is owned by WGL `SwapBuffers`. A separate
 D3D11/DirectComposition shell pipeline owns recoverable top-level targets and
 transparent DPI-sized D2D surfaces; host banner and operation text is the
 first DirectWrite production zone, with per-paint GDI fallback. That pipeline
-does not replace or call the terminal renderer.
+does not replace or call the terminal renderer. The terminal path has a hard
+OpenGL 4.3-via-WGL floor and no software fallback; below it, noctty shows a
+startup diagnostic naming the detected version and does not launch.
 
 ### Universal palette
 
