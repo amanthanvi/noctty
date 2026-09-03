@@ -240,56 +240,61 @@ try {
                 -PayloadRoot (Join-Path $extractDirectory 'noctty') `
                 -Label "Portable manifest $architecture"
         }
-        # Every PE in the portable ZIP is either one we sign (the shared list)
-        # or Microsoft's bundled ConPTY pair, which is checked separately below.
-        $expectedPortablePePaths = @(Get-WindowsSignedRuntimePayloads) + @(
-            'noctty/conpty.dll',
-            'noctty/OpenConsole.exe'
+        # Microsoft's bundled ConPTY pair is intentionally outside
+        # Get-WindowsSignedRuntimePayloads: it is never re-signed by us, so it
+        # can never satisfy the updater publisher pins. It still has to survive
+        # publication, so it is checked below the way the pre-publish verifier
+        # checks it, against the pinned hash and Microsoft's own signer.
+        $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
+        $conptyPortablePayloads = @(
+            [pscustomobject]@{
+                RelativePath = 'noctty/conpty.dll'
+                Pin          = $conptyArchitecture.conptyDll
+            },
+            [pscustomobject]@{
+                RelativePath = 'noctty/OpenConsole.exe'
+                Pin          = $conptyArchitecture.openConsoleExe
+            }
         )
+        $signedPortablePePaths = @(Get-WindowsSignedRuntimePayloads)
+        $expectedPortablePePaths = $signedPortablePePaths + @($conptyPortablePayloads.RelativePath)
         $portablePePaths = @(Get-PortablePeRelativePaths -Root $extractDirectory)
         $missingPortablePe = @($expectedPortablePePaths | Where-Object { $_ -notin $portablePePaths })
         $unexpectedPortablePe = @($portablePePaths | Where-Object { $_ -notin $expectedPortablePePaths })
         if ($missingPortablePe.Count -gt 0 -or $unexpectedPortablePe.Count -gt 0) {
             throw "$portableName PE inventory mismatch. Missing: $($missingPortablePe -join ', '); unexpected: $($unexpectedPortablePe -join ', ')."
         }
-        foreach ($relativePath in (Get-WindowsSignedRuntimePayloads)) {
+        # One loop over the whole expected inventory, so no expected PE can
+        # leave this block without an Authenticode verdict.
+        foreach ($relativePath in $expectedPortablePePaths) {
             $binaryPath = Join-Path $extractDirectory $relativePath
-            $signatureEvidence.Add((Assert-ReleaseSignature `
-                -Path $binaryPath `
-                -Label "$relativePath $architecture" `
-                -AllowedPins $allowedPins `
-                -TrustSelfSigned $trustSelfSigned))
-        }
-
-        # Get-WindowsSignedRuntimePayloads deliberately omits the bundled
-        # ConPTY pair: it is Microsoft's, never re-signed by us, so it can
-        # never satisfy the updater publisher pins. It still has to survive
-        # publication, so re-check it here the same way the pre-publish
-        # verifier does, against the pinned hashes and Microsoft's own signer.
-        $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
-        foreach ($payload in @(
-            @{ RelativePath = 'noctty/conpty.dll'; Pin = $conptyArchitecture.conptyDll },
-            @{ RelativePath = 'noctty/OpenConsole.exe'; Pin = $conptyArchitecture.openConsoleExe }
-        )) {
-            $payloadPath = Join-Path $extractDirectory $payload.RelativePath
-            if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
-                throw "$portableName is missing bundled ConPTY payload $($payload.RelativePath)."
-            }
-            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()
-            if ($actualHash -cne ([string] $payload.Pin.sha256).ToLowerInvariant()) {
-                throw "$($payload.RelativePath) $architecture does not match the pinned ConPTY SHA-256."
+            if ($relativePath -in $signedPortablePePaths) {
+                $signatureEvidence.Add((Assert-ReleaseSignature `
+                    -Path $binaryPath `
+                    -Label "$relativePath $architecture" `
+                    -AllowedPins $allowedPins `
+                    -TrustSelfSigned $trustSelfSigned))
+                continue
             }
 
-            $conptySignature = Get-AuthenticodeSignature -LiteralPath $payloadPath
+            $conptyPayloadPin = @(
+                $conptyPortablePayloads | Where-Object { $_.RelativePath -eq $relativePath }
+            )[0].Pin
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binaryPath).Hash.ToLowerInvariant()
+            if ($actualHash -cne ([string] $conptyPayloadPin.sha256).ToLowerInvariant()) {
+                throw "$relativePath $architecture does not match the pinned ConPTY SHA-256."
+            }
+
+            $conptySignature = Get-AuthenticodeSignature -LiteralPath $binaryPath
             if ($conptySignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-                throw "$($payload.RelativePath) $architecture has no valid Authenticode signature: $($conptySignature.Status)"
+                throw "$relativePath $architecture has no valid Authenticode signature: $($conptySignature.Status)"
             }
             $conptySigner = $conptySignature.SignerCertificate.GetNameInfo(
                 [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
                 $false
             )
             if ($conptySigner -cne 'Microsoft Corporation') {
-                throw "$($payload.RelativePath) $architecture is not signed by Microsoft Corporation: $conptySigner"
+                throw "$relativePath $architecture is not signed by Microsoft Corporation: $conptySigner"
             }
         }
     }

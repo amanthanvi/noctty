@@ -149,7 +149,9 @@ Assert-WorkflowContract `
     -Description 'published-release signature evidence count is derived, not a hardcoded literal'
 # The shared payload list cannot cover the Microsoft pair, so the published
 # verifier needs its own check or the pinned-hash chain stops at publication.
+# The single foreach over $expectedPortablePePaths is part of the contract:
+# it is what stops an expected PE from leaving the block unverified.
 Assert-WorkflowContract `
     -Path $publishedReleaseVerifierScript `
-    -Pattern '(?ms)dist/windows/conpty-redist\.json.*?conptyDll.*?openConsoleExe.*?is missing bundled ConPTY payload.*?Get-FileHash -Algorithm SHA256.*?pinned ConPTY SHA-256.*?X509NameType\]::SimpleName.*?Microsoft Corporation' `
+    -Pattern '(?ms)dist/windows/conpty-redist\.json.*?conptyDll.*?openConsoleExe.*?foreach \(\$relativePath in \$expectedPortablePePaths\).*?Get-FileHash -Algorithm SHA256.*?pinned ConPTY SHA-256.*?X509NameType\]::SimpleName.*?Microsoft Corporation' `
     -Description 'published-release verification rechecks the bundled ConPTY pair against its pinned hashes and Microsoft signer'
