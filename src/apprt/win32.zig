@@ -7841,7 +7841,7 @@ pub const App = struct {
                         c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                     );
                     runUiActionOrLog("theme update layout failed", host.layout());
-                    host.syncCaptionUiaState();
+                    host.scheduleCaptionUiaSync();
                 }
                 // Theme resource replacement always invalidates the full host
                 // chrome plus native child controls. A System->Dark swap does
@@ -17037,11 +17037,27 @@ const Host = struct {
         };
     }
 
+    /// Ask for a caption UIA re-check once the current message is done.
+    ///
+    /// The events below are delivered to listening clients while this
+    /// thread waits, so raising them from inside `WM_SIZE` or a decoration
+    /// change stalls the window's message loop at exactly the moment a
+    /// reader is asking it questions. Posting moves them to a point where
+    /// the loop is free.
+    fn scheduleCaptionUiaSync(self: *Host) void {
+        const hwnd = self.hwnd orelse return;
+        if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_UIA_CAPTION_SYNC, 0, 0) == 0) {
+            // The queue is full or the window is going away. Falling back
+            // to an inline raise is worse than skipping it: the next
+            // transition re-checks the same state from scratch.
+            log.warn("win32 caption UIA sync post failed", .{});
+        }
+    }
+
     /// Keep UIA in step with the caption row. Two things move: the whole
     /// child set appears and disappears with the integrated titlebar (and
     /// with minimize / hide), and the middle button's name follows the
-    /// zoomed state. Cheap enough to call from every transition that can
-    /// move either.
+    /// zoomed state. Always reached through `scheduleCaptionUiaSync`.
     fn syncCaptionUiaState(self: *Host) void {
         const provider = self.root_uia_provider orelse return;
         const painted = captionButtonsPaintedThunk(@ptrCast(self));
@@ -24062,6 +24078,10 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
+        c.WM_WINHOSTTY_UIA_CAPTION_SYNC => {
+            if (host) |v| v.syncCaptionUiaState();
+            return 0;
+        },
         // UIA root object request. Screen readers (Narrator, NVDA) call
         // `AccessibleObjectFromWindow` which turns into WM_GETOBJECT on
         // the target HWND. We only handle the UIA root-object ID; MSAA
@@ -24447,7 +24467,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     }
                 }
                 runUiActionOrLog("window resize layout failed", v.layout());
-                v.syncCaptionUiaState();
+                v.scheduleCaptionUiaSync();
                 v.app.resizeShellCompositorWindow(hwnd);
                 if (size_kind == c.SIZE_MAXIMIZED or
                     (size_kind == c.SIZE_RESTORED and !v.is_live_resize.load(.acquire)))
@@ -29585,7 +29605,7 @@ pub const Surface = struct {
                 return err;
             };
             value.cached_decorations_visible = visible;
-            value.syncCaptionUiaState();
+            value.scheduleCaptionUiaSync();
         }
     }
 
@@ -29609,7 +29629,7 @@ pub const Surface = struct {
             value.refreshChrome() catch |err| {
                 log.warn("win32 decoration rollback chrome refresh failed err={}", .{err});
             };
-            value.syncCaptionUiaState();
+            value.scheduleCaptionUiaSync();
         }
     }
 

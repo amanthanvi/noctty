@@ -22,6 +22,20 @@ pub fn raiseFocusChanged(provider: *com.IRawElementProviderSimple) void {
     logIfFailed("UIA_AutomationFocusChangedEventId", hr);
 }
 
+/// Announce that an `IInvokeProvider.Invoke` was carried out. UIA asks
+/// providers to raise this before `Invoke` returns, so it is the one
+/// event raised from inside a provider call rather than from a message
+/// handler; the providers that do so are COM-threaded, which puts the
+/// raise on the window's own thread.
+pub fn raiseInvoked(provider: *com.IRawElementProviderSimple) void {
+    if (!clientsAreListening()) return;
+    const hr = com.UiaRaiseAutomationEvent(
+        provider,
+        constants.UIA_Invoke_InvokedEventId,
+    );
+    logIfFailed("UIA_Invoke_InvokedEventId", hr);
+}
+
 pub fn raiseSelectionInvalidated(provider: *com.IRawElementProviderSimple) void {
     if (!clientsAreListening()) return;
     const hr = com.UiaRaiseAutomationEvent(

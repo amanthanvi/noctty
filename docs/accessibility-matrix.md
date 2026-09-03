@@ -19,7 +19,7 @@ so a stale claim cannot outlive the record.
 
 - Release: unreleased, branch `issues/145-caption-buttons-uia`
 - Windows build: 10.0.26200.9168 (Windows 11 25H2)
-- Automated UIA harness: **executed and passing** at `84e5e5a8f` — the run now
+- Automated UIA harness: **executed and passing** at `be3b2b3ac` — the run now
   also asserts the integrated-titlebar caption buttons and drives their
   Invoke
 - Narrator: **not yet measured**
@@ -29,10 +29,13 @@ so a stale claim cannot outlive the record.
   arrow keys and Enter/Space, the host banner as a focus landing,
   terminal selection, and the new caption buttons. Every other NVDA cell
   still records what was heard at `7540fe0d` and is older than the
-  current product code; those cells name their own commit. The only
-  product change after `e3ec3e7d3` is that the caption buttons leave the
-  tree while the window is hidden or minimized, which none of the
-  measured steps exercise; nothing measured below was re-run for it.
+  current product code; those cells name their own commit. Two product
+  changes landed after `e3ec3e7d3` and were not re-measured through NVDA:
+  the caption buttons now leave the tree while the window is hidden or
+  minimized, and the caption hit regions moved to the rects actually
+  painted. Neither is exercised by a measured step — NVDA never reaches
+  the buttons by object navigation, and it reads them under the mouse
+  through the provider rather than through hit testing.
 - JAWS: **not yet measured** (commercial licence; not installed)
 
 The "UIA assertion" column reflects

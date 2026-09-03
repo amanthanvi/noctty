@@ -854,17 +854,11 @@ pub const CaptionButtonProvider = struct {
         const self = fromInvoke(p);
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         const caption = self.parent.caption orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
-        // No `Invoked` event is raised here. This provider is COM-threaded,
-        // so `Invoke` runs on the window's own STA while a UIA client is
-        // blocked inside the call; raising an event from there makes the
-        // provider call back into a client that cannot answer until we
-        // return, and the window stops pumping messages long enough to
-        // lose the very command we just posted. Every other event in this
-        // module is raised from a message handler for that reason.
-        return if (caption.invoke(caption.ctx, self.kind))
-            com.S_OK
-        else
-            com.UIA_E_INVALIDOPERATION;
+        if (!caption.invoke(caption.ctx, self.kind)) return com.UIA_E_INVALIDOPERATION;
+        // Raised only once the command is actually on the window's queue,
+        // and before returning, which is where UIA expects it.
+        events.raiseInvoked(&self.base);
+        return com.S_OK;
     }
 };
 
