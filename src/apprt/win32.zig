@@ -2577,6 +2577,127 @@ const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noc
 /// sources so cross-instance cleanup can never delete an in-flight write.
 const recovery_pending_suffix = ".pending-";
 
+/// How long a ledger transaction waits for another instance to finish its own
+/// before giving up. Holders only ever do one small read-merge-write, so a
+/// wait this long means something is wrong on the other side; startup must
+/// not block on it.
+const recovery_ledger_lock_wait_ms: u32 = 2000;
+const recovery_ledger_lock_poll_ms: u32 = 10;
+
+/// Serialises every read-merge-append-replace of the startup ledger across
+/// processes. Two instances launched at once — a double-click, a jump-list
+/// entry plus a shortcut, `wt`-style shell integrations — each load the
+/// ledger, append their own attempt and replace the file; the atomic replace
+/// keeps the file well-formed but the later writer still overwrites the
+/// earlier writer's record. Atomicity was never the problem, serialisation
+/// was.
+///
+/// The lock is a byte-range lock on a sibling `.lock` file. Windows releases
+/// it when the holding process exits by any means, so a crashed holder cannot
+/// wedge later launches. The sibling is never deleted: removing it while
+/// another instance waits on its own handle would let a third instance create
+/// a fresh file and lock that instead, splitting the lock in two.
+const RecoveryLedgerLock = struct {
+    file: std.fs.File,
+
+    /// Returns null when the lock could not be taken inside `wait_ms`; the
+    /// caller decides whether that means skip or retry. Errors are the
+    /// sibling file itself being unusable, which usually means the ledger
+    /// directory is too.
+    fn acquire(alloc: Allocator, ledger_path: []const u8, wait_ms: u32) !?RecoveryLedgerLock {
+        if (std.fs.path.dirname(ledger_path)) |dir| {
+            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
+        const lock_path = try std.fmt.allocPrint(alloc, "{s}.lock", .{ledger_path});
+        defer alloc.free(lock_path);
+        // Open-if-exists, never truncate: the file's bytes are irrelevant and
+        // every instance must land on the same one.
+        const file = try std.fs.createFileAbsolute(lock_path, .{ .truncate = false, .read = true });
+        errdefer file.close();
+
+        const deadline = std.time.milliTimestamp() + wait_ms;
+        while (true) {
+            if (try tryLockExclusive(file)) return .{ .file = file };
+            if (std.time.milliTimestamp() >= deadline) {
+                file.close();
+                return null;
+            }
+            std.Thread.sleep(recovery_ledger_lock_poll_ms * std.time.ns_per_ms);
+        }
+    }
+
+    fn release(self: *RecoveryLedgerLock) void {
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        windows.UnlockFile(
+            self.file.handle,
+            &io_status_block,
+            &lock_range_off,
+            &lock_range_len,
+            null,
+        ) catch |err| {
+            // Closing the handle drops the lock regardless.
+            log.warn("win32 recovery: ledger unlock failed err={}", .{err});
+        };
+        self.file.close();
+        self.* = undefined;
+    }
+
+    const lock_range_off: windows.LARGE_INTEGER = 0;
+    const lock_range_len: windows.LARGE_INTEGER = 1;
+
+    /// `std.fs.File.tryLock` does not compile on Windows in Zig 0.15.2 (its
+    /// `.none` arm returns `void` from a `!bool` function), so the NT call is
+    /// made directly with the same one-byte range `std` uses.
+    fn tryLockExclusive(file: std.fs.File) !bool {
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        windows.LockFile(
+            file.handle,
+            null,
+            null,
+            null,
+            &io_status_block,
+            &lock_range_off,
+            &lock_range_len,
+            null,
+            windows.TRUE, // fail immediately
+            windows.TRUE, // exclusive
+        ) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            else => return err,
+        };
+        return true;
+    }
+};
+
+/// Read and parse the ledger at `path`. Missing, unreadable and invalid
+/// ledgers all read as empty; `context` names the caller in the log line.
+fn readRecoveryLedgerAlloc(
+    alloc: Allocator,
+    path: []const u8,
+    context: []const u8,
+) ?std.json.Parsed(win32_recovery.StartupAttemptRecord) {
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        switch (err) {
+            error.FileNotFound => {},
+            else => log.warn("win32 recovery: {s} open failed err={}", .{ context, err }),
+        }
+        return null;
+    };
+    defer file.close();
+    const raw = file.readToEndAlloc(alloc, 64 * 1024) catch |err| {
+        log.warn("win32 recovery: {s} read failed err={}", .{ context, err });
+        return null;
+    };
+    defer alloc.free(raw);
+    return win32_recovery.parseAlloc(alloc, raw) catch |err| {
+        log.warn("win32 recovery: {s} ignored invalid history err={}", .{ context, err });
+        return null;
+    };
+}
+
 fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
     return if (decision == .safe_mode) recovery_safe_mode_banner else null;
 }
@@ -2798,35 +2919,44 @@ fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
 fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
     const path = localAppDataPathAlloc(alloc, "startup-attempts.json") orelse return .{};
     defer alloc.free(path);
-    return beginRecoveryStartupAtPath(alloc, path, unixMillis());
+    return beginRecoveryStartupAtPath(alloc, path, unixMillis(), recovery_ledger_lock_wait_ms);
 }
 
+/// The whole read -> fold -> append -> replace -> cleanup sequence runs under
+/// `RecoveryLedgerLock`. Without it two instances launching together both
+/// load the same ledger and the second replace silently drops the first
+/// instance's attempt; the `.pending-` fold has the same exposure, since its
+/// delete could remove a record a concurrent startup has not folded yet.
+///
+/// Fail-open: when the lock cannot be taken inside `lock_wait_ms` this launch
+/// still reads the ledger for its safe-mode decision but records nothing, so
+/// `count` stays 0 and no later marker is attempted. An unrecorded launch is
+/// an honest gap in the history; a startup blocked behind a wedged sibling is
+/// the outage this ledger exists to prevent.
 fn beginRecoveryStartupAtPath(
     alloc: Allocator,
     path: []const u8,
     now: u64,
+    lock_wait_ms: u32,
 ) RecoveryStartup {
     var result: RecoveryStartup = .{};
-    var record: win32_recovery.StartupAttemptRecord = .{};
-    var parsed_record: ?std.json.Parsed(win32_recovery.StartupAttemptRecord) = null;
-    defer if (parsed_record) |*parsed| parsed.deinit();
 
-    if (std.fs.openFileAbsolute(path, .{})) |file| {
-        defer file.close();
-        if (file.readToEndAlloc(alloc, 64 * 1024)) |raw| {
-            defer alloc.free(raw);
-            parsed_record = win32_recovery.parseAlloc(alloc, raw) catch |err| invalid: {
-                log.warn("win32 recovery: ignored invalid startup history err={}", .{err});
-                break :invalid null;
-            };
-            if (parsed_record) |*parsed| record = parsed.value;
-        } else |err| {
-            log.warn("win32 recovery: startup history read failed err={}", .{err});
-        }
-    } else |err| switch (err) {
-        error.FileNotFound => {},
-        else => log.warn("win32 recovery: startup history open failed err={}", .{err}),
+    var lock = RecoveryLedgerLock.acquire(alloc, path, lock_wait_ms) catch |err| unlocked: {
+        log.warn("win32 recovery: ledger lock unavailable err={}; startup will not be recorded", .{err});
+        break :unlocked null;
+    };
+    defer if (lock) |*held| held.release();
+    if (lock == null) {
+        log.warn(
+            "win32 recovery: ledger lock not acquired within {d}ms; startup will not be recorded",
+            .{lock_wait_ms},
+        );
     }
+
+    var record: win32_recovery.StartupAttemptRecord = .{};
+    var parsed_record = readRecoveryLedgerAlloc(alloc, path, "startup history");
+    defer if (parsed_record) |*parsed| parsed.deinit();
+    if (parsed_record) |*parsed| record = parsed.value;
 
     var retained_paths: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
@@ -2849,8 +2979,10 @@ fn beginRecoveryStartupAtPath(
         // for whichever process owns them; a concurrently starting instance
         // that deleted one would make that process's ReplaceFileW fail and
         // send it down the in-place fallback, clobbering the record this
-        // process just merged. Keeping the two namespaces disjoint removes
-        // that race without an interprocess lock.
+        // process just merged. The namespaces stay disjoint even though the
+        // ledger lock now serialises ledger transactions: a `.tmp-` can also
+        // be left by a writer that died mid-replace, and nothing here should
+        // have to reason about whether its owner is alive.
         const retained_prefix = std.fmt.allocPrint(
             alloc,
             "{s}" ++ recovery_pending_suffix,
@@ -2898,6 +3030,12 @@ fn beginRecoveryStartupAtPath(
     }
 
     result.decision = win32_recovery.decide(record, now, false, .{});
+    // Everything above was read-only. Nothing below may run unlocked: the
+    // append-and-replace is the lost-update window, and deleting a folded
+    // `.pending-` record is only safe once its contents are on disk under
+    // the same lock.
+    if (lock == null) return result;
+
     const appended = win32_recovery.appendBounded(
         record,
         .{ .started_at_unix_ms = now },
@@ -4341,6 +4479,17 @@ pub const App = struct {
         const path = localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json") orelse return;
         defer self.core_app.alloc.free(path);
 
+        // A phase hint only; a launch that cannot take the lock simply keeps
+        // `init` on disk and the ready marker still resolves it later.
+        var lock = RecoveryLedgerLock.acquire(self.core_app.alloc, path, recovery_ledger_lock_wait_ms) catch |err| {
+            log.warn("win32 recovery: window-created marker skipped, ledger lock unavailable err={}", .{err});
+            return;
+        } orelse {
+            log.warn("win32 recovery: window-created marker skipped, ledger lock busy", .{});
+            return;
+        };
+        defer lock.release();
+
         var persisted: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
         @memcpy(persisted[0..current.len], current);
         persisted[current.len - 1].phase = .window_created;
@@ -4363,29 +4512,24 @@ pub const App = struct {
         const memory_attempts = self.recovery_startup.attempts[0..self.recovery_startup.count];
         const target_started_at = memory_attempts[memory_attempts.len - 1].started_at_unix_ms;
         if (memory_attempts[memory_attempts.len - 1].ready_at_unix_ms != null) return;
+        const path = localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json") orelse return;
+        defer self.core_app.alloc.free(path);
+
+        // The disk read and the replace below are one transaction against
+        // other instances' startups and ready markers. A busy lock is
+        // transient in the same way a handle hold is, so it spends a retry
+        // rather than resolving the launch.
+        var lock = (try RecoveryLedgerLock.acquire(
+            self.core_app.alloc,
+            path,
+            recovery_ledger_lock_wait_ms,
+        )) orelse return error.RecoveryLedgerBusy;
+        defer lock.release();
 
         var disk_record: win32_recovery.StartupAttemptRecord = .{};
-        var parsed_record: ?std.json.Parsed(win32_recovery.StartupAttemptRecord) = null;
+        var parsed_record = readRecoveryLedgerAlloc(self.core_app.alloc, path, "ready merge");
         defer if (parsed_record) |*parsed| parsed.deinit();
-        if (localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json")) |path| {
-            defer self.core_app.alloc.free(path);
-            if (std.fs.openFileAbsolute(path, .{})) |file| {
-                defer file.close();
-                if (file.readToEndAlloc(self.core_app.alloc, 64 * 1024)) |raw| {
-                    defer self.core_app.alloc.free(raw);
-                    parsed_record = win32_recovery.parseAlloc(self.core_app.alloc, raw) catch |err| invalid: {
-                        log.warn("win32 recovery: ready merge ignored invalid disk history err={}", .{err});
-                        break :invalid null;
-                    };
-                    if (parsed_record) |*parsed| disk_record = parsed.value;
-                } else |err| {
-                    log.warn("win32 recovery: ready merge read failed err={}", .{err});
-                }
-            } else |err| switch (err) {
-                error.FileNotFound => {},
-                else => log.warn("win32 recovery: ready merge open failed err={}", .{err}),
-            }
-        }
+        if (parsed_record) |*parsed| disk_record = parsed.value;
 
         var merged_attempts: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
         const merged = win32_recovery.mergeMarkReady(
@@ -4398,8 +4542,6 @@ pub const App = struct {
             log.warn("win32 recovery: ready marker merge failed err={}", .{err});
             return;
         };
-        const path = localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json") orelse return;
-        defer self.core_app.alloc.free(path);
         persistMergedRecoveryReadyAtPath(
             self.core_app.alloc,
             path,
@@ -35110,7 +35252,7 @@ test "win32 recovery next startup folds retained diagnosis before append" {
     try win32_session_persistence.writeFileInPlace(target, disk_json);
     try win32_session_persistence.writeFileInPlace(pending, pending_json);
 
-    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200);
+    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200, recovery_ledger_lock_wait_ms);
     try std.testing.expectEqual(win32_recovery.Decision.normal, startup.decision);
     try std.testing.expectEqual(@as(usize, 2), startup.count);
     try std.testing.expectEqual(@as(?u64, 150), startup.attempts[0].ready_at_unix_ms);
@@ -35160,7 +35302,7 @@ test "win32 recovery startup leaves another instance's in-flight write temp alon
     try win32_session_persistence.writeFileInPlace(in_flight, in_flight_json);
     try win32_session_persistence.writeFileInPlace(pending, pending_json);
 
-    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200);
+    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200, recovery_ledger_lock_wait_ms);
     try std.testing.expectEqual(@as(usize, 2), startup.count);
 
     // The `.pending-` diagnosis is folded and cleaned up.
@@ -35177,6 +35319,134 @@ test "win32 recovery startup leaves another instance's in-flight write temp alon
     const survivor = try std.fs.cwd().readFileAlloc(std.testing.allocator, in_flight, 64 * 1024);
     defer std.testing.allocator.free(survivor);
     try std.testing.expectEqualStrings(in_flight_json, survivor);
+}
+
+test "win32 recovery ledger lock excludes a second holder until released" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+
+    var first = (try RecoveryLedgerLock.acquire(std.testing.allocator, target, 0)) orelse
+        return error.TestUnexpectedResult;
+    // A second acquisition against the same ledger must time out rather than
+    // succeed, and must time out promptly: the wait is the bound on how long
+    // a startup can be held behind a sibling.
+    const started = std.time.milliTimestamp();
+    try std.testing.expectEqual(
+        @as(?RecoveryLedgerLock, null),
+        try RecoveryLedgerLock.acquire(std.testing.allocator, target, 50),
+    );
+    try std.testing.expect(std.time.milliTimestamp() - started < 1000);
+    first.release();
+
+    // Released, the next taker gets it. The sibling file is left behind on
+    // purpose so every instance keeps locking the same inode.
+    var second = (try RecoveryLedgerLock.acquire(std.testing.allocator, target, 0)) orelse
+        return error.TestUnexpectedResult;
+    second.release();
+    const lock_path = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".lock" });
+    defer std.testing.allocator.free(lock_path);
+    const lock_file = try std.fs.openFileAbsolute(lock_path, .{});
+    lock_file.close();
+}
+
+test "win32 recovery startup fails open when the ledger lock is held" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+    const pending = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".pending-feed" });
+    defer std.testing.allocator.free(pending);
+
+    // Three unresolved attempts on disk: enough for `decide` to pick safe
+    // mode, so the read-only decision is observable even when nothing is
+    // recorded.
+    const disk_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100 },
+        .{ .started_at_unix_ms = 110 },
+        .{ .started_at_unix_ms = 120 },
+    };
+    const disk_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &disk_attempts });
+    defer std.testing.allocator.free(disk_json);
+    try win32_session_persistence.writeFileInPlace(target, disk_json);
+    try win32_session_persistence.writeFileInPlace(pending, disk_json);
+
+    var held = (try RecoveryLedgerLock.acquire(std.testing.allocator, target, 0)) orelse
+        return error.TestUnexpectedResult;
+    const blocked = beginRecoveryStartupAtPath(std.testing.allocator, target, 200, 20);
+    held.release();
+
+    // Decision still made from the ledger; nothing appended, nothing
+    // replaced, nothing folded away.
+    try std.testing.expectEqual(win32_recovery.Decision.safe_mode, blocked.decision);
+    try std.testing.expectEqual(@as(usize, 0), blocked.count);
+    const untouched = try std.fs.cwd().readFileAlloc(std.testing.allocator, target, 64 * 1024);
+    defer std.testing.allocator.free(untouched);
+    try std.testing.expectEqualStrings(disk_json, untouched);
+    const pending_file = try std.fs.openFileAbsolute(pending, .{});
+    pending_file.close();
+
+    // With the lock free the same launch records itself and folds the
+    // retained record.
+    const recorded = beginRecoveryStartupAtPath(std.testing.allocator, target, 200, recovery_ledger_lock_wait_ms);
+    try std.testing.expectEqual(@as(usize, 4), recorded.count);
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+}
+
+const ConcurrentStartupWorker = struct {
+    target: []const u8,
+    now: u64,
+    count: usize = 0,
+
+    fn run(self: *ConcurrentStartupWorker) void {
+        const startup = beginRecoveryStartupAtPath(std.testing.allocator, self.target, self.now, recovery_ledger_lock_wait_ms);
+        self.count = startup.count;
+    }
+};
+
+test "win32 recovery concurrent startups never lose each other's attempt" {
+    // The Greptile reproduction: independent ledger readers that append and
+    // replace the same target. Each worker is a full `beginRecoveryStartupAtPath`
+    // transaction, all released at once; without the lock the final ledger
+    // holds fewer attempts than workers, because a later replace carries only
+    // its own snapshot. One shared timestamp keeps `appendBounded`'s ordering
+    // check out of the picture, so the only thing that can shrink the count
+    // is a lost update.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+
+    const worker_count = 6;
+    var workers: [worker_count]ConcurrentStartupWorker = undefined;
+    var threads: [worker_count]std.Thread = undefined;
+    for (&workers) |*worker| worker.* = .{ .target = target, .now = 500 };
+    for (&threads, &workers) |*thread, *worker| {
+        thread.* = try std.Thread.spawn(.{}, ConcurrentStartupWorker.run, .{worker});
+    }
+    for (&threads) |*thread| thread.join();
+
+    // Every worker got in (nobody timed out), and every worker's snapshot
+    // was one larger than the previous one's — the serialised order.
+    var seen = [_]bool{false} ** worker_count;
+    for (workers) |worker| {
+        try std.testing.expect(worker.count >= 1 and worker.count <= worker_count);
+        try std.testing.expect(!seen[worker.count - 1]);
+        seen[worker.count - 1] = true;
+    }
+
+    const final = try std.fs.cwd().readFileAlloc(std.testing.allocator, target, 64 * 1024);
+    defer std.testing.allocator.free(final);
+    var parsed = try win32_recovery.parseAlloc(std.testing.allocator, final);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, worker_count), parsed.value.attempts.len);
 }
 
 test "win32 recovery fallback failure is consumed by next startup" {
@@ -35223,7 +35493,7 @@ test "win32 recovery fallback failure is consumed by next startup" {
     try std.testing.expectEqual(win32_recovery.StartupPhase.ready_persist_failed, ready_attempts[0].phase);
     try std.testing.expect(ready_attempts[0].last_win32_error != null);
 
-    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200);
+    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200, recovery_ledger_lock_wait_ms);
     try std.testing.expectEqual(win32_recovery.Decision.normal, startup.decision);
     try std.testing.expectEqual(@as(usize, 2), startup.count);
     try std.testing.expectEqual(@as(?u64, 150), startup.attempts[0].ready_at_unix_ms);
