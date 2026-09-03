@@ -380,6 +380,13 @@ AltGr, the modifier state noctty reads cannot tell the two apart, so left
 Ctrl plus right Alt is always read as AltGr there; use left Alt or right
 Ctrl for a deliberate Ctrl+Alt chord.
 
+While a program has the Kitty keyboard protocol's `report_all` flag enabled,
+typed text travels on the physical key event rather than a separate character
+commit, so the press and release a program pairs share one key identity. This
+includes AltGr characters and dead-key sequences. `key-remap` affects
+keybinds and terminal encoding but not `global:` hotkeys, which register the
+literal chord you configured.
+
 Console applications reached through ConPTY see these sequences through
 conhost's own decoder, which does not translate every form back into a
 console key record. `[Console]::ReadKey()` therefore reports less than the

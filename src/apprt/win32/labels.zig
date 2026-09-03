@@ -484,6 +484,36 @@ pub fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action)
     return false;
 }
 
+/// Apply `key-remap` to a key event the same way `Surface.keyCallback` does.
+/// Two Win32 paths hand events to the core without going through a surface:
+/// the empty-host app-input path and the command-palette toggle lookup. Both
+/// must see remapped modifiers or a remapped chord silently misses there.
+pub fn remapWin32KeyEvent(
+    event_orig: input.KeyEvent,
+    remaps: *const input.KeyRemapSet,
+) input.KeyEvent {
+    var event = event_orig;
+    event.mods = remaps.apply(event_orig.mods);
+    if (event_orig.binding_mods) |binding_mods| {
+        event.binding_mods = remaps.apply(binding_mods);
+    }
+    return event;
+}
+
+pub fn keyEventTogglesCommandPalette(
+    event_orig: input.KeyEvent,
+    keybinds: *const input.Binding.Set,
+    remaps: *const input.KeyRemapSet,
+) bool {
+    const event = remapWin32KeyEvent(event_orig, remaps);
+    const entry = keybinds.getEvent(event) orelse return false;
+    const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
+        .leader => return false,
+        inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
+    };
+    return bindingActionsToggleCommandPalette(actions);
+}
+
 fn commandPaletteDirectionFromWheelDelta(delta: i16) bool {
     return delta > 0;
 }
@@ -3617,6 +3647,31 @@ test "win32 command palette toggle binding is recognized inside action chains" {
     const present = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .toggle_command_palette };
     try std.testing.expect(!bindingActionsToggleCommandPalette(&absent));
     try std.testing.expect(bindingActionsToggleCommandPalette(&present));
+}
+
+// Differential, not tautological: the same event misses the default
+// ctrl+shift+p binding with an empty remap set and matches it with alt=ctrl.
+test "win32 key-remap applies to command palette toggle lookup" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const configpkg = @import("../../config.zig");
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var remaps: input.KeyRemapSet = .empty;
+    try remaps.parseCLI(arena.allocator(), "alt=ctrl");
+    remaps.finalize();
+
+    const event: input.KeyEvent = .{
+        .key = .key_p,
+        .mods = .{ .shift = true, .alt = true },
+        .unshifted_codepoint = 'p',
+    };
+    const no_remaps: input.KeyRemapSet = .empty;
+    try std.testing.expect(!keyEventTogglesCommandPalette(event, &cfg.keybind.set, &no_remaps));
+    try std.testing.expect(keyEventTogglesCommandPalette(event, &cfg.keybind.set, &remaps));
 }
 
 test "win32 buildInspectorBannerText reflects host inspector context" {
