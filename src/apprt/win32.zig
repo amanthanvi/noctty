@@ -16976,6 +16976,9 @@ const Host = struct {
     /// which is also when UIA must not expose the buttons at all.
     fn captionButtonRects(self: *const Host, client_rect: RECT) ?CaptionButtonRects {
         if (!self.usingIntegratedTitlebar()) return null;
+        // A collapsed client area (a minimized window reports one) has no
+        // painted row, so there is no rect to hand out.
+        if (client_rect.right <= client_rect.left or client_rect.bottom <= client_rect.top) return null;
         const w = self.scaled(host_caption_button_w);
         const h = self.ncMetrics().caption_button_h;
         if (w <= 0 or h <= 0) return null;
@@ -23050,9 +23053,15 @@ test "win32 deferred UIA disconnect drain retries and releases once" {
 /// The integrated titlebar is the only thing that paints caption
 /// buttons; without it the window has a stock DWM caption that the host
 /// provider already describes.
+///
+/// A minimized or hidden window paints nothing either. Leaving the
+/// buttons in the tree there would hand a reader a full-size rect at the
+/// minimized window's off-screen origin, with `IsOffscreen = false`
+/// alongside it.
 fn captionButtonsPaintedThunk(ctx: *anyopaque) bool {
     const host: *Host = @ptrCast(@alignCast(ctx));
-    if (host.hwnd == null) return false;
+    const hwnd = host.hwnd orelse return false;
+    if (sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) return false;
     return host.usingIntegratedTitlebar();
 }
 
