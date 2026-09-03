@@ -289,6 +289,109 @@ Invoke-ContractTable -Contracts @(
     }
 )
 
+# Authenticode timestamping: every signtool invocation must request an RFC 3161
+# timestamp (/tr + /td SHA256); the legacy Authenticode /t countersignature is
+# forbidden because it cannot carry a SHA-256 digest policy.
+$signToolInvocationPattern = '(?ms)function Invoke-SignFile.*?"/fd", "SHA256".*?"/tr", \$SigningConfig\.TimestampUrl, "/td", "SHA256".*?& \$SigningConfig\.SignToolPath @signArgs'
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $windowsPackager
+        Content = { $windowsPackagerText }
+        Pattern = $signToolInvocationPattern
+        Kind = 'Text'
+        Description = 'packaging signs with SHA-256 file digests and RFC 3161 SHA-256 timestamps (/tr, /td SHA256)'
+    }
+    @{
+        File = $releasePreflight
+        Content = { Get-Content -LiteralPath $releasePreflight -Raw }
+        Pattern = '(?ms)function Assert-TimestampUrlConfigured.*?if \(\$TrustSelfSigned\) \{.*?return .*?\}.*?Test-EnvPresent -Name "WINDOWS_CODESIGN_TIMESTAMP_URL".*?throw "WINDOWS_CODESIGN_TIMESTAMP_URL must be set.*?\[Uri\]::TryCreate\(.*?\[UriKind\]::Absolute.*?Scheme -notin @\(''http'', ''https''\).*?throw "WINDOWS_CODESIGN_TIMESTAMP_URL must be an absolute http\(s\) URL.*?if \(\$RequireSigning\) \{\s*\$timestampStatus = Assert-TimestampUrlConfigured -TrustSelfSigned \$trustSelfSigned'
+        Kind = 'Text'
+        Description = 'release preflight requires an absolute http(s) RFC 3161 timestamp URL whenever signing is not self-signed'
+    }
+)
+$signToolInvocationText = [regex]::Match(
+    $windowsPackagerText,
+    '(?ms)function Invoke-SignFile.*?& \$SigningConfig\.SignToolPath @signArgs'
+).Value
+if ([string]::IsNullOrEmpty($signToolInvocationText) -or
+    $signToolInvocationText -match '"/t",' -or
+    $signToolInvocationText -match '(?m)^\s*/t\s') {
+    throw 'Packaging must never pass the legacy Authenticode /t timestamp switch to signtool.'
+}
+
+# The preflight timestamp gate is executed, not just pattern-matched: with the
+# signing environment cleared it must fail closed on the timestamp URL before it
+# reaches the PFX checks, and the self-signed mode must bypass that gate.
+function Invoke-PreflightTimestampProbe {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Environment
+    )
+
+    $signingVariables = @(
+        'WINDOWS_CODESIGN_TRUST_SELF_SIGNED',
+        'WINDOWS_CODESIGN_TIMESTAMP_URL',
+        'WINDOWS_CODESIGN_PFX_BASE64',
+        'WINDOWS_CODESIGN_PFX_PATH',
+        'WINDOWS_CODESIGN_PFX_PASSWORD',
+        'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS'
+    )
+    $saved = @{}
+    foreach ($name in $signingVariables) {
+        $saved[$name] = [Environment]::GetEnvironmentVariable($name)
+        [Environment]::SetEnvironmentVariable($name, $null)
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value)
+    }
+    try {
+        $output = @(& pwsh -NoProfile -File $releasePreflight -Version 1.3.100 -RequireSigning 2>&1)
+        return [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Text = ($output | ForEach-Object { [string]$_ }) -join "`n"
+        }
+    }
+    finally {
+        foreach ($name in $signingVariables) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name])
+        }
+    }
+}
+
+$preflightTimestampProbes = [ordered] @{
+    'CA-issued mode without a timestamp URL' = [pscustomobject]@{
+        Environment = @{}
+        ExpectedExitCode = 1
+        MustMatch = 'WINDOWS_CODESIGN_TIMESTAMP_URL must be set'
+        MustNotMatch = 'Required code-signing certificate was not configured'
+    }
+    'CA-issued mode with a non-http timestamp URL' = [pscustomobject]@{
+        Environment = @{ WINDOWS_CODESIGN_TIMESTAMP_URL = 'ftp://timestamp.invalid' }
+        ExpectedExitCode = 1
+        MustMatch = 'must be an absolute http\(s\) URL'
+        MustNotMatch = 'Required code-signing certificate was not configured'
+    }
+    'CA-issued mode with an http timestamp URL' = [pscustomobject]@{
+        Environment = @{ WINDOWS_CODESIGN_TIMESTAMP_URL = 'http://timestamp.invalid/rfc3161' }
+        ExpectedExitCode = 1
+        MustMatch = 'Required code-signing certificate was not configured'
+        MustNotMatch = 'WINDOWS_CODESIGN_TIMESTAMP_URL must'
+    }
+    'self-signed mode without a timestamp URL' = [pscustomobject]@{
+        Environment = @{ WINDOWS_CODESIGN_TRUST_SELF_SIGNED = 'true' }
+        ExpectedExitCode = 1
+        MustMatch = 'Required code-signing certificate was not configured'
+        MustNotMatch = 'WINDOWS_CODESIGN_TIMESTAMP_URL must'
+    }
+}
+foreach ($probe in $preflightTimestampProbes.GetEnumerator()) {
+    $result = Invoke-PreflightTimestampProbe -Environment $probe.Value.Environment
+    if ($result.ExitCode -ne $probe.Value.ExpectedExitCode -or
+        $result.Text -notmatch $probe.Value.MustMatch -or
+        $result.Text -match $probe.Value.MustNotMatch) {
+        throw "Release preflight timestamp gate misbehaved for $($probe.Key) (exit $($result.ExitCode)): $($result.Text)"
+    }
+}
+
 $portableManifestVerifier = Join-Path $repoRoot 'scripts\portable-manifest-verification.ps1'
 $portableManifestVerifierText = Get-Content -LiteralPath $portableManifestVerifier -Raw
 Invoke-ContractTable -Contracts @(

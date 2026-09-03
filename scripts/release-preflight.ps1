@@ -255,10 +255,28 @@ if ($patch -lt $firstForkPatch) {
     throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. noctty fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
 }
 
-$timestampUrl = if (Test-EnvPresent -Name "WINDOWS_CODESIGN_TIMESTAMP_URL") {
-    Get-EnvValue -Name "WINDOWS_CODESIGN_TIMESTAMP_URL"
-} else {
-    "http://timestamp.digicert.com"
+$trustSelfSigned = ([string](Get-OptionalEnvValue -Name "WINDOWS_CODESIGN_TRUST_SELF_SIGNED")).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
+
+function Assert-TimestampUrlConfigured {
+    param([bool]$TrustSelfSigned)
+
+    # Self-signed signatures are validated by updater SPKI pin, which ignores
+    # certificate expiry, and package-windows.ps1 skips the TSA in that mode.
+    # A CA-issued signature stays valid past NotAfter only through an RFC 3161
+    # timestamp, so that mode must name a TSA before the PFX is even loaded.
+    if ($TrustSelfSigned) {
+        return "disabled (WINDOWS_CODESIGN_TRUST_SELF_SIGNED is set)"
+    }
+    if (-not (Test-EnvPresent -Name "WINDOWS_CODESIGN_TIMESTAMP_URL")) {
+        throw "WINDOWS_CODESIGN_TIMESTAMP_URL must be set to an RFC 3161 timestamp service when WINDOWS_CODESIGN_TRUST_SELF_SIGNED is not true; signatures from a CA-issued certificate must be timestamped."
+    }
+    $timestampUrl = Get-EnvValue -Name "WINDOWS_CODESIGN_TIMESTAMP_URL"
+    $parsedTimestampUrl = $null
+    if (-not [Uri]::TryCreate($timestampUrl, [UriKind]::Absolute, [ref]$parsedTimestampUrl) -or
+        $parsedTimestampUrl.Scheme -notin @('http', 'https')) {
+        throw "WINDOWS_CODESIGN_TIMESTAMP_URL must be an absolute http(s) URL, got '$timestampUrl'."
+    }
+    return $timestampUrl
 }
 
 Write-Status -Label "Version" -Value $Version
@@ -323,6 +341,7 @@ function Assert-WingetArchitectureCoverage {
 }
 
 if ($RequireSigning) {
+    $timestampStatus = Assert-TimestampUrlConfigured -TrustSelfSigned $trustSelfSigned
     $hasPfxBase64 = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_BASE64"
     $hasPfxPath = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PATH"
     if ($hasPfxBase64 -and $hasPfxPath) {
@@ -363,7 +382,7 @@ if ($RequireSigning) {
     Write-Status -Label "Signer expires" -Value $signingPolicy.NotAfter.ToString('o')
     Write-Status -Label "Signer validity left" -Value "$($signingPolicy.RemainingValidityDays) days"
     Write-Status -Label "Signer identity" -Value $(if ($signingPolicy.SelfSigned) { 'self-signed; updater-pin constrained' } else { 'CA-issued; updater-pin constrained' })
-    Write-Status -Label "Timestamp URL" -Value $timestampUrl
+    Write-Status -Label "Timestamp URL" -Value $timestampStatus
 } else {
     Write-Status -Label "Code signing" -Value "not required"
 }

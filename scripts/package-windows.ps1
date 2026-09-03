@@ -338,7 +338,9 @@ function Invoke-SignFile {
     )
 
     if (-not [string]::IsNullOrWhiteSpace($SigningConfig.TimestampUrl)) {
-        $signArgs += @("/t", $SigningConfig.TimestampUrl)
+        # RFC 3161 timestamp (not legacy Authenticode /t) so the signature
+        # stays verifiable after the signing certificate expires.
+        $signArgs += @("/tr", $SigningConfig.TimestampUrl, "/td", "SHA256")
     }
 
     $signArgs += @(
@@ -451,7 +453,9 @@ try {
         Write-Host "Code signing : enabled"
         if ($signingConfig.TrustSelfSigned) {
             Write-Host "Signing trust: validating self-signed signatures by expected signer thumbprint"
-            Write-Host "Timestamping : disabled for self-signed signing"
+            Write-Host "Timestamping : disabled for self-signed signing (ADR-0005: pin-based verification ignores expiry; public TSA stalled packaging on 2026-04-30)"
+        } else {
+            Write-Host "Timestamping : RFC 3161 via $($signingConfig.TimestampUrl) (/tr, /td SHA256)"
         }
     } else {
         Write-Host "Code signing : disabled"
