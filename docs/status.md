@@ -3,7 +3,7 @@
 What works in noctty, what is experimental, and what is out of scope. When
 this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-09-01, against current fork HEAD.
+Last updated: 2026-09-02, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, including the
 implementation detail this page leaves out, see
@@ -19,7 +19,9 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
 
 ## Supported platform
 
-- Windows 10 and Windows 11, on x64 and ARM64.
+- Windows 10 version 1809 (build 17763) or newer, and Windows 11, on
+  x64 and ARM64. ConPTY is a static import, so earlier builds fail to load
+  rather than degrade.
 - No macOS, Linux, or cross-platform app runtime ships from this repo.
   `libghostty-vt` stays buildable for non-Windows targets as a library.
 - WSL sessions work from the profile picker. Making WSL the default shell
@@ -51,7 +53,8 @@ Win32-validated VT protocol coverage is tracked in
   falling back to the in-box conhost, which strips Kitty APC and Sixel DCS
   payloads. See
   [windows-vt-conformance.md](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
-- Native Win32 windows, tab bar with overflow, same-window tab reorder, and
+- Native Win32 windows, tab bar with overflow, a numeric tab overview
+  (`toggle_tab_overview`, no default keybind), same-window tab reorder, and
   exact-pane drag-to-split.
 - Horizontal and vertical splits.
 - Structural undo/redo for new splits, single-tab close (restoring the
@@ -68,13 +71,37 @@ Win32-validated VT protocol coverage is tracked in
   and drives, registered by the installer or explicitly per-user for
   portable builds.
 - Per-monitor DPI scaling.
-- DWM dark title bar that follows the app theme.
+- DWM dark caption that follows the app theme on all supported builds, plus
+  an integrated title bar with native caption actions and Snap Layout hover
+  on Windows 11 while the tab bar and decorations are visible
+  (`window-show-tab-bar = never` and older builds keep the stock caption).
 - High-contrast mode detection and palette switching.
 - IME for CJK and other composed input.
 - A local sensitive-input indicator for no-echo input. `toggle_secure_input`
   is a visual affordance only; it does not block system-wide keyboard hooks
   the way macOS Secure Keyboard Entry does.
-- Drag-and-drop of files into the terminal.
+- Drag-and-drop of files, plain text, URLs, and HTML into a pane. Shift
+  changes file/text handling, Ctrl suppresses file-path quoting, and Alt has
+  no assigned behavior.
+- Per-pane docked scrollback search (`Ctrl+Shift+F`) with regex, case, and
+  whole-word modes, result navigation, and match markers on the scrollbar.
+- Per-pane graphical scrollbars. `scrollbar = system` follows Windows'
+  dynamic-scrollbar preference; `never` hides the widget without disabling
+  scrolling.
+- Clipboard paste confirmation for risky content, including dropped
+  payloads, gated by `clipboard-paste-protection`. HTML copy writes both
+  CF_HTML and a plain-text fallback.
+- A configurable quick terminal on an edge or the center of the selected
+  monitor. It has no default binding; `global:` keybinds use
+  `RegisterHotKey`. `exclusive` keyboard interactivity falls back to focused
+  input, and `quick-terminal-space-behavior` has no Windows effect.
+- WinRT Action Center notifications with an in-app banner/log fallback,
+  gated by `desktop-notifications`. Command-finish toasts also need
+  `notify-on-command-finish` and a `notify` action, and are the only toasts
+  that focus the originating pane when clicked; OSC 9 / OSC 777 toasts are
+  display-only.
+- Taskbar progress for the active pane in each host window, driven by
+  terminal progress reports when `progress-style` is enabled.
 - Session restore via `window-save-state`: windows, tabs, splits, profiles,
   working directories, and explicit titles come back; child processes do
   not. The opt-in `window-save-state-scrollback` line count also restores
@@ -99,6 +126,9 @@ Win32-validated VT protocol coverage is tracked in
   open, or protected paste.
 - Copy mode (`Ctrl+Shift+X`): modal vi-style selection and scrollback
   navigation, with keyboard copy/cancel and no PTY input leakage.
+- Opt-in Job Object limits for Windows-local child processes through the
+  retained `linux-cgroup*` keys and `windows-job-object-kill-on-close`. Off
+  by default; WSL process trees are not covered.
 
 ### Performance measurement
 
@@ -189,6 +219,17 @@ flag toggles, and the docked search query edit do not announce their role,
 state, or name. Per-widget expectations, what the automated UIA harness
 proves, and per-reader results are in
 [accessibility-matrix.md](accessibility-matrix.md).
+
+### Link previews
+
+`link-previews` is parsed and the shared core emits link-hover preview
+actions, but the Win32 runtime does not render the preview tooltip. Link
+matching, hover highlighting, and opening work.
+
+### Status bar
+
+Not shipping. `Host.statusBarHeight()` returns 0, so no terminal rows are
+reserved; host banners and overlays carry transient status instead.
 
 ### Win32 runtime extraction
 
