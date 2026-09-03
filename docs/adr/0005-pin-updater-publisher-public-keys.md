@@ -39,6 +39,16 @@ and require timestamping, then (3) remove the retired pin only after the overlap
 release is broadly deployed. Until then, the updater pin is the narrow trust
 anchor and public copy must continue to warn that SmartScreen may intervene.
 
+Timestamping (2026-09-02). Release signing requests an RFC 3161 SHA-256
+timestamp (`signtool /tr <url> /td SHA256`) whenever a timestamp URL is in
+effect, never the legacy `/t` countersignature. Self-signed releases are still
+not timestamped: the updater and the verifier accept them only through the SPKI
+pin, which ignores certificate expiry, and the public timestamp authority
+stalled packaging for hours on 2026-04-30. Preflight therefore accepts a missing
+`WINDOWS_CODESIGN_TIMESTAMP_URL` only while `WINDOWS_CODESIGN_TRUST_SELF_SIGNED`
+is `true`; for any other signer it fails closed unless that variable holds an
+absolute http(s) URL, which is what makes migration step 2 enforceable.
+
 The staged installer and its containing stage directory must remain open
 without delete sharing from hash and Authenticode verification until the
 elevated launch handoff returns. The verifier rejects reparse points and

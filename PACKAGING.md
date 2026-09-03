@@ -147,7 +147,9 @@ Required for the GitHub `Release` workflow:
 Optional:
 
 - Environment or repo variable: `WINDOWS_CODESIGN_TIMESTAMP_URL`
-  Default: `http://timestamp.digicert.com`
+  Default: `http://timestamp.digicert.com` (RFC 3161). Optional only while
+  `WINDOWS_CODESIGN_TRUST_SELF_SIGNED` is `true`; preflight otherwise
+  requires an explicit http(s) URL.
 - Environment or repo variable: `WINDOWS_CODESIGN_TRUST_SELF_SIGNED`
   Default: unset / false
 
