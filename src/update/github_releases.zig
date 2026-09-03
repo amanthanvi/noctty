@@ -7,8 +7,6 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const log = std.log.scoped(.update_github_releases);
 
-pub const repo_owner = "amanthanvi";
-pub const repo_name = "noctty";
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/noctty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/noctty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
@@ -41,19 +39,55 @@ const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
 pub const State = struct {
     last_checked_at: i64 = 0,
     last_seen_version: ?[]u8 = null,
+    release_feed_url: ?[]u8 = null,
+    release_url: ?[]u8 = null,
     dismissed_version: ?[]u8 = null,
     staged_version: ?[]u8 = null,
     staged_installer_path: ?[]u8 = null,
     staged_sha256: ?[]u8 = null,
+    /// Feed URL the staged installer came from. State written before this
+    /// field existed has no value; that state can only have come from the
+    /// compiled-in default, so `stagedFeedUrl` reports the default for it.
+    staged_feed_url: ?[]u8 = null,
     staged_at: i64 = 0,
     apply_requested_at: i64 = 0,
 
+    pub fn stagedFeedUrl(self: *const State) []const u8 {
+        return self.staged_feed_url orelse latest_stable_api_url;
+    }
+
+    /// Drop every staged-install field. Returns true when something was
+    /// cleared, so the caller knows the on-disk state must be rewritten and
+    /// any live update notice for that staged install is now stale.
+    pub fn clearStagedInstall(self: *State, alloc: Allocator) bool {
+        var cleared = false;
+        inline for (.{ "staged_version", "staged_installer_path", "staged_sha256", "staged_feed_url" }) |field| {
+            if (@field(self, field)) |value| {
+                alloc.free(value);
+                @field(self, field) = null;
+                cleared = true;
+            }
+        }
+        if (self.staged_at != 0) {
+            self.staged_at = 0;
+            cleared = true;
+        }
+        if (self.apply_requested_at != 0) {
+            self.apply_requested_at = 0;
+            cleared = true;
+        }
+        return cleared;
+    }
+
     pub fn deinit(self: *State, alloc: Allocator) void {
         if (self.last_seen_version) |value| alloc.free(value);
+        if (self.release_feed_url) |value| alloc.free(value);
+        if (self.release_url) |value| alloc.free(value);
         if (self.dismissed_version) |value| alloc.free(value);
         if (self.staged_version) |value| alloc.free(value);
         if (self.staged_installer_path) |value| alloc.free(value);
         if (self.staged_sha256) |value| alloc.free(value);
+        if (self.staged_feed_url) |value| alloc.free(value);
         self.* = undefined;
     }
 };
@@ -115,12 +149,97 @@ pub const CheckResult = union(enum) {
     }
 };
 
+/// Outcome of one check, plus whatever the caller has to react to beyond the
+/// result itself.
+pub const CheckOutcome = struct {
+    result: CheckResult,
+    /// State belonging to a previously configured feed (a cached release, a
+    /// dismissal, or a staged installer) was discarded during this check.
+    /// Any live update notice came from that same feed, so the caller must
+    /// drop it.
+    feed_state_invalidated: bool = false,
+
+    pub fn deinit(self: *CheckOutcome, alloc: Allocator) void {
+        self.result.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
 pub const CheckOptions = struct {
     current_version: std.SemanticVersion,
+    release_feed_url: []const u8,
     force: bool = false,
     respect_dismissal: bool = true,
     now: i64 = 0,
 };
+
+/// Which of the three precedence levels supplied the effective feed URL.
+pub const FeedSource = enum { configured, environment, default };
+
+pub const ResolvedFeed = struct {
+    url: []u8,
+    source: FeedSource,
+    /// Set when a feed URL was supplied but rejected because it is not a
+    /// valid HTTPS URL. `url` is then the compiled-in default and this names
+    /// the level whose value was ignored.
+    ignored_non_https: ?FeedSource = null,
+
+    pub fn deinit(self: *ResolvedFeed, alloc: Allocator) void {
+        alloc.free(self.url);
+        self.* = undefined;
+    }
+};
+
+/// Resolve the effective release feed URL. Precedence is the explicit
+/// `auto-update-feed-url`, then a non-empty `NOCTTY_UPDATE_FEED_URL`, then
+/// the compiled-in default; a blank value at either level falls through to
+/// the next, and a non-HTTPS value falls back to the default.
+pub fn resolveReleaseFeed(alloc: Allocator, configured: ?[]const u8) !ResolvedFeed {
+    const configured_value = if (configured) |value|
+        std.mem.trim(u8, value, &std.ascii.whitespace)
+    else
+        "";
+    const env_value = if (configured_value.len == 0)
+        try internal_os.getEnvVarOwnedTrimmedNotEmpty(
+            alloc,
+            "NOCTTY_UPDATE_FEED_URL",
+        )
+    else
+        null;
+    defer if (env_value) |value| alloc.free(value);
+
+    const source: FeedSource = if (configured_value.len > 0)
+        .configured
+    else if (env_value != null)
+        .environment
+    else
+        .default;
+    const candidate = switch (source) {
+        .configured => configured_value,
+        .environment => env_value.?,
+        .default => "",
+    };
+    if (source == .default) return .{
+        .url = try alloc.dupe(u8, latest_stable_api_url),
+        .source = .default,
+    };
+
+    _ = validateHttpsUrl(candidate) catch {
+        log.warn("ignoring non-HTTPS update feed URL; using the default release feed", .{});
+        return .{
+            .url = try alloc.dupe(u8, latest_stable_api_url),
+            .source = .default,
+            .ignored_non_https = source,
+        };
+    };
+
+    return .{ .url = try alloc.dupe(u8, candidate), .source = source };
+}
+
+pub fn resolveReleaseFeedUrl(alloc: Allocator, configured: ?[]const u8) ![]u8 {
+    const resolved = try resolveReleaseFeed(alloc, configured);
+    return resolved.url;
+}
 
 pub fn defaultStatePath(alloc: Allocator) ![]u8 {
     return internal_os.xdg.state(alloc, .{
@@ -150,6 +269,7 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
     };
 
     var state: State = .{};
+    errdefer state.deinit(alloc);
     if (root.get("last_checked_at")) |value| {
         switch (value) {
             .integer => |integer| state.last_checked_at = @intCast(integer),
@@ -159,6 +279,18 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
     if (root.get("last_seen_version")) |value| {
         switch (value) {
             .string => |text| state.last_seen_version = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
+    if (root.get("release_feed_url")) |value| {
+        switch (value) {
+            .string => |text| state.release_feed_url = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
+    if (root.get("release_url")) |value| {
+        switch (value) {
+            .string => |text| state.release_url = try alloc.dupe(u8, text),
             else => {},
         }
     }
@@ -183,6 +315,12 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
     if (root.get("staged_sha256")) |value| {
         switch (value) {
             .string => |text| state.staged_sha256 = try alloc.dupe(u8, text),
+            else => {},
+        }
+    }
+    if (root.get("staged_feed_url")) |value| {
+        switch (value) {
+            .string => |text| state.staged_feed_url = try alloc.dupe(u8, text),
             else => {},
         }
     }
@@ -218,6 +356,10 @@ pub fn saveState(path: []const u8, state: *const State) !void {
     try writer.print("{d}", .{state.last_checked_at});
     try writer.writeAll(",\"last_seen_version\":");
     try writeOptionalJsonString(writer, state.last_seen_version);
+    try writer.writeAll(",\"release_feed_url\":");
+    try writeOptionalJsonString(writer, state.release_feed_url);
+    try writer.writeAll(",\"release_url\":");
+    try writeOptionalJsonString(writer, state.release_url);
     try writer.writeAll(",\"dismissed_version\":");
     try writeOptionalJsonString(writer, state.dismissed_version);
     try writer.writeAll(",\"staged_version\":");
@@ -226,6 +368,8 @@ pub fn saveState(path: []const u8, state: *const State) !void {
     try writeOptionalJsonString(writer, state.staged_installer_path);
     try writer.writeAll(",\"staged_sha256\":");
     try writeOptionalJsonString(writer, state.staged_sha256);
+    try writer.writeAll(",\"staged_feed_url\":");
+    try writeOptionalJsonString(writer, state.staged_feed_url);
     try writer.writeAll(",\"staged_at\":");
     try writer.print("{d}", .{state.staged_at});
     try writer.writeAll(",\"apply_requested_at\":");
@@ -256,55 +400,106 @@ pub fn checkLatestStableRelease(
     alloc: Allocator,
     state_path: []const u8,
     options: CheckOptions,
-) !CheckResult {
+) !CheckOutcome {
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
     const now = if (options.now > 0) options.now else std.time.timestamp();
 
-    if (!options.force and !shouldCheckNetwork(state.last_checked_at, now)) {
+    // Staged installers, the dismissal, and the cached release all describe
+    // one feed. Once the effective feed URL changes, none of them say
+    // anything about the new feed, and leaving the staged installer around
+    // would keep an Install action from the old feed live. Drop them before
+    // anything else looks at them.
+    const feed_state_invalidated = try invalidateForeignFeedState(
+        alloc,
+        state_path,
+        &state,
+        options.release_feed_url,
+    );
+
+    if (!options.force and !shouldCheckNetwork(&state, options.release_feed_url, now)) {
         if (try cachedAvailableRelease(alloc, &state, options.current_version, options.respect_dismissal)) |release| {
-            return .{ .update_available = release };
+            return .{ .result = .{ .update_available = release }, .feed_state_invalidated = feed_state_invalidated };
         }
-        return .throttled;
+        return .{ .result = .throttled, .feed_state_invalidated = feed_state_invalidated };
     }
 
-    var release = try fetchLatestStableRelease(alloc);
+    var release = try fetchLatestStableRelease(alloc, options.release_feed_url);
     errdefer release.deinit(alloc);
 
     state.last_checked_at = now;
-    if (state.last_seen_version) |value| alloc.free(value);
-    state.last_seen_version = try alloc.dupe(u8, release.version_text);
+    replaceOptionalOwned(alloc, &state.last_seen_version, try alloc.dupe(u8, release.version_text));
+    replaceOptionalOwned(alloc, &state.release_feed_url, try alloc.dupe(u8, options.release_feed_url));
+    replaceOptionalOwned(alloc, &state.release_url, try alloc.dupe(u8, release.release_url));
     try saveState(state_path, &state);
 
     const latest_version = try parseVersionText(release.version_text);
     if (options.current_version.order(latest_version) != .lt) {
         release.deinit(alloc);
-        return .up_to_date;
+        return .{ .result = .up_to_date, .feed_state_invalidated = feed_state_invalidated };
     }
 
     if (options.respect_dismissal) {
         if (state.dismissed_version) |dismissed| {
             if (std.mem.eql(u8, dismissed, release.version_text)) {
                 release.deinit(alloc);
-                return .up_to_date;
+                return .{ .result = .up_to_date, .feed_state_invalidated = feed_state_invalidated };
             }
         }
     }
 
-    return .{ .update_available = release };
+    return .{ .result = .{ .update_available = release }, .feed_state_invalidated = feed_state_invalidated };
 }
 
-pub fn releaseUrlForVersion(alloc: Allocator, version_text: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        alloc,
-        "https://github.com/{s}/{s}/releases/tag/v{s}",
-        .{ repo_owner, repo_name, version_text },
-    );
+/// Drop state that belongs to a feed other than `release_feed_url` and
+/// persist the result. Returns true when a staged install was discarded.
+fn invalidateForeignFeedState(
+    alloc: Allocator,
+    state_path: []const u8,
+    state: *State,
+    release_feed_url: []const u8,
+) !bool {
+    const cached_feed_url = state.release_feed_url orelse return false;
+    if (std.mem.eql(u8, cached_feed_url, release_feed_url)) return false;
+
+    var dirty = false;
+    if (state.staged_version != null or
+        state.staged_installer_path != null or
+        state.staged_sha256 != null)
+    {
+        // Best-effort: the download can be re-staged from the new feed, and
+        // a leftover file under the stage directory is never trusted without
+        // the metadata that clearStagedInstall removes.
+        if (state.staged_installer_path) |path| {
+            if (std.fs.path.isAbsolute(path)) {
+                std.fs.deleteFileAbsolute(path) catch {};
+            }
+        }
+    }
+    if (state.clearStagedInstall(alloc)) dirty = true;
+    if (state.dismissed_version) |value| {
+        alloc.free(value);
+        state.dismissed_version = null;
+        dirty = true;
+    }
+    if (state.last_seen_version) |value| {
+        alloc.free(value);
+        state.last_seen_version = null;
+        dirty = true;
+    }
+    if (state.release_url) |value| {
+        alloc.free(value);
+        state.release_url = null;
+        dirty = true;
+    }
+    if (dirty) try saveState(state_path, state);
+    return dirty;
 }
 
 pub fn stageWindowsInstall(
     alloc: Allocator,
     state_path: []const u8,
+    release_feed_url: []const u8,
     release: *const Release,
 ) !StagedWindowsInstall {
     const candidate = release.windows_install orelse return error.WindowsInstallNotEligible;
@@ -336,6 +531,12 @@ pub fn stageWindowsInstall(
         return error.AuthenticodeRequiresWindows;
     }
 
+    const installer_version = try readWindowsFileVersion(alloc, installer_path);
+    const claimed_version = try parseVersionText(release.version_text);
+    if (!installerVersionAtLeastClaim(installer_version, claimed_version)) {
+        return error.InstallerVersionOlderThanRelease;
+    }
+
     const sha256_hex = try alloc.dupe(u8, &std.fmt.bytesToHex(actual_digest, .lower));
     errdefer alloc.free(sha256_hex);
 
@@ -344,6 +545,7 @@ pub fn stageWindowsInstall(
     replaceOptionalOwned(alloc, &state.staged_version, try alloc.dupe(u8, release.version_text));
     replaceOptionalOwned(alloc, &state.staged_installer_path, try alloc.dupe(u8, installer_path));
     replaceOptionalOwned(alloc, &state.staged_sha256, try alloc.dupe(u8, sha256_hex));
+    replaceOptionalOwned(alloc, &state.staged_feed_url, try alloc.dupe(u8, release_feed_url));
     state.staged_at = std.time.timestamp();
     state.apply_requested_at = 0;
     try saveState(state_path, &state);
@@ -355,12 +557,21 @@ pub fn stageWindowsInstall(
     };
 }
 
+/// `release_feed_url` is the feed in effect right now. A staged installer
+/// that came from a different feed is refused rather than applied: the user
+/// re-pointed the updater, so nothing the old feed vouched for is still
+/// authoritative.
 pub fn verifyStagedWindowsInstall(
     alloc: Allocator,
     state_path: []const u8,
+    release_feed_url: []const u8,
 ) !StagedWindowsInstall {
     var state = try loadState(alloc, state_path);
     defer state.deinit(alloc);
+
+    if (!std.mem.eql(u8, state.stagedFeedUrl(), release_feed_url)) {
+        return error.StagedInstallFeedMismatch;
+    }
 
     const version_text = state.staged_version orelse return error.NoStagedWindowsInstall;
     const installer_path = state.staged_installer_path orelse return error.NoStagedWindowsInstall;
@@ -444,6 +655,147 @@ fn replaceOptionalOwned(alloc: Allocator, slot: *?[]u8, value: []u8) void {
     slot.* = value;
 }
 
+fn resolveRedirectTarget(
+    alloc: Allocator,
+    base_url: []const u8,
+    location: []const u8,
+) ![]u8 {
+    const base_uri = try validateHttpsUrl(base_url);
+    const combined_len = std.math.add(
+        usize,
+        base_url.len,
+        location.len,
+    ) catch return error.OutOfMemory;
+    const resolution_len = std.math.mul(
+        usize,
+        3,
+        std.math.add(usize, combined_len, 1) catch return error.OutOfMemory,
+    ) catch return error.OutOfMemory;
+    const resolution_buf = try alloc.alloc(u8, resolution_len);
+    defer alloc.free(resolution_buf);
+    @memcpy(resolution_buf[0..location.len], location);
+    var aux_buf = resolution_buf;
+    const resolved = base_uri.resolveInPlace(location.len, &aux_buf) catch
+        return error.InvalidUpdateUrl;
+
+    const resolved_url = try std.fmt.allocPrint(
+        alloc,
+        "{f}",
+        .{resolved.fmt(.all)},
+    );
+    errdefer alloc.free(resolved_url);
+    _ = try validateHttpsUrl(resolved_url);
+    return resolved_url;
+}
+
+/// Response body caps. `std.Io.Reader.streamRemaining` pumps until EOF with
+/// no limit, so an oversized or hostile response would otherwise grow the
+/// caller's buffer (metadata) or the staged file (download) without bound.
+/// Every body read below goes through `streamBounded` with one of these.
+const max_metadata_response_bytes: u64 = 4 * 1024 * 1024;
+const max_download_response_bytes: u64 = 512 * 1024 * 1024;
+const max_redirect_body_bytes: u64 = 1024 * 1024;
+
+/// Pump `reader` into `writer`, refusing a body longer than `max_bytes`.
+/// At most one byte past the cap reaches `writer` before the error, and
+/// every caller discards its destination on error.
+fn streamBounded(
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    max_bytes: u64,
+) !void {
+    var streamed: u64 = 0;
+    while (true) {
+        const room = max_bytes + 1 - streamed;
+        if (room == 0) return error.HttpResponseTooLarge;
+        streamed += reader.stream(writer, .limited64(room)) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => |other| return other,
+        };
+        if (streamed > max_bytes) return error.HttpResponseTooLarge;
+    }
+}
+
+fn fetchHttps(
+    alloc: Allocator,
+    context: []const u8,
+    initial_url: []const u8,
+    extra_headers: []const std.http.Header,
+    response_writer: *std.Io.Writer,
+    max_response_bytes: u64,
+) !void {
+    _ = try validateHttpsUrl(initial_url);
+
+    var client: std.http.Client = .{ .allocator = alloc };
+    defer client.deinit();
+
+    var current_url = try alloc.dupe(u8, initial_url);
+    defer alloc.free(current_url);
+
+    var redirect_count: u8 = 0;
+    while (true) {
+        var next_url: ?[]u8 = null;
+        {
+            const uri = try validateHttpsUrl(current_url);
+            var request = try client.request(.GET, uri, .{
+                .redirect_behavior = .unhandled,
+                .extra_headers = extra_headers,
+            });
+            defer request.deinit();
+
+            try request.sendBodiless();
+            var response = try request.receiveHead(&.{});
+
+            if (response.head.status.class() == .redirect) {
+                if (redirect_count >= 3) return error.TooManyHttpRedirects;
+                const location = response.head.location orelse return error.HttpRedirectLocationMissing;
+                next_url = try resolveRedirectTarget(alloc, current_url, location);
+                errdefer if (next_url) |value| alloc.free(value);
+
+                const redirect_reader = response.reader(&.{});
+                var discarded: u64 = 0;
+                while (true) {
+                    const room = max_redirect_body_bytes + 1 - discarded;
+                    if (room == 0) return error.HttpResponseTooLarge;
+                    discarded += redirect_reader.discard(.limited64(room)) catch |err| switch (err) {
+                        error.EndOfStream => break,
+                        error.ReadFailed => return response.bodyErr().?,
+                    };
+                    if (discarded > max_redirect_body_bytes) return error.HttpResponseTooLarge;
+                }
+                redirect_count += 1;
+            } else {
+                try requireOkHttpStatus(context, current_url, response.head.status);
+
+                const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+                    .identity => &.{},
+                    .zstd => try alloc.alloc(u8, std.compress.zstd.default_window_len),
+                    .deflate, .gzip => try alloc.alloc(u8, std.compress.flate.max_window_len),
+                    .compress => return error.UnsupportedCompressionMethod,
+                };
+                defer if (decompress_buffer.len > 0) alloc.free(decompress_buffer);
+
+                var transfer_buffer: [64]u8 = undefined;
+                var decompress: std.http.Decompress = undefined;
+                const body_reader = response.readerDecompressing(
+                    &transfer_buffer,
+                    &decompress,
+                    decompress_buffer,
+                );
+                streamBounded(body_reader, response_writer, max_response_bytes) catch |err| switch (err) {
+                    error.ReadFailed => return response.bodyErr().?,
+                    else => |other| return other,
+                };
+                return;
+            }
+        }
+
+        const replacement = next_url orelse unreachable;
+        alloc.free(current_url);
+        current_url = replacement;
+    }
+}
+
 fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !void {
     if (!std.fs.path.isAbsolute(dest_path)) return error.InvalidDownloadPath;
 
@@ -466,24 +818,22 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     var file_open = true;
     errdefer if (file_open) file.close();
 
-    var client: std.http.Client = .{ .allocator = alloc };
-    defer client.deinit();
-
     var file_buf: [64 * 1024]u8 = undefined;
     var file_writer = file.writer(&file_buf);
-    const result = try client.fetch(.{
-        .location = .{ .url = url },
-        .extra_headers = &.{
+    try fetchHttps(
+        alloc,
+        "download",
+        url,
+        &.{
             .{ .name = "accept", .value = "application/octet-stream" },
             .{ .name = "user-agent", .value = "noctty-updater" },
         },
-        .response_writer = &file_writer.interface,
-    });
+        &file_writer.interface,
+        max_download_response_bytes,
+    );
     try file_writer.interface.flush();
     file.close();
     file_open = false;
-
-    try requireOkHttpStatus("download", url, result.status);
 
     std.fs.deleteFileAbsolute(dest_path) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -632,6 +982,94 @@ fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.wi
     defer alloc.free(final_utf8);
     const final_path = if (std.mem.startsWith(u8, final_utf8, "\\\\?\\")) final_utf8[4..] else final_utf8;
     return std.ascii.eqlIgnoreCase(final_path, path);
+}
+
+const WindowsFileVersion = struct {
+    major: u16,
+    minor: u16,
+    patch: u16,
+    build: u16,
+};
+
+fn installerVersionAtLeastClaim(
+    installer: WindowsFileVersion,
+    claimed: std.SemanticVersion,
+) bool {
+    const installer_parts = [_]u64{
+        installer.major,
+        installer.minor,
+        installer.patch,
+        installer.build,
+    };
+    const claimed_parts = [_]u64{
+        claimed.major,
+        claimed.minor,
+        claimed.patch,
+        0,
+    };
+    for (installer_parts, claimed_parts) |actual, expected| {
+        if (actual != expected) return actual > expected;
+    }
+    return true;
+}
+
+fn readWindowsFileVersion(alloc: Allocator, path: []const u8) !WindowsFileVersion {
+    if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
+
+    const windows = std.os.windows;
+    const GetFileVersionInfoSizeWFn = *const fn ([*:0]const u16, *u32) callconv(.winapi) u32;
+    const GetFileVersionInfoWFn = *const fn ([*:0]const u16, u32, u32, *anyopaque) callconv(.winapi) windows.BOOL;
+    const VerQueryValueWFn = *const fn (*const anyopaque, [*:0]const u16, *?*anyopaque, *u32) callconv(.winapi) windows.BOOL;
+
+    const module = windows.LoadLibraryW(
+        std.unicode.utf8ToUtf16LeStringLiteral("version.dll"),
+    ) catch return error.InstallerVersionInfoUnavailable;
+    defer windows.FreeLibrary(module);
+
+    const size_proc = windows.kernel32.GetProcAddress(module, "GetFileVersionInfoSizeW") orelse
+        return error.InstallerVersionInfoUnavailable;
+    const info_proc = windows.kernel32.GetProcAddress(module, "GetFileVersionInfoW") orelse
+        return error.InstallerVersionInfoUnavailable;
+    const query_proc = windows.kernel32.GetProcAddress(module, "VerQueryValueW") orelse
+        return error.InstallerVersionInfoUnavailable;
+    const getFileVersionInfoSize: GetFileVersionInfoSizeWFn = @ptrCast(@alignCast(size_proc));
+    const getFileVersionInfo: GetFileVersionInfoWFn = @ptrCast(@alignCast(info_proc));
+    const verQueryValue: VerQueryValueWFn = @ptrCast(@alignCast(query_proc));
+
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
+    defer alloc.free(path_w);
+
+    var unused_handle: u32 = 0;
+    const info_size = getFileVersionInfoSize(path_w.ptr, &unused_handle);
+    if (info_size == 0) return error.InstallerVersionInfoUnavailable;
+
+    const info = try alloc.alignedAlloc(u8, std.mem.Alignment.of(VsFixedFileInfo), info_size);
+    defer alloc.free(info);
+    if (getFileVersionInfo(path_w.ptr, 0, info_size, info.ptr) == 0) {
+        return error.InstallerVersionInfoUnavailable;
+    }
+
+    var fixed_raw: ?*anyopaque = null;
+    var fixed_len: u32 = 0;
+    if (verQueryValue(
+        info.ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("\\"),
+        &fixed_raw,
+        &fixed_len,
+    ) == 0 or fixed_raw == null or fixed_len < @sizeOf(VsFixedFileInfo)) {
+        return error.InstallerVersionInfoUnavailable;
+    }
+
+    const fixed: *const VsFixedFileInfo = @ptrCast(@alignCast(fixed_raw.?));
+    if (fixed.signature != vs_fixed_file_info_signature) {
+        return error.InstallerVersionInfoUnavailable;
+    }
+    return .{
+        .major = @truncate(fixed.file_version_ms >> 16),
+        .minor = @truncate(fixed.file_version_ms),
+        .patch = @truncate(fixed.file_version_ls >> 16),
+        .build = @truncate(fixed.file_version_ls),
+    };
 }
 
 fn verifyAuthenticodeSignature(
@@ -816,6 +1254,22 @@ const WTD_CHOICE_FILE: u32 = 1;
 const WTD_STATEACTION_VERIFY: u32 = 1;
 const WTD_STATEACTION_CLOSE: u32 = 2;
 const cert_e_untrusted_root: i32 = @bitCast(@as(u32, 0x800B0109));
+const vs_fixed_file_info_signature: u32 = 0xFEEF04BD;
+const VsFixedFileInfo = extern struct {
+    signature: u32,
+    struct_version: u32,
+    file_version_ms: u32,
+    file_version_ls: u32,
+    product_version_ms: u32,
+    product_version_ls: u32,
+    file_flags_mask: u32,
+    file_flags: u32,
+    file_os: u32,
+    file_type: u32,
+    file_subtype: u32,
+    file_date_ms: u32,
+    file_date_ls: u32,
+};
 const WinTrustFileInfo = extern struct {
     cbStruct: u32,
     pcwszFilePath: [*:0]const u16,
@@ -885,10 +1339,13 @@ const CryptProviderCert = extern struct {
     pChainElement: ?*const anyopaque,
 };
 
-fn shouldCheckNetwork(last_checked_at: i64, now: i64) bool {
-    if (last_checked_at <= 0) return true;
-    if (now <= last_checked_at) return true;
-    return now - last_checked_at >= throttle_seconds;
+fn shouldCheckNetwork(state: *const State, release_feed_url: []const u8, now: i64) bool {
+    const cached_feed_url = state.release_feed_url orelse return true;
+    if (state.release_url == null) return true;
+    if (!std.mem.eql(u8, cached_feed_url, release_feed_url)) return true;
+    if (state.last_checked_at <= 0) return true;
+    if (now <= state.last_checked_at) return true;
+    return now - state.last_checked_at >= throttle_seconds;
 }
 
 fn cachedAvailableRelease(
@@ -898,6 +1355,8 @@ fn cachedAvailableRelease(
     respect_dismissal: bool,
 ) !?Release {
     const last_seen = state.last_seen_version orelse return null;
+    const cached_release_url = state.release_url orelse return null;
+    _ = validateHttpsUrl(cached_release_url) catch return null;
     const latest_version = parseVersionText(last_seen) catch return null;
     if (current_version.order(latest_version) != .lt) return null;
     if (respect_dismissal) {
@@ -906,32 +1365,33 @@ fn cachedAvailableRelease(
         }
     }
 
-    // Cached state only persists the version string, so throttled responses
-    // cannot reconstruct asset-scoped installer metadata.
+    const version_text = try alloc.dupe(u8, last_seen);
+    errdefer alloc.free(version_text);
+    const release_url = try alloc.dupe(u8, cached_release_url);
+
+    // Cached state does not persist asset-scoped installer metadata.
     return .{
-        .version_text = try alloc.dupe(u8, last_seen),
-        .release_url = try releaseUrlForVersion(alloc, last_seen),
+        .version_text = version_text,
+        .release_url = release_url,
     };
 }
 
-fn fetchLatestStableRelease(alloc: Allocator) !Release {
-    var client: std.http.Client = .{ .allocator = alloc };
-    defer client.deinit();
-
+fn fetchLatestStableRelease(alloc: Allocator, release_feed_url: []const u8) !Release {
     var response_buf: std.Io.Writer.Allocating = .init(alloc);
     defer response_buf.deinit();
 
-    const result = try client.fetch(.{
-        .location = .{ .url = latest_stable_api_url },
-        .extra_headers = &.{
+    try fetchHttps(
+        alloc,
+        "release metadata",
+        release_feed_url,
+        &.{
             .{ .name = "accept", .value = "application/vnd.github+json" },
             .{ .name = "user-agent", .value = "noctty-updater" },
             .{ .name = "x-github-api-version", .value = "2022-11-28" },
         },
-        .response_writer = &response_buf.writer,
-    });
-
-    try requireOkHttpStatus("release metadata", latest_stable_api_url, result.status);
+        &response_buf.writer,
+        max_metadata_response_bytes,
+    );
 
     const body = try response_buf.toOwnedSlice();
     defer alloc.free(body);
@@ -956,6 +1416,7 @@ fn parseLatestStableReleaseResponse(alloc: Allocator, body: []const u8) !Release
         .string => |value| value,
         else => return error.InvalidReleaseResponse,
     };
+    _ = try validateHttpsUrl(html_url);
 
     const version_text = try canonicalVersionText(alloc, tag_name);
     errdefer alloc.free(version_text);
@@ -1008,10 +1469,12 @@ fn parseWindowsInstallCandidate(
         };
 
         if (std.mem.eql(u8, name, expected_installer_name)) {
+            _ = try validateHttpsUrl(browser_download_url);
             installer_url = browser_download_url;
             continue;
         }
         if (std.mem.eql(u8, name, expected_checksums_name)) {
+            _ = try validateHttpsUrl(browser_download_url);
             checksums_url = browser_download_url;
             continue;
         }
@@ -1019,6 +1482,7 @@ fn parseWindowsInstallCandidate(
             std.mem.eql(u8, windowsInstallerArch(), "x64") and
             std.mem.eql(u8, name, windows_checksums_asset_name_legacy))
         {
+            _ = try validateHttpsUrl(browser_download_url);
             checksums_url = browser_download_url;
             continue;
         }
@@ -1061,6 +1525,14 @@ fn parseVersionText(version_text: []const u8) !std.SemanticVersion {
     return std.SemanticVersion.parse(version_text);
 }
 
+fn validateHttpsUrl(url: []const u8) !std.Uri {
+    const uri = std.Uri.parse(url) catch return error.InvalidUpdateUrl;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.InvalidUpdateUrl;
+    const host = uri.host orelse return error.InvalidUpdateUrl;
+    if (host.isEmpty()) return error.InvalidUpdateUrl;
+    return uri;
+}
+
 test "canonical version strips v prefix" {
     const alloc = std.testing.allocator;
     const version_text = try canonicalVersionText(alloc, "v1.2.3");
@@ -1068,16 +1540,182 @@ test "canonical version strips v prefix" {
     try std.testing.expectEqualStrings("1.2.3", version_text);
 }
 
+test "update release feed resolution" {
+    const alloc = std.testing.allocator;
+    const env_name = "NOCTTY_UPDATE_FEED_URL";
+    const saved_env = std.process.getEnvVarOwned(alloc, env_name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer {
+        if (saved_env) |value| {
+            const sentinel = alloc.dupeZ(u8, value) catch unreachable;
+            defer alloc.free(sentinel);
+            _ = internal_os.setenv(env_name, sentinel);
+            alloc.free(value);
+        } else {
+            _ = internal_os.unsetenv(env_name);
+        }
+    }
+
+    const cases = [_]struct {
+        env: ?[:0]const u8,
+        configured: ?[]const u8,
+        expected: []const u8,
+    }{
+        .{ .env = "https://env.example/latest", .configured = "https://config.example/latest", .expected = "https://config.example/latest" },
+        .{ .env = null, .configured = "https://config.example/latest", .expected = "https://config.example/latest" },
+        .{ .env = null, .configured = null, .expected = latest_stable_api_url },
+        .{ .env = " \t\r\n ", .configured = "  https://config.example/latest  ", .expected = "https://config.example/latest" },
+        .{ .env = "https://env.example/latest", .configured = " \t\r\n ", .expected = "https://env.example/latest" },
+        .{ .env = " \t\r\n ", .configured = " \t\r\n ", .expected = latest_stable_api_url },
+        .{ .env = "http://env.example/latest", .configured = "https://config.example/latest", .expected = "https://config.example/latest" },
+        .{ .env = "https://env.example/latest", .configured = "file:///tmp/latest", .expected = latest_stable_api_url },
+        .{ .env = "http://env.example/latest", .configured = null, .expected = latest_stable_api_url },
+        .{ .env = null, .configured = "file:///tmp/latest", .expected = latest_stable_api_url },
+    };
+
+    for (cases) |case| {
+        if (case.env) |value| {
+            _ = internal_os.setenv(env_name, value);
+        } else {
+            _ = internal_os.unsetenv(env_name);
+        }
+
+        const resolved = try resolveReleaseFeedUrl(alloc, case.configured);
+        defer alloc.free(resolved);
+        try std.testing.expectEqualStrings(case.expected, resolved);
+    }
+
+    // The ignored-feed signal names the level whose value was dropped, not
+    // just the configuration level: an environment feed is also a feed.
+    const signal_cases = [_]struct {
+        env: ?[:0]const u8,
+        configured: ?[]const u8,
+        source: FeedSource,
+        ignored: ?FeedSource,
+    }{
+        .{ .env = null, .configured = null, .source = .default, .ignored = null },
+        .{ .env = null, .configured = "https://config.example/latest", .source = .configured, .ignored = null },
+        .{ .env = "https://env.example/latest", .configured = null, .source = .environment, .ignored = null },
+        .{ .env = null, .configured = "http://config.example/latest", .source = .default, .ignored = .configured },
+        .{ .env = "http://env.example/latest", .configured = null, .source = .default, .ignored = .environment },
+        .{ .env = "not a url", .configured = null, .source = .default, .ignored = .environment },
+    };
+
+    for (signal_cases) |case| {
+        if (case.env) |value| {
+            _ = internal_os.setenv(env_name, value);
+        } else {
+            _ = internal_os.unsetenv(env_name);
+        }
+
+        var resolved = try resolveReleaseFeed(alloc, case.configured);
+        defer resolved.deinit(alloc);
+        try std.testing.expectEqual(case.source, resolved.source);
+        try std.testing.expectEqual(case.ignored, resolved.ignored_non_https);
+    }
+}
+
+test "bounded response streaming refuses an oversized body" {
+    const alloc = std.testing.allocator;
+    const body = "0123456789";
+
+    // Exactly at the cap is accepted.
+    {
+        var reader: std.Io.Reader = .fixed(body);
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try streamBounded(&reader, &out.writer, body.len);
+        try std.testing.expectEqualStrings(body, out.written());
+    }
+
+    // One byte over the cap is refused.
+    {
+        var reader: std.Io.Reader = .fixed(body);
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        try std.testing.expectError(
+            error.HttpResponseTooLarge,
+            streamBounded(&reader, &out.writer, body.len - 1),
+        );
+    }
+}
+
+test "update installer version must meet the claimed release version" {
+    const claimed = try std.SemanticVersion.parse("1.3.100");
+    try std.testing.expect(installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 3,
+        .patch = 100,
+        .build = 0,
+    }, claimed));
+    try std.testing.expect(installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 3,
+        .patch = 100,
+        .build = 7,
+    }, claimed));
+    try std.testing.expect(installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 4,
+        .patch = 0,
+        .build = 0,
+    }, claimed));
+    try std.testing.expect(!installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 3,
+        .patch = 99,
+        .build = 65535,
+    }, claimed));
+}
+
 test "cached update respects dismissal" {
     const alloc = std.testing.allocator;
     var state: State = .{
         .last_seen_version = try alloc.dupe(u8, "1.2.3"),
+        .release_url = try alloc.dupe(u8, "https://updates.example/releases/1.2.3"),
         .dismissed_version = try alloc.dupe(u8, "1.2.3"),
     };
     defer state.deinit(alloc);
 
     const current = try std.SemanticVersion.parse("1.2.2");
     try std.testing.expect((try cachedAvailableRelease(alloc, &state, current, true)) == null);
+}
+
+test "cached update returns persisted release URL" {
+    const alloc = std.testing.allocator;
+    var state: State = .{
+        .last_seen_version = try alloc.dupe(u8, "1.2.3"),
+        .release_url = try alloc.dupe(u8, "https://updates.example/releases/1.2.3"),
+    };
+    defer state.deinit(alloc);
+
+    const current = try std.SemanticVersion.parse("1.2.2");
+    var release = (try cachedAvailableRelease(alloc, &state, current, true)).?;
+    defer release.deinit(alloc);
+    try std.testing.expectEqualStrings(state.release_url.?, release.release_url);
+}
+
+test "changed release feed bypasses throttle" {
+    const alloc = std.testing.allocator;
+    const now: i64 = 1_000_000;
+    var state: State = .{
+        .last_checked_at = now - 1,
+        .release_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
+        .release_url = try alloc.dupe(u8, "https://updates.example/releases/1.2.3"),
+    };
+    defer state.deinit(alloc);
+
+    try std.testing.expect(!shouldCheckNetwork(&state, "https://updates.example/feed-a", now));
+    try std.testing.expect(shouldCheckNetwork(&state, "https://updates.example/feed-b", now));
+
+    const legacy_state: State = .{ .last_checked_at = now - 1 };
+    try std.testing.expect(shouldCheckNetwork(&legacy_state, "https://updates.example/feed-a", now));
+
+    alloc.free(state.release_url.?);
+    state.release_url = null;
+    try std.testing.expect(shouldCheckNetwork(&state, "https://updates.example/feed-a", now));
 }
 
 test "state persists staged windows install metadata with escaped path" {
@@ -1093,9 +1731,12 @@ test "state persists staged windows install metadata with escaped path" {
     var state: State = .{
         .last_checked_at = 123,
         .last_seen_version = try alloc.dupe(u8, "1.3.100"),
+        .release_feed_url = try alloc.dupe(u8, "https://updates.example/latest?channel=\"stable\""),
+        .release_url = try alloc.dupe(u8, "https://updates.example/releases/1.3.100"),
         .staged_version = try alloc.dupe(u8, "1.3.101"),
         .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\noctty-1.3.101-windows-x64-setup.exe"),
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .staged_feed_url = try alloc.dupe(u8, "https://updates.example/latest?channel=\"stable\""),
         .staged_at = 456,
         .apply_requested_at = 789,
     };
@@ -1108,9 +1749,127 @@ test "state persists staged windows install metadata with escaped path" {
     try std.testing.expectEqual(@as(i64, 123), loaded.last_checked_at);
     try std.testing.expectEqual(@as(i64, 456), loaded.staged_at);
     try std.testing.expectEqual(@as(i64, 789), loaded.apply_requested_at);
+    try std.testing.expectEqualStrings(state.release_feed_url.?, loaded.release_feed_url.?);
+    try std.testing.expectEqualStrings(state.release_url.?, loaded.release_url.?);
     try std.testing.expectEqualStrings("1.3.101", loaded.staged_version.?);
     try std.testing.expectEqualStrings(state.staged_installer_path.?, loaded.staged_installer_path.?);
     try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
+    try std.testing.expectEqualStrings(state.staged_feed_url.?, loaded.staged_feed_url.?);
+}
+
+test "staged install without a recorded feed is attributed to the default feed" {
+    const alloc = std.testing.allocator;
+    var legacy: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.101"),
+    };
+    defer legacy.deinit(alloc);
+    try std.testing.expectEqualStrings(latest_stable_api_url, legacy.stagedFeedUrl());
+
+    var bound: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_feed_url = try alloc.dupe(u8, "https://updates.example/feed-b"),
+    };
+    defer bound.deinit(alloc);
+    try std.testing.expectEqualStrings("https://updates.example/feed-b", bound.stagedFeedUrl());
+}
+
+test "changing the feed discards the previous feed's staged install and notice state" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(tmp_path);
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
+    defer alloc.free(state_path);
+    const installer_path = try std.fs.path.join(alloc, &.{ tmp_path, "staged-installer.exe" });
+    defer alloc.free(installer_path);
+    try tmp.dir.writeFile(.{ .sub_path = "staged-installer.exe", .data = "not a real installer" });
+
+    var state: State = .{
+        .last_checked_at = 123,
+        .last_seen_version = try alloc.dupe(u8, "1.3.101"),
+        .release_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
+        .release_url = try alloc.dupe(u8, "https://updates.example/releases/1.3.101"),
+        .dismissed_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_installer_path = try alloc.dupe(u8, installer_path),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .staged_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
+        .staged_at = 456,
+        .apply_requested_at = 789,
+    };
+    defer state.deinit(alloc);
+
+    // Same feed: nothing is touched.
+    try std.testing.expect(!try invalidateForeignFeedState(
+        alloc,
+        state_path,
+        &state,
+        "https://updates.example/feed-a",
+    ));
+    try std.testing.expect(state.staged_version != null);
+
+    // Different feed: the staged install, the dismissal, and the cached
+    // release all belonged to feed A and are dropped.
+    try std.testing.expect(try invalidateForeignFeedState(
+        alloc,
+        state_path,
+        &state,
+        "https://updates.example/feed-b",
+    ));
+    try std.testing.expect(state.staged_version == null);
+    try std.testing.expect(state.staged_installer_path == null);
+    try std.testing.expect(state.staged_sha256 == null);
+    try std.testing.expect(state.staged_feed_url == null);
+    try std.testing.expectEqual(@as(i64, 0), state.staged_at);
+    try std.testing.expectEqual(@as(i64, 0), state.apply_requested_at);
+    try std.testing.expect(state.dismissed_version == null);
+    try std.testing.expect(state.last_seen_version == null);
+    try std.testing.expect(state.release_url == null);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access("staged-installer.exe", .{}),
+    );
+
+    // It was persisted, not just cleared in memory.
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expect(loaded.staged_version == null);
+    try std.testing.expect(loaded.dismissed_version == null);
+
+    // Idempotent: a second pass has nothing left to discard.
+    try std.testing.expect(!try invalidateForeignFeedState(
+        alloc,
+        state_path,
+        &state,
+        "https://updates.example/feed-b",
+    ));
+}
+
+test "staged install from another feed is refused at apply time" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(tmp_path);
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
+    defer alloc.free(state_path);
+
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_installer_path = try alloc.dupe(u8, "C:\\updates\\noctty-setup.exe"),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .staged_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    try std.testing.expectError(
+        error.StagedInstallFeedMismatch,
+        verifyStagedWindowsInstall(alloc, state_path, "https://updates.example/feed-b"),
+    );
 }
 
 test "record staged apply request requires staged installer metadata" {
@@ -1253,6 +2012,50 @@ test "http status mapping distinguishes update response failures" {
     );
 }
 
+test "update redirect target resolution accepts absolute HTTPS URL" {
+    const alloc = std.testing.allocator;
+    const resolved = try resolveRedirectTarget(
+        alloc,
+        "https://updates.example/releases/latest",
+        "https://cdn.example/noctty/latest.json",
+    );
+    defer alloc.free(resolved);
+    try std.testing.expectEqualStrings("https://cdn.example/noctty/latest.json", resolved);
+}
+
+test "update redirect target resolution resolves a relative URL" {
+    const alloc = std.testing.allocator;
+    const resolved = try resolveRedirectTarget(
+        alloc,
+        "https://updates.example/releases/stable/latest.json",
+        "../next.json",
+    );
+    defer alloc.free(resolved);
+    try std.testing.expectEqualStrings("https://updates.example/releases/next.json", resolved);
+}
+
+test "update redirect target resolution refuses plaintext HTTP" {
+    try std.testing.expectError(
+        error.InvalidUpdateUrl,
+        resolveRedirectTarget(
+            std.testing.allocator,
+            "https://updates.example/releases/latest",
+            "http://updates.example/releases/latest",
+        ),
+    );
+}
+
+test "update redirect target resolution refuses garbage target" {
+    try std.testing.expectError(
+        error.InvalidUpdateUrl,
+        resolveRedirectTarget(
+            std.testing.allocator,
+            "https://updates.example/releases/latest",
+            "//[",
+        ),
+    );
+}
+
 test "windows install staging rejects relative state path before download" {
     const alloc = std.testing.allocator;
     var release: Release = .{
@@ -1268,7 +2071,7 @@ test "windows install staging rejects relative state path before download" {
 
     try std.testing.expectError(
         error.InvalidStatePath,
-        stageWindowsInstall(alloc, "relative-update-state.json", &release),
+        stageWindowsInstall(alloc, "relative-update-state.json", latest_stable_api_url, &release),
     );
 }
 
@@ -1306,6 +2109,75 @@ test "release parser accepts checksum metadata without detached signature" {
     defer release.deinit(alloc);
 
     try std.testing.expect(release.windows_install != null);
+}
+
+test "release parser rejects non-HTTPS release URL" {
+    try std.testing.expectError(
+        error.InvalidUpdateUrl,
+        parseLatestStableReleaseResponse(
+            std.testing.allocator,
+            \\{
+            \\  "tag_name": "v1.3.100",
+            \\  "html_url": "http://updates.example/releases/1.3.100",
+            \\  "assets": []
+            \\}
+            ,
+        ),
+    );
+}
+
+test "release parser rejects non-HTTPS Windows asset URLs" {
+    const alloc = std.testing.allocator;
+    const installer_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.100-windows-{s}-setup.exe",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(installer_name);
+    const checksum_name = windowsChecksumsAssetName();
+
+    const cases = [_]struct {
+        installer_scheme: []const u8,
+        checksums_scheme: []const u8,
+    }{
+        .{ .installer_scheme = "http", .checksums_scheme = "https" },
+        .{ .installer_scheme = "https", .checksums_scheme = "http" },
+    };
+
+    for (cases) |case| {
+        const body = try std.fmt.allocPrint(
+            alloc,
+            \\{{
+            \\  "tag_name": "v1.3.100",
+            \\  "html_url": "https://updates.example/releases/1.3.100",
+            \\  "assets": [
+            \\    {{
+            \\      "name": "{s}",
+            \\      "browser_download_url": "{s}://updates.example/{s}"
+            \\    }},
+            \\    {{
+            \\      "name": "{s}",
+            \\      "browser_download_url": "{s}://updates.example/{s}"
+            \\    }}
+            \\  ]
+            \\}}
+        ,
+            .{
+                installer_name,
+                case.installer_scheme,
+                installer_name,
+                checksum_name,
+                case.checksums_scheme,
+                checksum_name,
+            },
+        );
+        defer alloc.free(body);
+
+        try std.testing.expectError(
+            error.InvalidUpdateUrl,
+            parseLatestStableReleaseResponse(alloc, body),
+        );
+    }
 }
 
 test "release parser selects windows install candidate when checksum metadata is present" {
