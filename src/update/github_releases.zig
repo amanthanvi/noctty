@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
+const conpty_redist = @import("conpty_redist.zig");
 pub const portable_apply = @import("portable_apply.zig");
 
 const Allocator = std.mem.Allocator;
@@ -2488,12 +2489,31 @@ fn installedPortablePayloadMatches(
     return true;
 }
 
+/// How a PE inside the portable payload earns trust.
+const PortableBinaryTrust = union(enum) {
+    /// Signed by noctty: the Authenticode signer key must be a pinned one.
+    pinned_publisher,
+    /// Microsoft's bundled ConPTY pair, which noctty never re-signs and which
+    /// therefore can never satisfy the publisher pin. Bound by the exact bytes
+    /// scripts/conpty-redist.ps1 staged, plus a signature that has to chain to
+    /// a trusted root on this machine.
+    pinned_conpty: conpty_redist.Entry,
+};
+
+fn portableBinaryTrust(payload_relative_path: []const u8) PortableBinaryTrust {
+    if (conpty_redist.find(payload_relative_path)) |entry| {
+        return .{ .pinned_conpty = entry };
+    }
+    return .pinned_publisher;
+}
+
 fn verifyPortablePayloadBinaries(alloc: Allocator, payload_root: []const u8) !void {
     var payload_dir = try std.fs.openDirAbsolute(payload_root, .{ .iterate = true });
     defer payload_dir.close();
     var walker = try payload_dir.walk(alloc);
     defer walker.deinit();
     var verified_binary_count: usize = 0;
+    var verified_conpty_count: usize = 0;
     while (try walker.next()) |entry| {
         if (entry.kind == .directory) continue;
         if (entry.kind != .file) return error.InvalidPortablePayload;
@@ -2503,11 +2523,46 @@ fn verifyPortablePayloadBinaries(alloc: Allocator, payload_root: []const u8) !vo
             !std.ascii.eqlIgnoreCase(extension, ".dll")) continue;
         const path = try std.fs.path.join(alloc, &.{ payload_root, entry.path });
         defer alloc.free(path);
+        const relative = try portableRelativePathAlloc(alloc, entry.path);
+        defer alloc.free(relative);
         try verifyPortablePeMachine(path);
-        try verifyAuthenticodeSignature(path, null);
+        switch (portableBinaryTrust(relative)) {
+            .pinned_publisher => try verifyAuthenticodeSignature(path, null),
+            .pinned_conpty => |pin| {
+                try verifyPinnedConPtyBinary(path, &pin.sha256);
+                verified_conpty_count += 1;
+            },
+        }
         verified_binary_count += 1;
     }
     if (verified_binary_count == 0) return error.IncompletePortablePayload;
+    // Every pinned ConPTY file has to be present and verified, so dropping one
+    // from the payload cannot silently produce a ConPTY-less install.
+    if (verified_conpty_count != conpty_redist.entries.len) {
+        return error.IncompletePortablePayload;
+    }
+}
+
+fn verifyPinnedConPtyBinary(
+    path: []const u8,
+    expected_sha256: *const [Sha256.digest_length]u8,
+) !void {
+    try verifyPinnedConPtyHash(path, expected_sha256);
+    // No publisher pin here: this is Microsoft's signature, not ours. The
+    // signature still has to be valid against this machine's trust stores,
+    // and unlike the publisher-pinned path an untrusted root is not accepted,
+    // because there is no pin left to act as the trust anchor.
+    try verifyAuthenticodeSignatureFor(path, null, .trusted_root);
+}
+
+fn verifyPinnedConPtyHash(
+    path: []const u8,
+    expected_sha256: *const [Sha256.digest_length]u8,
+) !void {
+    const actual = try sha256File(path);
+    if (!std.mem.eql(u8, expected_sha256, &actual)) {
+        return error.UntrustedConPtyRedistributable;
+    }
 }
 
 fn verifyPortablePeMachine(path: []const u8) !void {
@@ -2697,9 +2752,28 @@ fn readWindowsFileVersion(alloc: Allocator, path: []const u8) !WindowsFileVersio
     };
 }
 
+/// What an Authenticode verdict has to prove about the signer.
+const AuthenticodeTrust = enum {
+    /// The signer key must be one of `pinned_publisher_spki_sha256`. The pin
+    /// is the trust anchor, so an untrusted root is tolerated.
+    pinned_publisher,
+    /// The signature must be valid against this machine's trust stores. Used
+    /// only where a pinned SHA-256 already fixes the exact bytes, so there is
+    /// no publisher pin left to anchor an untrusted root.
+    trusted_root,
+};
+
 fn verifyAuthenticodeSignature(
     path: []const u8,
     file_handle: ?std.os.windows.HANDLE,
+) !void {
+    return verifyAuthenticodeSignatureFor(path, file_handle, .pinned_publisher);
+}
+
+fn verifyAuthenticodeSignatureFor(
+    path: []const u8,
+    file_handle: ?std.os.windows.HANDLE,
+    trust: AuthenticodeTrust,
 ) !void {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
@@ -2753,14 +2827,19 @@ fn verifyAuthenticodeSignature(
     }
 
     const trust_status = winVerifyTrust(null, &action, &data);
-    if (!authenticodeStatusAllowsPinnedPublisherCheck(trust_status)) {
-        return error.InvalidAuthenticodeSignature;
+    switch (trust) {
+        .pinned_publisher => {
+            if (!authenticodeStatusAllowsPinnedPublisherCheck(trust_status)) {
+                return error.InvalidAuthenticodeSignature;
+            }
+            try verifyPinnedPublisherIdentityFromState(
+                data.hWVTStateData orelse return error.UpdatePublisherIdentityUnavailable,
+                wtHelperProvDataFromStateData,
+                wtHelperGetProvSignerFromChain,
+            );
+        },
+        .trusted_root => if (trust_status != 0) return error.InvalidAuthenticodeSignature,
     }
-    try verifyPinnedPublisherIdentityFromState(
-        data.hWVTStateData orelse return error.UpdatePublisherIdentityUnavailable,
-        wtHelperProvDataFromStateData,
-        wtHelperGetProvSignerFromChain,
-    );
 }
 
 fn verifyPinnedPublisherIdentityFromState(
@@ -5243,4 +5322,67 @@ test "DER element rejects overflowing offsets and lengths" {
         0xff,             0xff,
     };
     try std.testing.expectError(error.InvalidDer, readDerElement(&maximal_length, 0));
+}
+
+test "portable payload PEs are publisher-pinned except the bundled ConPTY pair" {
+    // The pair Microsoft signs, verified against conpty-redist.json instead.
+    for (conpty_redist.entries) |expected| {
+        switch (portableBinaryTrust(expected.payload_relative_path)) {
+            .pinned_conpty => |pin| try std.testing.expectEqualSlices(
+                u8,
+                &expected.sha256,
+                &pin.sha256,
+            ),
+            .pinned_publisher => return error.TestUnexpectedResult,
+        }
+    }
+
+    // Everything noctty builds and signs, plus anything unexpected, keeps the
+    // publisher pin. This list mirrors Get-WindowsSignedRuntimePayloads in
+    // scripts/common.ps1 with the portable-ZIP "noctty/" prefix removed.
+    for ([_][]const u8{
+        "noctty.exe",
+        "noctty.com",
+        "ghostty-vt.dll",
+        "noctty-terminal-handoff-proxy.dll",
+        "share/conpty.dll",
+        "attacker.dll",
+    }) |relative| {
+        switch (portableBinaryTrust(relative)) {
+            .pinned_publisher => {},
+            .pinned_conpty => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "portable managed entries cover every pinned ConPTY file" {
+    // A pinned file the payload verifier does not treat as managed would be
+    // rejected as an unmanaged payload file before its pin is ever checked.
+    for (conpty_redist.entries) |entry| {
+        try std.testing.expect(
+            portable_apply.isManagedRelativePath(entry.payload_relative_path),
+        );
+    }
+}
+
+test "portable ConPTY pin rejects bytes that are not the pinned redistributable" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const contents = "not the Microsoft ConPTY redistributable";
+    try tmp.dir.writeFile(.{ .sub_path = "conpty.dll", .data = contents });
+    const path = try tmp.dir.realpathAlloc(alloc, "conpty.dll");
+    defer alloc.free(path);
+
+    const pinned = conpty_redist.find("conpty.dll").?;
+    try std.testing.expectError(
+        error.UntrustedConPtyRedistributable,
+        verifyPinnedConPtyHash(path, &pinned.sha256),
+    );
+
+    // The same comparison accepts the bytes the pin actually names.
+    var matching: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(contents, &matching, .{});
+    try verifyPinnedConPtyHash(path, &matching);
 }

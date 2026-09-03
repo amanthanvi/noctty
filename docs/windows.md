@@ -692,6 +692,11 @@ entries cover every extracted file, and every extracted `.exe`, `.com`, and
 generic: the signer's public key must match a SHA-256 SPKI pin compiled into
 the app, so a binary signed by any other key is rejected even when its
 signature is otherwise valid. Unsigned binaries fail that verification too.
+The bundled Microsoft `conpty.dll` and `OpenConsole.exe` are the two
+exceptions, because noctty never re-signs them: each must match the SHA-256
+pinned in `dist/windows/conpty-redist.json` and carry a signature that chains
+to a trusted root, which is stricter about the chain than the pinned-publisher
+path. Every other PE keeps the publisher pin.
 See
 [ADR 0005](adr/0005-pin-updater-publisher-public-keys.md) for the pinning
 and key-rotation rules.

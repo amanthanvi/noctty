@@ -10191,6 +10191,7 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
         error.InstallerVersionOlderThanRelease => "the installer version was older than the release feed version",
         error.InstallerChecksumMismatch => "the downloaded Windows asset did not match SHA256SUMS.txt",
         error.InvalidAuthenticodeSignature => "an executable Authenticode signature could not be trusted",
+        error.UntrustedConPtyRedistributable => "a bundled ConPTY file did not match its pinned SHA-256",
         error.UnsafePortableArchiveEntry => "the portable ZIP contains an unsafe path",
         error.DuplicatePortableArchiveEntry => "the portable ZIP contains duplicate paths",
         error.InvalidPortableArchive, error.InvalidPortableArchiveRoot => "the portable ZIP layout is invalid",
