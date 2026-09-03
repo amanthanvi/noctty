@@ -15,9 +15,12 @@ Signing only happens inside the `Release` GitHub Actions workflow
 (`.github/workflows/release.yml`) on a GitHub-hosted `windows-latest` runner,
 triggered by a `v*` tag push or a manual dispatch by the maintainer. That job
 runs in the repository's `release` environment, which is where the signing
-secrets live; no other workflow in the repository can read them. There is no
-local signing path for published artifacts: a build signed on a workstation is
-not a Noctty release.
+secrets live. One other workflow enters that environment and can read the same
+two secrets: `release-readiness.yml`, which passes them to
+`scripts/release-preflight.ps1` so it can check the certificate before a
+release is attempted. It packages and signs nothing. No other workflow in the
+repository can read them. There is no local signing path for published
+artifacts: a build signed on a workstation is not a Noctty release.
 
 ## Where the key lives
 
@@ -58,9 +61,18 @@ describes the live state. The migration itself follows
 For each release and each architecture (`x64`, `arm64`):
 
 - the installer, `noctty-<version>-windows-<arch>-setup.exe`
-- every `.exe`, `.com`, and `.dll` inside the portable tree
+- every `.exe`, `.com`, and `.dll` that this project builds, inside the
+  portable tree
 - the portable payload manifest,
   `noctty-<version>-windows-<arch>-portable.manifest.ps1`
+
+The bundled ConPTY redistributable — `conpty.dll` and `OpenConsole.exe` — is
+**not** signed with this key. Those two files keep Microsoft's own Authenticode
+signature, and the release verifier checks them against the SHA-256 values
+pinned in `dist/windows/conpty-redist.json` rather than against the publisher
+pin.
+Seeing a Microsoft signer on those two files is expected, not a release-integrity
+failure.
 
 The portable ZIP container itself is not Authenticode-signed — a ZIP cannot
 carry an Authenticode signature — and is covered instead by its published
