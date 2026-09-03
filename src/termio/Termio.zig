@@ -815,6 +815,7 @@ pub fn resize(
     }
 
     // Mail the renderer so that it can update the GPU and re-render
+    self.renderer_state.noteWakeSource(.mailbox);
     renderer.Thread.sendMessage(
         self.renderer_wakeup,
         self.renderer_mailbox,
@@ -851,6 +852,7 @@ pub fn resizeBeforeThreadStart(
         self.terminal.modes.set(.synchronized_output, false);
     }
 
+    self.renderer_state.noteWakeSource(.mailbox);
     renderer.Thread.sendMessage(
         self.renderer_wakeup,
         self.renderer_mailbox,

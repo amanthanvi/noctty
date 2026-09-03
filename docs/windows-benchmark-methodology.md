@@ -267,13 +267,62 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   the app cannot become quiescent before the deadline the metric errors, and
   any counter change after the timed baseline remains a failure. Evidence
   retains the settle duration/probe count and the before/after delta for every
-  render-trace counter. Wake-source deltas separately identify core surface,
-  cursor timer, repaint retry, resize settle, paint retry, renderer health
-  recovery, and already-pending-paint notifications; they are diagnostic
+  render-trace counter. Wake-source deltas separately identify thread start,
+  core surface, renderer mailbox, PTY output, cursor timer, repaint retry,
+  resize settle, paint retry, renderer health recovery, already-pending-paint,
+  and inspector notifications, plus an unattributed count for a wake whose
+  reasons an earlier coalesced callback already consumed; they are diagnostic
   attribution, not a substitute for the authoritative update/paint/swap
-  counters. During the short lost-wake protection window, the
+  counters. Every reason is recorded by the code that requests the wake and
+  read by the renderer thread when it picks the wake up, so a repaint with no
+  named source means the wake primitive coalesced, not that the source is
+  unknown. During the short lost-wake protection window, the
   renderer's follow-up timer continues polling terminal dirtiness, but a clean
   poll does not rebuild or present another frame.
+
+### Power and idle
+
+Recorded 2026-09-03, noctty `1.3.2-dev+windows`, `ReleaseFast`, from
+`test/windows/bench-windows.ps1 -Metric idle -Runs 3 -IdleSeconds 30
+-ResetState`. Same machine as the tables above: Windows build 26200, Ryzen 9
+9900X, RTX 5070 Ti driver 32.0.16.1656, 3840x2160 at 240 Hz, 150% scale. It is
+a desktop on AC with no battery, so these figures say nothing about battery
+life and the power-saver code paths below were not exercised.
+
+| Metric                  | Collection 1 median |      2 |      3 |
+| ----------------------- | ------------------: | -----: | -----: |
+| `idle_cpu_percent`      |             0.0023% | 0.005% | 0.002% |
+| `idle_gpu_percent`      |                0.0% |   0.0% |   0.0% |
+| `idle_swap_count_delta` |                   0 |      0 |      0 |
+
+Nine runs across three collections, 30 s of measured idle each; every run
+recorded zero presented frames and zero attributed renderer wakes.
+Collections 1 and 2 ran exe SHA-256 `399b2de9…a63a35e3f`; collection 3 ran
+`8c485687…3d6fd82c` after a rebase onto a newer `main`. The CPU figure is
+process-tree processor time over the interval divided by logical cores, so at
+this magnitude it is dominated by the harness's own perf-counter sampling; the
+zero-present assertion, not the CPU percentage, is the load-bearing result.
+
+Before this measurement the same command failed with four presented frames in
+one or two runs of three (`samples=4,4,0` at 30 s, `4,0,0` at 10 s). Those
+frames came from `WM_MOUSEMOVE`: `Surface.modsChanged` compared raw incoming
+mods against a `binding()`-reduced stored value, so Num Lock alone made every
+mouse move mark the screen dirty and present an identical frame. Windows
+delivers mouse moves for foreground and z-order changes under a stationary
+cursor, which is how it reached a run with nobody at the keyboard. The
+counters that should have named the source were declared and unit-tested but
+had no emitter anywhere in `src`, which is why the failure read as
+unexplained.
+
+`power-saver-rendering` and `unfocused-render-fps` change the presented cadence
+and therefore idle cost on machines this measurement cannot speak for; a
+battery or Energy Saver baseline needs a laptop. See "Interactive Windows
+metrics" for the endpoint definitions and the quiescence requirement.
+
+The evidence JSON is not stored in the repository. Nothing under `docs/` or
+`test/windows/` keeps benchmark evidence files, and adding one would make a
+machine-specific artifact look like a portable claim. Reproduce with the
+command above and compare against the medians here.
 
 Every target PID returned by `Start-Process` is recorded with its run name,
 resolved executable path, start time, cleanup method, confirmed exit, and exit

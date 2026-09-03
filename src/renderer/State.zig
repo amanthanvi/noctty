@@ -34,6 +34,13 @@ mouse: Mouse = .{},
 /// underlying async wake primitive coalesces multiple notifies together.
 last_render_wakeup_notify_ms: std.atomic.Value(u64) = .init(0),
 
+/// Set of `WakeSource` bits contributed by every notify since the renderer
+/// thread last consumed them. The wake primitive coalesces, so a single
+/// wakeup callback can be owed to several sources at once; the renderer
+/// thread swaps this to zero when it picks the wake up and hands the set to
+/// the apprt, which is the only place that can name why a frame happened.
+wake_sources: std.atomic.Value(u32) = .init(0),
+
 /// Monotonic progress recorded after each parsed PTY output chunk. These
 /// fields are protected by `mutex` and let presentation diagnostics prove
 /// that a swap includes a specific amount of terminal output.
@@ -66,8 +73,52 @@ pub const Mouse = struct {
     mods: inputpkg.Mods = .{},
 };
 
+/// Why a renderer wake was requested. Every `renderer_thread.wakeup.notify()`
+/// call site records exactly one of these so an idle repaint can be traced
+/// back to the code that asked for it instead of showing up as an
+/// unexplained frame.
+pub const WakeSource = enum(u5) {
+    /// `renderer.Thread` sends itself one wake when the loop starts.
+    thread_start,
+    /// `Surface.queueRender` — core surface state changed.
+    core_surface,
+    /// A message was placed in the renderer mailbox.
+    mailbox,
+    /// The VT stream parsed PTY output.
+    io_output,
+    /// The cursor blink timer toggled visibility.
+    cursor_blink,
+    /// A Win32 paint completed while a newer frame was already pending.
+    apprt_repaint_retry,
+    /// The Win32 resize-settle sweep found no reserved paint to present.
+    apprt_resize_settle,
+    /// A Win32 `WM_PAINT` arrived with no renderer frame reserved.
+    apprt_paint_retry,
+    /// Win32 renderer health recovery asked for a fresh frame.
+    apprt_health_recovery,
+    /// A Win32 paint request collapsed into an already-pending paint.
+    apprt_paint_pending,
+    /// The inspector redrew itself.
+    inspector,
+
+    pub fn bit(self: WakeSource) u32 {
+        return @as(u32, 1) << @intFromEnum(self);
+    }
+};
+
 pub fn noteRenderWakeupNotify(self: *@This()) void {
     self.last_render_wakeup_notify_ms.store(@intCast(std.time.milliTimestamp()), .release);
+}
+
+/// Record the reason for a wake. Callers must do this before notifying, so
+/// the renderer thread cannot consume the wake before the reason is visible.
+pub fn noteWakeSource(self: *@This(), source: WakeSource) void {
+    _ = self.wake_sources.fetchOr(source.bit(), .acq_rel);
+}
+
+/// Take and clear the accumulated wake sources.
+pub fn takeWakeSources(self: *@This()) u32 {
+    return self.wake_sources.swap(0, .acq_rel);
 }
 
 pub fn renderWakeupNotifiedRecently(self: *const @This(), window_ms: u64) bool {
@@ -241,4 +292,37 @@ test "preedit range shifts left at right edge" {
     try testing.expectEqual(@as(terminalpkg.size.CellCountInt, 8), range.start);
     try testing.expectEqual(@as(terminalpkg.size.CellCountInt, 9), range.end);
     try testing.expectEqual(@as(usize, 0), range.cp_offset);
+}
+
+test "renderer state accumulates wake sources until taken" {
+    var mutex: std.Thread.Mutex = .{};
+    var state: @This() = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+
+    try std.testing.expectEqual(@as(u32, 0), state.takeWakeSources());
+
+    state.noteWakeSource(.io_output);
+    state.noteWakeSource(.mailbox);
+    state.noteWakeSource(.io_output);
+
+    const taken = state.takeWakeSources();
+    try std.testing.expect(taken & WakeSource.io_output.bit() != 0);
+    try std.testing.expect(taken & WakeSource.mailbox.bit() != 0);
+    try std.testing.expect(taken & WakeSource.cursor_blink.bit() == 0);
+
+    // Taking clears, so a coalesced wake with no new notify is reported as
+    // unattributed rather than blamed on the previous source.
+    try std.testing.expectEqual(@as(u32, 0), state.takeWakeSources());
+}
+
+test "renderer wake source bits are distinct and fit the mask" {
+    var seen: u32 = 0;
+    for (std.enums.values(WakeSource)) |source| {
+        const bit = source.bit();
+        try std.testing.expect(bit != 0);
+        try std.testing.expectEqual(@as(u32, 0), seen & bit);
+        seen |= bit;
+    }
 }
