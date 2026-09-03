@@ -413,6 +413,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Open a new window.",
         }},
 
+        .new_window_elevated => comptime &.{.{
+            .action = .{ .new_window_elevated = "" },
+            .title = "New Elevated Window",
+            .description = "Open a new window as administrator.",
+        }},
+
         .new_tab => comptime &.{.{
             .action = .new_tab,
             .title = "New Tab",
@@ -773,4 +779,16 @@ test "command defaults expose Win32 inspector alias" {
         }
     }
     return error.MissingWin32InspectorCommand;
+}
+
+test "command defaults expose exactly one elevated window action" {
+    var count: usize = 0;
+    for (defaults) |cmd| {
+        if (cmd.action == .new_window_elevated) {
+            count += 1;
+            try std.testing.expectEqualStrings("", cmd.action.new_window_elevated);
+            try std.testing.expectEqualStrings("New Elevated Window", cmd.title);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }

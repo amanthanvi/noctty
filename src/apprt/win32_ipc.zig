@@ -9,7 +9,12 @@ const windows = std.os.windows;
 
 const BOOL = std.os.windows.BOOL;
 const PIPE_READMODE_BYTE = 0x00000000;
+const security_sqos_present: windows.DWORD = 0x00100000;
+const security_identification: windows.DWORD = 0x00010000;
 pub const pipe_nowait = 0x00000001;
+pub const client_pipe_open_flags: windows.DWORD = windows.FILE_ATTRIBUTE_NORMAL |
+    security_sqos_present |
+    security_identification;
 pub const io_timeout_ms: u64 = 2_000;
 pub const automation_response_timeout_ms: u64 = 10_000;
 const poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
@@ -88,6 +93,12 @@ pub const NewSplitPayload = struct {
         self.* = undefined;
     }
 };
+
+/// Did the first-instance claim lose to a process that already owns the
+/// name? Both codes mean "someone else has it", not "the call was wrong".
+pub fn isIpcPipeClaimConflict(err: windows.Win32Error) bool {
+    return err == .ACCESS_DENIED or err == .PIPE_BUSY;
+}
 
 fn appendU32(dst: *std.ArrayList(u8), alloc: Allocator, value: u32) !void {
     var buf: [4]u8 = undefined;
@@ -1044,7 +1055,7 @@ test "win32 IPC silent client read is bounded" {
         0,
         null,
         windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        client_pipe_open_flags,
         null,
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
@@ -1082,6 +1093,16 @@ test "win32 IPC silent client read is bounded" {
     try std.testing.expectError(
         error.EndOfStream,
         readExactWithTimeout(client, &byte, std.math.maxInt(u64)),
+    );
+}
+
+test "win32 IPC pipe claims only the first instance" {
+    try std.testing.expect(isIpcPipeClaimConflict(.ACCESS_DENIED));
+    try std.testing.expect(isIpcPipeClaimConflict(.PIPE_BUSY));
+    try std.testing.expect(!isIpcPipeClaimConflict(.INVALID_PARAMETER));
+    try std.testing.expectEqual(
+        @as(windows.DWORD, 0x00110080),
+        client_pipe_open_flags,
     );
 }
 

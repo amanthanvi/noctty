@@ -1,0 +1,1228 @@
+const std = @import("std");
+const configpkg = @import("../config.zig");
+
+const Allocator = std.mem.Allocator;
+const windows = std.os.windows;
+const log = std.log.scoped(.win32_elevation);
+
+pub const title_prefix = "Administrator: ";
+
+const token_query: windows.DWORD = 0x0008;
+const process_query_limited_information: windows.DWORD = 0x1000;
+const token_user_class: c_int = 1;
+const token_elevation_type_class: c_int = 18;
+const token_elevation_class: c_int = 20;
+const sw_show_normal: c_int = 1;
+const see_mask_flag_no_ui: windows.ULONG = 0x00000400;
+const sddl_revision_1: windows.DWORD = 1;
+const invalid_file_attributes: windows.DWORD = 0xFFFF_FFFF;
+const file_attribute_directory: windows.DWORD = 0x0000_0010;
+
+const TokenElevation = extern struct {
+    token_is_elevated: windows.DWORD,
+};
+
+pub const TokenElevationType = enum(windows.DWORD) {
+    default = 1,
+    full = 2,
+    limited = 3,
+};
+
+const SidAndAttributes = extern struct {
+    sid: *anyopaque,
+    attributes: windows.DWORD,
+};
+
+const TokenUser = extern struct {
+    user: SidAndAttributes,
+};
+
+/// LocalAlloc-owned security descriptor and the attributes passed to
+/// CreateNamedPipeW. The descriptor remains valid for every pipe instance the
+/// server thread creates, elevated or not: `initElevatedPipeSecurity` builds
+/// the elevated one here, and `adoptPipeSecurityDescriptor` wraps the
+/// ordinary one the Win32 host builds from its own token.
+pub const IpcPipeSecurity = struct {
+    descriptor: *anyopaque,
+    attributes: windows.SECURITY_ATTRIBUTES,
+
+    pub fn deinit(self: *IpcPipeSecurity) void {
+        _ = LocalFree(self.descriptor);
+        self.* = undefined;
+    }
+
+    pub fn securityAttributes(self: *IpcPipeSecurity) *windows.SECURITY_ATTRIBUTES {
+        return &self.attributes;
+    }
+};
+
+const ShellExecuteInfoW = extern struct {
+    cb_size: windows.DWORD,
+    mask: windows.ULONG,
+    hwnd: ?windows.HWND,
+    verb: ?windows.LPCWSTR,
+    file: ?windows.LPCWSTR,
+    parameters: ?windows.LPCWSTR,
+    directory: ?windows.LPCWSTR,
+    show: c_int,
+    instance: ?windows.HINSTANCE,
+    id_list: ?*anyopaque,
+    class: ?windows.LPCWSTR,
+    class_key: ?windows.HKEY,
+    hot_key: windows.DWORD,
+    icon_or_monitor: ?*anyopaque,
+    process: ?windows.HANDLE,
+};
+
+const ElevationCache = union(enum) {
+    unknown,
+    value: bool,
+    failure: anyerror,
+};
+
+var elevation_cache: ElevationCache = .unknown;
+var elevation_cache_mutex: std.Thread.Mutex = .{};
+
+/// Return whether the current process token is elevated.
+///
+/// A successful result or query failure is cached for the process lifetime so
+/// callers on static CLI paths do not repeatedly open and inspect the token.
+pub fn isProcessElevated() !bool {
+    elevation_cache_mutex.lock();
+    defer elevation_cache_mutex.unlock();
+
+    switch (elevation_cache) {
+        .unknown => {},
+        .value => |value| return value,
+        .failure => |err| return err,
+    }
+
+    const value = queryProcessElevated() catch |err| {
+        elevation_cache = .{ .failure = err };
+        return err;
+    };
+    elevation_cache = .{ .value = value };
+    return value;
+}
+
+fn queryProcessElevated() !bool {
+    const token_handle = try openProcessToken(windows.GetCurrentProcess());
+    defer _ = windows.CloseHandle(token_handle);
+
+    return try tokenIsElevated(token_handle);
+}
+
+/// Return the current process token's UAC split-token elevation type.
+///
+/// This query intentionally does not share the `TokenElevation` cache. A
+/// class-18 failure must not discard a valid class-20 result used to scope
+/// the title and single-instance IPC namespace.
+pub fn processTokenElevationType() !TokenElevationType {
+    const token_handle = try openProcessToken(windows.GetCurrentProcess());
+    defer _ = windows.CloseHandle(token_handle);
+
+    var raw_type: windows.DWORD = 0;
+    var returned_size: windows.DWORD = 0;
+    if (GetTokenInformation(
+        token_handle,
+        token_elevation_type_class,
+        &raw_type,
+        @sizeOf(windows.DWORD),
+        &returned_size,
+    ) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    if (returned_size < @sizeOf(windows.DWORD)) return error.Unexpected;
+    return std.meta.intToEnum(TokenElevationType, raw_type) catch error.Unexpected;
+}
+
+/// Whether an elevated process must stay out of the ordinary user's session
+/// state. Only a genuine full split token does: a UAC-off machine and the
+/// built-in Administrator run elevated with the default elevation type and
+/// own the same session file the desktop uses, so they keep persistence.
+///
+/// A `null` elevation type means TokenElevationType could not be read, and
+/// that fails closed. `isProcessElevated` already assumes elevated when
+/// TokenElevation cannot be read, so the unknown case here must match: a
+/// split-token process that restored and later rewrote session-state.json
+/// would overwrite the unelevated user's windows with the elevated ones.
+pub fn excludesSessionState(
+    elevated: bool,
+    elevation_type: ?TokenElevationType,
+) bool {
+    if (!elevated) return false;
+    const known = elevation_type orelse return true;
+    return known == .full;
+}
+
+fn openProcessToken(process: windows.HANDLE) !windows.HANDLE {
+    var token: ?windows.HANDLE = null;
+    if (OpenProcessToken(process, token_query, &token) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    return token orelse error.Unexpected;
+}
+
+fn tokenIsElevated(token: windows.HANDLE) !bool {
+    var elevation: TokenElevation = .{ .token_is_elevated = 0 };
+    var returned_size: windows.DWORD = 0;
+    if (GetTokenInformation(
+        token,
+        token_elevation_class,
+        &elevation,
+        @sizeOf(TokenElevation),
+        &returned_size,
+    ) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    if (returned_size < @sizeOf(TokenElevation)) return error.Unexpected;
+    return elevation.token_is_elevated != 0;
+}
+
+fn allocTokenUser(
+    alloc: Allocator,
+    token: windows.HANDLE,
+) ![]align(@alignOf(TokenUser)) u8 {
+    var required_size: windows.DWORD = 0;
+    if (GetTokenInformation(
+        token,
+        token_user_class,
+        null,
+        0,
+        &required_size,
+    ) != 0) return error.Unexpected;
+
+    const size_error = windows.kernel32.GetLastError();
+    if (size_error != .INSUFFICIENT_BUFFER) return windows.unexpectedError(size_error);
+    if (required_size < @sizeOf(TokenUser)) return error.Unexpected;
+
+    const bytes = try alloc.alignedAlloc(u8, .of(TokenUser), required_size);
+    errdefer alloc.free(bytes);
+    var returned_size: windows.DWORD = 0;
+    if (GetTokenInformation(
+        token,
+        token_user_class,
+        @ptrCast(bytes.ptr),
+        @intCast(bytes.len),
+        &returned_size,
+    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (returned_size < @sizeOf(TokenUser) or returned_size > bytes.len) {
+        return error.Unexpected;
+    }
+    return bytes;
+}
+
+fn tokenUser(bytes: []align(@alignOf(TokenUser)) const u8) *const TokenUser {
+    return @ptrCast(bytes.ptr);
+}
+
+fn allocCurrentUserSidString(alloc: Allocator) ![]u8 {
+    const token = try openProcessToken(windows.GetCurrentProcess());
+    defer _ = windows.CloseHandle(token);
+
+    const user_bytes = try allocTokenUser(alloc, token);
+    defer alloc.free(user_bytes);
+
+    var sid_string_w: ?[*:0]u16 = null;
+    if (ConvertSidToStringSidW(tokenUser(user_bytes).user.sid, &sid_string_w) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    const sid_w = sid_string_w orelse return error.Unexpected;
+    defer _ = LocalFree(@ptrCast(sid_w));
+
+    return try std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(sid_w));
+}
+
+/// Build the elevated endpoint descriptor: only the current token user gets
+/// access, and the high mandatory label rejects both read-up and write-up.
+pub fn buildElevatedPipeSddl(alloc: Allocator, user_sid: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(
+        alloc,
+        "O:{s}D:P(A;;GA;;;{s})S:(ML;;NRNW;;;HI)",
+        .{ user_sid, user_sid },
+    );
+}
+
+pub fn initElevatedPipeSecurity(alloc: Allocator) !IpcPipeSecurity {
+    const user_sid = try allocCurrentUserSidString(alloc);
+    defer alloc.free(user_sid);
+    const sddl = try buildElevatedPipeSddl(alloc, user_sid);
+    defer alloc.free(sddl);
+    const sddl_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, sddl);
+    defer alloc.free(sddl_w);
+
+    var descriptor: ?*anyopaque = null;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl_w.ptr,
+        sddl_revision_1,
+        &descriptor,
+        null,
+    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+
+    const owned_descriptor = descriptor orelse return error.Unexpected;
+    return adoptPipeSecurityDescriptor(owned_descriptor);
+}
+
+/// Take ownership of a `LocalAlloc`-backed security descriptor the caller
+/// built elsewhere and wrap it in the same carrier the elevated path uses, so
+/// the non-elevated IPC endpoint is passed to the server thread and released
+/// through one code path rather than two.
+pub fn adoptPipeSecurityDescriptor(descriptor: *anyopaque) IpcPipeSecurity {
+    return .{
+        .descriptor = descriptor,
+        .attributes = .{
+            .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+            .lpSecurityDescriptor = descriptor,
+            .bInheritHandle = windows.FALSE,
+        },
+    };
+}
+
+pub const PipeServerIdentity = struct {
+    process_id: windows.DWORD,
+    same_user: bool,
+    elevated: bool,
+    /// Does the server run the SAME executable image as this process?
+    ///
+    /// This is defence in depth, not the boundary. The boundary is the user
+    /// SID plus the integrity level, and a peer that is already elevated as
+    /// this user has crossed it. Requiring the image path narrows who can
+    /// serve the predictable `.elevated` name to processes running our own
+    /// binary, at the cost of refusing a forward between two DIFFERENT noctty
+    /// installations -- which then starts a local instance instead, so the
+    /// only thing lost is single-instance coalescing across installs.
+    ///
+    /// Fails CLOSED: an unreadable image path on either side answers false.
+    same_image: bool,
+};
+
+/// Inspect the process at the server end of a connected pipe. Keeping these
+/// results observable lets the live Win32 test prove that both PID lookup and
+/// token-user SID comparison ran, even when the test process is not elevated.
+pub fn inspectPipeServerIdentity(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) !PipeServerIdentity {
+    var server_process_id: windows.DWORD = 0;
+    if (GetNamedPipeServerProcessId(pipe, &server_process_id) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    if (server_process_id == 0) return error.Unexpected;
+
+    const server_process = OpenProcess(
+        process_query_limited_information,
+        windows.FALSE,
+        server_process_id,
+    ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+    defer _ = windows.CloseHandle(server_process);
+
+    const current_token = try openProcessToken(windows.GetCurrentProcess());
+    defer _ = windows.CloseHandle(current_token);
+    const server_token = try openProcessToken(server_process);
+    defer _ = windows.CloseHandle(server_token);
+
+    const current_user_bytes = try allocTokenUser(alloc, current_token);
+    defer alloc.free(current_user_bytes);
+    const server_user_bytes = try allocTokenUser(alloc, server_token);
+    defer alloc.free(server_user_bytes);
+
+    const same_user = EqualSid(
+        tokenUser(current_user_bytes).user.sid,
+        tokenUser(server_user_bytes).user.sid,
+    ) != 0;
+
+    const own_image = try allocProcessImagePath(alloc, windows.GetCurrentProcess());
+    defer if (own_image) |value| alloc.free(value);
+    const server_image = try allocProcessImagePath(alloc, server_process);
+    defer if (server_image) |value| alloc.free(value);
+
+    return .{
+        .process_id = server_process_id,
+        .same_user = same_user,
+        .elevated = try tokenIsElevated(server_token),
+        .same_image = if (own_image != null and server_image != null)
+            imagePathsEqual(own_image.?, server_image.?)
+        else
+            false,
+    };
+}
+
+/// Full Win32 image path of a process opened with at least
+/// `PROCESS_QUERY_LIMITED_INFORMATION`. Returns null (rather than an error)
+/// when Windows will not report it, so the caller decides how to fail.
+fn allocProcessImagePath(alloc: Allocator, process: windows.HANDLE) !?[]u16 {
+    const buf = try alloc.alloc(u16, windows.PATH_MAX_WIDE + 1);
+    errdefer alloc.free(buf);
+
+    var len: windows.DWORD = @intCast(buf.len);
+    if (QueryFullProcessImageNameW(process, 0, buf.ptr, &len) == 0) {
+        log.warn("failed to read process image path err={}", .{windows.kernel32.GetLastError()});
+        alloc.free(buf);
+        return null;
+    }
+    if (len == 0 or len > buf.len) {
+        alloc.free(buf);
+        return null;
+    }
+    return try alloc.realloc(buf, len);
+}
+
+/// Compare two Win32 paths the way the filesystem does: case-insensitively.
+///
+/// The fold is deliberately ASCII-only. Folding fewer characters can only
+/// make the comparison STRICTER, so it never lets a different path pass; it
+/// would at worst refuse a forward between two spellings of an install
+/// directory whose case differs outside ASCII, which falls back to a local
+/// instance.
+fn imagePathsEqual(a: []const u16, b: []const u16) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (asciiLowerUtf16(left) != asciiLowerUtf16(right)) return false;
+    }
+    return true;
+}
+
+fn asciiLowerUtf16(unit: u16) u16 {
+    return if (unit >= 'A' and unit <= 'Z') unit + 32 else unit;
+}
+
+/// Authenticate the process at the server end of a connected elevated pipe.
+/// The server must run elevated under the same token user SID as this
+/// process, from the same executable image.
+pub fn authenticateElevatedPipeServer(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) !bool {
+    const identity = try inspectPipeServerIdentity(alloc, pipe);
+    return isTrustedElevatedPipeServer(identity);
+}
+
+pub fn isTrustedElevatedPipeServer(identity: PipeServerIdentity) bool {
+    return identity.same_user and identity.elevated and identity.same_image;
+}
+
+/// Allocate the effective window title, including the elevation marker when
+/// needed. A missing title uses the same `noctty` fallback as the Win32 host.
+pub fn allocPrefixedTitle(
+    alloc: Allocator,
+    title: ?[]const u8,
+    elevated: bool,
+) Allocator.Error![]u8 {
+    const base = title orelse "noctty";
+    if (!elevated or std.mem.startsWith(u8, base, title_prefix)) {
+        return alloc.dupe(u8, base);
+    }
+    return std.mem.concat(alloc, u8, &.{ title_prefix, base });
+}
+
+/// Build the argument string for a new elevated process.
+///
+/// `argv` is the complete current argv, including argv[0]. Only explicit
+/// config-file overrides are inherited; the effective class, invoking working
+/// directory, and selected profile command are appended after them.
+pub fn buildRelaunchParameters(
+    alloc: Allocator,
+    argv: []const []const u8,
+    effective_class: ?[]const u8,
+    cwd: []const u8,
+    config_base_cwd: []const u8,
+    command: ?configpkg.Command,
+) ![:0]u8 {
+    var result: std.Io.Writer.Allocating = .init(alloc);
+    errdefer result.deinit();
+
+    var i: usize = @min(argv.len, 1);
+    while (i < argv.len) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--")) break;
+        if (std.mem.eql(u8, arg, "--config-file")) {
+            if (i + 1 < argv.len) {
+                try appendConfigFileArgument(
+                    &result,
+                    argv[i + 1],
+                    config_base_cwd,
+                );
+                i += 2;
+                continue;
+            }
+        } else if (std.mem.startsWith(u8, arg, "--config-file=")) {
+            try appendConfigFileArgument(
+                &result,
+                arg["--config-file=".len..],
+                config_base_cwd,
+            );
+        }
+        i += 1;
+    }
+
+    if (effective_class) |class| {
+        try appendKeyValueArgument(&result, "--class=", class);
+    }
+    try appendKeyValueArgument(&result, "--working-directory=", cwd);
+
+    if (command) |value| {
+        var argument: std.Io.Writer.Allocating = .init(alloc);
+        defer argument.deinit();
+        try argument.writer.writeAll("--command=");
+        try writeCommand(&argument.writer, value);
+        try appendWindowsArgument(&result, argument.written());
+    }
+
+    return result.toOwnedSliceSentinel(0);
+}
+
+fn appendConfigFileArgument(
+    result: *std.Io.Writer.Allocating,
+    value: []const u8,
+    base_cwd: []const u8,
+) !void {
+    const optional = value.len > 0 and value[0] == '?';
+    const path = if (optional) value[1..] else value;
+    if (path.len == 0 or std.fs.path.isAbsolute(path)) {
+        return appendKeyValueArgument(result, "--config-file=", value);
+    }
+
+    const resolved = try std.fs.path.resolve(result.allocator, &.{ base_cwd, path });
+    defer result.allocator.free(resolved);
+    if (optional) {
+        const marked = try std.fmt.allocPrint(result.allocator, "?{s}", .{resolved});
+        defer result.allocator.free(marked);
+        return appendKeyValueArgument(result, "--config-file=", marked);
+    }
+    return appendKeyValueArgument(result, "--config-file=", resolved);
+}
+
+fn appendKeyValueArgument(
+    result: *std.Io.Writer.Allocating,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    var argument: std.Io.Writer.Allocating = .init(result.allocator);
+    defer argument.deinit();
+    try argument.writer.writeAll(key);
+    try argument.writer.writeAll(value);
+    try appendWindowsArgument(result, argument.written());
+}
+
+fn writeCommand(writer: *std.Io.Writer, command: configpkg.Command) !void {
+    switch (command) {
+        .shell => |value| try writer.writeAll(value),
+        .direct => |args| {
+            try writer.writeAll("direct:");
+            for (args, 0..) |arg, i| {
+                if (i != 0) try writer.writeByte(' ');
+                try configpkg.Command.writeDirectArg(writer, arg);
+            }
+        },
+    }
+}
+
+fn appendWindowsArgument(
+    result: *std.Io.Writer.Allocating,
+    argument: []const u8,
+) !void {
+    if (result.written().len != 0) try result.writer.writeByte(' ');
+    try writeWindowsArgument(&result.writer, argument);
+}
+
+/// Quote one complete argument according to CommandLineToArgvW parsing rules.
+fn writeWindowsArgument(writer: *std.Io.Writer, argument: []const u8) !void {
+    if (!windowsArgumentNeedsQuotes(argument)) return writer.writeAll(argument);
+
+    try writer.writeByte('"');
+    var backslashes: usize = 0;
+    for (argument) |byte| switch (byte) {
+        '\\' => backslashes += 1,
+        '"' => {
+            try writer.splatByteAll('\\', backslashes * 2 + 1);
+            backslashes = 0;
+            try writer.writeByte('"');
+        },
+        else => {
+            try writer.splatByteAll('\\', backslashes);
+            backslashes = 0;
+            try writer.writeByte(byte);
+        },
+    };
+    try writer.splatByteAll('\\', backslashes * 2);
+    try writer.writeByte('"');
+}
+
+fn windowsArgumentNeedsQuotes(argument: []const u8) bool {
+    if (argument.len == 0) return true;
+    for (argument) |byte| switch (byte) {
+        ' ', '\t', '\r', '\n', '"' => return true,
+        else => {},
+    };
+    return false;
+}
+
+pub const LaunchResult = enum {
+    launched,
+    cancelled,
+};
+
+/// Resolve the Windows-local directory for `ShellExecuteExW`'s `lpDirectory`.
+///
+/// The terminal cwd is not always a host path: a WSL-backed surface reports a
+/// live POSIX pwd such as `/home/user` (see `windows_shell.osc7PathToLocal`,
+/// which keeps WSL paths WSL-style on purpose), and the shell API rejects that
+/// outright. `SEE_MASK_FLAG_NO_UI` then turns the rejection into a silent
+/// failure, so the elevated window never appears. This applies the same
+/// translate-or-fall-back rule the ordinary `CreateProcessW` spawn uses in
+/// `termio.Exec`; the terminal path itself still travels untouched in
+/// `--working-directory`, where the child's own seam handles it.
+///
+/// `null` means "inherit this process's directory".
+pub fn resolveElevatedHostDirectory(
+    alloc: Allocator,
+    cwd: []const u8,
+) !?[]const u8 {
+    return try resolveElevatedHostDirectoryWithProbe(
+        alloc,
+        cwd,
+        realDirectoryProbe,
+    );
+}
+
+fn realDirectoryProbe(path: [*:0]const u16) windows.DWORD {
+    return GetFileAttributesW(path);
+}
+
+/// Does `attributes` describe something `ShellExecuteExW` will accept as
+/// `lpDirectory`? Fails CLOSED: `INVALID_FILE_ATTRIBUTES` (the path does not
+/// exist, or is not a legal Win32 name) and plain files both answer no.
+fn hostDirectoryAttributesUsable(attributes: windows.DWORD) bool {
+    if (attributes == invalid_file_attributes) return false;
+    return attributes & file_attribute_directory != 0;
+}
+
+/// `safeCurrentDirectory` passes a drive-absolute cwd through UNCHANGED; it
+/// is a syntax check, not an existence check. A directory the shell reported
+/// before it was deleted, or one carrying characters Win32 forbids, therefore
+/// reaches `lpDirectory` and makes `ShellExecuteExW` fail the whole launch --
+/// silently, because `SEE_MASK_FLAG_NO_UI` suppresses the shell's own error.
+/// Probe it here and answer null instead, which is the documented
+/// inherit-this-process's-directory fallback rather than a failed launch.
+fn resolveElevatedHostDirectoryWithProbe(
+    alloc: Allocator,
+    cwd: []const u8,
+    probe: *const fn ([*:0]const u16) windows.DWORD,
+) !?[]const u8 {
+    const resolved = try configpkg.windows_shell.safeCurrentDirectory(
+        alloc,
+        cwd,
+        false,
+        false,
+    ) orelse return null;
+    errdefer alloc.free(resolved);
+
+    const resolved_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, resolved) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            log.warn("dropping elevated host directory that is not valid UTF-8 cwd={s}", .{resolved});
+            alloc.free(resolved);
+            return null;
+        },
+    };
+    defer alloc.free(resolved_w);
+
+    if (!hostDirectoryAttributesUsable(probe(resolved_w.ptr))) {
+        log.warn(
+            "dropping elevated host directory that is not an existing directory cwd={s}",
+            .{resolved},
+        );
+        alloc.free(resolved);
+        return null;
+    }
+
+    return resolved;
+}
+
+/// Relaunch the current executable with the Windows `runas` verb. `cwd` must
+/// already be a Windows-local directory; see `resolveElevatedHostDirectory`.
+pub fn launchElevated(
+    alloc: Allocator,
+    parameters: [:0]const u8,
+    cwd: ?[]const u8,
+) !LaunchResult {
+    var exe_buffer: [windows.PATH_MAX_WIDE + 1]u16 = undefined;
+    const exe = try windows.GetModuleFileNameW(
+        null,
+        &exe_buffer,
+        @intCast(exe_buffer.len),
+    );
+    return launchElevatedWithShellApi(
+        alloc,
+        exe.ptr,
+        parameters,
+        cwd,
+        RealShellApi{},
+    );
+}
+
+const RealShellApi = struct {
+    fn shellExecute(_: @This(), info: *ShellExecuteInfoW) windows.BOOL {
+        return ShellExecuteExW(info);
+    }
+
+    fn lastError(_: @This()) windows.Win32Error {
+        return windows.kernel32.GetLastError();
+    }
+};
+
+fn launchElevatedWithShellApi(
+    alloc: Allocator,
+    executable: [*:0]const u16,
+    parameters: [:0]const u8,
+    cwd: ?[]const u8,
+    api: anytype,
+) !LaunchResult {
+    const parameters_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, parameters);
+    defer alloc.free(parameters_w);
+    const cwd_w: ?[:0]u16 = if (cwd) |value|
+        try std.unicode.utf8ToUtf16LeAllocZ(alloc, value)
+    else
+        null;
+    defer if (cwd_w) |value| alloc.free(value);
+
+    var info: ShellExecuteInfoW = .{
+        .cb_size = @sizeOf(ShellExecuteInfoW),
+        .mask = see_mask_flag_no_ui,
+        .hwnd = null,
+        .verb = std.unicode.utf8ToUtf16LeStringLiteral("runas"),
+        .file = executable,
+        .parameters = parameters_w.ptr,
+        .directory = if (cwd_w) |value| value.ptr else null,
+        .show = sw_show_normal,
+        .instance = null,
+        .id_list = null,
+        .class = null,
+        .class_key = null,
+        .hot_key = 0,
+        .icon_or_monitor = null,
+        .process = null,
+    };
+    if (api.shellExecute(&info) != 0) return .launched;
+
+    const err = api.lastError();
+    if (err == .CANCELLED) return .cancelled;
+    log.warn(
+        "ShellExecuteExW runas failed win32_error={d} hInstApp=0x{x}",
+        .{
+            @intFromEnum(err),
+            if (info.instance) |instance| @intFromPtr(instance) else 0,
+        },
+    );
+    return windows.unexpectedError(err);
+}
+
+extern "advapi32" fn OpenProcessToken(
+    process: windows.HANDLE,
+    desired_access: windows.DWORD,
+    token: *?windows.HANDLE,
+) callconv(.winapi) windows.BOOL;
+
+extern "advapi32" fn GetTokenInformation(
+    token: windows.HANDLE,
+    information_class: c_int,
+    information: ?*anyopaque,
+    information_size: windows.DWORD,
+    return_size: *windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+
+extern "advapi32" fn ConvertSidToStringSidW(
+    sid: *anyopaque,
+    string_sid: *?[*:0]u16,
+) callconv(.winapi) windows.BOOL;
+
+extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    string_security_descriptor: windows.LPCWSTR,
+    string_sd_revision: windows.DWORD,
+    security_descriptor: *?*anyopaque,
+    security_descriptor_size: ?*windows.ULONG,
+) callconv(.winapi) windows.BOOL;
+
+extern "advapi32" fn EqualSid(
+    sid1: *anyopaque,
+    sid2: *anyopaque,
+) callconv(.winapi) windows.BOOL;
+
+extern "kernel32" fn GetNamedPipeServerProcessId(
+    pipe: windows.HANDLE,
+    server_process_id: *windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+
+extern "kernel32" fn OpenProcess(
+    desired_access: windows.DWORD,
+    inherit_handle: windows.BOOL,
+    process_id: windows.DWORD,
+) callconv(.winapi) ?windows.HANDLE;
+
+extern "kernel32" fn QueryFullProcessImageNameW(
+    process: windows.HANDLE,
+    flags: windows.DWORD,
+    exe_name: [*]u16,
+    size: *windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+
+extern "kernel32" fn LocalFree(
+    memory: ?*anyopaque,
+) callconv(.winapi) ?*anyopaque;
+
+extern "kernel32" fn GetFileAttributesW(
+    file_name: [*:0]const u16,
+) callconv(.winapi) windows.DWORD;
+
+extern "shell32" fn ShellExecuteExW(
+    info: *ShellExecuteInfoW,
+) callconv(.winapi) windows.BOOL;
+
+test "elevation launch boundary maps accepted UAC to launched" {
+    const testing = std.testing;
+
+    const FakeShellApi = struct {
+        called: bool = false,
+        saw_runas: bool = false,
+        saw_executable: bool = false,
+        saw_parameters: bool = false,
+        saw_cwd: bool = false,
+
+        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) windows.BOOL {
+            self.called = true;
+            self.saw_runas = std.mem.eql(
+                u16,
+                std.mem.span(info.verb.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("runas"),
+            );
+            self.saw_executable = std.mem.eql(
+                u16,
+                std.mem.span(info.file.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            );
+            self.saw_parameters = std.mem.eql(
+                u16,
+                std.mem.span(info.parameters.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("--working-directory=C:\\work"),
+            );
+            self.saw_cwd = std.mem.eql(
+                u16,
+                std.mem.span(info.directory.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("C:\\work"),
+            );
+            return windows.TRUE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .SUCCESS;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    const result = try launchElevatedWithShellApi(
+        testing.allocator,
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+        "--working-directory=C:\\work",
+        "C:\\work",
+        &api,
+    );
+
+    try testing.expectEqual(LaunchResult.launched, result);
+    try testing.expect(api.called);
+    try testing.expect(api.saw_runas);
+    try testing.expect(api.saw_executable);
+    try testing.expect(api.saw_parameters);
+    try testing.expect(api.saw_cwd);
+}
+
+test "elevation launch boundary maps UAC cancellation without an error" {
+    const FakeShellApi = struct {
+        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) windows.BOOL {
+            return windows.FALSE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .CANCELLED;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    try std.testing.expectEqual(
+        LaunchResult.cancelled,
+        try launchElevatedWithShellApi(
+            std.testing.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            "",
+            "C:\\work",
+            &api,
+        ),
+    );
+}
+
+test "elevation launch boundary maps non-cancellation Win32 failures to an error" {
+    const FakeShellApi = struct {
+        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) windows.BOOL {
+            return windows.FALSE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .ACCESS_DENIED;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    try std.testing.expectError(
+        error.Unexpected,
+        launchElevatedWithShellApi(
+            std.testing.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            "",
+            "C:\\work",
+            &api,
+        ),
+    );
+}
+
+test "elevated host directory never forwards a WSL pwd to the shell API" {
+    const testing = std.testing;
+
+    // A WSL-backed surface reports a live POSIX pwd, which ShellExecuteExW
+    // rejects. The host directory falls back to a Windows-local one; the
+    // terminal path keeps travelling in `--working-directory`.
+    const wsl = try resolveElevatedHostDirectory(testing.allocator, "/home/user");
+    defer if (wsl) |value| testing.allocator.free(value);
+    if (wsl) |value| {
+        try testing.expect(!std.mem.eql(u8, value, "/home/user"));
+        try testing.expect(value.len >= 3 and value[1] == ':');
+    }
+
+    const wsl_unc = try resolveElevatedHostDirectory(
+        testing.allocator,
+        "\\\\wsl$\\Ubuntu\\home\\user",
+    );
+    defer if (wsl_unc) |value| testing.allocator.free(value);
+    if (wsl_unc) |value| {
+        try testing.expect(!std.mem.startsWith(u8, value, "\\\\wsl"));
+    }
+
+    // A drive-absolute pwd that really exists is already a host path and
+    // passes through. Use this process's own cwd so the assertion does not
+    // depend on a directory that happens to exist on the runner.
+    const real_cwd = try std.process.getCwdAlloc(testing.allocator);
+    defer testing.allocator.free(real_cwd);
+    const host = try resolveElevatedHostDirectory(testing.allocator, real_cwd);
+    defer if (host) |value| testing.allocator.free(value);
+    try testing.expectEqualStrings(real_cwd, host.?);
+}
+
+test "elevated host directory drops a drive-absolute cwd that is not a directory" {
+    const testing = std.testing;
+
+    // `safeCurrentDirectory` returns a drive-absolute value verbatim, so the
+    // existence check is the only thing standing between a deleted or
+    // syntactically illegal path and a `ShellExecuteExW` that fails the whole
+    // launch with no UI. Both failure shapes must answer null, which
+    // `launchElevated` turns into a null `lpDirectory`.
+    const Probe = struct {
+        fn missing(_: [*:0]const u16) windows.DWORD {
+            return invalid_file_attributes;
+        }
+
+        fn plainFile(_: [*:0]const u16) windows.DWORD {
+            return 0x0000_0080; // FILE_ATTRIBUTE_NORMAL
+        }
+
+        fn directory(_: [*:0]const u16) windows.DWORD {
+            return file_attribute_directory | 0x0000_0020; // + ARCHIVE
+        }
+    };
+
+    try testing.expectEqual(
+        @as(?[]const u8, null),
+        try resolveElevatedHostDirectoryWithProbe(
+            testing.allocator,
+            "C:\\deleted-since-the-shell-reported-it",
+            Probe.missing,
+        ),
+    );
+
+    try testing.expectEqual(
+        @as(?[]const u8, null),
+        try resolveElevatedHostDirectoryWithProbe(
+            testing.allocator,
+            "C:\\a-file-not-a-directory",
+            Probe.plainFile,
+        ),
+    );
+
+    // An existing directory is still forwarded unchanged; the probe is a
+    // filter, not a rewrite.
+    const kept = try resolveElevatedHostDirectoryWithProbe(
+        testing.allocator,
+        "C:\\work",
+        Probe.directory,
+    );
+    defer if (kept) |value| testing.allocator.free(value);
+    try testing.expectEqualStrings("C:\\work", kept.?);
+
+    // The attribute bits Windows also sets on a real directory must not make
+    // the check reject it.
+    try testing.expect(hostDirectoryAttributesUsable(file_attribute_directory));
+    try testing.expect(!hostDirectoryAttributesUsable(invalid_file_attributes));
+    try testing.expect(!hostDirectoryAttributesUsable(0));
+}
+
+test "elevation launch boundary omits lpDirectory when there is no host cwd" {
+    const testing = std.testing;
+
+    const FakeShellApi = struct {
+        saw_null_directory: bool = false,
+        saw_parameters: bool = false,
+
+        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) windows.BOOL {
+            self.saw_null_directory = info.directory == null;
+            self.saw_parameters = std.mem.eql(
+                u16,
+                std.mem.span(info.parameters.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("--working-directory=/home/user"),
+            );
+            return windows.TRUE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .SUCCESS;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    try testing.expectEqual(
+        LaunchResult.launched,
+        try launchElevatedWithShellApi(
+            testing.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            "--working-directory=/home/user",
+            null,
+            &api,
+        ),
+    );
+    try testing.expect(api.saw_null_directory);
+    try testing.expect(api.saw_parameters);
+}
+
+test "elevation title prefix handles elevated non-elevated null and prefixed titles" {
+    const testing = std.testing;
+
+    const elevated = try allocPrefixedTitle(testing.allocator, "PowerShell", true);
+    defer testing.allocator.free(elevated);
+    try testing.expectEqualStrings("Administrator: PowerShell", elevated);
+
+    const regular = try allocPrefixedTitle(testing.allocator, "PowerShell", false);
+    defer testing.allocator.free(regular);
+    try testing.expectEqualStrings("PowerShell", regular);
+
+    const fallback = try allocPrefixedTitle(testing.allocator, null, true);
+    defer testing.allocator.free(fallback);
+    try testing.expectEqualStrings("Administrator: noctty", fallback);
+
+    const prefixed = try allocPrefixedTitle(
+        testing.allocator,
+        "Administrator: PowerShell",
+        true,
+    );
+    defer testing.allocator.free(prefixed);
+    try testing.expectEqualStrings("Administrator: PowerShell", prefixed);
+}
+
+test "elevation IPC pipe SDDL is owner-only at high integrity" {
+    const sddl = try buildElevatedPipeSddl(
+        std.testing.allocator,
+        "S-1-5-21-111-222-333-1001",
+    );
+    defer std.testing.allocator.free(sddl);
+
+    try std.testing.expectEqualStrings(
+        "O:S-1-5-21-111-222-333-1001" ++
+            "D:P(A;;GA;;;S-1-5-21-111-222-333-1001)" ++
+            "S:(ML;;NRNW;;;HI)",
+        sddl,
+    );
+}
+
+test "elevation IPC accepts only a same-user elevated server identity" {
+    try std.testing.expect(isTrustedElevatedPipeServer(.{
+        .process_id = 100,
+        .same_user = true,
+        .elevated = true,
+        .same_image = true,
+    }));
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 101,
+        .same_user = true,
+        .elevated = false,
+        .same_image = true,
+    }));
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 102,
+        .same_user = false,
+        .elevated = true,
+        .same_image = true,
+    }));
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 103,
+        .same_user = false,
+        .elevated = false,
+        .same_image = true,
+    }));
+
+    // Defence in depth: a same-user elevated peer that is not running our
+    // image is refused, and an unreadable image path on either side lands
+    // here too because `inspectPipeServerIdentity` reports false.
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 104,
+        .same_user = true,
+        .elevated = true,
+        .same_image = false,
+    }));
+}
+
+test "elevation IPC image comparison is case-insensitive and length-exact" {
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+
+    try std.testing.expect(imagePathsEqual(
+        L("C:\\Program Files\\noctty\\noctty.exe"),
+        L("c:\\program files\\noctty\\NOCTTY.EXE"),
+    ));
+    try std.testing.expect(!imagePathsEqual(
+        L("C:\\Program Files\\noctty\\noctty.exe"),
+        L("C:\\Program Files\\noctty\\noctty.exe.bak"),
+    ));
+    try std.testing.expect(!imagePathsEqual(
+        L("C:\\noctty\\noctty.exe"),
+        L("C:\\attacker\\noctty.exe"),
+    ));
+
+    // The fold stops at ASCII on purpose, so a non-ASCII case difference is
+    // treated as a different path rather than silently accepted.
+    try std.testing.expect(!imagePathsEqual(L("Ä"), L("ä")));
+}
+
+test "elevation session state exclusion requires a full split token" {
+    try std.testing.expect(excludesSessionState(true, .full));
+    try std.testing.expect(!excludesSessionState(true, .default));
+    try std.testing.expect(!excludesSessionState(true, .limited));
+    try std.testing.expect(!excludesSessionState(false, .full));
+}
+
+test "elevation session state exclusion fails closed on an unknown type" {
+    // TokenElevationType could not be read. An elevated process may hold a
+    // full split token, so it stays out of the session file; an unelevated
+    // one never touches the exclusion at all.
+    try std.testing.expect(excludesSessionState(true, null));
+    try std.testing.expect(!excludesSessionState(false, null));
+}
+
+test "elevation relaunch parameters forward config class and cwd exactly" {
+    const testing = std.testing;
+    const argv = [_][]const u8{
+        "C:\\noctty.exe",
+        "--config-file",
+        "C:\\configs\\one.conf",
+        "--theme=Cobalt2",
+        "--config-file=C:\\configs\\two words.conf",
+        "--config-file",
+        "relative.conf",
+        "--config-file=?optional.conf",
+        "--config-file=?C:\\configs\\optional absolute.conf",
+        "-e",
+        "cmd.exe",
+        "--config-file=child-command.conf",
+    };
+
+    const parameters = try buildRelaunchParameters(
+        testing.allocator,
+        &argv,
+        "work class",
+        "C:\\Users\\Aman\\Source Dir",
+        "C:\\startup",
+        null,
+    );
+    defer testing.allocator.free(parameters);
+
+    try testing.expectEqualStrings(
+        "--config-file=C:\\configs\\one.conf " ++
+            "\"--config-file=C:\\configs\\two words.conf\" " ++
+            "--config-file=C:\\startup\\relative.conf " ++
+            "--config-file=?C:\\startup\\optional.conf " ++
+            "\"--config-file=?C:\\configs\\optional absolute.conf\" " ++
+            "\"--class=work class\" " ++
+            "\"--working-directory=C:\\Users\\Aman\\Source Dir\"",
+        parameters,
+    );
+}
+
+test "elevation relaunch parameters serialize and outer-quote direct command" {
+    const testing = std.testing;
+    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const direct_args = [_][:0]const u8{
+        "pwsh.exe",
+        "-NoLogo",
+        "C:\\Program Files\\profile.ps1",
+        "say \"hello\"",
+    };
+    const command: configpkg.Command = .{ .direct = &direct_args };
+
+    const parameters = try buildRelaunchParameters(
+        testing.allocator,
+        &argv,
+        null,
+        "C:\\work",
+        "C:\\startup",
+        command,
+    );
+    defer testing.allocator.free(parameters);
+
+    try testing.expectEqualStrings(
+        \\--working-directory=C:\work "--command=direct:pwsh.exe -NoLogo \"C:\Program Files\profile.ps1\" \"say \\\"hello\\\"\""
+    , parameters);
+}
+
+test "elevation relaunch parameters double a trailing backslash before closing quote" {
+    const testing = std.testing;
+    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const direct_args = [_][:0]const u8{ "cmd.exe", "C:\\path\\" };
+    const command: configpkg.Command = .{ .direct = &direct_args };
+
+    const parameters = try buildRelaunchParameters(
+        testing.allocator,
+        &argv,
+        null,
+        "C:\\work",
+        "C:\\startup",
+        command,
+    );
+    defer testing.allocator.free(parameters);
+
+    try testing.expectEqualStrings(
+        \\--working-directory=C:\work "--command=direct:cmd.exe \"C:\path\\\\\""
+    , parameters);
+}
+
+test "elevation relaunch parameters preserve shell command text" {
+    const testing = std.testing;
+    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const command: configpkg.Command = .{ .shell = "echo \"hello world\"" };
+
+    const parameters = try buildRelaunchParameters(
+        testing.allocator,
+        &argv,
+        null,
+        "C:\\work",
+        "C:\\startup",
+        command,
+    );
+    defer testing.allocator.free(parameters);
+
+    try testing.expectEqualStrings(
+        \\--working-directory=C:\work "--command=echo \"hello world\""
+    , parameters);
+}

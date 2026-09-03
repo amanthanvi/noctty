@@ -59,6 +59,9 @@ Win32-validated VT protocol coverage is tracked in
   (`toggle_tab_overview`, no default keybind), same-window tab reorder, and
   exact-pane drag-to-split.
 - Horizontal and vertical splits.
+- Deliberate elevated windows through the command palette or
+  `new_window_elevated:<profile-key>`, with integrity-scoped single-instance
+  IPC and no elevated session restore. See [Running elevated](windows.md#running-elevated).
 - Structural undo/redo for new splits, single-tab close (restoring the
   exact tab, panes, and layout), and drag-to-split subtree transfers. Tab
   reorder and multi-tab close modes are not undoable.

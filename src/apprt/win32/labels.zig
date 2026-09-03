@@ -7,6 +7,7 @@ const windows_shell = @import("../../config/windows_shell.zig");
 const input = @import("../../input.zig");
 const terminal = @import("../../terminal/main.zig");
 
+const win32_elevation = @import("../win32_elevation.zig");
 const win32_theme = @import("../win32_theme.zig");
 const win32_palette = @import("../win32_palette.zig");
 const win32_chrome_state = @import("../win32_chrome_state.zig");
@@ -830,13 +831,25 @@ pub fn buildHostAwareBaseTitle(
     alloc: Allocator,
     base_title: ?[]const u8,
     host: HostTabStatus,
+    elevated: bool,
 ) ![]u8 {
-    if (host.total <= 1) return try alloc.dupe(u8, base_title orelse "noctty");
-    return try std.fmt.allocPrint(
-        alloc,
-        "[{d}/{d}] {s}",
-        .{ host.index + 1, host.total, base_title orelse "noctty" },
-    );
+    const normalized_title = if (base_title) |value|
+        if (elevated and std.mem.startsWith(u8, value, win32_elevation.title_prefix))
+            value[win32_elevation.title_prefix.len..]
+        else
+            value
+    else
+        null;
+    const composed = if (host.total <= 1)
+        try alloc.dupe(u8, normalized_title orelse "noctty")
+    else
+        try std.fmt.allocPrint(
+            alloc,
+            "[{d}/{d}] {s}",
+            .{ host.index + 1, host.total, normalized_title orelse "noctty" },
+        );
+    defer alloc.free(composed);
+    return try win32_elevation.allocPrefixedTitle(alloc, composed, elevated);
 }
 
 /// Compact `value` to `max_len` bytes, ending in an ellipsis when it had to
@@ -2433,16 +2446,41 @@ test "win32 buildHostAwareBaseTitle prefixes host tab position" {
     const titled = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
         .index = 1,
         .total = 3,
-    });
+    }, false);
     defer std.testing.allocator.free(titled);
     try std.testing.expectEqualStrings("[2/3] pwsh", titled);
 
     const single = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
         .index = 0,
         .total = 1,
-    });
+    }, false);
     defer std.testing.allocator.free(single);
     try std.testing.expectEqualStrings("pwsh", single);
+}
+
+test "win32 elevated host title prefixes surface and default title once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const surface = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
+        .index = 1,
+        .total = 3,
+    }, true);
+    defer std.testing.allocator.free(surface);
+    try std.testing.expectEqualStrings("Administrator: [2/3] pwsh", surface);
+
+    const default = try buildHostAwareBaseTitle(std.testing.allocator, null, .{
+        .index = 0,
+        .total = 1,
+    }, true);
+    defer std.testing.allocator.free(default);
+    try std.testing.expectEqualStrings("Administrator: noctty", default);
+
+    const idempotent = try buildHostAwareBaseTitle(std.testing.allocator, "Administrator: pwsh", .{
+        .index = 1,
+        .total = 3,
+    }, true);
+    defer std.testing.allocator.free(idempotent);
+    try std.testing.expectEqualStrings("Administrator: [2/3] pwsh", idempotent);
 }
 
 test "win32 buildTabButtonLabel marks active tab and pane count" {
