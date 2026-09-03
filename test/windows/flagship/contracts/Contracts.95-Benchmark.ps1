@@ -55,7 +55,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow)
         }
-        Pattern = '(?ms)- name: Headless benchmark regression gates.*?--workload=ascii.*?--min-mb-s=50.*?--workload=utf8.*?--min-mb-s=35.*?--workload=osc.*?--min-mb-s=3.*?--workload=scroll.*?--min-mb-s=50.*?bench:palette-match.*?--budget-us=1000'
+        Pattern = '(?ms)- name: Headless benchmark regression gates.*?--workload=ascii.*?--min-mb-s=50.*?--workload=utf8.*?--min-mb-s=35.*?--workload=osc.*?--min-mb-s=3.*?--workload=scroll.*?--min-mb-s=50.*?bench:palette-match.*?--budget-us=2500'
         Kind = 'Text'
         Description = 'CI runs every headless throughput floor and the palette budget'
     }

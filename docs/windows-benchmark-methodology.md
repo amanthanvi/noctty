@@ -57,10 +57,15 @@ dependencies into a nominally `ReleaseFast` benchmark, which under-reports
 throughput by 25-46x — far below any of these floors on either machine.
 
 The palette baseline used 5,000 entries and 5,000 deterministic keystrokes on
-the same machine: p50 89 us and p99 128 us. CI uses a conservative 1,000 us p99
-ceiling. These wide tolerances are catastrophic-regression guards for a pinned
-Windows runner image and Zig toolchain; they are not a claim that different CI
-hardware has comparable absolute performance.
+the same machine: p50 89 us and p99 128 us. CI uses a 2,500 us p99 ceiling. The
+earlier 1,000 us ceiling was measured against the `windows-2025` runner on
+2026-09-03 across 26 runs of identical code: p99 ranged from 433 us to
+1,995 us with a median of 864 us, and four unrelated pull requests plus one
+`main` push failed the gate on noise alone. The ceiling still catches the
+failure class it exists for (a Debug-linked benchmark is 25-46x slower). These
+wide tolerances are catastrophic-regression guards for a pinned Windows runner
+image and Zig toolchain; they are not a claim that different CI hardware has
+comparable absolute performance.
 
 Reproduce the headless gates:
 
@@ -69,7 +74,7 @@ zig build bench:vt-throughput -- --workload=ascii --bytes=4194304 --seed=121 --r
 zig build bench:vt-throughput -- --workload=utf8 --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=35
 zig build bench:vt-throughput -- --workload=osc --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=3
 zig build bench:vt-throughput -- --workload=scroll --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=50
-zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=1000
+zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=2500
 ```
 
 ## Measured interactive baseline
