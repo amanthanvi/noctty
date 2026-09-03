@@ -138,11 +138,60 @@ pub fn deinit(self: *Thread) void {
     self.loop.deinit();
 }
 
+fn writeCommandError(
+    alloc: Allocator,
+    io: *termio.Termio,
+    err: anyerror,
+    cause: ?anyerror,
+    heading: []const u8,
+    detail: []const u8,
+) void {
+    const command = std.mem.join(alloc, " ", switch (io.backend) {
+        .exec => |*exec| exec.subprocess.args,
+    }) catch "<command unavailable>";
+    const error_heading = if (cause != null)
+        "error starting IO thread"
+    else
+        "error in IO thread";
+    const cause_suffix = if (cause) |value|
+        std.fmt.allocPrint(alloc, " (cause: {})", .{value}) catch
+            " (underlying error unavailable)"
+    else
+        "";
+    const str = std.fmt.allocPrint(
+        alloc,
+        \\{s}: {}{s}
+        \\
+        \\{s}
+        \\
+        \\{s}
+        \\
+        \\{s}
+        \\If this looks like a bug, please report it.
+        \\
+        \\This terminal is non-functional. Please close it and try again.
+    ,
+        .{ error_heading, err, cause_suffix, heading, command, detail },
+    ) catch
+        \\Out of memory. This terminal is non-functional. Please close it and try again.
+    ;
+
+    const t = io.renderer_state.terminal;
+    t.eraseDisplay(.complete, false);
+    t.printString(str) catch {};
+}
+
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread, io: *termio.Termio) void {
     // Call child function so we can use errors...
     self.threadMain_(io) catch |err| {
         log.warn("error in io thread err={}", .{err});
+
+        // Register this before the cleanup defers below so the terminal mutex
+        // is released before the renderer wakes and reads the error surface.
+        defer io.renderer_wakeup.notify() catch |notify_err| {
+            log.warn("failed to render io thread error err={}", .{notify_err});
+        };
 
         // Use an arena to simplify memory management below
         var arena = ArenaAllocator.init(self.alloc);
@@ -205,24 +254,57 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                 t.printString(str) catch {};
             },
 
-            else => {
-                const str = std.fmt.allocPrint(
+            error.ProcessNotStarted => {
+                const cause = switch (io.backend) {
+                    .exec => |*exec| exec.process_start_error,
+                } orelse err;
+                writeCommandError(
                     alloc,
-                    \\error starting IO thread: {}
+                    io,
+                    err,
+                    cause,
+                    "noctty failed to launch the requested command:",
+                    \\No child process was created, so there is no exit code.
                     \\
                     \\The underlying shell or command was unable to be started.
-                    \\This error is usually due to exhausting a system resource.
-                    \\If this looks like a bug, please report it.
-                    \\
-                    \\This terminal is non-functional. Please close it and try again.
-                ,
-                    .{err},
-                ) catch
-                    \\Out of memory. This terminal is non-functional. Please close it and try again.
-                ;
+                    \\Check the reported cause above; common causes include a
+                    \\missing, inaccessible, or invalid executable.
+                    ,
+                );
+            },
 
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
+            error.ProcessStartedThenFailed => {
+                const cause = switch (io.backend) {
+                    .exec => |*exec| exec.process_start_error,
+                } orelse err;
+                writeCommandError(
+                    alloc,
+                    io,
+                    err,
+                    cause,
+                    "noctty failed to launch the requested command:",
+                    \\The child process was created, but noctty could not
+                    \\finish launching it. Depending on the cause above, the
+                    \\child either exited on its own during launch setup or
+                    \\cleanup attempted to stop it, so no exit code is
+                    \\reported for it here.
+                    \\
+                    \\This happens during the post-creation launch steps, so a
+                    \\common cause is the optional Windows Job Object limits
+                    \\failing to apply.
+                    ,
+                );
+            },
+
+            else => {
+                writeCommandError(
+                    alloc,
+                    io,
+                    err,
+                    null,
+                    "noctty encountered an IO-thread failure while running the requested command:",
+                    "The command or its terminal IO could not continue.",
+                );
             },
         }
     };

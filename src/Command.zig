@@ -54,10 +54,12 @@ const PostForkFn = fn (*Command) PostForkError!void;
 /// adding a null terminator since POSIX systems are so common.
 path: [:0]const u8,
 
-/// Command-line arguments. It is the responsibility of the caller to set
-/// args[0] to the command. If args is empty then args[0] will automatically
-/// be set to equal path.
+/// Command-line arguments. The caller must set args[0] to a non-empty command.
 args: []const [:0]const u8,
+
+/// On Windows, the final argument is a raw cmd.exe `/C` command string.
+/// It must bypass argv quoting because cmd.exe uses its own quote rules.
+windows_cmd_shell: bool = false,
 
 /// Environment variables for the child process. If this is null, inherits
 /// the environment variables from this process. These are the exact
@@ -115,6 +117,22 @@ windows_job_object_plan: if (builtin.os.tag == .windows) apprt.win32_job_object.
     if (builtin.os.tag == .windows) .{ .mode = .never } else {},
 windows_job_object_handle: if (builtin.os.tag == .windows) ?windows.HANDLE else void =
     if (builtin.os.tag == .windows) null else {},
+
+/// Whether `CreateProcessW` returned successfully. That is the whole
+/// meaning: it says a process was created, and says nothing about whether
+/// one still exists.
+///
+/// Set immediately after `CreateProcessW` returns and before any of the
+/// post-creation launch setup (job object attach, exit-code probe, initial
+/// thread resume) that can still fail. Those failures unwind through an
+/// errdefer that *attempts* to terminate the child — `TerminateProcess`'s
+/// result is discarded, and in the exit-code-probe case the child had
+/// already exited on its own. So do not read `true` as "the child is gone";
+/// read it only as "the command did launch", which is what distinguishes a
+/// failure that needs the no-child report from one that does not. Inert on
+/// non-Windows, where a failed `start` always means no child exists.
+windows_process_created: if (builtin.os.tag == .windows) bool else void =
+    if (builtin.os.tag == .windows) false else {},
 
 /// The various methods a process may exit.
 pub const Exit = if (builtin.os.tag == .windows) union(enum) {
@@ -266,6 +284,8 @@ fn startPosix(self: *Command, arena: Allocator) !void {
 }
 
 fn startWindows(self: *Command, arena: Allocator) !void {
+    if (self.args.len == 0 or self.args[0].len == 0) return error.InvalidExe;
+
     const application_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, self.path);
     const application_name_w: ?[*:0]u16 = if (windowsShouldSearchPath(self.path))
         null
@@ -274,7 +294,11 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     const cwd = try safeWindowsCurrentDirectory(arena, self.path, self.cwd);
     const cwd_w = if (cwd) |v| try std.unicode.utf8ToUtf16LeAllocZ(arena, v) else null;
     const command_line_w = if (self.args.len > 0) b: {
-        const command_line = try windowsCreateCommandLine(arena, self.args);
+        const command_line = try windowsCreateCommandLine(
+            arena,
+            self.args,
+            self.windows_cmd_shell,
+        );
         break :b try std.unicode.utf8ToUtf16LeAllocZ(arena, command_line);
     } else null;
     const env_w = if (self.env) |env_map| try createWindowsEnvBlock(arena, env_map) else null;
@@ -358,12 +382,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (job_handle) |handle| _ = windows.CloseHandle(handle);
     }
 
-    var flags: windows.DWORD = windows.exp.CREATE_UNICODE_ENVIRONMENT;
-    if (attribute_list != null) flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
-    if (job_handle != null) flags |= windows.exp.CREATE_SUSPENDED;
+    const flags: std.os.windows.CreateProcessFlags = .{
+        .create_unicode_environment = true,
+        .extended_startupinfo_present = attribute_list != null,
+        .create_suspended = job_handle != null,
+    };
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
-    if (windows.exp.kernel32.CreateProcessW(
+    try std.os.windows.CreateProcessW(
         application_name_w,
         if (command_line_w) |w| w.ptr else null,
         null,
@@ -374,7 +400,12 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (cwd_w) |w| w.ptr else null,
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    );
+    // Past this point a child was created. Everything below can still fail
+    // and unwind through the errdefer below, which attempts to terminate it
+    // — but whatever the outcome of that attempt, "no child process was
+    // created" is no longer a true statement about the failure.
+    self.windows_process_created = true;
     errdefer {
         _ = windows.kernel32.TerminateProcess(process_information.hProcess, 1);
         _ = windows.CloseHandle(process_information.hThread);
@@ -397,6 +428,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
                 return windows.unexpectedError(windows.kernel32.GetLastError());
             }
             if (exit_code != windows.exp.STILL_ACTIVE) {
+                // This branch is the one post-creation failure where the
+                // child exited on its own and its exit code is known. Log it
+                // rather than discarding it: the launch still fails, so the
+                // code never reaches the normal child-exit reporting path.
+                log.warn(
+                    "windows job object attach target already exited exit_code={d}",
+                    .{exit_code},
+                );
                 return error.WindowsJobObjectAttachExitedChild;
             }
         }
@@ -678,13 +717,33 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
 }
 
 /// Copied from Zig. This function could be made public in child_process.zig instead.
-fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
+fn windowsCreateCommandLine(
+    allocator: mem.Allocator,
+    argv: []const []const u8,
+    cmd_shell: bool,
+) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const writer = &buf.writer;
 
+    if (cmd_shell) {
+        debug.assert(argv.len == 3);
+        debug.assert(mem.eql(u8, argv[1], "/C"));
+    }
+
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
+
+        // cmd.exe applies its own quote rules to the raw command after `/C`.
+        // Applying MSVCRT quoting here would turn inner quotes into literal
+        // `\"` bytes, which cmd.exe does not treat as escapes.
+        if (cmd_shell and arg_i == 2) {
+            try writer.writeByte('"');
+            try writer.writeAll(arg);
+            try writer.writeByte('"');
+            continue;
+        }
+
         if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
             try writer.writeAll(arg);
             continue;
@@ -711,6 +770,156 @@ fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) 
     }
 
     return buf.toOwnedSliceSentinel(0);
+}
+
+test "Command: windows-cmd-shell-command-line preserves cmd tail" {
+    const allocator = testing.allocator;
+
+    const cases = [_]struct {
+        argv: []const []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/C",
+                "cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/C",
+                "cmd.exe /c \"echo a && echo b\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"cmd.exe /c \"echo a && echo b\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/C",
+                "echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/C",
+                "echo \"C:\\Program Files\\noctty\\\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo \"C:\\Program Files\\noctty\\\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows Root\\System32\\cmd.exe",
+                "/C",
+                "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"",
+            },
+            .expected = "\"C:\\Windows Root\\System32\\cmd.exe\" /C \"\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/C",
+                "C:\\Program Files\\Git\\usr\\bin\\echo.exe",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"C:\\Program Files\\Git\\usr\\bin\\echo.exe\"",
+        },
+    };
+
+    for (cases) |case| {
+        const actual = try windowsCreateCommandLine(allocator, case.argv, true);
+        defer allocator.free(actual);
+        try testing.expectEqualStrings(case.expected, actual);
+    }
+}
+
+test "Command: windows-direct-command-line keeps argv quoting" {
+    const allocator = testing.allocator;
+    const actual = try windowsCreateCommandLine(
+        allocator,
+        &.{
+            "C:\\Program Files\\Noctty Tools\\probe.exe",
+            "--message",
+            "say \"hello\"",
+            "C:\\Program Files\\noctty\\",
+        },
+        false,
+    );
+    defer allocator.free(actual);
+
+    try testing.expectEqualStrings(
+        "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"say \\\"hello\\\"\" \"C:\\Program Files\\noctty\\\\\"",
+        actual,
+    );
+}
+
+test "Command: windows-command-line rejects empty executable argument" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const cases = [_][]const [:0]const u8{
+        &.{},
+        &.{""},
+    };
+
+    for (cases) |args| {
+        var cmd: Command = .{
+            .path = "cmd.exe",
+            .args = args,
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+
+        try testing.expectError(error.InvalidExe, cmd.start(testing.allocator));
+    }
+}
+
+test "Command: windows-cmd-shell-command-line executes quoted command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const windir = try std.process.getEnvVarOwned(testing.allocator, "WINDIR");
+    defer testing.allocator.free(windir);
+    const cmd_path = try std.fs.path.joinZ(testing.allocator, &.{
+        windir,
+        "System32",
+        "cmd.exe",
+    });
+    defer testing.allocator.free(cmd_path);
+
+    var td = try TempDir.init();
+    defer td.deinit();
+    var stdout = try createTestStdout(td.dir);
+    defer stdout.close();
+
+    var cmd: Command = .{
+        .path = cmd_path,
+        .args = &.{
+            cmd_path,
+            "/C",
+            "cmd.exe /d /c \"echo QUOTED_A && echo QUOTED_B\"",
+        },
+        .windows_cmd_shell = true,
+        .stdout = stdout,
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+
+    try cmd.testingStart();
+    const exit = try cmd.wait(true);
+    try testing.expectEqual(@as(u32, 0), exit.Exited);
+
+    try stdout.seekTo(0);
+    const contents = try stdout.readToEndAlloc(testing.allocator, 1024);
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings("QUOTED_A \r\nQUOTED_B\r\n", contents);
 }
 
 test "createNullDelimitedEnvMap" {
@@ -1104,6 +1313,55 @@ test "Command: windows job object plan attaches to local child process" {
     const exit = try cmd.wait(true);
     try testing.expect(exit == .Exited);
     try testing.expectEqual(@as(u32, 0), @as(u32, exit.Exited));
+}
+
+// `windows_process_created` is what lets termio tell "the command never
+// launched" apart from "the command launched and setup failed, so cleanup
+// attempted to stop it". Those two produce different reports, so the flag has
+// to be false for every failure before CreateProcessW and true the moment it
+// succeeds.
+test "Command: windows_process_created discriminates pre- and post-creation failures" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Pre-creation failure: CreateProcessW itself fails, no child exists.
+    {
+        const missing = "C:\\Windows\\System32\\noctty-does-not-exist.exe";
+        var cmd: Command = .{
+            .path = missing,
+            .args = &.{missing},
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        defer cmd.closeWindowsJobObject();
+
+        try testing.expect(!cmd.windows_process_created);
+        try testing.expectError(error.FileNotFound, cmd.testingStart());
+        try testing.expect(!cmd.windows_process_created);
+        try testing.expect(cmd.pid == null);
+    }
+
+    // Creation succeeds: the flag is set even though the post-creation setup
+    // steps run afterwards.
+    {
+        var cmd: Command = .{
+            .path = "C:\\Windows\\System32\\cmd.exe",
+            .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "exit", "0" },
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        defer cmd.closeWindowsJobObject();
+
+        try testing.expect(!cmd.windows_process_created);
+        try cmd.testingStart();
+        try testing.expect(cmd.windows_process_created);
+        _ = try cmd.wait(true);
+    }
 }
 
 test "Command: windows job object kill-on-close terminates local child" {
