@@ -83,6 +83,11 @@ font-size   = 12
 theme       = Dracula
 ```
 
+`noctty +list-fonts` shows a family whose typographic name differs from the
+name Windows registers as `Legacy (Typographic)`, for example
+`JetBrainsMono NFM (JetBrainsMono Nerd Font Mono)`; `font-family` accepts
+either name.
+
 Save, then press `Ctrl+Shift+,` to reload without restarting.
 `noctty +show-config --default --docs | more` lists every option with its
 docs, including the keybind grammar.

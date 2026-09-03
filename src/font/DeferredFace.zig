@@ -140,6 +140,15 @@ pub fn familyName(self: DeferredFace, buf: []u8) ![]const u8 {
     return "";
 }
 
+/// The typographic family (OpenType name ID 16) when it differs from the
+/// family name. Only the Windows backend tracks it; everywhere else the
+/// discovery backend already reports the name users configure.
+pub fn typographicFamilyName(self: DeferredFace, buf: []u8) !?[]const u8 {
+    _ = self;
+    _ = buf;
+    return null;
+}
+
 /// Returns the name of this face. The memory is always owned by the
 /// face so it doesn't have to be freed.
 pub fn name(self: DeferredFace, buf: []u8) ![]const u8 {

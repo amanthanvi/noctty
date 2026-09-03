@@ -19,11 +19,17 @@ pub const Windows = struct {
     family_name: [:0]const u8,
     style_name: [:0]const u8,
     full_name: [:0]const u8,
+    /// Typographic family (OpenType name ID 16) when the font has one and
+    /// it differs from the legacy family. This is the name Nerd Fonts and
+    /// the Windows Fonts UI tell users to configure, so `+list-fonts`
+    /// shows it alongside the legacy family.
+    typographic_family: ?[:0]const u8,
     variations: []const font.face.Variation,
     color: bool,
     charset: []const u32,
 
     pub fn deinit(self: *Windows) void {
+        if (self.typographic_family) |typographic| self.alloc.free(typographic);
         self.alloc.free(self.charset);
         self.alloc.free(self.path);
         self.alloc.free(self.family_name);
@@ -47,6 +53,13 @@ pub fn familyName(self: DeferredFace, buf: []u8) ![]const u8 {
 pub fn name(self: DeferredFace, buf: []u8) ![]const u8 {
     _ = buf;
     return self.win.full_name;
+}
+
+/// The typographic family (OpenType name ID 16), or null when the font
+/// has none. Both this and `familyName` are accepted by `font-family`.
+pub fn typographicFamilyName(self: DeferredFace, buf: []u8) !?[]const u8 {
+    _ = buf;
+    return self.win.typographic_family;
 }
 
 pub fn load(

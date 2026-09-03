@@ -44,6 +44,12 @@ pub const Options = struct {
 /// the sorting will be disabled and the results instead will be shown in the
 /// same priority order Ghostty would use to pick a font.
 ///
+/// A family whose typographic name (OpenType name ID 16) differs from the
+/// legacy family name is shown as `Legacy (Typographic)`. Either name works
+/// in `font-family`; Nerd Fonts v3 installs advertise only the typographic
+/// one (`JetBrainsMono Nerd Font Mono` for the family Windows registers as
+/// `JetBrainsMono NFM`).
+///
 /// Flags:
 ///
 ///   * `--bold`: Filter results to specific bold styles. It is not guaranteed
@@ -118,7 +124,27 @@ fn runArgs(alloc_gpa: Allocator, argsIter: anytype) !u8 {
             log.err("failed to get font family name: {}", .{err});
             continue;
         };
-        const family = try alloc.dupe(u8, family_buf);
+
+        // A font whose typographic family (OpenType name ID 16) differs
+        // from its legacy family is listed under both names, because both
+        // are accepted by `font-family` and installation guides for such
+        // fonts (Nerd Fonts v3 in particular) only ever mention the
+        // typographic one.
+        var typographic_buf: [1024]u8 = undefined;
+        const family = family: {
+            const typographic = face.typographicFamilyName(&typographic_buf) catch |err| {
+                log.err("failed to get typographic family name: {}", .{err});
+                break :family try alloc.dupe(u8, family_buf);
+            } orelse break :family try alloc.dupe(u8, family_buf);
+            if (std.ascii.eqlIgnoreCase(typographic, family_buf)) {
+                break :family try alloc.dupe(u8, family_buf);
+            }
+            break :family try std.fmt.allocPrint(
+                alloc,
+                "{s} ({s})",
+                .{ family_buf, typographic },
+            );
+        };
 
         const full_name_buf = face.name(&buf) catch |err| {
             log.err("failed to get font name: {}", .{err});
