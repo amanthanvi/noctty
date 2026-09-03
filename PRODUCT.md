@@ -16,7 +16,7 @@ stays lean: noctty surfaces and launches the user's own `ssh`; it
 does not bundle SSH clients, secret vaults, or fleet-management tools.
 
 The session promise is tiered: layout survives restarts (shipped),
-pane contents come back as clearly-marked snapshots (next), and
+pane contents come back as clearly-marked snapshots (shipped, opt-in), and
 process durability — shells that outlive the window — is a named
 aspiration, pursued only as feasibility work validates it.
 

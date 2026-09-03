@@ -72,8 +72,9 @@ Win32-validated VT protocol coverage is tracked in
   the way macOS Secure Keyboard Entry does.
 - Drag-and-drop of files into the terminal.
 - Session restore via `window-save-state`: windows, tabs, splits, profiles,
-  working directories, and explicit titles come back; terminal contents and
-  child processes do not.
+  working directories, and explicit titles come back; child processes do
+  not. The opt-in `window-save-state-scrollback` line count also restores
+  bounded, clearly marked plain-text pane snapshots.
 - Named layouts (C17): save the focused window's tabs, splits, profiles,
   working directories, and titles, then launch it in a new window from a
   keybind, the universal palette, or `+new-window --launch-layout=<name>`.
