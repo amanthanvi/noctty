@@ -735,12 +735,14 @@ least the client's, or the client treats it as no reachable instance. Clients
 also connect with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so a
 squatting server could learn who connected but could not use the token.
 
-Known limitation: the label denies writes, not reads. A medium-integrity
-process can open an elevated instance's pipe for `GENERIC_READ`, learn and
-submit nothing, but occupy the single listening instance until the server's
-read timeout, so the next real client fails with `ERROR_PIPE_BUSY`. Labeling
-the elevated endpoint `NWNR` closes this and is planned with the elevation
-work.
+The elevated endpoint is labelled `NRNW`, so a medium-integrity process
+cannot open it even for `GENERIC_READ` and cannot occupy its listening
+instance. Non-elevated endpoints keep the write-only-up label, where the
+same occupancy behaviour still applies within one integrity level. An
+elevated client additionally requires the server to be elevated, owned by the
+same token user, and running the same executable image; the image check is
+defence in depth, not a boundary, and refuses a forward between two different
+noctty installations.
 
 None of this is a privilege boundary. Code already running as your user can
 list your windows, perform allowlisted actions, and open new windows. Treat
