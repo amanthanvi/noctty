@@ -21210,6 +21210,11 @@ fn patchOrAppendEdits(
     user_edited: std.StaticBitSet(std.enums.values(@import("../config/key.zig").Key).len),
     out: *std.ArrayListUnmanaged(u8),
 ) !void {
+    // Three `inline for`s over every Config field run here. Adding
+    // `auto-update-feed-url` pushes that past the default 1000-branch quota,
+    // which surfaces as a compile error in this file rather than at the new
+    // option. State the budget so the next option added does not do it again.
+    @setEvalBranchQuota(10_000);
     const ConfigKey = @import("../config/key.zig").Key;
     const ConfigFormatter = @import("../config/formatter.zig");
 
