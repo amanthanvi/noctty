@@ -3,8 +3,12 @@ param(
     # $Version reaches a nuspec, artifact file names, and download URLs. The
     # release workflow already constrains it, but validate at the parameter so
     # manual and test invocations cannot inject path or URL fragments either.
+    # \A and \z rather than ^ and $ because .NET's $ also matches before a
+    # trailing newline, and [0-9] rather than \d because .NET's \d matches every
+    # Unicode decimal digit. Both would otherwise pass a value that is not a
+    # noctty release version.
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [ValidatePattern('\A[0-9]+\.[0-9]+\.[0-9]+\z')]
     [string]$Version,
 
     [string]$Tag,

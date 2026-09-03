@@ -383,44 +383,12 @@ jobs:
         run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION
 
       - name: Publish Chocolatey package
+        if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
-        run: |
-          if (-not $env:CHOCO_API_KEY) {
-            Write-Host "Skipping Chocolatey publish: CHOCO_API_KEY is not configured."
-            return
-          }
-
-          $version = "${{ steps.meta.outputs.version }}"
-          $artifactDirX64 = Join-Path $PWD "dist/artifacts/noctty-$version-windows-x64"
-          $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
-          $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-          $packageOutputDir = Join-Path $env:RUNNER_TEMP "noctty-chocolatey-$version"
-          if (Test-Path -LiteralPath $packageOutputDir) {
-            Remove-Item -LiteralPath $packageOutputDir -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $packageOutputDir -Force | Out-Null
-
-          & choco pack $metadata.chocolatey.nuspecPath `
-            --output-directory $packageOutputDir `
-            --limit-output
-          if ($LASTEXITCODE -ne 0) {
-            throw "choco pack failed with exit code $LASTEXITCODE."
-          }
-
-          $packages = @(Get-ChildItem -LiteralPath $packageOutputDir -Filter '*.nupkg' -File)
-          if ($packages.Count -ne 1) {
-            throw "Expected one Chocolatey package; found $($packages.Count)."
-          }
-
-          & choco push $packages[0].FullName `
-            --source "https://push.chocolatey.org/" `
-            --api-key $env:CHOCO_API_KEY `
-            --limit-output
-          if ($LASTEXITCODE -ne 0) {
-            throw "choco push failed with exit code $LASTEXITCODE."
-          }
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/release-publish-chocolatey.ps1 -Version $env:RELEASE_VERSION
 
       - name: Submit WinGet manifest update
         if: steps.meta.outputs.prerelease != 'true'
