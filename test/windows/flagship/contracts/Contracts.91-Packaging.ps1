@@ -42,6 +42,18 @@ Invoke-ContractTable -Contracts @(
         Description = 'Windows x64 baseline disassembly is time-bounded and kills a timed-out tool'
     }
     @{
+        File = $releaseWorkflow
+        Pattern = '(?ms)- name: Publish Chocolatey package\r?\n\s+if: steps\.meta\.outputs\.prerelease != ''true'''
+        Kind = 'Workflow'
+        Description = 'a prerelease never reaches the public Chocolatey feed'
+    }
+    @{
+        File = (Join-Path $repoRoot 'scripts\release-publish-chocolatey.ps1')
+        Pattern = '(?ms)Test-ChocolateyVersionPublished.*?nothing to push.*?choco push.*?\$pushExitCode -ne 0.*?already exists.*?treating the push as complete.*?throw "choco push failed'
+        Kind = 'Workflow'
+        Description = 'Chocolatey publishing is rerun-safe and tolerates only the duplicate-version response'
+    }
+    @{
         File = "$releasePreflight :: Assert-WingetArchitectureCoverage"
         Content = {
             (Get-PowerShellBlockText -Content (Get-Content -LiteralPath $releasePreflight -Raw) -HeaderPattern '^function\s+Assert-WingetArchitectureCoverage(?=\s|\{)')
