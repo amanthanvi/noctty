@@ -6199,7 +6199,10 @@ pub const App = struct {
                     const profile: ?*const windows_shell.Profile = if (source_host) |host|
                         try host.profileForKey(key)
                     else profile: {
-                        const profiles = try windows_shell.listProfiles(alloc);
+                        const profiles = try windows_shell.listProfiles(
+                            alloc,
+                            self.config.@"ssh-config-hosts",
+                        );
                         temporary_profiles = profiles;
                         const index = profileIndexByKey(profiles, key) orelse break :profile null;
                         break :profile &profiles[index];
@@ -33997,8 +34000,12 @@ test "win32 elevation authenticates a same-process pipe server token" {
         try win32_elevation.isProcessElevated(),
         identity.elevated,
     );
+    // The server here IS this process, so the image-path lookup must both
+    // run and succeed. A false value would mean the defence-in-depth check
+    // fails closed on every legitimate forward, not just impostors.
+    try std.testing.expect(identity.same_image);
     try std.testing.expectEqual(
-        identity.same_user and identity.elevated,
+        identity.same_user and identity.elevated and identity.same_image,
         try win32_elevation.authenticateElevatedPipeServer(
             std.testing.allocator,
             client,

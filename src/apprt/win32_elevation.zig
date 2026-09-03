@@ -15,6 +15,8 @@ const token_elevation_class: c_int = 20;
 const sw_show_normal: c_int = 1;
 const see_mask_flag_no_ui: windows.ULONG = 0x00000400;
 const sddl_revision_1: windows.DWORD = 1;
+const invalid_file_attributes: windows.DWORD = 0xFFFF_FFFF;
+const file_attribute_directory: windows.DWORD = 0x0000_0010;
 
 const TokenElevation = extern struct {
     token_is_elevated: windows.DWORD,
@@ -280,6 +282,18 @@ pub const PipeServerIdentity = struct {
     process_id: windows.DWORD,
     same_user: bool,
     elevated: bool,
+    /// Does the server run the SAME executable image as this process?
+    ///
+    /// This is defence in depth, not the boundary. The boundary is the user
+    /// SID plus the integrity level, and a peer that is already elevated as
+    /// this user has crossed it. Requiring the image path narrows who can
+    /// serve the predictable `.elevated` name to processes running our own
+    /// binary, at the cost of refusing a forward between two DIFFERENT noctty
+    /// installations -- which then starts a local instance instead, so the
+    /// only thing lost is single-instance coalescing across installs.
+    ///
+    /// Fails CLOSED: an unreadable image path on either side answers false.
+    same_image: bool,
 };
 
 /// Inspect the process at the server end of a connected pipe. Keeping these
@@ -316,15 +330,65 @@ pub fn inspectPipeServerIdentity(
         tokenUser(current_user_bytes).user.sid,
         tokenUser(server_user_bytes).user.sid,
     ) != 0;
+
+    const own_image = try allocProcessImagePath(alloc, windows.GetCurrentProcess());
+    defer if (own_image) |value| alloc.free(value);
+    const server_image = try allocProcessImagePath(alloc, server_process);
+    defer if (server_image) |value| alloc.free(value);
+
     return .{
         .process_id = server_process_id,
         .same_user = same_user,
         .elevated = try tokenIsElevated(server_token),
+        .same_image = if (own_image != null and server_image != null)
+            imagePathsEqual(own_image.?, server_image.?)
+        else
+            false,
     };
 }
 
+/// Full Win32 image path of a process opened with at least
+/// `PROCESS_QUERY_LIMITED_INFORMATION`. Returns null (rather than an error)
+/// when Windows will not report it, so the caller decides how to fail.
+fn allocProcessImagePath(alloc: Allocator, process: windows.HANDLE) !?[]u16 {
+    const buf = try alloc.alloc(u16, windows.PATH_MAX_WIDE + 1);
+    errdefer alloc.free(buf);
+
+    var len: windows.DWORD = @intCast(buf.len);
+    if (QueryFullProcessImageNameW(process, 0, buf.ptr, &len) == 0) {
+        log.warn("failed to read process image path err={}", .{windows.kernel32.GetLastError()});
+        alloc.free(buf);
+        return null;
+    }
+    if (len == 0 or len > buf.len) {
+        alloc.free(buf);
+        return null;
+    }
+    return try alloc.realloc(buf, len);
+}
+
+/// Compare two Win32 paths the way the filesystem does: case-insensitively.
+///
+/// The fold is deliberately ASCII-only. Folding fewer characters can only
+/// make the comparison STRICTER, so it never lets a different path pass; it
+/// would at worst refuse a forward between two spellings of an install
+/// directory whose case differs outside ASCII, which falls back to a local
+/// instance.
+fn imagePathsEqual(a: []const u16, b: []const u16) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        if (asciiLowerUtf16(left) != asciiLowerUtf16(right)) return false;
+    }
+    return true;
+}
+
+fn asciiLowerUtf16(unit: u16) u16 {
+    return if (unit >= 'A' and unit <= 'Z') unit + 32 else unit;
+}
+
 /// Authenticate the process at the server end of a connected elevated pipe.
-/// The server must run elevated under the same token user SID as this process.
+/// The server must run elevated under the same token user SID as this
+/// process, from the same executable image.
 pub fn authenticateElevatedPipeServer(
     alloc: Allocator,
     pipe: windows.HANDLE,
@@ -334,7 +398,7 @@ pub fn authenticateElevatedPipeServer(
 }
 
 pub fn isTrustedElevatedPipeServer(identity: PipeServerIdentity) bool {
-    return identity.same_user and identity.elevated;
+    return identity.same_user and identity.elevated and identity.same_image;
 }
 
 /// Allocate the effective window title, including the elevation marker when
@@ -514,12 +578,65 @@ pub fn resolveElevatedHostDirectory(
     alloc: Allocator,
     cwd: []const u8,
 ) !?[]const u8 {
-    return try configpkg.windows_shell.safeCurrentDirectory(
+    return try resolveElevatedHostDirectoryWithProbe(
+        alloc,
+        cwd,
+        realDirectoryProbe,
+    );
+}
+
+fn realDirectoryProbe(path: [*:0]const u16) windows.DWORD {
+    return GetFileAttributesW(path);
+}
+
+/// Does `attributes` describe something `ShellExecuteExW` will accept as
+/// `lpDirectory`? Fails CLOSED: `INVALID_FILE_ATTRIBUTES` (the path does not
+/// exist, or is not a legal Win32 name) and plain files both answer no.
+fn hostDirectoryAttributesUsable(attributes: windows.DWORD) bool {
+    if (attributes == invalid_file_attributes) return false;
+    return attributes & file_attribute_directory != 0;
+}
+
+/// `safeCurrentDirectory` passes a drive-absolute cwd through UNCHANGED; it
+/// is a syntax check, not an existence check. A directory the shell reported
+/// before it was deleted, or one carrying characters Win32 forbids, therefore
+/// reaches `lpDirectory` and makes `ShellExecuteExW` fail the whole launch --
+/// silently, because `SEE_MASK_FLAG_NO_UI` suppresses the shell's own error.
+/// Probe it here and answer null instead, which is the documented
+/// inherit-this-process's-directory fallback rather than a failed launch.
+fn resolveElevatedHostDirectoryWithProbe(
+    alloc: Allocator,
+    cwd: []const u8,
+    probe: *const fn ([*:0]const u16) windows.DWORD,
+) !?[]const u8 {
+    const resolved = try configpkg.windows_shell.safeCurrentDirectory(
         alloc,
         cwd,
         false,
         false,
-    );
+    ) orelse return null;
+    errdefer alloc.free(resolved);
+
+    const resolved_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, resolved) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            log.warn("dropping elevated host directory that is not valid UTF-8 cwd={s}", .{resolved});
+            alloc.free(resolved);
+            return null;
+        },
+    };
+    defer alloc.free(resolved_w);
+
+    if (!hostDirectoryAttributesUsable(probe(resolved_w.ptr))) {
+        log.warn(
+            "dropping elevated host directory that is not an existing directory cwd={s}",
+            .{resolved},
+        );
+        alloc.free(resolved);
+        return null;
+    }
+
+    return resolved;
 }
 
 /// Relaunch the current executable with the Windows `runas` verb. `cwd` must
@@ -642,9 +759,20 @@ extern "kernel32" fn OpenProcess(
     process_id: windows.DWORD,
 ) callconv(.winapi) ?windows.HANDLE;
 
+extern "kernel32" fn QueryFullProcessImageNameW(
+    process: windows.HANDLE,
+    flags: windows.DWORD,
+    exe_name: [*]u16,
+    size: *windows.DWORD,
+) callconv(.winapi) windows.BOOL;
+
 extern "kernel32" fn LocalFree(
     memory: ?*anyopaque,
 ) callconv(.winapi) ?*anyopaque;
+
+extern "kernel32" fn GetFileAttributesW(
+    file_name: [*:0]const u16,
+) callconv(.winapi) windows.DWORD;
 
 extern "shell32" fn ShellExecuteExW(
     info: *ShellExecuteInfoW,
@@ -777,10 +905,71 @@ test "elevated host directory never forwards a WSL pwd to the shell API" {
         try testing.expect(!std.mem.startsWith(u8, value, "\\\\wsl"));
     }
 
-    // A drive-absolute pwd is already a host path and passes through.
-    const host = try resolveElevatedHostDirectory(testing.allocator, "C:\\work");
+    // A drive-absolute pwd that really exists is already a host path and
+    // passes through. Use this process's own cwd so the assertion does not
+    // depend on a directory that happens to exist on the runner.
+    const real_cwd = try std.process.getCwdAlloc(testing.allocator);
+    defer testing.allocator.free(real_cwd);
+    const host = try resolveElevatedHostDirectory(testing.allocator, real_cwd);
     defer if (host) |value| testing.allocator.free(value);
-    try testing.expectEqualStrings("C:\\work", host.?);
+    try testing.expectEqualStrings(real_cwd, host.?);
+}
+
+test "elevated host directory drops a drive-absolute cwd that is not a directory" {
+    const testing = std.testing;
+
+    // `safeCurrentDirectory` returns a drive-absolute value verbatim, so the
+    // existence check is the only thing standing between a deleted or
+    // syntactically illegal path and a `ShellExecuteExW` that fails the whole
+    // launch with no UI. Both failure shapes must answer null, which
+    // `launchElevated` turns into a null `lpDirectory`.
+    const Probe = struct {
+        fn missing(_: [*:0]const u16) windows.DWORD {
+            return invalid_file_attributes;
+        }
+
+        fn plainFile(_: [*:0]const u16) windows.DWORD {
+            return 0x0000_0080; // FILE_ATTRIBUTE_NORMAL
+        }
+
+        fn directory(_: [*:0]const u16) windows.DWORD {
+            return file_attribute_directory | 0x0000_0020; // + ARCHIVE
+        }
+    };
+
+    try testing.expectEqual(
+        @as(?[]const u8, null),
+        try resolveElevatedHostDirectoryWithProbe(
+            testing.allocator,
+            "C:\\deleted-since-the-shell-reported-it",
+            Probe.missing,
+        ),
+    );
+
+    try testing.expectEqual(
+        @as(?[]const u8, null),
+        try resolveElevatedHostDirectoryWithProbe(
+            testing.allocator,
+            "C:\\a-file-not-a-directory",
+            Probe.plainFile,
+        ),
+    );
+
+    // An existing directory is still forwarded unchanged; the probe is a
+    // filter, not a rewrite.
+    const kept = try resolveElevatedHostDirectoryWithProbe(
+        testing.allocator,
+        "C:\\work",
+        Probe.directory,
+    );
+    defer if (kept) |value| testing.allocator.free(value);
+    try testing.expectEqualStrings("C:\\work", kept.?);
+
+    // The attribute bits Windows also sets on a real directory must not make
+    // the check reject it.
+    try testing.expect(hostDirectoryAttributesUsable(file_attribute_directory));
+    try testing.expect(!hostDirectoryAttributesUsable(invalid_file_attributes));
+    try testing.expect(!hostDirectoryAttributesUsable(0));
 }
 
 test "elevation launch boundary omits lpDirectory when there is no host cwd" {
@@ -864,22 +1053,57 @@ test "elevation IPC accepts only a same-user elevated server identity" {
         .process_id = 100,
         .same_user = true,
         .elevated = true,
+        .same_image = true,
     }));
     try std.testing.expect(!isTrustedElevatedPipeServer(.{
         .process_id = 101,
         .same_user = true,
         .elevated = false,
+        .same_image = true,
     }));
     try std.testing.expect(!isTrustedElevatedPipeServer(.{
         .process_id = 102,
         .same_user = false,
         .elevated = true,
+        .same_image = true,
     }));
     try std.testing.expect(!isTrustedElevatedPipeServer(.{
         .process_id = 103,
         .same_user = false,
         .elevated = false,
+        .same_image = true,
     }));
+
+    // Defence in depth: a same-user elevated peer that is not running our
+    // image is refused, and an unreadable image path on either side lands
+    // here too because `inspectPipeServerIdentity` reports false.
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 104,
+        .same_user = true,
+        .elevated = true,
+        .same_image = false,
+    }));
+}
+
+test "elevation IPC image comparison is case-insensitive and length-exact" {
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+
+    try std.testing.expect(imagePathsEqual(
+        L("C:\\Program Files\\noctty\\noctty.exe"),
+        L("c:\\program files\\noctty\\NOCTTY.EXE"),
+    ));
+    try std.testing.expect(!imagePathsEqual(
+        L("C:\\Program Files\\noctty\\noctty.exe"),
+        L("C:\\Program Files\\noctty\\noctty.exe.bak"),
+    ));
+    try std.testing.expect(!imagePathsEqual(
+        L("C:\\noctty\\noctty.exe"),
+        L("C:\\attacker\\noctty.exe"),
+    ));
+
+    // The fold stops at ASCII on purpose, so a non-ASCII case difference is
+    // treated as a different path rather than silently accepted.
+    try std.testing.expect(!imagePathsEqual(L("Ä"), L("ä")));
 }
 
 test "elevation session state exclusion requires a full split token" {
