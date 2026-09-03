@@ -2575,7 +2575,9 @@ const UpdateCheckRequest = struct {
     release_feed_url: []u8,
     force: bool,
     manual: bool,
-    configured_feed_ignored_non_https: bool,
+    /// Set when a configured or environment feed URL was dropped because it
+    /// is not a valid HTTPS URL, naming which one was dropped.
+    ignored_feed_source: ?updatepkg.FeedSource,
     respect_dismissal: bool,
     download: bool,
 
@@ -2592,6 +2594,9 @@ const UpdateCheckCompletion = struct {
     release: ?updatepkg.Release = null,
     manual_message: ?[]u8 = null,
     staged: bool = false,
+    /// The check discarded state that belonged to a previously configured
+    /// feed, so a notice raised from that feed must not stay actionable.
+    clear_stale_notice: bool = false,
 
     fn deinit(self: *UpdateCheckCompletion) void {
         if (self.release) |*value| value.deinit(self.alloc);
@@ -5460,14 +5465,15 @@ pub const App = struct {
         const request = try self.core_app.alloc.create(UpdateCheckRequest);
         errdefer self.core_app.alloc.destroy(request);
 
-        const release_feed_url = try updatepkg.resolveReleaseFeedUrl(
+        // The ignored-feed note has to come from the resolver, not from the
+        // config value alone: NOCTTY_UPDATE_FEED_URL is also a feed source
+        // and it is also dropped when it is not HTTPS.
+        const resolved_feed = try updatepkg.resolveReleaseFeed(
             self.core_app.alloc,
             self.config.@"auto-update-feed-url",
         );
+        const release_feed_url = resolved_feed.url;
         errdefer self.core_app.alloc.free(release_feed_url);
-        const configured_feed_ignored_non_https = configuredFeedIsNonHttps(
-            self.config.@"auto-update-feed-url",
-        );
 
         request.* = .{
             .alloc = self.core_app.alloc,
@@ -5478,7 +5484,7 @@ pub const App = struct {
             .release_feed_url = release_feed_url,
             .force = opts.force,
             .manual = opts.manual,
-            .configured_feed_ignored_non_https = configured_feed_ignored_non_https,
+            .ignored_feed_source = resolved_feed.ignored_non_https,
             .respect_dismissal = opts.respect_dismissal,
             .download = self.config.@"auto-update" == .download,
         };
@@ -5489,6 +5495,12 @@ pub const App = struct {
 
     fn handleUpdateCheckCompletion(self: *App, completion: *UpdateCheckCompletion) void {
         self.update_check_running.store(false, .release);
+
+        // The old notice offers Install (staged installer from the old feed)
+        // or Open Release (release URL from the old feed). Once the check
+        // discarded that feed's state, neither action is still valid, so drop
+        // the notice before anything below can raise a replacement.
+        if (completion.clear_stale_notice) self.clearUpdateNotice();
 
         if (completion.release) |release| {
             self.setUpdateNotice(release.version_text, release.release_url, completion.staged) catch |err| {
@@ -5577,7 +5589,20 @@ pub const App = struct {
         const state_path = try updatepkg.defaultStatePath(self.core_app.alloc);
         defer self.core_app.alloc.free(state_path);
 
-        var staged = updatepkg.verifyStagedWindowsInstall(self.core_app.alloc, state_path) catch |err| {
+        // Re-resolve the feed rather than trusting the staged metadata: a
+        // staged installer only stays applicable while the feed that
+        // produced it is still the effective one.
+        const release_feed_url = try updatepkg.resolveReleaseFeedUrl(
+            self.core_app.alloc,
+            self.config.@"auto-update-feed-url",
+        );
+        defer self.core_app.alloc.free(release_feed_url);
+
+        var staged = updatepkg.verifyStagedWindowsInstall(
+            self.core_app.alloc,
+            state_path,
+            release_feed_url,
+        ) catch |err| {
             self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
                 log.warn("failed to show updater apply failure err={}", .{banner_err});
             };
@@ -9668,7 +9693,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         alloc.destroy(completion);
     }
 
-    const result = updatepkg.checkLatestStableRelease(alloc, request.state_path, .{
+    const outcome = updatepkg.checkLatestStableRelease(alloc, request.state_path, .{
         .current_version = request.current_version,
         .release_feed_url = request.release_feed_url,
         .force = request.force,
@@ -9686,15 +9711,21 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         return;
     };
     defer {
-        var owned = result;
+        var owned = outcome;
         owned.deinit(alloc);
     }
+    completion.clear_stale_notice = outcome.feed_state_invalidated;
 
-    switch (result) {
+    switch (outcome.result) {
         .update_available => |release| {
             stage_download: {
                 if (request.download) {
-                    var staged = updatepkg.stageWindowsInstall(alloc, request.state_path, &release) catch |err| {
+                    var staged = updatepkg.stageWindowsInstall(
+                        alloc,
+                        request.state_path,
+                        request.release_feed_url,
+                        &release,
+                    ) catch |err| {
                         log.warn("failed to stage verified updater download err={}", .{err});
                         if (request.manual) {
                             completion.manual_message = updateStageFailureMessage(alloc, err) catch null;
@@ -9752,21 +9783,18 @@ fn tryOrNull(alloc: Allocator, text: []const u8) ?[]u8 {
     return alloc.dupe(u8, text) catch null;
 }
 
-fn configuredFeedIsNonHttps(configured: ?[]const u8) bool {
-    const value = configured orelse return false;
-    const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
-    if (trimmed.len == 0) return false;
-    const uri = std.Uri.parse(trimmed) catch return false;
-    return !std.ascii.eqlIgnoreCase(uri.scheme, "https");
-}
-
 fn appendConfiguredFeedIgnoredNote(
     request: *const UpdateCheckRequest,
     completion: *UpdateCheckCompletion,
 ) void {
-    if (!request.manual or !request.configured_feed_ignored_non_https) return;
+    if (!request.manual) return;
+    const ignored = request.ignored_feed_source orelse return;
 
-    const note = "Configured update feed ignored because its URL is not HTTPS.";
+    const note = switch (ignored) {
+        .configured => "Configured update feed ignored because its URL is not a valid HTTPS URL.",
+        .environment => "NOCTTY_UPDATE_FEED_URL ignored because its URL is not a valid HTTPS URL.",
+        .default => return,
+    };
     const message = if (completion.manual_message) |existing|
         std.fmt.allocPrint(request.alloc, "{s} {s}", .{ existing, note }) catch return
     else
@@ -9814,6 +9842,7 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
 fn updateApplyFailureMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.NoStagedWindowsInstall => "No verified staged update is available. Run Check for Updates again.",
+        error.StagedInstallFeedMismatch => "The staged update came from a different update feed. Run Check for Updates again.",
         error.InvalidStagedInstallerPath => "The staged update path is invalid. Run Check for Updates again.",
         error.InvalidInstallPath => "The current install path is invalid. The staged update was not launched.",
         error.InstallerChecksumMismatch => "The staged update no longer matches its verified checksum. Run Check for Updates again.",

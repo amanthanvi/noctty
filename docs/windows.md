@@ -484,9 +484,12 @@ Authenticode, and pinned-publisher-key verification stay mandatory whatever
 the feed host. For tests and diagnostics, `NOCTTY_UPDATE_FEED_URL` overrides
 the compiled-in default when no explicit `auto-update-feed-url` is set. The
 precedence is explicit config, then the environment variable, then the
-compiled-in default. In `check` mode it opens the release page when a newer
-stable version exists. It is the only outbound network call the app makes;
-there is no telemetry and no analytics.
+compiled-in default; a blank or whitespace-only value at either level falls
+through to the next, and a value that is not a valid HTTPS URL is ignored
+with a warning. Changing the effective feed discards the previous feed's
+cached release, dismissal, and staged installer. In `check` mode it opens the
+release page when a newer stable version exists. It is the only outbound
+network call the app makes; there is no telemetry and no analytics.
 
 Upstream Ghostty is leaving GitHub, so the maintainer periodically checks
 that the `upstream` remote and the release-feed host are still live and
