@@ -1,18 +1,18 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-09-03T01:40:01.0000000Z",
-  "git_commit": "e3a38268e6aa2187c8a41a07179aef360b27b78f",
+  "captured_at": "2026-09-03T03:34:28.0175349Z",
+  "git_commit": "34850eb9b191e0c350918f6311568d9348f534eb",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #131 scrollback-content restore on top of the issue #133 named-layouts roll after auditing every session parser hunk. The session schema remains v1 and adds optional bounded plain-text pane scrollback snapshots; the parser keeps the reviewed .allocate = .alloc_always ownership fix, decodes layout placement as opaque JSON before constructing the strict placement-free shape, and drops over-limit snapshots without losing layout. Hashes reflect checkout normalization. The durable git_commit identifies the PR base; Contracts.99-Baselines.ps1 independently pins the reviewed session-schema digest so squash-merging and deleting the PR branch cannot disable fail-closed artifact verification."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for the issue #123 Win32 paste-path audit on top of the issue #131 scrollback-content and issue #133 named-layout rolls, after auditing every session parser hunk. The session schema remains v1 and gains no field: this roll adds load-time pane-text rejection (InvalidPaneText) and a validation purpose so pane-text checks run on load only, letting the save path drop one hostile field instead of failing the whole save. The parser keeps the reviewed .allocate = .alloc_always ownership fix, the opaque-JSON layout placement decode, and the bounded scrollback budget. Hashes reflect checkout normalization. The durable git_commit identifies the PR base; Contracts.99-Baselines.ps1 independently pins the reviewed session-schema digest so squash-merging and deleting the PR branch cannot disable fail-closed artifact verification."
   },
   "artifacts": [
     {
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "591abc7a724cfc076f97a4a27d5368bbdcd5d6915942a711cc5de2c12959a0d5",
+      "sha256": "45630c3270cdd6bf2d8659471d796ed6e8733e5a2f10f2ef8461b3d12dac9f0b",
       "scenario_id": null
     },
     {

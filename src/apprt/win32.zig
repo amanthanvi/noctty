@@ -327,6 +327,16 @@ const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-ta
 const WNDPROC = win32_types.WNDPROC;
 const SHORT = i16;
 
+const ipc_server_pipe_mode = windows.PIPE_TYPE_BYTE |
+    c.PIPE_READMODE_BYTE |
+    win32_ipc.pipe_nowait |
+    c.PIPE_REJECT_REMOTE_CLIENTS;
+/// The server claims the pipe NAME once, at startup, and never releases it
+/// while it runs. `FILE_FLAG_FIRST_PIPE_INSTANCE` makes that claim fail if
+/// any other process already owns the name, and every replacement instance
+/// is created BEFORE the previous handle is closed, so the name is never
+/// momentarily unowned for a squatter to take.
+const ipc_server_pipe_access = c.PIPE_ACCESS_DUPLEX | c.FILE_FLAG_FIRST_PIPE_INSTANCE;
 const ipc_poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
 const ipc_pipe_prefix = "\\\\.\\pipe\\noctty.";
 
@@ -1987,6 +1997,23 @@ fn detectExplicitStartupWorkingDirectory(alloc: Allocator) bool {
     return false;
 }
 
+fn createIpcServerPipe(
+    pipe_name: [:0]const u16,
+    attributes: *windows.SECURITY_ATTRIBUTES,
+    first_instance: bool,
+) windows.HANDLE {
+    return sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        if (first_instance) ipc_server_pipe_access else c.PIPE_ACCESS_DUPLEX,
+        ipc_server_pipe_mode,
+        c.PIPE_UNLIMITED_INSTANCES,
+        16 * 1024,
+        16 * 1024,
+        0,
+        attributes,
+    );
+}
+
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
 
@@ -2007,27 +2034,19 @@ fn ipcServerMain(app: *App) void {
         .bInheritHandle = windows.FALSE,
     };
 
-    server: while (!app.ipc_stop_requested.load(.acquire)) {
-        const pipe = sys.CreateNamedPipeW(
-            pipe_name.ptr,
-            c.PIPE_ACCESS_DUPLEX,
-            windows.PIPE_TYPE_BYTE |
-                c.PIPE_READMODE_BYTE |
-                win32_ipc.pipe_nowait |
-                c.PIPE_REJECT_REMOTE_CLIENTS,
-            c.PIPE_UNLIMITED_INSTANCES,
-            16 * 1024,
-            16 * 1024,
-            0,
-            &security_attributes,
-        );
-        if (pipe == windows.INVALID_HANDLE_VALUE) {
-            log.warn("failed to create win32 IPC pipe err={}", .{
-                windows.kernel32.GetLastError(),
-            });
-            return;
-        }
+    // Claim the name once. If another process already holds it this fails
+    // and we do not listen at all, rather than joining a namespace someone
+    // else owns.
+    var pipe = createIpcServerPipe(pipe_name, &security_attributes, true);
+    if (pipe == windows.INVALID_HANDLE_VALUE) {
+        log.warn("failed to claim first win32 IPC pipe instance err={}", .{
+            windows.kernel32.GetLastError(),
+        });
+        return;
+    }
+    defer _ = windows.CloseHandle(pipe);
 
+    server: while (!app.ipc_stop_requested.load(.acquire)) {
         connect: while (!app.ipc_stop_requested.load(.acquire)) {
             const connected = sys.ConnectNamedPipe(pipe, null);
             if (connected != 0) break :connect;
@@ -2039,29 +2058,49 @@ fn ipcServerMain(app: *App) void {
                     continue;
                 },
                 else => {
-                    _ = windows.CloseHandle(pipe);
                     if (!app.ipc_stop_requested.load(.acquire)) {
                         log.warn("failed to connect win32 IPC client err={}", .{err});
                     }
+                    const replacement = createIpcServerPipe(
+                        pipe_name,
+                        &security_attributes,
+                        false,
+                    );
+                    if (replacement == windows.INVALID_HANDLE_VALUE) {
+                        log.warn("failed to preserve win32 IPC pipe ownership err={}", .{
+                            windows.kernel32.GetLastError(),
+                        });
+                        return;
+                    }
+                    _ = windows.CloseHandle(pipe);
+                    pipe = replacement;
                     continue :server;
                 },
             }
         }
 
-        if (app.ipc_stop_requested.load(.acquire)) {
-            _ = windows.CloseHandle(pipe);
-            break;
-        }
+        if (app.ipc_stop_requested.load(.acquire)) break;
 
-        _ = handleIpcClient(app, pipe) catch |err| {
+        if (handleIpcClient(app, pipe)) |_| {} else |err| {
             log.warn("failed to process win32 IPC client err={}", .{err});
-            _ = windows.CloseHandle(pipe);
-            continue :server;
-        };
+        }
+        const replacement = createIpcServerPipe(
+            pipe_name,
+            &security_attributes,
+            false,
+        );
+        if (replacement == windows.INVALID_HANDLE_VALUE) {
+            log.warn("failed to preserve win32 IPC pipe ownership err={}", .{
+                windows.kernel32.GetLastError(),
+            });
+            return;
+        }
         // Each pipe instance serves one request. Closing only the server handle
         // keeps unread response bytes available through the client's handle;
-        // DisconnectNamedPipe would discard them.
+        // DisconnectNamedPipe would discard them. The replacement is created
+        // first so the name is never released while the server is running.
         _ = windows.CloseHandle(pipe);
+        pipe = replacement;
     }
 }
 
@@ -4939,13 +4978,22 @@ pub const App = struct {
                 // snapshot may persist an SSH launch for unattended restore.
                 .leaf => |surface| switch (scope) {
                     .session => .{ .pane = .{
-                        .cwd = if (surface.launched_ssh) null else surface.pwd,
-                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
-                        .title_override = surface.title_override,
-                        .tab_title_override = if (surface.launched_ssh)
-                            null
-                        else
-                            surface.tab_title_override,
+                        .cwd = sessionSnapshotPaneText(
+                            "cwd",
+                            if (surface.launched_ssh) null else surface.pwd,
+                        ),
+                        .profile = sessionSnapshotPaneText(
+                            "profile",
+                            if (surface.launched_ssh) null else surface.launch_profile_key,
+                        ),
+                        .title_override = sessionSnapshotPaneText(
+                            "title_override",
+                            surface.title_override,
+                        ),
+                        .tab_title_override = sessionSnapshotPaneText(
+                            "tab_title_override",
+                            if (surface.launched_ssh) null else surface.tab_title_override,
+                        ),
                         .scrollback = surface.captureSessionScrollback(
                             alloc,
                             scrollback_lines,
@@ -4956,13 +5004,22 @@ pub const App = struct {
                         },
                     } },
                     .layout => .{ .pane = .{
-                        .cwd = if (surface.launched_ssh) null else surface.pwd,
-                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
-                        .title_override = surface.title_override,
-                        .tab_title_override = if (surface.launched_ssh)
-                            null
-                        else
-                            surface.tab_title_override,
+                        .cwd = sessionSnapshotPaneText(
+                            "cwd",
+                            if (surface.launched_ssh) null else surface.pwd,
+                        ),
+                        .profile = sessionSnapshotPaneText(
+                            "profile",
+                            if (surface.launched_ssh) null else surface.launch_profile_key,
+                        ),
+                        .title_override = sessionSnapshotPaneText(
+                            "title_override",
+                            surface.title_override,
+                        ),
+                        .tab_title_override = sessionSnapshotPaneText(
+                            "tab_title_override",
+                            if (surface.launched_ssh) null else surface.tab_title_override,
+                        ),
                     } },
                 },
                 .split => |split| .{ .split = .{
@@ -4977,6 +5034,16 @@ pub const App = struct {
             };
         }
         return .{ .root = 0, .nodes = nodes };
+    }
+
+    /// Drop a single pane field that a hostile source (OSC 7 pwd, OSC 0/2
+    /// title) made unsafe, rather than failing the whole save. The load path
+    /// stays strict: `win32_session_state.validatePane` rejects the file.
+    fn sessionSnapshotPaneText(field: []const u8, value: ?[]const u8) ?[]const u8 {
+        const text = value orelse return null;
+        if (win32_session_state.isValidPaneText(text)) return text;
+        log.warn("win32 session save: dropping unsafe pane field field={s} len={}", .{ field, text.len });
+        return null;
     }
 
     fn hostContainsQuickTerminal(host: *const Host) bool {
@@ -8987,14 +9054,120 @@ pub const App = struct {
     }
 
     fn openUrl(self: *App, url: []const u8) !void {
-        if (builtin.mode == .Debug and
-            try recordOpenUrlForTest(self.core_app.alloc, url)) return;
+        return openWin32Target(self.core_app.alloc, self, url, dispatchOpenTarget);
+    }
 
-        const url_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, url);
+    fn openWin32Target(
+        alloc: Allocator,
+        context: anytype,
+        target: []const u8,
+        comptime dispatch: anytype,
+    ) !void {
+        // Noctty fork hardening: the upstream Windows fallback dispatches any
+        // target through FileProtocolHandler. ShellExecuteW must instead stay
+        // inside the schemes and non-executable local files noctty produces.
+        if (!try isAllowedWin32OpenTarget(alloc, target)) {
+            log.warn("refusing unsafe Win32 open target len={}", .{target.len});
+            return error.OpenUrlRejected;
+        }
+
+        try dispatch(context, target);
+    }
+
+    fn dispatchOpenTarget(self: *App, target: []const u8) !void {
+        if (builtin.mode == .Debug and
+            try recordOpenUrlForTest(self.core_app.alloc, target)) return;
+
+        return shellExecuteOpenTarget(self, target);
+    }
+
+    fn shellExecuteOpenTarget(self: *App, target: []const u8) !void {
+        const url_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, target);
         defer self.core_app.alloc.free(url_w);
 
         const result = sys.ShellExecuteW(null, shell_open, url_w.ptr, null, null, c.SW_SHOW);
         if (@intFromPtr(result) <= 32) return error.OpenUrlFailed;
+    }
+
+    fn isAllowedWin32OpenTarget(alloc: Allocator, target: []const u8) !bool {
+        if (!windows_shell.isSafeWindowsPath(target)) return false;
+        if (windows_shell.isDriveAbsolutePath(target)) return isAllowedWin32LocalFile(target);
+        if (isWin32UncOrDevicePath(target)) return false;
+
+        const uri = std.Uri.parse(target) catch return false;
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "file")) {
+            return try isAllowedWin32FileUri(alloc, uri);
+        }
+
+        for ([_][]const u8{
+            "http",
+            "https",
+            "mailto",
+            "ftp",
+            "ssh",
+            "git",
+            "tel",
+            "magnet",
+            "ipfs",
+            "ipns",
+            "gemini",
+            "gopher",
+            "news",
+        }) |scheme| {
+            if (std.ascii.eqlIgnoreCase(uri.scheme, scheme)) return true;
+        }
+        return false;
+    }
+
+    fn isAllowedWin32FileUri(alloc: Allocator, uri: std.Uri) !bool {
+        if (uri.user != null or uri.password != null or uri.port != null or
+            uri.query != null or uri.fragment != null) return false;
+
+        if (uri.host) |_| {
+            var host_buf: [std.Uri.host_name_max]u8 = undefined;
+            const host = uri.getHost(&host_buf) catch return false;
+            if (host.len != 0 and !std.ascii.eqlIgnoreCase(host, "localhost")) return false;
+        }
+
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const decoded_path = try uri.path.toRawMaybeAlloc(arena.allocator());
+        const local_path = if (decoded_path.len >= 4 and
+            decoded_path[0] == '/' and
+            windows_shell.isDriveAbsolutePath(decoded_path[1..]))
+            decoded_path[1..]
+        else
+            decoded_path;
+        return isAllowedWin32LocalFile(local_path);
+    }
+
+    fn isAllowedWin32LocalFile(path: []const u8) bool {
+        if (!windows_shell.isSafeWindowsPath(path) or
+            !windows_shell.isDriveAbsolutePath(path) or
+            isWin32UncOrDevicePath(path)) return false;
+
+        // Reject NTFS alternate streams as another extension-dispatch bypass.
+        if (std.mem.indexOfScalar(u8, path[2..], ':') != null) return false;
+
+        const normalized = std.mem.trimRight(u8, path, " .");
+        const extension = std.fs.path.extension(normalized);
+        if (extension.len <= 1) return true;
+        const name = extension[1..];
+        for ([_][]const u8{
+            "exe",  "com",  "bat",         "cmd",       "ps1", "psm1", "psd1", "ps1xml",
+            "psc1", "psc2", "vbs",         "vbe",       "js",  "jse",  "wsf",  "wsh",
+            "hta",  "scr",  "cpl",         "msc",       "msi", "msp",  "mst",  "pif",
+            "lnk",  "url",  "application", "appref-ms", "scf", "sct",  "reg",  "inf",
+            "jar",  "py",   "pyw",         "rb",        "pl",  "chm",
+        }) |blocked| {
+            if (std.ascii.eqlIgnoreCase(name, blocked)) return false;
+        }
+        return true;
+    }
+
+    fn isWin32UncOrDevicePath(path: []const u8) bool {
+        return std.mem.startsWith(u8, path, "\\\\") or
+            std.mem.startsWith(u8, path, "//");
     }
 
     fn openConfig(self: *App) !void {
@@ -29039,17 +29212,24 @@ pub const Surface = struct {
         self.positionImeWindow();
     }
 
+    // Must route through formatFilePayload + surfaceDropPayloadCallback so paste protection applies.
     fn handleDropFiles(self: *Surface, wParam: WPARAM) void {
-        if (!self.core_initialized) return;
+        // `WM_DROPFILES` transfers ownership of the `HDROP` to us on every
+        // path, so claim it before any early return.
         const hDrop: *anyopaque = @ptrFromInt(wParam);
         defer sys.DragFinish(hDrop);
+
+        if (!self.core_initialized) return;
 
         const file_count = sys.DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
         if (file_count == 0) return;
 
         const alloc = self.app.core_app.alloc;
-        var result: std.ArrayListUnmanaged(u8) = .empty;
-        defer result.deinit(alloc);
+        var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (paths.items) |path| alloc.free(path);
+            paths.deinit(alloc);
+        }
 
         var i: UINT = 0;
         while (i < file_count) : (i += 1) {
@@ -29062,46 +29242,21 @@ pub const Surface = struct {
             defer alloc.free(buf);
             _ = sys.DragQueryFileW(hDrop, i, buf.ptr, wchar_len + 1);
 
-            // Convert UTF-16 to UTF-8
-            var utf8_buf: [1024]u8 = undefined;
-            const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, buf[0..wchar_len]) catch continue;
-            const path = utf8_buf[0..utf8_len];
-
-            // Add separator between multiple files
-            if (result.items.len > 0) {
-                result.append(alloc, ' ') catch continue;
-            }
-
-            // Quote paths containing spaces or special characters
-            const needs_quoting = std.mem.indexOfAny(u8, path, " \t'\"\\(){}[]$&;|<>!~`#") != null;
-            if (needs_quoting) {
-                result.append(alloc, '\'') catch continue;
-                // Escape any existing single quotes within the path
-                for (path) |char| {
-                    if (char == '\'') {
-                        result.appendSlice(alloc, "'\\''") catch continue;
-                    } else {
-                        result.append(alloc, char) catch continue;
-                    }
-                }
-                result.append(alloc, '\'') catch continue;
-            } else {
-                result.appendSlice(alloc, path) catch continue;
-            }
+            const path = std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..wchar_len]) catch continue;
+            paths.append(alloc, path) catch {
+                alloc.free(path);
+                continue;
+            };
         }
 
-        if (result.items.len == 0) return;
+        if (paths.items.len == 0) return;
+        const payload = win32_surface_drop.formatFilePayload(alloc, paths.items, .{}) catch |err| {
+            log.warn("win32 drop files format failed err={}", .{err});
+            return;
+        };
+        defer alloc.free(payload);
 
-        // Write the path(s) to the terminal via a synthetic key event
-        var event: input.KeyEvent = .{
-            .action = .press,
-            .key = .unidentified,
-            .mods = .{},
-        };
-        event.utf8 = result.items;
-        _ = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 drop files failed err={}", .{err});
-        };
+        surfaceDropPayloadCallback(self, payload);
     }
 
     fn handleMouseMove(self: *Surface, lParam: LPARAM, mods: input.Mods) void {
@@ -34944,6 +35099,121 @@ test "win32 IPC silent synchronous client read is bounded" {
     );
 }
 
+test "security regression win32 IPC server pipe mode rejects remote clients" {
+    try std.testing.expectEqual(
+        @as(u32, c.PIPE_REJECT_REMOTE_CLIENTS),
+        @as(u32, ipc_server_pipe_mode & c.PIPE_REJECT_REMOTE_CLIENTS),
+    );
+}
+
+test "security regression win32 IPC server claims the first pipe instance" {
+    try std.testing.expectEqual(
+        @as(u32, c.FILE_FLAG_FIRST_PIPE_INSTANCE),
+        @as(u32, ipc_server_pipe_access & c.FILE_FLAG_FIRST_PIPE_INSTANCE),
+    );
+}
+
+test "security regression win32 paste WM_DROPFILES matches OLE formatting and classifies metacharacters" {
+    const paths = [_][]const u8{
+        "C:\\Program Files\\noctty.txt",
+        "C:\\drop\\a& echo DROP_PROBE &.txt",
+    };
+    const payload = try win32_surface_drop.formatFilePayload(std.testing.allocator, &paths, .{});
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expectEqualStrings(
+        "\"C:\\Program Files\\noctty.txt\" \"C:\\drop\\a& echo DROP_PROBE &.txt\"",
+        payload,
+    );
+    try std.testing.expect(win32_paste_protection.inspect(payload).severity != .safe);
+}
+
+test "security regression win32 link opener allows known schemes and safe local files" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_][]const u8{
+        "http://example.com",
+        "https://example.com",
+        "mailto:user@example.com",
+        "ftp://example.com/file.txt",
+        "ssh:user@example.com",
+        "git://example.com/repo",
+        "tel:+15551234567",
+        "magnet:?xt=urn:btih:0123456789abcdef",
+        "ipfs://bafyexample",
+        "ipns://example.com",
+        "gemini://example.com",
+        "gopher://example.com",
+        "news:comp.security.misc",
+        "C:\\docs\\readme.txt",
+        "file:///C:/docs/readme.txt",
+        "file://localhost/C:/docs/a%20b.txt",
+    }) |target| {
+        try std.testing.expect(try App.isAllowedWin32OpenTarget(std.testing.allocator, target));
+    }
+}
+
+test "security regression win32 link opener rejects unsafe schemes and executable files" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_][]const u8{
+        "search-ms:query=*.exe",
+        "ms-settings:privacy",
+        "foo:custom-handler",
+        "\\\\server\\share\\readme.txt",
+        "//server/share/readme.txt",
+        "file://server/share/readme.txt",
+        "file:///C:/tmp/x.exe",
+        "file:///C:/tmp/x%2Eexe",
+        "file:///C:/tmp/x.ExE",
+        "file:///C:/tmp/x.exe%20",
+        "file:///C:/tmp/x.lnk",
+        "file:///C:/tmp/x.url",
+        "file:///C:/tmp/x%2Echm",
+        "file:///C:/tmp/x.msc",
+        "file:///C:/tmp/a%00.txt",
+        "C:\\tmp\\x.cmd",
+        "C:\\tmp\\x.chm",
+        "C:\\tmp\\safe.txt:payload.exe",
+        "relative/readme.txt",
+    }) |target| {
+        try std.testing.expect(!try App.isAllowedWin32OpenTarget(std.testing.allocator, target));
+    }
+}
+
+test "security regression win32 link opener rejects before shell dispatch" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const DispatchProbe = struct {
+        called: bool = false,
+
+        fn dispatch(self: *@This(), _: []const u8) !void {
+            self.called = true;
+        }
+    };
+
+    var rejected: DispatchProbe = .{};
+    try std.testing.expectError(
+        error.OpenUrlRejected,
+        App.openWin32Target(
+            std.testing.allocator,
+            &rejected,
+            "search-ms:query=*.exe",
+            DispatchProbe.dispatch,
+        ),
+    );
+    try std.testing.expect(!rejected.called);
+
+    var allowed: DispatchProbe = .{};
+    try App.openWin32Target(
+        std.testing.allocator,
+        &allowed,
+        "https://example.com",
+        DispatchProbe.dispatch,
+    );
+    try std.testing.expect(allowed.called);
+}
+
 test "win32 win32_ipc.encodeListWindowsRequest carries the response deadline" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -36451,6 +36721,53 @@ test "win32 session save skips quick terminal tabs" {
     try std.testing.expectEqual(@as(usize, 1), mixed_state.windows.len);
     try std.testing.expectEqual(@as(usize, 1), mixed_state.windows[0].tabs.len);
     try std.testing.expectEqual(@as(usize, 0), mixed_state.windows[0].selected_tab);
+}
+
+test "security regression win32 session save drops one hostile pane field" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var app: App = undefined;
+    app.hosts = .empty;
+    defer app.hosts.deinit(std.testing.allocator);
+
+    var host: Host = .{
+        .app = &app,
+        .id = 1,
+    };
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    var surface: Surface = undefined;
+    surface.quick_terminal = false;
+    surface.launched_ssh = false;
+    surface.pwd = "C:\\src\\noctty";
+    surface.launch_profile_key = "pwsh";
+    surface.title_override = "Build\x1b\x07";
+    surface.tab_title_override = "Docs";
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+    try app.hosts.append(std.testing.allocator, &host);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const state = try app.buildSessionState(arena.allocator(), 0);
+    const encoded = try win32_session_state.encodeAlloc(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"title_override\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\\u001b") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"cwd\":\"C:\\\\src\\\\noctty\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"profile\":\"pwsh\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"tab_title_override\":\"Docs\"") != null);
+
+    const hostile_file =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"title_override":"Build\u001b\u0007"}}]}}]}]}
+    ;
+    try std.testing.expectError(
+        error.InvalidPaneText,
+        win32_session_state.parseAlloc(std.testing.allocator, hostile_file),
+    );
 }
 
 test "win32 safe mode never mutates saved session state" {

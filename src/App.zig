@@ -339,6 +339,46 @@ test "automation-action dispatch rejects unsafe actions before dispatching" {
     );
 }
 
+fn fuzzAutomationActionParser(_: void, data: []const u8) !void {
+    if (input.Binding.Action.parse(data)) |action| {
+        const safe = isSafeAutomationAction(action);
+        if (std.mem.eql(u8, data, "new_tab")) try std.testing.expect(safe);
+        if (std.mem.startsWith(u8, data, "text:") or
+            std.mem.startsWith(u8, data, "csi:") or
+            std.mem.startsWith(u8, data, "esc:") or
+            std.mem.eql(u8, data, "paste_from_clipboard"))
+        {
+            try std.testing.expect(!safe);
+        }
+    } else |err| switch (err) {
+        error.InvalidAction, error.InvalidFormat => {},
+    }
+}
+
+test "fuzz automation action parser safety" {
+    try std.testing.fuzz({}, fuzzAutomationActionParser, .{ .corpus = &.{
+        "new_tab",
+        "text:echo unsafe",
+        "csi:0m",
+        "esc:c",
+        "paste_from_clipboard",
+    } });
+}
+
+test "bounded fuzz campaign automation action parser safety" {
+    const bounded_fuzz = @import("testing/bounded_fuzz.zig");
+    try bounded_fuzz.run({}, fuzzAutomationActionParser, .{
+        .random_seed = 0x50AA_E3C2_9471_7B6D,
+        .corpus = &.{
+            "new_tab",
+            "text:echo unsafe",
+            "csi:0m",
+            "esc:c",
+            "paste_from_clipboard",
+        },
+    });
+}
+
 test "automation-action surface id targets reject app scoped actions" {
     const action = try input.Binding.Action.parse("quit");
     try std.testing.expectEqual(input.Binding.Action.Scope.app, action.scope());

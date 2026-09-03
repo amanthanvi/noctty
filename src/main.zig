@@ -21,6 +21,13 @@ pub const std_options: std.Options = if (@hasDecl(entrypoint, "std_options"))
 else
     .{};
 
-test {
+// This only verifies the early child-mode hook; transport is covered by the
+// opt-in parent probe in pty_transport_probe.zig.
+test "ConPTY transport probe child dispatch only" {
+    if (build_config.exe_entrypoint == .ghostty) {
+        const probe = @import("pty_transport_probe.zig");
+        probe.runChildIfRequested();
+        try probe.runParentIfRequested();
+    }
     _ = entrypoint;
 }

@@ -267,3 +267,44 @@ test "scan launch args ignores non-activation wgh urls" {
     const target = scanLaunchArgs(&args).?;
     try std.testing.expectEqual(@as(?u64, 88), target.surface_id);
 }
+
+fn fuzzActivationParser(_: void, data: []const u8) !void {
+    if (parseLaunchArg(data)) |target| {
+        const rebuilt = try buildLaunchArg(std.testing.allocator, target);
+        defer std.testing.allocator.free(rebuilt);
+        try std.testing.expect(target.eql(try parseLaunchArg(rebuilt)));
+    } else |err| {
+        switch (err) {
+            error.InvalidScheme,
+            error.InvalidNumber,
+            error.Empty,
+            error.Malformed,
+            => {},
+        }
+        if (data.len == 0) {
+            try std.testing.expectEqual(error.Empty, err);
+        } else if (!std.mem.startsWith(u8, data, scheme)) {
+            try std.testing.expectEqual(error.InvalidScheme, err);
+        }
+    }
+}
+
+test "fuzz win32 toast activation parser" {
+    try std.testing.fuzz({}, fuzzActivationParser, .{ .corpus = &.{
+        "wgh://activate?surface=42&window=7&action=focus",
+        "wgh://activate?surface=not-a-number",
+        "wgh://other?surface=1",
+    } });
+}
+
+test "bounded fuzz campaign win32 toast activation parser" {
+    const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
+    try bounded_fuzz.run({}, fuzzActivationParser, .{
+        .random_seed = 0x93B8_A2D4_480C_12F7,
+        .corpus = &.{
+            "wgh://activate?surface=42&window=7&action=focus",
+            "wgh://activate?surface=not-a-number",
+            "wgh://other?surface=1",
+        },
+    });
+}
