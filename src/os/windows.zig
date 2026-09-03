@@ -15,6 +15,7 @@ pub const FILE_FLAG_OVERLAPPED = windows.FILE_FLAG_OVERLAPPED;
 pub const FILE_SHARE_READ = windows.FILE_SHARE_READ;
 pub const GENERIC_READ = windows.GENERIC_READ;
 pub const HANDLE = windows.HANDLE;
+pub const HMODULE = windows.HMODULE;
 pub const HANDLE_FLAG_INHERIT = windows.HANDLE_FLAG_INHERIT;
 pub const INFINITE = windows.INFINITE;
 pub const INVALID_HANDLE_VALUE = windows.INVALID_HANDLE_VALUE;
@@ -74,11 +75,28 @@ pub fn knownFolderPathUtf8(
 pub const exp = struct {
     pub const HPCON = windows.LPVOID;
 
+    pub const CreatePseudoConsoleFn = *const fn (
+        size: windows.COORD,
+        hInput: windows.HANDLE,
+        hOutput: windows.HANDLE,
+        dwFlags: windows.DWORD,
+        phPC: *HPCON,
+    ) callconv(.winapi) windows.HRESULT;
+    pub const ResizePseudoConsoleFn = *const fn (
+        hPC: HPCON,
+        size: windows.COORD,
+    ) callconv(.winapi) windows.HRESULT;
+    pub const ClosePseudoConsoleFn = *const fn (
+        hPC: HPCON,
+    ) callconv(.winapi) void;
+
     pub const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     pub const CREATE_SUSPENDED = 0x00000004;
     pub const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     pub const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
     pub const FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
+    pub const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = 0x00000100;
+    pub const LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
 
     pub const STATUS_PENDING = 0x00000103;
     pub const STILL_ACTIVE = STATUS_PENDING;

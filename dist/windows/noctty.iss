@@ -63,9 +63,14 @@ VersionInfoOriginalFileName=noctty-{#MyAppVersion}-windows-{#PackageArch}-setup.
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
+; The recursive stage rule includes the bundled ConPTY pair and its license.
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
+; Always clear a previously bundled ConPTY before staging this package.
+Type: files; Name: "{app}\conpty.dll"
+Type: files; Name: "{app}\OpenConsole.exe"
+Type: files; Name: "{app}\LICENSE-conpty.txt"
 ; Remove pre-rename WingHostty binaries and shortcuts left behind when an
 ; existing install upgrades in-place (same AppId, new file names).
 Type: files; Name: "{app}\winghostty.exe"

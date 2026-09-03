@@ -11,7 +11,9 @@ param(
 
     [switch]$RequireInstaller,
 
-    [switch]$RequireSigning
+    [switch]$RequireSigning,
+
+    [switch]$RequireConPty
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +22,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "signing-trust.ps1")
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
+. (Join-Path $PSScriptRoot "conpty-redist.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
@@ -57,6 +60,9 @@ $runtimeFiles = @(
     "noctty-terminal-handoff-proxy.dll"
 )
 $licensePath = Join-Path $repoRoot "LICENSE"
+$conptyLicensePath = Join-Path $repoRoot "dist/windows/LICENSE-conpty.txt"
+$conptyPinPath = Join-Path $repoRoot "dist/windows/conpty-redist.json"
+$conptyCacheRoot = Join-Path $localAppData "noctty/cache/conpty"
 $readmePath = Join-Path $repoRoot "README.md"
 $configTemplatePath = Join-Path $repoRoot "src/config/config-template"
 $innoScriptPath = Join-Path $repoRoot "dist/windows/noctty.iss"
@@ -398,7 +404,10 @@ function Write-PortablePayloadManifest {
         "noctty.exe",
         "ghostty-vt.dll",
         "noctty-terminal-handoff-proxy.dll",
+        "conpty.dll",
+        "OpenConsole.exe",
         "LICENSE",
+        "LICENSE-conpty.txt",
         "config-template.ghostty",
         "README.md",
         "noctty.ico",
@@ -521,6 +530,17 @@ try {
             Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath
             Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig
         }
+    }
+
+    $conptyStaged = Install-ConPtyRedist `
+        -PinPath $conptyPinPath `
+        -Architecture $Architecture `
+        -Destination $portableRoot `
+        -CacheRoot $conptyCacheRoot `
+        -RequireConPty:$RequireConPty
+    if ($conptyStaged) {
+        Write-Host "Staged bundled ConPTY for $Architecture."
+        Copy-Item -LiteralPath $conptyLicensePath -Destination (Join-Path $portableRoot "LICENSE-conpty.txt") -Force
     }
 
     Copy-Item -LiteralPath $licensePath -Destination (Join-Path $portableRoot "LICENSE") -Force

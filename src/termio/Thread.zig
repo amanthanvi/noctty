@@ -215,6 +215,7 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
         // have "OpenptyFailed".
         const Err = @TypeOf(err) || error{
             OpenptyFailed,
+            BundledConptyInconsistent,
             InputNotFound,
             InputFailed,
         };
@@ -230,6 +231,27 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     \\many pty devices.
                     \\
                     \\Please free up some pty devices and try again.
+                ;
+
+                t.eraseDisplay(.complete, false);
+                t.printString(str) catch {};
+            },
+
+            error.BundledConptyInconsistent => {
+                const str =
+                    \\The bundled ConPTY (conpty.dll next to noctty.exe) could not
+                    \\create a pseudo console for this terminal.
+                    \\
+                    \\Other terminals in this process are still running on the
+                    \\bundled ConPTY, so noctty refused to fall back to the in-box
+                    \\conhost for just this one: mixing the two implementations in
+                    \\one process is not supported.
+                    \\
+                    \\Close the other terminals and open a new one to allow the
+                    \\fallback, or restart noctty with NOCTTY_CONPTY=inbox. Run
+                    \\`noctty +version` to see which ConPTY is in use.
+                    \\
+                    \\This terminal is non-functional. Please close it and try again.
                 ;
 
                 t.eraseDisplay(.complete, false);

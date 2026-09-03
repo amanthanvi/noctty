@@ -49,6 +49,10 @@ if ($allowedPins.Count -eq 0) {
     throw 'Updater publisher-pin allowlist is empty.'
 }
 
+$conptyPin = Get-Content `
+    -LiteralPath (Join-Path $repoRoot 'dist/windows/conpty-redist.json') `
+    -Raw | ConvertFrom-Json
+
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     $artifactDirectory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
     $setup = Join-Path $artifactDirectory (
@@ -121,17 +125,39 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         -ManifestPath $manifest `
         -PayloadRoot (Join-Path $extractDirectory 'noctty') `
         -Label "Portable manifest $architecture"
-    foreach ($relativePath in @(
-        'noctty/noctty.com',
-        'noctty/noctty.exe',
-        'noctty/ghostty-vt.dll',
-        'noctty/noctty-terminal-handoff-proxy.dll'
-    )) {
+    foreach ($relativePath in (Get-WindowsSignedRuntimePayloads)) {
         [void](Assert-ReleaseSignature `
             -Path (Join-Path $extractDirectory $relativePath) `
             -Label "$relativePath $architecture" `
             -AllowedPins $allowedPins `
             -TrustSelfSigned $TrustSelfSigned)
+    }
+
+    # The bundled ConPTY pair is Microsoft's, not ours: it is never re-signed,
+    # so it is verified against the pinned hashes and Microsoft's own signature
+    # instead of the updater publisher pins.
+    $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
+    foreach ($payload in @(
+        @{ RelativePath = 'noctty/conpty.dll'; Pin = $conptyArchitecture.conptyDll },
+        @{ RelativePath = 'noctty/OpenConsole.exe'; Pin = $conptyArchitecture.openConsoleExe }
+    )) {
+        $payloadPath = Join-Path $extractDirectory $payload.RelativePath
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadPath).Hash.ToLowerInvariant()
+        if ($actualHash -cne ([string] $payload.Pin.sha256).ToLowerInvariant()) {
+            throw "$($payload.RelativePath) $architecture does not match the pinned ConPTY SHA-256."
+        }
+
+        $conptySignature = Get-AuthenticodeSignature -LiteralPath $payloadPath
+        if ($conptySignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "$($payload.RelativePath) $architecture has no valid Authenticode signature: $($conptySignature.Status)"
+        }
+        $conptySigner = $conptySignature.SignerCertificate.GetNameInfo(
+            [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        if ($conptySigner -cne 'Microsoft Corporation') {
+            throw "$($payload.RelativePath) $architecture is not signed by Microsoft Corporation: $conptySigner"
+        }
     }
 }
 

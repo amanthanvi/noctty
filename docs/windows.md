@@ -715,6 +715,15 @@ config.
 WSL fails to launch: set `command = wsl.exe` explicitly. If it still fails,
 verify the distribution starts in a normal PowerShell session first.
 
+### ConPTY source
+
+`noctty +version` reports `ConPTY : bundled (<DLL path>)` or
+`ConPTY : inbox`, and `+diagnostic-bundle` records the same selection. Set
+`NOCTTY_CONPTY=inbox` before launch to force the in-box conhost for diagnosis.
+noctty warns in-app when it falls back; the shell still works, but the tested
+in-box conhost strips Kitty-graphics APC and Sixel DCS payloads. See the
+[transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
+
 ### OpenGL driver issues
 
 noctty needs OpenGL 4.3 or newer. If the window fails to render or exits

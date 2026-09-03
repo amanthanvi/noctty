@@ -3813,6 +3813,7 @@ pub const App = struct {
             const result = sys.GetMessageW(&msg, null, 0, 0);
             if (result == -1) return lastError();
             if (result == 0) break;
+            self.showPendingConPtyFallbackBanner();
 
             if (msg.message == c.WM_WINHOSTTY_WAKE) {
                 if (self.global_hotkeys_dirty) {
@@ -7962,6 +7963,16 @@ pub const App = struct {
     fn primarySurface(self: *App) ?*Surface {
         if (self.hosts.items.len == 0) return null;
         return self.activeSurfaceForHost(self.hosts.items[0].id);
+    }
+
+    fn showPendingConPtyFallbackBanner(self: *App) void {
+        if (!ptypkg.hasPendingConPtyFallbackBanner()) return;
+        const surface = self.primarySurface() orelse return;
+        const host = surface.host orelse return;
+        if (!ptypkg.takeConPtyFallbackBanner()) return;
+        host.setBanner(.info, ptypkg.conpty_fallback_banner) catch |err| {
+            log.warn("failed to show ConPTY fallback banner err={}", .{err});
+        };
     }
 
     fn hostWithNewestStructuralUndo(self: *App) ?*Host {

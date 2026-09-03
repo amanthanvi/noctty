@@ -159,6 +159,9 @@ try {
     $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $repoRoot 'src/update/github_releases.zig'))
     if ($allowedPins.Count -eq 0) { throw 'Updater publisher-pin allowlist is empty.' }
     $trustSelfSigned = ([string]$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED).Trim().ToLowerInvariant() -in @('true', '1', 'yes', 'on')
+    $conptyPin = Get-Content `
+        -LiteralPath (Join-Path $repoRoot 'dist/windows/conpty-redist.json') `
+        -Raw | ConvertFrom-Json
 
     $attestationEvidenceCount = 0
     foreach ($asset in $assets) {
@@ -237,29 +240,72 @@ try {
                 -PayloadRoot (Join-Path $extractDirectory 'noctty') `
                 -Label "Portable manifest $architecture"
         }
-        $expectedPortablePePaths = @(
-            'noctty/noctty.com',
-            'noctty/noctty.exe',
-            'noctty/ghostty-vt.dll',
-            'noctty/noctty-terminal-handoff-proxy.dll'
+        # Microsoft's bundled ConPTY pair is intentionally outside
+        # Get-WindowsSignedRuntimePayloads: it is never re-signed by us, so it
+        # can never satisfy the updater publisher pins. It still has to survive
+        # publication, so it is checked below the way the pre-publish verifier
+        # checks it, against the pinned hash and Microsoft's own signer.
+        $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$architecture].Value
+        $conptyPortablePayloads = @(
+            [pscustomobject]@{
+                RelativePath = 'noctty/conpty.dll'
+                Pin          = $conptyArchitecture.conptyDll
+            },
+            [pscustomobject]@{
+                RelativePath = 'noctty/OpenConsole.exe'
+                Pin          = $conptyArchitecture.openConsoleExe
+            }
         )
+        $signedPortablePePaths = @(Get-WindowsSignedRuntimePayloads)
+        $expectedPortablePePaths = $signedPortablePePaths + @($conptyPortablePayloads.RelativePath)
         $portablePePaths = @(Get-PortablePeRelativePaths -Root $extractDirectory)
         $missingPortablePe = @($expectedPortablePePaths | Where-Object { $_ -notin $portablePePaths })
         $unexpectedPortablePe = @($portablePePaths | Where-Object { $_ -notin $expectedPortablePePaths })
         if ($missingPortablePe.Count -gt 0 -or $unexpectedPortablePe.Count -gt 0) {
             throw "$portableName PE inventory mismatch. Missing: $($missingPortablePe -join ', '); unexpected: $($unexpectedPortablePe -join ', ')."
         }
+        # One loop over the whole expected inventory, so no expected PE can
+        # leave this block without an Authenticode verdict.
         foreach ($relativePath in $expectedPortablePePaths) {
             $binaryPath = Join-Path $extractDirectory $relativePath
-            $signatureEvidence.Add((Assert-ReleaseSignature `
-                -Path $binaryPath `
-                -Label "$relativePath $architecture" `
-                -AllowedPins $allowedPins `
-                -TrustSelfSigned $trustSelfSigned))
+            if ($relativePath -in $signedPortablePePaths) {
+                $signatureEvidence.Add((Assert-ReleaseSignature `
+                    -Path $binaryPath `
+                    -Label "$relativePath $architecture" `
+                    -AllowedPins $allowedPins `
+                    -TrustSelfSigned $trustSelfSigned))
+                continue
+            }
+
+            $conptyPayloadPin = @(
+                $conptyPortablePayloads | Where-Object { $_.RelativePath -eq $relativePath }
+            )[0].Pin
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binaryPath).Hash.ToLowerInvariant()
+            if ($actualHash -cne ([string] $conptyPayloadPin.sha256).ToLowerInvariant()) {
+                throw "$relativePath $architecture does not match the pinned ConPTY SHA-256."
+            }
+
+            $conptySignature = Get-AuthenticodeSignature -LiteralPath $binaryPath
+            if ($conptySignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+                throw "$relativePath $architecture has no valid Authenticode signature: $($conptySignature.Status)"
+            }
+            $conptySigner = $conptySignature.SignerCertificate.GetNameInfo(
+                [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+                $false
+            )
+            if ($conptySigner -cne 'Microsoft Corporation') {
+                throw "$relativePath $architecture is not signed by Microsoft Corporation: $conptySigner"
+            }
         }
     }
 
-    $expectedSignatureCount = if ($requiresPortableManifests) { 12 } else { 10 }
+    # Per architecture: one setup, one portable manifest (from 1.3.124), and
+    # every signed runtime payload. Derived so that shipping a new signed
+    # binary cannot silently shrink the evidence set.
+    $signedAssetsPerArchitecture = if ($requiresPortableManifests) { 2 } else { 1 }
+    $expectedSignatureCount =
+        @(Get-WindowsPackageArchitectures).Count *
+        ($signedAssetsPerArchitecture + @(Get-WindowsSignedRuntimePayloads).Count)
     if ($signatureEvidence.Count -ne $expectedSignatureCount) {
         throw "Published release must contain exactly $expectedSignatureCount verified Authenticode signatures; found $($signatureEvidence.Count)."
     }

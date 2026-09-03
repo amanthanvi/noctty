@@ -1,7 +1,7 @@
 $releaseArtifactVerifier = Join-Path $repoRoot 'scripts\release-verify-artifacts.ps1'
 $releaseArtifactVerifierText = Get-Content -LiteralPath $releaseArtifactVerifier -Raw
 $releaseArtifactVerifierSha256 =
-    '67719f4ee9604d389eca6958f54088b0cc0923151d2c0be19aa372bf08fc80c0'
+    'd302619b204e1d68819bb88cf3a75a286ea126e08b2e764f03a515db319965ad'
 $canonicalReleaseArtifactVerifier = ConvertTo-CanonicalText `
     -Text $releaseArtifactVerifierText
 if ((Get-CanonicalTextSha256 -Text $canonicalReleaseArtifactVerifier) -cne
@@ -276,7 +276,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseArtifactVerifier
         Content = { $releaseArtifactVerifierText }
-        Pattern = '(?ms)Get-WindowsPackageArchitectures.*?-Kind setup.*?-Kind portable.*?-Kind manifest.*?-Kind checksums.*?Get-ChecksumEntries.*?\$expectedChecksumNames = @\(.*?GetFileName\(\$setup\).*?GetFileName\(\$portable\).*?\$checksumEntries\.Count -ne \$expectedChecksumNames\.Count.*?\$checksumEntries\.Contains\(\$_\).*?Get-FileSha256Lower.*?Assert-ReleaseSignature.*?Setup \$architecture.*?Assert-ReleaseSignature.*?Portable manifest \$architecture.*?Expand-Archive.*?Assert-PortableManifestMatchesPayload.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll.*?Assert-ReleaseSignature'
+        Pattern = '(?ms)Get-WindowsPackageArchitectures.*?-Kind setup.*?-Kind portable.*?-Kind manifest.*?-Kind checksums.*?Get-ChecksumEntries.*?\$expectedChecksumNames = @\(.*?GetFileName\(\$setup\).*?GetFileName\(\$portable\).*?\$checksumEntries\.Count -ne \$expectedChecksumNames\.Count.*?\$checksumEntries\.Contains\(\$_\).*?Get-FileSha256Lower.*?Assert-ReleaseSignature.*?Setup \$architecture.*?Assert-ReleaseSignature.*?Portable manifest \$architecture.*?Expand-Archive.*?Assert-PortableManifestMatchesPayload.*?Get-WindowsSignedRuntimePayloads.*?Assert-ReleaseSignature'
         Kind = 'Text'
         Description = 'local release verification checks both architecture checksum sets and all installer and portable PE signatures'
     }
@@ -444,11 +444,11 @@ foreach ($contract in @(
     @{ Pattern = '(?s)Get-FileSha256Lower.*?\$digest = .*?\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
-    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$expectedSignatureCount = if \(\$requiresPortableManifests\) \{ 12 \} else \{ 10 \}.*?\$signatureEvidence\.Count -ne \$expectedSignatureCount'; Description = 'published verifier validates two manifests plus every current portable PE while preserving pre-manifest releases' },
+    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?Portable manifest \$architecture.*?Assert-PortableManifestMatchesPayload.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$signedAssetsPerArchitecture = if \(\$requiresPortableManifests\) \{ 2 \} else \{ 1 \}.*?\$expectedSignatureCount =.*?@\(Get-WindowsPackageArchitectures\)\.Count \*.*?\(\$signedAssetsPerArchitecture \+ @\(Get-WindowsSignedRuntimePayloads\)\.Count\).*?\$signatureEvidence\.Count -ne \$expectedSignatureCount'; Description = 'published verifier validates two manifests plus a derived count of every signed portable PE while preserving pre-manifest releases' },
     @{ Pattern = '(?s)gh attestation verify \$Path.*?--repo \$Repository.*?--signer-workflow.*?release\.yml'; Description = 'published verifier binds provenance to the canonical release workflow' },
     @{ Pattern = '(?s)\$expectedAttestationNames = @\(\$expectedNames \| Where-Object \{ \$_ -ne ''noctty-icon\.svg'' \}\).*?foreach \(\$asset in \$assets\).*?\$expectedAttestationNames -contains \[string\]\$asset\.name.*?\$expectedAttestationNames\.Count -ne 9.*?\$attestationEvidenceCount -ne \$expectedAttestationNames\.Count'; Description = 'published verifier binds the exact nine non-icon asset names to attestation evidence' },
     @{ Pattern = '(?s)\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1.*?one consistent certificate'; Description = 'published verifier requires one consistent signer after shared updater-pin verification' },
-    @{ Pattern = "(?s)noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'.*?noctty/noctty-terminal-handoff-proxy\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
+    @{ Pattern = "Get-WindowsSignedRuntimePayloads"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Invoke-ContractTable -Contracts @(

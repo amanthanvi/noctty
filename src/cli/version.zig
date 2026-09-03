@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
+const pty = @import("../pty.zig");
 const xev = @import("../global.zig").xev;
 const renderer = @import("../renderer.zig");
 
@@ -9,6 +10,7 @@ const build_config_heading = "Build Config\n";
 const platform_label = "  - platform      : ";
 const event_backend_label = "  - event backend : ";
 const custom_shaders_label = "  - custom shaders: ";
+const conpty_label = "  - ConPTY        : ";
 
 fn customShadersStatus(comptime enabled: bool) []const u8 {
     return if (enabled) "enabled" else "disabled";
@@ -44,6 +46,11 @@ pub fn run(alloc: Allocator) !u8 {
     try stdout.print("  - Zig version   : {s}\n", .{builtin.zig_version_string});
     try stdout.print("  - build mode    : {}\n", .{builtin.mode});
     try stdout.print("{s}{}\n", .{ platform_label, builtin.target.os.tag });
+    if (pty.conPtyInfo()) |info| {
+        try stdout.print("{s}{t}", .{ conpty_label, info.source });
+        if (info.dll_path) |path| try stdout.print(" ({s})", .{path});
+        try stdout.writeByte('\n');
+    }
     try stdout.print("  - app runtime   : {}\n", .{build_config.app_runtime});
     try stdout.print("  - font engine   : {}\n", .{build_config.font_backend});
     try stdout.print("  - renderer      : {}\n", .{renderer.Renderer});
@@ -64,6 +71,7 @@ test "version output labels are Windows-facing" {
     try std.testing.expect(std.mem.indexOf(u8, event_backend_label, "event backend") != null);
     try std.testing.expect(std.mem.indexOf(u8, event_backend_label, "libxev") == null);
     try std.testing.expect(std.mem.indexOf(u8, custom_shaders_label, "custom shaders") != null);
+    try std.testing.expect(std.mem.indexOf(u8, conpty_label, "ConPTY") != null);
 }
 
 test "version custom shader status selection" {
