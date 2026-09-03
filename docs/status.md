@@ -151,10 +151,12 @@ Win32-validated VT protocol coverage is tracked in
 
 `+register-default-terminal` and `+unregister-default-terminal` implement
 per-user registration and exact selection restore, using Windows Terminal
-1.24 or newer OpenConsole for console delegation. The runtime handoff does
-not work yet: live validation reaches noctty, but the adopted session closes
-before a visible window appears. Do not select noctty as your normal default
-terminal yet. Details in [windows.md](windows.md#default-terminal).
+1.24 or newer OpenConsole for console delegation. A delegated console
+application is adopted into a visible noctty window, verified live on
+Windows 11 26200. Still missing: noctty cannot appear in the Windows Settings
+picker without package identity, and it implements no `IConsoleHandoff`, so
+Windows Terminal must stay selected as the console half. Details in
+[windows.md](windows.md#default-terminal).
 
 ### Windows UI Automation (accessibility)
 
