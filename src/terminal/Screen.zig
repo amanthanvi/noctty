@@ -2467,6 +2467,12 @@ pub fn semanticPromptInputPending(self: *const Screen) bool {
     return self.semantic_command.inputPending();
 }
 
+/// Consume the outstanding OSC 133;B input mark because a line terminator or
+/// Enter key was just written to the pty. See `SemanticCommand.consumeInput`.
+pub fn semanticPromptInputSubmitted(self: *Screen) void {
+    self.semantic_command.consumeInput(&self.pages);
+}
+
 /// Discard B/C state when a new prompt begins without a completing D mark.
 pub fn semanticPromptAbortCommand(self: *Screen) void {
     self.semantic_command.abortCommand(&self.pages);
@@ -10569,6 +10575,77 @@ test "Screen: semantic prompt input pending tracks the OSC 133;B mark" {
     try s.testWriteString("PS> ");
     try testing.expect(!s.semanticPromptCommandRunning());
     try testing.expect(!s.semanticPromptInputPending());
+}
+
+test "Screen: semantic prompt input mark is consumed when input is submitted" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // An earlier complete command, the kind a Clink-enabled cmd session or a
+    // nested PowerShell leaves behind.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("C:\\> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("ver");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nMicrosoft Windows");
+    try s.semanticPromptEndCommand();
+
+    // The A/B-only cmd PROMPT integration: a new prompt with a B mark, then
+    // the user presses Enter. cmd emits neither C nor another prompt until the
+    // child command exits, so the terminal sees nothing more for now.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("C:\\> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("some-child.exe");
+    try testing.expect(s.semanticPromptInputPending());
+    {
+        const before = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(before);
+        try testing.expectEqualStrings("ver", before);
+    }
+
+    // Submitting consumes the mark: nothing has told us a line editor is
+    // reading input any more, so an insertion gate must refuse, even though
+    // no command is reported as running and history is still readable.
+    s.semanticPromptInputSubmitted();
+    try testing.expect(!s.semanticPromptInputPending());
+    try testing.expect(!s.semanticPromptCommandRunning());
+    {
+        const history = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(history);
+        try testing.expectEqualStrings("ver", history);
+    }
+
+    // A shell that does emit C/D still completes the record normally: C falls
+    // back to the prompt iterator when no pending pin exists.
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try testing.expect(s.semanticPromptCommandRunning());
+    try s.testWriteString("\nchild output");
+    try s.semanticPromptEndCommand();
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("some-child.exe", command);
+    }
+
+    // A fresh B mark re-arms the gate.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("C:\\> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try testing.expect(s.semanticPromptInputPending());
 }
 
 test "Screen: last-command drops a record shifted onto the active input row" {

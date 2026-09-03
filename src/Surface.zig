@@ -1117,7 +1117,55 @@ fn queueIo(
         }
     }
 
+    // Every byte noctty writes to the pty passes through here, so this is
+    // the one place to notice that we just submitted a line.
+    switch (msg) {
+        .write_small => |v| self.noteSubmittedInput(v.data[0..v.len], mutex),
+        .write_stable => |v| self.noteSubmittedInput(v, mutex),
+        .write_alloc => |v| self.noteSubmittedInput(v.data, mutex),
+        else => {},
+    }
+
     self.io.queueMessage(msg, mutex);
+}
+
+/// True if `data`, about to be written to the pty, contains a line
+/// terminator. This is the legacy encoding of Enter, the end of a text
+/// binding or IME commit, and any multi-line paste; the Kitty keyboard
+/// protocol encodes Enter as `CSI 13 u` instead and is handled at the key
+/// level in `keyCallback`.
+fn submissionInBytes(data: []const u8) bool {
+    return std.mem.indexOfAny(u8, data, "\r\n") != null;
+}
+
+/// Consume the OSC 133;B input mark if `data` submits the line. See
+/// `SemanticCommand.consumeInput` for why: the mark is the shell's claim that
+/// it is reading input, and once we have sent the terminator that claim is
+/// stale until the shell renews it. `mutex` follows the `queueIo` contract.
+fn noteSubmittedInput(
+    self: *Surface,
+    data: []const u8,
+    mutex: termio.Termio.MutexState,
+) void {
+    if (!submissionInBytes(data)) return;
+    self.markInputSubmitted(mutex);
+}
+
+fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState) void {
+    if (mutex == .unlocked) self.renderer_state.mutex.lock();
+    defer if (mutex == .unlocked) self.renderer_state.mutex.unlock();
+    self.io.terminal.screens.active.semanticPromptInputSubmitted();
+}
+
+test "Surface: submissionInBytes recognises line terminators" {
+    const testing = std.testing;
+    try testing.expect(submissionInBytes("\r"));
+    try testing.expect(submissionInBytes("\n"));
+    try testing.expect(submissionInBytes("\x1b[200~one\ntwo\x1b[201~"));
+    try testing.expect(!submissionInBytes(""));
+    try testing.expect(!submissionInBytes("ls -la"));
+    try testing.expect(!submissionInBytes("\x1b[A"));
+    try testing.expect(!submissionInBytes("\x1b[<0;10;20M"));
 }
 
 /// Forces the surface to render. This is useful for when the surface
@@ -3366,6 +3414,15 @@ pub fn keyCallback(
             .stable => |v| .{ .write_stable = v },
             .alloc => |v| .{ .write_alloc = v },
         }, .unlocked);
+
+        // Enter submits the line whatever its encoding. The legacy `\r` is
+        // caught by `queueIo`'s byte scan; the Kitty keyboard protocol sends
+        // `CSI 13 u`, which is not, so consume the OSC 133;B mark here too.
+        if (event.action != .release and
+            (event.key == .enter or event.key == .numpad_enter))
+        {
+            self.markInputSubmitted(.unlocked);
+        }
     } else {
         // No valid request means that we didn't encode anything.
         return .ignored;
@@ -6222,7 +6279,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 // line of input. "No command is running" is not enough on its
                 // own: a child that emits OSC 133;A without a following B
                 // clears the running flag while still owning the pty, and we
-                // would type into that child instead of a shell prompt.
+                // would type into that child instead of a shell prompt. The
+                // mark is also consumed the moment we write a submission
+                // (`queueIo`), because an A/B-only shell such as the cmd.exe
+                // PROMPT integration emits nothing between Enter and the next
+                // prompt, and a B that survived our own Enter proves nothing.
                 if (!self.io.terminal.screens.active.semanticPromptInputPending()) {
                     log.info(
                         "insert last command ignored: no OSC 133;B input mark is outstanding",

@@ -102,9 +102,10 @@ that:
 - OSC 133 prompt marks back previous/next prompt navigation, copying the last
   completed command output, and inserting the last recoverable single-line
   command back on the prompt from the command palette. Insert requires
-  OSC 133;B and OSC 133;C; it does not inspect or modify the shell's line
-  editor, and it does not submit the command — OSC 133 marks are forgeable by
-  any program writing to the terminal, so the user reviews and presses Enter.
+  OSC 133;B and OSC 133;C and a B mark that noctty has not itself submitted
+  with Enter since; it does not inspect or modify the shell's line editor, and
+  it does not submit the command — OSC 133 marks are forgeable by any program
+  writing to the terminal, so the user reviews and presses Enter.
 - PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
   does not auto-install remote terminfo; uncached hosts use
   `xterm-256color`.

@@ -106,8 +106,10 @@ With OSC 133 shell integration active, the command palette also offers:
   single-line command back on the prompt without submitting it. Needs OSC
   133;B and OSC 133;C boundaries; noctty never reads or modifies the shell's
   line editor. It refuses on the alternate screen, while a command is running,
-  and when no OSC 133;B input mark is outstanding, and it rejects text that is
-  empty, multi-line, over 4096 bytes, or carries control or invisible
+  and when no OSC 133;B input mark is outstanding (pressing Enter, or pasting
+  a line terminator, consumes the mark until the shell draws the next prompt,
+  which matters for the A/B-only cmd.exe integration), and it rejects text
+  that is empty, multi-line, over 4096 bytes, or carries control or invisible
   formatting characters. It does not press Enter, by design: OSC 133 marks
   carry no provenance, so any program that can print (a file you `type`, a log
   you tail, a host you SSH into) can forge a complete A/B/C/D lifecycle around

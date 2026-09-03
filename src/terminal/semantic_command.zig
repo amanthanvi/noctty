@@ -152,6 +152,24 @@ pub fn inputPending(self: *const SemanticCommand) bool {
     return pinIsValid(pending);
 }
 
+/// Consume the outstanding input mark because noctty itself just wrote a
+/// submission (a carriage return, a newline, or an Enter key) to the pty.
+///
+/// The B mark is the shell's claim that it is reading a line. Once we have
+/// sent the line terminator, that claim is stale until the shell says
+/// otherwise: a shell with C/D marks will emit C next, but the A/B-only
+/// `cmd.exe` PROMPT integration emits nothing until the child command exits
+/// and the next prompt is drawn, so without this the mark would stay
+/// "pending" for the whole run of the child and `insert_last_command` could
+/// be satisfied while that child owns the pty. A new B re-arms it.
+///
+/// `active` and `completed` are untouched: a following C still has to find
+/// the prompt, and `startOutput` falls back to the prompt iterator when no
+/// pending pin exists, so C/D shells lose nothing.
+pub fn consumeInput(self: *SemanticCommand, pages: *PageList) void {
+    self.clearPending(pages);
+}
+
 /// Discard B/C state when a new prompt begins without a completing D mark.
 pub fn abortCommand(self: *SemanticCommand, pages: *PageList) void {
     self.clearPending(pages);
