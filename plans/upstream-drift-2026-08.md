@@ -24,8 +24,8 @@ without conflict, but one of them (`997a2aff2afc`) does not compile against the
 fork's older `PageList` API and was dropped. The remaining seven apply cleanly,
 build, and leave the full test suite green (3779 passed, 70 skipped, 0 failed).
 The three terminal/SIMD picks are certified by those gates. The four
-renderer/input picks remain provisional until the required interactive Windows
-results are recorded.
+renderer/input picks were certified on 2026-09-03 by the interactive Windows 11
+composite (see "Interactive certification" below).
 
 **Those seven commits are not on this branch, and none of the certification
 above describes it.** They live on `issues/141-upstream-sync-2026-08` (PR #175),
@@ -324,10 +324,28 @@ not a bare `zig fmt --check src`: the tracked generated
 
 Those gates certify `83027407e66e`, `e44f5cb0fa1a`, and `a8c3ab1915c9`.
 The renderer/input picks `ac67a6160c81`, `9c9cf3e82174`, `9e6e2ea96458`, and
-`bd647035e97d` are not certified until the Windows 11 composite plus the
-affected IME/key-input harness results required by the merge policy are
-recorded. The current seven-commit stack therefore remains provisional as a
-whole.
+`bd647035e97d` required the Windows 11 composite plus the affected IME and
+key-input harnesses; those results are recorded below.
+
+### Interactive certification
+
+Run on 2026-09-03 against `main` at `eaff07831`, which carries the seven picks
+(merged as #175). Machine: Windows 11 build 26200 (25H2), console session,
+Debug build, `noctty.exe` SHA-256
+`FB21EFAF572A6265AEAFF50A4276450AE9A1661DB10B642BF22603B7E3970E8E`.
+
+```powershell
+pwsh -NoProfile -File test/windows/interactive-win11-validate.ps1 -Rebuild -ResetState
+```
+
+Result: `interactive-win11 validate suite: PASS`, all component harnesses
+PASS, including `interactive-win11-ime-candidate.ps1` (covers the preedit range
+change in `9c9cf3e82174`) and the nine `interactive-win11-key-input.ps1`
+scenarios (classic, BMP, supplementary, burst, CR, LF, Tab, Backspace, Escape;
+cover the key-encoding changes). The foreground-sensitive
+`interactive-win11-shell-command-live.ps1` was skipped by the composite and
+run separately with `-ConfiguredScenariosOnly`: PASS. The seven-commit stack is
+therefore certified, not provisional.
 
 `997a2aff2afc` (`terminal: preserve pending wrap in VT formatter`) was the
 eighth candidate. It applies without conflict but fails to compile:
@@ -456,9 +474,8 @@ git status --porcelain=v2 --branch
   migration, and all `src/apprt/**` commits were excluded from the slice.
 - A patch applying textually does not prove that it builds. `997a2aff2afc`
   demonstrated exactly this and was dropped at the build gate.
-- All seven picks were validated by build and the full test suite. The four
-  renderer/input picks remain provisional because they were not validated by
-  the required interactive runtime harnesses. In particular,
-  `renderer: fix preedit range width` changes IME preedit cell suppression by
-  one cell in the shared generic renderer; it is covered by unit tests but was
-  not confirmed against a live IME session.
+- All seven picks were validated by build and the full test suite, and the
+  four renderer/input picks by the interactive Windows 11 composite on
+  2026-09-03 (see "Interactive certification"). `renderer: fix preedit range
+width` changes IME preedit cell suppression by one cell in the shared generic
+  renderer; the IME candidate harness passed against it in a live session.
