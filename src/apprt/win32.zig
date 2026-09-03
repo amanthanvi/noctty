@@ -22321,6 +22321,19 @@ fn runUiActionOrLog(comptime context: []const u8, action: anytype) void {
     _ = action catch |err| logUiActionError(context, err);
 }
 
+/// Run a chrome sync that reports "this changed", treating a failure as "no
+/// change". The sync helpers work on terminal-controlled data and can fail on
+/// it, and every `refreshChrome` call site already logs instead of
+/// propagating. Paths reached from `App.tick` need the same containment: the
+/// Win32 message loop calls `tick` with `try`, so an escaping error unwinds
+/// `App.run` and exits the process rather than dropping one chrome update.
+fn chromeSyncOrLog(comptime context: []const u8, sync: anytype) bool {
+    return sync catch |err| {
+        logUiActionError(context, err);
+        return false;
+    };
+}
+
 fn tabContainerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (getHost(hwnd)) |host| {
         if (msg == c.WM_GETOBJECT) {
@@ -28352,19 +28365,19 @@ pub const Surface = struct {
         // whatever title the shell emitted first until an unrelated event
         // (tab activation, focus change, tab reorder, split undo) refreshed
         // the whole chrome.
-        var invalidate = try host.syncWindowTitle();
+        //
+        // Neither sync propagates: see `chromeSyncOrLog`. Both are reachable
+        // only from title setters, which run under `App.tick`.
+        const caption_changed = chromeSyncOrLog(
+            "title window caption sync failed",
+            host.syncWindowTitle(),
+        );
+        const tabs_changed = chromeSyncOrLog(
+            "title tab label sync failed",
+            host.syncTabButtons(),
+        );
 
-        // Log rather than propagate, the way every `refreshChrome` caller
-        // already does. Chrome sync works on terminal-controlled data and
-        // can fail on it; a title path runs under `App.tick`, whose errors
-        // unwind the Win32 message loop and tear the process down.
-        const tabs_changed = host.syncTabButtons() catch |err| tabs: {
-            logUiActionError("title tab label sync failed", err);
-            break :tabs false;
-        };
-        invalidate = tabs_changed or invalidate;
-
-        if (invalidate) host.invalidateTopChromeText();
+        if (caption_changed or tabs_changed) host.invalidateTopChromeText();
     }
 
     fn invalidateStatusBarState(self: *Surface) void {
