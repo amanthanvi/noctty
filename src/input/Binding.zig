@@ -349,6 +349,19 @@ pub const Action = union(enum) {
     /// Copy the selected text to the clipboard.
     copy_to_clipboard: CopyToClipboard,
 
+    /// Copy the output of the most recent command completed by shell
+    /// integration to the default clipboard.
+    copy_last_command_output,
+
+    /// Insert the most recent single-line command recoverable from shell
+    /// integration at the shell's prompt, without submitting it. This never
+    /// reads or modifies the shell's line editor, and it deliberately does
+    /// not press Enter for you: OSC 133 marks are emitted by whatever is
+    /// writing to the terminal, so any program that produces output can forge
+    /// a command lifecycle. You review what lands on the prompt and submit it
+    /// yourself.
+    insert_last_command,
+
     /// Paste the contents of the default clipboard.
     paste_from_clipboard,
 
@@ -1366,6 +1379,8 @@ pub const Action = union(enum) {
             .end_search,
             .reset,
             .copy_to_clipboard,
+            .copy_last_command_output,
+            .insert_last_command,
             .copy_url_to_clipboard,
             .copy_title_to_clipboard,
             .paste_from_clipboard,

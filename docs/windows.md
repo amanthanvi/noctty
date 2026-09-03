@@ -96,6 +96,31 @@ the closing mark so cmd does not pair the dangling `$` with the mark's `$E`.
 `PROMPT` is session-wide, so `echo on` batch runs and `cmd /c` children can
 echo the wrapped value and emit spurious OSC 133 marks.
 
+With OSC 133 shell integration active, the command palette also offers:
+
+- `jump_to_prompt:-1` / `jump_to_prompt:1` (`Ctrl+Shift+PageUp` /
+  `Ctrl+Shift+PageDown`): previous / next prompt.
+- `copy_last_command_output` (`Ctrl+Shift+Y`): copy the last completed
+  command's output. Needs OSC 133;C and OSC 133;D boundaries.
+- `insert_last_command` (no default keybind): put the last recoverable
+  single-line command back on the prompt without submitting it. Needs OSC
+  133;B and OSC 133;C boundaries; noctty never reads or modifies the shell's
+  line editor. It refuses on the alternate screen, while a command is running,
+  and when no OSC 133;B input mark is outstanding (pressing Enter, or pasting
+  a line terminator, consumes the mark until the shell draws the next prompt,
+  which matters for the A/B-only cmd.exe integration), and it rejects text
+  that is empty, multi-line, over 4096 bytes, or carries control or invisible
+  formatting characters. It does not press Enter, by design: OSC 133 marks
+  carry no provenance, so any program that can print (a file you `type`, a log
+  you tail, a host you SSH into) can forge a complete A/B/C/D lifecycle around
+  text of its choosing and have it retained as "the last command". The text is
+  inserted the way a clipboard paste is (bracketed when the terminal asked for
+  it); you read what landed on the prompt and submit it yourself.
+
+After a resize or repaint, ConPTY can redraw the whole screen and retag
+previously marked cells as output, so a recovered command or output region may
+occasionally be unavailable or truncated afterward.
+
 `utf8-console` (`auto`, `always`, `never`) controls UTF-8 setup for bare
 interactive `cmd.exe` launches and for Windows PowerShell 5.1 and PowerShell 7
 sessions. `auto` (the default) enables UTF-8 unless the machine ANSI or OEM

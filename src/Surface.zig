@@ -1117,7 +1117,55 @@ fn queueIo(
         }
     }
 
+    // Every byte noctty writes to the pty passes through here, so this is
+    // the one place to notice that we just submitted a line.
+    switch (msg) {
+        .write_small => |v| self.noteSubmittedInput(v.data[0..v.len], mutex),
+        .write_stable => |v| self.noteSubmittedInput(v, mutex),
+        .write_alloc => |v| self.noteSubmittedInput(v.data, mutex),
+        else => {},
+    }
+
     self.io.queueMessage(msg, mutex);
+}
+
+/// True if `data`, about to be written to the pty, contains a line
+/// terminator. This is the legacy encoding of Enter, the end of a text
+/// binding or IME commit, and any multi-line paste; the Kitty keyboard
+/// protocol encodes Enter as `CSI 13 u` instead and is handled at the key
+/// level in `keyCallback`.
+fn submissionInBytes(data: []const u8) bool {
+    return std.mem.indexOfAny(u8, data, "\r\n") != null;
+}
+
+/// Consume the OSC 133;B input mark if `data` submits the line. See
+/// `SemanticCommand.consumeInput` for why: the mark is the shell's claim that
+/// it is reading input, and once we have sent the terminator that claim is
+/// stale until the shell renews it. `mutex` follows the `queueIo` contract.
+fn noteSubmittedInput(
+    self: *Surface,
+    data: []const u8,
+    mutex: termio.Termio.MutexState,
+) void {
+    if (!submissionInBytes(data)) return;
+    self.markInputSubmitted(mutex);
+}
+
+fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState) void {
+    if (mutex == .unlocked) self.renderer_state.mutex.lock();
+    defer if (mutex == .unlocked) self.renderer_state.mutex.unlock();
+    self.io.terminal.screens.active.semanticPromptInputSubmitted();
+}
+
+test "Surface: submissionInBytes recognises line terminators" {
+    const testing = std.testing;
+    try testing.expect(submissionInBytes("\r"));
+    try testing.expect(submissionInBytes("\n"));
+    try testing.expect(submissionInBytes("\x1b[200~one\ntwo\x1b[201~"));
+    try testing.expect(!submissionInBytes(""));
+    try testing.expect(!submissionInBytes("ls -la"));
+    try testing.expect(!submissionInBytes("\x1b[A"));
+    try testing.expect(!submissionInBytes("\x1b[<0;10;20M"));
 }
 
 /// Forces the surface to render. This is useful for when the surface
@@ -3381,6 +3429,15 @@ pub fn keyCallback(
             .stable => |v| .{ .write_stable = v },
             .alloc => |v| .{ .write_alloc = v },
         }, .unlocked);
+
+        // Enter submits the line whatever its encoding. The legacy `\r` is
+        // caught by `queueIo`'s byte scan; the Kitty keyboard protocol sends
+        // `CSI 13 u`, which is not, so consume the OSC 133;B mark here too.
+        if (event.action != .release and
+            (event.key == .enter or event.key == .numpad_enter))
+        {
+            self.markInputSubmitted(.unlocked);
+        }
     } else {
         // No valid request means that we didn't encode anything.
         return .ignored;
@@ -6173,6 +6230,127 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             return true;
         },
 
+        .copy_last_command_output => {
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
+
+            const output = try self.io.terminal.screens.active.lastCommandOutputString(
+                self.alloc,
+            ) orelse {
+                log.info(
+                    "copy last command output ignored: no complete OSC 133 C/D region is available",
+                    .{},
+                );
+                return true;
+            };
+            defer self.alloc.free(output);
+
+            if (output.len == 0) {
+                log.info(
+                    "copy last command output ignored: the completed command produced no output",
+                    .{},
+                );
+                return true;
+            }
+
+            self.rt_surface.setClipboard(.standard, &.{.{
+                .mime = "text/plain",
+                .data = output,
+            }}, false) catch |err| {
+                log.err("error copying last command output err={}", .{err});
+                return false;
+            };
+
+            if (self.config.app_notifications.@"clipboard-copy") {
+                try self.showAppNotification("noctty", "Copied last command output to clipboard");
+            }
+            return true;
+        },
+
+        .insert_last_command => {
+            const command = command: {
+                self.renderer_state.mutex.lock();
+                defer self.renderer_state.mutex.unlock();
+
+                // Never type into an alternate-screen program (a TUI) and
+                // never type while a command is still running: in both cases
+                // the bytes would land somewhere the user did not intend.
+                if (self.io.terminal.screens.active_key != .primary) {
+                    log.info(
+                        "insert last command ignored: the alternate screen is active",
+                        .{},
+                    );
+                    return true;
+                }
+                if (self.io.terminal.screens.active.semanticPromptCommandRunning()) {
+                    log.info(
+                        "insert last command ignored: a command is still running",
+                        .{},
+                    );
+                    return true;
+                }
+
+                // Only write into something that has told us it is reading a
+                // line of input. "No command is running" is not enough on its
+                // own: a child that emits OSC 133;A without a following B
+                // clears the running flag while still owning the pty, and we
+                // would type into that child instead of a shell prompt. The
+                // mark is also consumed the moment we write a submission
+                // (`queueIo`), because an A/B-only shell such as the cmd.exe
+                // PROMPT integration emits nothing between Enter and the next
+                // prompt, and a B that survived our own Enter proves nothing.
+                if (!self.io.terminal.screens.active.semanticPromptInputPending()) {
+                    log.info(
+                        "insert last command ignored: no OSC 133;B input mark is outstanding",
+                        .{},
+                    );
+                    return true;
+                }
+
+                break :command try self.io.terminal.screens.active.lastCommandString(
+                    self.alloc,
+                );
+            } orelse {
+                log.info(
+                    "insert last command ignored: no recoverable complete OSC 133 B/C region is available",
+                    .{},
+                );
+                return true;
+            };
+            defer self.alloc.free(command);
+
+            if (!insertCommandIsSafe(command)) {
+                log.info(
+                    "insert last command ignored: recovered command is empty, multiline, invalid UTF-8, or contains control characters",
+                    .{},
+                );
+                return true;
+            }
+
+            // Deliberately no trailing carriage return. OSC 133 marks carry no
+            // provenance: every byte the terminal sees is written by the child
+            // PTY, so any program that can print can also forge a complete
+            // A/B/C/D lifecycle around text of its choosing and have it
+            // retained as "the last command". Submitting that text on a single
+            // keypress would turn "display untrusted output" into "execute
+            // attacker-chosen command". We hand the text to the shell's line
+            // editor through the same encoder clipboard pastes use — bracketed
+            // when the terminal asked for it — and let the user read it and
+            // press Enter themselves.
+            self.completeClipboardPaste(command, false) catch |err| switch (err) {
+                error.UnsafePaste => {
+                    log.info(
+                        "insert last command ignored: recovered command failed paste protection",
+                        .{},
+                    );
+                    return true;
+                },
+                else => return err,
+            };
+
+            return true;
+        },
+
         .copy_url_to_clipboard => {
             // If the mouse isn't over a link, nothing we can do.
             if (!self.mouse.over_link) return false;
@@ -7277,6 +7455,65 @@ fn completeClipboardPaste(
             vec,
         ), .unlocked);
     };
+}
+
+/// Insert uses the same unsafe-paste detector as clipboard paste, then applies
+/// a stricter contract than a normal paste: one non-empty UTF-8 line with no
+/// control or Unicode line-separator characters. The recovered text is never
+/// submitted for the user, but it still has to reach the prompt as exactly the
+/// one line they can see.
+fn insertCommandIsSafe(data: []const u8) bool {
+    if (data.len == 0 or data.len > insert_command_max_len) return false;
+    if (!input.paste.isSafe(data)) return false;
+
+    const view = std.unicode.Utf8View.init(data) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp < 0x20 or
+            (cp >= 0x7F and cp <= 0x9F) or
+            cp == 0x2028 or
+            cp == 0x2029 or
+            // Bidi and other invisible formatting controls: they can make the
+            // command the user sees differ from the command that runs.
+            (cp >= 0x200B and cp <= 0x200F) or
+            (cp >= 0x202A and cp <= 0x202E) or
+            (cp >= 0x2060 and cp <= 0x2064) or
+            (cp >= 0x2066 and cp <= 0x2069) or
+            cp == 0xFEFF)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/// Recovered command text longer than this is rejected rather than inserted.
+/// A recovered line that long is far more likely to be a mis-parse than
+/// something the user actually typed.
+const insert_command_max_len: usize = 4096;
+
+test "Surface: last-command insert safety reuses paste protection and rejects controls" {
+    const testing = std.testing;
+
+    try testing.expect(insertCommandIsSafe("Write-Output 'safe'"));
+    try testing.expect(!insertCommandIsSafe(""));
+    try testing.expect(!insertCommandIsSafe("one\ntwo"));
+    try testing.expect(!insertCommandIsSafe("one\rtwo"));
+    try testing.expect(!insertCommandIsSafe("one\ttwo"));
+    try testing.expect(!insertCommandIsSafe("one\x1b[201~two"));
+    try testing.expect(!insertCommandIsSafe("one\xC2\x85two"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x80\xA8two"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x80\xA9two"));
+    try testing.expect(!insertCommandIsSafe("one\xC0two"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x80\xAEtwo"));
+    try testing.expect(!insertCommandIsSafe("one\xE2\x81\xA6two"));
+    try testing.expect(!insertCommandIsSafe("one\xEF\xBB\xBFtwo"));
+
+    const too_long = "e" ** (insert_command_max_len + 1);
+    try testing.expect(!insertCommandIsSafe(too_long));
+    const at_limit = "e" ** insert_command_max_len;
+    try testing.expect(insertCommandIsSafe(at_limit));
 }
 
 fn completeClipboardReadOSC52(

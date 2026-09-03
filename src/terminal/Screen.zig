@@ -13,6 +13,7 @@ const tripwire = @import("../tripwire.zig");
 const unicode = @import("../unicode/main.zig");
 const Selection = @import("Selection.zig");
 const PageList = @import("PageList.zig");
+const SemanticCommand = @import("semantic_command.zig");
 const StringMap = @import("StringMap.zig");
 const ScreenFormatter = @import("formatter.zig").ScreenFormatter;
 const osc = @import("osc.zig");
@@ -76,6 +77,9 @@ else
 
 /// Semantic prompt (OSC133) state.
 semantic_prompt: SemanticPrompt = .disabled,
+
+/// Recoverable completed-command state derived from OSC 133 marks.
+semantic_command: SemanticCommand = .{},
 
 /// Dirty flags for the renderer.
 dirty: Dirty = .{},
@@ -322,6 +326,7 @@ pub fn deinit(self: *Screen) void {
     if (comptime build_options.kitty_graphics) {
         self.kitty_images.deinit(self.alloc, self);
     }
+    self.semantic_command.deinit(&self.pages);
     self.cursor.deinit(self.alloc);
     self.pages.deinit();
 }
@@ -365,6 +370,8 @@ pub fn assertIntegrity(self: *const Screen) void {
 /// - Disables protection mode
 ///
 pub fn reset(self: *Screen) void {
+    self.semantic_command.deinit(&self.pages);
+
     // Reset our pages
     self.pages.reset();
 
@@ -394,6 +401,7 @@ pub fn reset(self: *Screen) void {
     self.kitty_keyboard = .{};
     self.protected_mode = .off;
     self.semantic_prompt = .disabled;
+    self.semantic_command = .{};
     self.clearSelection();
 }
 
@@ -793,6 +801,8 @@ pub fn cursorDownScroll(self: *Screen) !void {
 
     // If we have no scrollback, then we shift all our rows instead.
     if (self.no_scrollback) {
+        self.semantic_command.invalidateActiveTopRow(&self.pages);
+
         // If we have a single-row screen, we have no rows to shift
         // so our cursor is in the correct place we just have to clear
         // the cells.
@@ -1307,6 +1317,11 @@ pub inline fn eraseHistory(
     bl: ?point.Point,
 ) void {
     defer self.assertIntegrity();
+    self.semantic_command.invalidateRange(
+        &self.pages,
+        .{ .history = .{} },
+        bl,
+    );
     self.pages.eraseHistory(bl);
     self.cursorReload();
 }
@@ -1316,6 +1331,11 @@ pub inline fn eraseActive(
     y: size.CellCountInt,
 ) void {
     defer self.assertIntegrity();
+    self.semantic_command.invalidateRange(
+        &self.pages,
+        .{ .active = .{} },
+        .{ .active = .{ .y = y } },
+    );
     self.pages.eraseActive(y);
     self.cursorReload();
 }
@@ -1333,6 +1353,8 @@ pub fn clearRows(
     protected: bool,
 ) void {
     defer self.assertIntegrity();
+
+    self.semantic_command.invalidateRange(&self.pages, tl, bl);
 
     var it = self.pages.pageIterator(.right_down, tl, bl);
     while (it.next()) |chunk| {
@@ -1652,6 +1674,18 @@ pub inline fn resize(
         self.kitty_images.dirty = true;
     }
 
+    // A column shrink without reflow (the primary screen takes this path
+    // whenever DEC wraparound is off, and the alternate screen always does)
+    // clears every cell past the new width and clamps tracked pins to it,
+    // rather than moving the text somewhere else. A retained command record
+    // would survive that with its span silently truncated, so the recovered
+    // text would be a *different* command than the one that ran — a truncated
+    // path or a dropped redirect. Drop the record instead of recovering a
+    // half command.
+    if (!opts.reflow and opts.cols < self.pages.cols) {
+        self.semantic_command.reset(&self.pages);
+    }
+
     // Release the cursor style while resizing just
     // in case the cursor ends up on a different page.
     const cursor_style = self.cursor.style;
@@ -1763,6 +1797,7 @@ pub inline fn resize(
     // erase our history. This is because PageList always keeps at least
     // a page size of history.
     if (self.no_scrollback) {
+        self.semantic_command.invalidateRange(&self.pages, .{ .history = .{} }, null);
         self.pages.eraseHistory(null);
     }
 
@@ -2390,6 +2425,59 @@ pub fn cursorSetSemanticContent(self: *Screen, t: union(enum) {
     }
 }
 
+/// Record OSC 133;B/I, which begins recoverable command input. We track the
+/// prompt instead of scraping the cursor line so later extraction can use the
+/// semantic-content boundaries maintained by PageList.
+pub fn semanticPromptStartInput(self: *Screen) Allocator.Error!void {
+    return self.semantic_command.startInput(
+        &self.pages,
+        self.semantic_prompt.seen,
+        self.cursor.page_pin.*,
+    );
+}
+
+/// Record OSC 133;C. Prefer the prompt tracked by OSC 133;B/I, but preserve
+/// C..D output recovery even when the shell omitted the input mark.
+pub fn semanticPromptStartOutput(self: *Screen) Allocator.Error!void {
+    return self.semantic_command.startOutput(
+        &self.pages,
+        self.semantic_prompt.seen,
+        self.cursor.page_pin.*,
+    );
+}
+
+/// Record OSC 133;D and freeze the completed command's output endpoint.
+pub fn semanticPromptEndCommand(self: *Screen) Allocator.Error!void {
+    return self.semantic_command.endCommand(
+        &self.pages,
+        self.cursor.page_pin.*,
+    );
+}
+
+/// True while a command has emitted OSC 133;C but not yet OSC 133;D, i.e. the
+/// shell is busy running something rather than sitting at an idle prompt.
+pub fn semanticPromptCommandRunning(self: *const Screen) bool {
+    return self.semantic_command.commandRunning();
+}
+
+/// Whether an OSC 133;B input mark is currently outstanding. See
+/// `SemanticCommand.inputPending` — required before writing recovered bytes
+/// back to the pty, not required for reading history.
+pub fn semanticPromptInputPending(self: *const Screen) bool {
+    return self.semantic_command.inputPending();
+}
+
+/// Consume the outstanding OSC 133;B input mark because a line terminator or
+/// Enter key was just written to the pty. See `SemanticCommand.consumeInput`.
+pub fn semanticPromptInputSubmitted(self: *Screen) void {
+    self.semantic_command.consumeInput(&self.pages);
+}
+
+/// Discard B/C state when a new prompt begins without a completing D mark.
+pub fn semanticPromptAbortCommand(self: *Screen) void {
+    self.semantic_command.abortCommand(&self.pages);
+}
+
 /// Set the selection to the given selection. If this is a tracked selection
 /// then the screen will take ownership of the selection. If this is untracked
 /// then the screen will convert it to tracked internally. This will automatically
@@ -2913,6 +3001,40 @@ pub fn selectOutput(self: *Screen, pin: Pin) ?Selection {
     }
 
     return .init(hl.start, hl.end, false);
+}
+
+/// Return the output text in the most recent complete OSC 133;C..D region.
+/// A completed command with no output returns an allocated empty string;
+/// missing, running, or trimmed command regions return null.
+pub fn lastCommandOutputString(
+    self: *Screen,
+    alloc: Allocator,
+) Allocator.Error!?[:0]const u8 {
+    const region = switch (self.semantic_command.outputRegion(&self.pages)) {
+        .unavailable => return null,
+        .empty => return try alloc.dupeZ(u8, ""),
+        .region => |region| region,
+    };
+
+    return try self.selectionString(alloc, .{
+        .sel = .init(region.start, region.end, false),
+        .trim = false,
+    });
+}
+
+/// Return the command text in the most recent complete OSC 133;B..C region.
+/// The caller decides whether the recovered text is safe to execute.
+pub fn lastCommandString(
+    self: *Screen,
+    alloc: Allocator,
+) Allocator.Error!?[:0]const u8 {
+    const region = self.semantic_command.inputRegion(&self.pages) orelse
+        return null;
+
+    return try self.selectionString(alloc, .{
+        .sel = .init(region.start, region.end, false),
+        .trim = true,
+    });
 }
 
 pub const LineIterator = struct {
@@ -10351,4 +10473,622 @@ test "Screen: promptClickMove click right of input cursor on last char" {
 
     try testing.expectEqual(@as(usize, 1), result.right);
     try testing.expectEqual(@as(usize, 0), result.left);
+}
+
+test "Screen: last-command extracts most recent completed semantic regions" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // First complete A/B/C/D command lifecycle.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("Write-Output first");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nfirst output");
+    try s.semanticPromptEndCommand();
+
+    // A later complete command must replace the prior region.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("  Write-Output second   ");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nsecond output\nsecond line");
+    try s.semanticPromptEndCommand();
+
+    // Text after D is outside the completed output region.
+    try s.testWriteString(" ignored after D");
+
+    const output = (try s.lastCommandOutputString(alloc)).?;
+    defer alloc.free(output);
+    try testing.expectEqualStrings("second output\nsecond line", output);
+
+    const command = (try s.lastCommandString(alloc)).?;
+    defer alloc.free(command);
+    try testing.expectEqualStrings("  Write-Output second", command);
+}
+
+test "Screen: last-command has no region without shell integration or D" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("Start-Sleep 10");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nstill running");
+
+    try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Screen: semantic prompt input pending tracks the OSC 133;B mark" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try testing.expect(!s.semanticPromptInputPending());
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo one");
+    try testing.expect(s.semanticPromptInputPending());
+
+    // Once the command starts the input mark is consumed, and it stays
+    // consumed after the command completes.
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try testing.expect(!s.semanticPromptInputPending());
+    try s.testWriteString(" one");
+    try s.semanticPromptEndCommand();
+    try testing.expect(!s.semanticPromptInputPending());
+
+    // A bare OSC 133;A with no following B — the shape a non-shell child can
+    // produce — must not look like a live prompt to write into, even though no
+    // command is reported as running.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    try testing.expect(!s.semanticPromptCommandRunning());
+    try testing.expect(!s.semanticPromptInputPending());
+}
+
+test "Screen: semantic prompt input mark is consumed when input is submitted" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // An earlier complete command, the kind a Clink-enabled cmd session or a
+    // nested PowerShell leaves behind.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("C:\\> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("ver");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nMicrosoft Windows");
+    try s.semanticPromptEndCommand();
+
+    // The A/B-only cmd PROMPT integration: a new prompt with a B mark, then
+    // the user presses Enter. cmd emits neither C nor another prompt until the
+    // child command exits, so the terminal sees nothing more for now.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("C:\\> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("some-child.exe");
+    try testing.expect(s.semanticPromptInputPending());
+    {
+        const before = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(before);
+        try testing.expectEqualStrings("ver", before);
+    }
+
+    // Submitting consumes the mark: nothing has told us a line editor is
+    // reading input any more, so an insertion gate must refuse, even though
+    // no command is reported as running and history is still readable.
+    s.semanticPromptInputSubmitted();
+    try testing.expect(!s.semanticPromptInputPending());
+    try testing.expect(!s.semanticPromptCommandRunning());
+    {
+        const history = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(history);
+        try testing.expectEqualStrings("ver", history);
+    }
+
+    // A shell that does emit C/D still completes the record normally: C falls
+    // back to the prompt iterator when no pending pin exists.
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try testing.expect(s.semanticPromptCommandRunning());
+    try s.testWriteString("\nchild output");
+    try s.semanticPromptEndCommand();
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("some-child.exe", command);
+    }
+
+    // A fresh B mark re-arms the gate.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("C:\\> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try testing.expect(s.semanticPromptInputPending());
+}
+
+test "Screen: last-command drops a record shifted onto the active input row" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // A complete command whose whole lifecycle sits on row 0.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo one");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString(" one");
+    try s.semanticPromptEndCommand();
+
+    // A new prompt on row 1 whose input the user has NOT submitted.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("rm -rf secret");
+
+    // The scrolling fast path rotates row contents and shifts tracked pins by
+    // hand without marking them garbage, so the completed record's prompt pin
+    // lands on the row now holding the unsubmitted input.
+    try s.pages.eraseRowBounded(.{ .active = .{ .y = 0 } }, 7);
+
+    // The record must not resurrect as the unsubmitted line.
+    const command = try s.lastCommandString(alloc);
+    if (command) |v| {
+        defer alloc.free(v);
+        try testing.expect(std.mem.indexOf(u8, v, "rm -rf secret") == null);
+    }
+}
+
+test "Screen: last-command treats output starting after the D cursor as empty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Leave output-tagged rows below where the next command will finish.
+    s.cursorSetSemanticContent(.output);
+    s.cursorAbsolute(0, 2);
+    try s.testWriteString("stale output below");
+
+    // A command on row 0 that produces no output at all, so its OSC 133;D
+    // cursor sits above the stale output rows the highlight will find.
+    s.cursorAbsolute(0, 0);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo silent");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+
+    // Must not hand back the stale rows as this command's output.
+    const output = try s.lastCommandOutputString(alloc);
+    if (output) |v| {
+        defer alloc.free(v);
+        try testing.expect(std.mem.indexOf(u8, v, "stale output below") == null);
+    }
+}
+
+test "Screen: last-command drops a record truncated by a non-reflow column shrink" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("Remove-Item C:\\keep\\this\\path");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString(" done");
+    try s.semanticPromptEndCommand();
+
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("Remove-Item C:\\keep\\this\\path", command);
+    }
+
+    // Shrinking columns without reflow clears every cell past the new width
+    // and clamps tracked pins, so the retained span would silently become a
+    // shorter, different command.
+    try s.resize(.{ .cols = 16, .rows = 8, .reflow = false });
+
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Screen: last-command preserves an empty completed output region" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("$null");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+
+    const output = (try s.lastCommandOutputString(alloc)).?;
+    defer alloc.free(output);
+    try testing.expectEqualStrings("", output);
+
+    const command = (try s.lastCommandString(alloc)).?;
+    defer alloc.free(command);
+    try testing.expectEqualStrings("$null", command);
+}
+
+test "Screen: last-command copies C/D output without B input" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 4, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\noutput without B");
+    try s.semanticPromptEndCommand();
+
+    const output = (try s.lastCommandOutputString(alloc)).?;
+    defer alloc.free(output);
+    try testing.expectEqualStrings("output without B", output);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+fn testExpectLastCommandUnavailable(
+    self: *Screen,
+    alloc: Allocator,
+) !void {
+    const command = try self.lastCommandString(alloc);
+    defer if (command) |value| alloc.free(value);
+    try std.testing.expect(command == null);
+
+    const output = try self.lastCommandOutputString(alloc);
+    defer if (output) |value| alloc.free(value);
+    try std.testing.expect(output == null);
+}
+
+test "Screen: last-command ED2 drops a record whose output endpoint is erased" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 3, .max_scrollback = 1000 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo old");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nold");
+    try s.semanticPromptEndCommand();
+
+    // Scroll once so the valid prompt/input is in history while the tracked
+    // output endpoint remains in the active display that ED2 will clear.
+    try s.testWriteString("\n\n");
+
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("echo old", command);
+    }
+
+    // Query before any new prompt exists so only range invalidation can make
+    // this unavailable; the same-row redraw guard cannot mask a missing hook.
+    s.clearRows(.{ .active = .{} }, null, false);
+    try testExpectLastCommandUnavailable(&s, alloc);
+}
+
+test "Screen: last-command middle-row erase drops the completed span" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo lines");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\none\ntwo\nthree");
+    try s.semanticPromptEndCommand();
+
+    // The prompt and output endpoint remain intact, but erasing a row inside
+    // the recovered C..D span must invalidate the whole saved command.
+    s.clearRows(
+        .{ .active = .{ .y = 2 } },
+        .{ .active = .{ .y = 2 } },
+        false,
+    );
+    try testExpectLastCommandUnavailable(&s, alloc);
+}
+
+test "Screen: last-command same-row redraw drops the completed record" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 3, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo old");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.semanticPromptEndCommand();
+
+    // Start new input on the recorded prompt row without erasing anything.
+    s.cursorAbsolute(0, 0);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("rm -rf secret");
+
+    try testExpectLastCommandUnavailable(&s, alloc);
+}
+
+test "Screen: last-command history erase cannot retarget a completed prompt" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 3, .max_scrollback = 1000 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo old");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nold");
+    try s.semanticPromptEndCommand();
+
+    // Scroll both retained pins into history, then type but do not submit a
+    // new command at active row zero.
+    try s.testWriteString("\n\n\n");
+    s.cursorAbsolute(0, 0);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("rm -rf secret");
+
+    // PageList relocates erased pins to the top of the surviving page. Screen
+    // must invalidate first so the old record cannot land on current input.
+    s.eraseHistory(null);
+    try testExpectLastCommandUnavailable(&s, alloc);
+}
+
+test "Screen: last-command active erase cannot retarget a completed prompt" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 3, .max_scrollback = 1000 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo old");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nold");
+    try s.semanticPromptEndCommand();
+
+    // Type but do not submit a new command below the completed record.
+    s.cursorAbsolute(0, 2);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("rm -rf secret");
+
+    // Erasing rows zero and one shifts current input to row zero. The old
+    // prompt pin must be invalidated before PageList can retarget it there.
+    s.eraseActive(1);
+    try testExpectLastCommandUnavailable(&s, alloc);
+}
+
+test "Screen: last-command no-scrollback row shrink cannot retarget a completed prompt" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 3, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Complete a command across rows zero and one.
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo old");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    s.cursorAbsolute(0, 1);
+    try s.testWriteString("old");
+    try s.semanticPromptEndCommand();
+
+    // Type but do not submit a new command on the row that will survive.
+    s.cursorAbsolute(0, 2);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("rm -rf secret");
+
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("echo old", command);
+    }
+
+    // Row shrink creates history that the no-scrollback path erases directly.
+    // Invalidate before PageList can retarget the completed pins to current input.
+    try s.resize(.{
+        .cols = 30,
+        .rows = 1,
+        .reflow = false,
+        .prompt_redraw = .false,
+    });
+    try testExpectLastCommandUnavailable(&s, alloc);
+}
+
+test "Screen: last-command output stops at the D cursor" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Stale output text further down the screen that a later command must
+    // never absorb into its own C..D region.
+    s.cursorAbsolute(0, 3);
+    try s.testWriteString("stale text below");
+    s.cursorAbsolute(0, 0);
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo hi");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nhi");
+    try s.semanticPromptEndCommand();
+
+    const output = (try s.lastCommandOutputString(alloc)).?;
+    defer alloc.free(output);
+    try testing.expectEqualStrings("hi", output);
+}
+
+test "Screen: last-command reports whether a command is running" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try testing.expect(!s.semanticPromptCommandRunning());
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("sleep 10");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try testing.expect(s.semanticPromptCommandRunning());
+
+    try s.semanticPromptEndCommand();
+    try testing.expect(!s.semanticPromptCommandRunning());
+}
+
+test "Screen: last-command rejects a completed region trimmed from scrollback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 20, .rows = 3, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo old");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nold");
+    try s.semanticPromptEndCommand();
+
+    for (0..6) |_| try s.testWriteString("\ntrim");
+
+    try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+
+    // Trimming while a command is still active must also make a later D a
+    // no-op rather than completing a relocated prompt pin.
+    s.reset();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("long-running");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    for (0..6) |_| try s.testWriteString("\nrunning");
+    try s.semanticPromptEndCommand();
+
+    try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
 }
