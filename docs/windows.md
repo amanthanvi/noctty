@@ -773,23 +773,34 @@ noctty warns in-app when it falls back; the shell still works, but the tested
 in-box conhost strips Kitty-graphics APC and Sixel DCS payloads. See the
 [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 
-### OpenGL driver issues
+### GPU floor and OpenGL driver issues
 
-noctty needs OpenGL 4.3 or newer. If the window fails to render or exits
-early on older hardware, update GPU drivers before filing a rendering bug.
+noctty needs OpenGL 4.3 or newer through WGL and has no software, DirectX,
+or ANGLE fallback renderer, so it cannot start when the active OpenGL
+implementation is below that floor. That is common in RDP sessions that fall
+back to software GL (often `GDI Generic` at OpenGL 1.1), VMs without 3D
+acceleration or a guest GPU driver, and older integrated GPUs whose driver
+stops before 4.3.
+
+Below the floor, noctty stops before showing its window and the startup
+dialog lists the required and detected OpenGL versions plus the renderer and
+vendor strings the driver reports. Failures later in OpenGL initialization
+use the same dialog to name the failed step and any Win32 or Zig error. Try,
+in order:
+
+1. End the Remote Desktop session and launch noctty locally.
+2. In a VM, enable 3D acceleration and install the guest graphics driver.
+3. Update or reinstall the OEM graphics driver for the active GPU; on an
+   AMD+NVIDIA hybrid system, the AMD driver first, then NVIDIA.
+4. On a hybrid-GPU system, force `noctty.exe` to the discrete or integrated
+   GPU in Windows Graphics settings.
 
 If startup fails with `LoadLibrary failed with error 126` or the startup
 dialog reports `Win32 error: 126 (ERROR_MOD_NOT_FOUND)` during OpenGL/WGL
 initialization, Windows could not load a graphics-driver DLL or one of its
 dependencies. This shows up most often on AMD+NVIDIA hybrid-GPU laptops
-while WGL loads the AMD OpenGL ICD from DriverStore. Try, in order:
-
-1. Update or reinstall the OEM AMD graphics driver, then the NVIDIA driver.
-2. Force `noctty.exe` to the discrete or integrated GPU in Windows Graphics
-   settings.
-
-noctty ships only the OpenGL/WGL renderer on Windows. There is no DirectX or
-ANGLE fallback renderer in this build.
+while WGL loads the AMD OpenGL ICD from DriverStore; use the driver order in
+step 3 before retrying.
 
 ### Stale installed build
 

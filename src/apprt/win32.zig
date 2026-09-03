@@ -211,6 +211,8 @@ const beginOpenGLStartupDiagnostics = gl_startup.beginOpenGLStartupDiagnostics;
 pub const clearOpenGLStartupFailure = gl_startup.clearOpenGLStartupFailure;
 const recordOpenGLStartupWin32Failure = gl_startup.recordOpenGLStartupWin32Failure;
 pub const recordOpenGLStartupError = gl_startup.recordOpenGLStartupError;
+pub const recordOpenGLStartupVersionError = gl_startup.recordOpenGLStartupVersionError;
+pub const OpenGLStartupString = gl_startup.OpenGLStartupString;
 pub const reportStartupFailure = gl_startup.reportStartupFailure;
 
 const ATOM = win32_types.ATOM;
@@ -541,10 +543,6 @@ fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
 
 fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
-}
-
-fn shouldActivateSurfaceDuringInit(host_id: ?u32, passive_show: bool) bool {
-    return shouldShowSurfaceImmediately(host_id) and !passive_show;
 }
 
 fn shouldResizeHostForInitialSize(host_surface_count: usize) bool {
@@ -7633,7 +7631,7 @@ pub const App = struct {
         if (mapped_hosts != state.windows.items.len) return error.WindowCountMismatch;
     }
 
-    fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface, passive_show: bool) !*Host {
+    fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface) !*Host {
         try self.ensureHostWindowClass();
         try self.ensurePaletteListClass();
         try self.ensureScrollbarClass();
@@ -7705,14 +7703,9 @@ pub const App = struct {
 
         host.power_notifications = win32_power.Notifications.init(hwnd);
 
-        // Passive first-show for quick-terminal-keyboard-interactivity
-        // = none: `SW_SHOWNOACTIVATE` makes the window visible but
-        // does NOT bring it to the foreground, so the user's current
-        // typing context stays intact. `SW_SHOW` would activate the
-        // new HWND and steal focus.
-        _ = sys.ShowWindow(hwnd, if (passive_show) c.SW_SHOWNOACTIVATE else c.SW_SHOW);
-        _ = sys.UpdateWindow(hwnd);
-        self.maybeScheduleAutomaticUpdateCheck();
+        // The host stays hidden here. `Surface.init` shows it only after GL
+        // and core initialization succeed, so a below-floor GPU reaches the
+        // startup dialog without first flashing a blank window.
         return host;
     }
 
@@ -8760,12 +8753,11 @@ pub const App = struct {
         defer config.deinit();
         const surface = try self.createWindowSurface(&config, quick_terminal_title, .{
             .quick_terminal = true,
-            // Passive first-show: `createHost` uses `SW_SHOWNOACTIVATE`
-            // so the new HWND appears without taking focus. Without
-            // this, the very first toggle-on with
-            // `keyboard-interactivity = none` would still activate
-            // the window even though the later `present()` call is
-            // skipped.
+            // Passive first-show: `Surface.init` uses `SW_SHOWNOACTIVATE`
+            // after GL and core initialization, so the new HWND appears
+            // without taking focus. Without this, the very first toggle-on
+            // with `keyboard-interactivity = none` would still activate the
+            // window even though the later `present()` call is skipped.
             .passive_show = !want_focus,
         });
         try surface.setFloatWindow(.on);
@@ -19020,12 +19012,12 @@ const SurfaceInitOptions = struct {
     tab_insert_index: ?usize = null,
     clone_state_from: ?*const Surface = null,
     split_direction: SplitTreeSurface.Split.Direction = .right,
-    /// Passive first-show: the newly-created host HWND is shown via
-    /// `SW_SHOWNOACTIVATE` instead of `SW_SHOW`, so it becomes
-    /// visible without stealing focus from the caller's current
-    /// foreground window. Used by the quick-terminal passive mode
-    /// (`quick-terminal-keyboard-interactivity = none`) on first
-    /// toggle-on.
+    /// Passive first-show: once GL and core initialization succeed, the
+    /// newly-created host HWND is shown via `SW_SHOWNOACTIVATE` instead of
+    /// being presented with focus, so it becomes visible without stealing
+    /// focus from the caller's current foreground window. Used by the
+    /// quick-terminal passive mode
+    /// (`quick-terminal-keyboard-interactivity = none`) on first toggle-on.
     passive_show: bool = false,
     adopted_session: ?*win32_terminal_handoff.PendingSession = null,
 };
@@ -25451,7 +25443,7 @@ pub const Surface = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const host = existing_host orelse
-            try app.createHost(title, opts.clone_state_from, opts.passive_show);
+            try app.createHost(title, opts.clone_state_from);
         const created_host = existing_host == null;
         errdefer if (created_host) app.removeHost(host);
         self.* = .{
@@ -25675,12 +25667,19 @@ pub const Surface = struct {
         if (activate_during_init) {
             try host.refreshChrome();
             try host.layout();
-            // Passive launches were already shown with SW_SHOWNOACTIVATE when the
-            // host HWND was created. Only run the active present/focus path here
-            // for launches that should take foreground focus during init.
-            if (shouldActivateSurfaceDuringInit(opts.host_id, opts.passive_show)) {
+            // The top-level host was created hidden and stays hidden until GL
+            // and core initialization have succeeded, so a startup failure
+            // reaches the fatal dialog without first presenting a blank host
+            // window. Same-host tabs and splits never take this path.
+            if (opts.passive_show) {
+                if (host.hwnd) |host_hwnd| {
+                    _ = sys.ShowWindow(host_hwnd, c.SW_SHOWNOACTIVATE);
+                    _ = sys.UpdateWindow(host_hwnd);
+                }
+            } else {
                 self.presentWindow();
             }
+            app.maybeScheduleAutomaticUpdateCheck();
             try self.requestRepaint();
         }
 
@@ -33920,15 +33919,6 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(shouldShowSurfaceImmediately(null));
     try std.testing.expect(!shouldShowSurfaceImmediately(1));
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
-}
-
-test "win32 shouldActivateSurfaceDuringInit skips passive new-host activation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(shouldActivateSurfaceDuringInit(null, false));
-    try std.testing.expect(!shouldActivateSurfaceDuringInit(null, true));
-    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, false));
-    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, true));
 }
 
 test "win32 shouldPropagateSharedHostWindowState only for active shared-host surfaces" {

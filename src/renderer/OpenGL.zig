@@ -40,6 +40,13 @@ const log = std.log.scoped(.opengl);
 const WglSwapIntervalExt = *const fn (interval: c_int) callconv(.winapi) windows.BOOL;
 const wgl_swap_interval_ext_name: [*:0]const u8 = "wglSwapIntervalEXT";
 const enable_gl_debug_output = false;
+/// Bound on the driver strings read for the startup diagnostic. The Win32
+/// failure record owns the real capacity; other targets never reach this
+/// path, so they keep an unbounded scan only to stay compiling.
+const startup_gl_string_max_len: usize = if (apprt.runtime == apprt.win32)
+    apprt.win32.OpenGLStartupString.capacity
+else
+    std.math.maxInt(usize);
 
 /// We require at least OpenGL 4.3
 pub const MIN_VERSION_MAJOR = 4;
@@ -243,10 +250,17 @@ fn prepareContext(getProcAddress: anytype) !void {
         (major == MIN_VERSION_MAJOR and minor < MIN_VERSION_MINOR))
     {
         log.warn(
-            "OpenGL version is too old. Ghostty requires OpenGL {d}.{d}",
+            "OpenGL version is too old. noctty requires OpenGL {d}.{d}",
             .{ MIN_VERSION_MAJOR, MIN_VERSION_MINOR },
         );
-        recordWin32OpenGLStartupError(.version_check, error.OpenGLOutdated);
+        // Queried only on this below-floor branch; a successful start does
+        // no extra work.
+        recordWin32OpenGLStartupVersionError(
+            major,
+            minor,
+            startupGLString(gl.c.GL_RENDERER),
+            startupGLString(gl.c.GL_VENDOR),
+        );
         return error.OpenGLOutdated;
     }
 
@@ -269,6 +283,41 @@ fn recordWin32OpenGLStartupError(step: apprt.win32.OpenGLStartupStep, err: anyer
     if (apprt.runtime == apprt.win32) {
         apprt.win32.recordOpenGLStartupError(step, err);
     }
+}
+
+fn recordWin32OpenGLStartupVersionError(
+    major: u32,
+    minor: u32,
+    renderer: ?[]const u8,
+    vendor: ?[]const u8,
+) void {
+    if (apprt.runtime == apprt.win32) {
+        apprt.win32.recordOpenGLStartupVersionError(major, minor, renderer, vendor);
+    }
+}
+
+/// Read at most `max_len` bytes of a C string, stopping at the first NUL.
+///
+/// The scan itself is bounded, not just its result. Letting `std.mem.span`
+/// find the terminator would be wrong twice over: it is unbounded, so an
+/// unterminated buffer is scanned until it faults; and it is vectorized, so
+/// it can read a whole chunk past the NUL of a short string. This loop reads
+/// one byte at a time and never touches an index at or beyond `max_len`.
+fn boundedCString(ptr: [*]const u8, max_len: usize) []const u8 {
+    var len: usize = 0;
+    while (len < max_len and ptr[len] != 0) len += 1;
+    return ptr[0..len];
+}
+
+fn startupGLString(name: gl.c.GLenum) ?[]const u8 {
+    const get_string = gl.glad.context.GetString orelse return null;
+    const value = get_string(name);
+    if (value == null) return null;
+
+    // This runs only on the below-floor branch, i.e. precisely when the
+    // driver is old or malfunctioning, so do not assume it honoured the
+    // spec's promise of a NUL-terminated string.
+    return boundedCString(@ptrCast(value), startup_gl_string_max_len);
 }
 
 /// This is called early right after surface creation.
@@ -673,6 +722,32 @@ pub inline fn beginFrame(
 ) !Frame {
     _ = self;
     return try Frame.begin(.{}, renderer, target);
+}
+
+test "OpenGL startup driver strings bound the scan, not just the result" {
+    // Terminated and short: stops at the NUL and never reaches the trailing
+    // filler, which stands in for whatever follows the driver's buffer.
+    const terminated = "GDI Generic\x00\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA";
+    try std.testing.expectEqualStrings(
+        "GDI Generic",
+        boundedCString(terminated.ptr, 128),
+    );
+
+    // Unterminated: the scan stops at the cap instead of running on. Sizing
+    // the backing buffer to exactly `max_len` means reading even one byte
+    // past the bound would be an out-of-bounds index.
+    var unterminated: [16]u8 = @splat('x');
+    const bounded = boundedCString(&unterminated, unterminated.len);
+    try std.testing.expectEqual(@as(usize, 16), bounded.len);
+    try std.testing.expectEqualStrings("xxxxxxxxxxxxxxxx", bounded);
+
+    // Truncation still happens when the string is longer than the cap.
+    var long: [64]u8 = @splat('y');
+    try std.testing.expectEqual(@as(usize, 8), boundedCString(&long, 8).len);
+
+    // Degenerate cases.
+    try std.testing.expectEqualStrings("", boundedCString("\x00abc".ptr, 4));
+    try std.testing.expectEqualStrings("", boundedCString("abc".ptr, 0));
 }
 
 test "OpenGL hasVsync requires enabled swap interval" {
