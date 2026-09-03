@@ -127,7 +127,7 @@ $windowLibConsumerAsts = foreach ($source in $windowLibConsumerSources) {
 }
 
 $forceForegroundCallContracts = @(
-    [pscustomobject]@{ Path = $accessibilityHarness; Count = 19; AltTap = 'true'; SendInputAltTap = 'true' },
+    [pscustomobject]@{ Path = $accessibilityHarness; Count = 20; AltTap = 'true'; SendInputAltTap = 'true' },
     [pscustomobject]@{ Path = $keyInputHarness; Count = 5; AltTap = 'false'; SendInputAltTap = 'false' },
     [pscustomobject]@{ Path = $shellCommandLiveHarness; Count = 2; AltTap = 'true'; SendInputAltTap = 'false' }
 )

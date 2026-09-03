@@ -3,8 +3,10 @@
 //! Exposes enough of the UIA contract that:
 //!   * The host HWND answers WM_GETOBJECT with a working root provider.
 //!   * Narrator / NVDA can reach the window and see ControlType=Window.
-//!   * The system's built-in host provider chains in, so caption
-//!     buttons are still announced.
+//!   * The system's built-in host provider chains in, so the stock
+//!     caption is still announced.
+//!   * The integrated titlebar's custom-painted caption buttons, which
+//!     have no HWND at all, are fragment children of that root.
 //!
 //! Per-widget providers (tabs, command palette rows, settings fields)
 //! are added with the widgets they expose. Terminal text is exposed
@@ -19,6 +21,11 @@ pub const events = @import("events.zig");
 pub const widgets = @import("widgets.zig");
 
 pub const RootProvider = root.RootProvider;
+pub const CaptionButtonProvider = root.CaptionButtonProvider;
+pub const CaptionButtonKind = root.CaptionButtonKind;
+pub const CaptionButtonsState = root.CaptionButtonsState;
+pub const captionButtonName = root.captionButtonName;
+pub const UiaRect = com.UiaRect;
 pub const OffsetRange = text.OffsetRange;
 pub const TerminalTextSnapshot = text.TerminalTextSnapshot;
 pub const AccessibleTextSnapshot = text.AccessibleTextSnapshot;
