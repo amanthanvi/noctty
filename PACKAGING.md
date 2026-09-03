@@ -38,7 +38,9 @@ That file records the exact NuGet URL, package SHA256, and the x64/ARM64
 archive entry paths and SHA256 values for `conpty.dll` and `OpenConsole.exe`.
 The release verification contract in
 `test/windows/flagship/Test-VerificationContracts.ps1` independently pins the
-same values, so a pin refresh must update both files.
+same values, so a pin refresh must update both files. The in-app portable
+updater embeds `dist/windows/conpty-redist.json` itself
+(`src/update/conpty_redist.zig`), so it needs no separate pin refresh.
 
 The release workflow builds the Windows executable, stages runtime files,
 then produces:
@@ -55,7 +57,10 @@ Release workflow requires signing and fails closed when signing is absent.
 The release installer, portable payload manifest, and noctty-built Windows PE
 files inside the portable ZIP are Authenticode-signed; the pinned Microsoft
 `conpty.dll` and `OpenConsole.exe` remain byte-for-byte vendor artifacts and
-are not re-signed. The ZIP container itself is checksummed and bound to the
+are not re-signed. Because they cannot satisfy the updater's publisher pin,
+the release verifier and the in-app portable updater both check them against
+their `dist/windows/conpty-redist.json` SHA-256 and Microsoft's own signature
+instead. The ZIP container itself is checksummed and bound to the
 canonical release workflow by a GitHub build provenance attestation. Every
 published asset except the static icon is attested.
 

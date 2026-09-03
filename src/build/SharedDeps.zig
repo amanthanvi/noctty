@@ -101,6 +101,14 @@ pub fn add(
     // Every exe needs the terminal options
     self.config.terminalOptions().add(b, step.root_module);
 
+    // The bundled ConPTY pin document. scripts/conpty-redist.ps1 stages the
+    // Microsoft pair from this file and the portable updater verifies the
+    // same two files against it, so both sides have to read one document.
+    // @embedFile cannot escape the src/ module root, hence the named import.
+    step.root_module.addAnonymousImport("conpty_redist_json", .{
+        .root_source_file = b.path("dist/windows/conpty-redist.json"),
+    });
+
     // C imports for locale constants and functions
     {
         const c = b.addTranslateC(.{

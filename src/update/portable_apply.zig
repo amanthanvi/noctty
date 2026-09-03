@@ -110,10 +110,21 @@ pub fn isSafeZipEntryPath(path: []const u8) bool {
     return true;
 }
 
+/// Every file scripts/package-windows.ps1 puts in the portable root, which is
+/// the same set Write-PortablePayloadManifest allows there. A payload member
+/// missing from this list makes a genuine portable ZIP fail verification as an
+/// unmanaged file, and one listed here but never staged makes apply fail as an
+/// incomplete payload, so the two lists have to stay equal.
 pub const managed_entries = [_][]const u8{
     "noctty.com",
     "ghostty-vt.dll",
+    "noctty-terminal-handoff-proxy.dll",
+    // Microsoft's bundled ConPTY pair. These are the only payload PEs noctty
+    // does not sign; src/update/conpty_redist.zig pins their bytes instead.
+    "conpty.dll",
+    "OpenConsole.exe",
     "LICENSE",
+    "LICENSE-conpty.txt",
     "config-template.ghostty",
     "README.md",
     "noctty.ico",
