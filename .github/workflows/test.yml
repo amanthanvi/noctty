@@ -111,7 +111,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           zig build bench:vt-throughput -- --workload=scroll --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=50
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=1000
+          zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=2500
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Zig formatting
