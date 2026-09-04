@@ -106,7 +106,15 @@ if ($LASTEXITCODE -ne 0) {
         throw "Failed to create GitHub release $Tag."
     }
 } else {
-    & gh release edit $Tag --repo $Repository --title $Title "--prerelease=$Prerelease"
+    # Promoting an existing prerelease must also move the "Latest" pointer:
+    # GitHub keeps the previous stable release as latest when a release that
+    # was created as a prerelease is edited to stable. Keep a prerelease off
+    # the latest pointer.
+    $latestArgs = @()
+    if ($Prerelease -ne 'true') {
+        $latestArgs += '--latest'
+    }
+    & gh release edit $Tag --repo $Repository --title $Title "--prerelease=$Prerelease" @latestArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to edit GitHub release $Tag."
     }
