@@ -28,6 +28,49 @@ const sixel_dcs = "\x1bPqNOCTTYSIXEL~\x1b\\";
 const graphics_payload = graphics_begin_marker ++ kitty_apc ++
     graphics_middle_marker ++ sixel_dcs ++ graphics_end_marker;
 
+// The key-input differential below is a third child mode: it measures which
+// terminal-to-application key encodings survive the ConPTY input pipe. ConPTY
+// parses the bytes we write into INPUT_RECORDs and re-synthesises them for the
+// child, so an encoding its input state machine does not know is dropped
+// entirely rather than passed through.
+const key_input_child_mode = "keyinput";
+const key_input_run_env_name = "NOCTTY_CONPTY_KEY_INPUT_PROBE";
+const key_input_ready_marker = "NOCTTY-KEYS-READY";
+const key_input_begin_marker = "NOCTTY-KEYS-BEGIN";
+const key_input_end_marker = "NOCTTY-KEYS-END";
+
+/// Terminating byte the parent writes once every case has been sent. It is
+/// never part of a case payload or delimiter.
+const key_input_sentinel: u8 = 'Z';
+
+const KeyInputCase = struct {
+    name: []const u8,
+    /// Bytes the parent writes into the ConPTY input pipe.
+    payload: []const u8,
+    /// Printable byte written after the payload so the child can tell one
+    /// case from the next even when the payload is dropped outright.
+    delimiter: u8,
+    /// The bytes conhost would hand the application for this key when no
+    /// keyboard protocol is negotiated, i.e. what the app sees in plain
+    /// conhost. Used to tell a passthrough apart from a rewrite.
+    legacy_equivalent: []const u8,
+};
+
+/// The encodings noctty can emit for Esc, Ctrl+[, Ctrl+C, Tab and Enter, plus
+/// one sequence (CSI A) ConPTY is known to understand, as a control case that
+/// proves the input state machine is active.
+const key_input_cases = [_]KeyInputCase{
+    .{ .name = "legacy_esc", .payload = "\x1b", .delimiter = 'A', .legacy_equivalent = "\x1b" },
+    .{ .name = "kitty_esc", .payload = "\x1b[27u", .delimiter = 'B', .legacy_equivalent = "\x1b" },
+    .{ .name = "kitty_ctrl_bracket", .payload = "\x1b[27;5u", .delimiter = 'C', .legacy_equivalent = "\x1b" },
+    .{ .name = "legacy_ctrl_c", .payload = "\x03", .delimiter = 'D', .legacy_equivalent = "\x03" },
+    .{ .name = "kitty_ctrl_c", .payload = "\x1b[99;5u", .delimiter = 'E', .legacy_equivalent = "\x03" },
+    .{ .name = "legacy_tab", .payload = "\t", .delimiter = 'F', .legacy_equivalent = "\t" },
+    .{ .name = "kitty_enter", .payload = "\x1b[13u", .delimiter = 'G', .legacy_equivalent = "\r" },
+    .{ .name = "modify_other_keys_esc", .payload = "\x1b[27;5;27~", .delimiter = 'H', .legacy_equivalent = "\x1b" },
+    .{ .name = "csi_cursor_up", .payload = "\x1b[A", .delimiter = 'I', .legacy_equivalent = "\x1b[A" },
+};
+
 pub fn runChildIfRequested() void {
     if (comptime builtin.os.tag != .windows) return;
 
@@ -72,6 +115,97 @@ pub fn runChildIfRequested() void {
         };
 
         GraphicsChild.run();
+    }
+    if (std.mem.eql(u8, child, key_input_child_mode)) {
+        const KeyInputChild = struct {
+            const enable_processed_input: windows.DWORD = 0x0001;
+            const enable_line_input: windows.DWORD = 0x0002;
+            const enable_echo_input: windows.DWORD = 0x0004;
+            const enable_virtual_terminal_input: windows.DWORD = 0x0200;
+            const enable_processed_output: windows.DWORD = 0x0001;
+            const enable_virtual_terminal_processing: windows.DWORD = 0x0004;
+            const max_received = 512;
+
+            extern "kernel32" fn GetConsoleMode(
+                console: windows.HANDLE,
+                mode: *windows.DWORD,
+            ) callconv(.winapi) c_int;
+            extern "kernel32" fn SetConsoleMode(
+                console: windows.HANDLE,
+                mode: windows.DWORD,
+            ) callconv(.winapi) c_int;
+
+            fn writeAll(handle: windows.HANDLE, bytes: []const u8) void {
+                var offset: usize = 0;
+                while (offset < bytes.len) {
+                    var written: windows.DWORD = 0;
+                    if (windows.kernel32.WriteFile(
+                        handle,
+                        bytes[offset..].ptr,
+                        @intCast(bytes.len - offset),
+                        &written,
+                        null,
+                    ) == 0 or written == 0) std.process.exit(83);
+                    offset += written;
+                }
+            }
+
+            fn run() noreturn {
+                const stdin = std.fs.File.stdin().handle;
+                const stdout = std.fs.File.stdout().handle;
+
+                // Raw VT input: no line editing, no echo, and no processed
+                // input so Ctrl+C arrives as a 0x03 byte instead of a console
+                // control event. This is the mode a full-screen TUI uses.
+                var input_mode: windows.DWORD = 0;
+                if (GetConsoleMode(stdin, &input_mode) == 0) std.process.exit(81);
+                input_mode |= enable_virtual_terminal_input;
+                input_mode &= ~(enable_line_input |
+                    enable_echo_input |
+                    enable_processed_input);
+                if (SetConsoleMode(stdin, input_mode) == 0) std.process.exit(82);
+
+                var output_mode: windows.DWORD = 0;
+                if (GetConsoleMode(stdout, &output_mode) == 0) std.process.exit(84);
+                if (SetConsoleMode(
+                    stdout,
+                    output_mode |
+                        enable_processed_output |
+                        enable_virtual_terminal_processing,
+                ) == 0) std.process.exit(85);
+
+                writeAll(stdout, key_input_ready_marker ++ "\r\n");
+
+                var received: [max_received]u8 = undefined;
+                var len: usize = 0;
+                while (true) {
+                    var byte: [1]u8 = undefined;
+                    var read: windows.DWORD = 0;
+                    if (windows.kernel32.ReadFile(
+                        stdin,
+                        &byte,
+                        1,
+                        &read,
+                        null,
+                    ) == 0 or read != 1) std.process.exit(86);
+                    if (byte[0] == key_input_sentinel) break;
+                    if (len == received.len) std.process.exit(87);
+                    received[len] = byte[0];
+                    len += 1;
+                }
+
+                writeAll(stdout, key_input_begin_marker);
+                const digits = "0123456789abcdef";
+                for (received[0..len]) |byte| {
+                    const hex = [2]u8{ digits[byte >> 4], digits[byte & 0x0f] };
+                    writeAll(stdout, &hex);
+                }
+                writeAll(stdout, key_input_end_marker ++ "\r\n");
+                std.process.exit(0);
+            }
+        };
+
+        KeyInputChild.run();
     }
     if (!std.mem.eql(u8, child, "1")) return;
 
@@ -171,6 +305,85 @@ pub fn runChildIfRequested() void {
     Child.run();
 }
 
+fn cancelAndDrainWrite(
+    pipe: windows.HANDLE,
+    overlapped: *std.os.windows.OVERLAPPED,
+) !void {
+    var cancel_error: ?std.os.windows.Win32Error = null;
+    if (std.os.windows.kernel32.CancelIoEx(pipe, overlapped) == 0) {
+        const err = std.os.windows.kernel32.GetLastError();
+        if (err != .NOT_FOUND) cancel_error = err;
+    }
+
+    var ignored: windows.DWORD = 0;
+    if (std.os.windows.kernel32.GetOverlappedResult(
+        pipe,
+        overlapped,
+        &ignored,
+        windows.TRUE,
+    ) == 0) {
+        const result_error = std.os.windows.kernel32.GetLastError();
+        if (result_error != .OPERATION_ABORTED) {
+            return windows.unexpectedError(result_error);
+        }
+    }
+    if (cancel_error) |err| return windows.unexpectedError(err);
+}
+
+fn writeFragment(
+    pipe: windows.HANDLE,
+    bytes: []const u8,
+    timeout_ms: windows.DWORD,
+) !void {
+    const event = try std.os.windows.CreateEventEx(
+        null,
+        "",
+        0,
+        std.os.windows.EVENT_ALL_ACCESS,
+    );
+    defer _ = windows.CloseHandle(event);
+
+    var overlapped: std.os.windows.OVERLAPPED = .{
+        .Internal = 0,
+        .InternalHigh = 0,
+        .DUMMYUNIONNAME = .{ .DUMMYSTRUCTNAME = .{
+            .Offset = 0,
+            .OffsetHigh = 0,
+        } },
+        .hEvent = event,
+    };
+    const write_result = std.os.windows.kernel32.WriteFile(
+        pipe,
+        bytes.ptr,
+        @intCast(bytes.len),
+        null,
+        &overlapped,
+    );
+    if (write_result == 0) {
+        const write_error = std.os.windows.kernel32.GetLastError();
+        if (write_error != .IO_PENDING) return windows.unexpectedError(write_error);
+
+        switch (std.os.windows.kernel32.WaitForSingleObject(event, timeout_ms)) {
+            std.os.windows.WAIT_OBJECT_0 => {},
+            std.os.windows.WAIT_TIMEOUT => {
+                try cancelAndDrainWrite(pipe, &overlapped);
+                return error.ConptyWriteTimeout;
+            },
+            std.os.windows.WAIT_FAILED => {
+                const wait_error = std.os.windows.kernel32.GetLastError();
+                try cancelAndDrainWrite(pipe, &overlapped);
+                return windows.unexpectedError(wait_error);
+            },
+            else => {
+                try cancelAndDrainWrite(pipe, &overlapped);
+                return error.UnexpectedConptyWriteWait;
+            },
+        }
+    }
+    const written = try std.os.windows.GetOverlappedResult(pipe, &overlapped, false);
+    if (written != bytes.len) return error.ShortConptyWrite;
+}
+
 pub fn runParentIfRequested() !void {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -181,85 +394,6 @@ pub fn runParentIfRequested() !void {
         extern "kernel32" fn GetProcessId(
             process: windows.HANDLE,
         ) callconv(.winapi) windows.DWORD;
-
-        fn cancelAndDrainWrite(
-            pipe: windows.HANDLE,
-            overlapped: *std.os.windows.OVERLAPPED,
-        ) !void {
-            var cancel_error: ?std.os.windows.Win32Error = null;
-            if (std.os.windows.kernel32.CancelIoEx(pipe, overlapped) == 0) {
-                const err = std.os.windows.kernel32.GetLastError();
-                if (err != .NOT_FOUND) cancel_error = err;
-            }
-
-            var ignored: windows.DWORD = 0;
-            if (std.os.windows.kernel32.GetOverlappedResult(
-                pipe,
-                overlapped,
-                &ignored,
-                windows.TRUE,
-            ) == 0) {
-                const result_error = std.os.windows.kernel32.GetLastError();
-                if (result_error != .OPERATION_ABORTED) {
-                    return windows.unexpectedError(result_error);
-                }
-            }
-            if (cancel_error) |err| return windows.unexpectedError(err);
-        }
-
-        fn writeFragment(
-            pipe: windows.HANDLE,
-            bytes: []const u8,
-            timeout_ms: windows.DWORD,
-        ) !void {
-            const event = try std.os.windows.CreateEventEx(
-                null,
-                "",
-                0,
-                std.os.windows.EVENT_ALL_ACCESS,
-            );
-            defer _ = windows.CloseHandle(event);
-
-            var overlapped: std.os.windows.OVERLAPPED = .{
-                .Internal = 0,
-                .InternalHigh = 0,
-                .DUMMYUNIONNAME = .{ .DUMMYSTRUCTNAME = .{
-                    .Offset = 0,
-                    .OffsetHigh = 0,
-                } },
-                .hEvent = event,
-            };
-            const write_result = std.os.windows.kernel32.WriteFile(
-                pipe,
-                bytes.ptr,
-                @intCast(bytes.len),
-                null,
-                &overlapped,
-            );
-            if (write_result == 0) {
-                const write_error = std.os.windows.kernel32.GetLastError();
-                if (write_error != .IO_PENDING) return windows.unexpectedError(write_error);
-
-                switch (std.os.windows.kernel32.WaitForSingleObject(event, timeout_ms)) {
-                    std.os.windows.WAIT_OBJECT_0 => {},
-                    std.os.windows.WAIT_TIMEOUT => {
-                        try cancelAndDrainWrite(pipe, &overlapped);
-                        return error.ConptyWriteTimeout;
-                    },
-                    std.os.windows.WAIT_FAILED => {
-                        const wait_error = std.os.windows.kernel32.GetLastError();
-                        try cancelAndDrainWrite(pipe, &overlapped);
-                        return windows.unexpectedError(wait_error);
-                    },
-                    else => {
-                        try cancelAndDrainWrite(pipe, &overlapped);
-                        return error.UnexpectedConptyWriteWait;
-                    },
-                }
-            }
-            const written = try std.os.windows.GetOverlappedResult(pipe, &overlapped, false);
-            if (written != bytes.len) return error.ShortConptyWrite;
-        }
 
         fn readUntil(
             pty: *ptypkg.Pty,
@@ -655,6 +789,254 @@ test "Windows ConPTY transport probe reports APC and DCS survival" {
     const enabled = std.process.getEnvVarOwned(
         std.testing.allocator,
         graphics_run_env_name,
+    ) catch return error.SkipZigTest;
+    defer std.testing.allocator.free(enabled);
+    if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
+
+    try Probe.run();
+}
+test "Windows ConPTY input transport probe reports key encoding survival" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Probe = struct {
+        const Command = @import("Command.zig");
+        const settle_ms = 200;
+        const wait_timeout: windows.DWORD = 258;
+
+        const Survival = enum {
+            /// The child read exactly the bytes we wrote: ConPTY carried the
+            /// encoding through without understanding it.
+            passed_through,
+            /// ConPTY rewrote the encoding into the legacy bytes.
+            rewritten_to_legacy,
+            /// The child read something else entirely.
+            altered,
+            /// The child read nothing at all for this case.
+            dropped,
+        };
+
+        extern "kernel32" fn GetProcessId(
+            process: windows.HANDLE,
+        ) callconv(.winapi) windows.DWORD;
+
+        fn classify(
+            observed: []const u8,
+            payload: []const u8,
+            legacy_equivalent: []const u8,
+        ) Survival {
+            if (observed.len == 0) return .dropped;
+            if (std.mem.eql(u8, observed, payload)) return .passed_through;
+            if (std.mem.eql(u8, observed, legacy_equivalent)) return .rewritten_to_legacy;
+            return .altered;
+        }
+
+        fn printHex(label: []const u8, bytes: []const u8) void {
+            std.debug.print("{s}=", .{label});
+            for (bytes) |byte| std.debug.print("{x:0>2}", .{byte});
+            std.debug.print("", .{});
+        }
+
+        /// Drain whatever the pseudo console has already emitted without
+        /// blocking, so the output pipe never backs up mid-run.
+        fn pump(
+            pty: *ptypkg.Pty,
+            output: *std.ArrayList(u8),
+        ) !void {
+            while (true) {
+                var available: windows.DWORD = 0;
+                if (windows.exp.kernel32.PeekNamedPipe(
+                    pty.out_pipe,
+                    null,
+                    0,
+                    null,
+                    &available,
+                    null,
+                ) == 0) {
+                    if (windows.kernel32.GetLastError() == .BROKEN_PIPE) return;
+                    return windows.unexpectedError(windows.kernel32.GetLastError());
+                }
+                if (available == 0) return;
+                var buffer: [1024]u8 = undefined;
+                var read: windows.DWORD = 0;
+                if (windows.kernel32.ReadFile(
+                    pty.out_pipe,
+                    &buffer,
+                    @min(@as(windows.DWORD, buffer.len), available),
+                    &read,
+                    null,
+                ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+                if (output.items.len + read > max_output_bytes) {
+                    return error.KeyInputProbeOutputTooLarge;
+                }
+                try output.appendSlice(std.testing.allocator, buffer[0..read]);
+            }
+        }
+
+        fn readUntilMarker(
+            pty: *ptypkg.Pty,
+            output: *std.ArrayList(u8),
+            marker: []const u8,
+            timeout_ns: u64,
+        ) !void {
+            var timer = try std.time.Timer.start();
+            while (timer.read() < timeout_ns) {
+                try pump(pty, output);
+                if (std.mem.indexOf(u8, output.items, marker) != null) return;
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
+            return error.KeyInputProbeReadTimeout;
+        }
+
+        fn terminateAndConfirm(process: windows.HANDLE) !void {
+            switch (windows.kernel32.WaitForSingleObject(process, 0)) {
+                std.os.windows.WAIT_OBJECT_0 => return,
+                std.os.windows.WAIT_TIMEOUT => {},
+                std.os.windows.WAIT_FAILED => return windows.unexpectedError(
+                    windows.kernel32.GetLastError(),
+                ),
+                else => return error.KeyInputProbeUnexpectedWait,
+            }
+            if (windows.kernel32.TerminateProcess(process, 0xEE) == 0) {
+                return windows.unexpectedError(windows.kernel32.GetLastError());
+            }
+            if (windows.kernel32.WaitForSingleObject(process, 5000) != 0) {
+                return error.KeyInputProbeChildCleanupTimeout;
+            }
+        }
+
+        fn decodeHex(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
+            if (hex.len % 2 != 0) return error.KeyInputProbeOddHexLength;
+            const bytes = try allocator.alloc(u8, hex.len / 2);
+            errdefer allocator.free(bytes);
+            for (bytes, 0..) |*byte, index| {
+                byte.* = try std.fmt.parseInt(u8, hex[index * 2 ..][0..2], 16);
+            }
+            return bytes;
+        }
+
+        fn run() !void {
+            const allocator = std.testing.allocator;
+            const self_path = try std.fs.selfExePathAlloc(allocator);
+            defer allocator.free(self_path);
+            const self_path_z = try allocator.dupeZ(u8, self_path);
+            defer allocator.free(self_path_z);
+            var child_env = try std.process.getEnvMap(allocator);
+            defer child_env.deinit();
+            try child_env.put(child_env_name, key_input_child_mode);
+
+            var pty = try ptypkg.Pty.open(.{ .ws_row = 25, .ws_col = 200 });
+            defer pty.deinit();
+
+            var command: Command = .{
+                .path = self_path_z,
+                .args = &.{self_path_z},
+                .env = &child_env,
+                .pseudo_console = pty.pseudoConsole().?,
+                .os_pre_exec = null,
+                .rt_pre_exec = null,
+                .rt_post_fork = null,
+                .rt_pre_exec_info = undefined,
+                .rt_post_fork_info = undefined,
+            };
+            try command.start(allocator);
+            const process = command.pid.?;
+            var child_finished = false;
+            defer {
+                if (!child_finished) terminateAndConfirm(process) catch |err| {
+                    std.debug.print("key-input-probe cleanup failed err={}\n", .{err});
+                };
+                _ = windows.CloseHandle(process);
+            }
+            std.debug.print("key-input-probe parent_pid={d} child_pid={d}\n", .{
+                windows.GetCurrentProcessId(),
+                GetProcessId(process),
+            });
+
+            var output: std.ArrayList(u8) = .empty;
+            defer output.deinit(allocator);
+            try readUntilMarker(
+                &pty,
+                &output,
+                key_input_ready_marker,
+                10 * std.time.ns_per_s,
+            );
+
+            // Each payload is written on its own, then the delimiter is
+            // written on its own. ConPTY's input state machine flushes a
+            // partial escape at the end of every write, so a lone ESC is not
+            // held waiting for the delimiter that follows it.
+            for (key_input_cases) |case| {
+                try writeFragment(pty.in_pipe, case.payload, 2000);
+                std.Thread.sleep(settle_ms * std.time.ns_per_ms);
+                try pump(&pty, &output);
+                try writeFragment(pty.in_pipe, &[_]u8{case.delimiter}, 2000);
+                std.Thread.sleep(settle_ms * std.time.ns_per_ms);
+                try pump(&pty, &output);
+            }
+            try writeFragment(pty.in_pipe, &[_]u8{key_input_sentinel}, 2000);
+
+            try readUntilMarker(
+                &pty,
+                &output,
+                key_input_end_marker,
+                10 * std.time.ns_per_s,
+            );
+
+            const begin = std.mem.indexOf(u8, output.items, key_input_begin_marker).? +
+                key_input_begin_marker.len;
+            const end = begin + (std.mem.indexOf(
+                u8,
+                output.items[begin..],
+                key_input_end_marker,
+            ) orelse return error.KeyInputProbeEndMarkerMissing);
+            const received = try decodeHex(allocator, output.items[begin..end]);
+            defer allocator.free(received);
+
+            const info = ptypkg.conPtyInfo().?;
+            std.debug.print("key-input-probe source={t}\n", .{info.source});
+            printHex("key-input-probe received_hex", received);
+            std.debug.print("\n", .{});
+
+            var cursor: usize = 0;
+            var failures: usize = 0;
+            for (key_input_cases) |case| {
+                const relative = std.mem.indexOfScalar(
+                    u8,
+                    received[cursor..],
+                    case.delimiter,
+                ) orelse return error.KeyInputProbeDelimiterMissing;
+                const observed = received[cursor..][0..relative];
+                cursor += relative + 1;
+                const survival = classify(observed, case.payload, case.legacy_equivalent);
+                std.debug.print("key-input-probe case={s} verdict={t} ", .{
+                    case.name,
+                    survival,
+                });
+                printHex("wrote_hex", case.payload);
+                std.debug.print(" ", .{});
+                printHex("legacy_hex", case.legacy_equivalent);
+                std.debug.print(" ", .{});
+                printHex("observed_hex", observed);
+                std.debug.print("\n", .{});
+                // Every case must reach the child byte for byte. ConPTY parses
+                // our bytes into INPUT_RECORDs and re-synthesises them, so a
+                // dropped or rewritten case is a transport limit that noctty's
+                // key encoder has to work around.
+                if (survival != .passed_through) failures += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 0), failures);
+
+            try readUntilMarker(&pty, &output, key_input_end_marker, std.time.ns_per_s);
+            switch (windows.kernel32.WaitForSingleObject(process, 5000)) {
+                std.os.windows.WAIT_OBJECT_0 => child_finished = true,
+                else => {},
+            }
+        }
+    };
+
+    const enabled = std.process.getEnvVarOwned(
+        std.testing.allocator,
+        key_input_run_env_name,
     ) catch return error.SkipZigTest;
     defer std.testing.allocator.free(enabled);
     if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;

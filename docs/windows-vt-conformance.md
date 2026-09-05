@@ -111,6 +111,47 @@ re-rendered the three markers adjacent to one another inside a synthesized
 clear/home/title/cursor-update stream. This measurement establishes transport
 survival only; it does not close the Kitty pixel-rendering gap listed above.
 
+### Measured master-to-child key encoding differential
+
+The input direction has its own opt-in probe in `src/pty_transport_probe.zig`
+(`NOCTTY_CONPTY_KEY_INPUT_PROBE=1`). The child clears
+`ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT`, and `ENABLE_PROCESSED_INPUT`, sets
+`ENABLE_VIRTUAL_TERMINAL_INPUT`, and echoes every byte it reads back as hex.
+The parent writes one key encoding per case followed by a printable delimiter,
+so a case that never arrives is still distinguishable from the next one. ConPTY
+flushes a partial escape at the end of each write, so the lone-`ESC` case is not
+held waiting for the delimiter behind it.
+
+Measurement host: Windows `10.0.26200.0`; sources `inbox` and `bundled`
+(`1.24.260710001`). Both sources produced identical results.
+
+| Case                       | Written by the terminal (hex) | Read by the child (hex) | Verdict    |
+| -------------------------- | ----------------------------- | ----------------------- | ---------- |
+| lone `ESC`                 | `1b`                          | `1b`                    | byte-exact |
+| Kitty `CSI 27 u`           | `1b5b323775`                  | `1b5b323775`            | byte-exact |
+| Kitty `CSI 27;5 u`         | `1b5b32373b3575`              | `1b5b32373b3575`        | byte-exact |
+| `0x03`                     | `03`                          | `03`                    | byte-exact |
+| Kitty `CSI 99;5 u`         | `1b5b39393b3575`              | `1b5b39393b3575`        | byte-exact |
+| `TAB`                      | `09`                          | `09`                    | byte-exact |
+| Kitty `CSI 13 u`           | `1b5b313375`                  | `1b5b313375`            | byte-exact |
+| modifyOtherKeys `27;5;27~` | `1b5b32373b353b32377e`        | `1b5b32373b353b32377e`  | byte-exact |
+| `CSI A`                    | `1b5b41`                      | `1b5b41`                | byte-exact |
+
+ConPTY does not understand CSI-u, and on these two sources it does not drop it
+either: an unrecognised sequence is flushed to the input queue character by
+character and re-synthesised for the child unchanged. A Kitty-encoded `Esc`,
+`Ctrl+[`, or `Ctrl+C` therefore reaches the application exactly as noctty wrote
+it, and any loss of those keys is above or below this layer, not in it. The
+measurement covers only a child reading the byte stream; a child that reads
+`INPUT_RECORD`s through the console API sees conhost's decoding of those same
+characters instead.
+
+Every ConPTY session opens by asking the terminal for Win32 input mode
+(`CSI ?9001h`, alongside `CSI ?1004h`). noctty does not implement mode 9001, so
+ConPTY keeps parsing VT input; Windows Terminal answers it and receives exact
+key records instead. Implementing 9001 would remove ConPTY's VT input parsing
+from the path entirely, at the cost of the Kitty encoding it currently carries.
+
 ### Behavior by sequence class
 
 | Surface                                    | ConPTY v1 byte stream                                                                                                                                                                                                                                                                                                               | ConPTY v2 byte stream                                                                                                                                                                          | Status and mitigation                                                                                                                                                                                                                                                                                                                                                                                                              |
