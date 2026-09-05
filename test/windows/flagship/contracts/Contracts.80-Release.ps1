@@ -1446,7 +1446,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            'bdd1d01feac86ee799f2d0292e342dfc00e87e95a07ff6eb25f87e0e1c68efb6'
+            '704f06449994762ac43977a7e01005c5b335bc2e06d0e6bdc89c1af76541b173'
         CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
     }
     [pscustomobject] @{
@@ -1774,8 +1774,12 @@ if ($releaseArtifactVerifierText -notmatch
     throw 'Local artifact verification must require exactly the setup and portable checksum entries before comparing hashes.'
 }
 if ($releaseGithubPublisherText -notmatch
-        '(?m)^\s*& gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease"\s*$') {
+        '(?m)^\s*& gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease" @latestArgs\s*$') {
     throw 'Existing GitHub releases must explicitly reconcile prerelease true and false.'
+}
+if ($releaseGithubPublisherText -notmatch
+        '(?ms)\$latestArgs = @\(\)\s*if \(\$Prerelease -ne ''true''\) \{\s*\$latestArgs \+= ''--latest''\s*\}') {
+    throw 'Promoting an existing release to stable must also mark it as the latest release.'
 }
 $wingetTokens = $null
 $wingetParseErrors = $null
