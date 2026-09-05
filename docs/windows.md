@@ -458,7 +458,11 @@ Console applications reached through ConPTY see these sequences through
 conhost's own decoder, which does not translate every form back into a
 console key record. `[Console]::ReadKey()` therefore reports less than the
 terminal sent; applications that read the byte stream directly see
-everything.
+everything. Measured on the in-box conhost of Windows `10.0.26200.0` and on
+the bundled OpenConsole `1.24.260710001`, an unrecognised CSI-u key encoding
+is not dropped: ConPTY hands the child the same bytes noctty wrote. Older
+in-box conhosts, including Windows 10 build 19045, were not measured. See the
+[key encoding differential](windows-vt-conformance.md#measured-master-to-child-key-encoding-differential).
 
 `F6` and `Shift+F6` run `cycle_focus_region` and move keyboard focus
 between the terminal pane, the tab strip, the docked search query, and the

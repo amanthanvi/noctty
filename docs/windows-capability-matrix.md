@@ -129,6 +129,13 @@ character arrives, and a dead key that cannot combine delivers both
 characters. IME commits remain text without a physical key. These paths have
 unit coverage but have not been exercised on a real non-US keyboard.
 
+Kitty and modifyOtherKeys encodings survive the pseudo console byte for byte
+on the two sources measured here — the in-box conhost of Windows
+`10.0.26200.0` and the bundled OpenConsole `1.24.260710001`; older in-box
+conhosts are unmeasured. noctty does not implement Win32 input mode
+(`CSI ?9001h`), which ConPTY requests at the start of every session. See the
+[key encoding differential](windows-vt-conformance.md#measured-master-to-child-key-encoding-differential).
+
 `key-remap` changes modifier state before focused or in-app keybind matching
 and terminal encoding; it does not change physical key identity. `global:`
 bindings register the literal configured chord through `RegisterHotKey`, so
