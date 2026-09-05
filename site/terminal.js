@@ -29,7 +29,7 @@ export function observeElementVisibility(Observer, element, onChange) {
 const NC_REPO = 'amanthanvi/noctty';
 const PROMPT = 'PS C:\\Users\\dev>';
 
-let NC_VERSION = (typeof window !== 'undefined' && window.NC_VERSION) || '1.3.125';
+let NC_VERSION = (typeof window !== 'undefined' && window.NC_VERSION) || '1.3.126';
 
 export function buildScenes(v) {
   return [
