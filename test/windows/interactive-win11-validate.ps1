@@ -229,6 +229,7 @@ Invoke-Harness -ScriptName 'interactive-win11.ps1'
 Invoke-SuiteBuildIfNeeded
 Invoke-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -PassResetState
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-first-frame.ps1' -TimeoutSeconds 30
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-configured-size.ps1' -TimeoutSeconds 15
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20
 # Three configured scenarios run sequentially in one process, each with its

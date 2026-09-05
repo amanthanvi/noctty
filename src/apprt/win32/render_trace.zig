@@ -69,6 +69,7 @@ pub const RenderTrace = struct {
     paint_retry_wakeup_count: std.atomic.Value(u64) = .init(0),
     health_recovery_wakeup_count: std.atomic.Value(u64) = .init(0),
     paint_pending_wakeup_count: std.atomic.Value(u64) = .init(0),
+    first_show_wakeup_count: std.atomic.Value(u64) = .init(0),
     inspector_wakeup_count: std.atomic.Value(u64) = .init(0),
     /// A wakeup whose reasons were already consumed by an earlier callback,
     /// i.e. the wake primitive coalesced two notifies into one callback and
@@ -272,6 +273,7 @@ pub const RenderTrace = struct {
             .apprt_paint_retry => &self.paint_retry_wakeup_count,
             .apprt_health_recovery => &self.health_recovery_wakeup_count,
             .apprt_paint_pending => &self.paint_pending_wakeup_count,
+            .apprt_first_show => &self.first_show_wakeup_count,
             .inspector => &self.inspector_wakeup_count,
         };
     }
@@ -554,6 +556,7 @@ pub const RenderTrace = struct {
             .paint_retry_wakeup_count = self.paint_retry_wakeup_count.load(.acquire),
             .health_recovery_wakeup_count = self.health_recovery_wakeup_count.load(.acquire),
             .paint_pending_wakeup_count = self.paint_pending_wakeup_count.load(.acquire),
+            .first_show_wakeup_count = self.first_show_wakeup_count.load(.acquire),
             .inspector_wakeup_count = self.inspector_wakeup_count.load(.acquire),
             .unattributed_wakeup_count = self.unattributed_wakeup_count.load(.acquire),
             .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),

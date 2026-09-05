@@ -2076,6 +2076,7 @@ if ($script:adapter.Installed) {
             'paint_retry_wakeup_count',
             'health_recovery_wakeup_count',
             'paint_pending_wakeup_count',
+            'first_show_wakeup_count',
             'wakeup_callback_count',
             'render_callback_count',
             'renderer_repaint_accept_count',
