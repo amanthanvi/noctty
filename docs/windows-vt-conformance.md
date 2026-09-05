@@ -125,26 +125,36 @@ held waiting for the delimiter behind it.
 Measurement host: Windows `10.0.26200.0`; sources `inbox` and `bundled`
 (`1.24.260710001`). Both sources produced identical results.
 
-| Case                       | Written by the terminal (hex) | Read by the child (hex) | Verdict    |
-| -------------------------- | ----------------------------- | ----------------------- | ---------- |
-| lone `ESC`                 | `1b`                          | `1b`                    | byte-exact |
-| Kitty `CSI 27 u`           | `1b5b323775`                  | `1b5b323775`            | byte-exact |
-| Kitty `CSI 27;5 u`         | `1b5b32373b3575`              | `1b5b32373b3575`        | byte-exact |
-| `0x03`                     | `03`                          | `03`                    | byte-exact |
-| Kitty `CSI 99;5 u`         | `1b5b39393b3575`              | `1b5b39393b3575`        | byte-exact |
-| `TAB`                      | `09`                          | `09`                    | byte-exact |
-| Kitty `CSI 13 u`           | `1b5b313375`                  | `1b5b313375`            | byte-exact |
-| modifyOtherKeys `27;5;27~` | `1b5b32373b353b32377e`        | `1b5b32373b353b32377e`  | byte-exact |
-| `CSI A`                    | `1b5b41`                      | `1b5b41`                | byte-exact |
+A Kitty CSI-u key number is the key's own codepoint, so `Esc` is 27 and
+`Ctrl+[` is 91 with a Ctrl modifier; `CSI 27;5 u` is Ctrl+Esc, not Ctrl+[. The
+`CSI 27;129 u` row is the plain `Esc` noctty writes while Num Lock is on, since
+the Kitty modifier field carries the lock modifiers. Both that form and
+`CSI 91;5 u` were captured from a real Claude Code session in issue #223.
 
-ConPTY does not understand CSI-u, and on these two sources it does not drop it
-either: an unrecognised sequence is flushed to the input queue character by
-character and re-synthesised for the child unchanged. A Kitty-encoded `Esc`,
-`Ctrl+[`, or `Ctrl+C` therefore reaches the application exactly as noctty wrote
-it, and any loss of those keys is above or below this layer, not in it. The
-measurement covers only a child reading the byte stream; a child that reads
-`INPUT_RECORD`s through the console API sees conhost's decoding of those same
-characters instead.
+| Case                                     | Written by the terminal (hex) | Read by the child (hex) | Verdict    |
+| ---------------------------------------- | ----------------------------- | ----------------------- | ---------- |
+| lone `ESC`                               | `1b`                          | `1b`                    | byte-exact |
+| Kitty `CSI 27 u` (Esc)                   | `1b5b323775`                  | `1b5b323775`            | byte-exact |
+| Kitty `CSI 27;129 u` (Esc with Num Lock) | `1b5b32373b31323975`          | `1b5b32373b31323975`    | byte-exact |
+| Kitty `CSI 27;5 u` (Ctrl+Esc)            | `1b5b32373b3575`              | `1b5b32373b3575`        | byte-exact |
+| Kitty `CSI 91;5 u` (Ctrl+[)              | `1b5b39313b3575`              | `1b5b39313b3575`        | byte-exact |
+| `0x03`                                   | `03`                          | `03`                    | byte-exact |
+| Kitty `CSI 99;5 u` (Ctrl+C)              | `1b5b39393b3575`              | `1b5b39393b3575`        | byte-exact |
+| `TAB`                                    | `09`                          | `09`                    | byte-exact |
+| Kitty `CSI 13 u` (Enter)                 | `1b5b313375`                  | `1b5b313375`            | byte-exact |
+| modifyOtherKeys `27;5;27~`               | `1b5b32373b353b32377e`        | `1b5b32373b353b32377e`  | byte-exact |
+| `CSI A`                                  | `1b5b41`                      | `1b5b41`                | byte-exact |
+
+ConPTY does not understand CSI-u, and on the two sources measured here it does
+not drop it either: an unrecognised sequence is flushed to the input queue
+character by character and re-synthesised for the child unchanged. A
+Kitty-encoded `Esc`, `Ctrl+[`, or `Ctrl+C` therefore reaches the application
+exactly as noctty wrote it on this host, and any loss of those keys is above or
+below this layer, not in it. Older in-box conhosts — including the Windows 10
+build 19045 one in issue #223 — were not measured; do not generalise this row
+to every ConPTY. The measurement also covers only a child reading the byte
+stream; a child that reads `INPUT_RECORD`s through the console API sees
+conhost's decoding of those same characters instead.
 
 Every ConPTY session opens by asking the terminal for Win32 input mode
 (`CSI ?9001h`, alongside `CSI ?1004h`). noctty does not implement mode 9001, so

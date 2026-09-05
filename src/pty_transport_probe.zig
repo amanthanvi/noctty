@@ -59,16 +59,25 @@ const KeyInputCase = struct {
 /// The encodings noctty can emit for Esc, Ctrl+[, Ctrl+C, Tab and Enter, plus
 /// one sequence (CSI A) ConPTY is known to understand, as a control case that
 /// proves the input state machine is active.
+///
+/// A Kitty CSI-u key number is the key's own codepoint, so Ctrl+[ is 91 ('[')
+/// with a Ctrl modifier, not 27: `CSI 27;5 u` is Ctrl+Esc and is kept as its
+/// own case. `CSI 27;129 u` is the plain Esc noctty writes while Num Lock is
+/// on, because the Kitty modifier field carries the lock modifiers
+/// (num_lock = 128, reported as bitmask + 1). Both forms were captured from a
+/// real Claude Code session in issue #223.
 const key_input_cases = [_]KeyInputCase{
     .{ .name = "legacy_esc", .payload = "\x1b", .delimiter = 'A', .legacy_equivalent = "\x1b" },
     .{ .name = "kitty_esc", .payload = "\x1b[27u", .delimiter = 'B', .legacy_equivalent = "\x1b" },
-    .{ .name = "kitty_ctrl_bracket", .payload = "\x1b[27;5u", .delimiter = 'C', .legacy_equivalent = "\x1b" },
-    .{ .name = "legacy_ctrl_c", .payload = "\x03", .delimiter = 'D', .legacy_equivalent = "\x03" },
-    .{ .name = "kitty_ctrl_c", .payload = "\x1b[99;5u", .delimiter = 'E', .legacy_equivalent = "\x03" },
-    .{ .name = "legacy_tab", .payload = "\t", .delimiter = 'F', .legacy_equivalent = "\t" },
-    .{ .name = "kitty_enter", .payload = "\x1b[13u", .delimiter = 'G', .legacy_equivalent = "\r" },
-    .{ .name = "modify_other_keys_esc", .payload = "\x1b[27;5;27~", .delimiter = 'H', .legacy_equivalent = "\x1b" },
-    .{ .name = "csi_cursor_up", .payload = "\x1b[A", .delimiter = 'I', .legacy_equivalent = "\x1b[A" },
+    .{ .name = "kitty_esc_num_lock", .payload = "\x1b[27;129u", .delimiter = 'C', .legacy_equivalent = "\x1b" },
+    .{ .name = "kitty_ctrl_esc", .payload = "\x1b[27;5u", .delimiter = 'D', .legacy_equivalent = "\x1b" },
+    .{ .name = "kitty_ctrl_bracket", .payload = "\x1b[91;5u", .delimiter = 'E', .legacy_equivalent = "\x1b" },
+    .{ .name = "legacy_ctrl_c", .payload = "\x03", .delimiter = 'F', .legacy_equivalent = "\x03" },
+    .{ .name = "kitty_ctrl_c", .payload = "\x1b[99;5u", .delimiter = 'G', .legacy_equivalent = "\x03" },
+    .{ .name = "legacy_tab", .payload = "\t", .delimiter = 'H', .legacy_equivalent = "\t" },
+    .{ .name = "kitty_enter", .payload = "\x1b[13u", .delimiter = 'I', .legacy_equivalent = "\r" },
+    .{ .name = "modify_other_keys_esc", .payload = "\x1b[27;5;27~", .delimiter = 'J', .legacy_equivalent = "\x1b" },
+    .{ .name = "csi_cursor_up", .payload = "\x1b[A", .delimiter = 'K', .legacy_equivalent = "\x1b[A" },
 };
 
 pub fn runChildIfRequested() void {
@@ -1024,6 +1033,10 @@ test "Windows ConPTY input transport probe reports key encoding survival" {
                 // key encoder has to work around.
                 if (survival != .passed_through) failures += 1;
             }
+            // Nothing may follow the last delimiter. A trailing byte means the
+            // child read something no case accounts for, which would otherwise
+            // pass silently.
+            try std.testing.expectEqual(received.len, cursor);
             try std.testing.expectEqual(@as(usize, 0), failures);
 
             try readUntilMarker(&pty, &output, key_input_end_marker, std.time.ns_per_s);
