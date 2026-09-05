@@ -78,6 +78,7 @@ const gdi = @import("win32/gdi.zig");
 const c = @import("win32/consts.zig");
 const sys = @import("win32/sys.zig");
 const focus_region = @import("win32/focus_region.zig");
+const first_frame = @import("win32/first_frame.zig");
 
 test {
     _ = @import("win32/render_trace.zig");
@@ -89,6 +90,7 @@ test {
     _ = @import("win32/chrome_layout.zig");
     _ = @import("win32/gdi.zig");
     _ = @import("win32/focus_region.zig");
+    _ = @import("win32/first_frame.zig");
 }
 
 const ThemeColors = win32_theme.ThemeColors;
@@ -14466,11 +14468,42 @@ const Host = struct {
             observed_cloaked,
         );
         self.dwm_cloaked = state.cloaked;
-        if (self.surfaces_visible == state.visible) return;
-        self.surfaces_visible = state.visible;
+        if (self.surfaces_visible != state.visible) {
+            self.surfaces_visible = state.visible;
+            for (self.tabs.items) |*tab| {
+                var it = tab.tree.iterator();
+                while (it.next()) |entry| entry.view.syncOcclusion();
+            }
+        }
+
+        // Deliberately outside the transition branch, and deliberately here
+        // rather than at the message handlers. "The window is on screen" is
+        // the conjunction of shown, not minimized and not cloaked, and the
+        // three arrive independently: `ShowWindow` while DWM still reports
+        // the window cloaked leaves `surfaces_visible` false, and the uncloak
+        // that repairs it arrives as a WinEvent with no window message behind
+        // it (`onHostCloakEvent`). This function is the only place that sees
+        // every one of those inputs, so whichever of them completes last
+        // drives the handshake. `noteFirstFrameShown` is idempotent, so the
+        // common case -- already visible, nothing changed -- costs one
+        // already-spent latch check per surface.
+        if (self.surfaces_visible) self.noteFirstFrameShown();
+    }
+
+    /// Drive the one-shot post-show frame handshake for every surface this
+    /// host actually puts on screen.
+    ///
+    /// `surfaces_visible` already accounts for hidden, minimized and
+    /// DWM-cloaked, so gating on it means a window that is shown but still
+    /// cloaked does not spend the one-shot; the refresh that observes the
+    /// uncloak gets it instead. See `win32/first_frame.zig` (#224).
+    fn noteFirstFrameShown(self: *Host) void {
+        if (!self.surfaces_visible) return;
         for (self.tabs.items) |*tab| {
             var it = tab.tree.iterator();
-            while (it.next()) |entry| entry.view.syncOcclusion();
+            while (it.next()) |entry| {
+                if (entry.view.window_visible) entry.view.noteFirstFrame(.host_shown);
+            }
         }
     }
 
@@ -25433,6 +25466,12 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 } else {
                     v.render_trace.notePaintRetry();
                     v.requestRendererFrameNow(.apprt_paint_retry);
+                    // The OS asked for pixels and the renderer had none
+                    // reserved. `.apprt_paint_retry` above only wakes the
+                    // renderer; it cannot help if the renderer still thinks
+                    // this surface is occluded, and it does not re-arm the
+                    // update region. See `win32/first_frame.zig` (#224).
+                    v.noteFirstFrame(.paint_without_content);
                 }
             }
 
@@ -25792,6 +25831,10 @@ pub const Surface = struct {
     live_resize_repaint_deferred: bool = false,
     renderer_repaint_requested: std.atomic.Value(bool) = .init(false),
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
+    /// One-shot post-show frame handshake for #224. Only ever touched from
+    /// the UI thread (`WM_SHOWWINDOW`, `WM_WINDOWPOSCHANGED`, `WM_PAINT` and
+    /// the `SwapBuffers` that `WM_PAINT` drives), so it needs no atomics.
+    first_frame: first_frame.State = .{},
     draw_in_progress: bool = false,
     ime_composing: bool = false,
     deferred_char: DeferredCharState = .{},
@@ -27109,6 +27152,48 @@ pub const Surface = struct {
         }
     }
 
+    /// Feed the one-shot post-show handshake and act on its verdict.
+    ///
+    /// See `win32/first_frame.zig` for why this edge has to exist at all.
+    /// The action is deliberately asynchronous: `noteFirstFrame(.host_shown)`
+    /// runs inside the `ShowWindow` call at the end of `Surface.init`, and
+    /// forcing a synchronous `WM_PAINT` there would re-enter
+    /// `core_surface.draw()` before the shell entity and window state have
+    /// been committed. An invalidate that the normal pump answers is enough,
+    /// because the pump is running by the time anything can observe it.
+    fn noteFirstFrame(self: *Surface, event: first_frame.Event) void {
+        switch (self.first_frame.observe(event)) {
+            .none => {},
+            .request_frame => self.requestFirstFrame(),
+        }
+    }
+
+    fn requestFirstFrame(self: *Surface) void {
+        // The renderer thread does no work at all while it believes the
+        // surface is invisible (`minimumPresentIntervalMs` returns null), and
+        // the occlusion state it was given was computed while the host window
+        // was still hidden. Re-assert it before asking for a frame; both
+        // `syncOcclusion` and `occlusionCallback` are no-ops when the state
+        // already agrees.
+        self.syncOcclusion();
+        self.requestRendererFrameNow(.apprt_first_show);
+
+        // Not `queuePaintRequest`: that drops the invalidate whenever
+        // `paint_pending` is already set, which is exactly the latch that can
+        // be stuck from a paint request made while the window was hidden.
+        // Going straight to `RedrawWindow` re-arms the update region without
+        // `RDW_UPDATENOW`, so the paint is answered by the message pump
+        // rather than re-entrantly here.
+        const hwnd = self.hwnd orelse return;
+        const flags: UINT = c.RDW_INVALIDATE | c.RDW_INTERNALPAINT;
+        if (sys.RedrawWindow(hwnd, null, null, flags) == 0) {
+            log.warn(
+                "win32 first-frame invalidate failed err={}",
+                .{windows.kernel32.GetLastError()},
+            );
+        }
+    }
+
     fn flushDeferredLiveResizeRepaint(self: *Surface, repaint_fn: anytype) !bool {
         if (!self.live_resize_repaint_deferred) return false;
         if (self.paint_pending) {
@@ -27282,6 +27367,9 @@ pub const Surface = struct {
             return windows.unexpectedError(err);
         }
         self.render_trace.noteSwapBuffers();
+        // Real content reached the screen, so the post-show handshake is
+        // finished for good and can never wake the renderer again.
+        self.noteFirstFrame(.content_presented);
         // Only the first swap that actually returned non-zero; the claim is
         // idempotent so later swaps cost one atomic load.
         if (self.memory_stage_trace.claimFirstSwapObservation()) {
@@ -34745,6 +34833,74 @@ test "win32 forwardedActivationExtraArgCount counts args bundled with activation
 
     const malformed = [_][:0]const u8{"wgh://activate?surface=abc"};
     try std.testing.expectEqual(@as(usize, 0), forwardedActivationExtraArgCount(&malformed));
+}
+
+test "win32 first-frame one-shot survives a cloaked show and fires on uncloak" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var host: Host = undefined;
+    host.id = 224;
+    host.tabs = .empty;
+    host.active_tab = 0;
+    host.surfaces_visible = false;
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    // `core_initialized = false` and `hwnd = null` make every side effect of
+    // `requestFirstFrame` a no-op, so this test observes only the gating.
+    var on_screen: Surface = undefined;
+    on_screen.host = &host;
+    on_screen.host_id = host.id;
+    on_screen.hwnd = null;
+    on_screen.core_initialized = false;
+    on_screen.window_visible = true;
+    on_screen.first_frame = .{};
+
+    var background_tab: Surface = undefined;
+    background_tab.host = &host;
+    background_tab.host_id = host.id;
+    background_tab.hwnd = null;
+    background_tab.core_initialized = false;
+    background_tab.window_visible = false;
+    background_tab.first_frame = .{};
+
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &on_screen));
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &background_tab));
+
+    // `ShowWindow` ran but DWM still reports the window cloaked, so
+    // `refreshSurfaceVisibilityObserving` left `surfaces_visible` false. The
+    // show must not spend the one-shot: nothing is on screen to paint yet.
+    host.noteFirstFrameShown();
+    try std.testing.expect(!on_screen.first_frame.shown_requested);
+
+    // The uncloak arrives as a WinEvent with no window message behind it
+    // (`onHostCloakEvent`), so it reaches the handshake only because the call
+    // lives in `refreshSurfaceVisibilityObserving` rather than in the show
+    // and window-position message handlers. Without that, this window would
+    // never get its post-show frame.
+    host.surfaces_visible = true;
+    host.noteFirstFrameShown();
+    try std.testing.expect(on_screen.first_frame.shown_requested);
+    // A surface in a background tab is not on screen, so it keeps its
+    // one-shot for whenever its tab is actually activated.
+    try std.testing.expect(!background_tab.first_frame.shown_requested);
+
+    // A second uncloak, a restore from minimized, a virtual-desktop switch
+    // back: all free once the latch is spent.
+    on_screen.first_frame.shown_requested = false;
+    host.noteFirstFrameShown();
+    try std.testing.expect(on_screen.first_frame.shown_requested);
+
+    // And once a real swap has settled the handshake, nothing rearms it. This
+    // is what keeps `refreshSurfaceVisibilityObserving` -- which runs on every
+    // non-live-resize `WM_WINDOWPOSCHANGED` -- from becoming a wake source and
+    // regressing the #134 idle budget.
+    on_screen.first_frame.shown_requested = false;
+    on_screen.first_frame.settled = true;
+    host.noteFirstFrameShown();
+    try std.testing.expect(!on_screen.first_frame.shown_requested);
 }
 
 test "win32 hostSurfaceCount tracks surfaces attached to one host" {

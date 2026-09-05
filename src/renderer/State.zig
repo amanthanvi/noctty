@@ -98,6 +98,11 @@ pub const WakeSource = enum(u5) {
     apprt_health_recovery,
     /// A Win32 paint request collapsed into an already-pending paint.
     apprt_paint_pending,
+    /// The Win32 window was seen on screen for the first time, or its first
+    /// `WM_PAINT` found no reserved frame. Bounded to at most two wakes per
+    /// surface for the life of the process; see
+    /// `apprt/win32/first_frame.zig`.
+    apprt_first_show,
     /// The inspector redrew itself.
     inspector,
 

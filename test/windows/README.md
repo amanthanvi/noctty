@@ -34,6 +34,16 @@ state while inactive tabs initialize.
 pwsh -NoProfile -File .\interactive-win11-new-tab.ps1 -ResetState
 ```
 
+## interactive-win11-first-frame.ps1
+
+Asserts the window presents terminal content before it is given any input
+(#224). Sends no keys and never touches the mouse or the foreground; the
+oracle is the render trace the app writes on its first `SwapBuffers`.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-first-frame.ps1 -ResetState
+```
+
 ## interactive-win11-configured-size.ps1
 
 Launches a terminal with configured row and column dimensions and verifies the
