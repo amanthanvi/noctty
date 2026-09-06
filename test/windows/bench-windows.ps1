@@ -502,13 +502,16 @@ function Get-BenchWindowsTerminalCandidate {
 function Get-BenchTargetAdapter {
     param([Parameter(Mandatory)] [string] $Name)
 
-    $candidates = switch ($Name) {
+    # `switch` unrolls a single-element array into a scalar, and the noctty
+    # branch has exactly one candidate. Without @() around it, the fallback
+    # below indexes a string and resolves to its first character.
+    $candidates = @(switch ($Name) {
         'noctty' { @(Get-InteractiveWin11ExePath -RepoRoot $repoRoot) }
         'alacritty' { @('C:\Program Files\Alacritty\alacritty.exe') }
         'windows-terminal' { @((Get-BenchWindowsTerminalCandidate), 'wt.exe') }
         'tabby' { @('tabby.exe', (Join-Path $env:LOCALAPPDATA 'Programs\Tabby\Tabby.exe')) }
         'wave' { @('wave.exe', (Join-Path $env:LOCALAPPDATA 'Programs\Wave\Wave.exe')) }
-    }
+    })
     $resolved = $null
     foreach ($candidate in $candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
