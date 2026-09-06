@@ -17802,7 +17802,7 @@ const Host = struct {
                 if (i >= tab_range.start and i < tab_range.start + tab_range.count) {
                     const visible_index: i32 = @intCast(i - tab_range.start);
                     const tab_left = visible_index * button_width;
-                    changed.* = applyChildRect(
+                    changed.* = applyChromeChildRect(
                         button_hwnd,
                         &tab.button_placement,
                         childRect(
@@ -17839,7 +17839,7 @@ const Host = struct {
         if (self.tab_container_hwnd) |container_hwnd| {
             const visible_tabs: i32 = @intCast(tab_range.count);
             if (visible_tabs > 0) {
-                changed.* = applyChildRect(
+                changed.* = applyChromeChildRect(
                     container_hwnd,
                     &self.tab_container_placement,
                     childRect(
@@ -17865,7 +17865,7 @@ const Host = struct {
             const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
             const banner_y: i32 = self.tabBarHeight() + overlay_offset + inspector_offset + self.scaled(2);
             const banner_x = self.scaled(16);
-            changed.* = applyChildRect(
+            changed.* = applyChromeChildRect(
                 banner_hwnd,
                 &self.banner_placement,
                 childRect(
@@ -17887,7 +17887,7 @@ const Host = struct {
         if (self.overflow_hwnd) |button_hwnd| {
             const overflow_width = if (titlebar_actions) action_size else self.scaled(host_tab_overflow_button_width);
             button_x -= overflow_width;
-            changed.* = applyChildRect(
+            changed.* = applyChromeChildRect(
                 button_hwnd,
                 &self.overflow_placement,
                 childRect(
@@ -17903,7 +17903,7 @@ const Host = struct {
         if (self.new_tab_hwnd) |button_hwnd| {
             const new_tab_width = if (titlebar_actions) action_size else self.scaled(host_tab_small_button_width);
             button_x -= new_tab_width;
-            changed.* = applyChildRect(
+            changed.* = applyChromeChildRect(
                 button_hwnd,
                 &self.new_tab_placement,
                 childRect(
@@ -17949,13 +17949,13 @@ const Host = struct {
                 self.current_dpi,
             );
             const edit_rect = overlayEditChildRectFromFrame(edit_frame, self.scaled(8), self.scaled(6));
-            changed.* = applyChildRect(
+            changed.* = applyChromeChildRect(
                 edit_hwnd,
                 &self.overlay_edit_placement,
                 edit_rect,
             ) or changed.*;
             if (action_layout.accept_visible) {
-                changed.* = applyChildRect(
+                changed.* = applyChromeChildRect(
                     accept_hwnd,
                     &self.overlay_accept_placement,
                     childRect(
@@ -17978,7 +17978,7 @@ const Host = struct {
                 ) or changed.*;
             }
             if (action_layout.cancel_visible) {
-                changed.* = applyChildRect(
+                changed.* = applyChromeChildRect(
                     cancel_hwnd,
                     &self.overlay_cancel_placement,
                     childRect(
@@ -18045,7 +18045,7 @@ const Host = struct {
                         self.scaled(palette_row_height),
                         visible_rows * self.scaled(palette_row_height),
                     );
-                    changed.* = applyChildRect(
+                    changed.* = applyChromeChildRect(
                         list_hwnd,
                         &self.palette_list_placement,
                         paletteListRect(width, list_x, padding, list_y, list_height),
@@ -20209,6 +20209,37 @@ fn applyChildRect(hwnd: HWND, placement: *ChildPlacement, rect: RECT) bool {
     );
     placement.rect = rect;
     placement.rect_known = true;
+    return true;
+}
+
+/// `applyChildRect` for chrome children, which have to repaint themselves
+/// after a move.
+///
+/// `MoveWindow` runs with `bRepaint = FALSE` so a relayout never forces a
+/// paint of the terminal surfaces, and the host carries `WS_CLIPCHILDREN`, so
+/// the parent's own chrome-band repaint is clipped out of every child rect. A
+/// moved chrome child therefore keeps whatever pixels happened to be on screen
+/// at its new position -- the strip background, or the stale image of the
+/// button that used to sit there -- until something else invalidates it.
+///
+/// `Host.layout` covers the moves it makes itself via
+/// `invalidateChromeChildPaint`, but `Host.refreshChrome` and
+/// `Surface.refreshWindowTitle` also relayout the tab strip through
+/// `syncTabButtons` and invalidate only the parent. Whichever of them runs
+/// first after a tab is inserted does the move, and the placement cache then
+/// makes the miss permanent: the next `layout` sees no rect change and skips
+/// the child invalidation, so the button stays unpainted at its new slot while
+/// its old image survives underneath the neighbour that took its place.
+///
+/// Tying the invalidation to the move keeps correctness from depending on
+/// which caller happens to relayout the strip first. It costs one
+/// `InvalidateRect` per child that actually moved, so idle repaints are
+/// unaffected.
+fn applyChromeChildRect(hwnd: HWND, placement: *ChildPlacement, rect: RECT) bool {
+    if (!applyChildRect(hwnd, placement, rect)) return false;
+    // Chrome children are owner-drawn over their full client area, so the
+    // erase pass would only add a flash of background under the new paint.
+    _ = sys.InvalidateRect(hwnd, null, 0);
     return true;
 }
 
@@ -40018,6 +40049,68 @@ test "win32 searchBarGroupRect ignores hidden placements" {
         .right = 42,
         .bottom = 31,
     }, rect);
+}
+
+test "win32 chrome child placement invalidates a moved button" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Off-screen so the fixture never flashes over the desktop. An update
+    // region is per-window bookkeeping, so it survives being off-screen.
+    const hinstance = sys.GetModuleHandleW(null);
+    const parent = sys.CreateWindowExW(
+        0,
+        prompt_label_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_POPUP | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        -4000,
+        -4000,
+        1280,
+        64,
+        null,
+        null,
+        hinstance,
+        null,
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(parent);
+
+    const button = sys.CreateWindowExW(
+        0,
+        prompt_button_class,
+        std.unicode.utf8ToUtf16LeStringLiteral("2: tab"),
+        c.WS_CHILD | c.WS_VISIBLE | c.BS_OWNERDRAW,
+        0,
+        0,
+        220,
+        32,
+        parent,
+        null,
+        hinstance,
+        null,
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(button);
+
+    var placement: ChildPlacement = .{};
+    _ = applyChromeChildRect(button, &placement, childRect(0, 0, 220, 32));
+
+    // Baseline: the plain helper moves with `bRepaint = FALSE` and leaves
+    // nothing to repaint. That is what the terminal surfaces want, and it is
+    // why a tab button shifted right by a mid-strip insert stayed unpainted
+    // at its new slot while its old image survived under its neighbour.
+    var update: RECT = undefined;
+    _ = sys.ValidateRect(button, null);
+    try std.testing.expect(applyChildRect(button, &placement, childRect(220, 0, 220, 32)));
+    try std.testing.expectEqual(@as(BOOL, 0), sys.GetUpdateRect(button, &update, 0));
+
+    // The chrome variant leaves the button invalidated wherever it lands.
+    _ = sys.ValidateRect(button, null);
+    try std.testing.expect(applyChromeChildRect(button, &placement, childRect(440, 0, 210, 32)));
+    try std.testing.expect(sys.GetUpdateRect(button, &update, 0) != 0);
+
+    // An unchanged rect stays a no-op, so a settled strip does not repaint on
+    // every chrome sync.
+    _ = sys.ValidateRect(button, null);
+    try std.testing.expect(!applyChromeChildRect(button, &placement, childRect(440, 0, 210, 32)));
+    try std.testing.expectEqual(@as(BOOL, 0), sys.GetUpdateRect(button, &update, 0));
 }
 
 test "win32 scrollbarProxyPointFromSurfaceCursor tracks the right-edge hover band" {
