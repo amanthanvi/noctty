@@ -184,7 +184,11 @@ pub fn ownedStringEquals(current: ?[:0]const u8, value: []const u8) bool {
         false;
 }
 
-pub const OverlayFocusSlot = enum { edit, accept, cancel };
+/// Keyboard focus stops inside the overlay row, in tab order.
+/// `preview` is the confirm pane: it takes focus so a keyboard user
+/// can scroll the payload before deciding, and so that clicking it
+/// to scroll does not strand focus outside the cycle.
+pub const OverlayFocusSlot = enum { edit, preview, accept, cancel };
 
 const ScrollStatusKey = struct {
     visible: bool,
@@ -373,29 +377,50 @@ pub fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
 }
 
 fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, reverse: bool) OverlayFocusSlot {
-    if (mode == .confirm) return if (current == .accept) .cancel else .accept;
+    if (mode == .confirm) {
+        // preview -> accept -> cancel -> preview. `.edit` is hidden in
+        // this mode and only appears here as a landing correction when
+        // focus arrives from somewhere outside the cycle.
+        return if (reverse)
+            switch (current) {
+                .accept => .preview,
+                .cancel => .accept,
+                .preview, .edit => .cancel,
+            }
+        else switch (current) {
+            .preview, .edit => .accept,
+            .accept => .cancel,
+            .cancel => .preview,
+        };
+    }
+    // The preview pane exists only for confirm prompts, so outside that
+    // mode it is just another way of saying "back to the query field".
     if (!overlayAcceptButtonVisible(mode)) return if (current == .edit) .cancel else .edit;
     return if (reverse)
         switch (current) {
             .edit => .cancel,
             .accept => .edit,
             .cancel => .accept,
+            .preview => .edit,
         }
     else switch (current) {
         .edit => .accept,
         .accept => .cancel,
         .cancel => .edit,
+        .preview => .edit,
     };
 }
 
 fn overlayFocusSlotVisible(
     slot: OverlayFocusSlot,
     edit_visible: bool,
+    preview_visible: bool,
     accept_visible: bool,
     cancel_visible: bool,
 ) bool {
     return switch (slot) {
         .edit => edit_visible,
+        .preview => preview_visible,
         .accept => accept_visible,
         .cancel => cancel_visible,
     };
@@ -406,15 +431,18 @@ pub fn nextVisibleOverlayFocusSlot(
     current: OverlayFocusSlot,
     reverse: bool,
     edit_visible: bool,
+    preview_visible: bool,
     accept_visible: bool,
     cancel_visible: bool,
 ) ?OverlayFocusSlot {
     var candidate = current;
-    for (0..3) |_| {
+    // One iteration per slot: a full lap proves nothing else is visible.
+    for (0..@typeInfo(OverlayFocusSlot).@"enum".fields.len) |_| {
         candidate = nextOverlayFocusSlot(mode, candidate, reverse);
         if (candidate != current and overlayFocusSlotVisible(
             candidate,
             edit_visible,
+            preview_visible,
             accept_visible,
             cancel_visible,
         )) return candidate;
@@ -1255,7 +1283,130 @@ pub fn buildTabOverviewOverlayLabel(
 pub const ConfirmText = struct {
     title: []const u8,
     body: []const u8,
+    /// Size of the payload the preview pane is showing, appended to the
+    /// body line so the amount being approved is stated even when the
+    /// pane only shows the head of it. Empty for prompts with no
+    /// payload, and for a dropped payload mid-teardown.
+    preview_caption: []const u8 = "",
 };
+
+/// How much of a confirm payload the preview pane renders. A paste can
+/// be megabytes; a Win32 EDIT chokes long before that, and nobody reads
+/// a megabyte before clicking Allow. Only the DISPLAY is capped — the
+/// bytes actually delivered on Accept come from the Surface's pending
+/// clipboard op, never from this preview.
+pub const confirm_preview_limit: usize = 64 * 1024;
+
+/// A confirm payload rendered for display.
+pub const ConfirmPreview = struct {
+    /// UTF-8 that is safe to hand to a Win32 EDIT: always valid
+    /// encoding, never contains NUL, and control characters are
+    /// visible rather than invisible.
+    text: []u8,
+    /// How many source bytes `text` represents.
+    shown_bytes: usize,
+    /// How many bytes the source had in total.
+    total_bytes: usize,
+
+    pub fn truncated(self: ConfirmPreview) bool {
+        return self.shown_bytes < self.total_bytes;
+    }
+
+    pub fn deinit(self: *ConfirmPreview, alloc: Allocator) void {
+        alloc.free(self.text);
+        self.* = undefined;
+    }
+};
+
+fn appendCodepoint(alloc: Allocator, out: *std.ArrayListUnmanaged(u8), cp: u21) !void {
+    var buf: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+    try out.appendSlice(alloc, buf[0..len]);
+}
+
+/// Render `data` for the confirm preview pane.
+///
+/// The payload is shown as it is, matching upstream Ghostty's GTK and
+/// macOS confirmation dialogs. Exactly two bytes cannot survive the trip
+/// to a Win32 EDIT, and both are replaced with U+FFFD rather than
+/// given an invented glyph:
+///
+///   - Invalid UTF-8. OSC 52 write payloads are base64-decoded bytes
+///     from the terminal and need not be text at all; the UTF-16
+///     conversion on the way to the control would fail outright and
+///     show nothing at all.
+///   - NUL. The control takes a NUL-terminated string, so a literal NUL
+///     would silently drop the entire remainder of the payload — the
+///     opposite of what a preview is for.
+///
+/// Every other control character, DEL included, is passed through.
+pub fn buildConfirmPreview(
+    alloc: Allocator,
+    data: []const u8,
+    limit: usize,
+) !ConfirmPreview {
+    // Back off to the previous UTF-8 sequence boundary so the tail is
+    // never a split codepoint. Continuation bytes are 0b10xxxxxx.
+    var end = @min(limit, data.len);
+    if (end < data.len) {
+        while (end > 0 and (data[end] & 0xC0) == 0x80) end -= 1;
+    }
+    const src = data[0..end];
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, src.len);
+
+    var i: usize = 0;
+    while (i < src.len) {
+        const b = src[i];
+        if (b < 0x80) {
+            if (b == 0) {
+                try appendCodepoint(alloc, &out, 0xFFFD);
+            } else {
+                try out.append(alloc, b);
+            }
+            i += 1;
+            continue;
+        }
+
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try appendCodepoint(alloc, &out, 0xFFFD);
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > src.len or !std.unicode.utf8ValidateSlice(src[i .. i + seq_len])) {
+            try appendCodepoint(alloc, &out, 0xFFFD);
+            i += 1;
+            continue;
+        }
+        try out.appendSlice(alloc, src[i .. i + seq_len]);
+        i += seq_len;
+    }
+
+    return .{
+        .text = try out.toOwnedSlice(alloc),
+        .shown_bytes = end,
+        .total_bytes = data.len,
+    };
+}
+
+/// One-line caption above the preview pane, so the size of what is
+/// being approved is visible even when the pane only shows its head.
+pub fn buildConfirmPreviewCaption(
+    alloc: Allocator,
+    preview: ConfirmPreview,
+) ![]u8 {
+    if (preview.truncated()) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "Showing the first {d} of {d} bytes",
+            .{ preview.shown_bytes, preview.total_bytes },
+        );
+    }
+    if (preview.total_bytes == 1) return try alloc.dupe(u8, "1 byte");
+    return try std.fmt.allocPrint(alloc, "{d} bytes", .{preview.total_bytes});
+}
 
 pub fn buildOverlayPaintLabelText(
     alloc: Allocator,
@@ -1479,7 +1630,14 @@ pub fn buildOverlayHintText(
         // empty placeholder only appears when the payload has already
         // been dropped (mid-teardown).
         .confirm => if (confirm) |text|
-            try alloc.dupe(u8, text.body)
+            if (text.preview_caption.len == 0)
+                try alloc.dupe(u8, text.body)
+            else
+                try std.fmt.allocPrint(
+                    alloc,
+                    "{s}  ({s})",
+                    .{ text.body, text.preview_caption },
+                )
         else
             try alloc.dupe(u8, ""),
     };
@@ -3520,6 +3678,98 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
     try std.testing.expectEqualStrings("Window title", title);
 }
 
+test "win32 confirm preview passes ordinary text through untouched" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "echo one\r\necho two\r\n",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("echo one\r\necho two\r\n", preview.text);
+    try std.testing.expectEqual(@as(usize, 20), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 20), preview.total_bytes);
+    try std.testing.expect(!preview.truncated());
+}
+
+test "win32 confirm preview passes control characters through, except NUL" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Upstream's GTK and macOS dialogs show the payload as it is, so BEL,
+    // DEL, tab, CR and LF all survive verbatim. NUL cannot: the EDIT takes
+    // a NUL-terminated string and would drop everything after it.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "a\x00b\x07c\td\x7fe\r\n",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("a\u{FFFD}b\x07c\td\x7fe\r\n", preview.text);
+    try std.testing.expect(std.mem.indexOfScalar(u8, preview.text, 0) == null);
+    // The bytes after the NUL must still be there — that is the point.
+    try std.testing.expect(std.mem.endsWith(u8, preview.text, "e\r\n"));
+}
+
+test "win32 confirm preview replaces invalid UTF-8 rather than failing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // OSC 52 write payloads are base64-decoded bytes from the terminal
+    // and need not be text at all. The UTF-16 conversion on the way to
+    // the EDIT would reject them and show nothing.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "ok\xffbad\xe3\x81",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("ok\u{FFFD}bad\u{FFFD}\u{FFFD}", preview.text);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.text));
+}
+
+test "win32 confirm preview truncates on a codepoint boundary" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Two 3-byte codepoints, cut at 4 bytes: backing off to 3 keeps the
+    // first whole and never emits a split sequence.
+    var preview = try buildConfirmPreview(std.testing.allocator, "\u{3042}\u{3042}", 4);
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("\u{3042}", preview.text);
+    try std.testing.expectEqual(@as(usize, 3), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 6), preview.total_bytes);
+    try std.testing.expect(preview.truncated());
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.text));
+}
+
+test "win32 confirm preview caption reports what is being approved" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const whole = try buildConfirmPreviewCaption(
+        std.testing.allocator,
+        .{ .text = "", .shown_bytes = 12, .total_bytes = 12 },
+    );
+    defer std.testing.allocator.free(whole);
+    try std.testing.expectEqualStrings("12 bytes", whole);
+
+    const single = try buildConfirmPreviewCaption(
+        std.testing.allocator,
+        .{ .text = "", .shown_bytes = 1, .total_bytes = 1 },
+    );
+    defer std.testing.allocator.free(single);
+    try std.testing.expectEqualStrings("1 byte", single);
+
+    const cut = try buildConfirmPreviewCaption(
+        std.testing.allocator,
+        .{ .text = "", .shown_bytes = 65536, .total_bytes = 3145728 },
+    );
+    defer std.testing.allocator.free(cut);
+    try std.testing.expectEqualStrings("Showing the first 65536 of 3145728 bytes", cut);
+}
+
 test "win32 confirm overlay paints its payload title and body" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -3561,6 +3811,39 @@ test "win32 confirm overlay paints its payload title and body" {
     );
     defer std.testing.allocator.free(body);
     try std.testing.expectEqualStrings(confirm.body, body);
+}
+
+test "win32 confirm overlay states the payload size next to the body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const snap = PaletteSnapshot.fromDefaults();
+    const empty_mru: []const []const u8 = &.{};
+
+    const body = try buildOverlayFeedbackText(
+        std.testing.allocator,
+        .none,
+        null,
+        .confirm,
+        "",
+        null,
+        null,
+        null,
+        .{},
+        1,
+        snap,
+        empty_mru,
+        .{},
+        .{
+            .title = "Allow clipboard paste?",
+            .body = "Confirm this paste.",
+            .preview_caption = "Showing the first 65536 of 3145728 bytes",
+        },
+    );
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(
+        "Confirm this paste.  (Showing the first 65536 of 3145728 bytes)",
+        body,
+    );
 }
 
 test "win32 confirm overlay distinguishes the three prompts" {
@@ -4105,23 +4388,23 @@ test "win32 transient overlay focus ring includes every visible control" {
 
     try std.testing.expectEqual(
         OverlayFocusSlot.cancel,
-        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, true),
+        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, false, true),
     );
     try std.testing.expectEqual(
         OverlayFocusSlot.cancel,
-        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, true),
+        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, false, true),
     );
     try std.testing.expectEqual(
         OverlayFocusSlot.accept,
-        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, true, true),
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, false, true, true),
     );
     try std.testing.expectEqual(
         null,
-        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false),
+        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false, false),
     );
     try std.testing.expectEqual(
         null,
-        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, true),
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, false, true),
     );
 }
 

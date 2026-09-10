@@ -30,7 +30,7 @@ Last reviewed: 2026-09-02.
 | [Configuration: `scrollbar`](https://ghostty.org/docs/config/reference)                                            | Per-pane graphical scrollbars honor `system` (Windows dynamic-scrollbar preference) or `never`; search matches appear as markers. See [search and scrollbars](#search-and-scrollbars).                                      |
 | [Configuration: `notify-on-command-finish`](https://ghostty.org/docs/config/reference)                             | Focus policy, duration threshold, and bell/`notify` actions are applied; `notify` also needs `desktop-notifications`. See [notifications and progress](#notifications-and-progress).                                        |
 | [Configuration: `clipboard-codepoint-map`](https://ghostty.org/docs/config/reference)                              | Selection copies apply the map before the clipboard write. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                         |
-| [Configuration: `clipboard-paste-protection`](https://ghostty.org/docs/config/reference)                           | Risky clipboard and dropped-content pastes use a native confirmation. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                              |
+| [Configuration: `clipboard-paste-protection`](https://ghostty.org/docs/config/reference)                           | Risky clipboard and dropped-content pastes use a native confirmation that previews the payload. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                    |
 | [Action reference: `copy_to_clipboard:html`](https://ghostty.org/docs/config/keybind/reference)                    | HTML copy writes CF_HTML and a plain-text fallback in one clipboard transaction.                                                                                                                                            |
 | Kitty graphics protocol                                                                                            | Parser and renderer support ship, but child APC delivery depends on ConPTY. The bundled source passed the measured payload byte-exactly; the tested in-box fallback stripped it. See [ConPTY transport](#conpty-transport). |
 
@@ -233,8 +233,12 @@ Contrast; `never` removes only the visual widget.
 ### Clipboard and drag-drop
 
 `clipboard-paste-protection` controls confirmation for unsafe clipboard
-pastes and the stricter dropped-payload classifier. CF_HTML copies also place
-a plain-text fallback on the clipboard. Dropped files, text, URLs, and HTML
+pastes and the stricter dropped-payload classifier. The confirmation shows the
+payload it is about in a read-only monospace pane, capped at 64 KiB of display
+(the full payload is still what Accept delivers). The payload is shown as it is,
+matching upstream Ghostty's GTK and macOS dialogs; only invalid UTF-8 and NUL
+are replaced with U+FFFD, because neither survives the trip to a Win32 EDIT.
+CF_HTML copies also place a plain-text fallback on the clipboard. Dropped files, text, URLs, and HTML
 are converted to terminal input. Shift changes file/text handling, Ctrl
 suppresses file-path quoting, and Alt is reserved.
 

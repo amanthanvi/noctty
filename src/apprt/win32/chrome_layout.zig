@@ -67,6 +67,48 @@ pub fn centeredRect(rect: RECT, width: i32, height: i32) RECT {
     return childRect(left, top, width, height);
 }
 
+pub const confirm_preview_min_height_base: i32 = 72;
+pub const confirm_preview_max_height_base: i32 = 220;
+pub const confirm_preview_min_width_base: i32 = 200;
+
+/// Rect for the confirm preview pane: the width under the overlay band,
+/// tall enough to read several lines but never so tall that approving a
+/// paste means losing sight of the terminal underneath.
+///
+/// Returns a zero-area rect when the window cannot show anything
+/// readable. Callers treat that as "hide the pane" rather than drawing
+/// a sliver, matching how the palette list refuses to render when its
+/// width falls below the readable bound.
+pub fn confirmPreviewRect(
+    width: i32,
+    client_bottom: i32,
+    top: i32,
+    left: i32,
+    padding: i32,
+    dpi: u32,
+) RECT {
+    const empty: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    const min_h = scaledBy(confirm_preview_min_height_base, dpi);
+    const max_h = scaledBy(confirm_preview_max_height_base, dpi);
+    const min_w = scaledBy(confirm_preview_min_width_base, dpi);
+
+    const right = width - @max(0, padding);
+    if (right - left < min_w) return empty;
+
+    const available = client_bottom - top;
+    if (available < min_h) return empty;
+
+    // A third of what is left, bounded both ways: enough to read, never
+    // enough to hide the terminal the payload is about to land in.
+    const height = @min(max_h, @max(min_h, @divTrunc(available, 3)));
+    return .{
+        .left = left,
+        .top = top,
+        .right = right,
+        .bottom = top + height,
+    };
+}
+
 pub fn overlayEditFrameRect(
     width: i32,
     overlay_y: i32,
@@ -256,4 +298,40 @@ test "win32 overlay edit frame offsets scale with DPI" {
     }
     try std.testing.expect(!overlayActionVisibilityForWidth(220, 10, 80, 80, true, 96).accept);
     try std.testing.expect(overlayActionVisibilityForWidth(230, 10, 80, 80, true, 96).accept);
+}
+
+test "confirmPreviewRect fills the width under the overlay band" {
+    const r = confirmPreviewRect(1200, 800, 100, 26, 16, 96);
+    try std.testing.expectEqual(@as(i32, 26), r.left);
+    try std.testing.expectEqual(@as(i32, 100), r.top);
+    try std.testing.expectEqual(@as(i32, 1184), r.right);
+    // (800 - 100) / 3 = 233, clamped to the 220 maximum.
+    try std.testing.expectEqual(@as(i32, 320), r.bottom);
+}
+
+test "confirmPreviewRect keeps a floor so short windows still read" {
+    // (200 - 100) / 3 = 33, raised to the 72 minimum.
+    const r = confirmPreviewRect(1200, 200, 100, 26, 16, 96);
+    try std.testing.expectEqual(@as(i32, 172), r.bottom);
+    try std.testing.expect(r.bottom <= 200);
+}
+
+test "confirmPreviewRect refuses to render a sliver" {
+    // Too short for the minimum height.
+    const short = confirmPreviewRect(1200, 160, 100, 26, 16, 96);
+    try std.testing.expectEqual(@as(i32, 0), short.right);
+    try std.testing.expectEqual(@as(i32, 0), short.bottom);
+
+    // Too narrow for the minimum width.
+    const narrow = confirmPreviewRect(200, 800, 100, 26, 16, 96);
+    try std.testing.expectEqual(@as(i32, 0), narrow.right);
+}
+
+test "confirmPreviewRect scales its bounds with DPI" {
+    const r = confirmPreviewRect(2400, 1600, 200, 52, 32, 192);
+    // 220 base * 2 = 440 maximum; (1600 - 200) / 3 = 466 clamps to it.
+    try std.testing.expectEqual(@as(i32, 640), r.bottom);
+    // `padding` arrives already scaled by the caller, so the right edge
+    // is a plain subtraction and does not scale again here.
+    try std.testing.expectEqual(@as(i32, 2368), r.right);
 }
