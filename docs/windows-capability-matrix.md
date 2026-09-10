@@ -235,9 +235,17 @@ Contrast; `never` removes only the visual widget.
 `clipboard-paste-protection` controls confirmation for unsafe clipboard
 pastes and the stricter dropped-payload classifier. The confirmation shows the
 payload it is about in a read-only monospace pane, capped at 64 KiB of display
-(the full payload is still what Accept delivers). The payload is shown as it is,
-matching upstream Ghostty's GTK and macOS dialogs; only invalid UTF-8 and NUL
-are replaced with U+FFFD, because neither survives the trip to a Win32 EDIT.
+(the full payload is still what Accept delivers). Three things are replaced with
+U+FFFD: invalid UTF-8 and NUL, neither of which survives the trip to a Win32
+EDIT, and Unicode bidirectional formatting characters (`U+061C`, `U+200E`,
+`U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`). The bidi replacement is there
+for a different reason than the other two: those characters are invisible and
+reorder the text around them, so a pane that rendered them literally could show
+a different reading order than the payload actually has. That applies to
+legitimate right-to-left payloads as much as to crafted ones — a genuine RTL
+paste carrying directional marks will show U+FFFD where they were. Every other
+control character, DEL included, is shown as it is, matching upstream Ghostty's
+GTK and macOS dialogs.
 CF_HTML copies also place a plain-text fallback on the clipboard. Dropped files, text, URLs, and HTML
 are converted to terminal input. Shift changes file/text handling, Ctrl
 suppresses file-path quoting, and Alt is reserved.

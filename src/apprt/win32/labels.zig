@@ -1341,6 +1341,13 @@ pub const ConfirmPreview = struct {
 /// (CVE-2021-42574, "Trojan Source"). Ordinary control characters are
 /// left alone: they render as a box or as nothing, but they do not lie
 /// about the order of what surrounds them.
+///
+/// This is a real trade-off, not a pure win: these characters appear in
+/// legitimate right-to-left text too, so a genuine RTL payload shows
+/// U+FFFD where its directional marks were. The pane's job is to be
+/// trustworthy about order rather than pretty, and the substitution is
+/// documented in `docs/windows-capability-matrix.md` so the behaviour is
+/// not a surprise.
 fn isBidiFormatting(cp: u21) bool {
     return switch (cp) {
         0x061C, // ARABIC LETTER MARK
