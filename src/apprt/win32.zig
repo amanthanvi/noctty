@@ -17293,7 +17293,12 @@ const Host = struct {
     fn submitOverlay(self: *Host) !bool {
         _ = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        if (text.len == 0 and self.overlay_mode != .search and self.overlay_mode != .profile and self.overlay_mode != .command_palette) {
+        // Confirm prompts must NOT take this path: their query EDIT is
+        // hidden and always empty, so dismissing on "empty" would close
+        // the prompt without dispatching accept or cancel. Reachable
+        // since the preview pane joined the focus cycle and routes Enter
+        // through `submitOverlay`.
+        if (text.len == 0 and overlayEmptySubmitDismisses(self.overlay_mode)) {
             self.hideOverlay();
             try self.layout();
             return false;
@@ -23113,6 +23118,7 @@ const layoutChildPaintPlan = labels.layoutChildPaintPlan;
 const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
 const overlayEditFrameVisible = labels.overlayEditFrameVisible;
+const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
 
 const OverlayFocusSlot = labels.OverlayFocusSlot;
 
