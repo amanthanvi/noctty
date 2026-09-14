@@ -1063,12 +1063,13 @@ palette: Palette = .{},
 ///     reasonable for a good looking blur. Higher blur intensities may
 ///     cause strange rendering and performance issues.
 ///
-/// In the Windows-only fork this toggles the host window's DWM system
-/// backdrop when `background-opacity` is less than 1 and the OS supports
-/// `DWMWA_SYSTEMBACKDROP_TYPE` (Windows 11 22H2 / build 22621 and newer).
-/// The numeric blur intensity is currently treated as enabled/disabled
-/// rather than a tunable radius. On older Windows builds this remains a
-/// renderer-only transparent background with no system backdrop.
+/// In the Windows-only fork this setting is accepted but has no effect on
+/// any Windows build, and setting it logs a warning at startup. Windows
+/// makes `background-opacity` visible by layering the host window
+/// (`WS_EX_LAYERED` plus `LWA_ALPHA`), because DWM discards the OpenGL
+/// child window's framebuffer alpha, and a layered window cannot render a
+/// DWM backdrop material such as Mica or Acrylic. Blur intensities are
+/// ignored along with the rest of the setting.
 @"background-blur": BackgroundBlur = .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
