@@ -18193,9 +18193,14 @@ const Host = struct {
             // the only trigger for NameChanged or an event-driven reader keeps
             // announcing the stale name.
             const uia_name_changed = tab.button_label_cache_valid and
-                (!title_unchanged or
-                    tab.cached_button_index != i or
-                    tab.cached_button_pane_count != pane_count);
+                labels.tabItemUiaNameChanged(
+                    tab.cached_button_title,
+                    tab.cached_button_index,
+                    tab.cached_button_pane_count,
+                    title,
+                    i,
+                    pane_count,
+                );
             if (self.tab_tooltip_tab_id) |shown| {
                 // The title or the width budget moved under the tooltip.
                 if (shown == tab.id) self.hideTabTooltip();
@@ -18210,7 +18215,10 @@ const Host = struct {
                 show_pane_count,
             );
             defer self.app.core_app.alloc.free(label);
-            if (tab.button_hwnd == null) {
+            const is_new_button = tab.button_hwnd == null;
+            const label_changed = is_new_button or
+                !ownedStringEquals(tab.cached_button_label, label);
+            if (is_new_button) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
@@ -18237,15 +18245,18 @@ const Host = struct {
                     .selected = &tabItemUiaSelected,
                     .selection_container = &tabContainerUiaProvider,
                 });
-            } else if (!ownedStringEquals(tab.cached_button_label, label)) {
+            } else if (label_changed) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
                 _ = sys.SetWindowTextW(tab.button_hwnd.?, label_w.ptr);
-                if (tab.uia_provider) |provider| provider.raiseNameChanged();
-            } else if (uia_name_changed) {
-                if (tab.uia_provider) |provider| provider.raiseNameChanged();
             }
+            // Commit the cached name inputs BEFORE raising NameChanged.
+            // `events.raiseCurrentStringPropertyChanged` queries the provider
+            // for the property synchronously and publishes that string as the
+            // event's `newValue`, and `tabItemUiaName` builds it from
+            // `cached_button_title`, so raising first announced the PREVIOUS
+            // title -- the one the rename was replacing.
             try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_title, title);
             tab.cached_button_index = i;
             tab.cached_button_active = active;
@@ -18253,6 +18264,11 @@ const Host = struct {
             tab.cached_button_label_max_width = label_max_width;
             tab.cached_button_show_pane_count = show_pane_count;
             tab.button_label_cache_valid = true;
+            // A provider created above already reports the current name; only
+            // an existing one needs the event.
+            if (!is_new_button and (label_changed or uia_name_changed)) {
+                if (tab.uia_provider) |provider| provider.raiseNameChanged();
+            }
         }
         var chrome_changed = false;
         if (!self.layoutChromeForRect(rect, &chrome_changed)) return chrome_changed;

@@ -1041,6 +1041,30 @@ pub fn buildTabItemUiaName(
     return std.fmt.bufPrint(buf, "{d}: {s}", .{ index + 1, title }) catch null;
 }
 
+/// Whether the name `buildTabItemUiaName` builds differs between a tab's
+/// previously cached inputs and its current ones.
+///
+/// The drawn label cannot answer this. `shouldShowPaneCount` keeps the count
+/// out of a narrow tab's label, so splitting such a tab moves the name while
+/// the label stays byte-identical, and a reader driven by NameChanged events
+/// keeps announcing the old one. Keep these inputs in step with
+/// `buildTabItemUiaName`.
+pub fn tabItemUiaNameChanged(
+    cached_title: ?[:0]const u8,
+    cached_index: usize,
+    cached_pane_count: usize,
+    title: ?[]const u8,
+    index: usize,
+    pane_count: usize,
+) bool {
+    if (cached_index != index) return true;
+    if (cached_pane_count != pane_count) return true;
+    // A tab with no title falls back to the drawn label, which the caller
+    // already compares.
+    const value = title orelse return cached_title != null;
+    return !ownedStringEquals(cached_title, value);
+}
+
 /// Title text for a tab's hover tooltip: the whole thing, bounded only by
 /// `tab_tooltip_max_width`.
 pub fn buildTabTooltipText(alloc: Allocator, value: []const u8) ![]u8 {
@@ -3104,6 +3128,40 @@ test "win32 buildTabItemUiaName keeps the pane count the drawn label shows" {
     // fall back to the drawn label instead of reporting a cut name.
     var tiny: [4]u8 = undefined;
     try std.testing.expect(buildTabItemUiaName(&tiny, 0, "pwsh", 1) == null);
+}
+
+test "win32 tabItemUiaNameChanged tracks a split the drawn label hides" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const title: [:0]const u8 = "pwsh";
+    // Splitting a narrow tab: `shouldShowPaneCount` keeps the count out of the
+    // label, so the drawn text is byte-identical and only this predicate can
+    // tell the UIA name moved.
+    try std.testing.expect(!shouldShowPaneCount(120, 2));
+    const before = try buildTabButtonLabel(std.testing.allocator, title, 0, false, 1, 24, false);
+    defer std.testing.allocator.free(before);
+    const after = try buildTabButtonLabel(std.testing.allocator, title, 0, false, 2, 24, false);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    try std.testing.expect(tabItemUiaNameChanged(title, 0, 1, title, 0, 2));
+
+    // And the predicate agrees with the names themselves.
+    var before_buf: [64]u8 = undefined;
+    var after_buf: [64]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        buildTabItemUiaName(&before_buf, 0, title, 1).?,
+        buildTabItemUiaName(&after_buf, 0, title, 2).?,
+    ));
+
+    // Nothing moved: no event, or every layout pass would announce the tab.
+    try std.testing.expect(!tabItemUiaNameChanged(title, 0, 1, title, 0, 1));
+    // A reorder and a retitle both change the name.
+    try std.testing.expect(tabItemUiaNameChanged(title, 0, 1, title, 1, 1));
+    try std.testing.expect(tabItemUiaNameChanged(title, 0, 1, "bash", 0, 1));
+    // A tab with no title rides on the drawn-label fallback the caller checks.
+    try std.testing.expect(!tabItemUiaNameChanged(null, 0, 1, null, 0, 1));
+    try std.testing.expect(tabItemUiaNameChanged(null, 0, 1, title, 0, 1));
 }
 
 test "win32 buildTabTooltipText keeps a runaway title bounded" {
