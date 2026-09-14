@@ -1064,12 +1064,13 @@ palette: Palette = .{},
 ///     cause strange rendering and performance issues.
 ///
 /// In the Windows-only fork this setting is accepted but has no effect on
-/// any Windows build, and setting it logs a warning at startup. Windows
-/// makes `background-opacity` visible by layering the host window
-/// (`WS_EX_LAYERED` plus `LWA_ALPHA`), because DWM discards the OpenGL
-/// child window's framebuffer alpha, and a layered window cannot render a
-/// DWM backdrop material such as Mica or Acrylic. Blur intensities are
-/// ignored along with the rest of the setting.
+/// any Windows build, and enabling it logs a warning. Nothing in the Win32
+/// runtime can show a DWM backdrop material such as Mica or Acrylic: the
+/// window chrome is painted opaquely, the terminal is an opaque OpenGL child
+/// whose framebuffer alpha DWM discards, and nothing opts into per-pixel
+/// window alpha. `background-opacity` is a flat window-wide tint (layered
+/// window alpha), not a blur, and blur intensities are ignored along with the
+/// rest of the setting.
 @"background-blur": BackgroundBlur = .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
@@ -9961,9 +9962,10 @@ pub const BackgroundBlur = union(enum) {
         };
     }
 
-    /// Windows currently exposes background blur as a system-backdrop
-    /// toggle, so any positive radius behaves the same as `true`.
-    pub fn win32SystemBackdropEnabled(self: BackgroundBlur) bool {
+    /// Windows has no blur mechanism at all (see the `background-blur` docs),
+    /// so this only answers whether the user asked for blur; any positive
+    /// radius means the same thing as `true`.
+    pub fn win32BlurRequested(self: BackgroundBlur) bool {
         return self.enabled();
     }
 
@@ -9975,13 +9977,13 @@ pub const BackgroundBlur = union(enum) {
         };
     }
 
-    test "BackgroundBlur win32SystemBackdropEnabled" {
+    test "BackgroundBlur win32BlurRequested" {
         const testing = std.testing;
 
-        try testing.expect(!(@as(BackgroundBlur, .false)).win32SystemBackdropEnabled());
-        try testing.expect((@as(BackgroundBlur, .true)).win32SystemBackdropEnabled());
-        try testing.expect(!(BackgroundBlur{ .radius = 0 }).win32SystemBackdropEnabled());
-        try testing.expect((BackgroundBlur{ .radius = 42 }).win32SystemBackdropEnabled());
+        try testing.expect(!(@as(BackgroundBlur, .false)).win32BlurRequested());
+        try testing.expect((@as(BackgroundBlur, .true)).win32BlurRequested());
+        try testing.expect(!(BackgroundBlur{ .radius = 0 }).win32BlurRequested());
+        try testing.expect((BackgroundBlur{ .radius = 42 }).win32BlurRequested());
     }
 
     pub fn formatEntry(

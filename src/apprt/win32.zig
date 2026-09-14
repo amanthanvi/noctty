@@ -3529,8 +3529,9 @@ pub const App = struct {
     /// touch it on the way down.
     com_initialized: bool = false,
     /// Kernel build number from `RtlGetVersion`. 0 if probe failed.
-    /// 22000 = Win11 21H2; 22621 = Win11 22H2
-    /// (`DWMWA_SYSTEMBACKDROP_TYPE` / `DWMSBT_TABBEDWINDOW`).
+    /// 22000 = Win11 21H2; 22621 = Win11 22H2 (the floor for
+    /// `DWMWA_SYSTEMBACKDROP_TYPE`, which host windows always write as
+    /// `DWMSBT_NONE` — see `applyDwmThemeWithBuild`).
     /// Future chrome gates read this directly; no runtime config flag,
     /// per §12 Q1.
     os_build: u32 = 0,
@@ -3664,17 +3665,7 @@ pub const App = struct {
                 .{},
             );
         }
-        if (self.config.@"background-blur".win32SystemBackdropEnabled()) {
-            // Not a config error, so this stays a warning rather than a
-            // diagnostic: the value parses and is honoured on other
-            // platforms. See `applyDwmThemeWithBuild` for the measurement.
-            log.warn(
-                "background-blur has no effect on Windows in this build: background-opacity " ++
-                    "is applied as layered-window alpha (WS_EX_LAYERED + LWA_ALPHA), and a " ++
-                    "layered window cannot render a DWM backdrop material",
-                .{},
-            );
-        }
+        if (self.config.@"background-blur".win32BlurRequested()) logBackgroundBlurUnsupported();
         warnPortableIgnoredLocalData(core_app.alloc);
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
@@ -6422,6 +6413,13 @@ pub const App = struct {
                         var config = try value.config.clone(self.core_app.alloc);
                         const ssh_config_hosts_changed =
                             self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
+                        // Warn on the transition, not on every reload: the
+                        // Settings checkbox and an edited config file both
+                        // arrive here, and that is the only notice a user who
+                        // turns blur on after startup would ever get.
+                        const background_blur_newly_requested =
+                            config.@"background-blur".win32BlurRequested() and
+                            !self.config.@"background-blur".win32BlurRequested();
                         // CLI launch-layout is a one-shot startup/new-window
                         // request. Config reload reparses the original argv, so
                         // strip it before installing the long-lived app config
@@ -6443,6 +6441,7 @@ pub const App = struct {
                         self.unregisterGlobalHotkeys();
                         self.config.deinit();
                         self.config = config;
+                        if (background_blur_newly_requested) logBackgroundBlurUnsupported();
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
                         var jump_list_profiles_pending = ssh_config_hosts_changed and self.jump_list != null;
@@ -21313,6 +21312,19 @@ fn resolveTheme(config: *const configpkg.Config) ThemeColors {
     };
 }
 
+/// One notice for a setting Win32 cannot honour, shared by startup and the
+/// config-change path so the two cannot drift. Not a config diagnostic: the
+/// value parses and other platforms honour it.
+fn logBackgroundBlurUnsupported() void {
+    log.warn(
+        "background-blur has no effect on Windows in this build: noctty paints its " ++
+            "window opaquely and opts into no DWM transparency mechanism, so no backdrop " ++
+            "material can reach a visible pixel. background-opacity is a flat " ++
+            "window-wide tint, not a blur",
+        .{},
+    );
+}
+
 /// Whether this Windows build accepts `DWMWA_SYSTEMBACKDROP_TYPE` at all.
 /// Older builds reject the attribute with `E_INVALIDARG`, so the write is
 /// skipped there rather than failing on every theme apply.
@@ -21427,21 +21439,23 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
         isHighContrastActive(),
         caption_color,
         text_color,
-        // No host window ever carries a DWM backdrop material. The backdrop
-        // used to be requested exactly when `background-opacity < 1` and
-        // `background-blur` were both set, but `background-opacity < 1` is
-        // also what puts `WS_EX_LAYERED` + `LWA_ALPHA` on this HWND in
-        // `Surface.applyBackgroundOpacity` — the only mechanism that makes
-        // opacity visible on Win32, since DWM discards the GL child's
-        // framebuffer alpha — and a layered window renders no backdrop
-        // material. So the attribute was requested precisely when it could
-        // not take effect. Measured on Windows 11 build 26200: with
-        // `--background-opacity=0.8 --background-blur=true` the host read
-        // back `WS_EX_LAYERED`, `LWA_ALPHA` alpha=204 and backdrop=4, and
-        // its screenshot over a striped desktop was byte-identical to the
-        // same run with `--background-blur=false` (backdrop=1). Stripping
-        // `WS_EX_LAYERED` by hand from that window left it fully opaque with
-        // backdrop=4 still set, so the material never rendered either way.
+        // Host windows never carry a DWM backdrop material, because nothing
+        // in this runtime can show one: the chrome is painted opaquely with
+        // GDI, the terminal is an opaque OpenGL child whose framebuffer alpha
+        // DWM discards, and nothing opts into `DwmExtendFrameIntoClientArea`,
+        // `DwmEnableBlurBehindWindow` or `WS_EX_NOREDIRECTIONBITMAP`. The
+        // attribute used to be set to `DWMSBT_TABBEDWINDOW` whenever
+        // `background-opacity < 1` and `background-blur` were both set, which
+        // only ever cost a DWM call and made the docs promise a material the
+        // window could not show. Measured on Windows 11 build 26200 over a
+        // striped desktop: `--background-opacity=0.8 --background-blur=true`
+        // (backdrop 4) and `--background-blur=false` (backdrop 1) produced
+        // byte-identical screenshots, and flipping the attribute from outside
+        // the process on the same window with `WS_EX_LAYERED` stripped by
+        // hand changed nothing either. The layered alpha that implements
+        // `background-opacity` is NOT the obstacle: a synthetic window that
+        // does extend its frame shows a different material per backdrop type
+        // whether or not it is layered.
         c.DWMSBT_NONE,
         supportsDwmSystemBackdropAttribute(os_build),
     );

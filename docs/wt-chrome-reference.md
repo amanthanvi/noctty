@@ -121,7 +121,7 @@ Windows Terminal's chrome is a custom-frame Win32 window with WM_NCCALCSIZE zero
 - **22621+ (Win11 SV2):** DWMWA_SYSTEMBACKDROP_TYPE is publicly supported and functional.
 - **22000-22620 (Win11 RTM / 22H2 pre-release):** WT's code notes a "slightly different API surface" existed but the current codebase only uses the SV2 API.
 - **Windows 10:** the attribute does not exist.
-- **Noctty:** writes `DWMSBT_NONE` on 22621+ and skips the attribute below that. It never requests a backdrop material, because its transparency is layered-window alpha, which suppresses one. See [windows-capability-matrix.md](windows-capability-matrix.md#background-blur).
+- **Noctty:** writes `DWMSBT_NONE` on 22621+ and skips the attribute below that; the window uses an opaque solid color. It never requests a material, because it paints its window opaquely and opts into no DWM transparency mechanism, so none could reach a visible pixel. See [windows-capability-matrix.md](windows-capability-matrix.md#background-blur).
 
 ### Fallback
 - No Mica: titlebar painted with solid background brush color via GDI `FillRect` + `BeginBufferedPaint` in `_OnPaint()`.

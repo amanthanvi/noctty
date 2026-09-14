@@ -147,8 +147,9 @@ workflows above hold up.
 - `settings.json` itself: profile GUIDs, fragments, and JSON inheritance
 - Windows Terminal actions and command-palette entries, which have their own
   vocabulary
-- Acrylic and Mica materials; Noctty accepts `background-blur` but cannot
-  render a backdrop material, so translucent windows are evenly tinted
+- Acrylic and Mica materials; Noctty accepts `background-blur` but opts into
+  no DWM transparency mechanism, so translucent windows are evenly tinted
+  rather than blurred
 - The retro terminal effect and other WT-specific rendering experiments
 - Live tab contents and running child processes
 
