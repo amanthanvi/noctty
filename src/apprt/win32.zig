@@ -34767,27 +34767,47 @@ test "win32 supportsDwmSystemBackdropAttribute gates unsupported builds" {
 
 test "win32 host backdrop stays DWMSBT_NONE with background blur configured" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // `windowThemePolicy` forces `DWMSBT_NONE` on its own under High
+    // Contrast, so on such a machine this assertion would hold even with the
+    // old `DWMSBT_TABBEDWINDOW` argument restored. Skip rather than pass
+    // vacuously; the accessibility override has its own coverage in
+    // `win32_theme.zig`.
+    if (isHighContrastActive()) return error.SkipZigTest;
 
+    // Read-only: writing DWM theme attributes stays private to
+    // `win32_theme.zig`, so the seed below goes through `WindowThemeAdapter`.
     const dwm = struct {
         const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-        extern "dwmapi" fn DwmSetWindowAttribute(HWND, u32, *const anyopaque, u32) callconv(.winapi) i32;
         extern "dwmapi" fn DwmGetWindowAttribute(HWND, u32, *anyopaque, u32) callconv(.winapi) i32;
     };
 
     const hwnd = try createTestHostWindow();
     defer _ = sys.DestroyWindow(hwnd);
 
+    const theme = darkTheme();
+
     // Seed the attribute with the value the pre-fix build asked for, so a
     // pass cannot come from `DWMSBT_NONE` merely being the system default.
-    // A build that does not know the attribute rejects this with
-    // `E_INVALIDARG`; there is nothing to assert there.
-    const seed: u32 = c.DWMSBT_TABBEDWINDOW;
-    if (dwm.DwmSetWindowAttribute(
+    win32_theme.WindowThemeAdapter.applyHost(
+        hwnd,
+        theme,
+        false,
+        win32_theme.dwm_color_default,
+        win32_theme.dwm_color_default,
+        c.DWMSBT_TABBEDWINDOW,
+        true,
+    );
+
+    // A Windows build that does not know the attribute rejects both the seed
+    // and this query; there is nothing to assert there.
+    var backdrop: u32 = 0xFFFF_FFFF;
+    if (dwm.DwmGetWindowAttribute(
         hwnd,
         dwm.DWMWA_SYSTEMBACKDROP_TYPE,
-        @ptrCast(&seed),
+        @ptrCast(&backdrop),
         @sizeOf(u32),
     ) != 0) return error.SkipZigTest;
+    try std.testing.expectEqual(c.DWMSBT_TABBEDWINDOW, backdrop);
 
     // The configuration that used to request `DWMSBT_TABBEDWINDOW`. It is
     // also the configuration that layers the host window, which is why the
@@ -34796,10 +34816,8 @@ test "win32 host backdrop stays DWMSBT_NONE with background blur configured" {
     config.@"background-opacity" = 0.85;
     config.@"background-blur" = .true;
 
-    const theme = darkTheme();
     applyDwmThemeWithBuild(hwnd, &theme, &config, c.OS_BUILD_WIN11_22H2);
 
-    var backdrop: u32 = 0xFFFF_FFFF;
     try std.testing.expectEqual(@as(i32, 0), dwm.DwmGetWindowAttribute(
         hwnd,
         dwm.DWMWA_SYSTEMBACKDROP_TYPE,
