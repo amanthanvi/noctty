@@ -1247,6 +1247,16 @@ pub fn buildTabOverviewOverlayLabel(
     return try std.fmt.allocPrint(alloc, "Tab {d}/{d}", .{ current_index + 1, total });
 }
 
+/// The prompt text carried by an active confirm overlay. Chrome paint
+/// renders these directly: a confirm prompt has no fixed wording, so the
+/// caller-supplied title and body are the only text that identifies what
+/// is being confirmed. A null value means no payload is installed (the
+/// overlay is mid-teardown) and the placeholders below stand in.
+pub const ConfirmText = struct {
+    title: []const u8,
+    body: []const u8,
+};
+
 pub fn buildOverlayPaintLabelText(
     alloc: Allocator,
     mode: HostOverlayMode,
@@ -1255,6 +1265,7 @@ pub fn buildOverlayPaintLabelText(
     search_selected: ?usize,
     host_status: HostTabStatus,
     palette_presentation: PalettePresentation,
+    confirm: ?ConfirmText,
 ) ![]u8 {
     return switch (mode) {
         .none => try alloc.dupe(u8, ""),
@@ -1268,10 +1279,13 @@ pub fn buildOverlayPaintLabelText(
         .profile => try alloc.dupe(u8, "Profile"),
         .search => try buildSearchOverlayLabel(alloc, search_total, search_selected),
         .tab_overview => try buildTabOverviewOverlayLabel(alloc, host_status.index, host_status.total),
-        // Confirm overlays source their prompt title from the payload
-        // at paint time; this default only appears when the payload
-        // has already been dropped (mid-teardown).
-        .confirm => try alloc.dupe(u8, "Confirm"),
+        // Confirm overlays take their prompt title from the payload.
+        // The placeholder only appears when the payload has already
+        // been dropped (mid-teardown).
+        .confirm => if (confirm) |text|
+            try alloc.dupe(u8, text.title)
+        else
+            try alloc.dupe(u8, "Confirm"),
     };
 }
 
@@ -1289,6 +1303,7 @@ pub fn buildOverlayFeedbackText(
     palette: PaletteSnapshot,
     mru: []const []const u8,
     palette_presentation: PalettePresentation,
+    confirm: ?ConfirmText,
 ) ![]u8 {
     if (banner_text) |value| {
         return switch (banner_kind) {
@@ -1316,6 +1331,7 @@ pub fn buildOverlayFeedbackText(
         pane_count,
         palette,
         mru,
+        confirm,
     );
 }
 
@@ -1377,6 +1393,7 @@ pub fn buildOverlayHintText(
     pane_count: usize,
     palette: PaletteSnapshot,
     mru: []const []const u8,
+    confirm: ?ConfirmText,
 ) ![]u8 {
     return switch (mode) {
         .none => try alloc.dupe(u8, ""),
@@ -1458,12 +1475,13 @@ pub fn buildOverlayHintText(
                 .{ requested, host_status.total },
             );
         },
-        // Confirm overlays source their hint text from the payload
-        // body at paint time (the hint HWND is re-used as the body
-        // line). This helper produces a default so the promptTitle
-        // call doesn't need a special case; the real text lives on
-        // the payload.
-        .confirm => try alloc.dupe(u8, ""),
+        // Confirm overlays take their body line from the payload. The
+        // empty placeholder only appears when the payload has already
+        // been dropped (mid-teardown).
+        .confirm => if (confirm) |text|
+            try alloc.dupe(u8, text.body)
+        else
+            try alloc.dupe(u8, ""),
     };
 }
 
@@ -3470,6 +3488,7 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         null,
         .{},
         .{ .match_count = 4, .title = "Toggle fullscreen", .subtitle = "Fullscreen", .available = true },
+        null,
     );
     defer std.testing.allocator.free(command);
     try std.testing.expectEqualStrings("Command 4", command);
@@ -3482,6 +3501,7 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         2,
         .{},
         .{},
+        null,
     );
     defer std.testing.allocator.free(search);
     try std.testing.expectEqualStrings("Find 2/8", search);
@@ -3494,9 +3514,144 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         null,
         .{},
         .{},
+        null,
     );
     defer std.testing.allocator.free(title);
     try std.testing.expectEqualStrings("Window title", title);
+}
+
+test "win32 confirm overlay paints its payload title and body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const snap = PaletteSnapshot.fromDefaults();
+    const empty_mru: []const []const u8 = &.{};
+    const confirm: ConfirmText = .{
+        .title = "Allow clipboard paste?",
+        .body = "noctty needs confirmation before completing this clipboard paste or read request.",
+    };
+
+    const title = try buildOverlayPaintLabelText(
+        std.testing.allocator,
+        .confirm,
+        "",
+        null,
+        null,
+        .{},
+        .{},
+        confirm,
+    );
+    defer std.testing.allocator.free(title);
+    try std.testing.expectEqualStrings("Allow clipboard paste?", title);
+
+    const body = try buildOverlayFeedbackText(
+        std.testing.allocator,
+        .none,
+        null,
+        .confirm,
+        "",
+        null,
+        null,
+        null,
+        .{},
+        1,
+        snap,
+        empty_mru,
+        .{},
+        confirm,
+    );
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(confirm.body, body);
+}
+
+test "win32 confirm overlay distinguishes the three prompts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Every confirm prompt used to paint the same "Confirm" placeholder,
+    // so a close prompt and a clipboard prompt were indistinguishable.
+    const prompts = [_]ConfirmText{
+        .{ .title = "Close this terminal?", .body = "A process is still running." },
+        .{ .title = "Allow clipboard paste?", .body = "Confirm this paste." },
+        .{ .title = "Allow clipboard write?", .body = "Confirm this write." },
+    };
+    for (prompts) |prompt| {
+        const title = try buildOverlayPaintLabelText(
+            std.testing.allocator,
+            .confirm,
+            "",
+            null,
+            null,
+            .{},
+            .{},
+            prompt,
+        );
+        defer std.testing.allocator.free(title);
+        try std.testing.expectEqualStrings(prompt.title, title);
+        try std.testing.expect(!std.mem.eql(u8, "Confirm", title));
+    }
+}
+
+test "win32 confirm overlay falls back once its payload is dropped" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const snap = PaletteSnapshot.fromDefaults();
+    const empty_mru: []const []const u8 = &.{};
+
+    // Teardown drops the payload before the last repaint can run, so the
+    // placeholders still have to be reachable.
+    const title = try buildOverlayPaintLabelText(
+        std.testing.allocator,
+        .confirm,
+        "",
+        null,
+        null,
+        .{},
+        .{},
+        null,
+    );
+    defer std.testing.allocator.free(title);
+    try std.testing.expectEqualStrings("Confirm", title);
+
+    const body = try buildOverlayHintText(
+        std.testing.allocator,
+        .confirm,
+        "",
+        null,
+        null,
+        null,
+        .{},
+        1,
+        snap,
+        empty_mru,
+        null,
+    );
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("", body);
+}
+
+test "win32 confirm overlay keeps banner precedence over the payload body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const snap = PaletteSnapshot.fromDefaults();
+    const empty_mru: []const []const u8 = &.{};
+
+    const body = try buildOverlayFeedbackText(
+        std.testing.allocator,
+        .err,
+        "Something went wrong",
+        .confirm,
+        "",
+        null,
+        null,
+        null,
+        .{},
+        1,
+        snap,
+        empty_mru,
+        .{},
+        .{ .title = "Allow clipboard paste?", .body = "Confirm this paste." },
+    );
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("Error: Something went wrong", body);
 }
 
 test "win32 buildOverlayFeedbackText prefers inline banner state" {
@@ -3519,6 +3674,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         snap,
         empty_mru,
         .{},
+        null,
     );
     defer std.testing.allocator.free(info);
     try std.testing.expectEqualStrings("Info: Try: new_tab", info);
@@ -3537,6 +3693,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         snap,
         empty_mru,
         .{},
+        null,
     );
     defer std.testing.allocator.free(err);
     try std.testing.expectEqualStrings(
@@ -3558,6 +3715,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         snap,
         empty_mru,
         .{},
+        null,
     );
     defer std.testing.allocator.free(fallback);
     try std.testing.expect(std.mem.indexOf(u8, fallback, "next match") != null);
@@ -4118,6 +4276,7 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
         1,
         snap,
         empty_mru,
+        null,
     );
     defer std.testing.allocator.free(command_unique);
     try std.testing.expect(std.mem.indexOf(u8, command_unique, "reload_config") != null);
@@ -4133,6 +4292,7 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
         1,
         snap,
         empty_mru,
+        null,
     );
     defer std.testing.allocator.free(search_next);
     try std.testing.expect(std.mem.indexOf(u8, search_next, "2/8") != null);
@@ -4149,6 +4309,7 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
         2,
         snap,
         empty_mru,
+        null,
     );
     defer std.testing.allocator.free(tab_invalid);
     try std.testing.expect(std.mem.indexOf(u8, tab_invalid, "out of range") != null);
@@ -4164,6 +4325,7 @@ test "win32 buildOverlayHintText reflects live overlay guidance" {
         2,
         snap,
         empty_mru,
+        null,
     );
     defer std.testing.allocator.free(tab_title);
     try std.testing.expect(std.mem.indexOf(u8, tab_title, "tab 1/3") != null);
