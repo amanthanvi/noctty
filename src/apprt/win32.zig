@@ -13796,13 +13796,22 @@ const Host = struct {
             if (shown == tab.id) return;
         }
         const title = tab.cached_button_title orelse return self.hideTabTooltip();
-        // Measure the drawn label rather than the bare title. The label also
-        // carries the tab index, the active marker and the pane count, and GDI
-        // applies `DT_END_ELLIPSIS` to all of it inside a button that has
-        // already given up its close zone, so a title that fits on its own can
-        // still lose its tail to those decorations.
-        const label = tab.cached_button_label orelse return self.hideTabTooltip();
-        if (!labels.hostLabelIsCompacted(label, tab.cached_button_label_max_width)) {
+        // Measure the title against the budget the title was actually
+        // compacted to, not the drawn label against the button's own budget.
+        // The label also carries the tab index, the active marker and the pane
+        // count; `buildTabButtonLabel` charges those to the button budget
+        // first, so comparing the whole label against that budget asked
+        // whether a label that is built to fit fits. It also answered
+        // differently for an active tab than for its inactive neighbour
+        // showing the same title.
+        const budget = labels.tabButtonTitleBudget(
+            tab.cached_button_index,
+            tab.cached_button_active,
+            tab.cached_button_pane_count,
+            tab.cached_button_label_max_width,
+            tab.cached_button_show_pane_count,
+        );
+        if (!labels.hostLabelIsCompacted(title, budget)) {
             return self.hideTabTooltip();
         }
 
@@ -13925,8 +13934,13 @@ const Host = struct {
     }
 
     /// Paint the tab title tooltip popup.
-    fn paintTabTooltip(self: *Host) void {
-        const hwnd = self.tab_tooltip_hwnd orelse return;
+    ///
+    /// `hwnd` is the window the message was sent to, not `tab_tooltip_hwnd`:
+    /// WM_PAINT has to validate the update region of the window it was posted
+    /// for. Reading the host's own handle first and returning when it is gone
+    /// left the region dirty, and Windows re-posts WM_PAINT for a dirty window
+    /// forever -- a spin the message pump cannot leave.
+    fn paintTabTooltip(self: *Host, hwnd: HWND) void {
         var ps: PAINTSTRUCT = undefined;
         const hdc = sys.BeginPaint(hwnd, &ps);
         defer _ = sys.EndPaint(hwnd, &ps);
@@ -15068,14 +15082,16 @@ const Host = struct {
     /// reporting it would hand assistive technology the same truncated text a
     /// sighted user is already squinting at. Name the item from the tab's full
     /// title instead and fall back to the drawn label only when the title does
-    /// not fit the caller's buffer.
+    /// not fit the caller's buffer. The pane count rides along because the
+    /// drawn label carries it and a split tab is a different thing to land on
+    /// than a single-pane one.
     fn tabItemUiaName(ctx: *anyopaque, tab_id: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
         for (self.tabs.items, 0..) |*tab, index| {
             if (tab.id != tab_id) continue;
             const fallback: []const u8 = if (tab.cached_button_label) |label| label else "Tab";
             const title = tab.cached_button_title orelse return fallback;
-            return std.fmt.bufPrint(buf, "{d}: {s}", .{ index + 1, title }) catch fallback;
+            return labels.buildTabItemUiaName(buf, index, title, tab.leafCount()) orelse fallback;
         }
         return "Tab";
     }
@@ -15320,27 +15336,31 @@ const Host = struct {
         const initial_text = initial orelse "";
         _ = try self.setOverlayEditText(initial_text);
 
-        // Honor the sync results. `syncOverlayLabel` / `syncOverlayHint`
-        // are the only change detector the chrome paint's text cache
-        // has: `refreshChrome` normally consumes their return value and
-        // invalidates on it. Opening an overlay performs the same sync
-        // here, so discarding the result left the paint reusing the
+        // Keep the syncs: their return values still drive `refreshChrome`,
+        // and the control text they write is what the confirm prompt's
+        // hint HWND shows. Do NOT gate the invalidation on them here.
+        // A sync only reports a change against the control text it wrote
+        // last, and three other sites (`stepTabOverviewSelection`,
+        // `syncSearchOverlay`, the plain `EN_CHANGE` arm) run the same
+        // syncs and drop the result, so the control text can already
+        // have advanced past what the paint cache holds. The next open
+        // would then see "unchanged", skip the invalidate, and paint the
         // PREVIOUS overlay's cached strings — `hideOverlay` never frees
-        // those, and no `.confirm` path marks the text dirty the way
-        // the palette and profile paths do for their modes. The forced
-        // transition paint at the end of this function is synchronous
-        // and clears `chrome_repaint_dirty`, so the stale strings would
-        // be painted and then persist rather than merely flicker.
-        var text_changed = false;
-        text_changed = (try self.syncOverlayLabel()) or text_changed;
-        text_changed = (try self.syncOverlayHint()) or text_changed;
+        // those, and the forced transition paint below is synchronous
+        // and clears `chrome_repaint_dirty`, so the stale text persists
+        // rather than merely flickering.
+        _ = try self.syncOverlayLabel();
+        _ = try self.syncOverlayHint();
         _ = try self.syncOverlayPreview();
         _ = try self.syncOverlayButtons();
-        if (text_changed) self.invalidateOverlayText();
         // The command palette gets a scrollable list below the EDIT;
         // rebuild it for the initial (usually empty) query so the
         // ranker's "show all" path has something visible to draw.
         if (mode == .command_palette) self.rebuildPaletteList();
+        // Unconditional, and after `rebuildPaletteList`: opening an
+        // overlay is once per gesture, so the cost is one repaint, and
+        // the rebuild mutates the palette state the painted label reads.
+        self.invalidateOverlayText();
         try self.layout();
         if (is_confirm) {
             // Show body as hint label. Prefer the visible Accept button,
@@ -18165,6 +18185,22 @@ const Host = struct {
                 tab.cached_button_label_max_width == label_max_width and
                 tab.cached_button_show_pane_count == show_pane_count;
             if (label_inputs_unchanged) continue;
+            // The UIA name is not the drawn label: it carries the tab's FULL
+            // title and its pane count, and `shouldShowPaneCount` keeps the
+            // count out of the label on a narrow tab. Splitting such a tab
+            // moves the name from "1: pwsh" to "1: pwsh (2)" while the label
+            // stays byte-identical, so the label comparison below cannot be
+            // the only trigger for NameChanged or an event-driven reader keeps
+            // announcing the stale name.
+            const uia_name_changed = tab.button_label_cache_valid and
+                labels.tabItemUiaNameChanged(
+                    tab.cached_button_title,
+                    tab.cached_button_index,
+                    tab.cached_button_pane_count,
+                    title,
+                    i,
+                    pane_count,
+                );
             if (self.tab_tooltip_tab_id) |shown| {
                 // The title or the width budget moved under the tooltip.
                 if (shown == tab.id) self.hideTabTooltip();
@@ -18179,7 +18215,10 @@ const Host = struct {
                 show_pane_count,
             );
             defer self.app.core_app.alloc.free(label);
-            if (tab.button_hwnd == null) {
+            const is_new_button = tab.button_hwnd == null;
+            const label_changed = is_new_button or
+                !ownedStringEquals(tab.cached_button_label, label);
+            if (is_new_button) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
@@ -18206,13 +18245,18 @@ const Host = struct {
                     .selected = &tabItemUiaSelected,
                     .selection_container = &tabContainerUiaProvider,
                 });
-            } else if (!ownedStringEquals(tab.cached_button_label, label)) {
+            } else if (label_changed) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
                 _ = sys.SetWindowTextW(tab.button_hwnd.?, label_w.ptr);
-                if (tab.uia_provider) |provider| provider.raiseNameChanged();
             }
+            // Commit the cached name inputs BEFORE raising NameChanged.
+            // `events.raiseCurrentStringPropertyChanged` queries the provider
+            // for the property synchronously and publishes that string as the
+            // event's `newValue`, and `tabItemUiaName` builds it from
+            // `cached_button_title`, so raising first announced the PREVIOUS
+            // title -- the one the rename was replacing.
             try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_title, title);
             tab.cached_button_index = i;
             tab.cached_button_active = active;
@@ -18220,6 +18264,11 @@ const Host = struct {
             tab.cached_button_label_max_width = label_max_width;
             tab.cached_button_show_pane_count = show_pane_count;
             tab.button_label_cache_valid = true;
+            // A provider created above already reports the current name; only
+            // an existing one needs the event.
+            if (!is_new_button and (label_changed or uia_name_changed)) {
+                if (tab.uia_provider) |provider| provider.raiseNameChanged();
+            }
         }
         var chrome_changed = false;
         if (!self.layoutChromeForRect(rect, &chrome_changed)) return chrome_changed;
@@ -22859,7 +22908,16 @@ fn tabTooltipProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
     switch (msg) {
         c.WM_ERASEBKGND => return 1,
         c.WM_PAINT => {
-            if (windowData(Host, hwnd)) |host| host.paintTabTooltip();
+            if (windowData(Host, hwnd)) |host| {
+                host.paintTabTooltip(hwnd);
+            } else {
+                // No host behind the popup (teardown, or a paint that beat
+                // `setWindowData`). The update region still has to be
+                // validated or Windows keeps re-posting this message.
+                var ps: PAINTSTRUCT = undefined;
+                _ = sys.BeginPaint(hwnd, &ps);
+                _ = sys.EndPaint(hwnd, &ps);
+            }
             return 0;
         },
         c.WM_GETOBJECT => {
