@@ -405,7 +405,7 @@ pub const ThemeMetrics = struct {
     tab_close_zone: u16 = 22,
     tab_small_button_width: u16 = 34,
     tab_overflow_button_width: u16 = 34,
-    tab_label_max_len: u16 = 24, // character count, not pixels
+    tab_label_max_width: u16 = 24, // display cells, not pixels
 
     // Pane divider (px).
     pane_divider: u16 = 2,

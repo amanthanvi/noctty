@@ -2031,6 +2031,7 @@ pub const ChromeControlState = struct {
         live_text,
         scrollbar,
         decorative,
+        tooltip,
     };
 
     ctx: *anyopaque,
@@ -2323,7 +2324,7 @@ pub const ChromeControlProvider = struct {
             .scrollbar => if (pattern_id == constants.UIA_RangeValuePatternId) @ptrCast(&self.range_iface) else null,
             .tab_container => if (pattern_id == constants.UIA_SelectionPatternId) @ptrCast(&self.selection_iface) else null,
             .tab_item => if (pattern_id == constants.UIA_SelectionItemPatternId) @ptrCast(&self.selection_item_iface) else null,
-            .live_text, .decorative => null,
+            .live_text, .decorative, .tooltip => null,
         };
         out.* = pattern orelse return com.S_OK;
         _ = AddRef(&self.base);
@@ -2345,6 +2346,7 @@ pub const ChromeControlProvider = struct {
                 .button, .toggle => constants.UIA_ButtonControlTypeId,
                 .live_text, .decorative => constants.UIA_TextControlTypeId,
                 .scrollbar => constants.UIA_ScrollBarControlTypeId,
+                .tooltip => constants.UIA_ToolTipControlTypeId,
             }),
             constants.UIA_NamePropertyId => {
                 var buf: [512]u8 = undefined;

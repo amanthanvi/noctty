@@ -19,6 +19,7 @@ pub const UIA_TabItemControlTypeId: i32 = 50019;
 pub const UIA_TextControlTypeId: i32 = 50020;
 pub const UIA_DocumentControlTypeId: i32 = 50030;
 pub const UIA_WindowControlTypeId: i32 = 50032;
+pub const UIA_ToolTipControlTypeId: i32 = 50042;
 
 // ── Pattern IDs ────────────────────────────────────────────────────────
 

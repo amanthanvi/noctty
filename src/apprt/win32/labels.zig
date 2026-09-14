@@ -6,6 +6,7 @@ const apprt = @import("../../apprt.zig");
 const windows_shell = @import("../../config/windows_shell.zig");
 const input = @import("../../input.zig");
 const terminal = @import("../../terminal/main.zig");
+const unicode = @import("../../unicode/main.zig");
 
 const win32_elevation = @import("../win32_elevation.zig");
 const win32_theme = @import("../win32_theme.zig");
@@ -36,7 +37,7 @@ const LPCWSTR = win32_types.LPCWSTR;
 const WPARAM = usize;
 
 const default_metrics: win32_theme.ThemeMetrics = .{};
-const host_tab_label_max_len: usize = default_metrics.tab_label_max_len;
+const host_tab_label_max_width: usize = default_metrics.tab_label_max_width;
 const host_tab_min_button_width: i32 = default_metrics.tab_min_width;
 
 pub const PalettePresentation = struct {
@@ -852,48 +853,125 @@ pub fn buildHostAwareBaseTitle(
     return try win32_elevation.allocPrefixedTitle(alloc, composed, elevated);
 }
 
-/// Compact `value` to `max_len` bytes, ending in an ellipsis when it had to
-/// cut. The budget is bytes, not codepoints: callers derive it from a pixel
-/// width at roughly one byte per drawn cell (see `hostTabLabelMaxLen`), so
-/// counting codepoints would let a CJK label overrun the space reserved for
-/// it. `compactHostLabelLen` reports the same length without allocating.
+/// Compact `value` to `max_width` display cells, ending in an ellipsis when it
+/// had to cut. The budget is cells, not bytes or codepoints: callers derive it
+/// from a pixel width (see `hostTabLabelMaxWidth`), and cells are what a pixel
+/// budget actually buys. Counting bytes would hand a CJK title a third of the
+/// room it can use -- 24 bytes is 8 kana -- while counting codepoints would let
+/// the same title overrun the space reserved for it.
+/// `compactHostLabelWidth` reports the same width without allocating.
 fn compactHostLabel(
     alloc: Allocator,
     value: []const u8,
-    max_len: usize,
+    max_width: usize,
 ) ![]u8 {
-    if (value.len <= max_len) return try alloc.dupe(u8, value);
-    if (max_len <= 3) return try alloc.dupe(u8, "...");
-    const cut = utf8BoundaryFloor(value, max_len - 3);
+    if (displayWidth(value) <= max_width) return try alloc.dupe(u8, value);
+    if (max_width <= 3) return try alloc.dupe(u8, "...");
+    const cut = displayWidthFloor(value, max_width - 3);
     return try std.fmt.allocPrint(alloc, "{s}...", .{value[0..cut]});
 }
 
-/// Round `len` down to a UTF-8 sequence boundary in `value`.
+/// Display width of `value` in cells.
 ///
-/// Labels are compacted against a byte budget but are later converted with
-/// `utf8ToUtf16LeAllocZ`, which rejects the result with `error.InvalidUtf8`
-/// when the cut landed inside a multi-byte codepoint. Any non-ASCII title --
-/// CJK, an emoji, an accented path -- hits that on the tab strip as soon as
-/// a tab is narrow enough to truncate.
-fn utf8BoundaryFloor(value: []const u8, len: usize) usize {
-    if (len >= value.len) return value.len;
-    var i = len;
-    while (i > 0 and value[i] & 0xC0 == 0x80) i -= 1;
-    return i;
+/// Bytes that do not decode count as one cell each: a title that arrived
+/// mangled still gets compacted against a sane budget instead of failing the
+/// caller.
+fn displayWidth(value: []const u8) usize {
+    var width: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        if (decodeCodepoint(value, i)) |decoded| {
+            width += codepointWidth(decoded.cp);
+            i += decoded.len;
+        } else {
+            width += 1;
+            i += 1;
+        }
+    }
+    return width;
 }
 
-fn compactHostLabelLen(value: []const u8, max_len: usize) usize {
-    if (value.len <= max_len) return value.len;
-    if (max_len <= 3) return 3;
-    // Must track `compactHostLabel` exactly: `profileStatusBadgeTextLen`
-    // reserves chip width from this, and a cut rounded back off a multi-byte
-    // codepoint makes the real label shorter than the byte budget.
-    return utf8BoundaryFloor(value, max_len - 3) + 3;
+/// Byte index of the longest prefix of `value` that fits in `max_width` cells.
+///
+/// The cut always lands on a UTF-8 sequence boundary. Labels are later
+/// converted with `utf8ToUtf16LeAllocZ`, which rejects the result with
+/// `error.InvalidUtf8` when the cut landed inside a multi-byte codepoint. Any
+/// non-ASCII title -- CJK, an emoji, an accented path -- hits that on the tab
+/// strip as soon as a tab is narrow enough to truncate. A double-width
+/// codepoint that would straddle the budget is left out rather than allowed to
+/// spill one cell past it.
+fn displayWidthFloor(value: []const u8, max_width: usize) usize {
+    var width: usize = 0;
+    var i: usize = 0;
+    while (i < value.len) {
+        const decoded = decodeCodepoint(value, i) orelse {
+            if (width + 1 > max_width) return i;
+            width += 1;
+            i += 1;
+            continue;
+        };
+        const cell_width = codepointWidth(decoded.cp);
+        if (width + cell_width > max_width) return i;
+        width += cell_width;
+        i += decoded.len;
+    }
+    return value.len;
 }
 
-pub fn hostTabLabelMaxLen(button_width: i32) usize {
+const DecodedCodepoint = struct {
+    cp: u21,
+    len: usize,
+};
+
+fn decodeCodepoint(value: []const u8, index: usize) ?DecodedCodepoint {
+    const len = std.unicode.utf8ByteSequenceLength(value[index]) catch return null;
+    if (index + len > value.len) return null;
+    const cp = std.unicode.utf8Decode(value[index..][0..len]) catch return null;
+    return .{ .cp = cp, .len = len };
+}
+
+/// Cells one codepoint occupies, read from the same table the terminal grid
+/// uses so the chrome and the grid agree on what "wide" means.
+fn codepointWidth(cp: u21) usize {
+    if (cp <= 0xFF) return 1;
+    return @intCast(unicode.table.get(cp).width);
+}
+
+fn compactHostLabelWidth(value: []const u8, max_width: usize) usize {
+    const width = displayWidth(value);
+    if (width <= max_width) return width;
+    if (max_width <= 3) return 3;
+    // Must track `compactHostLabel` exactly: `profileStatusBadgeTextWidth`
+    // reserves chip width from this, and a double-width codepoint dropped at
+    // the cut makes the real label narrower than the budget.
+    return displayWidth(value[0..displayWidthFloor(value, max_width - 3)]) + 3;
+}
+
+/// Cell budget for a tab label drawn into a `button_width` pixel button.
+///
+/// The divisor is an average glyph advance, so the budget is an estimate; GDI
+/// still applies `DT_END_ELLIPSIS` when the estimate ran long.
+pub fn hostTabLabelMaxWidth(button_width: i32) usize {
     const estimated = @as(usize, @intCast(@max(6, @divTrunc(button_width - 26, 8))));
-    return std.math.clamp(estimated, @as(usize, 6), @as(usize, host_tab_label_max_len));
+    return std.math.clamp(estimated, @as(usize, 6), @as(usize, host_tab_label_max_width));
+}
+
+/// Widest tooltip title the tab strip will build. A title past this is
+/// pathological -- a runaway OSC 0 sequence, say -- and the popup would run off
+/// the window long before it was readable.
+pub const tab_tooltip_max_width: usize = 240;
+
+/// Whether `value` has to be compacted to fit `max_width` cells, i.e. whether
+/// the drawn label is hiding part of the title. This is what decides if a tab
+/// has anything to say in a tooltip.
+pub fn hostLabelIsCompacted(value: []const u8, max_width: usize) bool {
+    return displayWidth(value) > max_width;
+}
+
+/// Title text for a tab's hover tooltip: the whole thing, bounded only by
+/// `tab_tooltip_max_width`.
+pub fn buildTabTooltipText(alloc: Allocator, value: []const u8) ![]u8 {
+    return try compactHostLabel(alloc, value, tab_tooltip_max_width);
 }
 
 pub fn shouldShowPaneCount(button_width: i32, pane_count: usize) bool {
@@ -922,10 +1000,10 @@ pub fn buildTabButtonLabel(
     index: usize,
     active: bool,
     pane_count: usize,
-    max_len: usize,
+    max_width: usize,
     show_pane_count: bool,
 ) ![]u8 {
-    const compact = try compactHostLabel(alloc, base_title orelse "noctty", max_len);
+    const compact = try compactHostLabel(alloc, base_title orelse "noctty", max_width);
     defer alloc.free(compact);
     if (show_pane_count and pane_count > 1) {
         return try std.fmt.allocPrint(
@@ -1881,14 +1959,14 @@ pub fn buildProfileStatusBadgeText(
     return try alloc.dupe(u8, compact);
 }
 
-pub fn profileStatusBadgeTextLen(
+pub fn profileStatusBadgeTextWidth(
     profile: *const windows_shell.Profile,
     selected_index: ?usize,
     pinned_slot_ordinal: ?usize,
 ) usize {
     _ = selected_index;
     _ = pinned_slot_ordinal;
-    return compactHostLabelLen(profile.label, 12);
+    return compactHostLabelWidth(profile.label, 12);
 }
 
 pub fn buildDropdownProfileLabel(
@@ -1979,11 +2057,11 @@ pub fn profileOpenTargetBadgeGlyph(target: ProfileOpenTarget) u8 {
 fn buildProfileCommandPreviewText(
     alloc: Allocator,
     profile: *const windows_shell.Profile,
-    max_len: usize,
+    max_width: usize,
 ) ![]u8 {
     const command = try profile.command.string(alloc);
     defer alloc.free(command);
-    return try compactHostLabel(alloc, command, max_len);
+    return try compactHostLabel(alloc, command, max_width);
 }
 
 fn buildProfileOrderSummaryText(
@@ -2510,21 +2588,53 @@ test "win32 buildTabButtonLabel compacts long titles" {
 test "win32 compactHostLabel keeps the cut on a codepoint boundary" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    // Three-byte codepoints: a byte-wise cut at `max_len - 3` == 8 would
-    // land on the last byte of the third character.
-    const label = try compactHostLabel(std.testing.allocator, "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}", 11);
+    // Three-byte codepoints: a byte-wise cut inside the budget would land on
+    // a continuation byte and fail the later UTF-16 conversion.
+    const label = try compactHostLabel(std.testing.allocator, "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}", 6);
     defer std.testing.allocator.free(label);
     try std.testing.expect(std.unicode.utf8ValidateSlice(label));
-    try std.testing.expectEqualStrings("\u{3042}\u{3044}...", label);
+    try std.testing.expectEqualStrings("\u{3042}...", label);
 }
 
-test "win32 compactHostLabelLen matches the compacted label on a multi-byte cut" {
+test "win32 compactHostLabelWidth matches the compacted label on a multi-byte cut" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const value = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}";
-    const label = try compactHostLabel(std.testing.allocator, value, 11);
+    const label = try compactHostLabel(std.testing.allocator, value, 6);
     defer std.testing.allocator.free(label);
-    try std.testing.expectEqual(label.len, compactHostLabelLen(value, 11));
+    try std.testing.expectEqual(displayWidth(label), compactHostLabelWidth(value, 6));
+}
+
+test "win32 compactHostLabel spends the budget in cells, not bytes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Twelve kana are 36 bytes but 24 cells, so the whole title fits the
+    // widest tab budget. The byte budget this replaced cut it at the eighth.
+    const value = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}\u{304b}\u{304d}\u{304f}\u{3051}\u{3053}\u{3055}\u{3057}";
+    const label = try compactHostLabel(std.testing.allocator, value, 24);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings(value, label);
+}
+
+test "win32 compactHostLabel drops a wide codepoint that straddles the budget" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A budget of 8 leaves 5 cells ahead of the ellipsis. The third kana would
+    // end on cell 6, so it is dropped instead of spilling past the button.
+    const label = try compactHostLabel(std.testing.allocator, "\u{3042}\u{3044}\u{3046}\u{3048}\u{304a}", 8);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("\u{3042}\u{3044}...", label);
+    try std.testing.expectEqual(@as(usize, 7), displayWidth(label));
+}
+
+test "win32 displayWidth counts wide codepoints and mangled bytes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(usize, 2), displayWidth("ab"));
+    try std.testing.expectEqual(@as(usize, 4), displayWidth("\u{3042}\u{3044}"));
+    // A truncated three-byte sequence. Each stray byte still costs a cell, so
+    // a mangled title cannot escape the budget.
+    try std.testing.expectEqual(@as(usize, 2), displayWidth("\xe3\x81"));
 }
 
 test "win32 buildTabButtonLabel keeps narrow CJK titles valid UTF-8" {
@@ -2541,7 +2651,7 @@ test "win32 buildTabButtonLabel keeps narrow CJK titles valid UTF-8" {
     );
     defer std.testing.allocator.free(title);
     try std.testing.expect(std.unicode.utf8ValidateSlice(title));
-    try std.testing.expectEqualStrings("1: \u{65e5}\u{672c}...", title);
+    try std.testing.expectEqualStrings("1: \u{65e5}\u{672c}\u{8a9e}...", title);
 }
 
 test "win32 buildTabButtonLabel drops pane count when tabs are narrow" {
@@ -2552,12 +2662,34 @@ test "win32 buildTabButtonLabel drops pane count when tabs are narrow" {
     try std.testing.expectEqualStrings("2: logs-a...", title);
 }
 
-test "win32 hostTabLabelMaxLen shrinks with narrow tab widths" {
+test "win32 hostLabelIsCompacted tracks what the drawn label hides" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(usize, 24), hostTabLabelMaxLen(260));
-    try std.testing.expectEqual(@as(usize, 9), hostTabLabelMaxLen(98));
-    try std.testing.expectEqual(@as(usize, 6), hostTabLabelMaxLen(40));
+    try std.testing.expect(!hostLabelIsCompacted("build", 24));
+    // Eight kana are sixteen cells: they fit the widest tab but not the nine a
+    // narrow one gets, and that gap is exactly when a tooltip has something to
+    // add.
+    const kana = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30bf}\u{30a4}\u{30c8}\u{30eb}";
+    try std.testing.expect(!hostLabelIsCompacted(kana, 24));
+    try std.testing.expect(hostLabelIsCompacted(kana, 9));
+}
+
+test "win32 buildTabTooltipText keeps a runaway title bounded" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const long = "a" ** 600;
+    const text = try buildTabTooltipText(std.testing.allocator, long);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqual(tab_tooltip_max_width, displayWidth(text));
+    try std.testing.expect(std.mem.endsWith(u8, text, "..."));
+}
+
+test "win32 hostTabLabelMaxWidth shrinks with narrow tab widths" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(usize, 24), hostTabLabelMaxWidth(260));
+    try std.testing.expectEqual(@as(usize, 9), hostTabLabelMaxWidth(98));
+    try std.testing.expectEqual(@as(usize, 6), hostTabLabelMaxWidth(40));
     try std.testing.expect(shouldShowPaneCount(180, 3));
     try std.testing.expect(!shouldShowPaneCount(120, 3));
 }
@@ -3007,7 +3139,7 @@ test "win32 buildProfileStatusBadgeText reflects selected profile kind" {
     try std.testing.expectEqualStrings("Git Bash", badge);
 }
 
-test "win32 profileStatusBadgeTextLen matches built text" {
+test "win32 profileStatusBadgeTextWidth matches built text" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const profile: windows_shell.Profile = .{
@@ -3019,7 +3151,7 @@ test "win32 profileStatusBadgeTextLen matches built text" {
 
     const badge = try buildProfileStatusBadgeText(std.testing.allocator, &profile, 0, 0);
     defer std.testing.allocator.free(badge);
-    try std.testing.expectEqual(badge.len, profileStatusBadgeTextLen(&profile, 0, 0));
+    try std.testing.expectEqual(displayWidth(badge), profileStatusBadgeTextWidth(&profile, 0, 0));
 }
 
 test "win32 buildProfileQuickSlotChipText reflects ordered quick slot badge" {

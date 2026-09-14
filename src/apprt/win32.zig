@@ -46,6 +46,7 @@ const win32_toast_activation = @import("win32_toast_activation.zig");
 const win32_tab_drag = @import("win32_tab_drag.zig");
 const win32_tab_drag_ole = @import("win32_tab_drag_ole.zig");
 const win32_tab_drop_zones = @import("win32_tab_drop_zones.zig");
+const win32_tab_tooltip = @import("win32_tab_tooltip.zig");
 const win32_search_bar = @import("win32_search_bar.zig");
 const win32_icons = @import("win32_icons.zig");
 const win32_paste_protection = @import("win32_paste_protection.zig");
@@ -444,6 +445,7 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
 const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
 const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.palette_list");
 const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.scrollbar");
+const tab_tooltip_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.tab_tooltip");
 const quick_select_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.quick_select");
 
 /// Palette list row height at 96 DPI. Scaled via `Host.scaled` at paint.
@@ -3427,6 +3429,7 @@ pub const App = struct {
     class_atom: ATOM = 0,
     host_class_atom: ATOM = 0,
     palette_list_class_atom: ATOM = 0,
+    tab_tooltip_class_atom: ATOM = 0,
     scrollbar_class_atom: ATOM = 0,
     quick_select_class_atom: ATOM = 0,
     hosts: std.ArrayListUnmanaged(*Host) = .empty,
@@ -7510,6 +7513,30 @@ pub const App = struct {
         }
     }
 
+    fn ensureTabTooltipClass(self: *App) !void {
+        if (self.tab_tooltip_class_atom != 0) return;
+
+        var wc: WNDCLASSEXW = .{
+            .cbSize = @sizeOf(WNDCLASSEXW),
+            .style = 0,
+            .lpfnWndProc = &tabTooltipProc,
+            .cbClsExtra = 0,
+            .cbWndExtra = 0,
+            .hInstance = self.hinstance,
+            .hIcon = null,
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = tab_tooltip_class_name,
+            .hIconSm = null,
+        };
+
+        self.tab_tooltip_class_atom = sys.RegisterClassExW(&wc);
+        if (self.tab_tooltip_class_atom == 0) {
+            return lastError();
+        }
+    }
+
     fn ensureScrollbarClass(self: *App) !void {
         if (self.scrollbar_class_atom != 0) return;
 
@@ -10696,7 +10723,7 @@ const Tab = struct {
     cached_button_index: usize = 0,
     cached_button_active: bool = false,
     cached_button_pane_count: usize = 0,
-    cached_button_label_max_len: usize = 0,
+    cached_button_label_max_width: usize = 0,
     cached_button_show_pane_count: bool = false,
     button_label_cache_valid: bool = false,
     button_placement: ChildPlacement = .{},
@@ -10948,6 +10975,13 @@ const Host = struct {
     tab_drop_operation: win32_tab_drop_zones.Operation = .none,
     tab_drop_target_surface: ?*Surface = null,
     tab_drop_preview_hwnd: ?HWND = null,
+
+    // Hover tooltip for the tab strip. Created on the first hover that has
+    // something to show and reused after that; `tab_tooltip_tab_id` names the
+    // tab it currently describes.
+    tab_tooltip_hwnd: ?HWND = null,
+    tab_tooltip_tab_id: ?u32 = null,
+    tab_tooltip_uia_provider: ?*win32_uia.ChromeControlProvider = null,
 
     // Command palette list UI. Backed by a custom child HWND shown
     // only while the palette is open. `palette_list_ranked` caches the
@@ -13518,6 +13552,9 @@ const Host = struct {
         }
         destroyChildWindow(&self.palette_list_hwnd);
         destroyChildWindow(&self.tab_drop_preview_hwnd);
+        detachChromeControlProvider(self.app, &self.tab_tooltip_uia_provider);
+        destroyChildWindow(&self.tab_tooltip_hwnd);
+        self.tab_tooltip_tab_id = null;
 
         self.hovered_button_hwnd = null;
         self.tab_close_hover_hwnd = null;
@@ -13594,12 +13631,12 @@ const Host = struct {
         const selected_index = self.selectedProfileIndex();
 
         if (self.selectedProfile()) |profile| {
-            const chip_len = profileStatusBadgeTextLen(
+            const chip_cells = profileStatusBadgeTextWidth(
                 profile,
                 selected_index,
                 self.app.launcherQuickSlotOrdinal(profile.key),
             );
-            const chip_width = self.scaled(16) + @as(i32, @intCast(chip_len * @as(usize, @intCast(self.scaled(7)))));
+            const chip_width = self.scaled(16) + @as(i32, @intCast(chip_cells * @as(usize, @intCast(self.scaled(7)))));
             status_x += chip_width + self.scaled(10);
         }
 
@@ -13635,6 +13672,9 @@ const Host = struct {
     }
 
     fn destroyTabButton(self: *Host, tab: *Tab) void {
+        if (self.tab_tooltip_tab_id) |shown| {
+            if (shown == tab.id) self.hideTabTooltip();
+        }
         detachChromeControlProvider(self.app, &tab.uia_provider);
         destroySubclassedWindow(&tab.button_hwnd, &tab.button_prev_proc);
     }
@@ -13689,6 +13729,196 @@ const Host = struct {
         self.tabs.items[b].clearRedoHistory();
         self.app.auditShellNativeMapping("tab-drag-reorder");
         runUiActionOrLog("tab drag reorder layout failed", self.layout());
+    }
+
+    /// Hide the tab title tooltip if one is up.
+    fn hideTabTooltip(self: *Host) void {
+        self.tab_tooltip_tab_id = null;
+        const hwnd = self.tab_tooltip_hwnd orelse return;
+        _ = sys.ShowWindow(hwnd, c.SW_HIDE);
+    }
+
+    /// Show the full title of the tab drawn by `button`, under that tab.
+    ///
+    /// Only a tab whose label had to be compacted gets one: when the whole
+    /// title already fits the button, repeating it under the pointer is noise.
+    /// Every step is best-effort. A tooltip that cannot be measured, placed or
+    /// created is simply not shown -- this is chrome, and the terminal
+    /// underneath has to keep working either way.
+    fn showTabTooltip(self: *Host, button: HWND) void {
+        const host_hwnd = self.hwnd orelse return;
+        const index = self.tabIndexForButton(button) orelse return self.hideTabTooltip();
+        const tab = &self.tabs.items[index];
+        if (self.tab_tooltip_tab_id) |shown| {
+            // The hover timer re-arms on every pointer move inside the tab, so
+            // this fires repeatedly while the tooltip is already up.
+            if (shown == tab.id) return;
+        }
+        const title = tab.cached_button_title orelse return self.hideTabTooltip();
+        // Measure the drawn label rather than the bare title. The label also
+        // carries the tab index, the active marker and the pane count, and GDI
+        // applies `DT_END_ELLIPSIS` to all of it inside a button that has
+        // already given up its close zone, so a title that fits on its own can
+        // still lose its tail to those decorations.
+        const label = tab.cached_button_label orelse return self.hideTabTooltip();
+        if (!labels.hostLabelIsCompacted(label, tab.cached_button_label_max_width)) {
+            return self.hideTabTooltip();
+        }
+
+        const alloc = self.app.core_app.alloc;
+        const text = labels.buildTabTooltipText(alloc, title) catch return;
+        defer alloc.free(text);
+        const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
+        defer alloc.free(text_w);
+
+        var button_rect: RECT = undefined;
+        if (sys.GetWindowRect(button, &button_rect) == 0) return;
+        var anchor_top_left: POINT = .{ .x = button_rect.left, .y = button_rect.top };
+        var anchor_bottom_right: POINT = .{ .x = button_rect.right, .y = button_rect.bottom };
+        if (sys.ScreenToClient(host_hwnd, &anchor_top_left) == 0) return;
+        if (sys.ScreenToClient(host_hwnd, &anchor_bottom_right) == 0) return;
+
+        var client: RECT = undefined;
+        if (sys.GetClientRect(host_hwnd, &client) == 0) return;
+
+        const size = self.measureTabTooltip(host_hwnd, text_w) orelse return;
+        const placement = win32_tab_tooltip.place(
+            .{
+                .left = anchor_top_left.x,
+                .top = anchor_top_left.y,
+                .right = anchor_bottom_right.x,
+                .bottom = anchor_bottom_right.y,
+            },
+            size,
+            .{
+                .left = client.left,
+                .top = client.top,
+                .right = client.right,
+                .bottom = client.bottom,
+            },
+            self.scaled(4),
+            self.scaled(6),
+        );
+
+        if (self.tab_tooltip_hwnd == null) {
+            self.app.ensureTabTooltipClass() catch return;
+            const created = sys.CreateWindowExW(
+                // WS_EX_TRANSPARENT: the popup hangs a few pixels under its
+                // tab, and a pointer resting near the tab's bottom edge would
+                // otherwise leave the button, hide the tooltip, re-enter, and
+                // flicker. NOACTIVATE and TOOLWINDOW keep it out of the focus
+                // and taskbar paths.
+                c.WS_EX_TRANSPARENT | c.WS_EX_NOACTIVATE | c.WS_EX_TOOLWINDOW,
+                tab_tooltip_class_name,
+                std.unicode.utf8ToUtf16LeStringLiteral(""),
+                // Top level, owned by the host. A WS_CHILD popup drew fine and
+                // was then painted away by the terminal surface's next frame:
+                // the surfaces are siblings that repaint on their own clock,
+                // and no Z order among children survives that.
+                c.WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                host_hwnd,
+                null,
+                self.app.hinstance,
+                null,
+            ) orelse return;
+            setWindowData(created, self);
+            self.tab_tooltip_hwnd = created;
+            // AGENTS.md: a new UI widget ships with its provider. The tooltip
+            // is not focusable and exposes no pattern -- a reader needs its
+            // name and its ToolTip control type, nothing more.
+            self.tab_tooltip_uia_provider = self.createChromeUiaProvider(created, .{
+                .ctx = @ptrCast(self),
+                .role = .tooltip,
+                .name = &tabTooltipUiaName,
+            });
+        }
+        const tooltip = self.tab_tooltip_hwnd orelse return;
+        _ = sys.SetWindowTextW(tooltip, text_w.ptr);
+        const tooltip_tab_changed = self.tab_tooltip_tab_id != tab.id;
+        self.tab_tooltip_tab_id = tab.id;
+        if (tooltip_tab_changed) {
+            if (self.tab_tooltip_uia_provider) |provider| provider.raiseNameChanged();
+        }
+        // `place` works in the host's client space; the popup is top level.
+        var origin: POINT = .{ .x = placement.left, .y = placement.top };
+        if (sys.ClientToScreen(host_hwnd, &origin) == 0) return self.hideTabTooltip();
+        _ = sys.SetWindowPos(
+            tooltip,
+            null,
+            origin.x,
+            origin.y,
+            placement.width(),
+            placement.height(),
+            c.SWP_NOACTIVATE,
+        );
+        _ = sys.ShowWindow(tooltip, c.SW_SHOWNOACTIVATE);
+        _ = sys.InvalidateRect(tooltip, null, 1);
+    }
+
+    /// Size the tooltip popup needs for `text`, in client pixels.
+    fn measureTabTooltip(
+        self: *Host,
+        host_hwnd: HWND,
+        text: [:0]const u16,
+    ) ?win32_tab_tooltip.Size {
+        const len = std.math.cast(i32, text.len) orelse return null;
+        const hdc = sys.GetDC(host_hwnd) orelse return null;
+        defer _ = sys.ReleaseDC(host_hwnd, hdc);
+        if (self.chrome_font) |font| _ = sys.SelectObject(hdc, font);
+        var rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        if (sys.DrawTextW(
+            hdc,
+            text.ptr,
+            len,
+            &rect,
+            c.DT_CALCRECT | c.DT_SINGLELINE | c.DT_NOPREFIX,
+        ) == 0) return null;
+        return .{
+            .width = rect.right - rect.left + self.scaled(16),
+            .height = rect.bottom - rect.top + self.scaled(8),
+        };
+    }
+
+    /// Paint the tab title tooltip popup.
+    fn paintTabTooltip(self: *Host) void {
+        const hwnd = self.tab_tooltip_hwnd orelse return;
+        var ps: PAINTSTRUCT = undefined;
+        const hdc = sys.BeginPaint(hwnd, &ps);
+        defer _ = sys.EndPaint(hwnd, &ps);
+
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &rect) == 0) return;
+
+        self.ensureThemeBrushes() catch return;
+        const theme = &self.app.resolved_theme;
+        // DESIGN.md: 6 px corners for overlays.
+        drawRoundedRect(
+            hdc,
+            rect,
+            theme.overlay_bg,
+            theme.overlay_border,
+            self.scaled(6),
+        );
+
+        if (self.chrome_font) |font| _ = sys.SelectObject(hdc, font);
+        var text_buf: [labels.tab_tooltip_max_width * 2 + 1]u16 = undefined;
+        const text_len = sys.GetWindowTextW(hwnd, &text_buf, text_buf.len);
+        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+        _ = sys.SetTextColor(hdc, theme.overlay_label_fg);
+        var text_rect = rect;
+        text_rect.left += self.scaled(8);
+        text_rect.right -= self.scaled(8);
+        _ = sys.DrawTextW(
+            hdc,
+            @ptrCast(&text_buf),
+            text_len,
+            &text_rect,
+            c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
+        );
     }
 
     fn hideTabDropPreview(self: *Host) void {
@@ -14336,6 +14566,9 @@ const Host = struct {
 
     fn setHoveredButton(self: *Host, child: ?HWND) void {
         if (self.hovered_button_hwnd == child) return;
+        // The tooltip describes whatever the pointer was resting on. Moving to
+        // a different button invalidates it; the next dwell arms a new one.
+        self.hideTabTooltip();
         const previous = self.hovered_button_hwnd;
         self.hovered_button_hwnd = child;
         if (previous) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
@@ -14748,17 +14981,34 @@ const Host = struct {
         return "Tabs";
     }
 
+    /// UIA name for one tab item.
+    ///
+    /// The drawn label is compacted to whatever the button can show, so
+    /// reporting it would hand assistive technology the same truncated text a
+    /// sighted user is already squinting at. Name the item from the tab's full
+    /// title instead and fall back to the drawn label only when the title does
+    /// not fit the caller's buffer.
     fn tabItemUiaName(ctx: *anyopaque, tab_id: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
-        for (self.tabs.items) |*tab| {
+        for (self.tabs.items, 0..) |*tab, index| {
             if (tab.id != tab_id) continue;
-            return std.fmt.bufPrint(
-                buf,
-                "{s}",
-                .{if (tab.cached_button_label) |label| label else "Tab"},
-            ) catch "Tab";
+            const fallback: []const u8 = if (tab.cached_button_label) |label| label else "Tab";
+            const title = tab.cached_button_title orelse return fallback;
+            return std.fmt.bufPrint(buf, "{d}: {s}", .{ index + 1, title }) catch fallback;
         }
         return "Tab";
+    }
+
+    /// UIA name for the tab title tooltip: the full title it exists to show.
+    fn tabTooltipUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        const shown = self.tab_tooltip_tab_id orelse return "";
+        for (self.tabs.items) |*tab| {
+            if (tab.id != shown) continue;
+            const title = tab.cached_button_title orelse return "";
+            return std.fmt.bufPrint(buf, "{s}", .{title}) catch "";
+        }
+        return "";
     }
 
     fn tabItemUiaSelected(ctx: *anyopaque, tab_id: usize) bool {
@@ -17140,12 +17390,12 @@ const Host = struct {
 
         if (self.selectedProfile()) |profile| {
             const pinned_slot_ordinal = self.app.launcherQuickSlotOrdinal(profile.key);
-            const chip_len = profileStatusBadgeTextLen(
+            const chip_cells = profileStatusBadgeTextWidth(
                 profile,
                 selected_profile_index,
                 pinned_slot_ordinal,
             );
-            const chip_width = self.scaled(16) + @as(i32, @intCast(chip_len * @as(usize, @intCast(self.scaled(7)))));
+            const chip_width = self.scaled(16) + @as(i32, @intCast(chip_cells * @as(usize, @intCast(self.scaled(7)))));
             x += chip_width + self.scaled(10);
         }
 
@@ -17699,7 +17949,7 @@ const Host = struct {
         const tab_range = visibleTabRange(self.tabs.items.len, self.active_tab, tab_area_width);
         const visible_count = @max(@as(i32, 1), @as(i32, @intCast(tab_range.count)));
         const button_width = @max(1, @divTrunc(tab_area_width, visible_count));
-        const label_max_len = hostTabLabelMaxLen(button_width);
+        const label_max_width = hostTabLabelMaxWidth(button_width);
         for (self.tabs.items, 0..) |*tab, i| {
             const surface = tab.focusedSurface() orelse continue;
             const title = if (surface.effectiveTitle()) |value| value else null;
@@ -17716,16 +17966,20 @@ const Host = struct {
                 tab.cached_button_index == i and
                 tab.cached_button_active == active and
                 tab.cached_button_pane_count == pane_count and
-                tab.cached_button_label_max_len == label_max_len and
+                tab.cached_button_label_max_width == label_max_width and
                 tab.cached_button_show_pane_count == show_pane_count;
             if (label_inputs_unchanged) continue;
+            if (self.tab_tooltip_tab_id) |shown| {
+                // The title or the width budget moved under the tooltip.
+                if (shown == tab.id) self.hideTabTooltip();
+            }
             const label = try buildTabButtonLabel(
                 self.app.core_app.alloc,
                 title,
                 i,
                 active,
                 pane_count,
-                label_max_len,
+                label_max_width,
                 show_pane_count,
             );
             defer self.app.core_app.alloc.free(label);
@@ -17767,7 +18021,7 @@ const Host = struct {
             tab.cached_button_index = i;
             tab.cached_button_active = active;
             tab.cached_button_pane_count = pane_count;
-            tab.cached_button_label_max_len = label_max_len;
+            tab.cached_button_label_max_width = label_max_width;
             tab.cached_button_show_pane_count = show_pane_count;
             tab.button_label_cache_valid = true;
         }
@@ -19245,7 +19499,7 @@ const Host = struct {
                 const pinned_slot_digit = pinnedSlotBadgeDigit(pinned_slot_ordinal);
                 const chip_w = self.cached_launcher_selected_chip_w orelse return false;
                 const accent = profileChromeAccent(profile.kind, theme.is_dark);
-                const chip_width = self.scaled(16) + @as(i32, @intCast(profileStatusBadgeTextLen(
+                const chip_width = self.scaled(16) + @as(i32, @intCast(profileStatusBadgeTextWidth(
                     profile,
                     selected_profile_index,
                     pinned_slot_ordinal,
@@ -22316,6 +22570,35 @@ test "win32 palette EN_CHANGE re-entry guard: suppress_edit_events gates sync ca
     try std.testing.expectEqual(bool, @FieldType(Host, "suppress_edit_events"));
 }
 
+/// Window procedure for the tab strip's title tooltip.
+///
+/// The popup is owned by the host but is a top-level window, so nothing about
+/// it belongs to the host's own message flow beyond the paint.
+fn tabTooltipProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    switch (msg) {
+        c.WM_ERASEBKGND => return 1,
+        c.WM_PAINT => {
+            if (windowData(Host, hwnd)) |host| host.paintTabTooltip();
+            return 0;
+        },
+        c.WM_GETOBJECT => {
+            const host = windowData(Host, hwnd) orelse
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (!host.app.com_initialized) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (host.tab_tooltip_uia_provider) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        // The popup lands between the pointer and the tab it describes. It must
+        // never take a hit test or an activation away from the strip.
+        c.WM_NCHITTEST => return c.HTTRANSPARENT,
+        c.WM_MOUSEACTIVATE => return c.MA_NOACTIVATE,
+        else => {},
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 fn paletteListProc(
     hwnd: HWND,
     msg: UINT,
@@ -22673,7 +22956,7 @@ const nextTabInspectorVisible = labels.nextTabInspectorVisible;
 
 const buildHostAwareBaseTitle = labels.buildHostAwareBaseTitle;
 
-const hostTabLabelMaxLen = labels.hostTabLabelMaxLen;
+const hostTabLabelMaxWidth = labels.hostTabLabelMaxWidth;
 
 const shouldShowPaneCount = labels.shouldShowPaneCount;
 
@@ -22832,7 +23115,7 @@ fn isAutomaticSshCommandTitle(title: []const u8) bool {
         std.ascii.eqlIgnoreCase(base, "ssh");
 }
 
-const profileStatusBadgeTextLen = labels.profileStatusBadgeTextLen;
+const profileStatusBadgeTextWidth = labels.profileStatusBadgeTextWidth;
 /// Build a label for the profile dropdown menu: "Profile Name\tCtrl+Shift+N"
 const buildDropdownProfileLabel = labels.buildDropdownProfileLabel;
 
@@ -23533,6 +23816,9 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     }
                 },
                 c.WM_LBUTTONDOWN => {
+                    // A click answers the question the tooltip was there to
+                    // answer, and the strip is about to relayout under it.
+                    v.hideTabTooltip();
                     const down_x = signedLowWord(lParamBits(lParam));
                     var btn_rect: RECT = undefined;
                     _ = sys.GetClientRect(hwnd, &btn_rect);
@@ -23601,11 +23887,14 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     v.hideTabDropPreview();
                 },
                 c.WM_MOUSEMOVE => {
+                    // TME_HOVER arms WM_MOUSEHOVER for the title tooltip. The
+                    // timer restarts on every move, so it only fires once the
+                    // pointer has actually settled on the tab.
                     var track: TRACKMOUSEEVENT = .{
                         .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                        .dwFlags = c.TME_LEAVE,
+                        .dwFlags = c.TME_LEAVE | c.TME_HOVER,
                         .hwndTrack = hwnd,
-                        .dwHoverTime = 0,
+                        .dwHoverTime = c.HOVER_DEFAULT,
                     };
                     _ = sys.TrackMouseEvent(&track);
                     v.setHoveredButton(hwnd);
@@ -23626,6 +23915,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         // Activate drag after 5px threshold
                         if (!v.tab_drag_active and dx + dy > 5) {
                             v.tab_drag_active = true;
+                            v.hideTabTooltip();
                         }
 
                         if (v.tab_drag_active) {
@@ -23648,7 +23938,11 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         }
                     }
                 },
+                c.WM_MOUSEHOVER => {
+                    v.showTabTooltip(hwnd);
+                },
                 c.WM_MOUSELEAVE => {
+                    v.hideTabTooltip();
                     if (v.isHoveredButton(hwnd)) v.setHoveredButton(null);
                 },
                 c.WM_KEYDOWN => {
@@ -24033,6 +24327,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             if (host) |v| v.refreshSurfaceVisibility();
             if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {
+                    // The tab tooltip is a top-level popup, so losing the
+                    // window is not enough to take it down: a pointer that
+                    // never left the tab sends no WM_MOUSELEAVE, and the popup
+                    // would sit over whatever the user switched to.
+                    v.hideTabTooltip();
                     if (v.app.config.@"quick-terminal-autohide") {
                         if (v.app.quickTerminalSurfaceForHost(v)) |surface| {
                             if (surface.window_visible) {
