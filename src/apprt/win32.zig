@@ -35493,8 +35493,10 @@ test "win32 sharedHostWindowFrameStateEquals ignores non-frame host state" {
 }
 
 fn testHostExStyle(hwnd: HWND) u32 {
+    // Same checked cast `applyBackgroundOpacity` uses, so the test reads the
+    // ex-style exactly the way production writes it.
     const raw = sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
-    return @truncate(@as(usize, @bitCast(raw)));
+    return @intCast(@as(usize, @bitCast(raw)));
 }
 
 fn testHostIsLayered(hwnd: HWND) bool {
@@ -35537,6 +35539,10 @@ fn initTestHostWindowFixture(host: *Host, surface: *Surface, hwnd: HWND) !void {
     host.hwnd = hwnd;
     host.tabs = .empty;
     host.active_tab = 0;
+    // The caller can only register its own teardown once this returns, so a
+    // precondition that fails below would otherwise leak the Tab and its
+    // split tree and report an allocator leak on top of the real failure.
+    errdefer deinitTestHostWindowFixture(host);
 
     surface.host = host;
     surface.host_id = host.id;
@@ -35553,6 +35559,11 @@ fn initTestHostWindowFixture(host: *Host, surface: *Surface, hwnd: HWND) !void {
     try std.testing.expect(!testHostIsLayered(hwnd));
 }
 
+fn deinitTestHostWindowFixture(host: *Host) void {
+    for (host.tabs.items) |*tab| tab.deinit();
+    host.tabs.deinit(std.testing.allocator);
+}
+
 test "win32 applyInitialBackgroundOpacity layers the cold-start host window" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -35562,10 +35573,7 @@ test "win32 applyInitialBackgroundOpacity layers the cold-start host window" {
     var host: Host = undefined;
     var surface: Surface = undefined;
     try initTestHostWindowFixture(&host, &surface, hwnd);
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
+    defer deinitTestHostWindowFixture(&host);
 
     // Regression for #234: a cold-start window never reached
     // `applyBackgroundOpacity`, so it stayed opaque while cloned windows
@@ -35594,10 +35602,7 @@ test "win32 applyInitialBackgroundOpacity leaves a fully opaque window unlayered
     var host: Host = undefined;
     var surface: Surface = undefined;
     try initTestHostWindowFixture(&host, &surface, hwnd);
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
+    defer deinitTestHostWindowFixture(&host);
 
     // The default configuration must not start layering every window: that
     // would put all of Win32 on a composition path it does not need.
@@ -35615,14 +35620,12 @@ test "win32 applyInitialBackgroundOpacity seeds a clone from its source window" 
     var host: Host = undefined;
     var surface: Surface = undefined;
     try initTestHostWindowFixture(&host, &surface, hwnd);
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
+    defer deinitTestHostWindowFixture(&host);
 
     // `new_window` from an existing surface presents the clone before
     // `inheritWindowStateFrom` runs, so the source's opacity has to be seeded
-    // up front. The clone's own field still holds the configured value here.
+    // up front. The fixture left the clone on the configured 1.0, so reading
+    // 0.6 back off the clone is the seed and nothing else.
     var source: Surface = undefined;
     source.background_opacity_default = 0.6;
     source.background_opacity_force_opaque = false;
