@@ -499,6 +499,49 @@ test "integration_script_sha256 is not all zero" {
     try std.testing.expect(!std.mem.eql(u8, &integration_script_sha256, &zero));
 }
 
+/// Advance a PowerShell brace-nesting counter across one line of script.
+///
+/// Braces inside a `#` comment and inside single- or double-quoted strings do
+/// not count. String skipping is load-bearing for this script: every OSC
+/// payload interpolates `${Global:__ghostty_esc}` and friends, and those
+/// braces would otherwise desync the counter. Handles the backtick escape
+/// inside double quotes.
+///
+/// Quote state deliberately resets per line — `integration.ps1` contains no
+/// here-strings. `depthIsZeroAtEndOfScript` in the test below is the tripwire
+/// if that ever stops holding.
+fn advanceBraceDepth(line: []const u8, start: usize) usize {
+    var depth = start;
+    var in_single = false;
+    var in_double = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_single) {
+            if (c == '\'') in_single = false;
+            continue;
+        }
+        if (in_double) {
+            if (c == '`') {
+                i += 1;
+                continue;
+            }
+            if (c == '"') in_double = false;
+            continue;
+        }
+        switch (c) {
+            // The rest of the line is a comment.
+            '#' => return depth,
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '{' => depth += 1,
+            '}' => depth -|= 1,
+            else => {},
+        }
+    }
+    return depth;
+}
+
 test "integration.ps1 honours the injected block scope" {
     // `buildCommandValue` dot-sources the script from inside `& { ... }`, so
     // the script's top-level scope is a child scope that is destroyed the
@@ -520,20 +563,34 @@ test "integration.ps1 honours the injected block scope" {
     // indented declaration, and `if (...) { function __ghostty_x { } }` are
     // all caught.
     //
-    // Known limit: reflection forms (`$function:x = { }`, `Set-Item
-    // Function:x`) and `New-Variable` are not detected. Nothing in the
-    // script uses them; if that changes, extend this scan.
+    // Top-level is decided by brace depth, not by column: PowerShell
+    // indentation creates no scope, so `    $x = 1` written at depth 0 is
+    // just as fatal as one at column 0.
+    //
+    // Known limits, both currently unused by the script: reflection forms
+    // (`$function:x = { }`, `Set-Item Function:x`, `New-Variable`) are not
+    // detected; and an unqualified assignment inside a top-level `if` / `try`
+    // block sits at depth > 0 and is not flagged even though those blocks do
+    // not create a PowerShell scope either. Extend the scan if either starts
+    // to matter.
     var lines = std.mem.splitScalar(u8, integration_script, '\n');
     var declarations: usize = 0;
     var top_level_variables: usize = 0;
+    var depth: usize = 0;
     while (lines.next()) |raw| {
         const line = std.mem.trimRight(u8, raw, " \t\r");
         const trimmed = std.mem.trimLeft(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-        // Top-level (column 0) variable assignment. Anything indented is
-        // inside a function or block and is a legitimate local.
-        if (line.len == trimmed.len and trimmed[0] == '$') {
+        // Nesting as of the START of this line. Depth, not indentation:
+        // PowerShell indentation carries no meaning, so an unqualified
+        // assignment written with leading spaces is still top-level and
+        // still dies with the injected `& { }` scope.
+        const line_depth = depth;
+        depth = advanceBraceDepth(line, depth);
+
+        // Top-level variable assignment.
+        if (line_depth == 0 and trimmed[0] == '$') {
             const name_end = for (trimmed[1..], 1..) |c, idx| {
                 if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ':') break idx;
             } else trimmed.len;
@@ -587,6 +644,10 @@ test "integration.ps1 honours the injected block scope" {
     // vacuous. These are the live counts; bump them when the script grows.
     try std.testing.expectEqual(@as(usize, 12), declarations);
     try std.testing.expectEqual(@as(usize, 3), top_level_variables);
+    // depthIsZeroAtEndOfScript: unbalanced braces here mean the tracker
+    // desynced (an unterminated string, a here-string), which would silently
+    // mis-classify every line after it.
+    try std.testing.expectEqual(@as(usize, 0), depth);
 
     // The escape / bell characters the prompt interpolates are globals under
     // the `__ghostty_` prefix. Bare `$ESC` / `$BEL` died with the block on
