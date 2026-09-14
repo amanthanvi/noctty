@@ -1007,8 +1007,38 @@ pub const tab_tooltip_max_width: usize = 240;
 /// Whether `value` has to be compacted to fit `max_width` cells, i.e. whether
 /// the drawn label is hiding part of the title. This is what decides if a tab
 /// has anything to say in a tooltip.
+///
+/// Feed it the bare title and the budget that title was actually compacted to
+/// (`tabButtonTitleBudget`). Feeding it the decorated label and the button's
+/// own budget compares two different things: the label carries the index, the
+/// active marker and the pane count, and `buildTabButtonLabel` already keeps
+/// the whole label inside the button.
 pub fn hostLabelIsCompacted(value: []const u8, max_width: usize) bool {
     return displayWidth(value) > max_width;
+}
+
+/// UIA name for one tab item, written into the provider's stack buffer.
+///
+/// The name carries the tab's 1-based index and its FULL title -- assistive
+/// technology has no button to run out of -- plus the pane count the drawn
+/// label shows, because "2: pwsh" and "2: pwsh (3)" are different tabs to a
+/// screen-reader user and only the second one is split. Returns null when
+/// `buf` cannot hold the result so the caller can fall back to the drawn
+/// label.
+pub fn buildTabItemUiaName(
+    buf: []u8,
+    index: usize,
+    title: []const u8,
+    pane_count: usize,
+) ?[]const u8 {
+    if (pane_count > 1) {
+        return std.fmt.bufPrint(
+            buf,
+            "{d}: {s} ({d})",
+            .{ index + 1, title, pane_count },
+        ) catch null;
+    }
+    return std.fmt.bufPrint(buf, "{d}: {s}", .{ index + 1, title }) catch null;
 }
 
 /// Title text for a tab's hover tooltip: the whole thing, bounded only by
@@ -1037,6 +1067,60 @@ pub fn visibleTabRange(tab_count: usize, active_index: usize, tab_area_width: i3
     return .{ .start = start, .count = max_visible };
 }
 
+const tab_button_label_fmt = "{s}{d}: {s}";
+const tab_button_label_pane_fmt = "{s}{d}: {s} ({d})";
+
+/// Smallest title budget `tabButtonTitleBudget` will hand back. A button too
+/// narrow to hold even its own decorations still shows an ellipsis rather than
+/// nothing; the label then overflows, which is exactly what the tab strip's
+/// `DT_END_ELLIPSIS` is there for.
+const tab_button_min_title_width: usize = 3;
+
+/// Cells left for the title after `buildTabButtonLabel`'s decorations --
+/// the `"* "` active marker, the `"N: "` index prefix and the `" (N)"` pane
+/// count -- are paid for out of `max_width`.
+///
+/// `max_width` is what the BUTTON can draw. Compacting the bare title to all
+/// of it and only then adding the decorations spent up to nine cells the
+/// button never had: the drawn label overflowed, and because the tooltip gate
+/// measures the drawn label against this same budget, the active tab claimed
+/// it was hiding part of a title that its inactive neighbour -- same title,
+/// two cells cheaper -- reported as fitting. Charge the decorations first and
+/// both the label and the gate stay inside the button.
+pub fn tabButtonTitleBudget(
+    index: usize,
+    active: bool,
+    pane_count: usize,
+    max_width: usize,
+    show_pane_count: bool,
+) usize {
+    // Render the decorations around an empty title so the measurement can
+    // never drift from the format strings below, and measure them with the
+    // same `displayWidth` the compaction spends its budget in.
+    var buf: [96]u8 = undefined;
+    const decoration = if (show_pane_count and pane_count > 1)
+        std.fmt.bufPrint(
+            &buf,
+            tab_button_label_pane_fmt,
+            .{ tabButtonActiveMarker(active), index + 1, "", pane_count },
+        )
+    else
+        std.fmt.bufPrint(
+            &buf,
+            tab_button_label_fmt,
+            .{ tabButtonActiveMarker(active), index + 1, "" },
+        );
+    // `buf` holds the widest decoration two `usize` decimals can produce, so
+    // the error arm is unreachable in practice; charging the whole budget
+    // keeps it conservative rather than silently restoring the old overflow.
+    const decoration_width = if (decoration) |text| displayWidth(text) else |_| max_width;
+    return @max(tab_button_min_title_width, max_width -| decoration_width);
+}
+
+fn tabButtonActiveMarker(active: bool) []const u8 {
+    return if (active) "* " else "";
+}
+
 pub fn buildTabButtonLabel(
     alloc: Allocator,
     base_title: ?[]const u8,
@@ -1046,14 +1130,15 @@ pub fn buildTabButtonLabel(
     max_width: usize,
     show_pane_count: bool,
 ) ![]u8 {
-    const compact = try compactHostLabel(alloc, base_title orelse "noctty", max_width);
+    const budget = tabButtonTitleBudget(index, active, pane_count, max_width, show_pane_count);
+    const compact = try compactHostLabel(alloc, base_title orelse "noctty", budget);
     defer alloc.free(compact);
     if (show_pane_count and pane_count > 1) {
         return try std.fmt.allocPrint(
             alloc,
-            "{s}{d}: {s} ({d})",
+            tab_button_label_pane_fmt,
             .{
-                if (active) "* " else "",
+                tabButtonActiveMarker(active),
                 index + 1,
                 compact,
                 pane_count,
@@ -1063,9 +1148,9 @@ pub fn buildTabButtonLabel(
 
     return try std.fmt.allocPrint(
         alloc,
-        "{s}{d}: {s}",
+        tab_button_label_fmt,
         .{
-            if (active) "* " else "",
+            tabButtonActiveMarker(active),
             index + 1,
             compact,
         },
@@ -2857,7 +2942,7 @@ test "win32 buildTabButtonLabel compacts long titles" {
 
     const title = try buildTabButtonLabel(std.testing.allocator, "this-is-a-very-long-terminal-title", 0, false, 1, 24, false);
     defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("1: this-is-a-very-long-t...", title);
+    try std.testing.expectEqualStrings("1: this-is-a-very-lon...", title);
 }
 
 test "win32 compactHostLabel keeps the cut on a codepoint boundary" {
@@ -2926,7 +3011,7 @@ test "win32 buildTabButtonLabel keeps narrow CJK titles valid UTF-8" {
     );
     defer std.testing.allocator.free(title);
     try std.testing.expect(std.unicode.utf8ValidateSlice(title));
-    try std.testing.expectEqualStrings("1: \u{65e5}\u{672c}\u{8a9e}...", title);
+    try std.testing.expectEqualStrings("1: \u{65e5}...", title);
 }
 
 test "win32 buildTabButtonLabel drops pane count when tabs are narrow" {
@@ -2934,7 +3019,7 @@ test "win32 buildTabButtonLabel drops pane count when tabs are narrow" {
 
     const title = try buildTabButtonLabel(std.testing.allocator, "logs-and-output-pane", 1, false, 3, 9, false);
     defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("2: logs-a...", title);
+    try std.testing.expectEqualStrings("2: log...", title);
 }
 
 test "win32 hostLabelIsCompacted tracks what the drawn label hides" {
@@ -2947,6 +3032,78 @@ test "win32 hostLabelIsCompacted tracks what the drawn label hides" {
     const kana = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30bf}\u{30a4}\u{30c8}\u{30eb}";
     try std.testing.expect(!hostLabelIsCompacted(kana, 24));
     try std.testing.expect(hostLabelIsCompacted(kana, 9));
+}
+
+test "win32 tabButtonTitleBudget charges the label's decorations" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // "* " + "1: " + " (3)" is nine cells the title cannot also spend.
+    try std.testing.expectEqual(@as(usize, 15), tabButtonTitleBudget(0, true, 3, 24, true));
+    try std.testing.expectEqual(@as(usize, 19), tabButtonTitleBudget(0, true, 3, 24, false));
+    try std.testing.expectEqual(@as(usize, 21), tabButtonTitleBudget(1, false, 1, 24, false));
+    // A button too narrow for its own decorations still shows an ellipsis.
+    try std.testing.expectEqual(@as(usize, 3), tabButtonTitleBudget(0, true, 3, 6, true));
+
+    // The decorated label stays inside the button either way; it used to run
+    // up to nine cells past it.
+    const long = "a" ** 40;
+    for ([_]bool{ true, false }) |active| {
+        const label = try buildTabButtonLabel(std.testing.allocator, long, 0, active, 3, 24, true);
+        defer std.testing.allocator.free(label);
+        try std.testing.expect(displayWidth(label) <= 24);
+    }
+}
+
+test "win32 tab tooltip decision matches for an active tab and its neighbour" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const max_width: usize = 24;
+    // Eighteen cells, so the title fits even the active tab's 19-cell budget:
+    // nothing is hidden and neither tab has anything to say in a tooltip.
+    const fits = "session-alpha-1234";
+    const active_label = try buildTabButtonLabel(std.testing.allocator, fits, 0, true, 1, max_width, false);
+    defer std.testing.allocator.free(active_label);
+    const inactive_label = try buildTabButtonLabel(std.testing.allocator, fits, 1, false, 1, max_width, false);
+    defer std.testing.allocator.free(inactive_label);
+    try std.testing.expectEqualStrings("* 1: session-alpha-1234", active_label);
+    try std.testing.expectEqualStrings("2: session-alpha-1234", inactive_label);
+    try std.testing.expect(displayWidth(active_label) <= max_width);
+    try std.testing.expect(displayWidth(inactive_label) <= max_width);
+
+    // The gate the tab strip runs: the bare title against the budget it was
+    // actually compacted to. Measuring the decorated label against the button
+    // budget instead made this pair disagree -- tooltip on the active tab,
+    // none on its neighbour, same title.
+    const active_budget = tabButtonTitleBudget(0, true, 1, max_width, false);
+    const inactive_budget = tabButtonTitleBudget(1, false, 1, max_width, false);
+    try std.testing.expectEqual(
+        hostLabelIsCompacted(fits, active_budget),
+        hostLabelIsCompacted(fits, inactive_budget),
+    );
+    try std.testing.expect(!hostLabelIsCompacted(fits, active_budget));
+
+    const long = "session-alpha-1234-beta-5678";
+    try std.testing.expectEqual(
+        hostLabelIsCompacted(long, active_budget),
+        hostLabelIsCompacted(long, inactive_budget),
+    );
+    try std.testing.expect(hostLabelIsCompacted(long, active_budget));
+}
+
+test "win32 buildTabItemUiaName keeps the pane count the drawn label shows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("2: pwsh (3)", buildTabItemUiaName(&buf, 1, "pwsh", 3).?);
+    // One pane is the ordinary case and carries no count, matching the label.
+    try std.testing.expectEqualStrings("1: pwsh", buildTabItemUiaName(&buf, 0, "pwsh", 1).?);
+    // The name is the full title, not the compacted one the button draws.
+    const long = "a" ** 40;
+    try std.testing.expectEqualStrings("1: " ++ long, buildTabItemUiaName(&buf, 0, long, 1).?);
+    // A title too long for the provider's buffer is refused so the caller can
+    // fall back to the drawn label instead of reporting a cut name.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expect(buildTabItemUiaName(&tiny, 0, "pwsh", 1) == null);
 }
 
 test "win32 buildTabTooltipText keeps a runaway title bounded" {
