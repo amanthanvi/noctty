@@ -1384,6 +1384,15 @@ fn appendCodepoint(alloc: Allocator, out: *std.ArrayListUnmanaged(u8), cp: u21) 
 ///     reorder what is displayed, so the pane could show a different
 ///     reading order than the payload has. See `isBidiFormatting`.
 ///
+/// Line endings are normalised to CRLF for display. A Win32 multiline
+/// EDIT breaks a line only on CRLF: a lone LF is zero-width and a lone
+/// CR is swallowed, so `ls -l<spaces>\nrm -rf ~` would read as one
+/// padded command. LF-only payloads are the common case (VS Code on an
+/// LF file, anything routed through WSL, OSC 52 writes) and a newline
+/// is precisely what `input.paste.isSafe` raises this prompt for, so
+/// the pane must not be the one place it becomes invisible. Only the
+/// display text changes; `shown_bytes` still counts source bytes.
+///
 /// Every other control character, DEL included, is passed through.
 pub fn buildConfirmPreview(
     alloc: Allocator,
@@ -1410,7 +1419,14 @@ pub fn buildConfirmPreview(
             const lead = data[scan];
             if ((lead & 0xC0) == 0x80) continue; // still inside a sequence
             const seq_len = std.unicode.utf8ByteSequenceLength(lead) catch break;
-            if (scan + seq_len > end) end = scan;
+            // Back off only for a sequence that is actually whole and
+            // valid in `data`. A malformed lead byte at the boundary is
+            // rendered as U+FFFD like any other, instead of dragging
+            // `end` back over the bytes before it.
+            if (scan + seq_len > end and scan + seq_len <= data.len) {
+                _ = std.unicode.utf8Decode(data[scan .. scan + seq_len]) catch break;
+                end = scan;
+            }
             break;
         }
     }
@@ -1424,10 +1440,15 @@ pub fn buildConfirmPreview(
     while (i < src.len) {
         const b = src[i];
         if (b < 0x80) {
-            if (b == 0) {
-                try appendCodepoint(alloc, &out, 0xFFFD);
-            } else {
-                try out.append(alloc, b);
+            switch (b) {
+                0 => try appendCodepoint(alloc, &out, 0xFFFD),
+                '\r' => {
+                    try out.appendSlice(alloc, "\r\n");
+                    // Consume the LF of a CRLF so it is not doubled.
+                    if (i + 1 < src.len and src[i + 1] == '\n') i += 1;
+                },
+                '\n' => try out.appendSlice(alloc, "\r\n"),
+                else => try out.append(alloc, b),
             }
             i += 1;
             continue;
@@ -3921,6 +3942,53 @@ test "win32 confirm preview truncates on a codepoint boundary" {
     try std.testing.expectEqual(@as(usize, 6), preview.total_bytes);
     try std.testing.expect(preview.truncated());
     try std.testing.expect(std.unicode.utf8ValidateSlice(preview.text));
+}
+
+test "win32 confirm preview normalises line endings to CRLF" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A Win32 EDIT breaks lines only on CRLF. A lone LF renders as
+    // nothing and a lone CR is swallowed, which would hide the one
+    // structural fact the paste prompt exists to show.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "one\ntwo\rthree\r\nfour\n\nfive\r\r\nsix",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(
+        "one\r\ntwo\r\nthree\r\nfour\r\n\r\nfive\r\n\r\nsix",
+        preview.text,
+    );
+    // The caption still counts source bytes, not display bytes.
+    try std.testing.expectEqual(@as(usize, 31), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 31), preview.total_bytes);
+    try std.testing.expect(!preview.truncated());
+}
+
+test "win32 confirm preview keeps a malformed lead byte at the boundary" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A lead byte whose sequence crosses the limit is backed off only
+    // when the sequence is whole and valid. A malformed one is shown as
+    // U+FFFD instead of dragging the boundary back over the bytes
+    // before it -- here all the way to an empty pane.
+    var preview = try buildConfirmPreview(std.testing.allocator, "\xE0\x80x", 2);
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("\u{FFFD}\u{FFFD}", preview.text);
+    try std.testing.expectEqual(@as(usize, 2), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 3), preview.total_bytes);
+    try std.testing.expect(preview.truncated());
+
+    // A sequence that is cut by the end of the data itself is malformed
+    // too, and likewise must not move the boundary.
+    var cut = try buildConfirmPreview(std.testing.allocator, "abc\xE3\x81", 4);
+    defer cut.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("abc\u{FFFD}", cut.text);
+    try std.testing.expectEqual(@as(usize, 4), cut.shown_bytes);
 }
 
 test "win32 confirm preview caption reports what is being approved" {

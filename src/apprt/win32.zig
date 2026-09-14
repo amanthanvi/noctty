@@ -10656,16 +10656,10 @@ const PendingClipboardOp = union(enum) {
 const SurfaceStatus = labels.SurfaceStatus;
 const HostTabStatus = labels.HostTabStatus;
 
-/// Payload for a non-modal confirm overlay. The callbacks receive the
-/// `userdata` pointer passed at construction time so the issuer can
-/// bind state (e.g. which Surface's close is pending). Callbacks are
-/// invoked exactly once — either `on_accept` or `on_cancel` — and the
-/// payload is dropped immediately after. Owned byte slices
-/// (`title`, `body`, `accept_label`, `cancel_label`) live on the Host's
-/// allocator; `deinit` frees them.
 /// What a caller is asking the user to approve. A struct rather than
 /// positional arguments because every string field has the same type:
-/// swapping `title` and `accept_label` used to compile cleanly.
+/// swapping `title` and `accept_label` used to compile cleanly. Borrows
+/// the caller's strings; `showConfirm` copies what it keeps.
 const ConfirmPrompt = struct {
     title: []const u8,
     body: []const u8,
@@ -10677,6 +10671,13 @@ const ConfirmPrompt = struct {
     contents: ?[]const u8 = null,
 };
 
+/// Payload for a non-modal confirm overlay. The callbacks receive the
+/// `userdata` pointer passed at construction time so the issuer can
+/// bind state (e.g. which Surface's close is pending). Callbacks are
+/// invoked exactly once — either `on_accept` or `on_cancel` — and the
+/// payload is dropped immediately after. Owned byte slices
+/// (`title`, `body`, `accept_label`, `cancel_label`) live on the Host's
+/// allocator; `deinit` frees them.
 const ConfirmPayload = struct {
     title: []u8,
     body: []u8,
@@ -15382,6 +15383,12 @@ const Host = struct {
             p.deinit(self.app.core_app.alloc);
             self.confirm_payload = null;
         }
+        // Clear the preview pane now rather than on the next overlay
+        // open. A hidden EDIT still answers WM_GETTEXT, and a denied
+        // clipboard write was never placed on the clipboard, so its
+        // bytes must not stay readable from the control after the
+        // prompt is gone. Mode is already `.none`, so this writes "".
+        _ = chromeSyncOrLog("overlay preview clear failed", self.syncOverlayPreview());
         if (self.overlay_label_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_label_placement, false);
         if (self.overlay_edit_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_edit_placement, false);
         if (self.overlay_hint_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_hint_placement, false);

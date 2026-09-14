@@ -243,11 +243,14 @@ for a different reason than the other two: those characters are invisible and
 reorder the text around them, so a pane that rendered them literally could show
 a different reading order than the payload actually has. That applies to
 legitimate right-to-left payloads as much as to crafted ones — a genuine RTL
-paste carrying directional marks will show U+FFFD where they were. Every other
-control character, DEL included, is shown as it is, matching upstream Ghostty's
-GTK and macOS dialogs.
-CF_HTML copies also place a plain-text fallback on the clipboard. Dropped files, text, URLs, and HTML
-are converted to terminal input. Shift changes file/text handling, Ctrl
+paste carrying directional marks will show U+FFFD where they were. Line endings
+are normalised to CRLF for display, because a Win32 EDIT breaks lines only on
+CRLF and would otherwise render an LF-only payload as a single line. Every
+other control character, DEL included, is shown as it is, matching upstream
+Ghostty's GTK and macOS dialogs.
+
+CF_HTML copies also place a plain-text fallback on the clipboard. Dropped
+files, text, URLs, and HTML are converted to terminal input. Shift changes file/text handling, Ctrl
 suppresses file-path quoting, and Alt is reserved.
 
 `clipboard-codepoint-map` is applied by the shared selection formatter before
