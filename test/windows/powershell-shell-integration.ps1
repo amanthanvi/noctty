@@ -157,8 +157,6 @@ try {
     Assert-True (-not [string]::IsNullOrEmpty($psHost)) "Could not resolve the current PowerShell host path"
 
     $childQuotedPath = $script:IntegrationPath.Replace("'", "''")
-    $childPayload = "function global:prompt { 'NOCTTYPROBE> ' }; " +
-        "& { `$__ghostty_utf8_console = `$false; . '$childQuotedPath' }"
     # The child echoes each stdin line back, so the success token must be
     # assembled at runtime; a literal would match its own echo and the
     # assertion would pass even when the helper is gone.
@@ -166,30 +164,73 @@ try {
         'if (Get-Command __ghostty_write_osc -ErrorAction SilentlyContinue) { "HELPER" + "-RESOLVED" }',
         'exit'
     )
-    # `2>&1` on a native command produces ErrorRecords. Under Windows
-    # PowerShell 5.1 with $ErrorActionPreference = 'Stop' (set at the top of
-    # this file) that throws a RemoteException instead of landing in
-    # $childOut, which would turn any child stderr — exactly the diagnostic
-    # we want to read — into an unrelated crash. pwsh 7 does not do this.
-    $childErrorAction = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $childOut = ($childInput | & $psHost -NoProfile -NoExit -Command $childPayload 2>&1 | Out-String)
-    } finally {
-        $ErrorActionPreference = $childErrorAction
+
+    function Invoke-NocttyInjectedChild {
+        param(
+            [string]$Preamble,
+            [string[]]$Lines = $null
+        )
+
+        if ($null -eq $Lines) { $Lines = $script:ChildInput }
+        $payload = $Preamble +
+            "function global:prompt { 'NOCTTYPROBE> ' }; " +
+            "& { `$__ghostty_utf8_console = `$false; . '$childQuotedPath' }"
+        # `2>&1` on a native command produces ErrorRecords. Under Windows
+        # PowerShell 5.1 with $ErrorActionPreference = 'Stop' (set at the top
+        # of this file) that throws a RemoteException instead of landing in
+        # the captured output, which would turn any child stderr — exactly
+        # the diagnostic we want to read — into an unrelated crash. pwsh 7
+        # does not do this.
+        $saved = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            return ($Lines | & $script:PsHost -NoProfile -NoExit -Command $payload 2>&1 | Out-String)
+        } finally {
+            $ErrorActionPreference = $saved
+        }
     }
 
-    Assert-True ($childOut.Contains('HELPER-RESOLVED')) "Helper functions did not survive the injected & { } block: $($childOut -replace [char]27, '<ESC>')"
-    Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "Injected block replaced the user's prompt: $($childOut -replace [char]27, '<ESC>')"
-    # Load-time failures only. PowerShell swallows a throw from `prompt`
-    # without writing anything, so this cannot see a prompt-draw failure —
-    # the marker and OSC assertions are what cover that. pwsh 7 says "as a
-    # name of a cmdlet", 5.1 says "as the name of a cmdlet"; match the
-    # common prefix.
-    Assert-True (-not ($childOut -match 'is not recognized as')) "Injected block raised CommandNotFoundException while loading: $($childOut -replace [char]27, '<ESC>')"
-    foreach ($marker in @(']133;A;cl=line;aid=', ']133;B', ']133;D;', ']7;file://')) {
-        Assert-True ($childOut.Contains($marker)) "Injected block emitted no $marker : $($childOut -replace [char]27, '<ESC>')"
+    $script:PsHost = $psHost
+    $script:ChildInput = $childInput
+
+    # Case 1: the plain injected launch.
+    # Case 2: the same launch under a profile that enabled Set-StrictMode.
+    # StrictMode turns a read of an unset variable into a TERMINATING error,
+    # and both our own state globals and the built-in $LASTEXITCODE are
+    # legitimately unset on the first draw — which killed `prompt` outright
+    # and reproduced the #231 symptom from a second, independent cause.
+    foreach ($case in @(
+        @{ Name = 'plain'; Preamble = '' }
+        @{ Name = 'Set-StrictMode -Version Latest'; Preamble = 'Set-StrictMode -Version Latest; ' }
+    )) {
+        $childOut = Invoke-NocttyInjectedChild -Preamble $case.Preamble
+        $shown = $childOut -replace [char]27, '<ESC>'
+        $where = "[$($case.Name)]"
+
+        Assert-True ($childOut.Contains('HELPER-RESOLVED')) "$where Helper functions did not survive the injected & { } block: $shown"
+        Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
+        # PowerShell swallows a throw from `prompt` without writing anything,
+        # so these error patterns only catch load-time and StrictMode
+        # failures; the marker and OSC assertions cover a prompt-draw
+        # failure. pwsh 7 says "as a name of a cmdlet", 5.1 says "as the
+        # name of a cmdlet"; match the common prefix.
+        Assert-True (-not ($childOut -match 'is not recognized as')) "$where Injected block raised CommandNotFoundException: $shown"
+        Assert-True (-not ($childOut -match 'cannot be retrieved because it has not been set')) "$where Injected block read an unset variable: $shown"
+        foreach ($marker in @(']133;A;cl=line;aid=', ']133;B', ']133;D;', ']7;file://')) {
+            Assert-True ($childOut.Contains($marker)) "$where Injected block emitted no $marker : $shown"
+        }
     }
+
+    # The exit-status logic must survive the StrictMode rewrite: a fresh
+    # native exit code still has to reach OSC 133;D, and a clean draw must
+    # still report 0. Reading $LASTEXITCODE through Get-Variable is the part
+    # that could silently have broken this.
+    $nativeOut = Invoke-NocttyInjectedChild `
+        -Preamble 'Set-StrictMode -Version Latest; ' `
+        -Lines @('cmd /c exit 7', 'exit')
+    $nativeShown = $nativeOut -replace [char]27, '<ESC>'
+    Assert-True ($nativeOut.Contains(']133;D;0;')) "First prompt draw did not report exit 0 under StrictMode: $nativeShown"
+    Assert-True ($nativeOut.Contains(']133;D;7;')) "Native exit code did not reach OSC 133 D under StrictMode: $nativeShown"
 
     Write-Output 'PASS powershell shell integration'
 } finally {

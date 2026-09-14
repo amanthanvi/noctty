@@ -108,13 +108,16 @@ that:
   run `Set-PSReadLineKeyHandler -Chord Enter -Function ValidateAndAcceptLine`
   (or use Emacs edit mode, where Ctrl+M is bound to it) do get it. PSReadLine
   hands the handler one `CommandAst` per command, so a pipeline of two
-  commands produces two C marks, not one per line.
+  commands produces two C marks, not one per line. Both features that need a
+  C mark are therefore unavailable for PowerShell out of the box: copying the
+  last completed command output (which reads the C..D output region) and
+  inserting the last recoverable command. Prompt navigation and cwd reporting
+  are unaffected — they only need A / B / D and OSC 7.
 - OSC 133 prompt marks back previous/next prompt navigation, copying the last
   completed command output, and inserting the last recoverable single-line
-  command back on the prompt from the command palette. Insert requires
-  OSC 133;B and OSC 133;C — so for PowerShell it is unavailable unless the
-  user has opted into `ValidateAndAcceptLine` as above — and a B mark that
-  noctty has not itself submitted
+  command back on the prompt from the command palette. Copy-output needs a
+  complete OSC 133;C..D region; insert needs OSC 133;B and OSC 133;C and a B
+  mark that noctty has not itself submitted
   with Enter since; it does not inspect or modify the shell's line editor, and
   it does not submit the command — OSC 133 marks are forgeable by any program
   writing to the terminal, so the user reviews and presses Enter.

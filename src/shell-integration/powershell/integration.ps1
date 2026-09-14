@@ -52,17 +52,39 @@ if ($ghosttyUtf8Console) {
 $Global:__ghostty_esc = [char]27
 $Global:__ghostty_bel = [char]7
 
+# ── Reading a possibly-unset global ──────────────────────────────────────
+# `Set-StrictMode -Version 2.0` or later turns a read of an undefined
+# variable into a terminating error. Both our own state globals and the
+# built-in $LASTEXITCODE are legitimately unset at times — on the very first
+# prompt draw, and in any session that has not yet run a native executable.
+# Under a profile that enables StrictMode, reading them directly killed the
+# whole prompt function, so PowerShell fell back to `PS C:\...>` and the
+# user's prompt vanished: the #231 symptom, from a different cause.
+#
+# `Get-Variable -ErrorAction SilentlyContinue` yields $null for an unset name
+# instead of throwing, on every StrictMode version. -Scope Global is passed
+# explicitly so a profile's $PSDefaultParameterValues['Get-Variable:Scope']
+# cannot redirect the lookup: an explicitly passed parameter always wins.
+#
+# Calling this does NOT disturb $LASTEXITCODE (only native executables and
+# scripts write it) but it DOES reset $?, so `prompt` must still capture $?
+# as its very first statement.
+function global:__ghostty_read_global {
+    param([string]$Name)
+    return (Get-Variable -Name $Name -Scope Global -ValueOnly -ErrorAction SilentlyContinue)
+}
+
 # ── Idempotent guard: save original prompt once ──────────────────────────
-if ($null -eq $Global:__ghostty_aid) {
+if ($null -eq (__ghostty_read_global '__ghostty_aid')) {
     $Global:__ghostty_aid = [string]$PID
 }
 
-if ($null -eq $Global:__ghostty_original_prompt) {
+if ($null -eq (__ghostty_read_global '__ghostty_original_prompt')) {
     $Global:__ghostty_original_prompt = $function:global:prompt
     # Previous-prompt snapshot of $LASTEXITCODE. We compare against this
     # each prompt tick so a stale native exit code from an earlier
     # pipeline can't masquerade as the current command's exit status.
-    $Global:__ghostty_prev_exitcode = $LASTEXITCODE
+    $Global:__ghostty_prev_exitcode = __ghostty_read_global 'LASTEXITCODE'
 }
 
 function global:__ghostty_write_osc {
@@ -131,7 +153,10 @@ function global:__ghostty_ssh_cache {
 
     try {
         & $noctty '+ssh-cache' @Arguments *> $null
-        return ($LASTEXITCODE -eq 0)
+        # Read through the helper: if the invocation never reached the
+        # executable, $LASTEXITCODE can still be unset and a direct read
+        # would be a terminating error under Set-StrictMode.
+        return ((__ghostty_read_global 'LASTEXITCODE') -eq 0)
     } catch {
         return $false
     }
@@ -304,18 +329,32 @@ function global:prompt {
     # The fix is to compare $LASTEXITCODE against the value we snapshot
     # at the END of the previous prompt. If it didn't change, the slot
     # is stale and must be ignored.
+    #
+    # $? MUST stay the first statement: every later call resets it.
+    # Everything after it reads through __ghostty_read_global so a
+    # profile's Set-StrictMode cannot turn "no native command has run
+    # yet" into a terminating error that costs the user their prompt.
     $ok = $?
-    $exit_changed = ($LASTEXITCODE -ne $Global:__ghostty_prev_exitcode)
-    $code = if (-not $ok) {
-        # Cmdlet / script-block / `throw` failure. Honour a fresh
-        # native exit code from the same pipeline; otherwise
-        # synthesise 1 so OSC 133 D carries the failure signal.
-        if ($exit_changed -and $null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            $LASTEXITCODE
-        } else { 1 }
-    } elseif ($exit_changed -and $null -ne $LASTEXITCODE) {
-        $LASTEXITCODE
-    } else { 0 }
+    $code = 0
+    $original_prompt = $null
+    try {
+        $original_prompt = __ghostty_read_global '__ghostty_original_prompt'
+        $last_exitcode = __ghostty_read_global 'LASTEXITCODE'
+        $exit_changed = ($last_exitcode -ne (__ghostty_read_global '__ghostty_prev_exitcode'))
+        $code = if (-not $ok) {
+            # Cmdlet / script-block / `throw` failure. Honour a fresh
+            # native exit code from the same pipeline; otherwise
+            # synthesise 1 so OSC 133 D carries the failure signal.
+            if ($exit_changed -and $null -ne $last_exitcode -and $last_exitcode -ne 0) {
+                $last_exitcode
+            } else { 1 }
+        } elseif ($exit_changed -and $null -ne $last_exitcode) {
+            $last_exitcode
+        } else { 0 }
+    } catch {
+        # Report an unknown status rather than losing the prompt.
+        $code = 0
+    }
 
     # Everything terminal-reporting lives inside try/catch, and the user's
     # own prompt is invoked OUTSIDE it. Shell integration is a nice-to-have;
@@ -326,6 +365,11 @@ function global:prompt {
     # configuration. Degrading to "no OSC marks this tick" is always the
     # better failure. The harness asserts the marks ARE emitted, so this
     # cannot quietly swallow a real regression.
+    #
+    # Every statement in this function except `$ok = $?` and the delegation
+    # itself is inside one of these guards, and the delegation target is
+    # resolved inside a guard with a fallback. A throw from the USER's own
+    # prompt is deliberately not caught: that is their bug to see.
     try {
         # OSC 133 D — report previous command's exit code
         __ghostty_write_osc "${Global:__ghostty_esc}]133;D;${code};aid=${Global:__ghostty_aid}${Global:__ghostty_bel}"
@@ -348,12 +392,24 @@ function global:prompt {
     # user-typed cmdlet to inherit the prompt-helper's exit code as
     # its "fresh native" baseline, falsely reporting e.g. `7` for a
     # successful `Get-Date` when the prompt had run `cmd /c exit 7`.
-    $out = & $Global:__ghostty_original_prompt
+    # Resolved above, inside the guard. If it is somehow gone, emit what
+    # PowerShell's own default prompt would have: returning a sane string
+    # beats throwing, which costs the user the prompt line AND spills an
+    # error into it.
+    $out = if ($null -ne $original_prompt) {
+        & $original_prompt
+    } else {
+        "PS $($PWD.Path)> "
+    }
 
     # Re-snapshot AFTER the wrapped prompt completes so the next
     # prompt tick can distinguish "the user's command wrote
     # $LASTEXITCODE" from "the prompt helpers wrote it".
-    $Global:__ghostty_prev_exitcode = $LASTEXITCODE
+    try {
+        $Global:__ghostty_prev_exitcode = __ghostty_read_global 'LASTEXITCODE'
+    } catch {
+        # See below: never let our bookkeeping eat the user's prompt.
+    }
 
     # OSC 133 B — mark end of prompt / start of user input
     try {

@@ -499,6 +499,29 @@ test "integration_script_sha256 is not all zero" {
     try std.testing.expect(!std.mem.eql(u8, &integration_script_sha256, &zero));
 }
 
+/// Strip a leading PowerShell type cast from a statement, so
+/// `[string[]]$x = 'v'` reduces to `$x = 'v'`. Brackets nest, which is why
+/// this counts rather than searching for the first `]`. Returns the input
+/// unchanged when it does not start with a balanced cast.
+fn stripLeadingTypeCast(statement: []const u8) []const u8 {
+    var rest = statement;
+    while (rest.len > 0 and rest[0] == '[') {
+        var bracket: usize = 0;
+        const end = for (rest, 0..) |c, idx| {
+            switch (c) {
+                '[' => bracket += 1,
+                ']' => {
+                    bracket -= 1;
+                    if (bracket == 0) break idx;
+                },
+                else => {},
+            }
+        } else return statement;
+        rest = std.mem.trimLeft(u8, rest[end + 1 ..], " \t");
+    }
+    return rest;
+}
+
 /// Advance a PowerShell brace-nesting counter across one line of script.
 ///
 /// Braces inside a `#` comment and inside single- or double-quoted strings do
@@ -589,16 +612,19 @@ test "integration.ps1 honours the injected block scope" {
         const line_depth = depth;
         depth = advanceBraceDepth(line, depth);
 
-        // Top-level variable assignment.
-        if (line_depth == 0 and trimmed[0] == '$') {
-            const name_end = for (trimmed[1..], 1..) |c, idx| {
+        // Top-level variable assignment, with any leading type cast
+        // stripped: `[string]$x = 'v'` and `[string[]]$x = @()` declare a
+        // variable just as much as a bare `$x = 'v'` does.
+        const statement = stripLeadingTypeCast(trimmed);
+        if (line_depth == 0 and statement.len > 0 and statement[0] == '$') {
+            const name_end = for (statement[1..], 1..) |c, idx| {
                 if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ':') break idx;
-            } else trimmed.len;
-            const after = std.mem.trimLeft(u8, trimmed[name_end..], " \t");
+            } else statement.len;
+            const after = std.mem.trimLeft(u8, statement[name_end..], " \t");
             if (after.len > 0 and after[0] == '=' and
                 (after.len == 1 or after[1] != '='))
             {
-                const name = trimmed[1..name_end];
+                const name = statement[1..name_end];
                 top_level_variables += 1;
                 // `$ghosttyUtf8Console` is the one deliberate block-scoped
                 // local: it is consumed during load and must not outlive it.
@@ -642,7 +668,7 @@ test "integration.ps1 honours the injected block scope" {
     }
     // Guard the guard: if either scan stops matching, everything above turns
     // vacuous. These are the live counts; bump them when the script grows.
-    try std.testing.expectEqual(@as(usize, 12), declarations);
+    try std.testing.expectEqual(@as(usize, 13), declarations);
     try std.testing.expectEqual(@as(usize, 3), top_level_variables);
     // depthIsZeroAtEndOfScript: unbalanced braces here mean the tracker
     // desynced (an unterminated string, a here-string), which would silently
