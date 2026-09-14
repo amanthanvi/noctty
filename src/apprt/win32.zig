@@ -26930,6 +26930,35 @@ pub const Surface = struct {
         // unchanged for a surface that started unfocused.
         self.focusChanged(self.window_focused);
         if (activate_during_init) {
+            // `background-opacity` is only visible on Win32 through the host
+            // window's layered alpha: DWM discards the GL child's framebuffer
+            // alpha and nothing here opts into `DwmExtendFrameIntoClientArea`
+            // or `WS_EX_NOREDIRECTIONBITMAP`. `createHost` passes
+            // `dwExStyle = 0`, and the only callers of
+            // `applyBackgroundOpacity` were config reload, tab/window
+            // activation and `inheritWindowStateFrom` — none of which a
+            // cold-start window reaches — so window 1 stayed fully opaque
+            // while every later window faded (issue #234).
+            //
+            // Only this branch owns a brand-new host window; a same-host tab
+            // or split inherits an HWND whose alpha is already correct, and
+            // for a split `tab.focused` already points at `self`, so an
+            // unguarded call here would write to the live window instead of
+            // no-opping through `activeSharedHostWindowHwnd`.
+            if (opts.clone_state_from) |source| {
+                // `inheritWindowStateFrom` below copies the source's opacity
+                // wholesale, but it runs after the window is on screen. Seed
+                // it now so a clone of a window the user forced opaque with
+                // `toggle_background_opacity` is not briefly shown faded.
+                self.background_opacity_default = source.background_opacity_default;
+                self.background_opacity_force_opaque = source.background_opacity_force_opaque;
+            }
+            // Layer before the first show: setting `WS_EX_LAYERED` on an
+            // already-visible window is what produces an opaque-then-fade
+            // flash.
+            self.applyBackgroundOpacity() catch |err| {
+                log.warn("win32 initial background opacity failed err={}", .{err});
+            };
             try host.refreshChrome();
             try host.layout();
             // The top-level host was created hidden and stays hidden until GL
@@ -35442,6 +35471,84 @@ test "win32 sharedHostWindowFrameStateEquals ignores non-frame host state" {
 
     b.size_limit = .{ .min_width = 123, .min_height = 0, .max_width = 0, .max_height = 0 };
     try std.testing.expect(!sharedHostWindowFrameStateEquals(&a, &b));
+}
+
+fn testHostExStyle(hwnd: HWND) u32 {
+    const raw = sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
+    return @truncate(@as(usize, @bitCast(raw)));
+}
+
+fn testLayeredAlpha(hwnd: HWND) ?u8 {
+    var alpha: u8 = 0;
+    var flags: u32 = 0;
+    if (sys.GetLayeredWindowAttributes(hwnd, null, &alpha, &flags) == 0) return null;
+    if ((flags & c.LWA_ALPHA) == 0) return null;
+    return alpha;
+}
+
+test "win32 applyBackgroundOpacity layers the cold-start host window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const hinstance = sys.GetModuleHandleW(null);
+    const hwnd = sys.CreateWindowExW(
+        0,
+        prompt_label_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_POPUP,
+        0,
+        0,
+        320,
+        240,
+        null,
+        null,
+        hinstance,
+        null,
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(hwnd);
+
+    // Mirror the state `Surface.init` has built by the time it applies the
+    // initial opacity: a freshly created host whose single tab already
+    // focuses this surface. That is the gate the fix depends on — without
+    // it `activeSharedHostWindowHwnd` returns null and the call is a no-op.
+    var host: Host = undefined;
+    host.id = 234;
+    host.hwnd = hwnd;
+    host.tabs = .empty;
+    host.active_tab = 0;
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    // `surface.hwnd = null` on purpose: the layered alpha has to land on the
+    // top-level host window, never on the GL child.
+    var surface: Surface = undefined;
+    surface.host = &host;
+    surface.host_id = host.id;
+    surface.hwnd = null;
+    surface.background_opacity_default = 0.75;
+    surface.background_opacity_force_opaque = false;
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+
+    try std.testing.expectEqual(@as(?*Surface, &surface), host.activeSurface());
+    try std.testing.expectEqual(@as(?HWND, hwnd), surface.activeSharedHostWindowHwnd());
+    try std.testing.expect((testHostExStyle(hwnd) & c.WS_EX_LAYERED) == 0);
+
+    // Regression for #234: a cold-start window never reached
+    // `applyBackgroundOpacity`, so it stayed opaque while cloned windows
+    // faded. `WS_EX_LAYERED` plus `LWA_ALPHA` is the whole mechanism.
+    try surface.applyBackgroundOpacity();
+    try std.testing.expect((testHostExStyle(hwnd) & c.WS_EX_LAYERED) != 0);
+    try std.testing.expectEqual(@as(?u8, 191), testLayeredAlpha(hwnd));
+
+    // `toggle_background_opacity` forces the window opaque, which must drop
+    // the layered style entirely rather than set alpha 255.
+    try std.testing.expect(try surface.toggleBackgroundOpacity());
+    try std.testing.expect((testHostExStyle(hwnd) & c.WS_EX_LAYERED) == 0);
+
+    try std.testing.expect(try surface.toggleBackgroundOpacity());
+    try std.testing.expect((testHostExStyle(hwnd) & c.WS_EX_LAYERED) != 0);
+    try std.testing.expectEqual(@as(?u8, 191), testLayeredAlpha(hwnd));
 }
 
 test "win32 shared host topmost and opacity equality track separate window state" {
