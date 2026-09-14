@@ -12,6 +12,37 @@
 //!      script entry points. The sentinel is always bound, both ways, so it
 //!      shadows any same-named variable a profile may have defined.
 //!
+//! Why the payload is a `& { ... }` script block:
+//!
+//!   The block's child scope is the only way to make the per-launch
+//!   `$__ghostty_utf8_console` decision stick on a session whose profile
+//!   already defined a variable of that name. A child scope SHADOWS an outer
+//!   variable even when that outer variable is `ReadOnly` or `Constant`; a
+//!   plain global assignment does not — it raises a non-terminating
+//!   `Cannot overwrite variable ... because it is read-only or constant`,
+//!   the dot-source proceeds anyway, and the profile's value wins. Measured
+//!   on pwsh 7 and Windows PowerShell 5.1: with a `ReadOnly` profile
+//!   sentinel of `$true` and noctty asking for `$false`, the block form
+//!   leaves the console at codepage 437 (correct) while the global form
+//!   ends at 65001 with a visible error. The block is therefore load-bearing
+//!   for the `utf8-console = never` guarantee.
+//!
+//!   It is NOT about child-process inheritance — PowerShell variables are
+//!   never inherited by child processes in the first place. (An earlier
+//!   version of this comment claimed that; it was wrong.)
+//!
+//!   The cost of the block, and the contract it imposes: the child scope is
+//!   torn down as soon as the dot-source returns, so every top-level name in
+//!   `integration.ps1` that must outlive load has to carry an explicit
+//!   `global:` / `$Global:` qualifier. When it did not, `prompt` survived
+//!   (it was `function global:prompt`) but every helper it calls did not,
+//!   so each prompt draw threw `CommandNotFoundException`, PowerShell fell
+//!   back to its built-in `PS C:\...>` prompt over the user's starship /
+//!   oh-my-posh prompt, and no OSC 133 or OSC 7 was ever emitted (#231).
+//!   `integration.ps1 honours the injected block scope` below pins that
+//!   contract at compile time; note that a test which dot-sources the script
+//!   at its own scope cannot catch a violation.
+//!
 //! Testing: `@embedFile("../...")` needs the `src/` package root.
 //!   echo 'test { _ = @import("apprt/win32_powershell_install.zig"); }' > src/_t.zig
 //!   zig test src/_t.zig && rm src/_t.zig
@@ -166,6 +197,11 @@ pub const InjectError = error{ OutOfMemory, EmptyCommand };
 /// rather than as a child environment variable: profiles run before our
 /// `-Command` does, so an environment variable would already have been
 /// inherited by anything a profile spawned.
+///
+/// The payload is a `& { ... }` block so that binding lands in a child scope
+/// and shadows a profile-defined sentinel even when the profile marked it
+/// `ReadOnly` / `Constant`. See the module doc comment for the measurement
+/// and for the `global:` contract the block imposes on `integration.ps1`.
 pub fn buildInjectedArgv(
     alloc: Allocator,
     pwsh_argv: []const []const u8,
@@ -398,7 +434,7 @@ fn isValueTakingInteractiveFlag(arg: []const u8) bool {
 /// The variable `integration.ps1` reads to decide whether to force UTF-8
 /// console encodings. It only ever exists in the script block scope that
 /// dot-sources the integration script, so it is gone by the time the
-/// interactive session starts and no child process can inherit it.
+/// interactive session starts.
 pub const utf8_console_variable = "__ghostty_utf8_console";
 
 fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) ![]u8 {
@@ -409,8 +445,21 @@ fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) 
     // scope pin is what enforces `utf8-console = never` and the CJK guard
     // against a hostile profile; the explicit `$false` exists so the "no"
     // decision is a deliberate value rather than an absent variable, and so
-    // the local binding shadows any same-named outer variable if the lookup
-    // is ever loosened again.
+    // the child-scope binding shadows any same-named outer variable if the
+    // lookup is ever loosened again.
+    //
+    // Keep this a `& { ... }` block. A child scope shadows a `ReadOnly` /
+    // `Constant` profile global; a plain global assignment cannot overwrite
+    // one and silently leaves the profile's value in force. The tradeoff is
+    // that `integration.ps1` must `global:`-qualify everything that outlives
+    // the dot-source — see the module doc comment and the contract test.
+    //
+    // A profile can still defeat this by declaring the sentinel with
+    // `-Option AllScope,ReadOnly`, which makes the name unbindable in child
+    // scopes too. Hardening against that would mean prefixing a
+    // `Microsoft.PowerShell.Utility\Remove-Variable __ghostty_utf8_console
+    // -Scope Global -Force` inside the braces; deliberately not done here to
+    // keep the pinned payload string stable.
     return std.fmt.allocPrint(
         alloc,
         "& {{ ${s} = ${s}; . '{s}' }}",
@@ -448,6 +497,361 @@ test "integration_script is non-empty" {
 test "integration_script_sha256 is not all zero" {
     const zero: [32]u8 = .{0} ** 32;
     try std.testing.expect(!std.mem.eql(u8, &integration_script_sha256, &zero));
+}
+
+/// Strip a leading PowerShell type cast from a statement, so
+/// `[string[]]$x = 'v'` reduces to `$x = 'v'`. Brackets nest, which is why
+/// this counts rather than searching for the first `]`. Returns the input
+/// unchanged when it does not start with a balanced cast.
+fn stripLeadingTypeCast(statement: []const u8) []const u8 {
+    var rest = statement;
+    while (rest.len > 0 and rest[0] == '[') {
+        var bracket: usize = 0;
+        const end = for (rest, 0..) |c, idx| {
+            switch (c) {
+                '[' => bracket += 1,
+                ']' => {
+                    bracket -= 1;
+                    if (bracket == 0) break idx;
+                },
+                else => {},
+            }
+        } else return statement;
+        rest = std.mem.trimLeft(u8, rest[end + 1 ..], " \t");
+    }
+    return rest;
+}
+
+/// PowerShell braces come in two flavours and only one of them matters for
+/// scoping. `function`, `filter`, `& { }`, `. { }`, a scriptblock passed as
+/// an argument and a `@{ }` hashtable all open something the runtime treats
+/// as its own scope (or, for the hashtable, as a region whose keys are not
+/// statements at all). `if` / `elseif` / `else` / `try` / `catch` /
+/// `finally` / `foreach` / `for` / `while` / `switch` / `do` do NOT: a
+/// variable assigned inside a top-level `if` block lives in the enclosing
+/// script scope and dies with the injected `& { }` just like one written at
+/// column 0.
+const BraceKind = enum { scope, transparent };
+
+/// Keywords whose block does not introduce a PowerShell scope.
+fn isTransparentKeyword(word: []const u8) bool {
+    // A `}` or `;` can be glued to the keyword (`} else {`, `};try {`).
+    const bare = std.mem.trimLeft(u8, word, "};");
+    for ([_][]const u8{
+        "if",      "elseif", "else",  "try",    "catch", "finally",
+        "foreach", "for",    "while", "switch", "do",
+    }) |kw| {
+        if (std.ascii.eqlIgnoreCase(bare, kw)) return true;
+    }
+    return false;
+}
+
+fn lastWord(text: []const u8) []const u8 {
+    const trimmed = std.mem.trimRight(u8, text, " \t");
+    var start = trimmed.len;
+    while (start > 0 and trimmed[start - 1] != ' ' and trimmed[start - 1] != '\t') {
+        start -= 1;
+    }
+    return trimmed[start..];
+}
+
+/// Tracks PowerShell brace nesting across lines, separating scope-creating
+/// braces from control-flow braces that are transparent to scoping.
+///
+/// Braces inside a `#` comment and inside single- or double-quoted strings do
+/// not count. String skipping is load-bearing for this script: every OSC
+/// payload interpolates `${Global:__ghostty_esc}` and friends, and those
+/// braces would otherwise desync the counter. Handles the backtick escape
+/// inside double quotes.
+///
+/// Quote and paren state deliberately reset per line — `integration.ps1`
+/// contains no here-strings. The end-of-script depth assertions in the test
+/// below are the tripwire if that ever stops holding.
+const BraceTracker = struct {
+    stack: [64]BraceKind = undefined,
+    depth: usize = 0,
+    /// How many enclosing braces actually create a scope. An assignment is
+    /// top-level when this is zero, however deeply nested it is in `if` /
+    /// `try` blocks.
+    scoping_depth: usize = 0,
+    overflowed: bool = false,
+
+    fn push(self: *BraceTracker, kind: BraceKind) void {
+        if (self.depth >= self.stack.len) {
+            self.overflowed = true;
+            return;
+        }
+        self.stack[self.depth] = kind;
+        self.depth += 1;
+        if (kind == .scope) self.scoping_depth += 1;
+    }
+
+    fn pop(self: *BraceTracker) void {
+        if (self.depth == 0) return;
+        self.depth -= 1;
+        if (self.stack[self.depth] == .scope) self.scoping_depth -= 1;
+    }
+
+    fn advance(self: *BraceTracker, line: []const u8) void {
+        var in_single = false;
+        var in_double = false;
+        // Position of the `(` matching the most recently closed `)`, so a
+        // `... ) {` brace can be classified by the keyword in front of the
+        // condition. Recorded during the forward walk so parens inside
+        // strings (`-match '^user\s+(.+)$'`) cannot desync it.
+        var paren_opens: [32]usize = undefined;
+        var paren_depth: usize = 0;
+        var last_paren_open: ?usize = null;
+        // A `)` with no matching `(` on this line means the condition began
+        // on an earlier line, which in practice is always control flow.
+        var continued_condition = false;
+
+        var i: usize = 0;
+        while (i < line.len) : (i += 1) {
+            const c = line[i];
+            if (in_single) {
+                if (c == '\'') in_single = false;
+                continue;
+            }
+            if (in_double) {
+                if (c == '`') {
+                    i += 1;
+                    continue;
+                }
+                if (c == '"') in_double = false;
+                continue;
+            }
+            switch (c) {
+                // The rest of the line is a comment.
+                '#' => return,
+                '\'' => in_single = true,
+                '"' => in_double = true,
+                '(' => {
+                    if (paren_depth < paren_opens.len) paren_opens[paren_depth] = i;
+                    paren_depth += 1;
+                },
+                ')' => {
+                    if (paren_depth == 0) {
+                        continued_condition = true;
+                    } else {
+                        paren_depth -= 1;
+                        if (paren_depth < paren_opens.len) {
+                            last_paren_open = paren_opens[paren_depth];
+                        }
+                    }
+                },
+                '{' => self.push(classifyBrace(
+                    line[0..i],
+                    last_paren_open,
+                    continued_condition,
+                )),
+                '}' => self.pop(),
+                else => {},
+            }
+        }
+    }
+
+    fn classifyBrace(
+        prefix_raw: []const u8,
+        last_paren_open: ?usize,
+        continued_condition: bool,
+    ) BraceKind {
+        const prefix = std.mem.trimRight(u8, prefix_raw, " \t");
+        // A brace alone on its line. `integration.ps1` is K&R throughout, so
+        // this does not occur today; call it transparent because a loud
+        // false positive on an Allman-style function body beats silently
+        // missing an unqualified assignment in an Allman-style `if`.
+        if (prefix.len == 0) return .transparent;
+
+        switch (prefix[prefix.len - 1]) {
+            // `@{` hashtable (keys are not statements), `= {` scriptblock
+            // literal, `& {` / `. {` invocation, and `{` in argument
+            // position — all scope-creating, or close enough that we must
+            // not scan their contents as top-level statements.
+            '@', '=', '&', '.', '(', ',', '|' => return .scope,
+            ')' => {
+                if (continued_condition) return .transparent;
+                const open = last_paren_open orelse return .transparent;
+                if (open > prefix.len) return .transparent;
+                const head = prefix[0..open];
+                if (std.mem.trim(u8, head, " \t").len == 0) return .transparent;
+                return if (isTransparentKeyword(lastWord(head)))
+                    .transparent
+                else
+                    .scope;
+            },
+            else => {},
+        }
+
+        // Bare keyword forms: `else {`, `try {`, `catch {`, `do {`.
+        return if (isTransparentKeyword(lastWord(prefix))) .transparent else .scope;
+    }
+};
+
+test "integration.ps1 honours the injected block scope" {
+    // `buildCommandValue` dot-sources the script from inside `& { ... }`, so
+    // the script's top-level scope is a child scope that is destroyed the
+    // moment the dot-source returns. Anything the interactive session needs
+    // afterwards must be declared `global:`.
+    //
+    // This cannot be caught from `test/windows/powershell-shell-integration.ps1`
+    // alone: that harness dot-sources the script at its own scope, where
+    // unqualified definitions survive. Regression guard for #231, where the
+    // helpers died with the block, `prompt` threw CommandNotFoundException on
+    // every draw, and PowerShell replaced the user's prompt with `PS C:\...>`
+    // while emitting no OSC 133 / OSC 7 at all.
+
+    // Every function this script declares must be `global:`-qualified, and
+    // every top-level variable it defines must be `$Global:`-qualified.
+    // Declarations are found by scanning for the keyword at a statement
+    // start (line start, or right after `{` / `;`) rather than by matching
+    // one spelling, so `function  __ghostty_x`, `Function __ghostty_x`, an
+    // indented declaration, and `if (...) { function __ghostty_x { } }` are
+    // all caught.
+    //
+    // Top-level is decided by brace depth, not by column: PowerShell
+    // indentation creates no scope, so `    $x = 1` written at depth 0 is
+    // just as fatal as one at column 0.
+    //
+    // Known limits, both currently unused by the script: reflection forms
+    // (`$function:x = { }`, `Set-Item Function:x`, `New-Variable`) are not
+    // detected; and an unqualified assignment inside a top-level `if` / `try`
+    // block sits at depth > 0 and is not flagged even though those blocks do
+    // not create a PowerShell scope either. Extend the scan if either starts
+    // to matter.
+    var lines = std.mem.splitScalar(u8, integration_script, '\n');
+    var declarations: usize = 0;
+    var top_level_variables: usize = 0;
+    var braces: BraceTracker = .{};
+    while (lines.next()) |raw| {
+        const line = std.mem.trimRight(u8, raw, " \t\r");
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+        // Scoping depth as of the START of this line. Not indentation:
+        // PowerShell indentation carries no meaning. Not raw brace depth
+        // either: `if` / `try` / `foreach` blocks create no scope, so an
+        // unqualified assignment inside a top-level `if` is every bit as
+        // fatal as one written at column 0.
+        const line_depth = braces.scoping_depth;
+        braces.advance(line);
+
+        // Top-level variable assignment, with any leading type cast
+        // stripped: `[string]$x = 'v'` and `[string[]]$x = @()` declare a
+        // variable just as much as a bare `$x = 'v'` does.
+        const statement = stripLeadingTypeCast(trimmed);
+        if (line_depth == 0 and statement.len > 0 and statement[0] == '$') {
+            const name_end = for (statement[1..], 1..) |c, idx| {
+                if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ':') break idx;
+            } else statement.len;
+            const after = std.mem.trimLeft(u8, statement[name_end..], " \t");
+            if (after.len > 0 and after[0] == '=' and
+                (after.len == 1 or after[1] != '='))
+            {
+                const name = statement[1..name_end];
+                top_level_variables += 1;
+                // The deliberate block-scoped locals: both are consumed
+                // during load and must not outlive it. They carry the
+                // `ghostty` prefix so this list stays unambiguous — do not
+                // add a generically-named variable here.
+                const load_time_locals = [_][]const u8{
+                    "ghosttyUtf8Console",
+                    "ghosttyUtf8Encoding",
+                };
+                const allowed = for (load_time_locals) |local| {
+                    if (std.mem.eql(u8, name, local)) break true;
+                } else false;
+                if (!std.ascii.startsWithIgnoreCase(name, "Global:") and !allowed) {
+                    std.debug.print(
+                        "integration.ps1 defines a non-global top-level variable: {s}\n",
+                        .{trimmed},
+                    );
+                    return error.UnqualifiedVariableDeclaration;
+                }
+            }
+        }
+
+        // Function declarations, anywhere a statement can start.
+        var idx: usize = 0;
+        while (std.ascii.indexOfIgnoreCasePos(line, idx, "function")) |at| {
+            idx = at + "function".len;
+            const before_ok = at == 0 or switch (line[at - 1]) {
+                ' ', '\t', '{', ';' => true,
+                else => false,
+            };
+            if (!before_ok) continue;
+            // Only whitespace, `{` or `;` may precede it on the line, else
+            // this is prose or an argument rather than a declaration.
+            const prefix = std.mem.trim(u8, line[0..at], " \t");
+            if (prefix.len != 0 and prefix[prefix.len - 1] != '{' and
+                prefix[prefix.len - 1] != ';') continue;
+            if (idx >= line.len or (line[idx] != ' ' and line[idx] != '\t')) continue;
+            const rest = std.mem.trimLeft(u8, line[idx..], " \t");
+            declarations += 1;
+            if (!std.ascii.startsWithIgnoreCase(rest, "global:")) {
+                std.debug.print(
+                    "integration.ps1 declares a non-global function: {s}\n",
+                    .{trimmed},
+                );
+                return error.UnqualifiedFunctionDeclaration;
+            }
+        }
+    }
+    // Guard the guard: if either scan stops matching, everything above turns
+    // vacuous. These are the live counts; bump them when the script grows.
+    try std.testing.expectEqual(@as(usize, 13), declarations);
+    try std.testing.expectEqual(@as(usize, 7), top_level_variables);
+    // Unbalanced braces here mean the tracker desynced (an unterminated
+    // string, a here-string, nesting past the stack), which would silently
+    // mis-classify every line after it.
+    try std.testing.expect(!braces.overflowed);
+    try std.testing.expectEqual(@as(usize, 0), braces.depth);
+    try std.testing.expectEqual(@as(usize, 0), braces.scoping_depth);
+
+    // The escape / bell characters the prompt interpolates are globals under
+    // the `__ghostty_` prefix. Bare `$ESC` / `$BEL` died with the block on
+    // the injected path, and clobbered a profile variable of the same name
+    // on the manual dot-source path. Matched on a token boundary so an
+    // unrelated `$ESCAPED` local does not trip the guard.
+    for ([_][]const u8{ "$ESC", "$BEL" }) |banned| {
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, integration_script, at, banned)) |hit| {
+            at = hit + banned.len;
+            if (at < integration_script.len) {
+                const next = integration_script[at];
+                if (std.ascii.isAlphanumeric(next) or next == '_') continue;
+            }
+            std.debug.print("integration.ps1 still uses {s}\n", .{banned});
+            return error.UnprefixedGlobalVariable;
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "$Global:__ghostty_esc",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "$Global:__ghostty_bel",
+    ) != null);
+
+    // The helper set the prompt calls must all be global, and the prompt
+    // itself must stay global.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "\nfunction global:prompt {",
+    ) != null);
+    for ([_][]const u8{
+        "__ghostty_write_osc",
+        "__ghostty_encode_osc133_value",
+        "__ghostty_encode_cwd_uri",
+    }) |name| {
+        var buf: [96]u8 = undefined;
+        const decl = try std.fmt.bufPrint(&buf, "\nfunction global:{s} {{", .{name});
+        try std.testing.expect(std.mem.indexOf(u8, integration_script, decl) != null);
+    }
 }
 
 test "escapeForPwshSingleQuote: empty string" {

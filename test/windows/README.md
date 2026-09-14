@@ -145,6 +145,17 @@ escaping, feature flags, and cleanup. It is not wired into an automated runner.
 pwsh -NoProfile -File .\powershell-shell-integration.ps1
 ```
 
+Most of the script dot-sources `integration.ps1` at its own scope. The final
+section instead spawns a child running noctty's real injected argv
+(`-NoExit -Command "& { $__ghostty_utf8_console = $false; . <path> }"`) with a
+`NOCTTYPROBE> ` prompt pre-installed, because the `& { }` child scope is where
+scope-loss regressions like #231 show up and an in-scope dot-source cannot see
+them. Worth running under `powershell.exe` (5.1) as well as `pwsh` (7):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\powershell-shell-integration.ps1
+```
+
 ## interactive-win11-validate.ps1
 
 Composite Win11 validator. It runs launch-helper checks and startup smoke,

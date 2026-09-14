@@ -133,8 +133,17 @@ Shell integration requires Zsh 5.1+.
 Automatic PowerShell integration on Windows applies to both Windows
 PowerShell 5.1 (`powershell.exe`) and PowerShell 7+ (`pwsh.exe`).
 Interactive launches are wrapped by appending `-NoExit -Command "& {
-. '<path>' }"` while preserving the existing prefix flags such as
-`-NoProfile`, `-ExecutionPolicy`, or `-WorkingDirectory`.
+$__ghostty_utf8_console = $true|$false; . '<path>' }"` while preserving the
+existing prefix flags such as `-NoProfile`, `-ExecutionPolicy`, or
+`-WorkingDirectory`.
+
+The `& { ... }` block is load-bearing: its child scope is what lets the
+per-launch `$__ghostty_utf8_console` decision shadow a same-named variable a
+profile may have declared `ReadOnly` or `Constant`, which a plain global
+assignment cannot overwrite. The price is that the block scope dies with the
+dot-source, so every top-level name in `integration.ps1` that must outlive
+load carries an explicit `global:` / `$Global:` qualifier. A compile-time test
+in `src/apprt/win32_powershell_install.zig` enforces that.
 
 Explicit command / script entrypoints such as `-Command`,
 `-CommandWithArgs`, `-EncodedCommand`, `-File`, help/version flags, and
@@ -148,9 +157,12 @@ so users can source it from `$PROFILE` if automatic injection is
 disabled or the command shape is unsupported.
 
 The PowerShell script emits OSC 7 as a full `file://` URI with each path
-segment percent-encoded. It also emits OSC 133 prompt marks with a stable
-`aid=$PID` and, when PSReadLine exposes the accepted buffer, URL-encoded
-`cmdline_url` metadata on the command-start mark.
+segment percent-encoded, and OSC 133 A / B / D prompt marks with a stable
+`aid=$PID`, wrapped around whatever `prompt` the profile installed. The
+command-start mark (OSC 133 C, with URL-encoded `cmdline_url` metadata) rides
+on PSReadLine's `CommandValidationHandler`, which only `ValidateAndAcceptLine`
+invokes; since the default Enter binding is `AcceptLine`, it is not emitted
+unless the user rebinds Enter.
 
 When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
 wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
