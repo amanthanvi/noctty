@@ -1315,8 +1315,11 @@ pub const confirm_preview_limit: usize = 64 * 1024;
 /// A confirm payload rendered for display.
 pub const ConfirmPreview = struct {
     /// UTF-8 that is safe to hand to a Win32 EDIT: always valid
-    /// encoding, never contains NUL, and control characters are
-    /// visible rather than invisible.
+    /// encoding, never contains NUL, never contains bidirectional
+    /// formatting characters that could reorder the displayed payload,
+    /// and uses CRLF line endings so the control breaks lines where the
+    /// payload does. Other control characters pass through and may
+    /// render as a box or as nothing; see `buildConfirmPreview`.
     text: []u8,
     /// How many source bytes `text` represents.
     shown_bytes: usize,
