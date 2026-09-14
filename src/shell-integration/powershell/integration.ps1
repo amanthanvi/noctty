@@ -39,9 +39,13 @@ if ($ghosttyUtf8Console) {
     try {
         if (([Console]::InputEncoding.CodePage -ne 65001) -or
             ([Console]::OutputEncoding.CodePage -ne 65001)) {
-            $utf8 = [System.Text.UTF8Encoding]::new($false)
-            [Console]::InputEncoding = $utf8
-            [Console]::OutputEncoding = $utf8
+            # `ghostty`-prefixed because this sits at the script's own
+            # (block) scope, not inside a function: the scope guard in
+            # win32_powershell_install.zig allows exactly the load-time
+            # locals it knows are consumed before the dot-source returns.
+            $ghosttyUtf8Encoding = [System.Text.UTF8Encoding]::new($false)
+            [Console]::InputEncoding = $ghosttyUtf8Encoding
+            [Console]::OutputEncoding = $ghosttyUtf8Encoding
         }
     } catch {
         # Keep the rest of shell integration available if the host does not

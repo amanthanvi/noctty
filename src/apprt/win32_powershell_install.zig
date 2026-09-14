@@ -522,7 +522,41 @@ fn stripLeadingTypeCast(statement: []const u8) []const u8 {
     return rest;
 }
 
-/// Advance a PowerShell brace-nesting counter across one line of script.
+/// PowerShell braces come in two flavours and only one of them matters for
+/// scoping. `function`, `filter`, `& { }`, `. { }`, a scriptblock passed as
+/// an argument and a `@{ }` hashtable all open something the runtime treats
+/// as its own scope (or, for the hashtable, as a region whose keys are not
+/// statements at all). `if` / `elseif` / `else` / `try` / `catch` /
+/// `finally` / `foreach` / `for` / `while` / `switch` / `do` do NOT: a
+/// variable assigned inside a top-level `if` block lives in the enclosing
+/// script scope and dies with the injected `& { }` just like one written at
+/// column 0.
+const BraceKind = enum { scope, transparent };
+
+/// Keywords whose block does not introduce a PowerShell scope.
+fn isTransparentKeyword(word: []const u8) bool {
+    // A `}` or `;` can be glued to the keyword (`} else {`, `};try {`).
+    const bare = std.mem.trimLeft(u8, word, "};");
+    for ([_][]const u8{
+        "if",      "elseif", "else",  "try",    "catch", "finally",
+        "foreach", "for",    "while", "switch", "do",
+    }) |kw| {
+        if (std.ascii.eqlIgnoreCase(bare, kw)) return true;
+    }
+    return false;
+}
+
+fn lastWord(text: []const u8) []const u8 {
+    const trimmed = std.mem.trimRight(u8, text, " \t");
+    var start = trimmed.len;
+    while (start > 0 and trimmed[start - 1] != ' ' and trimmed[start - 1] != '\t') {
+        start -= 1;
+    }
+    return trimmed[start..];
+}
+
+/// Tracks PowerShell brace nesting across lines, separating scope-creating
+/// braces from control-flow braces that are transparent to scoping.
 ///
 /// Braces inside a `#` comment and inside single- or double-quoted strings do
 /// not count. String skipping is load-bearing for this script: every OSC
@@ -530,40 +564,129 @@ fn stripLeadingTypeCast(statement: []const u8) []const u8 {
 /// braces would otherwise desync the counter. Handles the backtick escape
 /// inside double quotes.
 ///
-/// Quote state deliberately resets per line — `integration.ps1` contains no
-/// here-strings. `depthIsZeroAtEndOfScript` in the test below is the tripwire
-/// if that ever stops holding.
-fn advanceBraceDepth(line: []const u8, start: usize) usize {
-    var depth = start;
-    var in_single = false;
-    var in_double = false;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (in_single) {
-            if (c == '\'') in_single = false;
-            continue;
+/// Quote and paren state deliberately reset per line — `integration.ps1`
+/// contains no here-strings. The end-of-script depth assertions in the test
+/// below are the tripwire if that ever stops holding.
+const BraceTracker = struct {
+    stack: [64]BraceKind = undefined,
+    depth: usize = 0,
+    /// How many enclosing braces actually create a scope. An assignment is
+    /// top-level when this is zero, however deeply nested it is in `if` /
+    /// `try` blocks.
+    scoping_depth: usize = 0,
+    overflowed: bool = false,
+
+    fn push(self: *BraceTracker, kind: BraceKind) void {
+        if (self.depth >= self.stack.len) {
+            self.overflowed = true;
+            return;
         }
-        if (in_double) {
-            if (c == '`') {
-                i += 1;
+        self.stack[self.depth] = kind;
+        self.depth += 1;
+        if (kind == .scope) self.scoping_depth += 1;
+    }
+
+    fn pop(self: *BraceTracker) void {
+        if (self.depth == 0) return;
+        self.depth -= 1;
+        if (self.stack[self.depth] == .scope) self.scoping_depth -= 1;
+    }
+
+    fn advance(self: *BraceTracker, line: []const u8) void {
+        var in_single = false;
+        var in_double = false;
+        // Position of the `(` matching the most recently closed `)`, so a
+        // `... ) {` brace can be classified by the keyword in front of the
+        // condition. Recorded during the forward walk so parens inside
+        // strings (`-match '^user\s+(.+)$'`) cannot desync it.
+        var paren_opens: [32]usize = undefined;
+        var paren_depth: usize = 0;
+        var last_paren_open: ?usize = null;
+        // A `)` with no matching `(` on this line means the condition began
+        // on an earlier line, which in practice is always control flow.
+        var continued_condition = false;
+
+        var i: usize = 0;
+        while (i < line.len) : (i += 1) {
+            const c = line[i];
+            if (in_single) {
+                if (c == '\'') in_single = false;
                 continue;
             }
-            if (c == '"') in_double = false;
-            continue;
-        }
-        switch (c) {
-            // The rest of the line is a comment.
-            '#' => return depth,
-            '\'' => in_single = true,
-            '"' => in_double = true,
-            '{' => depth += 1,
-            '}' => depth -|= 1,
-            else => {},
+            if (in_double) {
+                if (c == '`') {
+                    i += 1;
+                    continue;
+                }
+                if (c == '"') in_double = false;
+                continue;
+            }
+            switch (c) {
+                // The rest of the line is a comment.
+                '#' => return,
+                '\'' => in_single = true,
+                '"' => in_double = true,
+                '(' => {
+                    if (paren_depth < paren_opens.len) paren_opens[paren_depth] = i;
+                    paren_depth += 1;
+                },
+                ')' => {
+                    if (paren_depth == 0) {
+                        continued_condition = true;
+                    } else {
+                        paren_depth -= 1;
+                        if (paren_depth < paren_opens.len) {
+                            last_paren_open = paren_opens[paren_depth];
+                        }
+                    }
+                },
+                '{' => self.push(classifyBrace(
+                    line[0..i],
+                    last_paren_open,
+                    continued_condition,
+                )),
+                '}' => self.pop(),
+                else => {},
+            }
         }
     }
-    return depth;
-}
+
+    fn classifyBrace(
+        prefix_raw: []const u8,
+        last_paren_open: ?usize,
+        continued_condition: bool,
+    ) BraceKind {
+        const prefix = std.mem.trimRight(u8, prefix_raw, " \t");
+        // A brace alone on its line. `integration.ps1` is K&R throughout, so
+        // this does not occur today; call it transparent because a loud
+        // false positive on an Allman-style function body beats silently
+        // missing an unqualified assignment in an Allman-style `if`.
+        if (prefix.len == 0) return .transparent;
+
+        switch (prefix[prefix.len - 1]) {
+            // `@{` hashtable (keys are not statements), `= {` scriptblock
+            // literal, `& {` / `. {` invocation, and `{` in argument
+            // position — all scope-creating, or close enough that we must
+            // not scan their contents as top-level statements.
+            '@', '=', '&', '.', '(', ',', '|' => return .scope,
+            ')' => {
+                if (continued_condition) return .transparent;
+                const open = last_paren_open orelse return .transparent;
+                if (open > prefix.len) return .transparent;
+                const head = prefix[0..open];
+                if (std.mem.trim(u8, head, " \t").len == 0) return .transparent;
+                return if (isTransparentKeyword(lastWord(head)))
+                    .transparent
+                else
+                    .scope;
+            },
+            else => {},
+        }
+
+        // Bare keyword forms: `else {`, `try {`, `catch {`, `do {`.
+        return if (isTransparentKeyword(lastWord(prefix))) .transparent else .scope;
+    }
+};
 
 test "integration.ps1 honours the injected block scope" {
     // `buildCommandValue` dot-sources the script from inside `& { ... }`, so
@@ -599,18 +722,19 @@ test "integration.ps1 honours the injected block scope" {
     var lines = std.mem.splitScalar(u8, integration_script, '\n');
     var declarations: usize = 0;
     var top_level_variables: usize = 0;
-    var depth: usize = 0;
+    var braces: BraceTracker = .{};
     while (lines.next()) |raw| {
         const line = std.mem.trimRight(u8, raw, " \t\r");
         const trimmed = std.mem.trimLeft(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-        // Nesting as of the START of this line. Depth, not indentation:
-        // PowerShell indentation carries no meaning, so an unqualified
-        // assignment written with leading spaces is still top-level and
-        // still dies with the injected `& { }` scope.
-        const line_depth = depth;
-        depth = advanceBraceDepth(line, depth);
+        // Scoping depth as of the START of this line. Not indentation:
+        // PowerShell indentation carries no meaning. Not raw brace depth
+        // either: `if` / `try` / `foreach` blocks create no scope, so an
+        // unqualified assignment inside a top-level `if` is every bit as
+        // fatal as one written at column 0.
+        const line_depth = braces.scoping_depth;
+        braces.advance(line);
 
         // Top-level variable assignment, with any leading type cast
         // stripped: `[string]$x = 'v'` and `[string[]]$x = @()` declare a
@@ -626,11 +750,18 @@ test "integration.ps1 honours the injected block scope" {
             {
                 const name = statement[1..name_end];
                 top_level_variables += 1;
-                // `$ghosttyUtf8Console` is the one deliberate block-scoped
-                // local: it is consumed during load and must not outlive it.
-                if (!std.ascii.startsWithIgnoreCase(name, "Global:") and
-                    !std.mem.eql(u8, name, "ghosttyUtf8Console"))
-                {
+                // The deliberate block-scoped locals: both are consumed
+                // during load and must not outlive it. They carry the
+                // `ghostty` prefix so this list stays unambiguous — do not
+                // add a generically-named variable here.
+                const load_time_locals = [_][]const u8{
+                    "ghosttyUtf8Console",
+                    "ghosttyUtf8Encoding",
+                };
+                const allowed = for (load_time_locals) |local| {
+                    if (std.mem.eql(u8, name, local)) break true;
+                } else false;
+                if (!std.ascii.startsWithIgnoreCase(name, "Global:") and !allowed) {
                     std.debug.print(
                         "integration.ps1 defines a non-global top-level variable: {s}\n",
                         .{trimmed},
@@ -669,11 +800,13 @@ test "integration.ps1 honours the injected block scope" {
     // Guard the guard: if either scan stops matching, everything above turns
     // vacuous. These are the live counts; bump them when the script grows.
     try std.testing.expectEqual(@as(usize, 13), declarations);
-    try std.testing.expectEqual(@as(usize, 3), top_level_variables);
-    // depthIsZeroAtEndOfScript: unbalanced braces here mean the tracker
-    // desynced (an unterminated string, a here-string), which would silently
+    try std.testing.expectEqual(@as(usize, 7), top_level_variables);
+    // Unbalanced braces here mean the tracker desynced (an unterminated
+    // string, a here-string, nesting past the stack), which would silently
     // mis-classify every line after it.
-    try std.testing.expectEqual(@as(usize, 0), depth);
+    try std.testing.expect(!braces.overflowed);
+    try std.testing.expectEqual(@as(usize, 0), braces.depth);
+    try std.testing.expectEqual(@as(usize, 0), braces.scoping_depth);
 
     // The escape / bell characters the prompt interpolates are globals under
     // the `__ghostty_` prefix. Bare `$ESC` / `$BEL` died with the block on
