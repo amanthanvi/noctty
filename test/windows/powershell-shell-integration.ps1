@@ -278,6 +278,34 @@ try {
         Assert-True ($Global:__noctty_test_handler_lines[2] -eq 'Get-Date') "Re-sourced handler passed the wrong line on: $($Global:__noctty_test_handler_lines[2])"
         Assert-True ($resourcedResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "Re-sourced handler did not return the chained result unchanged: $resourcedResult"
 
+        # ── A predecessor that throws must fail CLOSED ──────────────────
+        #
+        # The predecessor is PSReadLine's sensitive-history scrubber unless a
+        # profile replaced it, so answering `$true` (== MemoryAndFile) when it
+        # throws would write to the on-disk history file a line it may have
+        # been about to hold back. MemoryOnly keeps the line usable in the
+        # session without persisting it.
+        Set-PSReadLineOption -AddToHistoryHandler {
+            param([string]$Line)
+            throw 'predecessor exploded'
+        }
+        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+        $throwingChainHandler = (Get-PSReadLineOption).AddToHistoryHandler
+        function global:__ghostty_line_is_being_accepted {
+            param([AllowNull()][string]$Line)
+            return $true
+        }
+
+        $throwCapture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($throwCapture)
+        $throwResult = $throwingChainHandler.Invoke('Connect-Thing -Token hunter2')
+        [Console]::Out.Flush()
+        [Console]::SetOut($script:OriginalOut)
+
+        Assert-True ($throwResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "A throwing chained handler must fail closed to MemoryOnly, got: $throwResult"
+        Assert-True ($throwCapture.ToString().Contains(']133;C')) "A throwing chained handler suppressed the OSC 133 C mark"
+
+
         Remove-Variable -Name '__noctty_test_handler_lines' -Scope Global -ErrorAction SilentlyContinue
     }
 

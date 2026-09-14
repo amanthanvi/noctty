@@ -583,14 +583,32 @@ function global:__ghostty_add_to_history {
     }
 
     $previous = __ghostty_read_global '__ghostty_addtohistory_original'
+    # No predecessor at all: PSReadLine's own behaviour with no handler is
+    # MemoryAndFile, and `$true` is its documented spelling of that. There is
+    # no policy to preserve in this case.
     if ($null -eq $previous) { return $true }
     try {
         if ($previous -is [scriptblock]) { return (& $previous $Line) }
         return $previous.Invoke($Line)
     } catch {
-        # A predecessor that throws must not cost the user their history
-        # either. `$true` is PSReadLine's own "add it" answer.
-        return $true
+        # Fail CLOSED. Unless a profile replaced it, the predecessor IS
+        # PSReadLine's sensitive-history scrubber, so the one answer we must
+        # not invent when it throws is `$true` (== MemoryAndFile): that would
+        # persist to the on-disk history file a line the predecessor may have
+        # been in the middle of holding back. MemoryOnly keeps the line
+        # usable in this session — the user still gets it on Up-arrow —
+        # without writing it to disk.
+        #
+        # The type is resolved through `-as [type]` rather than a `[...]`
+        # literal so an unexpected PSReadLine without the enum yields $null
+        # here instead of throwing a second time from inside this catch.
+        $history_option = 'Microsoft.PowerShell.AddToHistoryOption' -as [type]
+        if ($null -ne $history_option) {
+            return [System.Enum]::Parse($history_option, 'MemoryOnly')
+        }
+        # Too old for the enum. `$false` is PSReadLine's documented
+        # equivalent of SkipAdding, the conservative answer.
+        return $false
     }
 }
 
