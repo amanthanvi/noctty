@@ -120,6 +120,7 @@ const layoutRectToWin32 = chrome_layout.layoutRectToWin32;
 const centeredRect = chrome_layout.centeredRect;
 const overlayEditFrameRect = chrome_layout.overlayEditFrameRect;
 const overlayLabelReservation = chrome_layout.overlayLabelReservation;
+const confirmPreviewRect = chrome_layout.confirmPreviewRect;
 const overlayActionLayoutForWidth = chrome_layout.overlayActionLayoutForWidth;
 const overlayEditChildRectFromFrame = chrome_layout.overlayEditChildRectFromFrame;
 const blendColorRGB = gdi.blendColorRGB;
@@ -8081,6 +8082,7 @@ pub const App = struct {
         host.current_dpi = sys.GetDpiForWindow(hwnd);
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
+        host.preview_font = host.createPreviewFont();
         host.recreateTitlebarIconFonts();
         errdefer if (!host_registered) {
             _ = sys.DestroyWindow(hwnd);
@@ -10654,6 +10656,21 @@ const PendingClipboardOp = union(enum) {
 const SurfaceStatus = labels.SurfaceStatus;
 const HostTabStatus = labels.HostTabStatus;
 
+/// What a caller is asking the user to approve. A struct rather than
+/// positional arguments because every string field has the same type:
+/// swapping `title` and `accept_label` used to compile cleanly. Borrows
+/// the caller's strings; `showConfirm` copies what it keeps.
+const ConfirmPrompt = struct {
+    title: []const u8,
+    body: []const u8,
+    accept_label: []const u8,
+    cancel_label: []const u8,
+    /// The payload this prompt is about, rendered verbatim in the
+    /// preview pane. Null for prompts with nothing to show, such as
+    /// the close-surface prompt.
+    contents: ?[]const u8 = null,
+};
+
 /// Payload for a non-modal confirm overlay. The callbacks receive the
 /// `userdata` pointer passed at construction time so the issuer can
 /// bind state (e.g. which Surface's close is pending). Callbacks are
@@ -10666,6 +10683,13 @@ const ConfirmPayload = struct {
     body: []u8,
     accept_label: []u8,
     cancel_label: []u8,
+    /// Display-capped rendering of `ConfirmPrompt.contents`, built once
+    /// when the prompt opens. This is for the eyes only — Accept
+    /// delivers the Surface's pending clipboard op, never these bytes.
+    preview: ?OverlayConfirmPreview = null,
+    /// How much is being approved, stated next to the body because the
+    /// pane may only show the head of a large payload.
+    preview_caption: ?[]u8 = null,
     on_accept: *const fn (userdata: ?*anyopaque) void,
     on_cancel: ?*const fn (userdata: ?*anyopaque) void = null,
     userdata: ?*anyopaque = null,
@@ -10675,6 +10699,8 @@ const ConfirmPayload = struct {
         alloc.free(self.body);
         alloc.free(self.accept_label);
         alloc.free(self.cancel_label);
+        if (self.preview) |*preview| preview.deinit(alloc);
+        if (self.preview_caption) |caption| alloc.free(caption);
     }
 };
 
@@ -10842,6 +10868,7 @@ const Host = struct {
     overlay_label_hwnd: ?HWND = null,
     overlay_edit_hwnd: ?HWND = null,
     overlay_edit_prev_proc: ?*const anyopaque = null,
+    overlay_preview_prev_proc: ?*const anyopaque = null,
     overlay_edit_uia_provider: ?*win32_uia.TerminalProvider = null,
     overlay_edit_uia_selection: ?[2]u32 = null,
     cached_overlay_edit: ?[:0]const u8 = null,
@@ -10854,6 +10881,11 @@ const Host = struct {
     /// `win32_settings.zig` (AGENTS.md:75).
     suppress_edit_events: bool = false,
     overlay_hint_hwnd: ?HWND = null,
+    /// Read-only multiline EDIT that shows the payload a confirm
+    /// prompt is about. An EDIT rather than an owner-drawn panel so
+    /// scrolling, selection and UIA come from the control instead of
+    /// being hand-written.
+    overlay_preview_hwnd: ?HWND = null,
     overlay_accept_hwnd: ?HWND = null,
     overlay_cancel_hwnd: ?HWND = null,
     overlay_accept_uia_provider: ?*win32_uia.SettingsControlProvider = null,
@@ -10861,6 +10893,7 @@ const Host = struct {
     overlay_button_prev_proc: ?*const anyopaque = null,
     cached_overlay_label: ?[:0]const u8 = null,
     cached_overlay_hint: ?[:0]const u8 = null,
+    cached_overlay_preview: ?[:0]const u8 = null,
     cached_overlay_accept: ?[:0]const u8 = null,
     cached_overlay_cancel: ?[:0]const u8 = null,
     overlay_completion_seed: ?[:0]const u8 = null,
@@ -10877,6 +10910,10 @@ const Host = struct {
     current_dpi: u32 = 96,
     pending_dpi_update: bool = false,
     chrome_font: ?*anyopaque = null, // HFONT, owned
+    /// Monospace HFONT for the confirm preview. The chrome font is
+    /// proportional, which would misrepresent whitespace and column
+    /// alignment in the very bytes the user is judging.
+    preview_font: ?*anyopaque = null, // HFONT, owned
     titlebar_caption_icon_font: ?*anyopaque = null, // HFONT, owned
     titlebar_action_icon_font: ?*anyopaque = null, // HFONT, owned
 
@@ -10908,6 +10945,7 @@ const Host = struct {
     overlay_label_placement: ChildPlacement = .{},
     overlay_edit_placement: ChildPlacement = .{},
     overlay_hint_placement: ChildPlacement = .{},
+    overlay_preview_placement: ChildPlacement = .{},
     overlay_accept_placement: ChildPlacement = .{},
     overlay_cancel_placement: ChildPlacement = .{},
     hovered_button_hwnd: ?HWND = null,
@@ -13455,6 +13493,7 @@ const Host = struct {
         if (self.cached_overlay_edit) |value| self.app.core_app.alloc.free(value);
         if (self.cached_overlay_label) |value| self.app.core_app.alloc.free(value);
         if (self.cached_overlay_hint) |value| self.app.core_app.alloc.free(value);
+        if (self.cached_overlay_preview) |value| self.app.core_app.alloc.free(value);
         if (self.cached_overlay_accept) |value| self.app.core_app.alloc.free(value);
         if (self.cached_overlay_cancel) |value| self.app.core_app.alloc.free(value);
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
@@ -13465,6 +13504,7 @@ const Host = struct {
         if (self.overlay_brush) |brush| _ = sys.DeleteObject(brush);
         if (self.edit_brush) |brush| _ = sys.DeleteObject(brush);
         if (self.chrome_font) |font| _ = sys.DeleteObject(font);
+        if (self.preview_font) |font| _ = sys.DeleteObject(font);
         if (self.titlebar_caption_icon_font) |font| _ = sys.DeleteObject(font);
         if (self.titlebar_action_icon_font) |font| _ = sys.DeleteObject(font);
         self.clearStructuralHistory(.host_destroy);
@@ -13502,6 +13542,7 @@ const Host = struct {
         }
         destroySubclassedWindow(&self.overlay_edit_hwnd, &self.overlay_edit_prev_proc);
         destroyChildWindow(&self.overlay_hint_hwnd);
+        destroySubclassedWindow(&self.overlay_preview_hwnd, &self.overlay_preview_prev_proc);
 
         const overlay_button_providers = takeOverlayButtonUiaProviders(
             &self.overlay_accept_uia_provider,
@@ -14887,6 +14928,46 @@ const Host = struct {
             null,
         ) orelse return lastError();
 
+        // Confirm preview. Read-only so it cannot be edited, multiline
+        // with a vertical scrollbar so a long payload can be inspected,
+        // and a tab stop so keyboard users can reach and scroll it.
+        // Deliberately NOT `ES_AUTOHSCROLL`: wrapping keeps a long
+        // single-line paste visible instead of hiding its tail.
+        self.overlay_preview_hwnd = sys.CreateWindowExW(
+            0,
+            prompt_edit_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            c.WS_CHILD | c.WS_TABSTOP | c.WS_BORDER | c.WS_VSCROLL |
+                c.ES_MULTILINE | c.ES_READONLY | c.ES_AUTOVSCROLL,
+            0,
+            0,
+            320,
+            120,
+            hwnd,
+            @ptrFromInt(2007),
+            self.app.hinstance,
+            null,
+        ) orelse return lastError();
+        const preview_hwnd = self.overlay_preview_hwnd.?;
+        setWindowData(preview_hwnd, self);
+        // Share `overlayEditProc`. Both controls are the same EDIT
+        // class, so the saved original proc is the same function, and
+        // the pane needs the same Tab / Esc / Enter handling: without
+        // it, clicking the pane to scroll would strand focus in a
+        // control that swallows Tab and ignores Esc.
+        const preview_previous = sys.SetWindowLongPtrW(
+            preview_hwnd,
+            c.GWLP_WNDPROC,
+            @as(LONG_PTR, @intCast(@intFromPtr(&overlayEditProc))),
+        );
+        self.overlay_preview_prev_proc = if (preview_previous == 0)
+            null
+        else
+            @ptrFromInt(@as(usize, @intCast(preview_previous)));
+        if (self.preview_font) |font| {
+            _ = sys.SendMessageW(preview_hwnd, c.WM_SETFONT, @intFromPtr(font), 1);
+        }
+
         self.overlay_accept_hwnd = sys.CreateWindowExW(
             0,
             prompt_button_class,
@@ -15216,6 +15297,9 @@ const Host = struct {
         if (self.overlay_hint_hwnd) |hint_hwnd| {
             _ = applyChildVisibility(hint_hwnd, &self.overlay_hint_placement, false);
         }
+        if (self.overlay_preview_hwnd) |preview_hwnd| {
+            _ = applyChildVisibility(preview_hwnd, &self.overlay_preview_placement, false);
+        }
         const accept_hwnd = self.overlay_accept_hwnd orelse return;
         const cancel_hwnd = self.overlay_cancel_hwnd orelse return;
 
@@ -15250,6 +15334,7 @@ const Host = struct {
         var text_changed = false;
         text_changed = (try self.syncOverlayLabel()) or text_changed;
         text_changed = (try self.syncOverlayHint()) or text_changed;
+        _ = try self.syncOverlayPreview();
         _ = try self.syncOverlayButtons();
         if (text_changed) self.invalidateOverlayText();
         // The command palette gets a scrollable list below the EDIT;
@@ -15298,9 +15383,16 @@ const Host = struct {
             p.deinit(self.app.core_app.alloc);
             self.confirm_payload = null;
         }
+        // Clear the preview pane now rather than on the next overlay
+        // open. A hidden EDIT still answers WM_GETTEXT, and a denied
+        // clipboard write was never placed on the clipboard, so its
+        // bytes must not stay readable from the control after the
+        // prompt is gone. Mode is already `.none`, so this writes "".
+        _ = chromeSyncOrLog("overlay preview clear failed", self.syncOverlayPreview());
         if (self.overlay_label_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_label_placement, false);
         if (self.overlay_edit_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_edit_placement, false);
         if (self.overlay_hint_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_hint_placement, false);
+        if (self.overlay_preview_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_preview_placement, false);
         if (self.overlay_accept_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_accept_placement, false);
         if (self.overlay_cancel_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_cancel_placement, false);
         if (self.palette_list_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.palette_list_placement, false);
@@ -15344,10 +15436,7 @@ const Host = struct {
     /// profile).
     fn showConfirm(
         self: *Host,
-        title: []const u8,
-        body: []const u8,
-        accept_label: []const u8,
-        cancel_label: []const u8,
+        prompt: ConfirmPrompt,
         on_accept: *const fn (userdata: ?*anyopaque) void,
         on_cancel: ?*const fn (userdata: ?*anyopaque) void,
         userdata: ?*anyopaque,
@@ -15355,14 +15444,25 @@ const Host = struct {
         const alloc = self.app.core_app.alloc;
         // Deep-copy every string so the caller doesn't need to keep
         // the source alive.
-        const title_owned = try alloc.dupe(u8, title);
+        const title_owned = try alloc.dupe(u8, prompt.title);
         errdefer alloc.free(title_owned);
-        const body_owned = try alloc.dupe(u8, body);
+        const body_owned = try alloc.dupe(u8, prompt.body);
         errdefer alloc.free(body_owned);
-        const accept_owned = try alloc.dupe(u8, accept_label);
+        const accept_owned = try alloc.dupe(u8, prompt.accept_label);
         errdefer alloc.free(accept_owned);
-        const cancel_owned = try alloc.dupe(u8, cancel_label);
+        const cancel_owned = try alloc.dupe(u8, prompt.cancel_label);
         errdefer alloc.free(cancel_owned);
+
+        // Render the preview once, here, so a megabyte paste costs one
+        // capped copy rather than a rebuild on every chrome repaint.
+        var preview: ?OverlayConfirmPreview = null;
+        errdefer if (preview) |*value| value.deinit(alloc);
+        var caption: ?[]u8 = null;
+        errdefer if (caption) |value| alloc.free(value);
+        if (prompt.contents) |contents| {
+            preview = try buildConfirmPreview(alloc, contents, confirm_preview_limit);
+            caption = try buildConfirmPreviewCaption(alloc, preview.?);
+        }
 
         // Close any previous overlay so we don't stack. `hideOverlay`
         // frees an existing `confirm_payload` via its own deinit
@@ -15374,6 +15474,8 @@ const Host = struct {
             .body = body_owned,
             .accept_label = accept_owned,
             .cancel_label = cancel_owned,
+            .preview = preview,
+            .preview_caption = caption,
             .on_accept = on_accept,
             .on_cancel = on_cancel,
             .userdata = userdata,
@@ -15663,7 +15765,42 @@ const Host = struct {
     /// builders fall back to their placeholders.
     fn confirmText(self: *const Host) ?OverlayConfirmText {
         const payload = self.confirm_payload orelse return null;
-        return .{ .title = payload.title, .body = payload.body };
+        return .{
+            .title = payload.title,
+            .body = payload.body,
+            .preview_caption = payload.preview_caption orelse "",
+        };
+    }
+
+    /// True when the active confirm prompt has something to show in the
+    /// preview pane. The close-surface prompt does not: it is about a
+    /// running process, not a payload.
+    fn confirmHasPreview(self: *const Host) bool {
+        if (self.overlay_mode != .confirm) return false;
+        const payload = self.confirm_payload orelse return false;
+        const preview = payload.preview orelse return false;
+        return preview.text.len > 0;
+    }
+
+    /// Push the confirm payload's rendered preview into the preview
+    /// EDIT. Visibility and geometry belong to `layout`, following the
+    /// palette list, so the control is never shown at its creation rect
+    /// before the first layout pass places it.
+    fn syncOverlayPreview(self: *Host) !bool {
+        const preview_hwnd = self.overlay_preview_hwnd orelse return false;
+        const alloc = self.app.core_app.alloc;
+        const text: []const u8 = text: {
+            if (self.overlay_mode != .confirm) break :text "";
+            const payload = self.confirm_payload orelse break :text "";
+            const preview = payload.preview orelse break :text "";
+            break :text preview.text;
+        };
+        return try syncWindowTextUtf8Cached(
+            alloc,
+            preview_hwnd,
+            &self.cached_overlay_preview,
+            text,
+        );
     }
 
     fn syncOverlayHint(self: *Host) !bool {
@@ -15820,6 +15957,21 @@ const Host = struct {
         return sys.CreateFontIndirectW(&lf);
     }
 
+    /// Monospace font for the confirm preview. `window-title-font-family`
+    /// is deliberately not consulted: that option names a UI font, and a
+    /// proportional face would misrepresent the whitespace and column
+    /// alignment of the bytes being judged. Leaving `lfFaceName` empty
+    /// with `FIXED_PITCH | FF_MODERN` lets GDI pick the system's fixed
+    /// face, which avoids hardcoding a face that may not be installed.
+    fn createPreviewFont(self: *Host) ?*anyopaque {
+        var lf: LOGFONTW = .{};
+        lf.lfHeight = -self.scaled(13);
+        lf.lfWeight = c.FW_NORMAL;
+        lf.lfQuality = c.CLEARTYPE_QUALITY;
+        lf.lfPitchAndFamily = c.FIXED_PITCH | c.FF_MODERN;
+        return sys.CreateFontIndirectW(&lf);
+    }
+
     fn recreateTitlebarIconFonts(self: *Host) void {
         if (self.titlebar_caption_icon_font) |old| _ = sys.DeleteObject(old);
         if (self.titlebar_action_icon_font) |old| _ = sys.DeleteObject(old);
@@ -15830,6 +15982,15 @@ const Host = struct {
     fn recreateChromeFont(self: *Host) void {
         if (self.chrome_font) |old| _ = sys.DeleteObject(old);
         self.chrome_font = self.createChromeFont();
+        // The preview font tracks DPI the same way, so it is rebuilt on
+        // the same trigger rather than growing a second invalidation path.
+        if (self.preview_font) |old| _ = sys.DeleteObject(old);
+        self.preview_font = self.createPreviewFont();
+        if (self.preview_font) |font| {
+            if (self.overlay_preview_hwnd) |preview| {
+                _ = sys.SendMessageW(preview, c.WM_SETFONT, @intFromPtr(font), 1);
+            }
+        }
         self.recreateTitlebarIconFonts();
         // Send WM_SETFONT to child controls
         if (self.chrome_font) |font| {
@@ -16163,6 +16324,7 @@ const Host = struct {
 
     fn overlayFocusSlot(self: *const Host, child: HWND) ?OverlayFocusSlot {
         if (self.overlay_edit_hwnd != null and child == self.overlay_edit_hwnd.?) return .edit;
+        if (self.overlay_preview_hwnd != null and child == self.overlay_preview_hwnd.?) return .preview;
         if (self.overlay_accept_hwnd != null and child == self.overlay_accept_hwnd.?) return .accept;
         if (self.overlay_cancel_hwnd != null and child == self.overlay_cancel_hwnd.?) return .cancel;
         return null;
@@ -16175,11 +16337,13 @@ const Host = struct {
             current_slot,
             reverse,
             self.overlay_edit_hwnd != null and sys.IsWindowVisible(self.overlay_edit_hwnd.?) != 0,
+            self.overlay_preview_hwnd != null and sys.IsWindowVisible(self.overlay_preview_hwnd.?) != 0,
             self.overlay_accept_hwnd != null and sys.IsWindowVisible(self.overlay_accept_hwnd.?) != 0,
             self.overlay_cancel_hwnd != null and sys.IsWindowVisible(self.overlay_cancel_hwnd.?) != 0,
         ) orelse return false;
         const target = switch (target_slot) {
             .edit => self.overlay_edit_hwnd,
+            .preview => self.overlay_preview_hwnd,
             .accept => self.overlay_accept_hwnd,
             .cancel => self.overlay_cancel_hwnd,
         } orelse return false;
@@ -17136,7 +17300,12 @@ const Host = struct {
     fn submitOverlay(self: *Host) !bool {
         _ = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        if (text.len == 0 and self.overlay_mode != .search and self.overlay_mode != .profile and self.overlay_mode != .command_palette) {
+        // Confirm prompts must NOT take this path: their query EDIT is
+        // hidden and always empty, so dismissing on "empty" would close
+        // the prompt without dispatching accept or cancel. Reachable
+        // since the preview pane joined the focus cycle and routes Enter
+        // through `submitOverlay`.
+        if (text.len == 0 and overlayEmptySubmitDismisses(self.overlay_mode)) {
             self.hideOverlay();
             try self.layout();
             return false;
@@ -17639,6 +17808,7 @@ const Host = struct {
         if (self.overlay_mode != .none) {
             invalidate = (try self.syncOverlayLabel()) or invalidate;
             invalidate = (try self.syncOverlayHint()) or invalidate;
+            _ = try self.syncOverlayPreview();
             _ = try self.syncOverlayButtons();
         }
         if (invalidate) {
@@ -17797,6 +17967,7 @@ const Host = struct {
             self.overlay_label_hwnd,
             self.overlay_edit_hwnd,
             self.overlay_hint_hwnd,
+            self.overlay_preview_hwnd,
             self.overlay_accept_hwnd,
             self.overlay_cancel_hwnd,
             self.palette_list_hwnd,
@@ -17818,6 +17989,7 @@ const Host = struct {
             self.overlay_label_hwnd,
             self.overlay_edit_hwnd,
             self.overlay_hint_hwnd,
+            self.overlay_preview_hwnd,
             self.overlay_accept_hwnd,
             self.overlay_cancel_hwnd,
             self.palette_list_hwnd,
@@ -18341,6 +18513,59 @@ const Host = struct {
                     &self.palette_list_placement,
                     false,
                 ) or changed.*;
+            }
+
+            // Confirm preview. Anchored under the overlay band exactly like
+            // the palette list, and like it the pane overlaps the terminal
+            // rather than shrinking it: `contentBands` subtracts only the
+            // band, and a confirm is a transient prompt that should not
+            // reflow the surface underneath it.
+            if (self.overlay_preview_hwnd) |preview_hwnd| {
+                const preview_rect = if (self.confirmHasPreview())
+                    confirmPreviewRect(
+                        width,
+                        rect.bottom,
+                        overlay_y + self.scaled(host_overlay_height),
+                        padding + self.scaled(10),
+                        padding,
+                        self.current_dpi,
+                    )
+                else
+                    RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+                const show_preview = preview_rect.right > preview_rect.left and
+                    preview_rect.bottom > preview_rect.top;
+                if (show_preview) {
+                    changed.* = applyChromeChildRect(
+                        preview_hwnd,
+                        &self.overlay_preview_placement,
+                        preview_rect,
+                    ) or changed.*;
+                }
+                // The terminal Surface sits at the TOP of the sibling
+                // z-order (measured: Surface at index 0, this pane at 9),
+                // and `WS_CLIPSIBLINGS` on the Surface only spares
+                // siblings ABOVE it. This is the only chrome child that
+                // deliberately overlaps the terminal — the band's own
+                // controls never intersect the Surface rect — so without
+                // raising it the next present paints straight over the
+                // pane and it reads as a flicker.
+                const preview_visibility_changed = applyChildVisibility(
+                    preview_hwnd,
+                    &self.overlay_preview_placement,
+                    show_preview,
+                );
+                changed.* = preview_visibility_changed or changed.*;
+                if (show_preview and preview_visibility_changed) {
+                    _ = sys.SetWindowPos(
+                        preview_hwnd,
+                        null, // HWND_TOP
+                        0,
+                        0,
+                        0,
+                        0,
+                        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE,
+                    );
+                }
             }
         } else if (self.palette_list_hwnd) |list_hwnd| {
             self.palette_list_visible_rows = 0;
@@ -22900,6 +23125,7 @@ const layoutChildPaintPlan = labels.layoutChildPaintPlan;
 const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
 const overlayEditFrameVisible = labels.overlayEditFrameVisible;
+const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
 
 const OverlayFocusSlot = labels.OverlayFocusSlot;
 
@@ -23124,6 +23350,10 @@ fn searchBarSeparatorX(left: ChildPlacement, right: ChildPlacement) ?i32 {
 const buildTabOverviewOverlayLabel = labels.buildTabOverviewOverlayLabel;
 
 const OverlayConfirmText = labels.ConfirmText;
+const OverlayConfirmPreview = labels.ConfirmPreview;
+const buildConfirmPreview = labels.buildConfirmPreview;
+const buildConfirmPreviewCaption = labels.buildConfirmPreviewCaption;
+const confirm_preview_limit = labels.confirm_preview_limit;
 const buildOverlayPaintLabelText = labels.buildOverlayPaintLabelText;
 
 const buildOverlayFeedbackText = labels.buildOverlayFeedbackText;
@@ -24234,7 +24464,15 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
 fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
-    if (msg == c.WM_GETOBJECT) {
+    // This proc is shared with the confirm preview pane, which is the
+    // same EDIT class but a different control. The UIA provider below
+    // belongs to the query field alone; handing it out for the preview
+    // would report one control's name and selection for the other.
+    const is_query_edit = if (host) |v|
+        v.overlay_edit_hwnd != null and hwnd == v.overlay_edit_hwnd.?
+    else
+        false;
+    if (msg == c.WM_GETOBJECT and is_query_edit) {
         if (host) |v| {
             if (v.overlay_edit_uia_provider) |provider| {
                 if (win32_uia.returnTerminalProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
@@ -24344,17 +24582,20 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
     };
 
     const result = if (host) |v| blk: {
-        if (v.overlay_edit_prev_proc) |proc| {
+        const saved = if (is_query_edit) v.overlay_edit_prev_proc else v.overlay_preview_prev_proc;
+        if (saved) |proc| {
             break :blk sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
         }
         break :blk sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     } else sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-    if (host) |v| {
-        if (v.overlay_edit_uia_provider) |provider| switch (msg) {
-            c.WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
-            c.WM_KEYUP, c.WM_LBUTTONUP, c.EM_SETSEL => v.raiseOverlayEditSelectionChangedIfNeeded(),
-            else => {},
-        };
+    if (is_query_edit) {
+        if (host) |v| {
+            if (v.overlay_edit_uia_provider) |provider| switch (msg) {
+                c.WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+                c.WM_KEYUP, c.WM_LBUTTONUP, c.EM_SETSEL => v.raiseOverlayEditSelectionChangedIfNeeded(),
+                else => {},
+            };
+        }
     }
     return result;
 }
@@ -26780,10 +27021,14 @@ pub const Surface = struct {
                 return;
             };
             host.showConfirm(
-                "Close this terminal?",
-                "A process is still running. Closing this surface will terminate it.",
-                "Close",
-                "Cancel",
+                .{
+                    .title = "Close this terminal?",
+                    .body = "A process is still running. Closing this surface will terminate it.",
+                    .accept_label = "Close",
+                    .cancel_label = "Cancel",
+                    // Nothing to preview: this prompt is about a running
+                    // process, not about a payload.
+                },
                 &surfaceConfirmCloseAccept,
                 null,
                 @ptrCast(mutable),
@@ -31171,10 +31416,16 @@ pub const Surface = struct {
         errdefer alloc.free(data_copy);
 
         try host.showConfirm(
-            "Allow clipboard paste?",
-            "noctty needs confirmation before completing this clipboard paste or read request.",
-            "Allow",
-            "Cancel",
+            .{
+                .title = "Allow clipboard paste?",
+                .body = "noctty needs confirmation before completing this clipboard paste or read request.",
+                .accept_label = "Allow",
+                .cancel_label = "Cancel",
+                // Preview the exact bytes the gate stopped. `data_copy`
+                // is what Accept delivers; the preview is built from the
+                // same bytes and capped for display only.
+                .contents = data,
+            },
             surfaceConfirmPasteAccept,
             surfaceConfirmPasteCancel,
             self,
@@ -31229,11 +31480,34 @@ pub const Surface = struct {
             filled += 1;
         }
 
+        // Preview the plain-text representation when the application
+        // offered one, since that is what a later paste produces.
+        // Otherwise fall back to the first representation so an
+        // HTML-only or unknown-mime write is not approved blind.
+        //
+        // Today the only caller that reaches this confirm is the OSC 52
+        // write path, which always sends exactly one `text/plain`
+        // entry, so the previewed representation is the only one Accept
+        // writes. The selection-copy path that pairs `text/html` with
+        // `text/plain` never asks for confirmation. If a confirmed
+        // multi-representation write is ever introduced, extend the
+        // preview to show every representation rather than one.
+        const preview_contents: ?[]const u8 = preview: {
+            if (contents.len == 0) break :preview null;
+            for (contents) |content| {
+                if (std.mem.eql(u8, content.mime, "text/plain")) break :preview content.data;
+            }
+            break :preview contents[0].data;
+        };
+
         try host.showConfirm(
-            "Allow clipboard write?",
-            "noctty needs confirmation before allowing this application to write to the Windows clipboard.",
-            "Allow",
-            "Cancel",
+            .{
+                .title = "Allow clipboard write?",
+                .body = "noctty needs confirmation before allowing this application to write to the Windows clipboard.",
+                .accept_label = "Allow",
+                .cancel_label = "Cancel",
+                .contents = preview_contents,
+            },
             surfaceConfirmWriteAccept,
             surfaceConfirmWriteCancel,
             self,
@@ -40525,6 +40799,7 @@ test "win32 confirm overlay keeps a bounded visible action at narrow widths" {
             nextVisibleOverlayFocusSlot(
                 .confirm,
                 .edit,
+                false,
                 false,
                 false,
                 actions.accept_visible,

@@ -30,7 +30,7 @@ Last reviewed: 2026-09-02.
 | [Configuration: `scrollbar`](https://ghostty.org/docs/config/reference)                                            | Per-pane graphical scrollbars honor `system` (Windows dynamic-scrollbar preference) or `never`; search matches appear as markers. See [search and scrollbars](#search-and-scrollbars).                                      |
 | [Configuration: `notify-on-command-finish`](https://ghostty.org/docs/config/reference)                             | Focus policy, duration threshold, and bell/`notify` actions are applied; `notify` also needs `desktop-notifications`. See [notifications and progress](#notifications-and-progress).                                        |
 | [Configuration: `clipboard-codepoint-map`](https://ghostty.org/docs/config/reference)                              | Selection copies apply the map before the clipboard write. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                         |
-| [Configuration: `clipboard-paste-protection`](https://ghostty.org/docs/config/reference)                           | Risky clipboard and dropped-content pastes use a native confirmation. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                              |
+| [Configuration: `clipboard-paste-protection`](https://ghostty.org/docs/config/reference)                           | Risky clipboard and dropped-content pastes use a native confirmation that previews the payload. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                    |
 | [Action reference: `copy_to_clipboard:html`](https://ghostty.org/docs/config/keybind/reference)                    | HTML copy writes CF_HTML and a plain-text fallback in one clipboard transaction.                                                                                                                                            |
 | Kitty graphics protocol                                                                                            | Parser and renderer support ship, but child APC delivery depends on ConPTY. The bundled source passed the measured payload byte-exactly; the tested in-box fallback stripped it. See [ConPTY transport](#conpty-transport). |
 
@@ -233,9 +233,24 @@ Contrast; `never` removes only the visual widget.
 ### Clipboard and drag-drop
 
 `clipboard-paste-protection` controls confirmation for unsafe clipboard
-pastes and the stricter dropped-payload classifier. CF_HTML copies also place
-a plain-text fallback on the clipboard. Dropped files, text, URLs, and HTML
-are converted to terminal input. Shift changes file/text handling, Ctrl
+pastes and the stricter dropped-payload classifier. The confirmation shows the
+payload it is about in a read-only monospace pane, capped at 64 KiB of display
+(the full payload is still what Accept delivers). Three things are replaced with
+U+FFFD: invalid UTF-8 and NUL, neither of which survives the trip to a Win32
+EDIT, and Unicode bidirectional formatting characters (`U+061C`, `U+200E`,
+`U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`). The bidi replacement is there
+for a different reason than the other two: those characters are invisible and
+reorder the text around them, so a pane that rendered them literally could show
+a different reading order than the payload actually has. That applies to
+legitimate right-to-left payloads as much as to crafted ones — a genuine RTL
+paste carrying directional marks will show U+FFFD where they were. Line endings
+are normalised to CRLF for display, because a Win32 EDIT breaks lines only on
+CRLF and would otherwise render an LF-only payload as a single line. Every
+other control character, DEL included, is shown as it is, matching upstream
+Ghostty's GTK and macOS dialogs.
+
+CF_HTML copies also place a plain-text fallback on the clipboard. Dropped
+files, text, URLs, and HTML are converted to terminal input. Shift changes file/text handling, Ctrl
 suppresses file-path quoting, and Alt is reserved.
 
 `clipboard-codepoint-map` is applied by the shared selection formatter before

@@ -184,7 +184,11 @@ pub fn ownedStringEquals(current: ?[:0]const u8, value: []const u8) bool {
         false;
 }
 
-pub const OverlayFocusSlot = enum { edit, accept, cancel };
+/// Keyboard focus stops inside the overlay row, in tab order.
+/// `preview` is the confirm pane: it takes focus so a keyboard user
+/// can scroll the payload before deciding, and so that clicking it
+/// to scroll does not strand focus outside the cycle.
+pub const OverlayFocusSlot = enum { edit, preview, accept, cancel };
 
 const ScrollStatusKey = struct {
     visible: bool,
@@ -368,34 +372,70 @@ pub fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
     return mode != .command_palette;
 }
 
+/// Whether submitting an empty query field should close the overlay
+/// instead of acting on it.
+///
+/// A confirm prompt has no query field: the EDIT is hidden and always
+/// empty, so treating "empty" as "nothing to do" dismisses the prompt
+/// without dispatching either callback and strands the caller's pending
+/// operation. The switch is exhaustive on purpose — a new mode has to
+/// state its answer rather than silently inherit the dismissing one.
+pub fn overlayEmptySubmitDismisses(mode: HostOverlayMode) bool {
+    return switch (mode) {
+        .search, .profile, .command_palette, .confirm => false,
+        .none, .surface_title, .tab_title, .tab_overview => true,
+    };
+}
+
 pub fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
     return mode != .confirm;
 }
 
 fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, reverse: bool) OverlayFocusSlot {
-    if (mode == .confirm) return if (current == .accept) .cancel else .accept;
+    if (mode == .confirm) {
+        // preview -> accept -> cancel -> preview. `.edit` is hidden in
+        // this mode and only appears here as a landing correction when
+        // focus arrives from somewhere outside the cycle.
+        return if (reverse)
+            switch (current) {
+                .accept => .preview,
+                .cancel => .accept,
+                .preview, .edit => .cancel,
+            }
+        else switch (current) {
+            .preview, .edit => .accept,
+            .accept => .cancel,
+            .cancel => .preview,
+        };
+    }
+    // The preview pane exists only for confirm prompts, so outside that
+    // mode it is just another way of saying "back to the query field".
     if (!overlayAcceptButtonVisible(mode)) return if (current == .edit) .cancel else .edit;
     return if (reverse)
         switch (current) {
             .edit => .cancel,
             .accept => .edit,
             .cancel => .accept,
+            .preview => .edit,
         }
     else switch (current) {
         .edit => .accept,
         .accept => .cancel,
         .cancel => .edit,
+        .preview => .edit,
     };
 }
 
 fn overlayFocusSlotVisible(
     slot: OverlayFocusSlot,
     edit_visible: bool,
+    preview_visible: bool,
     accept_visible: bool,
     cancel_visible: bool,
 ) bool {
     return switch (slot) {
         .edit => edit_visible,
+        .preview => preview_visible,
         .accept => accept_visible,
         .cancel => cancel_visible,
     };
@@ -406,15 +446,18 @@ pub fn nextVisibleOverlayFocusSlot(
     current: OverlayFocusSlot,
     reverse: bool,
     edit_visible: bool,
+    preview_visible: bool,
     accept_visible: bool,
     cancel_visible: bool,
 ) ?OverlayFocusSlot {
     var candidate = current;
-    for (0..3) |_| {
+    // One iteration per slot: a full lap proves nothing else is visible.
+    for (0..@typeInfo(OverlayFocusSlot).@"enum".fields.len) |_| {
         candidate = nextOverlayFocusSlot(mode, candidate, reverse);
         if (candidate != current and overlayFocusSlotVisible(
             candidate,
             edit_visible,
+            preview_visible,
             accept_visible,
             cancel_visible,
         )) return candidate;
@@ -1255,7 +1298,214 @@ pub fn buildTabOverviewOverlayLabel(
 pub const ConfirmText = struct {
     title: []const u8,
     body: []const u8,
+    /// Size of the payload the preview pane is showing, appended to the
+    /// body line so the amount being approved is stated even when the
+    /// pane only shows the head of it. Empty for prompts with no
+    /// payload, and for a dropped payload mid-teardown.
+    preview_caption: []const u8 = "",
 };
+
+/// How much of a confirm payload the preview pane renders. A paste can
+/// be megabytes; a Win32 EDIT chokes long before that, and nobody reads
+/// a megabyte before clicking Allow. Only the DISPLAY is capped — the
+/// bytes actually delivered on Accept come from the Surface's pending
+/// clipboard op, never from this preview.
+pub const confirm_preview_limit: usize = 64 * 1024;
+
+/// A confirm payload rendered for display.
+pub const ConfirmPreview = struct {
+    /// UTF-8 that is safe to hand to a Win32 EDIT: always valid
+    /// encoding, never contains NUL, never contains bidirectional
+    /// formatting characters that could reorder the displayed payload,
+    /// and uses CRLF line endings so the control breaks lines where the
+    /// payload does. Other control characters pass through and may
+    /// render as a box or as nothing; see `buildConfirmPreview`.
+    text: []u8,
+    /// How many source bytes `text` represents.
+    shown_bytes: usize,
+    /// How many bytes the source had in total.
+    total_bytes: usize,
+
+    pub fn truncated(self: ConfirmPreview) bool {
+        return self.shown_bytes < self.total_bytes;
+    }
+
+    pub fn deinit(self: *ConfirmPreview, alloc: Allocator) void {
+        alloc.free(self.text);
+        self.* = undefined;
+    }
+};
+
+/// Unicode bidirectional formatting characters.
+///
+/// These are invisible and reorder the text around them, so a preview
+/// containing them can display something other than what the payload
+/// actually says — the precise failure this pane exists to prevent
+/// (CVE-2021-42574, "Trojan Source"). Ordinary control characters are
+/// left alone: they render as a box or as nothing, but they do not lie
+/// about the order of what surrounds them.
+///
+/// This is a real trade-off, not a pure win: these characters appear in
+/// legitimate right-to-left text too, so a genuine RTL payload shows
+/// U+FFFD where its directional marks were. The pane's job is to be
+/// trustworthy about order rather than pretty, and the substitution is
+/// documented in `docs/windows-capability-matrix.md` so the behaviour is
+/// not a surprise.
+fn isBidiFormatting(cp: u21) bool {
+    return switch (cp) {
+        0x061C, // ARABIC LETTER MARK
+        0x200E, // LEFT-TO-RIGHT MARK
+        0x200F, // RIGHT-TO-LEFT MARK
+        0x202A...0x202E, // LRE, RLE, PDF, LRO, RLO
+        0x2066...0x2069, // LRI, RLI, FSI, PDI
+        => true,
+        else => false,
+    };
+}
+
+fn appendCodepoint(alloc: Allocator, out: *std.ArrayListUnmanaged(u8), cp: u21) !void {
+    var buf: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(cp, &buf) catch unreachable;
+    try out.appendSlice(alloc, buf[0..len]);
+}
+
+/// Render `data` for the confirm preview pane.
+///
+/// The payload is shown as it is, matching upstream Ghostty's GTK and
+/// macOS confirmation dialogs. Three things are replaced with U+FFFD
+/// rather than given an invented glyph, each because showing them
+/// literally would defeat the pane instead of serving it:
+///
+///   - Invalid UTF-8. OSC 52 write payloads are base64-decoded bytes
+///     from the terminal and need not be text at all; the UTF-16
+///     conversion on the way to the control would fail outright and
+///     show nothing at all.
+///   - NUL. The control takes a NUL-terminated string, so a literal NUL
+///     would silently drop the entire remainder of the payload — the
+///     opposite of what a preview is for.
+///   - Bidirectional formatting characters. They are invisible and
+///     reorder what is displayed, so the pane could show a different
+///     reading order than the payload has. See `isBidiFormatting`.
+///
+/// Line endings are normalised to CRLF for display. A Win32 multiline
+/// EDIT breaks a line only on CRLF: a lone LF is zero-width and a lone
+/// CR is swallowed, so `ls -l<spaces>\nrm -rf ~` would read as one
+/// padded command. LF-only payloads are the common case (VS Code on an
+/// LF file, anything routed through WSL, OSC 52 writes) and a newline
+/// is precisely what `input.paste.isSafe` raises this prompt for, so
+/// the pane must not be the one place it becomes invisible. Only the
+/// display text changes; `shown_bytes` still counts source bytes.
+///
+/// Every other control character, DEL included, is passed through.
+pub fn buildConfirmPreview(
+    alloc: Allocator,
+    data: []const u8,
+    limit: usize,
+) !ConfirmPreview {
+    // Back off so the tail is never a split codepoint — but only for a
+    // sequence that STARTS before `end` and crosses it.
+    //
+    // Walking back on every continuation byte at the boundary looks
+    // identical for well-formed text and destroys malformed text: a run
+    // of orphan continuation bytes there drags `end` back through all of
+    // them, and a payload that is nothing but continuation bytes drags it
+    // to zero and shows an empty pane. Those bytes are displayable as
+    // U+FFFD, and the reported byte count has to match what is shown.
+    var end = @min(limit, data.len);
+    if (end < data.len and end > 0) {
+        // A UTF-8 sequence is at most 4 bytes, so the lead byte is at
+        // most 3 positions back from the last included byte.
+        var scan = end;
+        var steps: usize = 0;
+        while (steps < 4 and scan > 0) : (steps += 1) {
+            scan -= 1;
+            const lead = data[scan];
+            if ((lead & 0xC0) == 0x80) continue; // still inside a sequence
+            const seq_len = std.unicode.utf8ByteSequenceLength(lead) catch break;
+            // Back off only for a sequence that is actually whole and
+            // valid in `data`. A malformed lead byte at the boundary is
+            // rendered as U+FFFD like any other, instead of dragging
+            // `end` back over the bytes before it.
+            if (scan + seq_len > end and scan + seq_len <= data.len) {
+                _ = std.unicode.utf8Decode(data[scan .. scan + seq_len]) catch break;
+                end = scan;
+            }
+            break;
+        }
+    }
+    const src = data[0..end];
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, src.len);
+
+    var i: usize = 0;
+    while (i < src.len) {
+        const b = src[i];
+        if (b < 0x80) {
+            switch (b) {
+                0 => try appendCodepoint(alloc, &out, 0xFFFD),
+                '\r' => {
+                    try out.appendSlice(alloc, "\r\n");
+                    // Consume the LF of a CRLF so it is not doubled.
+                    if (i + 1 < src.len and src[i + 1] == '\n') i += 1;
+                },
+                '\n' => try out.appendSlice(alloc, "\r\n"),
+                else => try out.append(alloc, b),
+            }
+            i += 1;
+            continue;
+        }
+
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try appendCodepoint(alloc, &out, 0xFFFD);
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > src.len) {
+            try appendCodepoint(alloc, &out, 0xFFFD);
+            i += 1;
+            continue;
+        }
+        // `utf8Decode` validates as it decodes, so this replaces the
+        // separate validity check as well as yielding the codepoint the
+        // bidi test needs.
+        const cp = std.unicode.utf8Decode(src[i .. i + seq_len]) catch {
+            try appendCodepoint(alloc, &out, 0xFFFD);
+            i += 1;
+            continue;
+        };
+        if (isBidiFormatting(cp)) {
+            try appendCodepoint(alloc, &out, 0xFFFD);
+        } else {
+            try out.appendSlice(alloc, src[i .. i + seq_len]);
+        }
+        i += seq_len;
+    }
+
+    return .{
+        .text = try out.toOwnedSlice(alloc),
+        .shown_bytes = end,
+        .total_bytes = data.len,
+    };
+}
+
+/// One-line caption above the preview pane, so the size of what is
+/// being approved is visible even when the pane only shows its head.
+pub fn buildConfirmPreviewCaption(
+    alloc: Allocator,
+    preview: ConfirmPreview,
+) ![]u8 {
+    if (preview.truncated()) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "Showing the first {d} of {d} bytes",
+            .{ preview.shown_bytes, preview.total_bytes },
+        );
+    }
+    if (preview.total_bytes == 1) return try alloc.dupe(u8, "1 byte");
+    return try std.fmt.allocPrint(alloc, "{d} bytes", .{preview.total_bytes});
+}
 
 pub fn buildOverlayPaintLabelText(
     alloc: Allocator,
@@ -1479,7 +1729,14 @@ pub fn buildOverlayHintText(
         // empty placeholder only appears when the payload has already
         // been dropped (mid-teardown).
         .confirm => if (confirm) |text|
-            try alloc.dupe(u8, text.body)
+            if (text.preview_caption.len == 0)
+                try alloc.dupe(u8, text.body)
+            else
+                try std.fmt.allocPrint(
+                    alloc,
+                    "{s}  ({s})",
+                    .{ text.body, text.preview_caption },
+                )
         else
             try alloc.dupe(u8, ""),
     };
@@ -3520,6 +3777,248 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
     try std.testing.expectEqualStrings("Window title", title);
 }
 
+test "win32 confirm preview passes ordinary text through untouched" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "echo one\r\necho two\r\n",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("echo one\r\necho two\r\n", preview.text);
+    try std.testing.expectEqual(@as(usize, 20), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 20), preview.total_bytes);
+    try std.testing.expect(!preview.truncated());
+}
+
+test "win32 confirm preview passes control characters through, except NUL" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Upstream's GTK and macOS dialogs show the payload as it is, so BEL,
+    // DEL, tab, CR and LF all survive verbatim. NUL cannot: the EDIT takes
+    // a NUL-terminated string and would drop everything after it.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "a\x00b\x07c\td\x7fe\r\n",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("a\u{FFFD}b\x07c\td\x7fe\r\n", preview.text);
+    try std.testing.expect(std.mem.indexOfScalar(u8, preview.text, 0) == null);
+    // The bytes after the NUL must still be there — that is the point.
+    try std.testing.expect(std.mem.endsWith(u8, preview.text, "e\r\n"));
+}
+
+test "win32 confirm preview replaces invalid UTF-8 rather than failing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // OSC 52 write payloads are base64-decoded bytes from the terminal
+    // and need not be text at all. The UTF-16 conversion on the way to
+    // the EDIT would reject them and show nothing.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "ok\xffbad\xe3\x81",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("ok\u{FFFD}bad\u{FFFD}\u{FFFD}", preview.text);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.text));
+}
+
+test "win32 confirm preview keeps its prefix when the boundary byte is an orphan" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Regression: backing off on any continuation byte at the boundary
+    // threw away valid bytes before it. Here only one byte is excluded,
+    // and it is not part of any sequence that starts inside the prefix.
+    var preview = try buildConfirmPreview(std.testing.allocator, "aaaaaaaa\x80", 8);
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("aaaaaaaa", preview.text);
+    try std.testing.expectEqual(@as(usize, 8), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 9), preview.total_bytes);
+}
+
+test "win32 confirm preview survives a run of orphan continuation bytes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The old scan walked back through the whole run, so a payload with
+    // a long run at the boundary lost that much displayable content.
+    var run = try buildConfirmPreview(std.testing.allocator, "aaaa\x80\x80\x80\x80\x80\x80\x80\x80", 8);
+    defer run.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 8), run.shown_bytes);
+    try std.testing.expectEqualStrings("aaaa\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}", run.text);
+
+    // The pathological case: nothing but continuation bytes used to drag
+    // the boundary to zero and show an empty pane.
+    var all = try buildConfirmPreview(std.testing.allocator, "\x80" ** 12, 8);
+    defer all.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 8), all.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 12), all.total_bytes);
+    try std.testing.expect(all.text.len > 0);
+}
+
+test "win32 confirm preview leaves the boundary alone when a sequence ends on it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Three bytes in, three bytes out: the sequence ends exactly at the
+    // limit, so there is nothing to back off from.
+    var preview = try buildConfirmPreview(std.testing.allocator, "\u{3042}\u{3042}", 3);
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("\u{3042}", preview.text);
+    try std.testing.expectEqual(@as(usize, 3), preview.shown_bytes);
+}
+
+test "win32 confirm preview replaces bidirectional formatting characters" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Trojan Source (CVE-2021-42574): these are invisible and reorder the
+    // text around them, so the pane would show a different reading order
+    // than the payload actually has.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "echo \u{202E}dlrow olleh\u{202C}",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("echo \u{FFFD}dlrow olleh\u{FFFD}", preview.text);
+
+    const bidi = [_]u21{
+        0x061C, 0x200E, 0x200F,
+        0x202A, 0x202B, 0x202C,
+        0x202D, 0x202E, 0x2066,
+        0x2067, 0x2068, 0x2069,
+    };
+    for (bidi) |cp| {
+        var buf: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(cp, &buf);
+        var one = try buildConfirmPreview(std.testing.allocator, buf[0..len], confirm_preview_limit);
+        defer one.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("\u{FFFD}", one.text);
+    }
+
+    // Neighbouring codepoints outside the set must survive untouched, or
+    // the ranges have been written too wide.
+    for ([_]u21{ 0x061B, 0x061D, 0x200D, 0x2010, 0x2029, 0x202F, 0x2065, 0x206A }) |cp| {
+        var buf: [4]u8 = undefined;
+        const len = try std.unicode.utf8Encode(cp, &buf);
+        var one = try buildConfirmPreview(std.testing.allocator, buf[0..len], confirm_preview_limit);
+        defer one.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(buf[0..len], one.text);
+    }
+}
+
+test "win32 overlayEmptySubmitDismisses spares prompts with no query field" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A confirm's EDIT is hidden and always empty, so dismissing on
+    // "empty" would close the prompt without dispatching either callback.
+    try std.testing.expect(!overlayEmptySubmitDismisses(.confirm));
+    try std.testing.expect(!overlayEmptySubmitDismisses(.search));
+    try std.testing.expect(!overlayEmptySubmitDismisses(.profile));
+    try std.testing.expect(!overlayEmptySubmitDismisses(.command_palette));
+
+    // These do carry a query field, and an empty one means "cancel".
+    try std.testing.expect(overlayEmptySubmitDismisses(.surface_title));
+    try std.testing.expect(overlayEmptySubmitDismisses(.tab_title));
+    try std.testing.expect(overlayEmptySubmitDismisses(.tab_overview));
+    try std.testing.expect(overlayEmptySubmitDismisses(.none));
+}
+
+test "win32 confirm preview truncates on a codepoint boundary" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Two 3-byte codepoints, cut at 4 bytes: backing off to 3 keeps the
+    // first whole and never emits a split sequence.
+    var preview = try buildConfirmPreview(std.testing.allocator, "\u{3042}\u{3042}", 4);
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("\u{3042}", preview.text);
+    try std.testing.expectEqual(@as(usize, 3), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 6), preview.total_bytes);
+    try std.testing.expect(preview.truncated());
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.text));
+}
+
+test "win32 confirm preview normalises line endings to CRLF" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A Win32 EDIT breaks lines only on CRLF. A lone LF renders as
+    // nothing and a lone CR is swallowed, which would hide the one
+    // structural fact the paste prompt exists to show.
+    var preview = try buildConfirmPreview(
+        std.testing.allocator,
+        "one\ntwo\rthree\r\nfour\n\nfive\r\r\nsix",
+        confirm_preview_limit,
+    );
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(
+        "one\r\ntwo\r\nthree\r\nfour\r\n\r\nfive\r\n\r\nsix",
+        preview.text,
+    );
+    // The caption still counts source bytes, not display bytes.
+    try std.testing.expectEqual(@as(usize, 31), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 31), preview.total_bytes);
+    try std.testing.expect(!preview.truncated());
+}
+
+test "win32 confirm preview keeps a malformed lead byte at the boundary" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A lead byte whose sequence crosses the limit is backed off only
+    // when the sequence is whole and valid. A malformed one is shown as
+    // U+FFFD instead of dragging the boundary back over the bytes
+    // before it -- here all the way to an empty pane.
+    var preview = try buildConfirmPreview(std.testing.allocator, "\xE0\x80x", 2);
+    defer preview.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("\u{FFFD}\u{FFFD}", preview.text);
+    try std.testing.expectEqual(@as(usize, 2), preview.shown_bytes);
+    try std.testing.expectEqual(@as(usize, 3), preview.total_bytes);
+    try std.testing.expect(preview.truncated());
+
+    // A sequence that is cut by the end of the data itself is malformed
+    // too, and likewise must not move the boundary.
+    var cut = try buildConfirmPreview(std.testing.allocator, "abc\xE3\x81", 4);
+    defer cut.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("abc\u{FFFD}", cut.text);
+    try std.testing.expectEqual(@as(usize, 4), cut.shown_bytes);
+}
+
+test "win32 confirm preview caption reports what is being approved" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const whole = try buildConfirmPreviewCaption(
+        std.testing.allocator,
+        .{ .text = "", .shown_bytes = 12, .total_bytes = 12 },
+    );
+    defer std.testing.allocator.free(whole);
+    try std.testing.expectEqualStrings("12 bytes", whole);
+
+    const single = try buildConfirmPreviewCaption(
+        std.testing.allocator,
+        .{ .text = "", .shown_bytes = 1, .total_bytes = 1 },
+    );
+    defer std.testing.allocator.free(single);
+    try std.testing.expectEqualStrings("1 byte", single);
+
+    const cut = try buildConfirmPreviewCaption(
+        std.testing.allocator,
+        .{ .text = "", .shown_bytes = 65536, .total_bytes = 3145728 },
+    );
+    defer std.testing.allocator.free(cut);
+    try std.testing.expectEqualStrings("Showing the first 65536 of 3145728 bytes", cut);
+}
+
 test "win32 confirm overlay paints its payload title and body" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -3561,6 +4060,39 @@ test "win32 confirm overlay paints its payload title and body" {
     );
     defer std.testing.allocator.free(body);
     try std.testing.expectEqualStrings(confirm.body, body);
+}
+
+test "win32 confirm overlay states the payload size next to the body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const snap = PaletteSnapshot.fromDefaults();
+    const empty_mru: []const []const u8 = &.{};
+
+    const body = try buildOverlayFeedbackText(
+        std.testing.allocator,
+        .none,
+        null,
+        .confirm,
+        "",
+        null,
+        null,
+        null,
+        .{},
+        1,
+        snap,
+        empty_mru,
+        .{},
+        .{
+            .title = "Allow clipboard paste?",
+            .body = "Confirm this paste.",
+            .preview_caption = "Showing the first 65536 of 3145728 bytes",
+        },
+    );
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings(
+        "Confirm this paste.  (Showing the first 65536 of 3145728 bytes)",
+        body,
+    );
 }
 
 test "win32 confirm overlay distinguishes the three prompts" {
@@ -4105,23 +4637,23 @@ test "win32 transient overlay focus ring includes every visible control" {
 
     try std.testing.expectEqual(
         OverlayFocusSlot.cancel,
-        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, true),
+        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, false, true),
     );
     try std.testing.expectEqual(
         OverlayFocusSlot.cancel,
-        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, true),
+        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, false, true),
     );
     try std.testing.expectEqual(
         OverlayFocusSlot.accept,
-        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, true, true),
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, false, true, true),
     );
     try std.testing.expectEqual(
         null,
-        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false),
+        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false, false),
     );
     try std.testing.expectEqual(
         null,
-        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, true),
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, false, true),
     );
 }
 
