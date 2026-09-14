@@ -18185,6 +18185,17 @@ const Host = struct {
                 tab.cached_button_label_max_width == label_max_width and
                 tab.cached_button_show_pane_count == show_pane_count;
             if (label_inputs_unchanged) continue;
+            // The UIA name is not the drawn label: it carries the tab's FULL
+            // title and its pane count, and `shouldShowPaneCount` keeps the
+            // count out of the label on a narrow tab. Splitting such a tab
+            // moves the name from "1: pwsh" to "1: pwsh (2)" while the label
+            // stays byte-identical, so the label comparison below cannot be
+            // the only trigger for NameChanged or an event-driven reader keeps
+            // announcing the stale name.
+            const uia_name_changed = tab.button_label_cache_valid and
+                (!title_unchanged or
+                    tab.cached_button_index != i or
+                    tab.cached_button_pane_count != pane_count);
             if (self.tab_tooltip_tab_id) |shown| {
                 // The title or the width budget moved under the tooltip.
                 if (shown == tab.id) self.hideTabTooltip();
@@ -18231,6 +18242,8 @@ const Host = struct {
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
                 _ = sys.SetWindowTextW(tab.button_hwnd.?, label_w.ptr);
+                if (tab.uia_provider) |provider| provider.raiseNameChanged();
+            } else if (uia_name_changed) {
                 if (tab.uia_provider) |provider| provider.raiseNameChanged();
             }
             try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_title, title);
