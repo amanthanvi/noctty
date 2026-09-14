@@ -26,7 +26,11 @@ try {
     New-Item -ItemType Directory -Force -Path $specialDir | Out-Null
     Push-Location $specialDir
 
-    function global:prompt { 'PS> ' }
+    # Deliberately NOT 'PS> ': that is the string PowerShell's built-in prompt
+    # produces when our wrapper throws, so a fixture spelled that way cannot
+    # tell "the user's prompt was preserved" apart from "the user's prompt was
+    # lost and PowerShell fell back" (issue #231).
+    function global:prompt { 'NOCTTYPROBE> ' }
 
     # The UTF-8 console decision must never travel in the child environment.
     # A PowerShell profile runs before noctty's injected -Command, so an
@@ -123,7 +127,7 @@ try {
 
     $capture = [System.IO.StringWriter]::new()
     [Console]::SetOut($capture)
-    prompt | Out-Null
+    $promptText = (prompt | Out-String)
     [Console]::Out.Flush()
     $osc = $capture.ToString()
 
@@ -131,8 +135,62 @@ try {
     Assert-True ($osc.Contains(']7;file://')) "Prompt output missing OSC 7 cwd"
     Assert-True ($osc.Contains("]133;A;cl=line;aid=$PID")) "Prompt output missing OSC 133 A prompt metadata"
     Assert-True ($osc.Contains(']133;B')) "Prompt output missing OSC 133 B marker"
+    Assert-True ($promptText.Contains('NOCTTYPROBE> ')) "Wrapped prompt dropped the user's prompt text: $promptText"
 
     [Console]::SetOut($script:OriginalOut)
+
+    # ── Injected-block scope contract (issue #231) ───────────────────────
+    #
+    # Everything above dot-sources integration.ps1 at THIS script's scope,
+    # where unqualified top-level definitions survive. noctty does not: it
+    # runs `-NoExit -Command "& { $__ghostty_utf8_console = $false; . <path> }"`,
+    # and that block's child scope is torn down when the dot-source returns.
+    # The helpers therefore have to be `global:`-qualified or every prompt
+    # draw throws CommandNotFoundException, PowerShell silently substitutes
+    # its built-in prompt, and no OSC is emitted at all.
+    #
+    # The block is intentional and stays: a child scope shadows a
+    # profile-defined `$__ghostty_utf8_console` even when the profile marked
+    # it ReadOnly/Constant, which a global assignment cannot do. So this must
+    # be verified against a real child process running the real argv.
+    $psHost = (Get-Process -Id $PID).Path
+    Assert-True (-not [string]::IsNullOrEmpty($psHost)) "Could not resolve the current PowerShell host path"
+
+    $childQuotedPath = $script:IntegrationPath.Replace("'", "''")
+    $childPayload = "function global:prompt { 'NOCTTYPROBE> ' }; " +
+        "& { `$__ghostty_utf8_console = `$false; . '$childQuotedPath' }"
+    # The child echoes each stdin line back, so the success token must be
+    # assembled at runtime; a literal would match its own echo and the
+    # assertion would pass even when the helper is gone.
+    $childInput = @(
+        'if (Get-Command __ghostty_write_osc -ErrorAction SilentlyContinue) { "HELPER" + "-RESOLVED" }',
+        'exit'
+    )
+    # `2>&1` on a native command produces ErrorRecords. Under Windows
+    # PowerShell 5.1 with $ErrorActionPreference = 'Stop' (set at the top of
+    # this file) that throws a RemoteException instead of landing in
+    # $childOut, which would turn any child stderr — exactly the diagnostic
+    # we want to read — into an unrelated crash. pwsh 7 does not do this.
+    $childErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $childOut = ($childInput | & $psHost -NoProfile -NoExit -Command $childPayload 2>&1 | Out-String)
+    } finally {
+        $ErrorActionPreference = $childErrorAction
+    }
+
+    Assert-True ($childOut.Contains('HELPER-RESOLVED')) "Helper functions did not survive the injected & { } block: $($childOut -replace [char]27, '<ESC>')"
+    Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "Injected block replaced the user's prompt: $($childOut -replace [char]27, '<ESC>')"
+    # Load-time failures only. PowerShell swallows a throw from `prompt`
+    # without writing anything, so this cannot see a prompt-draw failure —
+    # the marker and OSC assertions are what cover that. pwsh 7 says "as a
+    # name of a cmdlet", 5.1 says "as the name of a cmdlet"; match the
+    # common prefix.
+    Assert-True (-not ($childOut -match 'is not recognized as')) "Injected block raised CommandNotFoundException while loading: $($childOut -replace [char]27, '<ESC>')"
+    foreach ($marker in @(']133;A;cl=line;aid=', ']133;B', ']133;D;', ']7;file://')) {
+        Assert-True ($childOut.Contains($marker)) "Injected block emitted no $marker : $($childOut -replace [char]27, '<ESC>')"
+    }
+
     Write-Output 'PASS powershell shell integration'
 } finally {
     [Console]::SetOut($script:OriginalOut)

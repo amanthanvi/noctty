@@ -12,6 +12,37 @@
 //!      script entry points. The sentinel is always bound, both ways, so it
 //!      shadows any same-named variable a profile may have defined.
 //!
+//! Why the payload is a `& { ... }` script block:
+//!
+//!   The block's child scope is the only way to make the per-launch
+//!   `$__ghostty_utf8_console` decision stick on a session whose profile
+//!   already defined a variable of that name. A child scope SHADOWS an outer
+//!   variable even when that outer variable is `ReadOnly` or `Constant`; a
+//!   plain global assignment does not — it raises a non-terminating
+//!   `Cannot overwrite variable ... because it is read-only or constant`,
+//!   the dot-source proceeds anyway, and the profile's value wins. Measured
+//!   on pwsh 7 and Windows PowerShell 5.1: with a `ReadOnly` profile
+//!   sentinel of `$true` and noctty asking for `$false`, the block form
+//!   leaves the console at codepage 437 (correct) while the global form
+//!   ends at 65001 with a visible error. The block is therefore load-bearing
+//!   for the `utf8-console = never` guarantee.
+//!
+//!   It is NOT about child-process inheritance — PowerShell variables are
+//!   never inherited by child processes in the first place. (An earlier
+//!   version of this comment claimed that; it was wrong.)
+//!
+//!   The cost of the block, and the contract it imposes: the child scope is
+//!   torn down as soon as the dot-source returns, so every top-level name in
+//!   `integration.ps1` that must outlive load has to carry an explicit
+//!   `global:` / `$Global:` qualifier. When it did not, `prompt` survived
+//!   (it was `function global:prompt`) but every helper it calls did not,
+//!   so each prompt draw threw `CommandNotFoundException`, PowerShell fell
+//!   back to its built-in `PS C:\...>` prompt over the user's starship /
+//!   oh-my-posh prompt, and no OSC 133 or OSC 7 was ever emitted (#231).
+//!   `integration.ps1 honours the injected block scope` below pins that
+//!   contract at compile time; note that a test which dot-sources the script
+//!   at its own scope cannot catch a violation.
+//!
 //! Testing: `@embedFile("../...")` needs the `src/` package root.
 //!   echo 'test { _ = @import("apprt/win32_powershell_install.zig"); }' > src/_t.zig
 //!   zig test src/_t.zig && rm src/_t.zig
@@ -166,6 +197,11 @@ pub const InjectError = error{ OutOfMemory, EmptyCommand };
 /// rather than as a child environment variable: profiles run before our
 /// `-Command` does, so an environment variable would already have been
 /// inherited by anything a profile spawned.
+///
+/// The payload is a `& { ... }` block so that binding lands in a child scope
+/// and shadows a profile-defined sentinel even when the profile marked it
+/// `ReadOnly` / `Constant`. See the module doc comment for the measurement
+/// and for the `global:` contract the block imposes on `integration.ps1`.
 pub fn buildInjectedArgv(
     alloc: Allocator,
     pwsh_argv: []const []const u8,
@@ -398,7 +434,7 @@ fn isValueTakingInteractiveFlag(arg: []const u8) bool {
 /// The variable `integration.ps1` reads to decide whether to force UTF-8
 /// console encodings. It only ever exists in the script block scope that
 /// dot-sources the integration script, so it is gone by the time the
-/// interactive session starts and no child process can inherit it.
+/// interactive session starts.
 pub const utf8_console_variable = "__ghostty_utf8_console";
 
 fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) ![]u8 {
@@ -409,8 +445,21 @@ fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) 
     // scope pin is what enforces `utf8-console = never` and the CJK guard
     // against a hostile profile; the explicit `$false` exists so the "no"
     // decision is a deliberate value rather than an absent variable, and so
-    // the local binding shadows any same-named outer variable if the lookup
-    // is ever loosened again.
+    // the child-scope binding shadows any same-named outer variable if the
+    // lookup is ever loosened again.
+    //
+    // Keep this a `& { ... }` block. A child scope shadows a `ReadOnly` /
+    // `Constant` profile global; a plain global assignment cannot overwrite
+    // one and silently leaves the profile's value in force. The tradeoff is
+    // that `integration.ps1` must `global:`-qualify everything that outlives
+    // the dot-source — see the module doc comment and the contract test.
+    //
+    // A profile can still defeat this by declaring the sentinel with
+    // `-Option AllScope,ReadOnly`, which makes the name unbindable in child
+    // scopes too. Hardening against that would mean prefixing a
+    // `Microsoft.PowerShell.Utility\Remove-Variable __ghostty_utf8_console
+    // -Scope Global -Force` inside the braces; deliberately not done here to
+    // keep the pinned payload string stable.
     return std.fmt.allocPrint(
         alloc,
         "& {{ ${s} = ${s}; . '{s}' }}",
@@ -448,6 +497,141 @@ test "integration_script is non-empty" {
 test "integration_script_sha256 is not all zero" {
     const zero: [32]u8 = .{0} ** 32;
     try std.testing.expect(!std.mem.eql(u8, &integration_script_sha256, &zero));
+}
+
+test "integration.ps1 honours the injected block scope" {
+    // `buildCommandValue` dot-sources the script from inside `& { ... }`, so
+    // the script's top-level scope is a child scope that is destroyed the
+    // moment the dot-source returns. Anything the interactive session needs
+    // afterwards must be declared `global:`.
+    //
+    // This cannot be caught from `test/windows/powershell-shell-integration.ps1`
+    // alone: that harness dot-sources the script at its own scope, where
+    // unqualified definitions survive. Regression guard for #231, where the
+    // helpers died with the block, `prompt` threw CommandNotFoundException on
+    // every draw, and PowerShell replaced the user's prompt with `PS C:\...>`
+    // while emitting no OSC 133 / OSC 7 at all.
+
+    // Every function this script declares must be `global:`-qualified, and
+    // every top-level variable it defines must be `$Global:`-qualified.
+    // Declarations are found by scanning for the keyword at a statement
+    // start (line start, or right after `{` / `;`) rather than by matching
+    // one spelling, so `function  __ghostty_x`, `Function __ghostty_x`, an
+    // indented declaration, and `if (...) { function __ghostty_x { } }` are
+    // all caught.
+    //
+    // Known limit: reflection forms (`$function:x = { }`, `Set-Item
+    // Function:x`) and `New-Variable` are not detected. Nothing in the
+    // script uses them; if that changes, extend this scan.
+    var lines = std.mem.splitScalar(u8, integration_script, '\n');
+    var declarations: usize = 0;
+    var top_level_variables: usize = 0;
+    while (lines.next()) |raw| {
+        const line = std.mem.trimRight(u8, raw, " \t\r");
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+        // Top-level (column 0) variable assignment. Anything indented is
+        // inside a function or block and is a legitimate local.
+        if (line.len == trimmed.len and trimmed[0] == '$') {
+            const name_end = for (trimmed[1..], 1..) |c, idx| {
+                if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ':') break idx;
+            } else trimmed.len;
+            const after = std.mem.trimLeft(u8, trimmed[name_end..], " \t");
+            if (after.len > 0 and after[0] == '=' and
+                (after.len == 1 or after[1] != '='))
+            {
+                const name = trimmed[1..name_end];
+                top_level_variables += 1;
+                // `$ghosttyUtf8Console` is the one deliberate block-scoped
+                // local: it is consumed during load and must not outlive it.
+                if (!std.ascii.startsWithIgnoreCase(name, "Global:") and
+                    !std.mem.eql(u8, name, "ghosttyUtf8Console"))
+                {
+                    std.debug.print(
+                        "integration.ps1 defines a non-global top-level variable: {s}\n",
+                        .{trimmed},
+                    );
+                    return error.UnqualifiedVariableDeclaration;
+                }
+            }
+        }
+
+        // Function declarations, anywhere a statement can start.
+        var idx: usize = 0;
+        while (std.ascii.indexOfIgnoreCasePos(line, idx, "function")) |at| {
+            idx = at + "function".len;
+            const before_ok = at == 0 or switch (line[at - 1]) {
+                ' ', '\t', '{', ';' => true,
+                else => false,
+            };
+            if (!before_ok) continue;
+            // Only whitespace, `{` or `;` may precede it on the line, else
+            // this is prose or an argument rather than a declaration.
+            const prefix = std.mem.trim(u8, line[0..at], " \t");
+            if (prefix.len != 0 and prefix[prefix.len - 1] != '{' and
+                prefix[prefix.len - 1] != ';') continue;
+            if (idx >= line.len or (line[idx] != ' ' and line[idx] != '\t')) continue;
+            const rest = std.mem.trimLeft(u8, line[idx..], " \t");
+            declarations += 1;
+            if (!std.ascii.startsWithIgnoreCase(rest, "global:")) {
+                std.debug.print(
+                    "integration.ps1 declares a non-global function: {s}\n",
+                    .{trimmed},
+                );
+                return error.UnqualifiedFunctionDeclaration;
+            }
+        }
+    }
+    // Guard the guard: if either scan stops matching, everything above turns
+    // vacuous. These are the live counts; bump them when the script grows.
+    try std.testing.expectEqual(@as(usize, 12), declarations);
+    try std.testing.expectEqual(@as(usize, 3), top_level_variables);
+
+    // The escape / bell characters the prompt interpolates are globals under
+    // the `__ghostty_` prefix. Bare `$ESC` / `$BEL` died with the block on
+    // the injected path, and clobbered a profile variable of the same name
+    // on the manual dot-source path. Matched on a token boundary so an
+    // unrelated `$ESCAPED` local does not trip the guard.
+    for ([_][]const u8{ "$ESC", "$BEL" }) |banned| {
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, integration_script, at, banned)) |hit| {
+            at = hit + banned.len;
+            if (at < integration_script.len) {
+                const next = integration_script[at];
+                if (std.ascii.isAlphanumeric(next) or next == '_') continue;
+            }
+            std.debug.print("integration.ps1 still uses {s}\n", .{banned});
+            return error.UnprefixedGlobalVariable;
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "$Global:__ghostty_esc",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "$Global:__ghostty_bel",
+    ) != null);
+
+    // The helper set the prompt calls must all be global, and the prompt
+    // itself must stay global.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "\nfunction global:prompt {",
+    ) != null);
+    for ([_][]const u8{
+        "__ghostty_write_osc",
+        "__ghostty_encode_osc133_value",
+        "__ghostty_encode_cwd_uri",
+    }) |name| {
+        var buf: [96]u8 = undefined;
+        const decl = try std.fmt.bufPrint(&buf, "\nfunction global:{s} {{", .{name});
+        try std.testing.expect(std.mem.indexOf(u8, integration_script, decl) != null);
+    }
 }
 
 test "escapeForPwshSingleQuote: empty string" {

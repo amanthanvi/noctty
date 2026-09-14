@@ -97,12 +97,24 @@ that:
 - Automatic PowerShell injection (`powershell.exe`, `pwsh.exe`), with a
   manual fallback at
   `%LOCALAPPDATA%\noctty\shell-integration\powershell\integration.ps1`.
-- PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish
-  status, and PSReadLine command metadata when available.
+- PowerShell emits OSC 7 cwd URIs and OSC 133 A / B prompt marks plus
+  OSC 133 D command-finish status, around whatever `prompt` the profile
+  installed (starship, oh-my-posh, hand-written).
+- OSC 133 C (pre-execution mark, carrying a `cmdline_url` of the command being
+  accepted) is emitted only through PSReadLine's `ValidateAndAcceptLine`,
+  which is what calls the `CommandValidationHandler` the integration hooks.
+  The default Enter binding on both pwsh 7 and Windows PowerShell 5.1 is
+  `AcceptLine`, so out of the box PowerShell reports no OSC 133 C; users who
+  run `Set-PSReadLineKeyHandler -Chord Enter -Function ValidateAndAcceptLine`
+  (or use Emacs edit mode, where Ctrl+M is bound to it) do get it. PSReadLine
+  hands the handler one `CommandAst` per command, so a pipeline of two
+  commands produces two C marks, not one per line.
 - OSC 133 prompt marks back previous/next prompt navigation, copying the last
   completed command output, and inserting the last recoverable single-line
   command back on the prompt from the command palette. Insert requires
-  OSC 133;B and OSC 133;C and a B mark that noctty has not itself submitted
+  OSC 133;B and OSC 133;C — so for PowerShell it is unavailable unless the
+  user has opted into `ValidateAndAcceptLine` as above — and a B mark that
+  noctty has not itself submitted
   with Enter since; it does not inspect or modify the shell's line editor, and
   it does not submit the command — OSC 133 marks are forgeable by any program
   writing to the terminal, so the user reviews and presses Enter.

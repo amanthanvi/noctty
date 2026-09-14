@@ -1,5 +1,29 @@
 # Noctty shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
+#
+# ── Scope contract ───────────────────────────────────────────────────────
+# noctty dot-sources this file from INSIDE a `& { ... }` script block:
+#
+#   pwsh -NoExit -Command "& { $__ghostty_utf8_console = $false; . '<path>' }"
+#
+# That block is deliberate, not incidental. The block's child scope is the
+# only way to force the per-launch `$__ghostty_utf8_console` decision onto a
+# session whose profile already defined a variable of that name: a child
+# scope SHADOWS an outer variable even when the outer one is ReadOnly or
+# Constant, whereas a plain global assignment fails outright and leaves the
+# profile's value in force. See `src/apprt/win32_powershell_install.zig`.
+#
+# The cost is that the block scope is torn down the moment the dot-source
+# returns. Anything defined here that must outlive load — every helper
+# function, every variable the prompt interpolates — MUST be written with an
+# explicit `global:` / `$Global:` qualifier, or it dies with the block and
+# `prompt` throws CommandNotFoundException on its first draw (issue #231).
+# `src/apprt/win32_powershell_install.zig` pins that contract in a test.
+#
+# Corollary: do not introduce unqualified top-level names, and keep globals
+# under the `__ghostty_` prefix so this script never clobbers a profile's own
+# variables (the unprefixed escape/bell character variables this script used
+# to define did exactly that).
 
 # Per-launch UTF-8 console request. noctty sets $__ghostty_utf8_console in the
 # scope that dot-sources this script, never in the environment: profiles run
@@ -25,8 +49,8 @@ if ($ghosttyUtf8Console) {
     }
 }
 
-$ESC = [char]27
-$BEL = [char]7
+$Global:__ghostty_esc = [char]27
+$Global:__ghostty_bel = [char]7
 
 # ── Idempotent guard: save original prompt once ──────────────────────────
 if ($null -eq $Global:__ghostty_aid) {
@@ -41,7 +65,7 @@ if ($null -eq $Global:__ghostty_original_prompt) {
     $Global:__ghostty_prev_exitcode = $LASTEXITCODE
 }
 
-function __ghostty_write_osc {
+function global:__ghostty_write_osc {
     param([string]$Sequence)
     try {
         [Console]::Write($Sequence)
@@ -50,13 +74,13 @@ function __ghostty_write_osc {
     }
 }
 
-function __ghostty_encode_osc133_value {
+function global:__ghostty_encode_osc133_value {
     param([AllowNull()][string]$Value)
     if ($null -eq $Value) { return "" }
     return ([uri]::EscapeDataString($Value)).Replace("'", "%27")
 }
 
-function __ghostty_has_feature {
+function global:__ghostty_has_feature {
     param([string]$Name)
     if ([string]::IsNullOrEmpty($env:GHOSTTY_SHELL_FEATURES)) { return $false }
     foreach ($feature in ($env:GHOSTTY_SHELL_FEATURES -split ',')) {
@@ -66,7 +90,7 @@ function __ghostty_has_feature {
     return $false
 }
 
-function __ghostty_has_feature_prefix {
+function global:__ghostty_has_feature_prefix {
     param([string]$Prefix)
     if ([string]::IsNullOrEmpty($env:GHOSTTY_SHELL_FEATURES)) { return $false }
     foreach ($feature in ($env:GHOSTTY_SHELL_FEATURES -split ',')) {
@@ -78,7 +102,7 @@ function __ghostty_has_feature_prefix {
     return $false
 }
 
-function __ghostty_find_command_application {
+function global:__ghostty_find_command_application {
     param([string[]]$Names)
     foreach ($name in $Names) {
         $cmd = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -87,7 +111,7 @@ function __ghostty_find_command_application {
     return $null
 }
 
-function __ghostty_find_noctty {
+function global:__ghostty_find_noctty {
     if (-not [string]::IsNullOrEmpty($env:GHOSTTY_BIN_DIR)) {
         foreach ($name in @('noctty.com', 'noctty.exe', 'noctty')) {
             $candidate = Join-Path $env:GHOSTTY_BIN_DIR $name
@@ -99,7 +123,7 @@ function __ghostty_find_noctty {
     return __ghostty_find_command_application @('noctty.com', 'noctty.exe', 'noctty')
 }
 
-function __ghostty_ssh_cache {
+function global:__ghostty_ssh_cache {
     param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
 
     $noctty = __ghostty_find_noctty
@@ -113,7 +137,7 @@ function __ghostty_ssh_cache {
     }
 }
 
-function __ghostty_ssh_target_from_config {
+function global:__ghostty_ssh_target_from_config {
     param([string[]]$ConfigLines)
 
     $ssh_user = $null
@@ -145,7 +169,7 @@ function __ghostty_ssh_target_from_config {
     }
 }
 
-function __ghostty_build_ssh_invocation {
+function global:__ghostty_build_ssh_invocation {
     param(
         [string[]]$Arguments,
         [string[]]$ConfigLines,
@@ -241,7 +265,7 @@ if (__ghostty_has_feature_prefix 'ssh-') {
 # spaces. For example `C:\Users\amant\project#v1` previously emitted
 # `file://HOST/C:/Users/amant/project#v1` where the `#` starts a URL
 # fragment in any RFC-compliant parser.
-function __ghostty_encode_cwd_uri {
+function global:__ghostty_encode_cwd_uri {
     $path = $PWD.Path
     if ($path.StartsWith('\\')) {
         # UNC — split `\\server\share\rest\...`; authority = server,
@@ -293,15 +317,29 @@ function global:prompt {
         $LASTEXITCODE
     } else { 0 }
 
-    # OSC 133 D — report previous command's exit code
-    __ghostty_write_osc "${ESC}]133;D;${code};aid=${Global:__ghostty_aid}${BEL}"
+    # Everything terminal-reporting lives inside try/catch, and the user's
+    # own prompt is invoked OUTSIDE it. Shell integration is a nice-to-have;
+    # the user's prompt is not. If any of our helpers throws, PowerShell
+    # discards the whole prompt function and silently substitutes its
+    # built-in `PS C:\...>` — which is exactly how #231 presented, and it
+    # looks to the user like noctty deleted their starship / oh-my-posh
+    # configuration. Degrading to "no OSC marks this tick" is always the
+    # better failure. The harness asserts the marks ARE emitted, so this
+    # cannot quietly swallow a real regression.
+    try {
+        # OSC 133 D — report previous command's exit code
+        __ghostty_write_osc "${Global:__ghostty_esc}]133;D;${code};aid=${Global:__ghostty_aid}${Global:__ghostty_bel}"
 
-    # OSC 7 — current working directory (full file:// URI)
-    $cwd_uri = __ghostty_encode_cwd_uri
-    __ghostty_write_osc "${ESC}]7;${cwd_uri}${BEL}"
+        # OSC 7 — current working directory (full file:// URI)
+        $cwd_uri = __ghostty_encode_cwd_uri
+        __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
 
-    # OSC 133 A — mark prompt start (jump-to-prompt anchor)
-    __ghostty_write_osc "${ESC}]133;A;cl=line;aid=${Global:__ghostty_aid}${BEL}"
+        # OSC 133 A — mark prompt start (jump-to-prompt anchor)
+        __ghostty_write_osc "${Global:__ghostty_esc}]133;A;cl=line;aid=${Global:__ghostty_aid}${Global:__ghostty_bel}"
+    } catch {
+        # Deliberately silent: writing an error here would corrupt the
+        # prompt line we are about to draw.
+    }
 
     # Delegate to original prompt. This can internally run native
     # helpers (git-aware prompts are the common case) which overwrite
@@ -318,7 +356,11 @@ function global:prompt {
     $Global:__ghostty_prev_exitcode = $LASTEXITCODE
 
     # OSC 133 B — mark end of prompt / start of user input
-    __ghostty_write_osc "${ESC}]133;B${BEL}"
+    try {
+        __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
+    } catch {
+        # See above: never let a reporting failure eat the user's prompt.
+    }
 
     return $out
 }
@@ -326,6 +368,18 @@ function global:prompt {
 # ── OSC 133 C via PSReadLine (pre-execution marker) ─────────────────────
 # CommandValidationHandler fires right before the command line is accepted,
 # giving us the "command is about to execute" signal.
+#
+# Caveat: PSReadLine calls this handler only from its ValidateAndAcceptLine
+# function. The default Enter binding on both pwsh 7 and Windows PowerShell
+# 5.1 is AcceptLine, so unless the user has run
+# `Set-PSReadLineKeyHandler -Chord Enter -Function ValidateAndAcceptLine`
+# (or uses Emacs edit mode, where Ctrl+M is bound to it) this never fires and
+# PowerShell reports no OSC 133 C. Registering it is still worthwhile: it
+# costs nothing and works for users who do rebind. Note the handler receives
+# one CommandAst PER COMMAND, so a two-command pipeline produces two C marks.
+#
+# Known gap, not addressed here: this overwrites a CommandValidationHandler
+# the user's profile may have installed, without chaining to it.
 try {
     if (Get-Module -Name PSReadLine -ErrorAction SilentlyContinue) {
         Set-PSReadLineOption -CommandValidationHandler {
@@ -334,7 +388,7 @@ try {
             # PSReadLine buffer as URL-encoded metadata so command-finished
             # notifications can show a useful command label when supported.
             $cmdline = __ghostty_encode_osc133_value $line
-            __ghostty_write_osc "${ESC}]133;C;aid=${Global:__ghostty_aid};cmdline_url=${cmdline}${BEL}"
+            __ghostty_write_osc "${Global:__ghostty_esc}]133;C;aid=${Global:__ghostty_aid};cmdline_url=${cmdline}${Global:__ghostty_bel}"
             # Return $true to let the command proceed
             return $true
         }
