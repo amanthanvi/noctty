@@ -490,7 +490,7 @@ function global:prompt {
 #
 # `AddToHistoryHandler` is the hook PSReadLine runs for every accepted line
 # regardless of which accept function Enter is bound to, and it runs BEFORE
-# the host executes the line, which is exactly the OSC 133 C contract. Two
+# the host executes the line, which is exactly the OSC 133 C contract. Three
 # properties of that contract shape the code below:
 #
 #   * A handler is ALWAYS already installed. PSReadLine 2.4.5 (pwsh 7) and
@@ -522,7 +522,7 @@ function global:prompt {
 #     for lines appended by other live sessions. pwsh 7 / 2.4.5 does not do
 #     this. Emitting 133;C for each of those would be a storm of bogus command
 #     marks at startup, so `__ghostty_line_is_being_accepted` gates the
-#     emission (the chained handler is still called every time -- suppressing
+#     emission (the chained handler is still called every time — suppressing
 #     the terminal report must not change the history decision).
 #
 # The handler's return value has to stay a SCALAR. A scriptblock-derived
@@ -530,6 +530,7 @@ function global:prompt {
 # stray value on the pipeline turns a `$true` into an `object[]` that
 # PSReadLine cannot interpret and silently treats as the default. Every
 # statement here is an assignment or a void call for that reason.
+
 # Is PSReadLine handing us the line the user just accepted, or one it is
 # replaying out of the history file?
 #
