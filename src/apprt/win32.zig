@@ -31484,6 +31484,14 @@ pub const Surface = struct {
         // offered one, since that is what a later paste produces.
         // Otherwise fall back to the first representation so an
         // HTML-only or unknown-mime write is not approved blind.
+        //
+        // Today the only caller that reaches this confirm is the OSC 52
+        // write path, which always sends exactly one `text/plain`
+        // entry, so the previewed representation is the only one Accept
+        // writes. The selection-copy path that pairs `text/html` with
+        // `text/plain` never asks for confirmation. If a confirmed
+        // multi-representation write is ever introduced, extend the
+        // preview to show every representation rather than one.
         const preview_contents: ?[]const u8 = preview: {
             if (contents.len == 0) break :preview null;
             for (contents) |content| {
