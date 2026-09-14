@@ -101,18 +101,30 @@ that:
   OSC 133 D command-finish status, around whatever `prompt` the profile
   installed (starship, oh-my-posh, hand-written).
 - OSC 133 C (pre-execution mark, carrying a `cmdline_url` of the command being
-  accepted) is emitted only through PSReadLine's `ValidateAndAcceptLine`,
-  which is what calls the `CommandValidationHandler` the integration hooks.
-  The default Enter binding on both pwsh 7 and Windows PowerShell 5.1 is
-  `AcceptLine`, so out of the box PowerShell reports no OSC 133 C; users who
-  run `Set-PSReadLineKeyHandler -Chord Enter -Function ValidateAndAcceptLine`
-  (or use Emacs edit mode, where Ctrl+M is bound to it) do get it. PSReadLine
-  hands the handler one `CommandAst` per command, so a pipeline of two
-  commands produces two C marks, not one per line. Both features that need a
-  C mark are therefore unavailable for PowerShell out of the box: copying the
-  last completed command output (which reads the C..D output region) and
-  inserting the last recoverable command. Prompt navigation and cwd reporting
-  are unaffected — they only need A / B / D and OSC 7.
+  accepted) rides on PSReadLine's `AddToHistoryHandler`, which PSReadLine
+  invokes for every accepted line whatever Enter is bound to, and invokes
+  before the host executes the line. One mark per accepted line, so a pipeline
+  of two commands now produces one C mark rather than one per command.
+  It previously rode on `CommandValidationHandler`, which PSReadLine calls
+  only from its `ValidateAndAcceptLine` function; the default Enter binding on
+  both pwsh 7 and Windows PowerShell 5.1 is `AcceptLine`, so out of the box
+  PowerShell reported no OSC 133 C at all. Both features that need a C mark
+  therefore now work by default on PowerShell: copying the last completed
+  command output (which reads the C..D output region) and inserting the last
+  recoverable command. Prompt navigation and cwd reporting are unaffected —
+  they only need A / B / D and OSC 7.
+- The integration chains to whatever `AddToHistoryHandler` was already in
+  force and returns its answer unchanged, so the session's history policy is
+  untouched. That predecessor is never absent: PSReadLine 2.4.x (pwsh 7) and
+  2.0.x (Windows PowerShell 5.1) both install a default handler that keeps
+  credential-shaped lines out of the on-disk history file, and an unchained
+  override would start writing them there.
+- PSReadLine 2.0.x (Windows PowerShell 5.1 only) also calls the handler for
+  every line it replays out of the shared `ConsoleHost_history.txt` at
+  startup, and for lines other live sessions append to it. The integration
+  emits OSC 133 C only when PSReadLine's own edit buffer matches the line it
+  was handed, so replayed lines still reach the chained handler but produce no
+  command mark.
 - OSC 133 prompt marks back previous/next prompt navigation, copying the last
   completed command output, and inserting the last recoverable single-line
   command back on the prompt from the command palette. Copy-output needs a
@@ -123,7 +135,10 @@ that:
   writing to the terminal, so the user reviews and presses Enter.
 - PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
   does not auto-install remote terminfo; uncached hosts use
-  `xterm-256color`.
+  `xterm-256color`. The wrapper is installed only when an `ssh-*` feature is
+  enabled, and only a wrapper noctty itself installed is ever removed: a
+  `function ssh` defined in the user's `$PROFILE` — which runs before noctty's
+  injected `-Command` — is left in place.
 - Automatic `cmd.exe` integration wraps the existing `PROMPT` (or cmd's
   `$P$G` default) to emit OSC 133 A/B prompt marks and OSC 9;9 cwd reports.
   When Clink is detected, noctty prepends its shipped Lua directory to
