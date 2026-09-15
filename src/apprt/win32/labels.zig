@@ -1399,6 +1399,31 @@ pub fn buildTabOverviewOverlayLabel(
     return try std.fmt.allocPrint(alloc, "Tab {d}/{d}", .{ current_index + 1, total });
 }
 
+/// The longest prefix of `text` that fits `limit` bytes without splitting
+/// a UTF-8 sequence.
+///
+/// For UI Automation names, which are converted to a `BSTR` and rejected
+/// outright if the conversion fails: a name that overflows its caller's
+/// buffer has to come back shortened, never empty, because the caller is
+/// usually a live region that is about to be announced.
+///
+/// Deliberately simpler than the back-off in `buildConfirmPreview`, which
+/// must not drag its cut through orphan continuation bytes because it is
+/// showing arbitrary payload bytes and reports how many it showed. Names
+/// come from strings this process built, so a plain walk is enough.
+pub fn utf8BoundedPrefix(text: []const u8, limit: usize) []const u8 {
+    if (text.len <= limit) return text;
+    var end = limit;
+    // A UTF-8 sequence is at most 4 bytes, so the lead byte is at most 3
+    // positions back.
+    var steps: usize = 0;
+    while (steps < 4 and end > 0) : (steps += 1) {
+        if ((text[end] & 0xC0) != 0x80) break;
+        end -= 1;
+    }
+    return text[0..end];
+}
+
 /// The prompt text carried by an active confirm overlay. Chrome paint
 /// renders these directly: a confirm prompt has no fixed wording, so the
 /// caller-supplied title and body are the only text that identifies what
@@ -1664,6 +1689,7 @@ pub fn buildOverlayFeedbackText(
     palette_presentation: PalettePresentation,
     confirm: ?ConfirmText,
 ) ![]u8 {
+    if (mode == .confirm) return try buildConfirmBodyText(alloc, banner_kind, banner_text, confirm);
     if (banner_text) |value| {
         return switch (banner_kind) {
             .err => try std.fmt.allocPrint(alloc, "Error: {s}", .{value}),
@@ -1690,6 +1716,36 @@ pub fn buildOverlayFeedbackText(
         pane_count,
         palette,
         mru,
+        confirm,
+    );
+}
+
+/// The confirm prompt's body line: the payload body plus its preview
+/// caption, or a live banner when one overrides it.
+///
+/// Both renderers of that line go through here. Chrome paint reaches it
+/// via `buildOverlayFeedbackText`; the body STATIC that carries the line
+/// for UI Automation calls it directly. Two independent spellings would
+/// let the name a screen reader reports drift from the text on screen,
+/// which is the failure this whole path exists to avoid.
+pub fn buildConfirmBodyText(
+    alloc: Allocator,
+    banner_kind: HostBannerKind,
+    banner_text: ?[]const u8,
+    confirm: ?ConfirmText,
+) ![]u8 {
+    if (banner_text) |value| return try buildHostBannerText(alloc, banner_kind, value);
+    return try buildOverlayHintText(
+        alloc,
+        .confirm,
+        "",
+        null,
+        null,
+        null,
+        .{},
+        1,
+        .{ .commands = &.{}, .cvals = &.{} },
+        &.{},
         confirm,
     );
 }
@@ -4373,6 +4429,104 @@ test "win32 confirm overlay falls back once its payload is dropped" {
     );
     defer std.testing.allocator.free(body);
     try std.testing.expectEqualStrings("", body);
+}
+
+test "win32 utf8BoundedPrefix never splits a codepoint" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings("abc", utf8BoundedPrefix("abc", 8));
+    try std.testing.expectEqualStrings("abc", utf8BoundedPrefix("abc", 3));
+    try std.testing.expectEqualStrings("ab", utf8BoundedPrefix("abc", 2));
+    try std.testing.expectEqualStrings("", utf8BoundedPrefix("abc", 0));
+
+    // "aé" is 3 bytes; a 2-byte limit lands mid-sequence and has to back
+    // off to 1 rather than hand back half a codepoint.
+    const accented = "a\u{e9}b";
+    try std.testing.expectEqualStrings("a", utf8BoundedPrefix(accented, 2));
+    try std.testing.expectEqualStrings("a\u{e9}", utf8BoundedPrefix(accented, 3));
+
+    // A 4-byte sequence, cut at every interior offset.
+    const emoji = "x\u{1f600}y";
+    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 2));
+    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 3));
+    try std.testing.expectEqualStrings("x", utf8BoundedPrefix(emoji, 4));
+    try std.testing.expectEqualStrings("x\u{1f600}", utf8BoundedPrefix(emoji, 5));
+
+    // Every result is valid UTF-8, which is what the BSTR conversion needs.
+    for (0..emoji.len + 2) |limit| {
+        try std.testing.expect(std.unicode.utf8ValidateSlice(utf8BoundedPrefix(emoji, limit)));
+    }
+}
+
+test "win32 confirm body text is the one the overlay feedback lane draws" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The confirm body STATIC reports its own window text as its UIA
+    // name, and chrome paint is still the fallback renderer for the same
+    // line. Both go through `buildConfirmBodyText`; if the two ever
+    // diverged a screen reader would narrate something the screen does
+    // not say, so pin the delegation rather than the strings.
+    const snap = PaletteSnapshot.fromDefaults();
+    const empty_mru: []const []const u8 = &.{};
+    const confirm: ConfirmText = .{
+        .title = "Allow clipboard paste?",
+        .body = "noctty needs confirmation before completing this clipboard paste or read request.",
+        .preview_caption = "3 bytes",
+    };
+
+    const cases = [_]struct { kind: HostBannerKind, text: ?[]const u8 }{
+        .{ .kind = .none, .text = null },
+        .{ .kind = .none, .text = "Plain notice" },
+        .{ .kind = .info, .text = "Heads up" },
+        .{ .kind = .err, .text = "Something went wrong" },
+    };
+    for (cases) |case| {
+        const direct = try buildConfirmBodyText(
+            std.testing.allocator,
+            case.kind,
+            case.text,
+            confirm,
+        );
+        defer std.testing.allocator.free(direct);
+        const painted = try buildOverlayFeedbackText(
+            std.testing.allocator,
+            case.kind,
+            case.text,
+            .confirm,
+            "",
+            null,
+            null,
+            null,
+            .{},
+            1,
+            snap,
+            empty_mru,
+            .{},
+            confirm,
+        );
+        defer std.testing.allocator.free(painted);
+        try std.testing.expectEqualStrings(painted, direct);
+    }
+
+    // No banner: body plus the preview caption, which is how the amount
+    // being approved stays visible when the pane only shows its head.
+    const plain = try buildConfirmBodyText(std.testing.allocator, .none, null, confirm);
+    defer std.testing.allocator.free(plain);
+    try std.testing.expectEqualStrings(
+        "noctty needs confirmation before completing this clipboard paste or read request.  (3 bytes)",
+        plain,
+    );
+
+    // A banner raised while the prompt is open takes the line, prefix and
+    // all, exactly as the painted lane did.
+    const banner = try buildConfirmBodyText(std.testing.allocator, .err, "Clipboard unavailable", confirm);
+    defer std.testing.allocator.free(banner);
+    try std.testing.expectEqualStrings("Error: Clipboard unavailable", banner);
+
+    // Mid-teardown the payload is already gone.
+    const dropped = try buildConfirmBodyText(std.testing.allocator, .none, null, null);
+    defer std.testing.allocator.free(dropped);
+    try std.testing.expectEqualStrings("", dropped);
 }
 
 test "win32 confirm overlay keeps banner precedence over the payload body" {
