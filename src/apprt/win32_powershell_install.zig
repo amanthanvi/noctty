@@ -63,7 +63,13 @@ pub const integration_script = @embedFile("../shell-integration/powershell/integ
 /// the version identifier so the installed file rewrites automatically
 /// when the script changes between builds.
 pub const integration_script_sha256: [32]u8 = blk: {
-    @setEvalBranchQuota(1_000_000);
+    // The quota scales with the script's length: Sha256 runs one comptime
+    // compression round per 64 bytes and each round is thousands of
+    // backwards branches. 1_000_000 was already exhausted at ~26 KiB, and
+    // the failure mode is a confusing `evaluation exceeded 1000000 backwards
+    // branches` pointing into std/crypto/sha2.zig from a build that only
+    // grew a comment in the .ps1. Keep generous headroom.
+    @setEvalBranchQuota(10_000_000);
     var buf: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(integration_script, &buf, .{});
     break :blk buf;
@@ -799,8 +805,8 @@ test "integration.ps1 honours the injected block scope" {
     }
     // Guard the guard: if either scan stops matching, everything above turns
     // vacuous. These are the live counts; bump them when the script grows.
-    try std.testing.expectEqual(@as(usize, 13), declarations);
-    try std.testing.expectEqual(@as(usize, 7), top_level_variables);
+    try std.testing.expectEqual(@as(usize, 17), declarations);
+    try std.testing.expectEqual(@as(usize, 9), top_level_variables);
     // Unbalanced braces here mean the tracker desynced (an unterminated
     // string, a here-string, nesting past the stack), which would silently
     // mis-classify every line after it.
@@ -847,11 +853,117 @@ test "integration.ps1 honours the injected block scope" {
         "__ghostty_write_osc",
         "__ghostty_encode_osc133_value",
         "__ghostty_encode_cwd_uri",
+        // PSReadLine calls this one through a `Func[string, object]` it
+        // built from a scriptblock we hand it at load time. The scriptblock
+        // outlives the injected `& { }` inside PSReadLine's options object,
+        // so if the function it calls is not global the handler throws
+        // CommandNotFoundException on the first accepted line and PSReadLine
+        // silently falls back to its default history decision.
+        "__ghostty_add_to_history",
+        "__ghostty_install_add_to_history_handler",
+        "__ghostty_ssh_wrapper_is_ours",
+        "__ghostty_line_is_being_accepted",
     }) |name| {
         var buf: [96]u8 = undefined;
         const decl = try std.fmt.bufPrint(&buf, "\nfunction global:{s} {{", .{name});
         try std.testing.expect(std.mem.indexOf(u8, integration_script, decl) != null);
     }
+}
+
+/// Does `integration.ps1` contain `needle` in CODE, ignoring whole-line `#`
+/// comments? The comments in that script quote the very constructs these tests
+/// assert are gone (`-CommandValidationHandler`, the old `Function:\global:ssh`
+/// path) in order to explain why they were removed, so a naive substring scan
+/// over the whole file could never go green.
+///
+/// Whole-line comments are enough here, and the test below keeps it that way.
+fn codeContains(needle: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, integration_script, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (std.mem.indexOf(u8, line, needle) != null) return true;
+    }
+    return false;
+}
+
+test "integration.ps1 keeps trailing comments off code lines" {
+    // `codeContains` only skips whole-line comments, so a trailing `#` on a
+    // code line would hide that code from it. Quotes are tracked because every
+    // OSC payload is a double-quoted string and `#` is legal inside one.
+    var lines = std.mem.splitScalar(u8, integration_script, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var in_single = false;
+        var in_double = false;
+        for (line) |c| {
+            if (in_single) {
+                if (c == '\'') in_single = false;
+                continue;
+            }
+            if (in_double) {
+                if (c == '"') in_double = false;
+                continue;
+            }
+            switch (c) {
+                '\'' => in_single = true,
+                '"' => in_double = true,
+                '#' => {
+                    std.debug.print(
+                        "integration.ps1 has a trailing comment on a code line: {s}\n",
+                        .{line},
+                    );
+                    return error.TrailingCommentOnCodeLine;
+                },
+                else => {},
+            }
+        }
+    }
+}
+
+test "integration.ps1 hooks OSC 133 C through AddToHistoryHandler" {
+    // PSReadLine invokes `CommandValidationHandler` from exactly one place,
+    // its `ValidateAndAcceptLine` function, and the default Enter binding on
+    // both pwsh 7 and Windows PowerShell 5.1 is `AcceptLine` -- so the old
+    // hook never fired for a user who had not rebound Enter and PowerShell
+    // emitted no OSC 133 C at all. `AddToHistoryHandler` runs for every
+    // accepted line whatever Enter is bound to, and runs before the host
+    // executes the line.
+    try std.testing.expect(codeContains("Set-PSReadLineOption -AddToHistoryHandler"));
+    // The old hook has to be gone rather than merely redundant: left
+    // registered, it would double-emit 133;C for the users who DO bind
+    // ValidateAndAcceptLine.
+    try std.testing.expect(!codeContains("-CommandValidationHandler"));
+    // Chaining is not optional. Both hosts ship a non-null default handler
+    // (PSReadLine's sensitive-history scrubber), so an unchained override
+    // would start writing to the history file the secrets it skips.
+    try std.testing.expect(codeContains("__ghostty_addtohistory_original"));
+    // The re-source identity check. The option is a `Func[string, object]`
+    // with no recoverable script text, so reference equality against the
+    // delegate we read back after installing is the only marker available.
+    try std.testing.expect(codeContains("[object]::ReferenceEquals"));
+    // PSReadLine 2.0.0 also calls the handler for every line it replays out of
+    // the history file (measured: 1790 invocations before a keypress on a
+    // fresh 5.1 session, plus lines other live sessions append), so the
+    // emission is gated on PSReadLine's own buffer matching the line we were
+    // handed. The chained handler still runs for every invocation.
+    try std.testing.expect(codeContains("GetBufferState"));
+    try std.testing.expect(codeContains("__ghostty_line_is_being_accepted $Line"));
+}
+
+test "integration.ps1 removes only an ssh wrapper it installed" {
+    // The unconditional `Remove-Item -Path Function:\ssh,Function:\global:ssh`
+    // that used to sit ahead of the feature check deleted a user's own
+    // profile-defined `ssh` on every launch, and `Function:\global:ssh` is not
+    // a valid provider path, so each launch also pushed two
+    // ItemNotFoundException records into `$Error`.
+    try std.testing.expect(!codeContains("Function:\\global:ssh"));
+    // Removal is gated on our own marker plus a flag that cannot be set on a
+    // first load, which is what makes it a re-source-only operation.
+    try std.testing.expect(codeContains("if (__ghostty_ssh_wrapper_is_ours) {"));
+    try std.testing.expect(codeContains("__ghostty_ssh_wrapper_marker"));
+    try std.testing.expect(codeContains("$Global:__ghostty_ssh_wrapper_installed = $true"));
 }
 
 test "escapeForPwshSingleQuote: empty string" {

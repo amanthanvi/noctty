@@ -17,6 +17,10 @@ function Assert-True {
 $script:OriginalPrompt = $function:global:prompt
 $script:OriginalOut = [Console]::Out
 $script:OriginalFeatures = $env:GHOSTTY_SHELL_FEATURES
+# PSReadLine is not auto-loaded in a non-interactive host, so this is $null
+# until the AddToHistoryHandler section below imports the module itself.
+$script:PSReadLineImported = $false
+$script:OriginalAddToHistoryHandler = $null
 $script:IntegrationPath = Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1'
 $script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ps-si-" + [guid]::NewGuid().ToString('n'))
 
@@ -98,7 +102,22 @@ try {
     $env:FAKE_SSH_CAPTURE = $fakeCapture
     $env:GHOSTTY_SHELL_FEATURES = 'ssh-env'
     . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
-    Assert-True ($null -ne (Get-Command ssh -CommandType Function -ErrorAction SilentlyContinue)) "ssh wrapper was not installed"
+    $installedSsh = Get-Command ssh -CommandType Function -ErrorAction SilentlyContinue
+    Assert-True ($null -ne $installedSsh) "ssh wrapper was not installed"
+    # The marker is what lets a re-source tell our wrapper apart from a
+    # user-defined `ssh`; without it the removal below is a no-op and the
+    # wrapper would stack.
+    Assert-True (([string]$installedSsh.ScriptBlock).Contains('__ghostty_ssh_wrapper_marker')) "ssh wrapper is missing the ownership marker"
+    Assert-True ([bool]$Global:__ghostty_ssh_wrapper_installed) "ssh wrapper install flag was not set"
+    Assert-True (__ghostty_ssh_wrapper_is_ours) "__ghostty_ssh_wrapper_is_ours did not recognise our own wrapper"
+
+    # Re-sourcing with the feature still on must REPLACE our wrapper, not
+    # stack a second one on top of it.
+    $errorsBeforeResource = $Error.Count
+    . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+    Assert-True ($Error.Count -eq $errorsBeforeResource) "Re-sourcing the integration script pushed records into `$Error"
+    Assert-True (@(Get-Command ssh -CommandType Function -ErrorAction SilentlyContinue).Count -eq 1) "Re-sourcing stacked more than one ssh wrapper"
+    Assert-True (__ghostty_ssh_wrapper_is_ours) "Re-sourced ssh wrapper lost the ownership marker"
 
     function __ghostty_find_command_application {
         param([string[]]$Names)
@@ -139,6 +158,157 @@ try {
 
     [Console]::SetOut($script:OriginalOut)
 
+    # ── OSC 133 C rides on PSReadLine's AddToHistoryHandler ──────────────
+    #
+    # It used to ride on `CommandValidationHandler`, which PSReadLine invokes
+    # only from its `ValidateAndAcceptLine` function. The default Enter
+    # binding on both pwsh 7 and Windows PowerShell 5.1 is `AcceptLine`, so
+    # that hook never fired for a user who had not rebound Enter and no OSC
+    # 133 C was emitted at all. `AddToHistoryHandler` runs for every accepted
+    # line whatever Enter is bound to, and runs before the host executes it.
+    #
+    # PSReadLine is not auto-loaded in a non-interactive host, so the module
+    # has to be imported explicitly here; that is also why every dot-source
+    # above installed no handler. Driving a real Enter keypress needs a real
+    # console, so this exercises the registered handler object directly --
+    # `(Get-PSReadLineOption).AddToHistoryHandler` is exactly what PSReadLine
+    # itself calls.
+    if ($null -ne (Get-Module PSReadLine -ListAvailable | Select-Object -First 1)) {
+        Import-Module PSReadLine -ErrorAction Stop
+        $script:PSReadLineImported = $true
+        $script:OriginalAddToHistoryHandler = (Get-PSReadLineOption).AddToHistoryHandler
+
+        # PSReadLine ships its own handler (the sensitive-history scrubber) on
+        # both 2.0.x and 2.4.x, so there is always something to chain to and
+        # an unchained override would silently start writing secrets to the
+        # history file.
+        Assert-True ($null -ne $script:OriginalAddToHistoryHandler) "PSReadLine was expected to ship a default AddToHistoryHandler"
+
+        # Stand in for a profile that installed its own handler.
+        $Global:__noctty_test_handler_lines = New-Object System.Collections.ArrayList
+        Set-PSReadLineOption -AddToHistoryHandler {
+            param([string]$Line)
+            [void]$Global:__noctty_test_handler_lines.Add($Line)
+            return [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly
+        }
+        $userHandler = (Get-PSReadLineOption).AddToHistoryHandler
+        Assert-True ($null -ne $userHandler) "Test handler was not registered"
+
+        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+        $nocttyHandler = (Get-PSReadLineOption).AddToHistoryHandler
+        Assert-True (-not [object]::ReferenceEquals($nocttyHandler, $userHandler)) "Integration did not install its own AddToHistoryHandler"
+
+        # ── Replayed history line ───────────────────────────────────────
+        #
+        # PSReadLine 2.0.0 (Windows PowerShell 5.1) calls AddToHistoryHandler
+        # for every line it replays out of the on-disk history file, not only
+        # for lines the user accepts -- measured at 1790 invocations before a
+        # keypress on a fresh session, plus lines other live sessions append.
+        # Those must produce no OSC 133 C, and must still reach the chained
+        # handler: suppressing the terminal report may not change the history
+        # decision. A non-interactive host has an empty PSReadLine buffer, so
+        # this invocation IS the replay shape.
+        $replayCapture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($replayCapture)
+        $replayResult = $nocttyHandler.Invoke('Get-Date')
+        [Console]::Out.Flush()
+        [Console]::SetOut($script:OriginalOut)
+        $replayOsc = $replayCapture.ToString()
+
+        Assert-True (-not $replayOsc.Contains(']133;C')) "A replayed history line emitted OSC 133 C: $($replayOsc -replace [char]27, '<ESC>')"
+        Assert-True ($Global:__noctty_test_handler_lines.Count -eq 1) "A replayed history line did not reach the chained handler"
+        Assert-True ($replayResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "A replayed history line did not return the chained result: $replayResult"
+
+        # The discriminator itself: PSReadLine's buffer must equal the line.
+        Assert-True (-not (__ghostty_line_is_being_accepted 'Get-Date')) "Discriminator accepted a line that is not in PSReadLine's buffer"
+        Assert-True (-not (__ghostty_line_is_being_accepted '')) "Discriminator matched an empty line against an empty buffer"
+
+        # ── Accepted line ───────────────────────────────────────────────
+        #
+        # A non-interactive host cannot put text in PSReadLine's buffer --
+        # `[Microsoft.PowerShell.PSConsoleReadLine]::Insert` throws
+        # NullReferenceException with no console attached, on both hosts -- so
+        # the accept shape is produced by overriding the discriminator. The
+        # real one is exercised directly above; everything below is about what
+        # the handler does once it has decided a line was accepted.
+        function global:__ghostty_line_is_being_accepted {
+            param([AllowNull()][string]$Line)
+            return $true
+        }
+
+        $handlerCapture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($handlerCapture)
+        $handlerResult = $nocttyHandler.Invoke("Get-ChildItem 'a;b'")
+        [Console]::Out.Flush()
+        [Console]::SetOut($script:OriginalOut)
+        $handlerOsc = $handlerCapture.ToString()
+
+        Assert-True ($handlerOsc.Contains("]133;C;aid=$PID;cmdline_url=Get-ChildItem%20%27a%3Bb%27")) "AddToHistoryHandler did not emit OSC 133 C with URL-encoded cmdline: $($handlerOsc -replace [char]27, '<ESC>')"
+        Assert-True ($Global:__noctty_test_handler_lines.Count -eq 2) "Pre-existing AddToHistoryHandler was not chained"
+        Assert-True ($Global:__noctty_test_handler_lines[1] -eq "Get-ChildItem 'a;b'") "Chained handler received the wrong line: $($Global:__noctty_test_handler_lines[1])"
+        # The chained handler's answer must reach PSReadLine unchanged, or the
+        # user's history policy silently changes -- PSReadLine's own default
+        # handler is the sensitive-history scrubber. A scriptblock-derived
+        # Func[string, object] returns the block's whole output collection, so
+        # this also catches a stray value on our handler's pipeline.
+        Assert-True ($handlerResult -is [Microsoft.PowerShell.AddToHistoryOption]) "Chained handler result was reshaped: $($handlerResult.GetType().FullName)"
+        Assert-True ($handlerResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "Chained handler result was not returned unchanged: $handlerResult"
+
+        # ── Re-source ───────────────────────────────────────────────────
+        #
+        # We must rebind to the SAVED original rather than chain to ourselves,
+        # or every accepted line would emit 133;C once per source.
+        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+        $resourcedHandler = (Get-PSReadLineOption).AddToHistoryHandler
+        function global:__ghostty_line_is_being_accepted {
+            param([AllowNull()][string]$Line)
+            return $true
+        }
+
+        $resourceCapture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($resourceCapture)
+        $resourcedResult = $resourcedHandler.Invoke('Get-Date')
+        [Console]::Out.Flush()
+        [Console]::SetOut($script:OriginalOut)
+        $resourcedOsc = $resourceCapture.ToString()
+
+        $cMarks = [regex]::Matches($resourcedOsc, [regex]::Escape(']133;C')).Count
+        Assert-True ($cMarks -eq 1) "Re-sourcing stacked the AddToHistoryHandler: $cMarks OSC 133 C marks for one line"
+        Assert-True ($Global:__noctty_test_handler_lines.Count -eq 3) "Re-sourced handler called the chained handler $($Global:__noctty_test_handler_lines.Count - 2) times for one line"
+        Assert-True ($Global:__noctty_test_handler_lines[2] -eq 'Get-Date') "Re-sourced handler passed the wrong line on: $($Global:__noctty_test_handler_lines[2])"
+        Assert-True ($resourcedResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "Re-sourced handler did not return the chained result unchanged: $resourcedResult"
+
+        # ── A predecessor that throws must fail CLOSED ──────────────────
+        #
+        # The predecessor is PSReadLine's sensitive-history scrubber unless a
+        # profile replaced it, so answering `$true` (== MemoryAndFile) when it
+        # throws would write to the on-disk history file a line it may have
+        # been about to hold back. MemoryOnly keeps the line usable in the
+        # session without persisting it.
+        Set-PSReadLineOption -AddToHistoryHandler {
+            param([string]$Line)
+            throw 'predecessor exploded'
+        }
+        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+        $throwingChainHandler = (Get-PSReadLineOption).AddToHistoryHandler
+        function global:__ghostty_line_is_being_accepted {
+            param([AllowNull()][string]$Line)
+            return $true
+        }
+
+        $throwCapture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($throwCapture)
+        $throwResult = $throwingChainHandler.Invoke('Connect-Thing -Token hunter2')
+        [Console]::Out.Flush()
+        [Console]::SetOut($script:OriginalOut)
+
+        Assert-True ($throwResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "A throwing chained handler must fail closed to MemoryOnly, got: $throwResult"
+        Assert-True ($throwCapture.ToString().Contains(']133;C')) "A throwing chained handler suppressed the OSC 133 C mark"
+
+
+        Remove-Variable -Name '__noctty_test_handler_lines' -Scope Global -ErrorAction SilentlyContinue
+    }
+
     # ── Injected-block scope contract (issue #231) ───────────────────────
     #
     # Everything above dot-sources integration.ps1 at THIS script's scope,
@@ -168,13 +338,15 @@ try {
     function Invoke-NocttyInjectedChild {
         param(
             [string]$Preamble,
+            [string]$Postamble,
             [string[]]$Lines = $null
         )
 
         if ($null -eq $Lines) { $Lines = $script:ChildInput }
         $payload = $Preamble +
             "function global:prompt { 'NOCTTYPROBE> ' }; " +
-            "& { `$__ghostty_utf8_console = `$false; . '$childQuotedPath' }"
+            "& { `$__ghostty_utf8_console = `$false; . '$childQuotedPath' }" +
+            $Postamble
         # `2>&1` on a native command produces ErrorRecords. Under Windows
         # PowerShell 5.1 with $ErrorActionPreference = 'Stop' (set at the top
         # of this file) that throws a RemoteException instead of landing in
@@ -232,11 +404,57 @@ try {
     Assert-True ($nativeOut.Contains(']133;D;0;')) "First prompt draw did not report exit 0 under StrictMode: $nativeShown"
     Assert-True ($nativeOut.Contains(']133;D;7;')) "Native exit code did not reach OSC 133 D under StrictMode: $nativeShown"
 
+    # ── A user's own `ssh` must survive a launch that installs no wrapper ──
+    #
+    # The profile runs BEFORE noctty's injected -Command, so a
+    # `function ssh { ... }` the user defined there is already in the global
+    # scope when we load. The old unconditional
+    # `Remove-Item -Path Function:\ssh,Function:\global:ssh` deleted it on
+    # every launch, feature or not, and `Function:\global:ssh` is not a valid
+    # provider path so the same line pushed two ItemNotFoundException records
+    # into `$Error` (measured: `$Error.Count` 0 -> 2 on both hosts).
+    #
+    # Run in a real child so the preamble's `ssh` is a genuine pre-existing
+    # global rather than a leftover of this harness's own state.
+    # `$Error.Count` is sampled in the postamble, immediately after the
+    # dot-source returns. Sampling it from a stdin line instead would also
+    # count the host's own `PSConsoleReadLine::ReadLine ... Specified method is
+    # not supported` record, which this harness provokes by piping stdin into
+    # an interactive host and which has nothing to do with the script.
+    $userSshOut = Invoke-NocttyInjectedChild `
+        -Preamble 'function global:ssh { ''USER-SSH-PRESERVED'' }; $Error.Clear(); ' `
+        -Postamble '; $Global:__noctty_load_errors = $Error.Count' `
+        -Lines @(
+            '"ERR" + "COUNT=" + $Global:__noctty_load_errors',
+            'if ((ssh) -eq "USER-SSH-PRESERVED") { "USER" + "-SSH-SURVIVED" }',
+            'exit'
+        )
+    $userSshShown = $userSshOut -replace [char]27, '<ESC>'
+    Assert-True ($userSshOut.Contains('USER-SSH-SURVIVED')) "Loading with no ssh-* feature destroyed the user's own ssh function: $userSshShown"
+    Assert-True ($userSshOut.Contains('ERRCOUNT=0')) "Loading polluted `$Error: $userSshShown"
+
+    # With the feature on we DO install a wrapper, and it must be ours rather
+    # than the user's function left in place.
+    $wrapperOut = Invoke-NocttyInjectedChild `
+        -Preamble "`$env:GHOSTTY_SHELL_FEATURES = 'ssh-env'; `$Error.Clear(); " `
+        -Postamble '; $Global:__noctty_load_errors = $Error.Count' `
+        -Lines @(
+            '"ERR" + "COUNT=" + $Global:__noctty_load_errors',
+            'if (([string](Get-Command ssh -CommandType Function).ScriptBlock).Contains("__ghostty_ssh_wrapper_marker")) { "WRAPPER" + "-INSTALLED" }',
+            'exit'
+        )
+    $wrapperShown = $wrapperOut -replace [char]27, '<ESC>'
+    Assert-True ($wrapperOut.Contains('WRAPPER-INSTALLED')) "ssh-env did not install the noctty ssh wrapper in a real child: $wrapperShown"
+    Assert-True ($wrapperOut.Contains('ERRCOUNT=0')) "Installing the ssh wrapper polluted `$Error: $wrapperShown"
+
     Write-Output 'PASS powershell shell integration'
 } finally {
     [Console]::SetOut($script:OriginalOut)
     Pop-Location -ErrorAction SilentlyContinue
     $function:global:prompt = $script:OriginalPrompt
+    if ($script:PSReadLineImported) {
+        Set-PSReadLineOption -AddToHistoryHandler $script:OriginalAddToHistoryHandler
+    }
     if ($null -eq $script:OriginalFeatures) {
         Remove-Item Env:GHOSTTY_SHELL_FEATURES -ErrorAction SilentlyContinue
     } else {

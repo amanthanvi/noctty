@@ -160,9 +160,31 @@ The PowerShell script emits OSC 7 as a full `file://` URI with each path
 segment percent-encoded, and OSC 133 A / B / D prompt marks with a stable
 `aid=$PID`, wrapped around whatever `prompt` the profile installed. The
 command-start mark (OSC 133 C, with URL-encoded `cmdline_url` metadata) rides
-on PSReadLine's `CommandValidationHandler`, which only `ValidateAndAcceptLine`
-invokes; since the default Enter binding is `AcceptLine`, it is not emitted
-unless the user rebinds Enter.
+on PSReadLine's `AddToHistoryHandler`, which PSReadLine invokes for every
+accepted line whatever Enter is bound to, and invokes before the host executes
+the line. It used to ride on `CommandValidationHandler`, which only
+`ValidateAndAcceptLine` invokes; since the default Enter binding is
+`AcceptLine`, no OSC 133 C was emitted at all unless the user had rebound
+Enter. Both command-palette actions that need a C mark — copying the last
+completed command output and inserting the last recoverable command —
+therefore now work by default on PowerShell.
+
+The integration chains to whatever `AddToHistoryHandler` was already installed
+and returns its answer unchanged rather than replacing it. PSReadLine always
+has one: 2.4.x and 2.0.x both ship a default handler that keeps
+credential-shaped lines out of the on-disk history file, so an unchained
+override would start writing secrets there. Re-sourcing the script rebinds to
+the saved original instead of chaining to itself, so the mark is never
+duplicated. On PSReadLine 2.0.x (Windows PowerShell 5.1) the handler is also
+called for every line replayed from the shared `ConsoleHost_history.txt` and
+for lines other live sessions append; OSC 133 C is emitted only when
+PSReadLine's edit buffer matches the line, so those replays reach the chained
+handler without producing a command mark.
+
+The `ssh` wrapper below is installed only when an `ssh-*` feature is enabled,
+and only a wrapper this script installed is ever removed — a `function ssh`
+defined in the user's `$PROFILE` (which runs before noctty's injected
+`-Command`) is left alone.
 
 When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
 wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
