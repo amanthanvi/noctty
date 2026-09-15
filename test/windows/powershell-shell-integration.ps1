@@ -339,11 +339,21 @@ try {
         param(
             [string]$Preamble,
             [string]$Postamble,
-            [string[]]$Lines = $null
+            [string[]]$Lines = $null,
+            [switch]$WithoutPSReadLine
         )
 
         if ($null -eq $Lines) { $Lines = $script:ChildInput }
-        $payload = $Preamble +
+        # PSReadLine's ReadLine is unsupported when stdin is a pipe rather
+        # than a console, and PowerShell records that failure in $Error once
+        # per prompt. Children that read $Error have to drop it; see the
+        # OSC 133 D cases below. `Ignore` rather than `SilentlyContinue` so
+        # a child without PSReadLine does not start with a record of its own
+        # in $Error.
+        $prefix = if ($WithoutPSReadLine) {
+            'Remove-Module PSReadLine -Force -ErrorAction Ignore; '
+        } else { '' }
+        $payload = $prefix + $Preamble +
             "function global:prompt { 'NOCTTYPROBE> ' }; " +
             "& { `$__ghostty_utf8_console = `$false; . '$childQuotedPath' }" +
             $Postamble
@@ -446,6 +456,115 @@ try {
     $wrapperShown = $wrapperOut -replace [char]27, '<ESC>'
     Assert-True ($wrapperOut.Contains('WRAPPER-INSTALLED')) "ssh-env did not install the noctty ssh wrapper in a real child: $wrapperShown"
     Assert-True ($wrapperOut.Contains('ERRCOUNT=0')) "Installing the ssh wrapper polluted `$Error: $wrapperShown"
+
+    # ── OSC 133 D disambiguation (CodeRabbit on #237) ────────────────────
+    #
+    # Comparing $LASTEXITCODE against the previous prompt's snapshot cannot
+    # tell a repeated native failure from a cmdlet failure that followed a
+    # native one: both leave $? false and $LASTEXITCODE untouched. `cmd /c
+    # exit 5` run twice used to mark D;5 and then D;1. `prompt` now also
+    # consults the head of $Error, and each case below pins one arm of that
+    # decision on the real injected argv.
+    #
+    # PSReadLine must be unloaded in these children, and only in these. Its
+    # ReadLine throws NotSupportedException when stdin is a pipe instead of
+    # a console, and PowerShell records that MethodInvocationException in
+    # $Error once PER PROMPT — landing between our end-of-prompt snapshot
+    # and the user's next command, which is exactly the window the signal
+    # reads. A real noctty session is a ConPTY, where PSReadLine reads fine
+    # and records nothing; measured through a live pseudo console on both
+    # hosts, every sequence below holds with PSReadLine loaded. Asserting
+    # the piped-stdin behaviour instead would pin an artifact of the rig.
+    foreach ($case in @(
+        # The regression: the second failure must still report 5, not 1.
+        @{ Name = 'repeated native failure'
+           Pre = ''
+           Lines = @('cmd /c exit 5', 'cmd /c exit 5')
+           Expect = @(0, 5, 5) }
+        # The behaviour that forced the old stale-code rule: a cmdlet
+        # failure must not inherit the native code lying around.
+        @{ Name = 'cmdlet failure after native failure'
+           Pre = ''
+           Lines = @('cmd /c exit 5', 'Get-Item C:\nope')
+           Expect = @(0, 5, 1) }
+        @{ Name = 'native success after native failure'
+           Pre = ''
+           Lines = @('cmd /c exit 5', 'cmd /c exit 0')
+           Expect = @(0, 5, 0) }
+        @{ Name = 'throw after native failure'
+           Pre = ''
+           Lines = @('cmd /c exit 5', "throw 'x'")
+           Expect = @(0, 5, 1) }
+        @{ Name = 'successful cmdlet after native failure'
+           Pre = ''
+           Lines = @('cmd /c exit 5', 'Get-Date | Out-Null')
+           Expect = @(0, 5, 0) }
+        # Reading $Error and indexing it must stay StrictMode-safe.
+        @{ Name = 'native failure under StrictMode'
+           Pre = 'Set-StrictMode -Version Latest; '
+           Lines = @('cmd /c exit 7')
+           Expect = @(0, 7) }
+        # `$Error.Clear()` empties the ArrayList, so the head goes null
+        # rather than changing. That is "nothing new failed", not "a
+        # PowerShell error happened", and `$Error[0]` must not be indexed.
+        @{ Name = 'repeated native failure across $Error.Clear()'
+           Pre = ''
+           Lines = @('cmd /c exit 5', '$Error.Clear()', 'cmd /c exit 5')
+           Expect = @(0, 5, 0, 5) }
+        # A failure deserialized out of a job carries a RemoteException,
+        # which is also the exception on the `NativeCommandError` record
+        # Windows PowerShell 5.1 makes from a native command's redirected
+        # stderr. Classifying by exception type alone therefore called this
+        # native and re-reported 5; the FullyQualifiedErrorId here is the
+        # job's own (`x`), so it must stay a PowerShell-level failure.
+        @{ Name = 'job failure after native failure'
+           Pre = ''
+           Lines = @('cmd /c exit 5', "Start-Job { throw 'x' } | Wait-Job | Receive-Job")
+           Expect = @(0, 5, 1) }
+        # `$ErrorActionPreference = 'Stop'` makes PowerShell push an
+        # ActionPreferenceStopException AHEAD of the record it stopped on,
+        # and it is not an ErrorRecord. With
+        # $PSNativeCommandUseErrorActionPreference also on, that wrapper is
+        # what hides the ProgramExitedWithNonZeroCode underneath it, so the
+        # classifier has to unwrap `.ErrorRecord` or a repeated native
+        # failure reports 1 again. (5.1 has no such preference; the
+        # assignment is inert there and the case still exercises `Stop`.)
+        @{ Name = 'repeated native failure under ErrorActionPreference Stop'
+           Pre = '$PSNativeCommandUseErrorActionPreference = $true; $ErrorActionPreference = ''Stop''; '
+           Lines = @('cmd /c exit 5', 'cmd /c exit 5')
+           Expect = @(0, 5, 5) }
+        # StrictMode AND an empty $Error at the same time: `$Error[0]` is an
+        # out-of-range ArrayList index there, which StrictMode 3.0+ turns
+        # into a terminating error. `__ghostty_error_head` catches it, so
+        # the marks alone cannot see the missing `.Count` guard — but the
+        # caught exception is itself recorded, so the count can. The last
+        # line reports what the user would see; the token is assembled at
+        # runtime so it cannot match the child's echo of the line itself.
+        @{ Name = 'prompt leaves $Error alone under StrictMode'
+           Pre = 'Set-StrictMode -Version Latest; '
+           Lines = @('cmd /c exit 5', '$Error.Clear()', 'cmd /c exit 5',
+                     '("ERR" + "COUNT=") + $Error.Count')
+           Expect = @(0, 5, 0, 5, 0)
+           ErrorCount = 0 }
+    )) {
+        $childOut = Invoke-NocttyInjectedChild `
+            -Preamble $case.Pre `
+            -Lines (@($case.Lines) + @('exit')) `
+            -WithoutPSReadLine
+        $shown = $childOut -replace [char]27, '<ESC>'
+        $marks = @([regex]::Matches($childOut, ']133;D;(\d+);') |
+            ForEach-Object { [int]$_.Groups[1].Value })
+        $where = "[$($case.Name)]"
+        Assert-True ((($marks) -join ',') -eq (($case.Expect) -join ',')) `
+            "$where OSC 133 D sequence was $($marks -join ','), expected $($case.Expect -join ','): $shown"
+        Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
+        if ($case.ContainsKey('ErrorCount')) {
+            $counted = [regex]::Match($childOut, 'ERRCOUNT=(\d+)')
+            Assert-True ($counted.Success) "$where Child never reported the error count: $shown"
+            Assert-True ([int]$counted.Groups[1].Value -eq $case.ErrorCount) `
+                "$where Prompt left $($counted.Groups[1].Value) record(s) in the child's error list, expected $($case.ErrorCount): $shown"
+        }
+    }
 
     Write-Output 'PASS powershell shell integration'
 } finally {

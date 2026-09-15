@@ -186,6 +186,47 @@ and only a wrapper this script installed is ever removed — a `function ssh`
 defined in the user's `$PROFILE` (which runs before noctty's injected
 `-Command`) is left alone.
 
+The exit code carried by OSC 133 D is derived without ever writing to
+`$LASTEXITCODE`, which users read. PowerShell only updates that variable for
+native executables and scripts and never clears it, while `$?` goes false for
+any failure, so the prompt combines three readings taken at the top of each
+draw: `$?`, `$LASTEXITCODE` against the value snapshotted at the end of the
+previous draw, and the head of `$Error` against its own snapshot.
+
+When `$?` is true, a changed `$LASTEXITCODE` is reported and an unchanged one
+means `0`. When `$?` is false and `$LASTEXITCODE` changed to a nonzero value,
+the new code is reported. When `$?` is false and `$LASTEXITCODE` either did
+not change or changed to `0`, `$Error` decides: a new record that is not native-sourced means a cmdlet, script,
+`throw` or `Write-Error` failure and the mark is `1`, while no new record
+means the native command failed again with the same code and that code is
+reported. A failure with no nonzero code to report anywhere is marked `1`.
+
+"Native-sourced" is decided by `FullyQualifiedErrorId`:
+`ProgramExitedWithNonZeroCode` (a nonzero exit under
+`$PSNativeCommandUseErrorActionPreference` on PowerShell 7.4+),
+`NativeCommandError` / `NativeCommandErrorMessage` / `NativeCommandFailed`
+(Windows PowerShell 5.1 turning a native command's redirected stderr into a
+record). Deliberately not by exception type: the 5.1 stderr record's exception
+is a `RemoteException`, which is also what every failure deserialized out of a
+job or a remote session carries. Entries that are not `ErrorRecord`s are
+unwrapped one level through `.ErrorRecord` first, because
+`$ErrorActionPreference = 'Stop'` pushes an `ActionPreferenceStopException`
+ahead of the record it stopped on.
+
+Known limits, all measured on both hosts. Where the mark is wrong it is wrong
+in the direction of repeating the previous command's real exit code, so it
+still reads as a failure:
+
+- A command silenced with `-ErrorAction Ignore` records nothing anywhere, so
+  it is reported with the stale native code rather than `1`.
+- PowerShell does not reset `$?` for an empty command line, so pressing Enter
+  after a failed native command re-reports its code.
+- Ctrl-C at the prompt is not distinguished from the previous failure.
+- `$?` does not propagate out of a function, `& { }`, `. { }` or
+  `Invoke-Expression`, and Windows PowerShell 5.1 leaves it true for a parse
+  error, so `function f { cmd /c exit 5 }; f` marks `0`. These take the
+  `$?`-true path, where `$Error` is not consulted at all.
+
 When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
 wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
 `ssh-env` also sends `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`

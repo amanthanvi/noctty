@@ -88,6 +88,108 @@ function global:__ghostty_read_global {
     return (Get-Variable -Name $Name -Scope Global -ValueOnly -ErrorAction Ignore)
 }
 
+# ── Reading the head of $Error safely ──────────────────────────────────
+# $Error itself always exists, so an unset-variable read is not the hazard
+# here; the index is. Under StrictMode 3.0+ (which `-Version Latest` selects)
+# an out-of-range index is an error, so `$Error[0]` on an EMPTY $Error throws
+# ArgumentOutOfRangeException on both hosts — and the throw is itself
+# recorded in $Error, so even swallowing it leaves a record where the user
+# had none. Without StrictMode the same expression quietly yields $null.
+# Guard on .Count and the behaviour is the same either way.
+#
+# We keep the head RECORD, never the count. $Error is capped at
+# $MaximumErrorCount (256 on Windows PowerShell 5.1), so past the cap the
+# count stops growing while the head keeps changing; and the user may run
+# `$Error.Clear()`, which drops the count back to 0 while nothing failed.
+# An ErrorRecord is a fresh object per failure, so reference identity of the
+# head is the reliable "did anything new get recorded" signal.
+function global:__ghostty_error_head {
+    try {
+        if ($Error.Count -gt 0) { return $Error[0] }
+    } catch {
+        # A host that reshapes $Error is not evidence of an error.
+    }
+    return $null
+}
+
+# ── Telling a native failure from a PowerShell-level one ────────────────
+# Records that a NATIVE command pushed onto $Error, which must not be read
+# as "a cmdlet/script failed". Two known producers, both measured:
+#
+#   * pwsh 7.4+ with $PSNativeCommandUseErrorActionPreference $true (it is
+#     $false by default, including on 7.6) records a nonzero exit as
+#     NativeCommandExitException / `ProgramExitedWithNonZeroCode`.
+#   * Windows PowerShell 5.1 turns a native command's redirected stderr
+#     into a `NativeCommandError` record (its exception is a
+#     RemoteException). pwsh 7 does not.
+#
+# Matched by FullyQualifiedErrorId, plus NativeCommandExitException by type
+# NAME rather than by type identity — that type does not exist on Windows
+# PowerShell 5.1, where a `[NativeCommandExitException]` literal parses and
+# dot-sources fine but throws `Unable to find type` every time the function
+# is CALLED, i.e. on every prompt draw.
+#
+# Deliberately NOT matched: RemoteException on its own. It is the exception
+# of the 5.1 stderr record above, but it is also what every failure
+# deserialized out of a job or a remote session carries, keeping its own
+# error id — `Start-Job { throw 'x' } | Receive-Job` yields a
+# RemotingErrorRecord whose exception is a RemoteException and whose
+# FullyQualifiedErrorId is `jobfail`, on both hosts. Treating that as native
+# would report a stale native code for a PowerShell-level failure. The
+# `NativeCommandError` id already covers the case that matters.
+function global:__ghostty_is_native_error {
+    param($Record)
+    if ($null -eq $Record) { return $false }
+    # $Error does not hold only ErrorRecords, and the two other shapes that
+    # turn up want opposite answers:
+    #
+    #   * A parse error typed at the prompt is stored as a bare
+    #     ParseException (both hosts) — a PowerShell-level failure.
+    #   * Under `$ErrorActionPreference = 'Stop'` PowerShell pushes an
+    #     ActionPreferenceStopException AHEAD of the record it stopped on.
+    #     With $PSNativeCommandUseErrorActionPreference also $true, that
+    #     wrapper hides a perfectly good ProgramExitedWithNonZeroCode and a
+    #     repeated native failure got mis-reported as 1.
+    #
+    # Unwrap one level through `.ErrorRecord`, which both shapes inherit
+    # from RuntimeException, and classify what comes out — a ParseException
+    # unwraps to a non-native record, so it still reads as a PowerShell
+    # failure. `$x.PSObject.Properties[...]` yields $null for an absent
+    # property instead of throwing under StrictMode.
+    if (-not ($Record -is [System.Management.Automation.ErrorRecord])) {
+        $unwrapped = $null
+        try {
+            if ($null -ne $Record.PSObject.Properties['ErrorRecord']) {
+                $unwrapped = $Record.ErrorRecord
+            }
+        } catch {
+            $unwrapped = $null
+        }
+        if (-not ($unwrapped -is [System.Management.Automation.ErrorRecord])) {
+            return $false
+        }
+        $Record = $unwrapped
+    }
+    try {
+        $fqid = [string]$Record.FullyQualifiedErrorId
+        if ($fqid -eq 'ProgramExitedWithNonZeroCode' -or
+            $fqid -eq 'NativeCommandError' -or
+            $fqid -eq 'NativeCommandErrorMessage' -or
+            $fqid -eq 'NativeCommandFailed') {
+            return $true
+        }
+        $exception = $Record.Exception
+        if ($null -ne $exception -and
+            $exception.GetType().Name -eq 'NativeCommandExitException') {
+            return $true
+        }
+    } catch {
+        # An unexpected record shape is not evidence of a native failure.
+        return $false
+    }
+    return $false
+}
+
 # ── Idempotent guard: save original prompt once ──────────────────────────
 if ($null -eq (__ghostty_read_global '__ghostty_aid')) {
     $Global:__ghostty_aid = [string]$PID
@@ -95,10 +197,14 @@ if ($null -eq (__ghostty_read_global '__ghostty_aid')) {
 
 if ($null -eq (__ghostty_read_global '__ghostty_original_prompt')) {
     $Global:__ghostty_original_prompt = $function:global:prompt
-    # Previous-prompt snapshot of $LASTEXITCODE. We compare against this
-    # each prompt tick so a stale native exit code from an earlier
-    # pipeline can't masquerade as the current command's exit status.
+    # Previous-prompt snapshots, both re-taken at the END of every prompt.
+    # $LASTEXITCODE is compared so a stale native exit code from an earlier
+    # pipeline can't masquerade as the current command's exit status; the
+    # head of $Error is compared so a repeated native failure can be told
+    # apart from a cmdlet failure that left $LASTEXITCODE untouched. See
+    # `prompt` for why one signal alone is not enough.
     $Global:__ghostty_prev_exitcode = __ghostty_read_global 'LASTEXITCODE'
+    $Global:__ghostty_prev_error = __ghostty_error_head
 }
 
 function global:__ghostty_write_osc {
@@ -384,9 +490,38 @@ function global:prompt {
     # pipeline — e.g. `cmd /c exit 5; Get-Item missing` would double-
     # emit OSC 133;D;5.
     #
-    # The fix is to compare $LASTEXITCODE against the value we snapshot
-    # at the END of the previous prompt. If it didn't change, the slot
-    # is stale and must be ignored.
+    # Comparing $LASTEXITCODE against the value snapshotted at the END of
+    # the previous prompt separates a fresh code from a stale one — but
+    # only when the code CHANGED. Two native commands failing with the
+    # same code are indistinguishable from a cmdlet failing after a native
+    # one on that signal alone: both leave $? false and $LASTEXITCODE
+    # untouched, so `cmd /c exit 5` twice reported 5 and then 1 (#237).
+    #
+    # $Error breaks the tie. A cmdlet / script / `throw` / `Write-Error`
+    # failure always pushes an ErrorRecord; a native command's nonzero
+    # exit does not (measured on Windows PowerShell 5.1 and on pwsh 7.6,
+    # whose $PSNativeCommandUseErrorActionPreference defaults to $false),
+    # and the records native commands DO push are recognised by
+    # __ghostty_is_native_error. So when $? is false:
+    #
+    #   * head of $Error is a new, non-native record → PowerShell-level
+    #     failure: report $LASTEXITCODE only if it changed and is nonzero,
+    #     else 1.
+    #   * otherwise → native failure: report $LASTEXITCODE whenever it is
+    #     nonzero, changed or not.
+    #
+    # Two measured limits, both of which report a stale-but-real native
+    # code where the old rule reported a synthetic 1, so the mark still
+    # reads as a failure either way:
+    #
+    #   * A command silenced with `-ErrorAction Ignore` leaves $? false and
+    #     pushes nothing, so it lands in the native arm.
+    #   * PowerShell does not reset $? for an EMPTY command line, so
+    #     pressing Enter after a failed native command re-reports its code
+    #     instead of 1.
+    #
+    # Resetting $LASTEXITCODE here to remove the ambiguity is not an
+    # option: users read it.
     #
     # $? MUST stay the first statement: every later call resets it.
     # Everything after it reads through __ghostty_read_global so a
@@ -396,19 +531,45 @@ function global:prompt {
     $code = 0
     $original_prompt = $null
     try {
+        # Read the head FIRST, before any other helper. This used to be
+        # load-bearing: __ghostty_read_global asked for -ErrorAction
+        # SilentlyContinue, which still APPENDS to $Error, and
+        # $LASTEXITCODE is legitimately unset in a session that has run no
+        # native command — so our own VariableNotFound record landed on top
+        # of the user's and every native failure read as a PowerShell one.
+        # That helper now uses -ErrorAction Ignore, but keeping this read
+        # first means no later change over there can silently do it again.
+        $error_head = __ghostty_error_head
+        $prev_error = __ghostty_read_global '__ghostty_prev_error'
         $original_prompt = __ghostty_read_global '__ghostty_original_prompt'
         $last_exitcode = __ghostty_read_global 'LASTEXITCODE'
         $exit_changed = ($last_exitcode -ne (__ghostty_read_global '__ghostty_prev_exitcode'))
-        $code = if (-not $ok) {
+        # A null head means $Error is empty, so no record survived and
+        # there is no new PowerShell-level failure to report. That is also
+        # how a user's `$Error.Clear()` between prompts lands here.
+        $ps_error = ($null -ne $error_head) -and
+            (-not [object]::ReferenceEquals($error_head, $prev_error)) -and
+            (-not (__ghostty_is_native_error $error_head))
+        $code = if ($ok) {
+            if ($exit_changed -and $null -ne $last_exitcode) {
+                $last_exitcode
+            } else { 0 }
+        } elseif ($ps_error) {
             # Cmdlet / script-block / `throw` failure. Honour a fresh
             # native exit code from the same pipeline; otherwise
             # synthesise 1 so OSC 133 D carries the failure signal.
             if ($exit_changed -and $null -ne $last_exitcode -and $last_exitcode -ne 0) {
                 $last_exitcode
             } else { 1 }
-        } elseif ($exit_changed -and $null -ne $last_exitcode) {
-            $last_exitcode
-        } else { 0 }
+        } else {
+            # Native failure. The code is authoritative even when it
+            # repeats the previous command's, which is the whole point of
+            # consulting $Error: `$exit_changed` is false for the second of
+            # two `cmd /c exit 5`.
+            if ($null -ne $last_exitcode -and $last_exitcode -ne 0) {
+                $last_exitcode
+            } else { 1 }
+        }
     } catch {
         # Report an unknown status rather than losing the prompt.
         $code = 0
@@ -474,6 +635,20 @@ function global:prompt {
         __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
     } catch {
         # See above: never let a reporting failure eat the user's prompt.
+    }
+
+    # Re-snapshot the head of $Error LAST — after the user's prompt and
+    # after every one of our own guards. A caught exception is still
+    # recorded in $Error, so a snapshot taken any earlier would leave one of
+    # OUR records, or one the user's own prompt caused, looking like the
+    # user's next failure. Anything the host pushes after this point (a
+    # PSReadLine whose ReadLine is unsupported on a redirected stdin, a
+    # module's background work) only degrades this to the pre-existing
+    # behaviour of reporting 1 for a repeated native failure, never worse.
+    try {
+        $Global:__ghostty_prev_error = __ghostty_error_head
+    } catch {
+        # See above: never let our bookkeeping eat the user's prompt.
     }
 
     return $out

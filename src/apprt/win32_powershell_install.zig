@@ -65,11 +65,13 @@ pub const integration_script = @embedFile("../shell-integration/powershell/integ
 pub const integration_script_sha256: [32]u8 = blk: {
     // The quota scales with the script's length: Sha256 runs one comptime
     // compression round per 64 bytes and each round is thousands of
-    // backwards branches. 1_000_000 was already exhausted at ~26 KiB, and
-    // the failure mode is a confusing `evaluation exceeded 1000000 backwards
-    // branches` pointing into std/crypto/sha2.zig from a build that only
-    // grew a comment in the .ps1. Keep generous headroom.
-    @setEvalBranchQuota(10_000_000);
+    // backwards branches, measured at roughly 50 per input byte. A FIXED
+    // quota silently becomes a build error the moment the script grows past
+    // it -- 1_000_000 was exhausted at ~26 KiB, and the failure mode is a
+    // confusing `evaluation exceeded 1000000 backwards branches` pointing
+    // into std/crypto/sha2.zig from a build that only grew a comment in the
+    // .ps1. Derive it from the input, with a generous floor.
+    @setEvalBranchQuota(@max(10_000_000, integration_script.len * 256));
     var buf: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(integration_script, &buf, .{});
     break :blk buf;
@@ -805,8 +807,8 @@ test "integration.ps1 honours the injected block scope" {
     }
     // Guard the guard: if either scan stops matching, everything above turns
     // vacuous. These are the live counts; bump them when the script grows.
-    try std.testing.expectEqual(@as(usize, 17), declarations);
-    try std.testing.expectEqual(@as(usize, 9), top_level_variables);
+    try std.testing.expectEqual(@as(usize, 19), declarations);
+    try std.testing.expectEqual(@as(usize, 10), top_level_variables);
     // Unbalanced braces here mean the tracker desynced (an unterminated
     // string, a here-string, nesting past the stack), which would silently
     // mis-classify every line after it.
