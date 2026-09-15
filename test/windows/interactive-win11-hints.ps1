@@ -929,6 +929,15 @@ try {
     }
     $allow = $script:allow
     [void](Get-HintsButtonInvokePattern -Element $allow -Description 'Protected-paste Allow control')
+    # Cancel gets the same check. Dismissing with Escape never reaches
+    # this control's WM_GETOBJECT, so without asserting the pattern here a
+    # Cancel button with no provider -- or a generic one -- would pass the
+    # whole scenario unnoticed.
+    $cancelHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Cancel', $true)
+    if ($cancelHwnd -eq [IntPtr]::Zero) { throw 'Protected-paste Cancel control is absent.' }
+    $cancel = [System.Windows.Automation.AutomationElement]::FromHandle($cancelHwnd)
+    $cancelInvoke = Get-HintsButtonInvokePattern -Element $cancel `
+        -Description 'Protected-paste Cancel control'
 
     # The prompt's own heading and body. Before they were exposed, a
     # screen-reader user reached Allow / Cancel and the payload preview
@@ -955,6 +964,31 @@ try {
     if ($confirmBody.bounds.top -lt $confirmTitle.bounds.top + $confirmTitle.bounds.height) {
         throw 'Protected-paste confirm body overlaps its title.'
     }
+    # Cancel through the Invoke pattern first: that is the path assistive
+    # technology takes, and it is the only one that exercises the
+    # provider end to end.
+    $cancelInvoke.Invoke()
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation dismissed by Cancel Invoke' -Process $process -Condition {
+        [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -eq [IntPtr]::Zero
+    }
+    if (@(Get-HintsInputEvents -Path $unsafeInputPath).Count -ne 0) {
+        throw 'Protected paste cancelled through Invoke reached the PTY.'
+    }
+
+    Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
+        -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen unsafe-paste quick select after Invoke cancel'
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay after Invoke cancel' -Process $process -Condition {
+        [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+    }
+    $escapeQuickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $escapeQuickHwnd `
+        -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste for the Escape round'
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation before Escape' -Process $process -Condition {
+        [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -ne [IntPtr]::Zero
+    }
+
+    # And through the keyboard, which is a separate handler in
+    # `hostButtonProc` and is non-negotiable for a modal-ish overlay.
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -Keys @([uint16]0x1B) -Description 'cancel protected paste'
     Start-Sleep -Milliseconds 400
     if (@(Get-HintsInputEvents -Path $unsafeInputPath).Count -ne 0) { throw 'Cancelled protected paste reached the PTY.' }
@@ -997,6 +1031,9 @@ try {
     $evidence.protected_paste = [ordered]@{
         confirmation_name = 'Allow'
         invoke_pattern = $true
+        cancel_control_name = 'Cancel'
+        cancel_invoke_pattern = $true
+        cancel_invoke_suppressed_pty = $true
         cancel_suppressed_pty = $true
         accepted_key_count = $unsafeEvents.Count
         accepted_contains_carriage_return = @($unsafeEvents | Where-Object { $_.char -eq 13 }).Count -ge 1

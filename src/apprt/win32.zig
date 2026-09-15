@@ -15239,22 +15239,12 @@ const Host = struct {
     /// label, which is not a name any client should read.
     fn confirmTitleUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
-        if (self.overlay_mode != .confirm) return "";
-        const text = self.cached_overlay_label orelse return "";
-        // Shorten rather than drop. A name that does not fit comes back
-        // empty from `bufPrint`, and this one is about to be announced as
-        // a live region -- silence at the moment the user needs the text
-        // is the exact failure this path exists to prevent.
-        return std.fmt.bufPrint(buf, "{s}", .{utf8BoundedPrefix(text, buf.len)}) catch "Confirm";
+        return confirmPromptUiaName(self.overlay_mode, self.cached_overlay_label, buf, "Confirm");
     }
 
     fn confirmBodyUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
-        if (self.overlay_mode != .confirm) return "";
-        const text = self.cached_overlay_hint orelse return "";
-        // The body can carry a banner, and banner text is arbitrary
-        // (error strings with paths), so this one really can overflow.
-        return std.fmt.bufPrint(buf, "{s}", .{utf8BoundedPrefix(text, buf.len)}) catch "";
+        return confirmPromptUiaName(self.overlay_mode, self.cached_overlay_hint, buf, "");
     }
 
     /// Announce a freshly opened confirm prompt. Runs after the text
@@ -15359,29 +15349,28 @@ const Host = struct {
     /// but reading the placement alone makes this correct only as long as
     /// that guard stays where it is.
     fn confirmTitleTextPlaced(self: *const Host) bool {
-        if (self.overlay_mode != .confirm) return false;
-        return self.overlay_label_hwnd != null and self.overlay_label_placement.visible;
+        return confirmPromptLineOwnedByChild(
+            self.overlay_mode,
+            self.overlay_label_hwnd,
+            self.overlay_label_placement,
+        );
     }
 
     fn confirmBodyTextPlaced(self: *const Host) bool {
-        if (self.overlay_mode != .confirm) return false;
-        return self.overlay_hint_hwnd != null and self.overlay_hint_placement.visible;
+        return confirmPromptLineOwnedByChild(
+            self.overlay_mode,
+            self.overlay_hint_hwnd,
+            self.overlay_hint_placement,
+        );
     }
 
-    /// Foreground for one of the confirm prompt's text children.
-    ///
-    /// The colours are the ones chrome paint used for the same two
-    /// lines: the overlay label colour for the title, and the
-    /// banner-kind-sensitive secondary colour for the body, which keeps
-    /// an error raised while a prompt is open reading as an error.
     fn confirmPromptTextColor(self: *const Host, title: bool) u32 {
-        const theme = &self.app.resolved_theme;
-        if (title) return theme.overlay_label_fg;
-        return switch (if (self.banner_text != null) self.banner_kind else .none) {
-            .none => theme.text_secondary,
-            .info => theme.info_fg,
-            .err => theme.error_fg,
-        };
+        return confirmPromptLineColor(
+            &self.app.resolved_theme,
+            title,
+            self.banner_kind,
+            self.banner_text != null,
+        );
     }
 
     /// Owner-draw for the confirm prompt's title and body lines.
@@ -24450,6 +24439,70 @@ fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         if (host.banner_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/// The UIA name for one confirm prompt line, from the text its control
+/// was last given.
+///
+/// Reporting the control's own cached text rather than re-deriving it is
+/// what keeps the spoken name and the drawn line the same string. Two
+/// rules ride along, and both matter enough to be testable without a
+/// live `Host`:
+///
+///   * Outside `.confirm` the control is hidden and still holds the
+///     previous overlay's text. That is not a name any client should
+///     read, so the answer is empty.
+///   * A name that does not fit the caller's buffer is shortened on a
+///     UTF-8 boundary, never dropped. `bufPrint` returns an error there
+///     and the obvious `catch ""` would report nothing at the moment a
+///     live region is about to be announced. The body can carry banner
+///     text, which is arbitrary, so this is reachable.
+fn confirmPromptUiaName(
+    mode: HostOverlayMode,
+    cached: ?[:0]const u8,
+    buf: []u8,
+    fallback: []const u8,
+) []const u8 {
+    if (mode != .confirm) return "";
+    const text = cached orelse return "";
+    return std.fmt.bufPrint(buf, "{s}", .{utf8BoundedPrefix(text, buf.len)}) catch fallback;
+}
+
+/// Whether a confirm prompt line is rendered by its own child window
+/// rather than by chrome paint.
+///
+/// Per line, never for the pair: the title's rect is bounded by the query
+/// frame and collapses on a narrow window while the body's still has
+/// room, so a shared gate would answer that by taking the body out of the
+/// UI Automation tree as well. The HWND is checked alongside the
+/// placement because reading the placement alone is correct only for as
+/// long as `layout` keeps touching it exclusively inside its null check.
+fn confirmPromptLineOwnedByChild(
+    mode: HostOverlayMode,
+    hwnd: ?HWND,
+    placement: ChildPlacement,
+) bool {
+    if (mode != .confirm) return false;
+    return hwnd != null and placement.visible;
+}
+
+/// Foreground for one confirm prompt line: the overlay label colour for
+/// the title, and the banner-kind-sensitive secondary colour for the
+/// body, which is what keeps an error raised while a prompt is open
+/// reading as an error. Mirrors the colours the chrome paint fallback
+/// picks for the same two lines.
+fn confirmPromptLineColor(
+    theme: *const ThemeColors,
+    title: bool,
+    banner_kind: HostBannerKind,
+    has_banner: bool,
+) u32 {
+    if (title) return theme.overlay_label_fg;
+    return switch (if (has_banner) banner_kind else .none) {
+        .none => theme.text_secondary,
+        .info => theme.info_fg,
+        .err => theme.error_fg,
+    };
 }
 
 /// Subclass for the confirm prompt's title and body STATICs.
@@ -41348,6 +41401,124 @@ test "win32 profileChromeAccent assigns distinct profile accents" {
     try std.testing.expectEqual(rgb(46, 125, 70), wsl_light.idle_border);
     try std.testing.expect(pwsh_light.idle_border != git_light.idle_border);
     try std.testing.expect(wsl_light.focus != pwsh_light.focus);
+}
+
+test "win32 confirm prompt UIA name reports only a live prompt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [512]u8 = undefined;
+    const title: [:0]const u8 = "Allow clipboard paste?";
+
+    try std.testing.expectEqualStrings(
+        "Allow clipboard paste?",
+        confirmPromptUiaName(.confirm, title, &buf, "Confirm"),
+    );
+
+    // Outside `.confirm` the control is hidden and still holds the
+    // previous overlay's label. Reporting it would have a reader announce
+    // a prompt that is not open.
+    for ([_]HostOverlayMode{ .none, .command_palette, .search, .profile, .tab_overview, .surface_title, .tab_title }) |mode| {
+        try std.testing.expectEqualStrings("", confirmPromptUiaName(mode, title, &buf, "Confirm"));
+    }
+
+    // No text yet: empty, not the fallback. The fallback is for a name
+    // that exists and does not fit.
+    try std.testing.expectEqualStrings("", confirmPromptUiaName(.confirm, null, &buf, "Confirm"));
+}
+
+test "win32 confirm prompt UIA name shortens instead of going silent" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The body can carry banner text, which is arbitrary, so overflow is
+    // reachable. A bare `bufPrint ... catch ""` would announce nothing.
+    var small: [8]u8 = undefined;
+    const long: [:0]const u8 = "Error: a very long banner message";
+    const shortened = confirmPromptUiaName(.confirm, long, &small, "");
+    try std.testing.expectEqualStrings("Error: a", shortened);
+    try std.testing.expect(shortened.len <= small.len);
+
+    // The cut lands on a codepoint boundary, because the name is turned
+    // into a BSTR and invalid UTF-8 fails that conversion outright.
+    // "ab\u{e9}cd" is a, b, C3, A9, c, d: a 3-byte limit lands on the
+    // continuation byte and has to give the whole codepoint up.
+    var tiny: [3]u8 = undefined;
+    const accented: [:0]const u8 = "ab\u{e9}cd";
+    const cut = confirmPromptUiaName(.confirm, accented, &tiny, "");
+    try std.testing.expectEqualStrings("ab", cut);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
+
+    // One byte further and the codepoint is complete, so it survives.
+    var fits: [4]u8 = undefined;
+    const whole = confirmPromptUiaName(.confirm, accented, &fits, "");
+    try std.testing.expectEqualStrings("ab\u{e9}", whole);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(whole));
+}
+
+test "win32 confirm prompt lines fall back to paint independently" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const hwnd: HWND = @ptrFromInt(0x1000);
+    const shown: ChildPlacement = .{ .visible = true, .visible_known = true };
+    const hidden: ChildPlacement = .{};
+
+    try std.testing.expect(confirmPromptLineOwnedByChild(.confirm, hwnd, shown));
+
+    // A line whose rect collapsed, or whose control was never created,
+    // stays with chrome paint -- and says nothing about the other line,
+    // which is the point of keeping this per line. A narrow window
+    // collapses the title first; the body must still reach the tree.
+    try std.testing.expect(!confirmPromptLineOwnedByChild(.confirm, hwnd, hidden));
+    try std.testing.expect(!confirmPromptLineOwnedByChild(.confirm, null, shown));
+    try std.testing.expect(!confirmPromptLineOwnedByChild(.confirm, null, hidden));
+
+    // Never in any other mode: those paint their own label and feedback
+    // line and keep both controls hidden.
+    for ([_]HostOverlayMode{ .none, .command_palette, .search, .profile, .tab_overview, .surface_title, .tab_title }) |mode| {
+        try std.testing.expect(!confirmPromptLineOwnedByChild(mode, hwnd, shown));
+    }
+}
+
+test "win32 confirm prompt line colours follow the banner" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_]ThemeColors{ darkTheme(), lightTheme() }) |theme| {
+        // The title is the overlay label colour in every state: a banner
+        // qualifies the body, not the heading.
+        for ([_]HostBannerKind{ .none, .info, .err }) |kind| {
+            for ([_]bool{ false, true }) |has_banner| {
+                try std.testing.expectEqual(
+                    theme.overlay_label_fg,
+                    confirmPromptLineColor(&theme, true, kind, has_banner),
+                );
+            }
+        }
+
+        // With no banner the body is ordinary secondary text, whatever
+        // kind is left over on the Host.
+        for ([_]HostBannerKind{ .none, .info, .err }) |kind| {
+            try std.testing.expectEqual(
+                theme.text_secondary,
+                confirmPromptLineColor(&theme, false, kind, false),
+            );
+        }
+
+        // A banner raised while the prompt is open keeps reading as what
+        // it is, which is why the body is not just `text_secondary`.
+        try std.testing.expectEqual(
+            theme.text_secondary,
+            confirmPromptLineColor(&theme, false, .none, true),
+        );
+        try std.testing.expectEqual(
+            theme.info_fg,
+            confirmPromptLineColor(&theme, false, .info, true),
+        );
+        try std.testing.expectEqual(
+            theme.error_fg,
+            confirmPromptLineColor(&theme, false, .err, true),
+        );
+        try std.testing.expect(theme.error_fg != theme.text_secondary);
+        try std.testing.expect(theme.info_fg != theme.text_secondary);
+    }
 }
 
 test "win32 applyProfileChromeAccent respects profile state" {
