@@ -123,6 +123,13 @@ const overlayLabelReservation = chrome_layout.overlayLabelReservation;
 const confirmPreviewRect = chrome_layout.confirmPreviewRect;
 const overlayActionLayoutForWidth = chrome_layout.overlayActionLayoutForWidth;
 const overlayEditChildRectFromFrame = chrome_layout.overlayEditChildRectFromFrame;
+const confirmTitlePaintRect = chrome_layout.confirmTitlePaintRect;
+const overlayFeedbackLineRect = chrome_layout.overlayFeedbackLineRect;
+const confirmBodyPaintRect = chrome_layout.confirmBodyPaintRect;
+const confirmTextPlacement = chrome_layout.confirmTextPlacement;
+const overlayPanelInterior = chrome_layout.overlayPanelInterior;
+const ConfirmTextPlacement = chrome_layout.ConfirmTextPlacement;
+const empty_confirm_text_placement = chrome_layout.empty_confirm_text_placement;
 const blendColorRGB = gdi.blendColorRGB;
 const fillSolidRect = gdi.fillSolidRect;
 const drawRectBorder = gdi.drawRectBorder;
@@ -456,6 +463,20 @@ const palette_max_visible_rows: usize = 7;
 const default_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
 const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
 const prompt_label_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+/// Style for the confirm prompt's title and body STATICs.
+///
+/// Owner-drawn rather than a plain text STATIC so both renderers of those
+/// two lines stay one function: `WM_DRAWITEM` runs the same
+/// `gdi.drawTextWz` call with the same `DrawText` flags chrome paint uses
+/// for the fallback. A stock STATIC would have to re-derive the vertical
+/// position, and `SS_CENTERIMAGE` rounds its half-leading up where
+/// `DT_VCENTER` truncates, which measurably moved the body line by a
+/// pixel at 150% DPI.
+const prompt_text_static_style: u32 = c.SS_OWNERDRAW;
+/// `DrawText` flags shared by the chrome paint fallback and the
+/// owner-draw handler for the confirm prompt lines.
+const confirm_prompt_text_format: u32 = c.DT_LEFT | c.DT_VCENTER |
+    c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS;
 const prompt_edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
 const prompt_button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
 const prompt_ok_label = std.unicode.utf8ToUtf16LeStringLiteral("OK");
@@ -10875,7 +10896,15 @@ const Host = struct {
     /// `cancel_label`) are allocated via `app.core_app.alloc` and
     /// freed when the overlay closes or the Host deinits.
     confirm_payload: ?ConfirmPayload = null,
+    /// STATIC that carries the confirm prompt's title. Laid out and
+    /// shown only in `.confirm` mode; in every other overlay mode it
+    /// stays hidden and exists purely so `syncOverlayLabel`'s
+    /// changed-return can drive the chrome paint-text cache.
     overlay_label_hwnd: ?HWND = null,
+    overlay_label_prev_proc: ?*const anyopaque = null,
+    /// ControlType Text provider for the confirm title. Named from the
+    /// payload so a screen reader can report what is being approved.
+    overlay_title_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     overlay_edit_hwnd: ?HWND = null,
     overlay_edit_prev_proc: ?*const anyopaque = null,
     overlay_preview_prev_proc: ?*const anyopaque = null,
@@ -10890,7 +10919,14 @@ const Host = struct {
     /// outer caller racing its own sync. Matches the precedent in
     /// `win32_settings.zig` (AGENTS.md:75).
     suppress_edit_events: bool = false,
+    /// STATIC that carries the confirm prompt's body. Same visibility
+    /// contract as `overlay_label_hwnd`.
     overlay_hint_hwnd: ?HWND = null,
+    overlay_hint_prev_proc: ?*const anyopaque = null,
+    /// Live-region provider for the confirm body, so opening a prompt
+    /// announces it instead of leaving the user on an unexplained
+    /// Allow button.
+    overlay_body_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     /// Read-only multiline EDIT that shows the payload a confirm
     /// prompt is about. An EDIT rather than an owner-drawn panel so
     /// scrolling, selection and UIA come from the control instead of
@@ -10953,8 +10989,13 @@ const Host = struct {
     new_tab_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     new_tab_placement: ChildPlacement = .{},
     overlay_label_placement: ChildPlacement = .{},
+    /// Where the confirm title's text sits inside its child window.
+    /// Written by `layout`, read by the owner-draw handler.
+    overlay_label_text: ConfirmTextPlacement = empty_confirm_text_placement,
     overlay_edit_placement: ChildPlacement = .{},
     overlay_hint_placement: ChildPlacement = .{},
+    /// Where the confirm body's text sits inside its child window.
+    overlay_hint_text: ConfirmTextPlacement = empty_confirm_text_placement,
     overlay_preview_placement: ChildPlacement = .{},
     overlay_accept_placement: ChildPlacement = .{},
     overlay_cancel_placement: ChildPlacement = .{},
@@ -13538,7 +13579,9 @@ const Host = struct {
         detachChromeControlProvider(self.app, &self.overflow_uia_provider);
         detachChromeControlProvider(self.app, &self.banner_uia_provider);
 
-        destroyChildWindow(&self.overlay_label_hwnd);
+        detachChromeControlProvider(self.app, &self.overlay_title_uia_provider);
+        detachChromeControlProvider(self.app, &self.overlay_body_uia_provider);
+        destroySubclassedWindow(&self.overlay_label_hwnd, &self.overlay_label_prev_proc);
         if (self.overlay_edit_uia_provider) |provider| {
             self.overlay_edit_uia_provider = null;
             self.overlay_edit_uia_selection = null;
@@ -13551,7 +13594,7 @@ const Host = struct {
             );
         }
         destroySubclassedWindow(&self.overlay_edit_hwnd, &self.overlay_edit_prev_proc);
-        destroyChildWindow(&self.overlay_hint_hwnd);
+        destroySubclassedWindow(&self.overlay_hint_hwnd, &self.overlay_hint_prev_proc);
         destroySubclassedWindow(&self.overlay_preview_hwnd, &self.overlay_preview_prev_proc);
 
         const overlay_button_providers = takeOverlayButtonUiaProviders(
@@ -14843,6 +14886,18 @@ const Host = struct {
         // While an overlay is open, banner text is rendered inside the
         // overlay feedback lane rather than the ordinary host banner lane.
         if (self.overlay_mode != .none) self.invalidateOverlayText();
+        // A confirm prompt's feedback lane is an owner-drawn child rather
+        // than chrome paint, so invalidating the paint text is not enough
+        // to put a banner raised mid-prompt on screen. Push it into the
+        // control now instead of waiting for whatever runs `refreshChrome`
+        // next, and announce it there: the host banner's own provider is
+        // on an HWND that stays hidden for the whole overlay.
+        if (self.overlay_mode == .confirm) {
+            _ = chromeSyncOrLog("confirm body banner sync failed", self.syncOverlayHint());
+            if (self.confirmBodyTextPlaced()) {
+                if (self.overlay_body_uia_provider) |provider| provider.raiseLiveRegionChanged();
+            }
+        }
     }
 
     fn clearUpdateActionRects(self: *Host) void {
@@ -14878,7 +14933,7 @@ const Host = struct {
             0,
             prompt_label_class,
             host_overlay_command_palette_label,
-            c.WS_CHILD,
+            c.WS_CHILD | prompt_text_static_style,
             0,
             0,
             80,
@@ -14888,6 +14943,22 @@ const Host = struct {
             self.app.hinstance,
             null,
         ) orelse return lastError();
+        self.initOverlayPromptText(
+            self.overlay_label_hwnd.?,
+            &self.overlay_label_prev_proc,
+            &self.overlay_title_uia_provider,
+            &confirmTitleUiaName,
+        );
+        // A later `CreateWindowExW` in this function can still fail. The
+        // guard at the top keys off `overlay_edit_hwnd`, so a retry after
+        // a partial run would skip straight past this control and
+        // overwrite its provider and saved wndproc without detaching
+        // them -- leaving a live HWND whose `GWLP_USERDATA` points at a
+        // Host that nothing will ever clean up through. Unwind instead.
+        errdefer {
+            detachChromeControlProvider(self.app, &self.overlay_title_uia_provider);
+            destroySubclassedWindow(&self.overlay_label_hwnd, &self.overlay_label_prev_proc);
+        }
 
         self.overlay_edit_hwnd = sys.CreateWindowExW(
             0,
@@ -14941,7 +15012,7 @@ const Host = struct {
             0,
             prompt_label_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            c.WS_CHILD,
+            c.WS_CHILD | prompt_text_static_style,
             0,
             0,
             100,
@@ -14951,6 +15022,16 @@ const Host = struct {
             self.app.hinstance,
             null,
         ) orelse return lastError();
+        self.initOverlayPromptText(
+            self.overlay_hint_hwnd.?,
+            &self.overlay_hint_prev_proc,
+            &self.overlay_body_uia_provider,
+            &confirmBodyUiaName,
+        );
+        errdefer {
+            detachChromeControlProvider(self.app, &self.overlay_body_uia_provider);
+            destroySubclassedWindow(&self.overlay_hint_hwnd, &self.overlay_hint_prev_proc);
+        }
 
         // Confirm preview. Read-only so it cannot be edited, multiline
         // with a vertical scrollbar so a long payload can be inspected,
@@ -15151,6 +15232,191 @@ const Host = struct {
             "";
     }
 
+    /// UIA name for the confirm title. Reports the text the control was
+    /// actually given rather than re-deriving it, so the spoken name and
+    /// the drawn line can never disagree. Empty outside `.confirm`: the
+    /// control is hidden there and still holds the previous overlay's
+    /// label, which is not a name any client should read.
+    fn confirmTitleUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        return confirmPromptUiaName(self.overlay_mode, self.cached_overlay_label, buf, "Confirm");
+    }
+
+    fn confirmBodyUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
+        const self: *Host = @ptrCast(@alignCast(ctx));
+        return confirmPromptUiaName(self.overlay_mode, self.cached_overlay_hint, buf, "");
+    }
+
+    /// Announce a freshly opened confirm prompt. Runs after the text
+    /// syncs and after `layout` has shown the controls: a provider whose
+    /// HWND is still hidden reports `IsOffscreen`, and a live-region
+    /// event on an offscreen element is dropped by readers.
+    fn announceConfirmPrompt(self: *Host) void {
+        if (self.overlay_mode != .confirm) return;
+        // Title first: it is what the prompt is asking, and the body only
+        // qualifies it. Each is raised only if its child is on screen --
+        // a hidden HWND reports `IsOffscreen`, and readers drop live
+        // regions that are, so raising there would be noise that hides
+        // the fact that the line has no element at all.
+        if (self.confirmTitleTextPlaced()) {
+            if (self.overlay_title_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        }
+        if (self.confirmBodyTextPlaced()) {
+            if (self.overlay_body_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        }
+    }
+
+    /// Finish a confirm-prompt text STATIC: chrome font, host back-
+    /// pointer, `WM_GETOBJECT` subclass and its UIA provider.
+    ///
+    /// The font matters now that these controls are drawn. `Host.init`
+    /// builds `chrome_font` once and only `recreateChromeFont` re-sends
+    /// `WM_SETFONT`, which fires on a DPI or theme change -- not on the
+    /// lazy creation path that runs the first time an overlay opens. A
+    /// control created here and never sent the font would render in the
+    /// stock `SYSTEM_FONT` bitmap face until the user happened to move
+    /// the window to another monitor.
+    ///
+    /// Both prompt lines are `live_text`. The suggestion on the issue
+    /// was a plain text role for the title, but focus lands on the
+    /// accept button when a confirm opens, and a non-live Text element
+    /// nothing is focused on is never spoken -- which is the exact gap
+    /// this exists to close. A polite live region is also honest: the
+    /// title is a region whose content changes per prompt.
+    fn initOverlayPromptText(
+        self: *Host,
+        hwnd: HWND,
+        prev_proc: *?*const anyopaque,
+        provider_slot: *?*win32_uia.ChromeControlProvider,
+        name: *const fn (*anyopaque, usize, []u8) []const u8,
+    ) void {
+        if (self.chrome_font) |font| {
+            _ = sys.SendMessageW(hwnd, c.WM_SETFONT, @intFromPtr(font), 1);
+        }
+        setWindowData(hwnd, self);
+        const previous = sys.SetWindowLongPtrW(
+            hwnd,
+            c.GWLP_WNDPROC,
+            @as(LONG_PTR, @intCast(@intFromPtr(&overlayPromptTextProc))),
+        );
+        prev_proc.* = if (previous == 0)
+            null
+        else
+            @ptrFromInt(@as(usize, @intCast(previous)));
+        provider_slot.* = self.createChromeUiaProvider(hwnd, .{
+            .ctx = @ptrCast(self),
+            .role = .live_text,
+            .name = name,
+        });
+    }
+
+    /// Provider for one of the two confirm prompt text STATICs.
+    fn overlayPromptTextProvider(
+        self: *Host,
+        child: HWND,
+    ) ?*win32_uia.ChromeControlProvider {
+        if (self.overlay_label_hwnd) |label| {
+            if (label == child) return self.overlay_title_uia_provider;
+        }
+        if (self.overlay_hint_hwnd) |hint| {
+            if (hint == child) return self.overlay_body_uia_provider;
+        }
+        return null;
+    }
+
+    fn overlayPromptTextPrevProc(self: *Host, child: HWND) ?*const anyopaque {
+        if (self.overlay_label_hwnd) |label| {
+            if (label == child) return self.overlay_label_prev_proc;
+        }
+        if (self.overlay_hint_hwnd) |hint| {
+            if (hint == child) return self.overlay_hint_prev_proc;
+        }
+        return null;
+    }
+
+    /// True while one of the confirm prompt's own children owns its rect.
+    ///
+    /// Chrome paint reads these to skip the GDI string it used to draw
+    /// there: the host carries `WS_CLIPCHILDREN`, so a visible child
+    /// already clips the parent out of that rect and painting underneath
+    /// it would only burn time. They are deliberately per line, not one
+    /// gate for both: the title's rect is bounded by the query frame and
+    /// collapses on a narrow window while the body's still has room, and
+    /// an all-or-nothing gate would answer that by hiding the body too.
+    ///
+    /// The HWND check is not redundant with the placement. `layout` only
+    /// touches a placement it has an HWND for, so the two agree today,
+    /// but reading the placement alone makes this correct only as long as
+    /// that guard stays where it is.
+    fn confirmTitleTextPlaced(self: *const Host) bool {
+        return confirmPromptLineOwnedByChild(
+            self.overlay_mode,
+            self.overlay_label_hwnd,
+            self.overlay_label_placement,
+        );
+    }
+
+    fn confirmBodyTextPlaced(self: *const Host) bool {
+        return confirmPromptLineOwnedByChild(
+            self.overlay_mode,
+            self.overlay_hint_hwnd,
+            self.overlay_hint_placement,
+        );
+    }
+
+    fn confirmPromptTextColor(self: *const Host, title: bool) u32 {
+        return confirmPromptLineColor(
+            &self.app.resolved_theme,
+            title,
+            self.banner_kind,
+            self.banner_text != null,
+        );
+    }
+
+    /// Owner-draw for the confirm prompt's title and body lines.
+    ///
+    /// Reads the text back off the control rather than off the chrome
+    /// paint cache: the control's own text is what `syncOverlayLabel` /
+    /// `syncOverlayHint` wrote and what the UIA name reports, so drawing
+    /// from it makes the pixels and the spoken name the same string by
+    /// construction.
+    fn drawConfirmPromptText(self: *Host, draw: *const DRAWITEMSTRUCT) bool {
+        const title = if (self.overlay_label_hwnd) |label|
+            label == draw.hwndItem
+        else
+            false;
+        if (!title) {
+            const is_body = if (self.overlay_hint_hwnd) |hint| hint == draw.hwndItem else false;
+            if (!is_body) return false;
+        }
+        const placement = if (title) self.overlay_label_text else self.overlay_hint_text;
+        const theme = &self.app.resolved_theme;
+        // `WS_CLIPCHILDREN` keeps the parent's panel fill out of this
+        // rect, so the child owns every pixel of its own background.
+        fillSolidRect(draw.hDC, draw.rcItem, themeSurface(theme, .overlay_panel_bg));
+
+        var buf: [1024]u16 = undefined;
+        const copied = sys.GetWindowTextW(draw.hwndItem, &buf, @intCast(buf.len));
+        if (copied <= 0) return true;
+        const text: [:0]const u16 = buf[0..@intCast(copied) :0];
+
+        // Restore everything this touches. The DC comes from the system
+        // cache and is released when the control's `WM_PAINT` returns, so
+        // nothing leaks today, but leaving half the state changed is how
+        // the next handler added here inherits a surprise.
+        const prev_font = if (self.chrome_font) |font| sys.SelectObject(draw.hDC, font) else null;
+        defer if (prev_font) |pf| {
+            _ = sys.SelectObject(draw.hDC, pf);
+        };
+        const prev_bk_mode = sys.SetBkMode(draw.hDC, c.TRANSPARENT);
+        defer _ = sys.SetBkMode(draw.hDC, prev_bk_mode);
+        const prev_color = sys.SetTextColor(draw.hDC, self.confirmPromptTextColor(title));
+        defer _ = sys.SetTextColor(draw.hDC, prev_color);
+        var text_rect = placement.text;
+        drawTextWz(draw.hDC, text, &text_rect, confirm_prompt_text_format);
+        return true;
+    }
+
     fn createChromeUiaProvider(
         self: *Host,
         hwnd: HWND,
@@ -15316,13 +15582,11 @@ const Host = struct {
         self.clearOverlayCompletion();
         try self.setOverlayDefaultBanner(mode);
 
-        if (self.overlay_label_hwnd) |label_hwnd| {
-            _ = applyChildVisibility(label_hwnd, &self.overlay_label_placement, false);
-        }
+        // Visibility of the title / body STATICs belongs to `layout`:
+        // they are shown for `.confirm` and hidden for every other mode.
+        // Force-hiding them here would make a confirm open flash them
+        // off and straight back on.
         const edit_hwnd = self.overlay_edit_hwnd orelse return;
-        if (self.overlay_hint_hwnd) |hint_hwnd| {
-            _ = applyChildVisibility(hint_hwnd, &self.overlay_hint_placement, false);
-        }
         if (self.overlay_preview_hwnd) |preview_hwnd| {
             _ = applyChildVisibility(preview_hwnd, &self.overlay_preview_placement, false);
         }
@@ -15380,9 +15644,14 @@ const Host = struct {
                 accept_hwnd
             else if (sys.IsWindowVisible(cancel_hwnd) != 0)
                 cancel_hwnd
-            else
+            else {
+                self.announceConfirmPrompt();
                 return;
+            };
             _ = sys.SetFocus(initial_target);
+            // After the focus move, so a reader queues the prompt text
+            // behind "Allow, button" rather than having it cut off.
+            self.announceConfirmPrompt();
         } else {
             _ = sys.SetFocus(edit_hwnd);
             _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
@@ -15445,6 +15714,8 @@ const Host = struct {
     }
 
     fn invalidateOverlayTransitionPlacementCache(self: *Host) void {
+        self.overlay_label_placement.rect_known = false;
+        self.overlay_hint_placement.rect_known = false;
         self.overlay_edit_placement.rect_known = false;
         self.overlay_accept_placement.rect_known = false;
         self.overlay_cancel_placement.rect_known = false;
@@ -15836,14 +16107,24 @@ const Host = struct {
     fn syncOverlayHint(self: *Host) !bool {
         const hint_hwnd = self.overlay_hint_hwnd orelse return false;
         const alloc = self.app.core_app.alloc;
-        // Confirm overlays render the payload body through the chrome
-        // paint path, not this control: the hint HWND is never given a
-        // rect by `layout`, so showing it here only put a stray 100x18
-        // STATIC at client (0,0). Keep the text in sync — a follow-up
-        // that places the control (and exposes it to UIA) needs it —
-        // but leave it hidden.
+        // Confirm overlays show this control: `layout` gives it the rect
+        // chrome paint used for the body line. It carries the same string
+        // that paint would have drawn -- payload body, preview caption,
+        // and a banner override when one is live -- because the UIA name
+        // is read straight back off the control, so anything this writes
+        // is also what a screen reader says.
+        //
+        // Visibility still belongs to `layout`, never to this function:
+        // the control must not appear at its 100x18 creation rect at
+        // client (0,0) before the first layout pass places it.
         if (self.overlay_mode == .confirm) {
-            const body = if (self.confirm_payload) |p| p.body else "";
+            const body = try buildConfirmBodyText(
+                alloc,
+                self.banner_kind,
+                self.banner_text,
+                self.confirmText(),
+            );
+            defer alloc.free(body);
             return try syncWindowTextUtf8Cached(
                 alloc,
                 hint_hwnd,
@@ -18463,6 +18744,81 @@ const Host = struct {
                 &self.overlay_edit_placement,
                 edit_rect,
             ) or changed.*;
+
+            // Confirm prompt title and body. Both are real STATICs only
+            // in `.confirm` mode -- every other overlay paints its label
+            // and feedback line as chrome text and keeps these two
+            // hidden, where they still serve as the change detectors
+            // `refreshChrome` reads.
+            //
+            // The rects are the ones chrome paint used for the same two
+            // strings, so this is a move of ownership rather than a
+            // relayout. Neither rect intersects the terminal Surface:
+            // `contentBands` puts the surface at or below
+            // `inspector_top`, which is the band's own bottom edge, so
+            // unlike the preview pane these children do not need raising
+            // above the topmost Surface sibling on the transition to
+            // visible.
+            const confirm_prompt = self.overlay_mode == .confirm;
+            const overlay_bottom = overlay_y + self.scaled(host_overlay_height);
+            const panel_interior = overlayPanelInterior(overlay_y, overlay_bottom, self.current_dpi);
+            const title_text = if (confirm_prompt)
+                confirmTextPlacement(confirmTitlePaintRect(
+                    overlay_y,
+                    padding + self.scaled(10),
+                    edit_frame.right,
+                    self.current_dpi,
+                ), panel_interior)
+            else
+                empty_confirm_text_placement;
+            const body_text = if (confirm_prompt)
+                confirmTextPlacement(confirmBodyPaintRect(
+                    width,
+                    overlay_y,
+                    overlay_bottom,
+                    padding,
+                    self.current_dpi,
+                ), panel_interior)
+            else
+                empty_confirm_text_placement;
+            // Each line stands on its own. The title's rect is bounded by
+            // the query frame and collapses before the body's does on a
+            // narrow window; gating both on the pair would answer that by
+            // taking the body out of the UIA tree as well, leaving the
+            // prompt unreachable at exactly the size where it is hardest
+            // to read. Chrome paint's fallback is per line to match.
+            const show_title = title_text.visible();
+            const show_body = body_text.visible();
+            if (show_title) self.overlay_label_text = title_text;
+            if (show_body) self.overlay_hint_text = body_text;
+            if (self.overlay_label_hwnd) |label_hwnd| {
+                if (show_title) {
+                    changed.* = applyChromeChildRect(
+                        label_hwnd,
+                        &self.overlay_label_placement,
+                        title_text.child,
+                    ) or changed.*;
+                }
+                changed.* = applyChildVisibility(
+                    label_hwnd,
+                    &self.overlay_label_placement,
+                    show_title,
+                ) or changed.*;
+            }
+            if (self.overlay_hint_hwnd) |hint_hwnd| {
+                if (show_body) {
+                    changed.* = applyChromeChildRect(
+                        hint_hwnd,
+                        &self.overlay_hint_placement,
+                        body_text.child,
+                    ) or changed.*;
+                }
+                changed.* = applyChildVisibility(
+                    hint_hwnd,
+                    &self.overlay_hint_placement,
+                    show_body,
+                ) or changed.*;
+            }
             if (action_layout.accept_visible) {
                 changed.* = applyChromeChildRect(
                     accept_hwnd,
@@ -18626,13 +18982,29 @@ const Host = struct {
                     );
                 }
             }
-        } else if (self.palette_list_hwnd) |list_hwnd| {
-            self.palette_list_visible_rows = 0;
-            changed.* = applyChildVisibility(
-                list_hwnd,
-                &self.palette_list_placement,
-                false,
-            ) or changed.*;
+        } else {
+            if (self.overlay_label_hwnd) |label_hwnd| {
+                changed.* = applyChildVisibility(
+                    label_hwnd,
+                    &self.overlay_label_placement,
+                    false,
+                ) or changed.*;
+            }
+            if (self.overlay_hint_hwnd) |hint_hwnd| {
+                changed.* = applyChildVisibility(
+                    hint_hwnd,
+                    &self.overlay_hint_placement,
+                    false,
+                ) or changed.*;
+            }
+            if (self.palette_list_hwnd) |list_hwnd| {
+                self.palette_list_visible_rows = 0;
+                changed.* = applyChildVisibility(
+                    list_hwnd,
+                    &self.palette_list_placement,
+                    false,
+                ) or changed.*;
+            }
         }
 
         return true;
@@ -19202,40 +19574,47 @@ const Host = struct {
                     overlay_label_color = profileKindLabelColor(profile.kind, theme.is_dark);
                 }
             }
+            // In `.confirm` mode the title and body live in their own
+            // STATIC children (`overlay_label_hwnd` / `overlay_hint_hwnd`)
+            // so UI Automation can see them. The host carries
+            // `WS_CLIPCHILDREN`, so those rects are already clipped out of
+            // this paint -- drawing them again would be invisible work.
+            // The fallback still matters, per line: if control creation
+            // failed, or the band is too narrow to place that line, paint
+            // remains its only renderer.
+            const confirm_title_is_child = self.confirmTitleTextPlaced();
+            const confirm_body_is_child = self.confirmBodyTextPlaced();
             _ = sys.SetTextColor(hdc, overlay_label_color);
-            if (overlay_label_reservation > 0) if (self.cached_overlay_paint_label_w) |overlay_label_w| {
-                if (self.overlay_mode == .confirm) {
-                    // A confirm title is caller-supplied ("Allow clipboard
-                    // paste?") and routinely wider than the fixed label
-                    // reservation, so bound it at the action buttons and
-                    // ellipsize instead of running underneath them. The
-                    // EDIT frame is hidden in this mode, so its span is
-                    // free for the title.
-                    var title_rect = RECT{
-                        .left = overlay_label_x,
-                        .top = overlay_rect.top + self.scaled(5),
-                        .right = @max(overlay_label_x, overlayEditFrameRect(
-                            client_rect.right,
-                            tab_h,
-                            overlay_padding,
-                            self.scaled(host_overlay_label_width),
-                            overlay_action_layout.cancel_width,
-                            overlay_action_layout.accept_reservation_width,
-                            self.scaled(host_overlay_row_height),
+            if (overlay_label_reservation > 0 and !confirm_title_is_child) {
+                if (self.cached_overlay_paint_label_w) |overlay_label_w| {
+                    if (self.overlay_mode == .confirm) {
+                        // A confirm title is caller-supplied ("Allow
+                        // clipboard paste?") and routinely wider than the
+                        // fixed label reservation, so bound it at the
+                        // action buttons and ellipsize instead of running
+                        // underneath them. The EDIT frame is hidden in
+                        // this mode, so its span is free for the title.
+                        var title_rect = confirmTitlePaintRect(
+                            overlay_rect.top,
+                            overlay_label_x,
+                            overlayEditFrameRect(
+                                client_rect.right,
+                                tab_h,
+                                overlay_padding,
+                                self.scaled(host_overlay_label_width),
+                                overlay_action_layout.cancel_width,
+                                overlay_action_layout.accept_reservation_width,
+                                self.scaled(host_overlay_row_height),
+                                self.current_dpi,
+                            ).right,
                             self.current_dpi,
-                        ).right),
-                        .bottom = overlay_rect.top + self.scaled(25),
-                    };
-                    drawTextWz(
-                        hdc,
-                        overlay_label_w,
-                        &title_rect,
-                        c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
-                    );
-                } else {
-                    textOutWz(hdc, overlay_label_x, overlay_rect.top + self.scaled(7), overlay_label_w);
+                        );
+                        drawTextWz(hdc, overlay_label_w, &title_rect, confirm_prompt_text_format);
+                    } else {
+                        textOutWz(hdc, overlay_label_x, overlay_rect.top + self.scaled(7), overlay_label_w);
+                    }
                 }
-            };
+            }
 
             if (overlayEditFrameVisible(self.overlay_mode)) {
                 const edit_frame = overlayEditFrameRect(
@@ -19265,23 +19644,29 @@ const Host = struct {
                 .info => theme.info_fg,
                 .err => theme.error_fg,
             });
-            if (self.cached_overlay_paint_feedback_w) |overlay_feedback_w| {
-                var feedback_rect = RECT{
-                    .left = self.scaled(host_overlay_padding) + self.scaled(10),
-                    .top = overlay_rect.top + self.scaled(31),
-                    .right = @max(
-                        self.scaled(host_overlay_padding) + self.scaled(40),
-                        client_rect.right - self.scaled(host_overlay_padding) - self.scaled(10),
-                    ),
-                    .bottom = overlay_rect.bottom - self.scaled(4),
-                };
-                drawTextWz(
-                    hdc,
-                    overlay_feedback_w,
-                    &feedback_rect,
-                    c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
-                );
-            }
+            if (!confirm_body_is_child) if (self.cached_overlay_paint_feedback_w) |overlay_feedback_w| {
+                // A confirm shares its rect with the child that normally
+                // owns this line, so the fallback and the control put the
+                // glyphs on the same pixels. Every other mode keeps the
+                // untouched feedback rect.
+                var feedback_rect = if (self.overlay_mode == .confirm)
+                    confirmBodyPaintRect(
+                        client_rect.right,
+                        overlay_rect.top,
+                        overlay_rect.bottom,
+                        self.scaled(host_overlay_padding),
+                        self.current_dpi,
+                    )
+                else
+                    overlayFeedbackLineRect(
+                        client_rect.right,
+                        overlay_rect.top,
+                        overlay_rect.bottom,
+                        self.scaled(host_overlay_padding),
+                        self.current_dpi,
+                    );
+                drawTextWz(hdc, overlay_feedback_w, &feedback_rect, confirm_prompt_text_format);
+            };
         }
 
         return true;
@@ -23451,6 +23836,8 @@ const buildOverlayFeedbackText = labels.buildOverlayFeedbackText;
 const buildOverlayAcceptLabel = labels.buildOverlayAcceptLabel;
 
 const buildOverlayHintText = labels.buildOverlayHintText;
+const buildConfirmBodyText = labels.buildConfirmBodyText;
+const utf8BoundedPrefix = labels.utf8BoundedPrefix;
 
 const overlayCancelLabel = labels.overlayCancelLabel;
 
@@ -24054,12 +24441,116 @@ fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+/// The UIA name for one confirm prompt line, from the text its control
+/// was last given.
+///
+/// Reporting the control's own cached text rather than re-deriving it is
+/// what keeps the spoken name and the drawn line the same string. Two
+/// rules ride along, and both matter enough to be testable without a
+/// live `Host`:
+///
+///   * Outside `.confirm` the control is hidden and still holds the
+///     previous overlay's text. That is not a name any client should
+///     read, so the answer is empty.
+///   * A name that does not fit the caller's buffer is shortened on a
+///     UTF-8 boundary, never dropped. `bufPrint` returns an error there
+///     and the obvious `catch ""` would report nothing at the moment a
+///     live region is about to be announced. The body can carry banner
+///     text, which is arbitrary, so this is reachable.
+fn confirmPromptUiaName(
+    mode: HostOverlayMode,
+    cached: ?[:0]const u8,
+    buf: []u8,
+    fallback: []const u8,
+) []const u8 {
+    if (mode != .confirm) return "";
+    const text = cached orelse return "";
+    return std.fmt.bufPrint(buf, "{s}", .{utf8BoundedPrefix(text, buf.len)}) catch fallback;
+}
+
+/// Whether a confirm prompt line is rendered by its own child window
+/// rather than by chrome paint.
+///
+/// Per line, never for the pair: the title's rect is bounded by the query
+/// frame and collapses on a narrow window while the body's still has
+/// room, so a shared gate would answer that by taking the body out of the
+/// UI Automation tree as well. The HWND is checked alongside the
+/// placement because reading the placement alone is correct only for as
+/// long as `layout` keeps touching it exclusively inside its null check.
+fn confirmPromptLineOwnedByChild(
+    mode: HostOverlayMode,
+    hwnd: ?HWND,
+    placement: ChildPlacement,
+) bool {
+    if (mode != .confirm) return false;
+    return hwnd != null and placement.visible;
+}
+
+/// Foreground for one confirm prompt line: the overlay label colour for
+/// the title, and the banner-kind-sensitive secondary colour for the
+/// body, which is what keeps an error raised while a prompt is open
+/// reading as an error. Mirrors the colours the chrome paint fallback
+/// picks for the same two lines.
+fn confirmPromptLineColor(
+    theme: *const ThemeColors,
+    title: bool,
+    banner_kind: HostBannerKind,
+    has_banner: bool,
+) u32 {
+    if (title) return theme.overlay_label_fg;
+    return switch (if (has_banner) banner_kind else .none) {
+        .none => theme.text_secondary,
+        .info => theme.info_fg,
+        .err => theme.error_fg,
+    };
+}
+
+/// Subclass for the confirm prompt's title and body STATICs.
+///
+/// Exists for `WM_GETOBJECT`: a stock STATIC hands UIA only the default
+/// HWND provider, which reports ControlType Text but no live-region
+/// setting, so the prompt would appear in the tree without ever being
+/// announced. `HTTRANSPARENT` keeps the two lines from eating clicks
+/// aimed at the overlay band underneath them.
+fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    if (getHost(hwnd)) |host| {
+        if (msg == c.WM_GETOBJECT) {
+            if (host.overlayPromptTextProvider(hwnd)) |provider| {
+                if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
+        if (msg == c.WM_NCHITTEST) return c.HTTRANSPARENT;
+        if (host.overlayPromptTextPrevProc(hwnd)) |previous| {
+            return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+        }
+    }
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
         if (msg == c.WM_GETOBJECT) {
             if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
                 if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+            // The overlay accept / cancel pair. Their providers were
+            // built in `ensureOverlayControls` and torn down with the
+            // rest, but `overlayButtonUiaProviderForHwnd` had no caller,
+            // so UIA only ever saw the default HWND provider: measured
+            // with `AutomationElement.FindAll` on a live clipboard-paste
+            // prompt, "Allow" and "Cancel" came back as ControlType Pane
+            // with no Invoke pattern. Returning the provider makes them
+            // announce as buttons and gives assistive technology a way
+            // to press them.
+            if (overlayButtonUiaProviderForHwnd(
+                hwnd,
+                v.overlay_accept_hwnd,
+                v.overlay_cancel_hwnd,
+                v.overlay_accept_uia_provider,
+                v.overlay_cancel_uia_provider,
+            )) |provider| {
+                if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
             }
         }
         // Focus-region keys for the tab-strip action buttons and the
@@ -24760,6 +25251,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         c.WM_DRAWITEM => {
             if (host) |v| {
                 const draw: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                if (v.drawConfirmPromptText(draw)) return 1;
                 if (v.drawSearchBarBackground(draw)) return 1;
                 v.drawButton(draw);
                 return 1;
@@ -40909,6 +41401,124 @@ test "win32 profileChromeAccent assigns distinct profile accents" {
     try std.testing.expectEqual(rgb(46, 125, 70), wsl_light.idle_border);
     try std.testing.expect(pwsh_light.idle_border != git_light.idle_border);
     try std.testing.expect(wsl_light.focus != pwsh_light.focus);
+}
+
+test "win32 confirm prompt UIA name reports only a live prompt" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [512]u8 = undefined;
+    const title: [:0]const u8 = "Allow clipboard paste?";
+
+    try std.testing.expectEqualStrings(
+        "Allow clipboard paste?",
+        confirmPromptUiaName(.confirm, title, &buf, "Confirm"),
+    );
+
+    // Outside `.confirm` the control is hidden and still holds the
+    // previous overlay's label. Reporting it would have a reader announce
+    // a prompt that is not open.
+    for ([_]HostOverlayMode{ .none, .command_palette, .search, .profile, .tab_overview, .surface_title, .tab_title }) |mode| {
+        try std.testing.expectEqualStrings("", confirmPromptUiaName(mode, title, &buf, "Confirm"));
+    }
+
+    // No text yet: empty, not the fallback. The fallback is for a name
+    // that exists and does not fit.
+    try std.testing.expectEqualStrings("", confirmPromptUiaName(.confirm, null, &buf, "Confirm"));
+}
+
+test "win32 confirm prompt UIA name shortens instead of going silent" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The body can carry banner text, which is arbitrary, so overflow is
+    // reachable. A bare `bufPrint ... catch ""` would announce nothing.
+    var small: [8]u8 = undefined;
+    const long: [:0]const u8 = "Error: a very long banner message";
+    const shortened = confirmPromptUiaName(.confirm, long, &small, "");
+    try std.testing.expectEqualStrings("Error: a", shortened);
+    try std.testing.expect(shortened.len <= small.len);
+
+    // The cut lands on a codepoint boundary, because the name is turned
+    // into a BSTR and invalid UTF-8 fails that conversion outright.
+    // "ab\u{e9}cd" is a, b, C3, A9, c, d: a 3-byte limit lands on the
+    // continuation byte and has to give the whole codepoint up.
+    var tiny: [3]u8 = undefined;
+    const accented: [:0]const u8 = "ab\u{e9}cd";
+    const cut = confirmPromptUiaName(.confirm, accented, &tiny, "");
+    try std.testing.expectEqualStrings("ab", cut);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
+
+    // One byte further and the codepoint is complete, so it survives.
+    var fits: [4]u8 = undefined;
+    const whole = confirmPromptUiaName(.confirm, accented, &fits, "");
+    try std.testing.expectEqualStrings("ab\u{e9}", whole);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(whole));
+}
+
+test "win32 confirm prompt lines fall back to paint independently" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const hwnd: HWND = @ptrFromInt(0x1000);
+    const shown: ChildPlacement = .{ .visible = true, .visible_known = true };
+    const hidden: ChildPlacement = .{};
+
+    try std.testing.expect(confirmPromptLineOwnedByChild(.confirm, hwnd, shown));
+
+    // A line whose rect collapsed, or whose control was never created,
+    // stays with chrome paint -- and says nothing about the other line,
+    // which is the point of keeping this per line. A narrow window
+    // collapses the title first; the body must still reach the tree.
+    try std.testing.expect(!confirmPromptLineOwnedByChild(.confirm, hwnd, hidden));
+    try std.testing.expect(!confirmPromptLineOwnedByChild(.confirm, null, shown));
+    try std.testing.expect(!confirmPromptLineOwnedByChild(.confirm, null, hidden));
+
+    // Never in any other mode: those paint their own label and feedback
+    // line and keep both controls hidden.
+    for ([_]HostOverlayMode{ .none, .command_palette, .search, .profile, .tab_overview, .surface_title, .tab_title }) |mode| {
+        try std.testing.expect(!confirmPromptLineOwnedByChild(mode, hwnd, shown));
+    }
+}
+
+test "win32 confirm prompt line colours follow the banner" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_]ThemeColors{ darkTheme(), lightTheme() }) |theme| {
+        // The title is the overlay label colour in every state: a banner
+        // qualifies the body, not the heading.
+        for ([_]HostBannerKind{ .none, .info, .err }) |kind| {
+            for ([_]bool{ false, true }) |has_banner| {
+                try std.testing.expectEqual(
+                    theme.overlay_label_fg,
+                    confirmPromptLineColor(&theme, true, kind, has_banner),
+                );
+            }
+        }
+
+        // With no banner the body is ordinary secondary text, whatever
+        // kind is left over on the Host.
+        for ([_]HostBannerKind{ .none, .info, .err }) |kind| {
+            try std.testing.expectEqual(
+                theme.text_secondary,
+                confirmPromptLineColor(&theme, false, kind, false),
+            );
+        }
+
+        // A banner raised while the prompt is open keeps reading as what
+        // it is, which is why the body is not just `text_secondary`.
+        try std.testing.expectEqual(
+            theme.text_secondary,
+            confirmPromptLineColor(&theme, false, .none, true),
+        );
+        try std.testing.expectEqual(
+            theme.info_fg,
+            confirmPromptLineColor(&theme, false, .info, true),
+        );
+        try std.testing.expectEqual(
+            theme.error_fg,
+            confirmPromptLineColor(&theme, false, .err, true),
+        );
+        try std.testing.expect(theme.error_fg != theme.text_secondary);
+        try std.testing.expect(theme.info_fg != theme.text_secondary);
+    }
 }
 
 test "win32 applyProfileChromeAccent respects profile state" {

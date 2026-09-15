@@ -468,6 +468,64 @@ function Get-HintsButtonInvokePattern {
     return [System.Windows.Automation.InvokePattern]$pattern
 }
 
+function Get-HintsConfirmPromptLines {
+    param(
+        [Parameter(Mandatory)][IntPtr] $HostHwnd,
+        [Parameter(Mandatory)][string] $TitlePrefix,
+        [Parameter(Mandatory)][string] $BodyPrefix
+    )
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($HostHwnd)
+    $condition = New-Object System.Windows.Automation.AndCondition(
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text)),
+        (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Static'))
+    )
+    # Match by name, not by position. The host banner and the docked
+    # search result count are also Text STATICs, and they only sort below
+    # the overlay band by accident of their current layout.
+    $found = @($root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition))
+    return [pscustomobject]@{
+        Count = $found.Count
+        Names = @($found | ForEach-Object { [string]$_.Current.Name })
+        Title = @($found | Where-Object {
+                ([string]$_.Current.Name).StartsWith($TitlePrefix, [StringComparison]::Ordinal)
+            })[0]
+        Body = @($found | Where-Object {
+                ([string]$_.Current.Name).StartsWith($BodyPrefix, [StringComparison]::Ordinal)
+            })[0]
+    }
+}
+
+function Assert-HintsConfirmPromptLine {
+    param(
+        [Parameter(Mandatory)][AllowNull()] $Element,
+        [Parameter(Mandatory)][string] $Description,
+        [Parameter(Mandatory)][string] $ExpectedPrefix
+    )
+    if ($null -eq $Element) { throw "$Description is absent from the UI Automation tree." }
+    $name = [string]$Element.Current.Name
+    if (-not $name.StartsWith($ExpectedPrefix, [StringComparison]::Ordinal)) {
+        throw "$Description name mismatch: actual='$name' expected prefix='$ExpectedPrefix'."
+    }
+    if ($Element.Current.IsOffscreen) { throw "$Description is reported offscreen." }
+    $bounds = $Element.Current.BoundingRectangle
+    $degenerate = [double]::IsInfinity($bounds.Width) -or [double]::IsInfinity($bounds.Height) -or
+        [double]::IsInfinity($bounds.Left) -or [double]::IsInfinity($bounds.Top) -or
+        $bounds.Width -le 0 -or $bounds.Height -le 0
+    if ($degenerate) { throw "$Description has no on-screen rectangle." }
+    return [ordered]@{
+        name = $name
+        control_type = $Element.Current.ControlType.ProgrammaticName
+        is_offscreen = [bool]$Element.Current.IsOffscreen
+        bounds = [ordered]@{
+            left = [int]$bounds.Left; top = [int]$bounds.Top
+            width = [int]$bounds.Width; height = [int]$bounds.Height
+        }
+    }
+}
+
 function Get-HintsScenarioPlan {
     param(
         [Parameter(Mandatory)]
@@ -871,6 +929,66 @@ try {
     }
     $allow = $script:allow
     [void](Get-HintsButtonInvokePattern -Element $allow -Description 'Protected-paste Allow control')
+    # Cancel gets the same check. Dismissing with Escape never reaches
+    # this control's WM_GETOBJECT, so without asserting the pattern here a
+    # Cancel button with no provider -- or a generic one -- would pass the
+    # whole scenario unnoticed.
+    $cancelHwnd = [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Cancel', $true)
+    if ($cancelHwnd -eq [IntPtr]::Zero) { throw 'Protected-paste Cancel control is absent.' }
+    $cancel = [System.Windows.Automation.AutomationElement]::FromHandle($cancelHwnd)
+    $cancelInvoke = Get-HintsButtonInvokePattern -Element $cancel `
+        -Description 'Protected-paste Cancel control'
+
+    # The prompt's own heading and body. Before they were exposed, a
+    # screen-reader user reached Allow / Cancel and the payload preview
+    # without ever being told what was being approved, so assert the two
+    # lines are real, named, on-screen elements rather than paint.
+    $titlePrefix = 'Allow clipboard paste?'
+    $bodyPrefix = 'noctty needs confirmation'
+    $promptLines = Get-HintsConfirmPromptLines -HostHwnd $hostHwnd `
+        -TitlePrefix $titlePrefix -BodyPrefix $bodyPrefix
+    try {
+        $confirmTitle = Assert-HintsConfirmPromptLine -Element $promptLines.Title `
+            -Description 'Protected-paste confirm title' -ExpectedPrefix $titlePrefix
+        $confirmBody = Assert-HintsConfirmPromptLine -Element $promptLines.Body `
+            -Description 'Protected-paste confirm body' -ExpectedPrefix $bodyPrefix
+    }
+    catch {
+        try {
+            Write-HintsDescendantInventory -HostHwnd $hostHwnd -Path $unsafeInventoryPath `
+                -Phase 'protected-paste confirm prompt text'
+        }
+        catch { Write-Warning "Unable to write protected-paste descendant inventory: $_" }
+        throw
+    }
+    if ($confirmBody.bounds.top -lt $confirmTitle.bounds.top + $confirmTitle.bounds.height) {
+        throw 'Protected-paste confirm body overlaps its title.'
+    }
+    # Cancel through the Invoke pattern first: that is the path assistive
+    # technology takes, and it is the only one that exercises the
+    # provider end to end.
+    $cancelInvoke.Invoke()
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation dismissed by Cancel Invoke' -Process $process -Condition {
+        [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -eq [IntPtr]::Zero
+    }
+    if (@(Get-HintsInputEvents -Path $unsafeInputPath).Count -ne 0) {
+        throw 'Protected paste cancelled through Invoke reached the PTY.'
+    }
+
+    Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $surfaceHwnd `
+        -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x20) -Description 'reopen unsafe-paste quick select after Invoke cancel'
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'unsafe-paste quick-select overlay after Invoke cancel' -Process $process -Condition {
+        [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true) -ne [IntPtr]::Zero
+    }
+    $escapeQuickHwnd = [NocttyHintsNative]::FindDescendant($hostHwnd, 'noctty.win32.quick_select', $true)
+    Send-HintsChord -Process $process -HostHwnd $hostHwnd -ExpectedFocus $escapeQuickHwnd `
+        -Keys @([uint16]0x12, [uint16]0x41) -Description 'request protected quick-select paste for the Escape round'
+    Wait-HintsUntil -Deadline $deadline -TimeoutSeconds $TimeoutSeconds -Description 'protected-paste confirmation before Escape' -Process $process -Condition {
+        [NocttyHintsNative]::FindDescendantByText($hostHwnd, 'BUTTON', 'Allow', $true) -ne [IntPtr]::Zero
+    }
+
+    # And through the keyboard, which is a separate handler in
+    # `hostButtonProc` and is non-negotiable for a modal-ish overlay.
     Send-HintsChord -Process $process -HostHwnd $hostHwnd -Keys @([uint16]0x1B) -Description 'cancel protected paste'
     Start-Sleep -Milliseconds 400
     if (@(Get-HintsInputEvents -Path $unsafeInputPath).Count -ne 0) { throw 'Cancelled protected paste reached the PTY.' }
@@ -913,9 +1031,14 @@ try {
     $evidence.protected_paste = [ordered]@{
         confirmation_name = 'Allow'
         invoke_pattern = $true
+        cancel_control_name = 'Cancel'
+        cancel_invoke_pattern = $true
+        cancel_invoke_suppressed_pty = $true
         cancel_suppressed_pty = $true
         accepted_key_count = $unsafeEvents.Count
         accepted_contains_carriage_return = @($unsafeEvents | Where-Object { $_.char -eq 13 }).Count -ge 1
+        confirm_title = $confirmTitle
+        confirm_body = $confirmBody
     }
 
     $evidence.processes = [ordered]@{
