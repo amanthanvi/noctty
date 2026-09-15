@@ -14894,7 +14894,7 @@ const Host = struct {
         // on an HWND that stays hidden for the whole overlay.
         if (self.overlay_mode == .confirm) {
             _ = chromeSyncOrLog("confirm body banner sync failed", self.syncOverlayHint());
-            if (self.overlay_hint_placement.visible) {
+            if (self.confirmBodyTextPlaced()) {
                 if (self.overlay_body_uia_provider) |provider| provider.raiseLiveRegionChanged();
             }
         }
@@ -15263,10 +15263,17 @@ const Host = struct {
     /// event on an offscreen element is dropped by readers.
     fn announceConfirmPrompt(self: *Host) void {
         if (self.overlay_mode != .confirm) return;
-        // Title first: it is what the prompt is asking, and the body
-        // only qualifies it.
-        if (self.overlay_title_uia_provider) |provider| provider.raiseLiveRegionChanged();
-        if (self.overlay_body_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        // Title first: it is what the prompt is asking, and the body only
+        // qualifies it. Each is raised only if its child is on screen --
+        // a hidden HWND reports `IsOffscreen`, and readers drop live
+        // regions that are, so raising there would be noise that hides
+        // the fact that the line has no element at all.
+        if (self.confirmTitleTextPlaced()) {
+            if (self.overlay_title_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        }
+        if (self.confirmBodyTextPlaced()) {
+            if (self.overlay_body_uia_provider) |provider| provider.raiseLiveRegionChanged();
+        }
     }
 
     /// Finish a confirm-prompt text STATIC: chrome font, host back-
@@ -15337,17 +15344,28 @@ const Host = struct {
         return null;
     }
 
-    /// True while the confirm prompt's own title/body children own their
-    /// rects. Chrome paint reads this to skip the GDI strings it used to
-    /// draw there: the host carries `WS_CLIPCHILDREN`, so a visible child
-    /// already clips the parent out of that rect, and painting underneath
-    /// it would only burn time. When placement has not happened yet --
-    /// control creation failed, or the band is too small to hold a line --
-    /// this is false and paint still draws the text.
-    fn confirmPromptTextPlaced(self: *const Host) bool {
+    /// True while one of the confirm prompt's own children owns its rect.
+    ///
+    /// Chrome paint reads these to skip the GDI string it used to draw
+    /// there: the host carries `WS_CLIPCHILDREN`, so a visible child
+    /// already clips the parent out of that rect and painting underneath
+    /// it would only burn time. They are deliberately per line, not one
+    /// gate for both: the title's rect is bounded by the query frame and
+    /// collapses on a narrow window while the body's still has room, and
+    /// an all-or-nothing gate would answer that by hiding the body too.
+    ///
+    /// The HWND check is not redundant with the placement. `layout` only
+    /// touches a placement it has an HWND for, so the two agree today,
+    /// but reading the placement alone makes this correct only as long as
+    /// that guard stays where it is.
+    fn confirmTitleTextPlaced(self: *const Host) bool {
         if (self.overlay_mode != .confirm) return false;
-        return self.overlay_label_placement.visible and
-            self.overlay_hint_placement.visible;
+        return self.overlay_label_hwnd != null and self.overlay_label_placement.visible;
+    }
+
+    fn confirmBodyTextPlaced(self: *const Host) bool {
+        if (self.overlay_mode != .confirm) return false;
+        return self.overlay_hint_hwnd != null and self.overlay_hint_placement.visible;
     }
 
     /// Foreground for one of the confirm prompt's text children.
@@ -18774,17 +18792,18 @@ const Host = struct {
                 ), panel_interior)
             else
                 empty_confirm_text_placement;
-            // Both lines share one gate. Showing a title with no body (or
-            // the reverse) would leave chrome paint drawing one string
-            // while a child owns the other, and `confirmPromptTextPlaced`
-            // would then have to reason about halves.
-            const show_prompt_text = title_text.visible() and body_text.visible();
-            if (show_prompt_text) {
-                self.overlay_label_text = title_text;
-                self.overlay_hint_text = body_text;
-            }
+            // Each line stands on its own. The title's rect is bounded by
+            // the query frame and collapses before the body's does on a
+            // narrow window; gating both on the pair would answer that by
+            // taking the body out of the UIA tree as well, leaving the
+            // prompt unreachable at exactly the size where it is hardest
+            // to read. Chrome paint's fallback is per line to match.
+            const show_title = title_text.visible();
+            const show_body = body_text.visible();
+            if (show_title) self.overlay_label_text = title_text;
+            if (show_body) self.overlay_hint_text = body_text;
             if (self.overlay_label_hwnd) |label_hwnd| {
-                if (show_prompt_text) {
+                if (show_title) {
                     changed.* = applyChromeChildRect(
                         label_hwnd,
                         &self.overlay_label_placement,
@@ -18794,11 +18813,11 @@ const Host = struct {
                 changed.* = applyChildVisibility(
                     label_hwnd,
                     &self.overlay_label_placement,
-                    show_prompt_text,
+                    show_title,
                 ) or changed.*;
             }
             if (self.overlay_hint_hwnd) |hint_hwnd| {
-                if (show_prompt_text) {
+                if (show_body) {
                     changed.* = applyChromeChildRect(
                         hint_hwnd,
                         &self.overlay_hint_placement,
@@ -18808,7 +18827,7 @@ const Host = struct {
                 changed.* = applyChildVisibility(
                     hint_hwnd,
                     &self.overlay_hint_placement,
-                    show_prompt_text,
+                    show_body,
                 ) or changed.*;
             }
             if (action_layout.accept_visible) {
@@ -19571,12 +19590,13 @@ const Host = struct {
             // so UI Automation can see them. The host carries
             // `WS_CLIPCHILDREN`, so those rects are already clipped out of
             // this paint -- drawing them again would be invisible work.
-            // The fallback still matters: if control creation failed or the
-            // band is too small to place a line, nothing is shown and paint
-            // remains the only renderer.
-            const confirm_text_is_child = self.confirmPromptTextPlaced();
+            // The fallback still matters, per line: if control creation
+            // failed, or the band is too narrow to place that line, paint
+            // remains its only renderer.
+            const confirm_title_is_child = self.confirmTitleTextPlaced();
+            const confirm_body_is_child = self.confirmBodyTextPlaced();
             _ = sys.SetTextColor(hdc, overlay_label_color);
-            if (overlay_label_reservation > 0 and !confirm_text_is_child) {
+            if (overlay_label_reservation > 0 and !confirm_title_is_child) {
                 if (self.cached_overlay_paint_label_w) |overlay_label_w| {
                     if (self.overlay_mode == .confirm) {
                         // A confirm title is caller-supplied ("Allow
@@ -19635,7 +19655,7 @@ const Host = struct {
                 .info => theme.info_fg,
                 .err => theme.error_fg,
             });
-            if (!confirm_text_is_child) if (self.cached_overlay_paint_feedback_w) |overlay_feedback_w| {
+            if (!confirm_body_is_child) if (self.cached_overlay_paint_feedback_w) |overlay_feedback_w| {
                 // A confirm shares its rect with the child that normally
                 // owns this line, so the fallback and the control put the
                 // glyphs on the same pixels. Every other mode keeps the
