@@ -3529,8 +3529,9 @@ pub const App = struct {
     /// touch it on the way down.
     com_initialized: bool = false,
     /// Kernel build number from `RtlGetVersion`. 0 if probe failed.
-    /// 22000 = Win11 21H2; 22621 = Win11 22H2
-    /// (`DWMWA_SYSTEMBACKDROP_TYPE` / `DWMSBT_TABBEDWINDOW`).
+    /// 22000 = Win11 21H2; 22621 = Win11 22H2 (the floor for
+    /// `DWMWA_SYSTEMBACKDROP_TYPE`, which host windows always write as
+    /// `DWMSBT_NONE` — see `applyDwmThemeWithBuild`).
     /// Future chrome gates read this directly; no runtime config flag,
     /// per §12 Q1.
     os_build: u32 = 0,
@@ -3664,6 +3665,7 @@ pub const App = struct {
                 .{},
             );
         }
+        if (self.config.@"background-blur".win32BlurRequested()) logBackgroundBlurUnsupported();
         warnPortableIgnoredLocalData(core_app.alloc);
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
@@ -6411,6 +6413,13 @@ pub const App = struct {
                         var config = try value.config.clone(self.core_app.alloc);
                         const ssh_config_hosts_changed =
                             self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
+                        // Warn on the transition, not on every reload: the
+                        // Settings checkbox and an edited config file both
+                        // arrive here, and that is the only notice a user who
+                        // turns blur on after startup would ever get.
+                        const background_blur_newly_requested =
+                            config.@"background-blur".win32BlurRequested() and
+                            !self.config.@"background-blur".win32BlurRequested();
                         // CLI launch-layout is a one-shot startup/new-window
                         // request. Config reload reparses the original argv, so
                         // strip it before installing the long-lived app config
@@ -6432,6 +6441,7 @@ pub const App = struct {
                         self.unregisterGlobalHotkeys();
                         self.config.deinit();
                         self.config = config;
+                        if (background_blur_newly_requested) logBackgroundBlurUnsupported();
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
                         var jump_list_profiles_pending = ssh_config_hosts_changed and self.jump_list != null;
@@ -21302,19 +21312,24 @@ fn resolveTheme(config: *const configpkg.Config) ThemeColors {
     };
 }
 
-fn shouldUseSystemBackdrop(config: *const configpkg.Config) bool {
-    return config.@"background-opacity" < 1.0 and
-        config.@"background-blur".win32SystemBackdropEnabled();
+/// One notice for a setting Win32 cannot honour, shared by startup and the
+/// config-change path so the two cannot drift. Not a config diagnostic: the
+/// value parses and other platforms honour it.
+fn logBackgroundBlurUnsupported() void {
+    log.warn(
+        "background-blur has no effect on Windows in this build: noctty paints its " ++
+            "window opaquely and opts into no DWM transparency mechanism, so no backdrop " ++
+            "material can reach a visible pixel. background-opacity is a flat " ++
+            "window-wide tint, not a blur",
+        .{},
+    );
 }
 
+/// Whether this Windows build accepts `DWMWA_SYSTEMBACKDROP_TYPE` at all.
+/// Older builds reject the attribute with `E_INVALIDARG`, so the write is
+/// skipped there rather than failing on every theme apply.
 fn supportsDwmSystemBackdropAttribute(os_build: u32) bool {
     return os_build >= c.OS_BUILD_WIN11_22H2;
-}
-
-fn systemBackdropTypeForBuild(config: *const configpkg.Config, os_build: u32) u32 {
-    if (!shouldUseSystemBackdrop(config)) return c.DWMSBT_NONE;
-    if (!supportsDwmSystemBackdropAttribute(os_build)) return c.DWMSBT_NONE;
-    return c.DWMSBT_TABBEDWINDOW;
 }
 
 fn configuredHostWindowPosition(config: *const configpkg.Config) ?struct { x: i32, y: i32 } {
@@ -21424,7 +21439,24 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
         isHighContrastActive(),
         caption_color,
         text_color,
-        systemBackdropTypeForBuild(config, os_build),
+        // Host windows never carry a DWM backdrop material, because nothing
+        // in this runtime can show one: the chrome is painted opaquely with
+        // GDI, the terminal is an opaque OpenGL child whose framebuffer alpha
+        // DWM discards, and nothing opts into `DwmExtendFrameIntoClientArea`,
+        // `DwmEnableBlurBehindWindow` or `WS_EX_NOREDIRECTIONBITMAP`. The
+        // attribute used to be set to `DWMSBT_TABBEDWINDOW` whenever
+        // `background-opacity < 1` and `background-blur` were both set, which
+        // only ever cost a DWM call and made the docs promise a material the
+        // window could not show. Measured on Windows 11 build 26200 over a
+        // striped desktop: `--background-opacity=0.8 --background-blur=true`
+        // (backdrop 4) and `--background-blur=false` (backdrop 1) produced
+        // byte-identical screenshots, and flipping the attribute from outside
+        // the process on the same window with `WS_EX_LAYERED` stripped by
+        // hand changed nothing either. The layered alpha that implements
+        // `background-opacity` is NOT the obstacle: a synthetic window that
+        // does extend its frame shows a different material per backdrop type
+        // whether or not it is layered.
+        c.DWMSBT_NONE,
         supportsDwmSystemBackdropAttribute(os_build),
     );
 }
@@ -34739,36 +34771,74 @@ test "win32 quitTimerDelayMs rounds up to the next millisecond" {
     }));
 }
 
-test "win32 shouldUseSystemBackdrop requires opacity and blur" {
+test "win32 supportsDwmSystemBackdropAttribute gates unsupported builds" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var config: configpkg.Config = .{};
-    try std.testing.expect(!shouldUseSystemBackdrop(&config));
-
-    config.@"background-opacity" = 0.85;
-    try std.testing.expect(!shouldUseSystemBackdrop(&config));
-
-    config.@"background-blur" = .true;
-    try std.testing.expect(shouldUseSystemBackdrop(&config));
-}
-
-test "win32 systemBackdropTypeForBuild gates unsupported builds" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var config: configpkg.Config = .{};
-    config.@"background-opacity" = 0.85;
-    config.@"background-blur" = .true;
 
     try std.testing.expect(!supportsDwmSystemBackdropAttribute(c.OS_BUILD_WIN10_22H2));
     try std.testing.expect(!supportsDwmSystemBackdropAttribute(c.OS_BUILD_WIN11_21H2));
     try std.testing.expect(supportsDwmSystemBackdropAttribute(c.OS_BUILD_WIN11_22H2));
+}
 
-    try std.testing.expectEqual(c.DWMSBT_NONE, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN10_22H2));
-    try std.testing.expectEqual(c.DWMSBT_NONE, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN11_21H2));
-    try std.testing.expectEqual(c.DWMSBT_TABBEDWINDOW, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN11_22H2));
+test "win32 host backdrop stays DWMSBT_NONE with background blur configured" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // `windowThemePolicy` forces `DWMSBT_NONE` on its own under High
+    // Contrast, so on such a machine this assertion would hold even with the
+    // old `DWMSBT_TABBEDWINDOW` argument restored. Skip rather than pass
+    // vacuously; the accessibility override has its own coverage in
+    // `win32_theme.zig`.
+    if (isHighContrastActive()) return error.SkipZigTest;
 
-    config.@"background-blur" = .false;
-    try std.testing.expectEqual(c.DWMSBT_NONE, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN11_22H2));
+    // Read-only: writing DWM theme attributes stays private to
+    // `win32_theme.zig`, so the seed below goes through `WindowThemeAdapter`.
+    const dwm = struct {
+        const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+        extern "dwmapi" fn DwmGetWindowAttribute(HWND, u32, *anyopaque, u32) callconv(.winapi) i32;
+    };
+
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+
+    const theme = darkTheme();
+
+    // Seed the attribute with the value the pre-fix build asked for, so a
+    // pass cannot come from `DWMSBT_NONE` merely being the system default.
+    win32_theme.WindowThemeAdapter.applyHost(
+        hwnd,
+        theme,
+        false,
+        win32_theme.dwm_color_default,
+        win32_theme.dwm_color_default,
+        c.DWMSBT_TABBEDWINDOW,
+        true,
+    );
+
+    // A Windows build that does not know the attribute rejects both the seed
+    // and this query; there is nothing to assert there.
+    var backdrop: u32 = 0xFFFF_FFFF;
+    if (dwm.DwmGetWindowAttribute(
+        hwnd,
+        dwm.DWMWA_SYSTEMBACKDROP_TYPE,
+        @ptrCast(&backdrop),
+        @sizeOf(u32),
+    ) != 0) return error.SkipZigTest;
+    try std.testing.expectEqual(c.DWMSBT_TABBEDWINDOW, backdrop);
+
+    // The configuration that used to request `DWMSBT_TABBEDWINDOW`. It is
+    // also the configuration that layers the host window, which is why the
+    // backdrop can never render for it.
+    var config: configpkg.Config = .{};
+    config.@"background-opacity" = 0.85;
+    config.@"background-blur" = .true;
+
+    applyDwmThemeWithBuild(hwnd, &theme, &config, c.OS_BUILD_WIN11_22H2);
+
+    try std.testing.expectEqual(@as(i32, 0), dwm.DwmGetWindowAttribute(
+        hwnd,
+        dwm.DWMWA_SYSTEMBACKDROP_TYPE,
+        @ptrCast(&backdrop),
+        @sizeOf(u32),
+    ));
+    try std.testing.expectEqual(c.DWMSBT_NONE, backdrop);
 }
 
 test "win32 configuredHostWindowPosition requires both coordinates" {

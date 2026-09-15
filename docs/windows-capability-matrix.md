@@ -43,7 +43,7 @@ Last reviewed: 2026-09-02.
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                                                                                                                 |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages installer releases after SHA-256 and Authenticode verification; portable ZIP staging/apply additionally requires a pinned-publisher-signed manifest covering every payload file and otherwise stays on the release-page path. Apply is user-initiated. See [windows.md](windows.md#updates). |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\noctty\session-state.json`. `window-save-state-scrollback` opts in to bounded plain-text pane snapshots; child processes are not restored.                                                                                                                                    |
-| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Windows 11 22H2+ with `background-opacity < 1` requests the DWM tabbed backdrop; accepted but inert on Windows 10 and 11 21H2. Radii are treated as on/off.                                                                                                                                                                                                                   |
+| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Accepted but inert on every Windows build: nothing in the Win32 runtime opts into a DWM transparency mechanism, so no backdrop material can show. Enabling it logs a warning. See [background blur](#background-blur).                                                                                                                                                        |
 | [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial: UI Automation covers the daily chrome and terminal text, but caption buttons, overlay rows, and menus are uncovered. Only NVDA has been measured, with mixed results. See [accessibility notes](#accessibility) and the [screen-reader matrix](accessibility-matrix.md).                                                                            |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                                                                                                                      |
 | [Configuration: `link-previews`](https://ghostty.org/docs/config/reference)                  | Link matching, highlighting, and opening work, but the Win32 runtime does not render the preview tooltip.                                                                                                                                                                                                                                                                     |
@@ -193,6 +193,33 @@ first DirectWrite production zone, with per-paint GDI fallback. That pipeline
 does not replace or call the terminal renderer. The terminal path has a hard
 OpenGL 4.3-via-WGL floor and no software fallback; below it, noctty shows a
 startup diagnostic naming the detected version and does not launch.
+
+### Background blur
+
+`background-blur` has no visible effect on Windows in this build, on any build
+number, and noctty never asks for a DWM backdrop material. Nothing in the Win32
+runtime can show one: the chrome is painted opaquely with GDI, the terminal is
+an opaque OpenGL child whose framebuffer alpha DWM discards, and nothing opts
+into `DwmExtendFrameIntoClientArea`, `DwmEnableBlurBehindWindow`, or
+`WS_EX_NOREDIRECTIONBITMAP`.
+
+Measured on Windows 11 build 26200 over a finely striped desktop, which a real
+blur would smear: with `--background-opacity=0.8 --background-blur=true` the
+host window read back `WS_EX_LAYERED`, `LWA_ALPHA` alpha 204, and
+`DWMWA_SYSTEMBACKDROP_TYPE` 4 (`DWMSBT_TABBEDWINDOW`), and its screenshot was
+byte-identical to the same run with `--background-blur=false` (backdrop 1).
+Flipping the attribute from outside the process on the same window with
+`WS_EX_LAYERED` stripped by hand changed nothing either, so the layered alpha
+that implements `background-opacity` is not the obstacle — a synthetic window
+that does extend its frame renders a visibly different material per backdrop
+type whether or not it is layered. The obstacle is that noctty never opts in.
+
+Blurred translucency would therefore need a per-pixel window alpha opt-in plus
+a composition swapchain for the terminal, so the OpenGL content is not
+flattened opaque on its way through DWM. Enabling `background-blur` logs one
+warning instead, at startup or when a config reload turns it on; like every
+other log line in this runtime it goes to stderr, so it is visible where stderr
+is captured.
 
 ### Universal palette
 
