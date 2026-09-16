@@ -129,20 +129,46 @@ source:
 | CR / LF                       | 0 / 0      | 48 / 229  |
 | Total bytes                   | 421084     | 302644    |
 
-The bundled source forwards the multiplexer's own repaint, which addresses every
-run with an absolute CUP. The in-box source replaces most of those with relative
-motion: it walks the row with CUF over cells it believes are already correct,
-erases runs with ECH, and steps between rows with CR/LF.
+The bundled numbers are the multiplexer's own repaint, forwarded. A control run
+confirms which stream is whose: a child that writes
+`ESC[?1049h` `MARK_A\r\nMARK_B\r\n` `ESC[5;10H` `MARK_C   MARK_D`
+`ESC[1;1H` `ESC[38;2;1;2;3m` `MARK_E` `ESC[m` `ESC[7;1H` `MARK_F` `ESC[3C`
+`MARK_G` came back byte-for-byte under the bundled source, between an added
+`ESC[1t ESC[c ESC[?1004h ESC[?9001h` prologue and a `ESC[?1004l ESC[?9001l`
+epilogue. The same child under the in-box source came back as a synthesized
+top-to-bottom redraw -- clear, then each row emitted with `ESC[K` and `CR/LF`,
+`MARK_A` gone because `MARK_E` had overwritten it, and the child's own `ESC[3C`
+replaced by literal spaces. So a bundled capture shows what the application
+emitted; an in-box capture shows only what conhost decided to emit. In
+particular the zero CR/LF count above is herdr's, not the transport's.
 
-The practical consequence is that the two sources have different failure modes,
-not just different sequence coverage. CUF moves the cursor without writing, so a
-v1 repaint only rewrites the cells conhost's buffer says changed. If the
-terminal grid and that buffer ever disagree, the stale glyphs sit in the skipped
-gaps and no later repaint clears them; they survive until something forces a
-full redraw. An absolute-CUP repaint from the application rewrites those same
-cells every frame, so the same divergence self-heals. When a user reports stray
-leftover characters in a multiplexer or full-screen TUI, that asymmetry is the
-first thing to rule out.
+Neither shape rewrites every cell -- both skip runs they believe are unchanged,
+and the application's own repaint skips the gaps between words
+(`ESC[4;28H` `Name:` `ESC[4;52H` `Email` `ESC[4;58H` `Ingestion`). The
+difference that matters is _how_ a skip is expressed, in two ways.
+
+First, addressing. Every run in the application's repaint carries an absolute
+CUP, so the cursor is re-anchored before each run and a disagreement about where
+the previous run ended cannot propagate. v1's motion is relative and
+context-dependent instead: CUF clamps at the right margin, LF scrolls at the
+bottom row, CR interacts with margins, ECH interacts with pending wrap. One
+context the terminal models differently from conhost desynchronizes the cursor
+for the rest of that row or frame, with no absolute move to correct it.
+
+Second, granularity. v1 skips at single-cell resolution in the middle of a word.
+The in-box capture above contains literal runs such as `Modif` `ESC[1C` `ed`
+and `9/1` `ESC[1C` `/2026`, where conhost believed one interior cell already
+held the right glyph. A divergence there surfaces as one wrong _letter_ inside a
+word, which is the shape "scrambled text" reports usually describe. An
+application repaint skipping a whitespace gap cannot produce that shape.
+
+A rigid whole-frame offset between the two models -- the terminal's grid holding
+content some fixed number of rows and columns away from conhost's buffer -- most
+plausibly starts at a **resize**: `ResizePseudoConsole` makes conhost reflow its
+buffer by its rules and the terminal reflow by Ghostty's, the screen is not
+retransmitted, and the delta stream simply continues from there. Ask about a
+window resize or a pane-divider drag before treating such a report as a pure
+terminal bug.
 
 To split terminal behavior from transport behavior, run the same scenario
 twice on a current build: once as shipped (bundled; confirm with the `ConPTY`

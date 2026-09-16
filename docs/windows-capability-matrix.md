@@ -86,10 +86,11 @@ the in-box conhost with a warning. `+version` and the diagnostic-bundle manifest
 report the active source. On this machine the bundled source delivered measured
 Kitty APC and Sixel DCS payloads byte-for-byte; the in-box source dropped both.
 The in-box source also reshapes repaints: it rewrites an application's
-absolute-CUP redraw into relative cursor motion plus ECH, so a terminal grid
-that ever diverges from the conhost buffer keeps stale glyphs in the skipped
-gaps. Releases before 1.3.125 have no bundled pair and always take that path;
-`NOCTTY_CONPTY=inbox` reproduces it on current builds. See the
+absolute-CUP redraw into relative, context-dependent cursor motion plus ECH,
+and skips at single-cell resolution inside a word, so a terminal that models
+one of those contexts differently loses the re-anchoring an absolute CUP would
+have given it. Releases before 1.3.125 have no bundled pair and always take
+that path; `NOCTTY_CONPTY=inbox` reproduces it on current builds. See the
 generation-specific
 [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 
