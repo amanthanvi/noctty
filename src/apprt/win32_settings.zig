@@ -1178,6 +1178,10 @@ pub const SettingsWindow = struct {
         self.btn_section_advanced = null;
         self.section_button_prev_proc = null;
         self.section_hovered = null;
+        // The window object outlives its HWND. A reopened window is
+        // reached by whatever opened it, not by the keys pressed in the
+        // previous one, so it starts ring-less like a fresh one.
+        self.focus_input_mode = .pointer;
         self.text_uia_prev_proc = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
@@ -1849,6 +1853,7 @@ pub const SettingsWindow = struct {
         self.btn_section_advanced = null;
         self.section_button_prev_proc = null;
         self.section_hovered = null;
+        self.focus_input_mode = .pointer;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
         self.btn_conflict_keep = null;
@@ -5560,7 +5565,12 @@ fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPAR
             WM_SETTINGS_PROOF_KILLFOCUS_COUNT => return @intCast(settings.proof_killfocus_count),
             WM_SETTINGS_PROOF_REDRAW_SUCCEEDED => return @intFromBool(settings.proof_redraw_succeeded),
             WM_SETTINGS_PROOF_UPDATE_PENDING => return @intFromBool(settings.proof_update_pending),
-            WM_SETTINGS_PROOF_LIVE_FOCUS_RING => return @intFromBool(GetFocus() == hwnd),
+            WM_SETTINGS_PROOF_LIVE_FOCUS_RING => return @intFromBool(shouldDrawSettingsSectionFocusRing(
+                SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
+                GetFocus() == hwnd,
+                settings.focus_input_mode,
+                settings.theme_adapter.colors.high_contrast,
+            )),
             WM_ERASEBKGND => return 1,
             WM_PAINT => {
                 paintSettingsSectionButton(hwnd, settings);

@@ -13906,12 +13906,15 @@ const Host = struct {
         const title = tab.cached_button_title orelse return self.hideTabTooltip();
         // Measure the title against the budget the title was actually
         // compacted to, not the drawn label against the button's own budget.
-        // The label also carries the tab index and the pane count;
-        // `buildTabButtonLabel` charges those to the button budget first, so
-        // comparing the whole label against that budget asked whether a
-        // label that is built to fit fits.
+        // The label also carries the tab index, the active marker and the pane
+        // count; `buildTabButtonLabel` charges those to the button budget
+        // first, so comparing the whole label against that budget asked
+        // whether a label that is built to fit fits. It also answered
+        // differently for an active tab than for its inactive neighbour
+        // showing the same title.
         const budget = labels.tabButtonTitleBudget(
             tab.cached_button_index,
+            tab.cached_button_active,
             tab.cached_button_pane_count,
             tab.cached_button_label_max_width,
             tab.cached_button_show_pane_count,
@@ -16666,9 +16669,12 @@ const Host = struct {
         // The BUTTON class takes focus on the click that opened the menu,
         // and nothing gives it back when the menu closes without a
         // command: the next keystroke went to the chevron, not the shell.
-        // A chosen command moves focus itself (new tab, palette, find),
-        // so only the dismissed case needs the terminal restored.
-        if (cmd <= 0 and sys.GetFocus() == button) {
+        // A chosen command moves focus itself (new tab, palette, find), so
+        // only the dismissed case needs the terminal restored, and only
+        // when the pointer opened the menu. A keyboard user who reached
+        // the chevron with F6 and opened it with Space expects Escape to
+        // put them back on the chevron, as every menu does.
+        if (cmd <= 0 and self.focus_input_mode == .pointer and sys.GetFocus() == button) {
             refocusHostAfterActivation(self);
         }
         self.handleOverflowMenuCommand(cmd);
@@ -17395,7 +17401,17 @@ const Host = struct {
                 .bottom = draw.rcItem.top + self.scaled(5),
             }, border);
         }
-        if (self.chromeFocusRingVisible(focused, disabled)) {
+        // An overlay button is the default button of a modal prompt: focus
+        // lands on Allow programmatically and Enter presses whatever holds
+        // it, so the ring is the only thing that says what Enter will do.
+        // Native dialogs keep their default button visibly marked under
+        // `UISF_HIDEFOCUS` for the same reason; the pointer gate applies
+        // to the tab strip and the search bar, not here.
+        const ring_visible = if (overlay)
+            focused and !disabled
+        else
+            self.chromeFocusRingVisible(focused, disabled);
+        if (ring_visible) {
             const focus = if (profile_kind) |kind|
                 profileKindFocusRingColor(kind, theme.is_dark)
             else if (accept)
@@ -18586,6 +18602,7 @@ const Host = struct {
                 self.app.core_app.alloc,
                 title,
                 i,
+                active,
                 pane_count,
                 label_max_width,
                 show_pane_count,
@@ -18594,12 +18611,6 @@ const Host = struct {
             const is_new_button = tab.button_hwnd == null;
             const label_changed = is_new_button or
                 !ownedStringEquals(tab.cached_button_label, label);
-            // Activation no longer changes the label text, so the
-            // `SetWindowTextW` below cannot be what repaints the button in
-            // its active or inactive look; ask for the repaint directly.
-            if (!is_new_button and !label_changed and tab.cached_button_active != active) {
-                _ = sys.InvalidateRect(tab.button_hwnd.?, null, 0);
-            }
             if (is_new_button) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
@@ -19470,8 +19481,6 @@ const Host = struct {
                     },
                     themeSurface(titlebar_theme, .tab_accent),
                 );
-            }
-            if (!self.usingIntegratedTitlebar()) {
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
                 const cluster_rect = RECT{
                     .left = cluster_left,
@@ -24572,7 +24581,10 @@ fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         if (msg == c.WM_SETFOCUS) {
             if (host.banner_uia_provider) |provider| provider.raiseFocusChanged();
         }
-        if (msg == c.WM_KEYDOWN and host.handleFocusRegionKey(hwnd, wParam, true)) return 0;
+        if (msg == c.WM_KEYDOWN) {
+            host.noteChromeKeyInput(wParam);
+            if (host.handleFocusRegionKey(hwnd, wParam, true)) return 0;
+        }
         if (host.banner_prev_proc) |previous| return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -31693,6 +31705,9 @@ pub const Surface = struct {
 
         self.cursor_pos = cursorPosFromLParam(lParam);
         if (state == .press) {
+            // The pointer is driving again; the next chrome control to
+            // take focus programmatically should not wear a ring.
+            if (self.host) |host| host.noteChromePointerInput();
             if (self.hwnd) |hwnd| {
                 _ = sys.SetFocus(hwnd);
                 _ = sys.SetCapture(hwnd);

@@ -39,13 +39,16 @@ pub fn showRing(focused: bool, disabled: bool, mode: InputMode, high_contrast: b
 
 /// Whether a key that just arrived counts as navigation for the purpose
 /// of revealing rings. Character keys do not: typing into the palette
-/// query must not light the Close button next to it.
+/// query must not light the Close button next to it. The tab strip's own
+/// verbs count too: Delete closes the focused tab and moves focus to its
+/// neighbour, F2 renames it, Apps opens the overview, and each leaves
+/// keyboard focus on a control the user has to be able to find.
 pub fn keyRevealsRing(vk: u32) bool {
     return switch (vk) {
         vk_tab, vk_return, vk_space, vk_escape => true,
         vk_prior, vk_next, vk_end, vk_home => true,
         vk_left, vk_up, vk_right, vk_down => true,
-        vk_f6 => true,
+        vk_delete, vk_f2, vk_f6, vk_apps => true,
         else => false,
     };
 }
@@ -62,6 +65,9 @@ pub const vk_left: u32 = 0x25;
 pub const vk_up: u32 = 0x26;
 pub const vk_right: u32 = 0x27;
 pub const vk_down: u32 = 0x28;
+pub const vk_delete: u32 = 0x2E;
+pub const vk_apps: u32 = 0x5D;
+pub const vk_f2: u32 = 0x71;
 pub const vk_f6: u32 = 0x75;
 
 test "focus cue rings follow keyboard input, not the pointer" {
@@ -83,6 +89,9 @@ test "focus cue navigation keys reveal rings and text keys do not" {
     try std.testing.expect(keyRevealsRing(vk_f6));
     try std.testing.expect(keyRevealsRing(vk_left));
     try std.testing.expect(keyRevealsRing(vk_return));
+    try std.testing.expect(keyRevealsRing(vk_delete));
+    try std.testing.expect(keyRevealsRing(vk_f2));
+    try std.testing.expect(keyRevealsRing(vk_apps));
     try std.testing.expect(!keyRevealsRing('a'));
     try std.testing.expect(!keyRevealsRing(0x10)); // VK_SHIFT
     try std.testing.expect(!keyRevealsRing(0x11)); // VK_CONTROL
