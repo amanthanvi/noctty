@@ -111,6 +111,105 @@ re-rendered the three markers adjacent to one another inside a synthesized
 clear/home/title/cursor-update stream. This measurement establishes transport
 survival only; it does not close the Kitty pixel-rendering gap listed above.
 
+### Measured repaint-shape differential for full-screen multiplexers
+
+Stripping whole sequences is not the only way v1 differs. Because v1 re-renders
+its own text buffer instead of forwarding the child's bytes, it also rewrites
+the _shape_ of a repaint. Measured by recording the master side of a pseudo
+console running `herdr` 0.8.2 (a terminal multiplexer whose panes hosted an
+Ink-style agent UI) at 160x45 for the same scripted 30 s scenario, once per
+source:
+
+| Emitted by the pseudo console | Bundled v2 | In-box v1 |
+| ----------------------------- | ---------- | --------- |
+| CUP (`CSI r;c H`)             | 22803      | 6988      |
+| CUF (`CSI n C`)               | 0          | 15138     |
+| ECH (`CSI n X`)               | 0          | 1933      |
+| EL (`CSI n K`)                | 0          | 45        |
+| CR / LF                       | 0 / 0      | 48 / 229  |
+| Total bytes                   | 421084     | 302644    |
+
+The bundled numbers are the multiplexer's own repaint, forwarded. A control run
+confirms which stream is whose: a child that writes
+`ESC[?1049h` `MARK_A\r\nMARK_B\r\n` `ESC[5;10H` `MARK_C   MARK_D`
+`ESC[1;1H` `ESC[38;2;1;2;3m` `MARK_E` `ESC[m` `ESC[7;1H` `MARK_F` `ESC[3C`
+`MARK_G` came back byte-for-byte under the bundled source, between an added
+`ESC[1t ESC[c ESC[?1004h ESC[?9001h` prologue and a `ESC[?1004l ESC[?9001l`
+epilogue. The same child under the in-box source came back as a synthesized
+top-to-bottom redraw -- clear, then each row emitted with `ESC[K` and `CR/LF`,
+`MARK_A` gone because `MARK_E` had overwritten it, and the child's own `ESC[3C`
+replaced by literal spaces. So a bundled capture shows what the application
+emitted; an in-box capture shows only what conhost decided to emit. In
+particular the zero CR/LF count above is herdr's, not the transport's.
+
+Neither shape rewrites every cell -- both skip runs they believe are unchanged,
+and the application's own repaint skips the gaps between words
+(`ESC[4;28H` `Name:` `ESC[4;52H` `Email` `ESC[4;58H` `Ingestion`). The
+difference that matters is _how_ a skip is expressed, in two ways.
+
+First, addressing. Every run in the application's repaint carries an absolute
+CUP, so the cursor is re-anchored before each run and a disagreement about where
+the previous run ended cannot propagate. v1's motion is relative and
+context-dependent instead: CUF clamps at the right margin, LF scrolls at the
+bottom row, CR interacts with margins, ECH interacts with pending wrap. One
+context the terminal models differently from conhost desynchronizes the cursor
+for the rest of that row or frame, with no absolute move to correct it.
+
+Second, granularity. v1 skips at single-cell resolution in the middle of a word.
+The in-box capture above contains literal runs such as `Modif` `ESC[1C` `ed`
+and `9/1` `ESC[1C` `/2026`, where conhost believed one interior cell already
+held the right glyph. A divergence there surfaces as one wrong _letter_ inside a
+word, which is the shape "scrambled text" reports usually describe. An
+application repaint skipping a whitespace gap cannot produce that shape.
+
+A rigid whole-frame offset between the two models -- the terminal's grid holding
+content some fixed number of rows and columns away from conhost's buffer -- is
+worth suspecting at a **resize**, because that is where the two models reflow
+independently and the paths differ again. Recording the same scenario with three
+`ResizePseudoConsole` calls and noting the output offset at each one: on all
+three, the bundled path emitted no snapshot of its own and the next bytes were
+the application's own full repaint (`CSI ?2026h` `CSI 2J` `CSI 1;1H` ...) once
+it saw the new size, while the in-box path emitted its own synthesized repaint
+instead -- `CSI ?25l` `CSI H` and then overwriting from home with ECH for the
+blanks, with no ED at all (the first, shrinking resize additionally emitted one
+`CSI 8;30;120t` size report; the two later ones did not). This matches the
+"Resize and reflow" row below: v2 resize emits no buffer snapshot, while a v1
+resize can repaint into the pipe after reflowing its own viewport-only buffer.
+A v1 repaint that overwrites from home without clearing is precisely the case
+where a reflow disagreement between conhost's buffer and the terminal's grid can
+leave cells behind, so ask about a window resize or a pane-divider drag before
+treating such a report as a pure terminal bug.
+
+To separate the two sides, run the same scenario twice on a current build: once
+as shipped (bundled; confirm with the `ConPTY` line in `noctty +version`) and
+once with `NOCTTY_CONPTY=inbox`. Reproducing only under `inbox` implicates the
+in-box **path**, which is not the same as implicating the transport: the in-box
+stream shape reaches terminal code the bundled stream never exercises (CUF at
+the right margin, ECH against pending wrap, LF at the bottom row), so a terminal
+bug in exactly that code would also be inbox-only. Capture the failing stream
+and replay it through `libghostty-vt` before attributing it:
+
+- The replayed screen shows the corruption. The terminal mishandles that stream
+  shape; the divergence is in noctty, and the capture is the regression test.
+- The replayed screen is correct. The core is consistent with the bytes it was
+  given, so the divergence is either upstream (conhost's buffer already
+  disagreed with the grid before the repaint) or in what a capture cannot hold:
+  live resize and reflow ordering, and the GPU renderer. Rule those out before
+  calling it transport.
+
+Releases before 1.3.125 have no bundled pair at all, so they always take the
+in-box path and always show the in-box shape.
+
+On the measurement host below, both sources rendered the `herdr` scenario
+correctly -- including across repeated live window resizes -- and their window
+captures were pixel-identical, so the in-box _shape_ difference is not by itself
+a defect here. Whether a given in-box conhost also mangles content is specific
+to that conhost's vintage; do not infer it from the OS build number.
+
+Measurement host: Windows `10.0.26200.0`; in-box `System32\conhost.exe`
+FileVersion `10.0.26100.1`; bundled `conpty.dll` ProductVersion
+`1.24.260710001`.
+
 ### Measured master-to-child key encoding differential
 
 The input direction has its own opt-in probe in `src/pty_transport_probe.zig`
