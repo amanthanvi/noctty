@@ -215,10 +215,11 @@ Explorer or clear the icon cache before assuming the build is broken.
 The icon in a toast's header comes from the `noctty.ico` next to
 `noctty.exe`; the installer, the portable ZIP, and `zig build` all stage it
 there. Windows does not read the icon out of the executable for toasts, and
-it caches the first resolution per AppUserModelID for the rest of the logon
-session, so a copy of `noctty.exe` without its sibling `noctty.ico` keeps
-showing toasts without an icon until the next sign-in, even after the file is
-added.
+it caches the first icon it resolves per AppUserModelID, so a fix to the
+registered icon is not picked up by the running session. A reboot clears
+that cache; whether signing out alone does has not been measured. A copy of
+`noctty.exe` without its sibling `noctty.ico` leaves the registered icon
+untouched rather than replacing it with one Windows cannot show.
 
 ## Default terminal
 

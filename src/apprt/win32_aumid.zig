@@ -21,12 +21,14 @@
 //!      `IconUri` must name an image file (`.ico` / `.png`). The
 //!      notification platform does not extract the icon resource from
 //!      an exe path: the toast header renders without an icon, and the
-//!      "no icon" resolution is then cached per AUMID for the rest of
-//!      the logon session, so a later registry fix is not picked up
-//!      until the next sign-in. We point it at the `noctty.ico` that the
-//!      installer, the portable ZIP and `zig build` all stage next to
-//!      the exe, and only fall back to the exe path when that file is
-//!      missing.
+//!      "no icon" resolution is then cached per AUMID, so a later
+//!      registry fix is not picked up by the running session (a reboot
+//!      cleared it in testing; sign-out alone was not measured). We
+//!      point it at the `noctty.ico` that the installer, the portable
+//!      ZIP and `zig build` all stage next to the exe. When that file is
+//!      missing the value is left as it was: the key is per user, not
+//!      per install, so a bare copy of the exe writing its own path
+//!      would strip the icon from every other noctty on the machine.
 //!
 //! The AUMID string `io.github.amanthanvi.noctty` lives in a namespace
 //! we own (matching the instance/bundle id) rather than any
@@ -110,21 +112,28 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
         defer alloc.free(exe_path);
 
         const icon_path = iconUriPath(alloc, exe_path) catch |err| blk: {
-            std.log.warn("AUMID: sibling icon path unavailable err={}; using exe path for IconUri", .{err});
+            std.log.warn("AUMID: sibling icon path unavailable err={}; leaving IconUri unchanged", .{err});
             break :blk null;
         };
         defer if (icon_path) |path| alloc.free(path);
 
-        const icon_source = icon_path orelse exe_path;
-        if (std.unicode.utf8ToUtf16LeAllocZ(alloc, icon_source)) |icon_uri| {
-            defer alloc.free(icon_uri);
+        // No sibling icon (a cached dev artifact, or a bare exe copied
+        // somewhere on its own): keep whatever `IconUri` already holds.
+        // Writing this exe's path instead would register a value the
+        // notification platform cannot render, and because the key is
+        // shared by every noctty the user runs, it would take the icon
+        // away from the installed build too.
+        if (icon_path) |icon_source| {
+            if (std.unicode.utf8ToUtf16LeAllocZ(alloc, icon_source)) |icon_uri| {
+                defer alloc.free(icon_uri);
 
-            const icon_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("IconUri"), icon_uri);
-            if (icon_rc != ERROR_SUCCESS) {
-                std.log.warn("AUMID: write IconUri failed rc={d}", .{icon_rc});
+                const icon_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("IconUri"), icon_uri);
+                if (icon_rc != ERROR_SUCCESS) {
+                    std.log.warn("AUMID: write IconUri failed rc={d}", .{icon_rc});
+                }
+            } else |err| {
+                std.log.warn("AUMID: IconUri utf16 conversion failed err={}", .{err});
             }
-        } else |err| {
-            std.log.warn("AUMID: IconUri utf16 conversion failed err={}", .{err});
         }
     } else |err| {
         std.log.warn("AUMID: self exe path unavailable for IconUri err={}", .{err});
@@ -166,13 +175,13 @@ fn siblingIconPath(alloc: std.mem.Allocator, exe_path: []const u8) ![]u8 {
 }
 
 /// Resolve the value to write into `IconUri`: the sibling `noctty.ico`
-/// when it exists on disk, otherwise `null` so the caller falls back to
-/// the exe path (a dev tree that never ran the install step). Caller
-/// owns a non-null result.
+/// when it exists on disk, otherwise `null` so the caller leaves the
+/// registry value alone (a dev tree that never ran the install step, or
+/// a bare copy of the exe). Caller owns a non-null result.
 fn iconUriPath(alloc: std.mem.Allocator, exe_path: []const u8) !?[]u8 {
     const icon_path = try siblingIconPath(alloc, exe_path);
     std.fs.accessAbsolute(icon_path, .{}) catch |err| {
-        std.log.info("AUMID: {s} not found next to exe ({}); using exe path for IconUri", .{ icon_file_name, err });
+        std.log.info("AUMID: {s} not found next to exe ({}); leaving IconUri unchanged", .{ icon_file_name, err });
         alloc.free(icon_path);
         return null;
     };
@@ -193,7 +202,7 @@ test "aumid sibling icon path sits next to the exe" {
     try testing.expectEqualStrings(expected, actual);
 }
 
-test "aumid icon uri falls back when the sibling icon is missing" {
+test "aumid icon uri is absent when the sibling icon is missing" {
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -203,7 +212,7 @@ test "aumid icon uri falls back when the sibling icon is missing" {
     const exe_path = try std.fs.path.join(testing.allocator, &.{ dir, "noctty.exe" });
     defer testing.allocator.free(exe_path);
 
-    // No noctty.ico yet: the caller must fall back to the exe path.
+    // No noctty.ico yet: the caller must leave IconUri as it is.
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
 
     // Once the icon is staged next to the exe it is preferred.
