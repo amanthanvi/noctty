@@ -180,11 +180,20 @@ fn siblingIconPath(alloc: std.mem.Allocator, exe_path: []const u8) ![]u8 {
 /// a bare copy of the exe). Caller owns a non-null result.
 fn iconUriPath(alloc: std.mem.Allocator, exe_path: []const u8) !?[]u8 {
     const icon_path = try siblingIconPath(alloc, exe_path);
-    std.fs.accessAbsolute(icon_path, .{}) catch |err| {
+    errdefer alloc.free(icon_path);
+    // A stat, not an access check: `IconUri` has to name an image file,
+    // and a directory that happens to be called `noctty.ico` passes
+    // `accessAbsolute` just the same.
+    const stat = std.fs.cwd().statFile(icon_path) catch |err| {
         std.log.info("AUMID: {s} not found next to exe ({}); leaving IconUri unchanged", .{ icon_file_name, err });
         alloc.free(icon_path);
         return null;
     };
+    if (stat.kind != .file) {
+        std.log.info("AUMID: {s} next to exe is not a regular file ({s}); leaving IconUri unchanged", .{ icon_file_name, @tagName(stat.kind) });
+        alloc.free(icon_path);
+        return null;
+    }
     return icon_path;
 }
 
@@ -214,6 +223,11 @@ test "aumid icon uri is absent when the sibling icon is missing" {
 
     // No noctty.ico yet: the caller must leave IconUri as it is.
     try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
+
+    // A directory of that name is not an icon either.
+    try tmp.dir.makeDir(icon_file_name);
+    try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
+    try tmp.dir.deleteDir(icon_file_name);
 
     // Once the icon is staged next to the exe it is preferred.
     try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
