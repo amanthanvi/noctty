@@ -111,6 +111,56 @@ re-rendered the three markers adjacent to one another inside a synthesized
 clear/home/title/cursor-update stream. This measurement establishes transport
 survival only; it does not close the Kitty pixel-rendering gap listed above.
 
+### Measured repaint-shape differential for full-screen multiplexers
+
+Stripping whole sequences is not the only way v1 differs. Because v1 re-renders
+its own text buffer instead of forwarding the child's bytes, it also rewrites
+the _shape_ of a repaint. Measured by recording the master side of a pseudo
+console running `herdr` 0.8.2 (a terminal multiplexer whose panes hosted an
+Ink-style agent UI) at 160x45 for the same scripted 30 s scenario, once per
+source:
+
+| Emitted by the pseudo console | Bundled v2 | In-box v1 |
+| ----------------------------- | ---------- | --------- |
+| CUP (`CSI r;c H`)             | 22803      | 6988      |
+| CUF (`CSI n C`)               | 0          | 15138     |
+| ECH (`CSI n X`)               | 0          | 1933      |
+| EL (`CSI n K`)                | 0          | 45        |
+| CR / LF                       | 0 / 0      | 48 / 229  |
+| Total bytes                   | 421084     | 302644    |
+
+The bundled source forwards the multiplexer's own repaint, which addresses every
+run with an absolute CUP. The in-box source replaces most of those with relative
+motion: it walks the row with CUF over cells it believes are already correct,
+erases runs with ECH, and steps between rows with CR/LF.
+
+The practical consequence is that the two sources have different failure modes,
+not just different sequence coverage. CUF moves the cursor without writing, so a
+v1 repaint only rewrites the cells conhost's buffer says changed. If the
+terminal grid and that buffer ever disagree, the stale glyphs sit in the skipped
+gaps and no later repaint clears them; they survive until something forces a
+full redraw. An absolute-CUP repaint from the application rewrites those same
+cells every frame, so the same divergence self-heals. When a user reports stray
+leftover characters in a multiplexer or full-screen TUI, that asymmetry is the
+first thing to rule out.
+
+To split terminal behaviour from transport behaviour, run the same scenario
+twice on a current build: once as shipped (bundled; confirm with the `ConPTY`
+line in `noctty +version`) and once with `NOCTTY_CONPTY=inbox`. Corruption that
+appears only under `inbox` is transport shape, not terminal state. Releases
+before 1.3.125 have no bundled pair at all, so they always take the in-box path
+and always show the in-box shape.
+
+On the measurement host below, both sources rendered the `herdr` scenario
+correctly and their window captures were pixel-identical, so the in-box
+_shape_ difference is not by itself a defect here. Whether a given in-box
+conhost also mangles content is specific to that conhost's vintage; do not
+infer it from the OS build number.
+
+Measurement host: Windows `10.0.26200.0`; in-box `System32\conhost.exe`
+FileVersion `10.0.26100.1`; bundled `conpty.dll` ProductVersion
+`1.24.260710001`.
+
 ### Measured master-to-child key encoding differential
 
 The input direction has its own opt-in probe in `src/pty_transport_probe.zig`

@@ -85,7 +85,12 @@ Packaged builds prefer the side-by-side ConPTY redistributable and fall back to
 the in-box conhost with a warning. `+version` and the diagnostic-bundle manifest
 report the active source. On this machine the bundled source delivered measured
 Kitty APC and Sixel DCS payloads byte-for-byte; the in-box source dropped both.
-See the generation-specific
+The in-box source also reshapes repaints: it rewrites an application's
+absolute-CUP redraw into relative cursor motion plus ECH, so a terminal grid
+that ever diverges from the conhost buffer keeps stale glyphs in the skipped
+gaps. Releases before 1.3.125 have no bundled pair and always take that path;
+`NOCTTY_CONPTY=inbox` reproduces it on current builds. See the
+generation-specific
 [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 
 ### Shell integration
