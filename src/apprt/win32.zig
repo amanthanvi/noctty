@@ -14300,6 +14300,9 @@ const Host = struct {
     }
 
     fn notifyActiveTabUiaSelectionChanged(self: *Host, previous_tab_id: ?u32) void {
+        // A hidden tab strip is not in the UIA tree at all, so these would be
+        // cross-process COM raises for elements no reader can reach (#244).
+        if (!self.shouldShowTabBar()) return;
         const current = self.activeTab();
         const current_tab_id: ?u32 = if (current) |tab| tab.id else null;
         if (previous_tab_id == current_tab_id) return;
@@ -18592,8 +18595,15 @@ const Host = struct {
             tab.cached_button_show_pane_count = show_pane_count;
             tab.button_label_cache_valid = true;
             // A provider created above already reports the current name; only
-            // an existing one needs the event.
-            if (!is_new_button and (label_changed or uia_name_changed)) {
+            // an existing one needs the event. A hidden strip needs none of
+            // them: its buttons are out of the UIA tree, and a reader that
+            // cannot see the element has nothing to re-announce (#244). The
+            // cached inputs above are still committed, so the labels are
+            // correct the moment the strip comes back.
+            if (!is_new_button and
+                (label_changed or uia_name_changed) and
+                self.shouldShowTabBar())
+            {
                 if (tab.uia_provider) |provider| provider.raiseNameChanged();
             }
         }
@@ -18724,40 +18734,49 @@ const Host = struct {
         const action_size = self.scaled(host_titlebar_action_button_size);
         const action_y = @max(0, @divTrunc(self.tabBarHeight() - action_size, 2));
         var button_x = width - self.scaled(if (titlebar_actions) 4 else 8) - caption_buttons_w;
+        // Unlike a tab button, the cluster has no membership test of its own:
+        // it belongs to the strip whenever the strip exists. Its rect is kept
+        // current even while hidden, so `showOverflowMenu`, which anchors its
+        // popup to `GetWindowRect(overflow_hwnd)`, never reads a rect from an
+        // older window size.
         if (self.overflow_hwnd) |button_hwnd| {
             const overflow_width = if (titlebar_actions) action_size else self.scaled(host_tab_overflow_button_width);
             button_x -= overflow_width;
-            if (tab_strip_visible) {
-                changed.* = applyChromeChildRect(
-                    button_hwnd,
-                    &self.overflow_placement,
-                    childRect(
-                        button_x,
-                        if (titlebar_actions) action_y else button_y,
-                        overflow_width,
-                        if (titlebar_actions) action_size else button_height,
-                    ),
-                ) or changed.*;
-            }
-            changed.* = applyChildVisibility(button_hwnd, &self.overflow_placement, tab_strip_visible) or changed.*;
+            changed.* = applyChromeChildRect(
+                button_hwnd,
+                &self.overflow_placement,
+                childRect(
+                    button_x,
+                    if (titlebar_actions) action_y else button_y,
+                    overflow_width,
+                    if (titlebar_actions) action_size else button_height,
+                ),
+            ) or changed.*;
+            changed.* = applyChildVisibility(
+                button_hwnd,
+                &self.overflow_placement,
+                tabStripChildVisible(tab_strip_visible, true),
+            ) or changed.*;
         }
         button_x -= self.scaled(4);
         if (self.new_tab_hwnd) |button_hwnd| {
             const new_tab_width = if (titlebar_actions) action_size else self.scaled(host_tab_small_button_width);
             button_x -= new_tab_width;
-            if (tab_strip_visible) {
-                changed.* = applyChromeChildRect(
-                    button_hwnd,
-                    &self.new_tab_placement,
-                    childRect(
-                        button_x,
-                        if (titlebar_actions) action_y else button_y,
-                        new_tab_width,
-                        if (titlebar_actions) action_size else button_height,
-                    ),
-                ) or changed.*;
-            }
-            changed.* = applyChildVisibility(button_hwnd, &self.new_tab_placement, tab_strip_visible) or changed.*;
+            changed.* = applyChromeChildRect(
+                button_hwnd,
+                &self.new_tab_placement,
+                childRect(
+                    button_x,
+                    if (titlebar_actions) action_y else button_y,
+                    new_tab_width,
+                    if (titlebar_actions) action_size else button_height,
+                ),
+            ) or changed.*;
+            changed.* = applyChildVisibility(
+                button_hwnd,
+                &self.new_tab_placement,
+                tabStripChildVisible(tab_strip_visible, true),
+            ) or changed.*;
         }
 
         if (self.overlay_mode != .none) {
@@ -35989,10 +36008,13 @@ test "win32 usesIntegratedTitlebar requires visible decorations" {
 test "win32 tabStripChildVisible hides strip chrome when the tab bar is off" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    // Regression for #244. `window-show-tab-bar = never` leaves the strip
-    // zero pixels tall, and the chrome children in it are real HWNDs: shown
-    // anyway they collapse to 1 px rows over the terminal. A child's own
-    // reason to be shown never survives a hidden tab bar.
+    // The truth table only pins the predicate; the behaviour it guards --
+    // real windows actually going invisible and coming back -- is covered by
+    // `win32 layoutChromeForRect hides tab-strip chrome when the tab bar is
+    // off`. Regression for #244: `window-show-tab-bar = never` leaves the
+    // strip zero pixels tall, and the chrome children in it are real HWNDs,
+    // so shown anyway they collapse to 1 px rows over the terminal. A child's
+    // own reason to be shown never survives a hidden tab bar.
     try std.testing.expect(tabBarVisibleForConfig(.always));
     try std.testing.expect(tabBarVisibleForConfig(.auto));
     try std.testing.expect(!tabBarVisibleForConfig(.never));
@@ -36243,7 +36265,10 @@ test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" 
     host.tabs = .empty;
     host.active_tab = 0;
     defer deinitTestHostWindowFixture(&host);
-    try host.tabs.append(alloc, try Tab.init(alloc, 1, &surface));
+    // Reserve first: a failing `append` between `Tab.init` and the list
+    // taking ownership would leak the tab's split tree past the teardown.
+    try host.tabs.ensureTotalCapacity(alloc, 1);
+    host.tabs.appendAssumeCapacity(try Tab.init(alloc, 1, &surface));
 
     // Every tab-strip child as the runtime creates it: WS_VISIBLE, parented
     // to the host. `Tab.deinit` owns the tab button; the rest are destroyed
@@ -36272,6 +36297,13 @@ test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" 
     for (strip) |child| try std.testing.expectEqual(@as(i32, 0), sys.IsWindowVisible(child));
     // A hidden button is not a focus-cycle target either.
     try std.testing.expectEqual(@as(?HWND, null), host.tabStripFocusHwnd());
+    // The [▾] rect still tracks the window: `showOverflowMenu` anchors its
+    // popup to it and must not read the creation rect at x = 0.
+    var host_rect: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(hwnd, &host_rect) != 0);
+    var overflow_rect: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(host.overflow_hwnd.?, &overflow_rect) != 0);
+    try std.testing.expect(overflow_rect.left - host_rect.left > 600);
 
     // Turning the tab bar back on at runtime (a config reload) has to bring
     // all of it back, at the strip's real height.

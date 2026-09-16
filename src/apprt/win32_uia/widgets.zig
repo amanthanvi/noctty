@@ -2365,10 +2365,18 @@ pub const ChromeControlProvider = struct {
             constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
             constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(IsWindowVisible(self.hwnd) == 0),
             constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(
-                self.state.keyboard_focusable orelse switch (self.state.role) {
-                    .tab_item, .button, .toggle => true,
-                    else => false,
-                },
+                // A hidden control is never a focus target: the host's
+                // focus-region cycle filters its candidates through
+                // `focusableHwnd`, which is exactly `IsWindowVisible`. With
+                // `window-show-tab-bar = never` the tab buttons and the
+                // [+] / [▾] cluster are hidden but alive, and claiming they
+                // are focusable would contradict the focus-changed events a
+                // reader actually receives.
+                IsWindowVisible(self.hwnd) != 0 and
+                    (self.state.keyboard_focusable orelse switch (self.state.role) {
+                        .tab_item, .button, .toggle => true,
+                        else => false,
+                    }),
             ),
             constants.UIA_HasKeyboardFocusPropertyId => out.* = com.VARIANT.fromBool(hwndHasKeyboardFocus(self.hwnd)),
             constants.UIA_SelectionItemIsSelectedPropertyId => if (self.state.role == .tab_item) {
@@ -6823,6 +6831,80 @@ test "ChromeControlProvider keyboard focusability follows the role unless overri
         &value,
     ));
     try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
+}
+
+test "ChromeControlProvider hidden chrome is not keyboard focusable" {
+    const Context = struct {
+        fn name(_: *anyopaque, tag: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "tab {d}", .{tag}) catch "";
+        }
+    };
+
+    const win32 = struct {
+        extern "user32" fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?com.HWND,
+            hMenu: ?*anyopaque,
+            hInstance: ?*anyopaque,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?com.HWND;
+        extern "user32" fn DestroyWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+        extern "user32" fn ShowWindow(hWnd: com.HWND, nCmdShow: i32) callconv(.winapi) com.BOOL;
+    };
+
+    // `window-show-tab-bar = never` hides the tab buttons and the [+] / [▾]
+    // cluster but keeps the HWNDs (and their providers) alive. The host's
+    // focus-region cycle filters candidates through `IsWindowVisible`, so a
+    // hidden control must not advertise itself as a focus target.
+    const hwnd = win32.CreateWindowExW(
+        0x0000_0080, // WS_EX_TOOLWINDOW
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        0x8000_0000, // WS_POPUP
+        -32_000,
+        -32_000,
+        100,
+        24,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.SkipZigTest;
+    defer _ = win32.DestroyWindow(hwnd);
+
+    var context: u8 = 0;
+    const item = try ChromeControlProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = @ptrCast(&context),
+        .role = .tab_item,
+        .tag = 1,
+        .name = Context.name,
+    });
+    defer _ = ChromeControlProvider.Release(&item.base);
+    defer item.detach();
+
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetPropertyValue(
+        &item.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &value,
+    ));
+    try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
+
+    _ = win32.ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE
+    value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetPropertyValue(
+        &item.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &value,
+    ));
+    try std.testing.expectEqual(com.VARIANT_TRUE, value.value.bool_val);
 }
 
 test "ChromeControlProvider tab items enforce required single selection" {
