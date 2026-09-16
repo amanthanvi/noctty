@@ -170,9 +170,21 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    // Run step
+    // Run step. With an installed exe, launch the zig-out layout rather
+    // than the cached artifact: the runtime finds share/, the bundled
+    // ConPTY, the handoff proxy and the toast icon
+    // (src/apprt/win32_aumid.zig) as siblings of the exe, and only
+    // zig-out/bin has them. Running the cached binary registers the exe
+    // path as the toast IconUri, and Windows then caches that icon-less
+    // resolution for the rest of the logon session.
     if (config.app_runtime != .none) {
-        const run_cmd = b.addRunArtifact(exe.?.exe);
+        const run_cmd = if (config.emit_exe) run: {
+            const cmd = b.addSystemCommand(&.{
+                b.getInstallPath(.bin, exe.?.exe.out_filename),
+            });
+            cmd.step.dependOn(b.getInstallStep());
+            break :run cmd;
+        } else b.addRunArtifact(exe.?.exe);
         if (b.args) |args| run_cmd.addArgs(args);
         if (install_resources) run_cmd.setEnvironmentVariable(
             "GHOSTTY_RESOURCES_DIR",
