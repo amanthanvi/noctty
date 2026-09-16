@@ -144,7 +144,7 @@ cells every frame, so the same divergence self-heals. When a user reports stray
 leftover characters in a multiplexer or full-screen TUI, that asymmetry is the
 first thing to rule out.
 
-To split terminal behaviour from transport behaviour, run the same scenario
+To split terminal behavior from transport behavior, run the same scenario
 twice on a current build: once as shipped (bundled; confirm with the `ConPTY`
 line in `noctty +version`) and once with `NOCTTY_CONPTY=inbox`. Corruption that
 appears only under `inbox` is transport shape, not terminal state. Releases
