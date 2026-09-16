@@ -94,6 +94,7 @@ test {
     _ = @import("win32/focus_region.zig");
     _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
+    _ = @import("win32_aumid.zig");
 }
 
 const ThemeColors = win32_theme.ThemeColors;

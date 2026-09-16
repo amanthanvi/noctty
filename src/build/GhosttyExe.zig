@@ -14,6 +14,12 @@ install_step: *std.Build.Step.InstallArtifact,
 command_exe: ?*std.Build.Step.Compile = null,
 command_install_step: ?*std.Build.Step.InstallFile = null,
 
+/// `noctty.ico` next to the exe. The AUMID registration points the toast
+/// `IconUri` at it (src/apprt/win32_aumid.zig), and the packaging script
+/// stages the same file in the portable/installer layout, so a dev tree
+/// gets the same toast icon as a release install.
+icon_install_step: ?*std.Build.Step.InstallFile = null,
+
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty {
     const exe: *std.Build.Step.Compile = b.addExecutable(.{
         .name = "noctty",
@@ -31,6 +37,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     const install_step = b.addInstallArtifact(exe, .{});
     var command_exe: ?*std.Build.Step.Compile = null;
     var command_install_step: ?*std.Build.Step.InstallFile = null;
+    var icon_install_step: ?*std.Build.Step.InstallFile = null;
 
     // Set PIE if requested
     if (cfg.pie) exe.pie = true;
@@ -64,6 +71,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             _ = try deps.add(command);
             command_exe = command;
             command_install_step = b.addInstallBinFile(command.getEmittedBin(), "noctty.com");
+            icon_install_step = b.addInstallBinFile(b.path("dist/windows/noctty.ico"), "noctty.ico");
         },
 
         else => {},
@@ -74,6 +82,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         .install_step = install_step,
         .command_exe = command_exe,
         .command_install_step = command_install_step,
+        .icon_install_step = icon_install_step,
     };
 }
 
@@ -82,6 +91,7 @@ pub fn install(self: *const Ghostty) void {
     const b = self.install_step.step.owner;
     b.getInstallStep().dependOn(&self.install_step.step);
     if (self.command_install_step) |step| b.getInstallStep().dependOn(&step.step);
+    if (self.icon_install_step) |step| b.getInstallStep().dependOn(&step.step);
 }
 
 fn win32IconResourceStamp(b: *std.Build) ![]const u8 {
