@@ -163,25 +163,48 @@ word, which is the shape "scrambled text" reports usually describe. An
 application repaint skipping a whitespace gap cannot produce that shape.
 
 A rigid whole-frame offset between the two models -- the terminal's grid holding
-content some fixed number of rows and columns away from conhost's buffer -- most
-plausibly starts at a **resize**: `ResizePseudoConsole` makes conhost reflow its
-buffer by its rules and the terminal reflow by Ghostty's, the screen is not
-retransmitted, and the delta stream simply continues from there. Ask about a
-window resize or a pane-divider drag before treating such a report as a pure
-terminal bug.
+content some fixed number of rows and columns away from conhost's buffer -- is
+worth suspecting at a **resize**, because that is where the two models reflow
+independently and the paths differ again. Recording the same scenario with three
+`ResizePseudoConsole` calls and noting the output offset at each one: on all
+three, the bundled path emitted no snapshot of its own and the next bytes were
+the application's own full repaint (`CSI ?2026h` `CSI 2J` `CSI 1;1H` ...) once
+it saw the new size, while the in-box path emitted its own synthesized repaint
+instead -- `CSI ?25l` `CSI H` and then overwriting from home with ECH for the
+blanks, with no ED at all (the first, shrinking resize additionally emitted one
+`CSI 8;30;120t` size report; the two later ones did not). This matches the
+"Resize and reflow" row below: v2 resize emits no buffer snapshot, while a v1
+resize can repaint into the pipe after reflowing its own viewport-only buffer.
+A v1 repaint that overwrites from home without clearing is precisely the case
+where a reflow disagreement between conhost's buffer and the terminal's grid can
+leave cells behind, so ask about a window resize or a pane-divider drag before
+treating such a report as a pure terminal bug.
 
-To split terminal behavior from transport behavior, run the same scenario
-twice on a current build: once as shipped (bundled; confirm with the `ConPTY`
-line in `noctty +version`) and once with `NOCTTY_CONPTY=inbox`. Corruption that
-appears only under `inbox` is transport shape, not terminal state. Releases
-before 1.3.125 have no bundled pair at all, so they always take the in-box path
-and always show the in-box shape.
+To separate the two sides, run the same scenario twice on a current build: once
+as shipped (bundled; confirm with the `ConPTY` line in `noctty +version`) and
+once with `NOCTTY_CONPTY=inbox`. Reproducing only under `inbox` implicates the
+in-box **path**, which is not the same as implicating the transport: the in-box
+stream shape reaches terminal code the bundled stream never exercises (CUF at
+the right margin, ECH against pending wrap, LF at the bottom row), so a terminal
+bug in exactly that code would also be inbox-only. Capture the failing stream
+and replay it through `libghostty-vt` before attributing it:
+
+- The replayed screen shows the corruption. The terminal mishandles that stream
+  shape; the divergence is in noctty, and the capture is the regression test.
+- The replayed screen is correct. The core is consistent with the bytes it was
+  given, so the divergence is either upstream (conhost's buffer already
+  disagreed with the grid before the repaint) or in what a capture cannot hold:
+  live resize and reflow ordering, and the GPU renderer. Rule those out before
+  calling it transport.
+
+Releases before 1.3.125 have no bundled pair at all, so they always take the
+in-box path and always show the in-box shape.
 
 On the measurement host below, both sources rendered the `herdr` scenario
-correctly and their window captures were pixel-identical, so the in-box
-_shape_ difference is not by itself a defect here. Whether a given in-box
-conhost also mangles content is specific to that conhost's vintage; do not
-infer it from the OS build number.
+correctly -- including across repeated live window resizes -- and their window
+captures were pixel-identical, so the in-box _shape_ difference is not by itself
+a defect here. Whether a given in-box conhost also mangles content is specific
+to that conhost's vintage; do not infer it from the OS build number.
 
 Measurement host: Windows `10.0.26200.0`; in-box `System32\conhost.exe`
 FileVersion `10.0.26100.1`; bundled `conpty.dll` ProductVersion
