@@ -18,6 +18,18 @@
 //!      allow HKCU writes, and the registry entry alone is enough for
 //!      warm-start toast attribution to look correct.
 //!
+//!      `IconUri` must name an image file (`.ico` / `.png`). The
+//!      notification platform does not extract the icon resource from
+//!      an exe path: the toast header renders without an icon, and the
+//!      "no icon" resolution is then cached per AUMID, so a later
+//!      registry fix is not picked up by the running session (a reboot
+//!      cleared it in testing; sign-out alone was not measured). We
+//!      point it at the `noctty.ico` that the installer, the portable
+//!      ZIP and `zig build` all stage next to the exe. When that file is
+//!      missing the value is left as it was: the key is per user, not
+//!      per install, so a bare copy of the exe writing its own path
+//!      would strip the icon from every other noctty on the machine.
+//!
 //! The AUMID string `io.github.amanthanvi.noctty` lives in a namespace
 //! we own (matching the instance/bundle id) rather than any
 //! Ghostty-owned reverse-DNS prefix, so it cannot collide with — or
@@ -99,15 +111,29 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
     if (std.fs.selfExePathAlloc(alloc)) |exe_path| {
         defer alloc.free(exe_path);
 
-        if (std.unicode.utf8ToUtf16LeAllocZ(alloc, exe_path)) |icon_uri| {
-            defer alloc.free(icon_uri);
+        const icon_path = iconUriPath(alloc, exe_path) catch |err| blk: {
+            std.log.warn("AUMID: sibling icon path unavailable err={}; leaving IconUri unchanged", .{err});
+            break :blk null;
+        };
+        defer if (icon_path) |path| alloc.free(path);
 
-            const icon_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("IconUri"), icon_uri);
-            if (icon_rc != ERROR_SUCCESS) {
-                std.log.warn("AUMID: write IconUri failed rc={d}", .{icon_rc});
+        // No sibling icon (a cached dev artifact, or a bare exe copied
+        // somewhere on its own): keep whatever `IconUri` already holds.
+        // Writing this exe's path instead would register a value the
+        // notification platform cannot render, and because the key is
+        // shared by every noctty the user runs, it would take the icon
+        // away from the installed build too.
+        if (icon_path) |icon_source| {
+            if (std.unicode.utf8ToUtf16LeAllocZ(alloc, icon_source)) |icon_uri| {
+                defer alloc.free(icon_uri);
+
+                const icon_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("IconUri"), icon_uri);
+                if (icon_rc != ERROR_SUCCESS) {
+                    std.log.warn("AUMID: write IconUri failed rc={d}", .{icon_rc});
+                }
+            } else |err| {
+                std.log.warn("AUMID: IconUri utf16 conversion failed err={}", .{err});
             }
-        } else |err| {
-            std.log.warn("AUMID: IconUri utf16 conversion failed err={}", .{err});
         }
     } else |err| {
         std.log.warn("AUMID: self exe path unavailable for IconUri err={}", .{err});
@@ -136,6 +162,79 @@ fn writeRegSz(hkey: HKEY, value_name: LPCWSTR, value: [:0]const u16) i32 {
         @ptrCast(value.ptr),
         @intCast((value.len + 1) * @sizeOf(u16)),
     );
+}
+
+/// The icon file staged next to `noctty.exe` by `scripts/package-windows.ps1`
+/// (installer + portable ZIP) and by the `zig build` install step.
+pub const icon_file_name = "noctty.ico";
+
+/// `<dir of exe_path>\noctty.ico`. Caller owns the returned slice.
+fn siblingIconPath(alloc: std.mem.Allocator, exe_path: []const u8) ![]u8 {
+    const dir = std.fs.path.dirname(exe_path) orelse ".";
+    return try std.fs.path.join(alloc, &.{ dir, icon_file_name });
+}
+
+/// Resolve the value to write into `IconUri`: the sibling `noctty.ico`
+/// when it exists on disk, otherwise `null` so the caller leaves the
+/// registry value alone (a dev tree that never ran the install step, or
+/// a bare copy of the exe). Caller owns a non-null result.
+fn iconUriPath(alloc: std.mem.Allocator, exe_path: []const u8) !?[]u8 {
+    const icon_path = try siblingIconPath(alloc, exe_path);
+    errdefer alloc.free(icon_path);
+    // A stat, not an access check: `IconUri` has to name an image file,
+    // and a directory that happens to be called `noctty.ico` passes
+    // `accessAbsolute` just the same.
+    const stat = std.fs.cwd().statFile(icon_path) catch |err| {
+        std.log.info("AUMID: {s} not found next to exe ({}); leaving IconUri unchanged", .{ icon_file_name, err });
+        alloc.free(icon_path);
+        return null;
+    };
+    if (stat.kind != .file) {
+        std.log.info("AUMID: {s} next to exe is not a regular file ({s}); leaving IconUri unchanged", .{ icon_file_name, @tagName(stat.kind) });
+        alloc.free(icon_path);
+        return null;
+    }
+    return icon_path;
+}
+
+test "aumid sibling icon path sits next to the exe" {
+    const testing = std.testing;
+    const sep = std.fs.path.sep_str;
+
+    const exe_path = try std.mem.join(testing.allocator, sep, &.{ "C:", "Program Files", "noctty", "noctty.exe" });
+    defer testing.allocator.free(exe_path);
+    const expected = try std.mem.join(testing.allocator, sep, &.{ "C:", "Program Files", "noctty", "noctty.ico" });
+    defer testing.allocator.free(expected);
+
+    const actual = try siblingIconPath(testing.allocator, exe_path);
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings(expected, actual);
+}
+
+test "aumid icon uri is absent when the sibling icon is missing" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir);
+    const exe_path = try std.fs.path.join(testing.allocator, &.{ dir, "noctty.exe" });
+    defer testing.allocator.free(exe_path);
+
+    // No noctty.ico yet: the caller must leave IconUri as it is.
+    try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
+
+    // A directory of that name is not an icon either.
+    try tmp.dir.makeDir(icon_file_name);
+    try testing.expectEqual(@as(?[]u8, null), try iconUriPath(testing.allocator, exe_path));
+    try tmp.dir.deleteDir(icon_file_name);
+
+    // Once the icon is staged next to the exe it is preferred.
+    try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
+    const resolved = (try iconUriPath(testing.allocator, exe_path)) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(resolved);
+    try testing.expect(std.mem.endsWith(u8, resolved, icon_file_name));
+    try testing.expectEqualStrings(dir, std.fs.path.dirname(resolved).?);
 }
 
 test "aumid string shape" {
