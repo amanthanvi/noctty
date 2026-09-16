@@ -627,6 +627,29 @@ fn usesIntegratedTitlebar(
     return enabled and tab_bar_visible and decorations_visible;
 }
 
+/// Whether `window-show-tab-bar` reserves a tab strip at all. `.auto` shows
+/// it unconditionally here: the strip also carries the [+] and [▾] controls,
+/// which have no other home on this runtime.
+fn tabBarVisibleForConfig(value: configpkg.Config.WindowShowTabBar) bool {
+    return switch (value) {
+        .always, .auto => true,
+        .never => false,
+    };
+}
+
+/// Whether a tab-strip chrome child -- a tab button, the Selection
+/// container, the [+] / [▾] cluster -- may be shown.
+///
+/// `in_strip` is the child's own reason to exist (a tab button inside the
+/// visible overflow range, a container with at least one tab). It is not
+/// enough on its own: with the tab bar hidden the strip has zero height, so
+/// every one of those children still lands as a 1 px window at the top of the
+/// client area, above the terminal surface of any tab but the first, and
+/// paints itself there (#244).
+fn tabStripChildVisible(tab_bar_visible: bool, in_strip: bool) bool {
+    return tab_bar_visible and in_strip;
+}
+
 fn hostPresentShowCommand(
     is_visible: bool,
     is_iconic: bool,
@@ -3561,6 +3584,12 @@ pub const App = struct {
     /// from the Win11 build floor via `shouldUseIntegratedTitlebar`;
     /// false keeps the stock non-client caption path.
     use_integrated_titlebar: bool = false,
+    /// Last applied `window-show-tab-bar` visibility. Only
+    /// `reconfigureTheme` reads it, to notice a reload that turned the tab
+    /// strip on or off: the chrome children that live in the strip are shown
+    /// and hidden by `layoutChromeForRect`, which a reload otherwise reaches
+    /// only when the frame mode flips too (never on Win10).
+    tab_bar_visible: bool = true,
     // Live-resize state is tracked PER HOST (`Host.is_live_resize`),
     // not per App. Dragging window A must NOT freeze renderer
     // invalidations for unrelated background windows B/C.
@@ -3748,6 +3777,7 @@ pub const App = struct {
             self.os_build,
             self.config.@"window-show-tab-bar",
         );
+        self.tab_bar_visible = tabBarVisibleForConfig(self.config.@"window-show-tab-bar");
         log.info("win32 os_build={d} integrated_titlebar={}", .{
             self.os_build,
             self.use_integrated_titlebar,
@@ -7877,6 +7907,13 @@ pub const App = struct {
             self.config.@"window-show-tab-bar",
         );
         const frame_mode_changed = previous_integrated_titlebar != self.use_integrated_titlebar;
+        const previous_tab_bar_visible = self.tab_bar_visible;
+        self.tab_bar_visible = tabBarVisibleForConfig(self.config.@"window-show-tab-bar");
+        // Showing or hiding the strip moves every chrome child in it, and on
+        // Win10 the frame mode never flips, so the layout below cannot hang
+        // off `frame_mode_changed` alone.
+        const chrome_layout_changed = frame_mode_changed or
+            previous_tab_bar_visible != self.tab_bar_visible;
         self.resolved_theme = resolveTheme(&self.config);
         for (self.hosts.items) |host| {
             host.rebuildThemeBrushes();
@@ -7901,8 +7938,10 @@ pub const App = struct {
                         0,
                         c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                     );
-                    runUiActionOrLog("theme update layout failed", host.layout());
                     host.scheduleCaptionUiaSync();
+                }
+                if (chrome_layout_changed) {
+                    runUiActionOrLog("theme update layout failed", host.layout());
                 }
                 // Theme resource replacement always invalidates the full host
                 // chrome plus native child controls. A System->Dark swap does
@@ -17712,10 +17751,7 @@ const Host = struct {
     }
 
     fn shouldShowTabBar(self: *const Host) bool {
-        return switch (self.app.config.@"window-show-tab-bar") {
-            .always, .auto => true, // always show: tab bar has essential controls (+, ▾ dropdown)
-            .never => false,
-        };
+        return tabBarVisibleForConfig(self.app.config.@"window-show-tab-bar");
     }
 
     fn decorationVisibilityForChrome(self: *const Host) bool {
@@ -18586,10 +18622,21 @@ const Host = struct {
         // buttons fill the integrated-titlebar row in Win11 (40 px)
         // without a dead gap above the underline.
         const button_height = @max(1, self.tabBarHeight() - self.scaled(6));
+        // `window-show-tab-bar = never` gives the strip zero height, but every
+        // tab-strip child is a real HWND that keeps whatever visibility it was
+        // created with, so laying them out unconditionally collapsed the tab
+        // buttons and the [+] / [▾] cluster to `button_height == 1` at the top
+        // of the client area, where they still painted their own background
+        // and the active tab's accent border over the terminal (#244). Decide
+        // the strip's visibility once and gate every child that belongs to it.
+        const tab_strip_visible = self.shouldShowTabBar();
         var active_tab_left: ?i32 = null;
         for (self.tabs.items, 0..) |*tab, i| {
             if (tab.button_hwnd) |button_hwnd| {
-                if (i >= tab_range.start and i < tab_range.start + tab_range.count) {
+                if (tabStripChildVisible(
+                    tab_strip_visible,
+                    i >= tab_range.start and i < tab_range.start + tab_range.count,
+                )) {
                     const visible_index: i32 = @intCast(i - tab_range.start);
                     const tab_left = visible_index * button_width;
                     changed.* = applyChromeChildRect(
@@ -18614,7 +18661,10 @@ const Host = struct {
         // on-screen rect. First retarget (slide_started_ms == 0) snaps
         // so the line doesn't slide in from the left on window open;
         // subsequent retargets slide over underline_slide_ms. Reduced-
-        // motion collapses to a snap via `retargetTabUnderline`.
+        // motion collapses to a snap via `retargetTabUnderline`. A hidden
+        // strip leaves `active_tab_left` null, so a tab switch with the tab
+        // bar off neither repaints the top band nor arms the 16 ms slide
+        // heartbeat for a line that is never painted.
         if (active_tab_left) |left| {
             self.retargetTabUnderline(left, button_width);
         }
@@ -18628,7 +18678,7 @@ const Host = struct {
         // rather than on a degenerate box at the window origin.
         if (self.tab_container_hwnd) |container_hwnd| {
             const visible_tabs: i32 = @intCast(tab_range.count);
-            if (visible_tabs > 0) {
+            if (tabStripChildVisible(tab_strip_visible, visible_tabs > 0)) {
                 changed.* = applyChromeChildRect(
                     container_hwnd,
                     &self.tab_container_placement,
@@ -18677,33 +18727,37 @@ const Host = struct {
         if (self.overflow_hwnd) |button_hwnd| {
             const overflow_width = if (titlebar_actions) action_size else self.scaled(host_tab_overflow_button_width);
             button_x -= overflow_width;
-            changed.* = applyChromeChildRect(
-                button_hwnd,
-                &self.overflow_placement,
-                childRect(
-                    button_x,
-                    if (titlebar_actions) action_y else button_y,
-                    overflow_width,
-                    if (titlebar_actions) action_size else button_height,
-                ),
-            ) or changed.*;
-            changed.* = applyChildVisibility(button_hwnd, &self.overflow_placement, true) or changed.*;
+            if (tab_strip_visible) {
+                changed.* = applyChromeChildRect(
+                    button_hwnd,
+                    &self.overflow_placement,
+                    childRect(
+                        button_x,
+                        if (titlebar_actions) action_y else button_y,
+                        overflow_width,
+                        if (titlebar_actions) action_size else button_height,
+                    ),
+                ) or changed.*;
+            }
+            changed.* = applyChildVisibility(button_hwnd, &self.overflow_placement, tab_strip_visible) or changed.*;
         }
         button_x -= self.scaled(4);
         if (self.new_tab_hwnd) |button_hwnd| {
             const new_tab_width = if (titlebar_actions) action_size else self.scaled(host_tab_small_button_width);
             button_x -= new_tab_width;
-            changed.* = applyChromeChildRect(
-                button_hwnd,
-                &self.new_tab_placement,
-                childRect(
-                    button_x,
-                    if (titlebar_actions) action_y else button_y,
-                    new_tab_width,
-                    if (titlebar_actions) action_size else button_height,
-                ),
-            ) or changed.*;
-            changed.* = applyChildVisibility(button_hwnd, &self.new_tab_placement, true) or changed.*;
+            if (tab_strip_visible) {
+                changed.* = applyChromeChildRect(
+                    button_hwnd,
+                    &self.new_tab_placement,
+                    childRect(
+                        button_x,
+                        if (titlebar_actions) action_y else button_y,
+                        new_tab_width,
+                        if (titlebar_actions) action_size else button_height,
+                    ),
+                ) or changed.*;
+            }
+            changed.* = applyChildVisibility(button_hwnd, &self.new_tab_placement, tab_strip_visible) or changed.*;
         }
 
         if (self.overlay_mode != .none) {
@@ -35932,6 +35986,23 @@ test "win32 usesIntegratedTitlebar requires visible decorations" {
     try std.testing.expect(!usesIntegratedTitlebar(true, true, false));
 }
 
+test "win32 tabStripChildVisible hides strip chrome when the tab bar is off" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Regression for #244. `window-show-tab-bar = never` leaves the strip
+    // zero pixels tall, and the chrome children in it are real HWNDs: shown
+    // anyway they collapse to 1 px rows over the terminal. A child's own
+    // reason to be shown never survives a hidden tab bar.
+    try std.testing.expect(tabBarVisibleForConfig(.always));
+    try std.testing.expect(tabBarVisibleForConfig(.auto));
+    try std.testing.expect(!tabBarVisibleForConfig(.never));
+
+    try std.testing.expect(tabStripChildVisible(true, true));
+    try std.testing.expect(!tabStripChildVisible(true, false));
+    try std.testing.expect(!tabStripChildVisible(false, true));
+    try std.testing.expect(!tabStripChildVisible(false, false));
+}
+
 test "win32 surfaceWindowStyle clips sibling repaints" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -36129,6 +36200,106 @@ fn testLayeredAlpha(hwnd: HWND) ?u8 {
     if (sys.GetLayeredWindowAttributes(hwnd, null, &alpha, &flags) == 0) return null;
     if ((flags & c.LWA_ALPHA) == 0) return null;
     return alpha;
+}
+
+test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    // `IsWindowVisible` -- which is what the residue, `focusableHwnd` and
+    // UIA all key off -- is false for every child of an invisible parent, so
+    // this host has to be shown. Off-screen plus WS_EX_TOOLWINDOW keeps it
+    // off the desktop and out of the taskbar while the test runs.
+    const hwnd = sys.CreateWindowExW(
+        c.WS_EX_TOOLWINDOW,
+        prompt_label_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_POPUP,
+        -32_000,
+        -32_000,
+        800,
+        600,
+        null,
+        null,
+        sys.GetModuleHandleW(null),
+        null,
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(hwnd);
+    _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+
+    var app: App = undefined;
+    app.config = try configpkg.Config.default(alloc);
+    defer app.config.deinit();
+    app.use_integrated_titlebar = false;
+
+    var surface: Surface = undefined;
+    surface.decorations_visible = true;
+    surface.inspector_visible = false;
+
+    var host: Host = .{ .app = &app, .id = 244 };
+    host.hwnd = hwnd;
+    host.current_dpi = 96;
+    host.tabs = .empty;
+    host.active_tab = 0;
+    defer deinitTestHostWindowFixture(&host);
+    try host.tabs.append(alloc, try Tab.init(alloc, 1, &surface));
+
+    // Every tab-strip child as the runtime creates it: WS_VISIBLE, parented
+    // to the host. `Tab.deinit` owns the tab button; the rest are destroyed
+    // with the host window.
+    host.tabs.items[0].button_hwnd = try createTestChromeChild(hwnd, prompt_button_class);
+    host.tab_container_hwnd = try createTestChromeChild(hwnd, prompt_label_class);
+    host.new_tab_hwnd = try createTestChromeChild(hwnd, prompt_button_class);
+    host.overflow_hwnd = try createTestChromeChild(hwnd, prompt_button_class);
+
+    const rect: RECT = .{ .left = 0, .top = 0, .right = 800, .bottom = 600 };
+    var changed = false;
+
+    // Regression for #244: a zero-height strip used to lay its children out
+    // anyway, at `button_height = @max(1, 0 - scaled(6))`, so a 1 px row of
+    // tab buttons and the [+] / [▾] cluster painted itself over the terminal
+    // of every tab but the first.
+    app.config.@"window-show-tab-bar" = .never;
+    try std.testing.expectEqual(@as(i32, 0), host.tabBarHeight());
+    try std.testing.expect(host.layoutChromeForRect(rect, &changed));
+    const strip = [_]HWND{
+        host.tabs.items[0].button_hwnd.?,
+        host.tab_container_hwnd.?,
+        host.new_tab_hwnd.?,
+        host.overflow_hwnd.?,
+    };
+    for (strip) |child| try std.testing.expectEqual(@as(i32, 0), sys.IsWindowVisible(child));
+    // A hidden button is not a focus-cycle target either.
+    try std.testing.expectEqual(@as(?HWND, null), host.tabStripFocusHwnd());
+
+    // Turning the tab bar back on at runtime (a config reload) has to bring
+    // all of it back, at the strip's real height.
+    app.config.@"window-show-tab-bar" = .always;
+    try std.testing.expect(host.tabBarHeight() > 0);
+    try std.testing.expect(host.layoutChromeForRect(rect, &changed));
+    for (strip) |child| try std.testing.expect(sys.IsWindowVisible(child) != 0);
+    try std.testing.expectEqual(host.tabs.items[0].button_hwnd, host.tabStripFocusHwnd());
+    var button_rect: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(strip[0], &button_rect) != 0);
+    try std.testing.expect(button_rect.bottom - button_rect.top > 1);
+}
+
+fn createTestChromeChild(parent: HWND, class: [*:0]const u16) !HWND {
+    return sys.CreateWindowExW(
+        0,
+        class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_CHILD | c.WS_VISIBLE,
+        0,
+        0,
+        100,
+        24,
+        parent,
+        null,
+        sys.GetModuleHandleW(null),
+        null,
+    ) orelse lastError();
 }
 
 fn createTestHostWindow() !HWND {
