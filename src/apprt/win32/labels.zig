@@ -2024,8 +2024,8 @@ pub fn buildCommandPaletteFeedbackText(
         if (subtitle.len > 0) {
             return try std.fmt.allocPrint(
                 alloc,
-                "{s} — {s}. Enter activates; Escape closes.",
-                .{ title, subtitle },
+                "{s} — {s}{s} Enter activates; Escape closes.",
+                .{ title, subtitle, sentenceStop(subtitle) },
             );
         }
         return try std.fmt.allocPrint(
@@ -2037,8 +2037,8 @@ pub fn buildCommandPaletteFeedbackText(
     if (subtitle.len > 0) {
         return try std.fmt.allocPrint(
             alloc,
-            "{d} matches. Selected: {s} — {s}. Up/Down selects; Enter activates.",
-            .{ presentation.match_count, title, subtitle },
+            "{d} matches. Selected: {s} — {s}{s} Up/Down selects; Enter activates.",
+            .{ presentation.match_count, title, subtitle, sentenceStop(subtitle) },
         );
     }
     return try std.fmt.allocPrint(
@@ -2046,6 +2046,43 @@ pub fn buildCommandPaletteFeedbackText(
         "{d} matches. Selected: {s}. Up/Down selects; Enter activates.",
         .{ presentation.match_count, title },
     );
+}
+
+/// The full stop to put after a fragment that is spliced into a sentence.
+/// Command descriptions are prose ("Open the config file.") while theme
+/// and setting subtitles are labels ("Bundled theme"); appending a period
+/// to both produced "Open the config file.." in the hint line.
+fn sentenceStop(text: []const u8) []const u8 {
+    if (text.len == 0) return ".";
+    return switch (text[text.len - 1]) {
+        '.', '!', '?' => "",
+        else => ".",
+    };
+}
+
+test "win32 command palette feedback does not double a description's full stop" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const prose = try buildCommandPaletteFeedbackText(
+        std.testing.allocator,
+        "open",
+        &.{},
+        .{ .match_count = 3, .title = "Open Config", .subtitle = "Open the config file.", .available = true },
+    );
+    defer std.testing.allocator.free(prose);
+    try std.testing.expectEqualStrings(
+        "3 matches. Selected: Open Config — Open the config file. Up/Down selects; Enter activates.",
+        prose,
+    );
+
+    const label = try buildCommandPaletteFeedbackText(
+        std.testing.allocator,
+        "0x96f",
+        &.{},
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("0x96f — Bundled theme. Enter activates; Escape closes.", label);
 }
 
 pub fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
