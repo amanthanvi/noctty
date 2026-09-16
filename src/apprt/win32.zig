@@ -55,6 +55,7 @@ const win32_nc_layout = @import("win32_nc_layout.zig");
 const win32_status_bar = @import("win32_status_bar.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
+const focus_cue = @import("win32/focus_cue.zig");
 const win32_types = @import("win32_types.zig");
 const win32_layouts = @import("win32_layouts.zig");
 const win32_session_state = @import("win32_session_state.zig");
@@ -91,6 +92,7 @@ test {
     _ = @import("win32/chrome_layout.zig");
     _ = @import("win32/gdi.zig");
     _ = @import("win32/focus_region.zig");
+    _ = @import("win32/focus_cue.zig");
     _ = @import("win32/first_frame.zig");
 }
 
@@ -123,6 +125,8 @@ const overlayLabelReservation = chrome_layout.overlayLabelReservation;
 const confirmPreviewRect = chrome_layout.confirmPreviewRect;
 const overlayActionLayoutForWidth = chrome_layout.overlayActionLayoutForWidth;
 const overlayEditChildRectFromFrame = chrome_layout.overlayEditChildRectFromFrame;
+const overlay_edit_child_inset_x_base = chrome_layout.overlay_edit_child_inset_x_base;
+const overlay_edit_child_inset_y_base = chrome_layout.overlay_edit_child_inset_y_base;
 const confirmTitlePaintRect = chrome_layout.confirmTitlePaintRect;
 const overlayFeedbackLineRect = chrome_layout.overlayFeedbackLineRect;
 const confirmBodyPaintRect = chrome_layout.confirmBodyPaintRect;
@@ -4210,6 +4214,11 @@ pub const App = struct {
             // Shift+Tab, arrow-key radio navigation, and default buttons use
             // standard Win32 accessibility semantics.
             if (self.settings_window.hwnd) |settings_hwnd| {
+                // The dialog manager consumes Tab and the arrow keys here and
+                // never dispatches them to the control that gains focus, so
+                // the settings window learns about keyboard navigation from
+                // the pump, not from its controls.
+                self.settings_window.noteInputMessage(msg.hwnd, msg.message, msg.wParam);
                 if (sys.IsDialogMessageW(settings_hwnd, &msg) != 0) {
                     try self.tickCoreApp();
                     continue;
@@ -11039,6 +11048,13 @@ const Host = struct {
     overlay_accept_placement: ChildPlacement = .{},
     overlay_cancel_placement: ChildPlacement = .{},
     hovered_button_hwnd: ?HWND = null,
+    /// How the user last reached a chrome control. Owner-drawn buttons
+    /// paint their focus ring only in `.keyboard` mode, the way native
+    /// controls honour `UISF_HIDEFOCUS`: a tab that was just clicked or
+    /// a `[▾]` whose menu was just dismissed holds focus but shows no
+    /// ring. Any navigation key flips it back (`focus_cue.keyRevealsRing`),
+    /// any pointer press on a chrome control clears it.
+    focus_input_mode: focus_cue.InputMode = .pointer,
     /// Fade state for the tab the user is currently hovering. Paint
     /// reads `alphaAt(now)` + pre-composites the glyph colour against
     /// the tab bg so the close X visibly fades in with
@@ -13890,15 +13906,12 @@ const Host = struct {
         const title = tab.cached_button_title orelse return self.hideTabTooltip();
         // Measure the title against the budget the title was actually
         // compacted to, not the drawn label against the button's own budget.
-        // The label also carries the tab index, the active marker and the pane
-        // count; `buildTabButtonLabel` charges those to the button budget
-        // first, so comparing the whole label against that budget asked
-        // whether a label that is built to fit fits. It also answered
-        // differently for an active tab than for its inactive neighbour
-        // showing the same title.
+        // The label also carries the tab index and the pane count;
+        // `buildTabButtonLabel` charges those to the button budget first, so
+        // comparing the whole label against that budget asked whether a
+        // label that is built to fit fits.
         const budget = labels.tabButtonTitleBudget(
             tab.cached_button_index,
-            tab.cached_button_active,
             tab.cached_button_pane_count,
             tab.cached_button_label_max_width,
             tab.cached_button_show_pane_count,
@@ -14642,6 +14655,28 @@ const Host = struct {
             }
         }
         return false;
+    }
+
+    /// Record that a navigation key reached a chrome control. Rings
+    /// appear on the next paint of whatever holds focus.
+    fn noteChromeKeyInput(self: *Host, vk: WPARAM) void {
+        if (!focus_cue.keyRevealsRing(@intCast(vk & 0xFFFF))) return;
+        if (self.focus_input_mode == .keyboard) return;
+        self.focus_input_mode = .keyboard;
+        if (sys.GetFocus()) |focused| _ = sys.InvalidateRect(focused, null, 0);
+    }
+
+    /// Record a pointer press on a chrome control. The control may take
+    /// focus, but it must not show a ring for it.
+    fn noteChromePointerInput(self: *Host) void {
+        if (self.focus_input_mode == .pointer) return;
+        self.focus_input_mode = .pointer;
+        if (sys.GetFocus()) |focused| _ = sys.InvalidateRect(focused, null, 0);
+    }
+
+    /// Whether a focused chrome control should paint its focus ring now.
+    fn chromeFocusRingVisible(self: *const Host, focused: bool, disabled: bool) bool {
+        return focus_cue.showRing(focused, disabled, self.focus_input_mode, isHighContrastActive());
     }
 
     fn isHoveredButton(self: *Host, child: HWND) bool {
@@ -16628,6 +16663,14 @@ const Host = struct {
 
         // Guard: host may have been destroyed during the modal menu loop
         if (self.hwnd == null) return;
+        // The BUTTON class takes focus on the click that opened the menu,
+        // and nothing gives it back when the menu closes without a
+        // command: the next keystroke went to the chevron, not the shell.
+        // A chosen command moves focus itself (new tab, palette, find),
+        // so only the dismissed case needs the terminal restored.
+        if (cmd <= 0 and sys.GetFocus() == button) {
+            refocusHostAfterActivation(self);
+        }
         self.handleOverflowMenuCommand(cmd);
     }
 
@@ -16793,6 +16836,10 @@ const Host = struct {
     /// resolved from live focus rather than assumed, so a binding invoked
     /// through automation while chrome holds focus still moves correctly.
     fn cycleFocusRegionFromCurrentFocus(self: *Host, direction: focus_region.Direction) bool {
+        // This is the keybind path (F6 from the terminal). The key never
+        // reaches a chrome control's own WM_KEYDOWN, but the control it
+        // lands on is being reached by keyboard and must show its ring.
+        self.focus_input_mode = .keyboard;
         const current = if (sys.GetFocus()) |hwnd| self.focusRegionForHwnd(hwnd) else null;
         return self.cycleFocusRegion(direction, current);
     }
@@ -17082,7 +17129,7 @@ const Host = struct {
         fillSolidRect(draw.hDC, draw.rcItem, parent_bg);
         drawRoundedRect(draw.hDC, bg_rect, colors.bg, colors.border, self.scaled(4));
 
-        if (focused and !disabled) {
+        if (self.chromeFocusRingVisible(focused, disabled)) {
             drawRoundedRect(
                 draw.hDC,
                 rectInset(bg_rect, self.scaled(2), self.scaled(2)),
@@ -17188,7 +17235,7 @@ const Host = struct {
         if (visual.bg) |bg| {
             drawRoundedRect(draw.hDC, draw.rcItem, bg, bg, self.scaled(4));
         }
-        if (focused and !disabled) {
+        if (self.chromeFocusRingVisible(focused, disabled)) {
             drawRoundedRect(
                 draw.hDC,
                 rectInset(draw.rcItem, self.scaled(2), self.scaled(2)),
@@ -17348,7 +17395,7 @@ const Host = struct {
                 .bottom = draw.rcItem.top + self.scaled(5),
             }, border);
         }
-        if (focused and !disabled) {
+        if (self.chromeFocusRingVisible(focused, disabled)) {
             const focus = if (profile_kind) |kind|
                 profileKindFocusRingColor(kind, theme.is_dark)
             else if (accept)
@@ -18539,7 +18586,6 @@ const Host = struct {
                 self.app.core_app.alloc,
                 title,
                 i,
-                active,
                 pane_count,
                 label_max_width,
                 show_pane_count,
@@ -18548,6 +18594,12 @@ const Host = struct {
             const is_new_button = tab.button_hwnd == null;
             const label_changed = is_new_button or
                 !ownedStringEquals(tab.cached_button_label, label);
+            // Activation no longer changes the label text, so the
+            // `SetWindowTextW` below cannot be what repaints the button in
+            // its active or inactive look; ask for the repaint directly.
+            if (!is_new_button and !label_changed and tab.cached_button_active != active) {
+                _ = sys.InvalidateRect(tab.button_hwnd.?, null, 0);
+            }
             if (is_new_button) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
@@ -18811,7 +18863,11 @@ const Host = struct {
                 self.scaled(host_overlay_row_height),
                 self.current_dpi,
             );
-            const edit_rect = overlayEditChildRectFromFrame(edit_frame, self.scaled(8), self.scaled(6));
+            const edit_rect = overlayEditChildRectFromFrame(
+                edit_frame,
+                self.scaled(overlay_edit_child_inset_x_base),
+                self.scaled(overlay_edit_child_inset_y_base),
+            );
             changed.* = applyChromeChildRect(
                 edit_hwnd,
                 &self.overlay_edit_placement,
@@ -19397,16 +19453,24 @@ const Host = struct {
                 }
             }
 
-            fillSolidRect(
-                hdc,
-                .{
-                    .left = 0,
-                    .top = 0,
-                    .right = client_rect.right,
-                    .bottom = @max(1, self.scaled(2)),
-                },
-                themeSurface(titlebar_theme, .tab_accent),
-            );
+            // A separate tab row (Win10, or decorations without the
+            // integrated titlebar) sits under the system caption and gets
+            // a 2 px accent strip so the strip reads as ours. In the
+            // integrated titlebar the same strip landed directly under
+            // DWM's own 1 px accent border and read as a thick blue rim
+            // around the window, so there the band starts clean.
+            if (!self.usingIntegratedTitlebar()) {
+                fillSolidRect(
+                    hdc,
+                    .{
+                        .left = 0,
+                        .top = 0,
+                        .right = client_rect.right,
+                        .bottom = @max(1, self.scaled(2)),
+                    },
+                    themeSurface(titlebar_theme, .tab_accent),
+                );
+            }
             if (!self.usingIntegratedTitlebar()) {
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
                 const cluster_rect = RECT{
@@ -24626,6 +24690,10 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
             }
         }
+        if (msg == c.WM_KEYDOWN) v.noteChromeKeyInput(wParam);
+        if (msg == c.WM_LBUTTONDOWN or msg == c.WM_RBUTTONDOWN or msg == c.WM_MBUTTONDOWN) {
+            v.noteChromePointerInput();
+        }
         // Focus-region keys for the tab-strip action buttons and the
         // docked search controls. Overlay buttons are deliberately
         // excluded: they belong to a modal overlay, not to the window's
@@ -24757,6 +24825,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     }
                 },
                 c.WM_LBUTTONDOWN => {
+                    v.noteChromePointerInput();
                     // A click answers the question the tooltip was there to
                     // answer, and the strip is about to relayout under it.
                     v.hideTabTooltip();
@@ -24887,6 +24956,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     if (v.isHoveredButton(hwnd)) v.setHoveredButton(null);
                 },
                 c.WM_KEYDOWN => {
+                    v.noteChromeKeyInput(wParam);
                     if (v.handleFocusRegionKey(hwnd, wParam, true)) return 0;
                     if (tabButtonKeyAction(wParam, keyPressed(c.VK_CONTROL))) |action| {
                         switch (action) {
@@ -25054,10 +25124,12 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             c.WM_KILLFOCUS => {
                 surface.invalidateSearchBarChildPaint();
             },
+            c.WM_LBUTTONDOWN => v.noteChromePointerInput(),
             c.WM_CHAR => {
                 if (wParam == c.VK_RETURN or wParam == c.VK_ESCAPE) return 0;
             },
             c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+                v.noteChromeKeyInput(wParam);
                 // Escape stays with the search bar, which dismisses
                 // itself and returns focus to the terminal; only F6
                 // is taken for the focus-region cycle.
@@ -25134,6 +25206,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         }
     }
     if (host) |v| switch (msg) {
+        c.WM_LBUTTONDOWN => v.noteChromePointerInput(),
         c.WM_CHAR => {
             if (wParam == c.VK_ESCAPE) return 0;
             if (wParam == c.VK_RETURN) {
@@ -25145,6 +25218,9 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         },
 
         c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+            // Tab out of the query is how the keyboard reaches the Close
+            // button; it has to show its ring when it gets there.
+            v.noteChromeKeyInput(wParam);
             if (v.commandPaletteToggleKeyMessage(msg, wParam, lParam)) {
                 _ = v.dismissCommandPalette();
                 return 0;

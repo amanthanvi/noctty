@@ -24,6 +24,7 @@ const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
 const win32_theme = @import("win32_theme.zig");
 const win32_uia = @import("win32_uia/mod.zig");
+const focus_cue = @import("win32/focus_cue.zig");
 const settings_transaction = @import("win32_settings_transaction.zig");
 const sys = @import("win32/sys.zig");
 const SetFocus = sys.SetFocus;
@@ -56,7 +57,7 @@ const HMONITOR = sys.HMONITOR;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
 const WS_EX_APPWINDOW: u32 = 0x00040000;
-const WS_EX_CLIENTEDGE: u32 = 0x00000200;
+const WS_BORDER: u32 = 0x00800000;
 const WS_VSCROLL: u32 = 0x00200000;
 const SW_HIDE: i32 = 0;
 const SW_SHOWNORMAL: i32 = 1;
@@ -88,6 +89,11 @@ const WM_VSCROLL: UINT = 0x0115;
 const WM_MOUSEWHEEL: UINT = 0x020A;
 const WM_MOUSEMOVE: UINT = 0x0200;
 const WM_MOUSELEAVE: UINT = 0x02A3;
+const WM_KEYDOWN: UINT = 0x0100;
+const WM_SYSKEYDOWN: UINT = 0x0104;
+const WM_LBUTTONDOWN: UINT = 0x0201;
+const WM_RBUTTONDOWN: UINT = 0x0204;
+const WM_MBUTTONDOWN: UINT = 0x0207;
 const WM_GETMINMAXINFO: UINT = 0x0024;
 const WM_DPICHANGED: UINT = 0x02E0;
 const WM_SETFONT: UINT = 0x0030;
@@ -1011,6 +1017,13 @@ pub const SettingsWindow = struct {
     btn_section_advanced: ?HWND = null,
     section_button_prev_proc: ?*const anyopaque = null,
     section_hovered: ?HWND = null,
+    /// How the user last reached a section button. The rail's owner-drawn
+    /// buttons paint a focus ring only in `.keyboard` mode, the way native
+    /// controls honour `UISF_HIDEFOCUS`: the section that opened with the
+    /// window, or was just clicked, holds focus but shows no ring until a
+    /// navigation key arrives. The native EDIT / COMBOBOX / BUTTON
+    /// children already behave this way through the dialog manager.
+    focus_input_mode: focus_cue.InputMode = .pointer,
     section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
     section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
     btn_save: ?HWND = null,
@@ -2285,6 +2298,19 @@ pub const SettingsWindow = struct {
             _ = SendMessageW(control, CB_SETITEMHEIGHT, 0, item_height);
             win32_theme.WindowThemeAdapter.applyNativeCombo(control, self.theme_adapter.colors);
         };
+    }
+
+    /// Feed an input message bound for this window or one of its children
+    /// to the focus-cue tracker. The App pump calls this BEFORE
+    /// `IsDialogMessageW`, because the dialog manager consumes Tab and the
+    /// arrow keys itself and never dispatches them to the control that
+    /// gains focus: a subclass on the rail buttons would see the click that
+    /// focused one but never the key that did.
+    pub fn noteInputMessage(self: *SettingsWindow, target: ?HWND, msg: UINT, wParam: WPARAM) void {
+        const hwnd = self.hwnd orelse return;
+        const control = target orelse return;
+        if (control != hwnd and IsChild(hwnd, control) == 0) return;
+        noteSettingsInput(self, msg, wParam);
     }
 
     pub fn themeChanged(self: *SettingsWindow) void {
@@ -4063,11 +4089,16 @@ fn makeEdit(
     extra_style: u32,
 ) ?HWND {
     const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
+    // `WS_EX_CLIENTEDGE` is the classic sunken 3-D frame. It ignores the
+    // `DarkMode_Explorer` theme entirely, so on the dark pane every field
+    // wore a two-pixel near-white bevel. A themed `WS_BORDER` EDIT draws
+    // the same 1 px frame the combo boxes beside it draw, in the theme's
+    // own colour, in both modes.
     const edit = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
+        0,
         edit_class,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
-        WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | extra_style,
+        WS_CHILD | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | extra_style,
         0,
         0,
         settings_field_max_width,
@@ -5394,14 +5425,37 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-fn shouldDrawSettingsSectionFocusRing(selected: bool, focused: bool) bool {
+fn shouldDrawSettingsSectionFocusRing(
+    selected: bool,
+    focused: bool,
+    mode: focus_cue.InputMode,
+    high_contrast: bool,
+) bool {
     _ = selected;
-    return focused;
+    return focus_cue.showRing(focused, false, mode, high_contrast);
 }
 
-test "settings section focus ring follows focus, not selection" {
-    try std.testing.expect(!shouldDrawSettingsSectionFocusRing(true, false));
-    try std.testing.expect(shouldDrawSettingsSectionFocusRing(false, true));
+test "settings section focus ring follows keyboard focus, not selection" {
+    try std.testing.expect(!shouldDrawSettingsSectionFocusRing(true, false, .keyboard, false));
+    try std.testing.expect(shouldDrawSettingsSectionFocusRing(false, true, .keyboard, false));
+    // The section that opens with the window, or was just clicked, holds
+    // focus without a ring; a navigation key reveals it.
+    try std.testing.expect(!shouldDrawSettingsSectionFocusRing(true, true, .pointer, false));
+    // High Contrast keeps the ring on pointer focus.
+    try std.testing.expect(shouldDrawSettingsSectionFocusRing(true, true, .pointer, true));
+}
+
+/// Flip the focus cue mode from an input message that reached a section
+/// button, repainting the focused control when the mode changed.
+fn noteSettingsInput(settings: *SettingsWindow, msg: UINT, wParam: WPARAM) void {
+    const next: focus_cue.InputMode = switch (msg) {
+        WM_KEYDOWN, WM_SYSKEYDOWN => if (focus_cue.keyRevealsRing(@intCast(wParam & 0xFFFF))) .keyboard else return,
+        WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN => .pointer,
+        else => return,
+    };
+    if (settings.focus_input_mode == next) return;
+    settings.focus_input_mode = next;
+    if (GetFocus()) |focused| _ = InvalidateRect(focused, null, 0);
 }
 
 fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
@@ -5414,7 +5468,12 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
     const selected = SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
     const pressed = (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
     const hovered = settings.section_hovered == hwnd;
-    const focused = shouldDrawSettingsSectionFocusRing(selected, GetFocus() == hwnd);
+    const focused = shouldDrawSettingsSectionFocusRing(
+        selected,
+        GetFocus() == hwnd,
+        settings.focus_input_mode,
+        colors.high_contrast,
+    );
     const fill_color = if (selected or pressed)
         colors.selection_bg
     else if (hovered and !colors.high_contrast)

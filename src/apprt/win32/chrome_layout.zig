@@ -379,6 +379,16 @@ pub fn overlayActionLayoutForWidth(
     };
 }
 
+/// Insets of the overlay query EDIT inside its painted frame, in unscaled
+/// logical pixels. The frame is `overlay_row_height` (24) tall and the
+/// EDIT uses the 14 px chrome font, whose GDI cell is 19 px at 96 DPI:
+/// a 6 px vertical inset left the child 12 px tall and the EDIT class
+/// clipped every glyph at the waist. 2 px keeps the frame's own stroke
+/// (`drawRoundedRect` draws one pixel in from the rect) visible around
+/// the child while giving the text its full cell.
+pub const overlay_edit_child_inset_x_base: i32 = 8;
+pub const overlay_edit_child_inset_y_base: i32 = 2;
+
 pub fn overlayEditChildRectFromFrame(frame: RECT, inset_x: i32, inset_y: i32) RECT {
     const left = @min(frame.right, frame.left + @max(0, inset_x));
     const top = @min(frame.bottom, frame.top + @max(0, inset_y));
@@ -404,6 +414,31 @@ test "win32 overlay edit child rect preserves frame border" {
     try std.testing.expectEqual(@as(i32, 292), child.right);
     try std.testing.expectEqual(@as(i32, 52), child.bottom);
     try std.testing.expect(child.bottom < frame.bottom);
+}
+
+test "win32 overlay edit child leaves room for the chrome font" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The frame is one overlay row tall. With the shipped insets the EDIT
+    // has to hold a 14 px font's 19 px GDI cell at 96 DPI, and scale with
+    // it: the old 6 px inset left 12 px and clipped every glyph.
+    const metrics: win32_theme.ThemeMetrics = .{};
+    const dpis = [_]u32{ 96, 144, 192, 288 };
+    for (dpis) |dpi| {
+        const row_h = scaledBy(metrics.overlay_row_height, dpi);
+        const frame = overlayEditFrameRect(800, 40, scaledBy(12, dpi), scaledBy(110, dpi), scaledBy(80, dpi), 0, row_h, dpi);
+        const child = overlayEditChildRectFromFrame(
+            frame,
+            scaledBy(overlay_edit_child_inset_x_base, dpi),
+            scaledBy(overlay_edit_child_inset_y_base, dpi),
+        );
+        const font_cell = scaledBy(19, dpi);
+        try std.testing.expect(child.bottom - child.top >= font_cell);
+        // The frame stroke sits one pixel inside the rect; the child must
+        // not paint over it.
+        try std.testing.expect(child.top > frame.top + 1);
+        try std.testing.expect(child.bottom < frame.bottom - 1);
+    }
 }
 
 test "win32 overlay edit frame offsets scale with DPI" {
