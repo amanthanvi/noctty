@@ -25854,6 +25854,23 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
+        c.WM_MENUCHAR => {
+            // An Alt chord typed into a chrome control (a tab button, the
+            // search field) reaches DefWindowProc as WM_SYSCHAR, becomes
+            // SC_KEYMENU, and lands here with MF_POPUP clear: no menu is
+            // open, nothing can match, and the default answer is the shell's
+            // beep. Close that phantom loop silently. With a menu actually
+            // open (MF_POPUP, the window menu after Alt+Space) the default
+            // stays, so an unmatched mnemonic beeps the way every Win32 menu
+            // does. The terminal surface never gets this far: it consumes
+            // its own WM_SYSCHAR (#250).
+            const menu_flags: u32 = @intCast((wParam >> 16) & 0xFFFF);
+            if (win32_input.menuCharClosesPhantomMenu(menu_flags)) {
+                return @as(LRESULT, c.MNC_CLOSE) << 16;
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+
         c.WM_GETMINMAXINFO => {
             if (host) |v| {
                 if (v.activeSurface()) |surface| {
@@ -26670,6 +26687,23 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 v.handleCharMessage(wParam, lParam);
             }
             return 0;
+        },
+
+        c.WM_SYSCHAR => {
+            // `TranslateMessage` turns an Alt chord's WM_SYSKEYDOWN into
+            // this. The chord was already encoded from the key message, so
+            // the character goes through the same deferred-commit gate as a
+            // WM_CHAR (it commits only when the key message authorized it)
+            // and then stops here: handed to DefWindowProc it becomes
+            // SC_KEYMENU, and a window with no menu bar answers that with a
+            // menu loop that matches nothing and the shell's default beep
+            // (#250). Alt+Space alone still opens the window menu, which
+            // Windows reserves for moving and resizing from the keyboard.
+            if (surface) |v| {
+                v.handleCharMessage(wParam, lParam);
+                if (!win32_input.sysCharOpensWindowMenu(@intCast(wParam & 0xFFFF))) return 0;
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
         c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {

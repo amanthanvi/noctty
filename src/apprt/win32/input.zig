@@ -743,6 +743,32 @@ pub fn deferPlainTextToCharMessage(kitty_report_all: bool, ime_composing: bool) 
     return !kitty_report_all or ime_composing;
 }
 
+/// Whether the surface lets a `WM_SYSCHAR` fall through to `DefWindowProc`.
+///
+/// `TranslateMessage` turns the `WM_SYSKEYDOWN` of an Alt chord into a
+/// `WM_SYSCHAR`. The chord was already encoded from the key message, so the
+/// character carries nothing the terminal still needs, and `DefWindowProc`
+/// answers it with `SC_KEYMENU`: on a window without a menu bar that is a
+/// menu loop that matches no mnemonic and plays the shell's default beep
+/// (#250). Only Alt+Space is let through, because Windows reserves it for
+/// the window menu and that menu is how a keyboard-only user moves or
+/// resizes the window.
+pub fn sysCharOpensWindowMenu(code_unit: u16) bool {
+    return code_unit == ' ';
+}
+
+/// Whether a `WM_MENUCHAR` came from the menu loop `SC_KEYMENU` runs on a
+/// window with no menu bar, rather than from a menu that is actually open.
+///
+/// `menu_flags` is the high word of `wParam`. A real menu carries
+/// `MF_POPUP`; the phantom loop that follows an Alt chord on a menu-less
+/// window carries `MF_SYSMENU` alone (measured). Nothing in that loop can
+/// match, so the only thing the default reply (`MNC_IGNORE`) adds is the
+/// shell's beep; answering `MNC_CLOSE` ends it silently.
+pub fn menuCharClosesPhantomMenu(menu_flags: u32) bool {
+    return (menu_flags & c.MF_POPUP) == 0;
+}
+
 fn applyTranslatedKeyText(
     result: *Win32KeyMessage,
     translated: KeyText,
@@ -1437,6 +1463,24 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .{ .unshifted_codepoint = 0x0D },
         true,
     ));
+}
+
+test "win32 sysChar lets only Alt+Space reach the window menu" {
+    try std.testing.expect(sysCharOpensWindowMenu(' '));
+    try std.testing.expect(!sysCharOpensWindowMenu('/'));
+    try std.testing.expect(!sysCharOpensWindowMenu('w'));
+    try std.testing.expect(!sysCharOpensWindowMenu('1'));
+    try std.testing.expect(!sysCharOpensWindowMenu('\r'));
+    try std.testing.expect(!sysCharOpensWindowMenu(0x1b));
+}
+
+test "win32 menuChar closes only the phantom system-menu loop" {
+    // Alt+w on a window with no menu bar: MF_SYSMENU, no popup.
+    try std.testing.expect(menuCharClosesPhantomMenu(c.MF_SYSMENU));
+    try std.testing.expect(menuCharClosesPhantomMenu(0));
+    // 'q' typed into the open window menu after Alt+Space.
+    try std.testing.expect(!menuCharClosesPhantomMenu(c.MF_SYSMENU | c.MF_POPUP));
+    try std.testing.expect(!menuCharClosesPhantomMenu(c.MF_POPUP));
 }
 
 test "win32 kitty-report-all skips WM_CHAR deferral" {

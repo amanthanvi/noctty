@@ -97,6 +97,9 @@ pub const WM_NCLBUTTONDOWN = 0x00A1;
 pub const WM_NCLBUTTONUP = 0x00A2;
 pub const WM_NCMOUSELEAVE = 0x02A2;
 pub const WM_SYSCOMMAND = 0x0112;
+pub const WM_MENUCHAR = 0x0120;
+/// `WM_MENUCHAR` reply: close the active menu without a beep.
+pub const MNC_CLOSE: u32 = 1;
 pub const SC_CLOSE: WPARAM = 0xF060;
 pub const SC_MINIMIZE: WPARAM = 0xF020;
 pub const SC_MAXIMIZE: WPARAM = 0xF030;
@@ -341,6 +344,7 @@ pub const SEARCH_WORD_ID: usize = 2106;
 pub const SEARCH_RESULTS_ID: usize = 2107;
 pub const SEARCH_CLOSE_ID: usize = 2108;
 pub const MF_POPUP: UINT = 0x00000010;
+pub const MF_SYSMENU: UINT = 0x00002000;
 pub const MF_CHECKED: UINT = 0x00000008;
 
 pub const VK_LBUTTON = 0x01;
