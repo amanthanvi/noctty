@@ -25937,10 +25937,10 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             // SC_KEYMENU, and lands here with MF_POPUP clear: no menu is
             // open, nothing can match, and the default answer is the shell's
             // beep. Close that phantom loop silently. With a menu actually
-            // open (MF_POPUP, the window menu after Alt+Space) the default
-            // stays, so an unmatched mnemonic beeps the way every Win32 menu
-            // does. The terminal surface never gets this far: it consumes
-            // its own WM_SYSCHAR (#250).
+            // open (MF_POPUP: the window menu after Alt+Space, or one of
+            // this window's own TrackPopupMenu menus) the default reply
+            // stays. The terminal surface consumes its own WM_SYSCHAR
+            // (#250) except for Alt+Space, whose menu is a real popup.
             const menu_flags: u32 = @intCast((wParam >> 16) & 0xFFFF);
             if (win32_input.menuCharClosesPhantomMenu(menu_flags)) {
                 return @as(LRESULT, c.MNC_CLOSE) << 16;
@@ -26768,17 +26768,21 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         c.WM_SYSCHAR => {
             // `TranslateMessage` turns an Alt chord's WM_SYSKEYDOWN into
-            // this. The chord was already encoded from the key message, so
-            // the character goes through the same deferred-commit gate as a
-            // WM_CHAR (it commits only when the key message authorized it)
-            // and then stops here: handed to DefWindowProc it becomes
-            // SC_KEYMENU, and a window with no menu bar answers that with a
-            // menu loop that matches nothing and the shell's default beep
-            // (#250). Alt+Space alone still opens the window menu, which
-            // Windows reserves for moving and resizing from the keyboard.
+            // this. The chord was already encoded from the key message (an
+            // Alt chord never defers its text to a character message), so
+            // the character carries nothing the terminal still needs, and
+            // handed to DefWindowProc it becomes SC_KEYMENU: a window with
+            // no menu bar answers that with a menu loop that matches nothing
+            // and the shell's default beep (#250). Swallowed outright rather
+            // than routed through the deferred-commit gate -- a unit that
+            // gate still holds by now was leaked by an earlier key, and
+            // committing it here would type a bare character after the
+            // chord. Alt+Space alone still opens the window menu, which
+            // Windows reserves for moving and resizing from the keyboard,
+            // and only on a window that has one.
             if (surface) |v| {
-                v.handleCharMessage(wParam, lParam);
                 if (!win32_input.sysCharOpensWindowMenu(@intCast(wParam & 0xFFFF))) return 0;
+                if (!v.hasWindowMenu()) return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -28267,6 +28271,15 @@ pub const Surface = struct {
     fn windowHwnd(self: *const Surface) ?HWND {
         if (self.host) |host| return host.hwnd;
         return self.hwnd;
+    }
+
+    /// Whether the top-level window carries `WS_SYSMENU`: fullscreen and
+    /// `window-decoration = none` strip it (`effectiveHostWindowStyle`), and
+    /// `SC_KEYMENU` on such a window has no menu to open.
+    fn hasWindowMenu(self: *const Surface) bool {
+        const top = self.windowHwnd() orelse return false;
+        const style: usize = @bitCast(sys.GetWindowLongPtrW(top, c.GWL_STYLE));
+        return (style & c.WS_SYSMENU) != 0;
     }
 
     pub fn getTitle(self: *Surface) ?[:0]const u8 {
