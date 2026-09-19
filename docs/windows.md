@@ -456,6 +456,22 @@ AltGr, the modifier state noctty reads cannot tell the two apart, so left
 Ctrl plus right Alt is always read as AltGr there; use left Alt or right
 Ctrl for a deliberate Ctrl+Alt chord.
 
+An Alt chord does not ring the Windows default beep. `TranslateMessage`
+turns the key message of `Alt+<key>` into a `WM_SYSCHAR`, and a window that
+lets that message reach `DefWindowProc` gets `SC_KEYMENU`: with no menu bar
+to match, the shell plays its default sound on every chord, which is what
+`Alt+/` and `Alt+w` in Neovim did before the fix for #250. The terminal
+surface now consumes the message, since the chord was already encoded from
+the key message. That sound is the shell's, not the terminal bell, so
+`bell-features` never affected it. The same chord typed into the tab strip,
+the search field or the Settings window is silenced one step later, when
+the window answers the empty menu loop's `WM_MENUCHAR`. `Alt+Space` still
+opens the window menu on a decorated window, which Windows reserves for
+moving and resizing the window from the keyboard; a key that matches
+nothing inside that open menu leaves it open and, measured on Windows 11,
+does not beep either. A `keybind` on `alt+space` runs its action and then
+opens that menu as well, as it did before.
+
 While a program has the Kitty keyboard protocol's `report_all` flag enabled,
 typed text travels on the physical key event rather than a separate character
 commit, so the press and release a program pairs share one key identity. This

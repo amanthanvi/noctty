@@ -25,6 +25,7 @@ const win32_types = @import("win32_types.zig");
 const win32_theme = @import("win32_theme.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const focus_cue = @import("win32/focus_cue.zig");
+const win32_input = @import("win32/input.zig");
 const settings_transaction = @import("win32_settings_transaction.zig");
 const sys = @import("win32/sys.zig");
 const SetFocus = sys.SetFocus;
@@ -91,6 +92,9 @@ const WM_MOUSEMOVE: UINT = 0x0200;
 const WM_MOUSELEAVE: UINT = 0x02A3;
 const WM_KEYDOWN: UINT = 0x0100;
 const WM_SYSKEYDOWN: UINT = 0x0104;
+const WM_MENUCHAR: UINT = 0x0120;
+/// `WM_MENUCHAR` reply: close the active menu without a beep.
+const MNC_CLOSE: u32 = 1;
 const WM_LBUTTONDOWN: UINT = 0x0201;
 const WM_RBUTTONDOWN: UINT = 0x0204;
 const WM_MBUTTONDOWN: UINT = 0x0207;
@@ -5781,6 +5785,20 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         WM_SIZE => {
             if (owner) |o| layoutChildren(o);
             return 0;
+        },
+        WM_MENUCHAR => {
+            // An Alt chord typed into a settings control reaches the
+            // control's DefWindowProc as WM_SYSCHAR, becomes SC_KEYMENU, and
+            // the menu loop for it runs on this window: no menu bar, no
+            // mnemonic to match, and the default reply is the shell's beep
+            // (#250, same shape as the host window). Close the phantom loop
+            // silently; the window menu after Alt+Space carries MF_POPUP and
+            // keeps the default.
+            const menu_flags: u32 = @intCast((wParam >> 16) & 0xFFFF);
+            if (win32_input.menuCharClosesPhantomMenu(menu_flags)) {
+                return @as(LRESULT, MNC_CLOSE) << 16;
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_MOUSEWHEEL => {
             if (owner) |o| {
