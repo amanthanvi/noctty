@@ -14053,11 +14053,13 @@ const Host = struct {
         }
         const tooltip = self.tab_tooltip_hwnd orelse return;
         // The popup remembers its text so a refresh that leaves it unchanged
-        // does not repaint. That is a paint decision only: the UIA name is
-        // the FULL title (`tabTooltipUiaName`), while `text` is bounded by
-        // `tab_tooltip_max_width`, so a title that changed past that bound
-        // renders identically and must still announce -- `name_changed` is
-        // computed on the full title by the caller for exactly that reason.
+        // does not repaint; it is still re-placed below, since the button's
+        // rect may have moved. That is a paint decision only: the UIA name
+        // is the FULL title (`tabTooltipUiaName`), while `text` is bounded
+        // by `tab_tooltip_max_width`, so a title that changed past that
+        // bound renders identically and must still announce -- `name_changed`
+        // is computed on the full title by the caller for exactly that
+        // reason.
         const text_changed = !ownedStringEquals(self.tab_tooltip_text, text);
         appendOwnedString(alloc, &self.tab_tooltip_text, text) catch return;
         _ = sys.SetWindowTextW(tooltip, text_w.ptr);
