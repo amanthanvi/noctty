@@ -14052,17 +14052,17 @@ const Host = struct {
             });
         }
         const tooltip = self.tab_tooltip_hwnd orelse return;
-        // A refresh that changes nothing the popup shows is a no-op: an
-        // animated title whose compacted form is the same string as before
-        // (or a width-budget change that left the full title alone) must not
-        // re-announce the name to a reader or re-place the popup. The text
-        // is compared as the popup holds it, so this also covers a refresh
-        // for a title the popup already displays.
+        // The popup remembers its text so a refresh that leaves it unchanged
+        // does not repaint. That is a paint decision only: the UIA name is
+        // the FULL title (`tabTooltipUiaName`), while `text` is bounded by
+        // `tab_tooltip_max_width`, so a title that changed past that bound
+        // renders identically and must still announce -- `name_changed` is
+        // computed on the full title by the caller for exactly that reason.
         const text_changed = !ownedStringEquals(self.tab_tooltip_text, text);
         appendOwnedString(alloc, &self.tab_tooltip_text, text) catch return;
         _ = sys.SetWindowTextW(tooltip, text_w.ptr);
         self.tab_tooltip_tab_id = tab.id;
-        if (name_changed and text_changed) {
+        if (name_changed) {
             if (self.tab_tooltip_uia_provider) |provider| provider.raiseNameChanged();
         }
         // `place` works in the host's client space; the popup is top level.
