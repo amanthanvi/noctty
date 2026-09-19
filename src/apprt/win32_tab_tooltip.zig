@@ -69,6 +69,47 @@ pub fn place(anchor: Rect, size: Size, client: Rect, gap: i32, margin: i32) Rect
     return .{ .left = left, .top = top, .right = left + w, .bottom = top + h };
 }
 
+pub const Point = struct {
+    x: i32,
+    y: i32,
+};
+
+/// Whether the tooltip for a tab button may be shown or refreshed in place.
+///
+/// `button_visible` is the strip's own record of the button (the placement
+/// `layoutChromeForRect` maintains), not a rect: a button that scrolled out
+/// of `visibleTabRange`, or a whole strip turned off by config, is hidden
+/// with `ShowWindow` alone and keeps its last rect, so `GetWindowRect` would
+/// still describe a slot that some other tab now occupies -- or, with the
+/// bar off, a slot over the terminal. `cursor` is checked against the
+/// half-open `button` rect so the pointer on a shared edge belongs to one
+/// tab, the same way the strip tiles its buttons.
+pub fn mayPresent(button_visible: bool, cursor: Point, button: Rect) bool {
+    if (!button_visible) return false;
+    return cursor.x >= button.left and
+        cursor.x < button.right and
+        cursor.y >= button.top and
+        cursor.y < button.bottom;
+}
+
+test "win32 tab tooltip is not presented for a hidden button" {
+    const button: Rect = .{ .left = 100, .top = 3, .right = 200, .bottom = 40 };
+    // A tab scrolled out of the visible range keeps its last rect; the
+    // pointer inside that rect is on whatever tab now occupies the slot.
+    try std.testing.expect(!mayPresent(false, .{ .x = 150, .y = 20 }, button));
+    try std.testing.expect(mayPresent(true, .{ .x = 150, .y = 20 }, button));
+}
+
+test "win32 tab tooltip follows the pointer across the strip's shared edges" {
+    const button: Rect = .{ .left = 100, .top = 3, .right = 200, .bottom = 40 };
+    try std.testing.expect(mayPresent(true, .{ .x = 100, .y = 3 }, button));
+    try std.testing.expect(mayPresent(true, .{ .x = 199, .y = 39 }, button));
+    // The right and bottom edges belong to the neighbour / the row below.
+    try std.testing.expect(!mayPresent(true, .{ .x = 200, .y = 20 }, button));
+    try std.testing.expect(!mayPresent(true, .{ .x = 150, .y = 40 }, button));
+    try std.testing.expect(!mayPresent(true, .{ .x = 99, .y = 20 }, button));
+}
+
 test "win32 tab tooltip hangs under its tab" {
     const placement = place(
         .{ .left = 40, .top = 0, .right = 180, .bottom = 32 },

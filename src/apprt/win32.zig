@@ -11126,6 +11126,9 @@ const Host = struct {
     // tab it currently describes.
     tab_tooltip_hwnd: ?HWND = null,
     tab_tooltip_tab_id: ?u32 = null,
+    /// The text the popup currently holds, so a refresh that leaves it
+    /// unchanged neither re-announces the name nor repaints.
+    tab_tooltip_text: ?[:0]const u8 = null,
     tab_tooltip_uia_provider: ?*win32_uia.ChromeControlProvider = null,
 
     // Command palette list UI. Backed by a custom child HWND shown
@@ -13603,6 +13606,7 @@ const Host = struct {
         if (self.cached_overlay_preview) |value| self.app.core_app.alloc.free(value);
         if (self.cached_overlay_accept) |value| self.app.core_app.alloc.free(value);
         if (self.cached_overlay_cancel) |value| self.app.core_app.alloc.free(value);
+        if (self.tab_tooltip_text) |value| self.app.core_app.alloc.free(value);
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         if (self.selected_profile_key) |value| self.app.core_app.alloc.free(value);
         if (self.cached_window_title) |value| self.app.core_app.alloc.free(value);
@@ -13884,6 +13888,10 @@ const Host = struct {
     /// Hide the tab title tooltip if one is up.
     fn hideTabTooltip(self: *Host) void {
         self.tab_tooltip_tab_id = null;
+        if (self.tab_tooltip_text) |value| {
+            self.app.core_app.alloc.free(value);
+            self.tab_tooltip_text = null;
+        }
         const hwnd = self.tab_tooltip_hwnd orelse return;
         _ = sys.ShowWindow(hwnd, c.SW_HIDE);
     }
@@ -13961,9 +13969,25 @@ const Host = struct {
         // the tab out from under a pointer that has not moved, and the button's
         // WM_MOUSELEAVE for that arrives on the tracker's own clock, so check
         // here rather than re-present the popup under a tab nobody points at.
+        // The strip's own visibility record is consulted, not the rect: a
+        // button that scrolled out of `visibleTabRange` (or a strip turned
+        // off by config) is hidden with `ShowWindow` alone and keeps its last
+        // rect, which now describes some other tab's slot.
         var cursor: POINT = undefined;
         if (sys.GetCursorPos(&cursor) == 0) return self.hideTabTooltip();
-        if (!pointInRect(cursor, button_rect)) return self.hideTabTooltip();
+        const button_visible = self.shouldShowTabBar() and
+            tab.button_placement.visible_known and
+            tab.button_placement.visible;
+        if (!win32_tab_tooltip.mayPresent(
+            button_visible,
+            .{ .x = cursor.x, .y = cursor.y },
+            .{
+                .left = button_rect.left,
+                .top = button_rect.top,
+                .right = button_rect.right,
+                .bottom = button_rect.bottom,
+            },
+        )) return self.hideTabTooltip();
         var anchor_top_left: POINT = .{ .x = button_rect.left, .y = button_rect.top };
         var anchor_bottom_right: POINT = .{ .x = button_rect.right, .y = button_rect.bottom };
         if (sys.ScreenToClient(host_hwnd, &anchor_top_left) == 0) return;
@@ -14028,9 +14052,17 @@ const Host = struct {
             });
         }
         const tooltip = self.tab_tooltip_hwnd orelse return;
+        // A refresh that changes nothing the popup shows is a no-op: an
+        // animated title whose compacted form is the same string as before
+        // (or a width-budget change that left the full title alone) must not
+        // re-announce the name to a reader or re-place the popup. The text
+        // is compared as the popup holds it, so this also covers a refresh
+        // for a title the popup already displays.
+        const text_changed = !ownedStringEquals(self.tab_tooltip_text, text);
+        appendOwnedString(alloc, &self.tab_tooltip_text, text) catch return;
         _ = sys.SetWindowTextW(tooltip, text_w.ptr);
         self.tab_tooltip_tab_id = tab.id;
-        if (name_changed) {
+        if (name_changed and text_changed) {
             if (self.tab_tooltip_uia_provider) |provider| provider.raiseNameChanged();
         }
         // `place` works in the host's client space; the popup is top level.
@@ -14046,7 +14078,7 @@ const Host = struct {
             c.SWP_NOACTIVATE,
         );
         _ = sys.ShowWindow(tooltip, c.SW_SHOWNOACTIVATE);
-        _ = sys.InvalidateRect(tooltip, null, 1);
+        if (text_changed) _ = sys.InvalidateRect(tooltip, null, 1);
     }
 
     /// Size the tooltip popup needs for `text`, in client pixels.
@@ -18591,7 +18623,6 @@ const Host = struct {
         const visible_count = @max(@as(i32, 1), @as(i32, @intCast(tab_range.count)));
         const button_width = @max(1, @divTrunc(tab_area_width, visible_count));
         const label_max_width = hostTabLabelMaxWidth(button_width);
-        var tooltip_stale = false;
         var tooltip_title_changed = false;
         for (self.tabs.items, 0..) |*tab, i| {
             const surface = tab.focusedSurface() orelse continue;
@@ -18633,10 +18664,7 @@ const Host = struct {
                 // refreshed in place once the buttons are laid out below, since
                 // the popup hangs off the button's final rect. Hiding it here
                 // made an animated title flicker the popup: `refreshTabTooltip`.
-                if (shown == tab.id) {
-                    tooltip_stale = true;
-                    tooltip_title_changed = !title_unchanged;
-                }
+                if (shown == tab.id) tooltip_title_changed = !title_unchanged;
             }
             const label = try buildTabButtonLabel(
                 self.app.core_app.alloc,
@@ -18712,7 +18740,14 @@ const Host = struct {
         }
         var chrome_changed = false;
         _ = self.layoutChromeForRect(rect, &chrome_changed);
-        if (tooltip_stale) self.refreshTabTooltip(tooltip_title_changed);
+        // Refresh whenever a tooltip is up, not only when its own tab's label
+        // was rebuilt: a tab that scrolls out of `visibleTabRange` because
+        // ANOTHER tab was activated keeps every label input and is never
+        // rebuilt, yet its button is now hidden and its slot belongs to a
+        // different tab. `presentTabTooltip` re-checks the button and the
+        // pointer and takes the popup down when either moved; a refresh that
+        // changes nothing it shows is a no-op.
+        if (self.tab_tooltip_tab_id != null) self.refreshTabTooltip(tooltip_title_changed);
         return chrome_changed;
     }
 
