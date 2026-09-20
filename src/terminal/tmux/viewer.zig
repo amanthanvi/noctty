@@ -1548,11 +1548,23 @@ test "session changed resets state" {
             } },
             .contains_tags = &.{ .windows, .command },
             .check = (struct {
-                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                fn check(v: *Viewer, actions: []const Viewer.Action) anyerror!void {
                     try testing.expectEqual(1, v.session_id);
                     try testing.expectEqual(1, v.windows.items.len);
                     try testing.expectEqual(2, v.panes.count());
                     try testing.expectEqualStrings("3.5a", v.tmux_version);
+                    for (actions) |action| switch (action) {
+                        .windows => |windows| {
+                            // The action must reference viewer-owned state,
+                            // not the temporary list used while parsing.
+                            try testing.expectEqual(v.windows.items.ptr, windows.ptr);
+                            try testing.expectEqual(v.windows.items.len, windows.len);
+                            try testing.expectEqual(@as(usize, 0), windows[0].id);
+                            return;
+                        },
+                        else => {},
+                    };
+                    return error.TestExpectedWindowsAction;
                 }
             }).check,
         },
