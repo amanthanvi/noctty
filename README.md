@@ -51,7 +51,7 @@ compares it feature by feature with upstream Ghostty.
 You need Windows 10 version 1809 (build 17763) or newer, or Windows 11, on
 x64 or ARM64, and a GPU driver with OpenGL 4.3 or newer. Latest release:
 [noctty 1.3.129](https://github.com/amanthanvi/noctty/releases/tag/v1.3.129),
-published 2026-09-19.
+published 2026-09-20.
 
 With Scoop (the WinGet package is pending bootstrap):
 
