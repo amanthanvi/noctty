@@ -21,7 +21,10 @@ noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
 
 - Windows 10 version 1809 (build 17763) or newer, and Windows 11, on
   x64 and ARM64. ConPTY is a static import, so earlier builds fail to load
-  rather than degrade.
+  rather than degrade. ARM64 additionally needs the Microsoft Store
+  "OpenCL, OpenGL, and Vulkan Compatibility Pack", because Qualcomm ships
+  no desktop OpenGL driver; see
+  [windows.md](windows.md#windows-on-arm-needs-the-compatibility-pack).
 - No macOS, Linux, or cross-platform app runtime ships from this repo.
   `libghostty-vt` stays buildable for non-Windows targets as a library.
 - WSL sessions work from the profile picker. Making WSL the default shell
@@ -267,6 +270,8 @@ lands incrementally.
 - OpenGL 4.3 through WGL is a hard floor with no software fallback renderer.
   Below it, noctty shows a startup diagnostic with the detected version and
   does not start; see [windows.md](windows.md#gpu-floor-and-opengl-driver-issues).
+  On ARM64 that OpenGL comes from Microsoft's GLon12 mapping layer in the
+  Compatibility Pack, not from a GPU vendor driver.
 - No supported Linux application packaging. Upstream's Flatpak and Snap
   surfaces are removed; the curated Nix flake supports only `libghostty-vt`.
 - A few generated artifacts still reference upstream: the `libghostty-vt`
