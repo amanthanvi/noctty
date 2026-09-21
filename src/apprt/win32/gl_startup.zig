@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const build_config = @import("../../build_config.zig");
+const os_windows = @import("../../os/windows.zig");
 const win32_types = @import("../win32_types.zig");
 const c = @import("consts.zig");
 const sys = @import("sys.zig");
@@ -242,7 +243,12 @@ pub fn reportStartupFailure(err: anyerror) void {
 
 fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
     if (currentOpenGLStartupFailure()) |failure| {
-        return formatOpenGLStartupFailureMessage(buf, err, failure) catch
+        return formatOpenGLStartupFailureMessage(
+            buf,
+            err,
+            failure,
+            os_windows.detectProcessArchitecture(),
+        ) catch
             "noctty could not initialize the Windows OpenGL renderer.";
     }
 
@@ -253,8 +259,110 @@ fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
     ) catch "noctty failed.";
 }
 
-fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLStartupFailure) ![]const u8 {
+/// Where a working OpenGL 4.3 implementation is supposed to come from on this
+/// machine, which decides what the dialog tells the user to install.
+///
+/// Windows on ARM has no vendor desktop-OpenGL ICD: Qualcomm ships none, so a
+/// Snapdragon PC has no AMD or NVIDIA driver to reinstall and no second GPU to
+/// select in Windows Graphics settings. Its OpenGL comes from Microsoft's
+/// Direct3D 12 mapping layer instead, which ships in a Microsoft Store pack
+/// the user has to install. Naming the wrong source sends an ARM64 bug
+/// reporter chasing drivers that cannot exist.
+const Remediation = enum {
+    /// Windows on ARM, where the Microsoft mapping layer is the only source.
+    arm64,
+    /// x86/x64, where a GPU vendor's installable client driver is the source.
+    vendor_icd,
+
+    fn forNativeMachine(native_machine: u16) Remediation {
+        return if (native_machine == os_windows.IMAGE_FILE_MACHINE_ARM64)
+            .arm64
+        else
+            .vendor_icd;
+    }
+};
+
+/// The machine noctty is running on, falling back to the build target when
+/// Windows reported nothing usable.
+///
+/// The fallback is safe in the direction that matters: an ARM64 binary only
+/// ever runs on ARM64 Windows, so it cannot mistake a Snapdragon for an x64
+/// desktop and hand back driver advice that names hardware it does not have.
+fn nativeMachineOrBuild(arch: ?os_windows.ProcessArchitecture) u16 {
+    const detected = arch orelse return os_windows.build_machine;
+    if (detected.native_machine == os_windows.IMAGE_FILE_MACHINE_UNKNOWN) {
+        return os_windows.build_machine;
+    }
+    return detected.native_machine;
+}
+
+/// Advice for the version-floor dialog, which already carries its own Remote
+/// Desktop and VM guidance.
+fn detectedRemediationAdvice(remediation: Remediation) []const u8 {
+    return switch (remediation) {
+        .arm64 =>
+        \\This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. Install the free "OpenCL, OpenGL, and Vulkan Compatibility Pack" from the Microsoft Store and restart noctty: it is the only way to get a desktop OpenGL implementation here, and it supplies one that runs on Direct3D 12.
+        \\
+        \\If you are on Remote Desktop, end the session and launch noctty in a local console session. In a VM, enable 3D acceleration and install the guest graphics driver.
+        ,
+        .vendor_icd => "Try ending Remote Desktop and launching noctty in a local console session; enabling 3D acceleration and installing the VM guest graphics driver; or updating or reinstalling your GPU driver. On hybrid-GPU systems, you can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings.",
+    };
+}
+
+/// Advice for the two dialogs that report a failed initialization step rather
+/// than a detected version.
+fn stepRemediationAdvice(remediation: Remediation) []const u8 {
+    return switch (remediation) {
+        .arm64 => "This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. Install the free \"OpenCL, OpenGL, and Vulkan Compatibility Pack\" from the Microsoft Store and restart noctty: it is the only way to get a desktop OpenGL implementation here, and it supplies one that runs on Direct3D 12. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.",
+        .vendor_icd => "Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.",
+    };
+}
+
+/// One line of architecture provenance for the dialog, so a bug report
+/// separates a native ARM64 build from an x64 build under emulation without
+/// the reporter having to know how to check.
+fn formatArchitectureLine(buf: []u8, arch: ?os_windows.ProcessArchitecture) []const u8 {
+    var native_buf: [24]u8 = undefined;
+    var process_buf: [24]u8 = undefined;
+
+    if (arch) |detected| {
+        if (detected.native_machine != os_windows.IMAGE_FILE_MACHINE_UNKNOWN) {
+            const native = os_windows.machineArchitectureLabel(
+                &native_buf,
+                detected.native_machine,
+            );
+            const process = os_windows.machineArchitectureLabel(
+                &process_buf,
+                detected.process_machine,
+            );
+            if (std.fmt.bufPrint(buf, "{s} process on {s} Windows{s}", .{
+                process,
+                native,
+                if (detected.emulated()) " (emulated)" else "",
+            })) |line| return line else |_| {}
+        }
+    }
+
+    // Windows told us nothing usable, so fall back to the one architecture
+    // fact that is always available: what this binary was built for.
+    return std.fmt.bufPrint(
+        buf,
+        "{s} build; Windows did not report the process architecture",
+        .{os_windows.machineArchitectureLabel(&native_buf, os_windows.build_machine)},
+    ) catch "not reported";
+}
+
+fn formatOpenGLStartupFailureMessage(
+    buf: []u8,
+    err: anyerror,
+    failure: OpenGLStartupFailure,
+    arch: ?os_windows.ProcessArchitecture,
+) ![]const u8 {
     const zig_error_name = failure.zig_error_name orelse @errorName(err);
+    const remediation: Remediation = .forNativeMachine(nativeMachineOrBuild(arch));
+
+    var architecture_buf: [96]u8 = undefined;
+    const architecture_text = formatArchitectureLine(&architecture_buf, arch);
 
     if (failure.detected) |detected| {
         var win32_error_buf: [64]u8 = undefined;
@@ -268,6 +376,7 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
             \\
             \\Startup error: {s}
             \\Win32 error: {s}
+            \\Architecture: {s}
             \\Required OpenGL version: 4.3 through WGL
             \\Detected OpenGL version: {d}.{d}
             \\Detected renderer: {s}
@@ -275,7 +384,7 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
             \\
             \\This build does not include a software, DirectX, or ANGLE fallback renderer, so noctty cannot start below OpenGL 4.3.
             \\
-            \\Try ending Remote Desktop and launching noctty in a local console session; enabling 3D acceleration and installing the VM guest graphics driver; or updating or reinstalling your GPU driver. On hybrid-GPU systems, you can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings.
+            \\{s}
             \\
             \\If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
         , .{
@@ -283,10 +392,12 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
             failure.step.label(),
             zig_error_name,
             win32_error_text,
+            architecture_text,
             detected.major,
             detected.minor,
             if (detected.renderer.len > 0) detected.renderer.value() else "not reported",
             if (detected.vendor.len > 0) detected.vendor.value() else "not reported",
+            detectedRemediationAdvice(remediation),
         });
     }
 
@@ -296,19 +407,22 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
             \\
             \\Startup error: {s}
             \\Win32 error: {d}{s}
+            \\Architecture: {s}
             \\
             \\noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
             \\
             \\{s}
             \\
-            \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
+            \\{s}
         , .{
             build_config.version_string,
             failure.step.label(),
             zig_error_name,
             win32_error,
             win32ErrorSuffix(win32_error),
-            openglStartupFailureHint(failure),
+            architecture_text,
+            openglStartupFailureHint(failure, remediation),
+            stepRemediationAdvice(remediation),
         });
     }
 
@@ -317,17 +431,20 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
         \\
         \\Startup error: {s}
         \\Win32 error: not reported
+        \\Architecture: {s}
         \\
         \\noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
         \\
         \\{s}
         \\
-        \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
+        \\{s}
     , .{
         build_config.version_string,
         failure.step.label(),
         zig_error_name,
-        openglStartupFailureHint(failure),
+        architecture_text,
+        openglStartupFailureHint(failure, remediation),
+        stepRemediationAdvice(remediation),
     });
 }
 
@@ -338,18 +455,58 @@ fn win32ErrorSuffix(code: DWORD) []const u8 {
     };
 }
 
-fn openglStartupFailureHint(failure: OpenGLStartupFailure) []const u8 {
+fn openglStartupFailureHint(failure: OpenGLStartupFailure, remediation: Remediation) []const u8 {
     if (failure.win32_error) |code| {
         if (code == c.ERROR_MOD_NOT_FOUND) {
-            return "Win32 error 126 means Windows could not load a graphics-driver DLL or one of its dependent DLLs. On AMD+NVIDIA hybrid GPU laptops, this can happen while WGL loads the AMD OpenGL ICD from DriverStore.";
+            return switch (remediation) {
+                .arm64 => "Win32 error 126 means Windows could not load a graphics-driver DLL or one of its dependent DLLs. On Windows on ARM that usually means no OpenGL implementation is installed at all, because Qualcomm ships no desktop OpenGL driver.",
+                .vendor_icd => "Win32 error 126 means Windows could not load a graphics-driver DLL or one of its dependent DLLs. On AMD+NVIDIA hybrid GPU laptops, this can happen while WGL loads the AMD OpenGL ICD from DriverStore.",
+            };
         }
     }
 
     if (failure.step == .version_check) {
-        return "The active GPU driver did not expose the required OpenGL 4.3 feature level.";
+        return switch (remediation) {
+            .arm64 => "No installed OpenGL implementation exposed the required OpenGL 4.3 feature level.",
+            .vendor_icd => "The active GPU driver did not expose the required OpenGL 4.3 feature level.",
+        };
     }
 
-    return "This is usually caused by an unavailable or incompatible OpenGL driver, a stale GPU driver installation, or missing OpenGL 4.3 support.";
+    return switch (remediation) {
+        .arm64 => "This is usually caused by a missing or incompatible OpenGL implementation, or by one that does not reach OpenGL 4.3.",
+        .vendor_icd => "This is usually caused by an unavailable or incompatible OpenGL driver, a stale GPU driver installation, or missing OpenGL 4.3 support.",
+    };
+}
+
+// These are resolved architectures, as `os_windows.resolveProcessArchitecture`
+// hands them to this module: the process machine is always concrete, so these
+// fixtures do not change meaning with the architecture the suite is built for.
+
+/// A native x64 desktop, where the existing GPU-vendor advice is correct.
+const test_x64: os_windows.ProcessArchitecture = .{
+    .process_machine = os_windows.IMAGE_FILE_MACHINE_AMD64,
+    .native_machine = os_windows.IMAGE_FILE_MACHINE_AMD64,
+};
+
+/// A native ARM64 build on a Snapdragon PC, as in issue #255.
+const test_arm64: os_windows.ProcessArchitecture = .{
+    .process_machine = os_windows.IMAGE_FILE_MACHINE_ARM64,
+    .native_machine = os_windows.IMAGE_FILE_MACHINE_ARM64,
+};
+
+/// An x64 build running under Windows on ARM emulation.
+const test_x64_on_arm64: os_windows.ProcessArchitecture = .{
+    .process_machine = os_windows.IMAGE_FILE_MACHINE_AMD64,
+    .native_machine = os_windows.IMAGE_FILE_MACHINE_ARM64,
+};
+
+/// Every dialog path must be free of advice that names hardware a Snapdragon
+/// PC does not have.
+fn expectNoVendorGpuAdvice(message: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, message, "AMD") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "NVIDIA") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Windows Graphics settings") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "discrete or integrated GPU") == null);
 }
 
 test "win32-opengl-startup-failure-message-explains-error-126" {
@@ -358,7 +515,7 @@ test "win32-opengl-startup-failure-message-explains-error-126" {
         .step = .create_context,
         .win32_error = c.ERROR_MOD_NOT_FOUND,
         .zig_error_name = "Unexpected",
-    });
+    }, test_x64);
 
     try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "AMD+NVIDIA hybrid GPU") != null);
@@ -371,7 +528,7 @@ test "win32-opengl-startup-failure-message-explains-version-floor" {
     const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
         .step = .version_check,
         .zig_error_name = "OpenGLOutdated",
-    });
+    }, test_x64);
 
     try std.testing.expect(std.mem.indexOf(u8, message, "OpenGL 4.3 through WGL") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "required OpenGL 4.3 feature level") != null);
@@ -389,7 +546,7 @@ test "win32-opengl-startup-failure-message-reports-detected-version" {
             .renderer = .init("GDI Generic"),
             .vendor = .init("Microsoft Corporation"),
         },
-    });
+    }, test_x64);
 
     try std.testing.expect(std.mem.indexOf(u8, message, "while checking the OpenGL version") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Required OpenGL version: 4.3 through WGL") != null);
@@ -410,12 +567,180 @@ test "win32-opengl-startup-detected-version-message-uses-recorded-diagnostics" {
         .win32_error = c.ERROR_MOD_NOT_FOUND,
         .zig_error_name = "OpenGLOutdated",
         .detected = .{ .major = 1, .minor = 1 },
-    });
+    }, test_x64);
 
     try std.testing.expect(std.mem.indexOf(u8, message, "while creating the WGL context") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "while checking the OpenGL version") == null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Detected renderer: not reported") != null);
+}
+
+test "win32-opengl-startup-remediation-follows-the-native-machine" {
+    try std.testing.expectEqual(
+        Remediation.arm64,
+        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_ARM64),
+    );
+    try std.testing.expectEqual(
+        Remediation.vendor_icd,
+        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_AMD64),
+    );
+    try std.testing.expectEqual(
+        Remediation.vendor_icd,
+        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_I386),
+    );
+    // ARM32 is not Windows on ARM64 and has no Compatibility Pack.
+    try std.testing.expectEqual(
+        Remediation.vendor_icd,
+        Remediation.forNativeMachine(os_windows.IMAGE_FILE_MACHINE_ARMNT),
+    );
+
+    // An x64 build under emulation still needs the ARM advice: the machine,
+    // not the process, decides which drivers can exist.
+    try std.testing.expectEqual(
+        os_windows.IMAGE_FILE_MACHINE_ARM64,
+        nativeMachineOrBuild(test_x64_on_arm64),
+    );
+    try std.testing.expectEqual(
+        os_windows.IMAGE_FILE_MACHINE_AMD64,
+        nativeMachineOrBuild(test_x64),
+    );
+
+    // Anything Windows did not report falls back to the build target, so an
+    // ARM64 build can never be handed x64 driver advice.
+    try std.testing.expectEqual(os_windows.build_machine, nativeMachineOrBuild(null));
+    try std.testing.expectEqual(os_windows.build_machine, nativeMachineOrBuild(.{
+        .process_machine = os_windows.build_machine,
+        .native_machine = os_windows.IMAGE_FILE_MACHINE_UNKNOWN,
+    }));
+}
+
+test "win32-opengl-startup-architecture-line-separates-native-from-emulated" {
+    var buf: [96]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        "ARM64 process on ARM64 Windows",
+        formatArchitectureLine(&buf, test_arm64),
+    );
+    try std.testing.expectEqualStrings(
+        "x64 process on x64 Windows",
+        formatArchitectureLine(&buf, test_x64),
+    );
+    // The case the line exists for: Windows on ARM reports the same process
+    // machine for this as for a native ARM64 process, so the line must not
+    // claim "ARM64 process" here.
+    try std.testing.expectEqualStrings(
+        "x64 process on ARM64 Windows (emulated)",
+        formatArchitectureLine(&buf, test_x64_on_arm64),
+    );
+
+    // With no usable report, the build target is still stated, and a native
+    // process is never described to the user as "unknown".
+    var build_buf: [24]u8 = undefined;
+    const build_name = os_windows.machineArchitectureLabel(&build_buf, os_windows.build_machine);
+
+    var unreported_buf: [96]u8 = undefined;
+    const unreported = formatArchitectureLine(&unreported_buf, null);
+    try std.testing.expect(std.mem.startsWith(u8, unreported, build_name));
+    try std.testing.expect(std.mem.indexOf(u8, unreported, "did not report") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unreported, "unknown") == null);
+
+    // A separate buffer, so this compares two independently rendered strings
+    // rather than one buffer against itself.
+    try std.testing.expectEqualStrings(unreported, formatArchitectureLine(&buf, .{
+        .process_machine = os_windows.build_machine,
+        .native_machine = os_windows.IMAGE_FILE_MACHINE_UNKNOWN,
+    }));
+}
+
+test "win32-opengl-startup-arm64-message-names-the-compatibility-pack" {
+    var buf: [4096]u8 = undefined;
+
+    // Path 1: the detected-version dialog, which is what issue #255 hit.
+    const detected_message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
+        .step = .version_check,
+        .zig_error_name = "OpenGLOutdated",
+        .detected = .{
+            .major = 1,
+            .minor = 1,
+            .renderer = .init("GDI Generic"),
+            .vendor = .init("Microsoft Corporation"),
+        },
+    }, test_arm64);
+
+    try std.testing.expect(std.mem.indexOf(u8, detected_message, "Architecture: ARM64 process on ARM64 Windows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detected_message, "OpenCL, OpenGL, and Vulkan Compatibility Pack") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detected_message, "Microsoft Store") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detected_message, "Detected renderer: GDI Generic") != null);
+    // Remote Desktop and VM guidance is architecture-neutral and stays.
+    try std.testing.expect(std.mem.indexOf(u8, detected_message, "Remote Desktop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detected_message, "3D acceleration") != null);
+    try expectNoVendorGpuAdvice(detected_message);
+
+    // Path 2: a Win32 error with no detected version.
+    var win32_buf: [4096]u8 = undefined;
+    const win32_message = try formatOpenGLStartupFailureMessage(&win32_buf, error.Unexpected, .{
+        .step = .create_context,
+        .win32_error = c.ERROR_MOD_NOT_FOUND,
+        .zig_error_name = "Unexpected",
+    }, test_arm64);
+
+    try std.testing.expect(std.mem.indexOf(u8, win32_message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, win32_message, "OpenCL, OpenGL, and Vulkan Compatibility Pack") != null);
+    try std.testing.expect(std.mem.indexOf(u8, win32_message, "Qualcomm ships no desktop OpenGL driver") != null);
+    try expectNoVendorGpuAdvice(win32_message);
+
+    // Path 3: neither a detected version nor a Win32 error.
+    var bare_buf: [4096]u8 = undefined;
+    const bare_message = try formatOpenGLStartupFailureMessage(&bare_buf, error.OpenGLOutdated, .{
+        .step = .version_check,
+        .zig_error_name = "OpenGLOutdated",
+    }, test_arm64);
+
+    try std.testing.expect(std.mem.indexOf(u8, bare_message, "Win32 error: not reported") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_message, "OpenCL, OpenGL, and Vulkan Compatibility Pack") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_message, "https://github.com/amanthanvi/noctty/issues/64") != null);
+    try expectNoVendorGpuAdvice(bare_message);
+}
+
+// noctty has no DirectX or ANGLE fallback renderer. The ARM64 advice must
+// describe the Microsoft mapping layer without implying otherwise.
+test "win32-opengl-startup-arm64-message-does-not-claim-a-fallback-renderer" {
+    var buf: [4096]u8 = undefined;
+    const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
+        .step = .version_check,
+        .zig_error_name = "OpenGLOutdated",
+        .detected = .{ .major = 1, .minor = 1 },
+    }, test_arm64);
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "does not include a software, DirectX, or ANGLE fallback renderer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "noctty cannot start below OpenGL 4.3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "noctty supports DirectX") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "fallback to Direct3D") == null);
+}
+
+// Nothing about the x64 advice changes; only ARM64 gets new wording.
+test "win32-opengl-startup-x64-message-keeps-the-gpu-vendor-advice" {
+    var buf: [4096]u8 = undefined;
+    const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
+        .step = .version_check,
+        .zig_error_name = "OpenGLOutdated",
+        .detected = .{ .major = 1, .minor = 1 },
+    }, test_x64);
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "Architecture: x64 process on x64 Windows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "updating or reinstalling your GPU driver") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Windows Graphics settings") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Compatibility Pack") == null);
+
+    var win32_buf: [4096]u8 = undefined;
+    const win32_message = try formatOpenGLStartupFailureMessage(&win32_buf, error.Unexpected, .{
+        .step = .load_opengl32,
+        .win32_error = c.ERROR_MOD_NOT_FOUND,
+        .zig_error_name = "Unexpected",
+    }, test_x64);
+
+    try std.testing.expect(std.mem.indexOf(u8, win32_message, "OEM AMD graphics driver, then the NVIDIA driver") != null);
+    try std.testing.expect(std.mem.indexOf(u8, win32_message, "Compatibility Pack") == null);
 }
 
 test "win32-opengl-startup-failure-bounds-driver-strings" {

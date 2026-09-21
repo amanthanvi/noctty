@@ -976,9 +976,11 @@ stops before 4.3.
 
 Below the floor, noctty stops before showing its window and the startup
 dialog lists the required and detected OpenGL versions plus the renderer and
-vendor strings the driver reports. Failures later in OpenGL initialization
-use the same dialog to name the failed step and any Win32 or Zig error. Try,
-in order:
+vendor strings the driver reports. The dialog also prints an `Architecture:`
+line naming the process and native machine, so a bug report separates a
+native ARM64 build from an x64 build running under emulation. Failures later
+in OpenGL initialization use the same dialog to name the failed step and any
+Win32 or Zig error. On x64, try in order:
 
 1. End the Remote Desktop session and launch noctty locally.
 2. In a VM, enable 3D acceleration and install the guest graphics driver.
@@ -987,12 +989,59 @@ in order:
 4. On a hybrid-GPU system, force `noctty.exe` to the discrete or integrated
    GPU in Windows Graphics settings.
 
+Steps 3 and 4 do not apply on ARM64, where there is no GPU vendor driver to
+reinstall. Use
+[Windows on ARM needs the Compatibility Pack](#windows-on-arm-needs-the-compatibility-pack)
+instead.
+
 If startup fails with `LoadLibrary failed with error 126` or the startup
 dialog reports `Win32 error: 126 (ERROR_MOD_NOT_FOUND)` during OpenGL/WGL
 initialization, Windows could not load a graphics-driver DLL or one of its
 dependencies. This shows up most often on AMD+NVIDIA hybrid-GPU laptops
 while WGL loads the AMD OpenGL ICD from DriverStore; use the driver order in
 step 3 before retrying.
+
+#### Windows on ARM needs the Compatibility Pack
+
+Qualcomm Snapdragon PCs ship no desktop OpenGL driver. No Qualcomm
+implementation has ever appeared in the Khronos OpenGL conformant-products
+register, so a fresh Snapdragon machine has no OpenGL ICD for WGL to load at
+all, whatever else its Adreno driver supports. noctty's startup dialog
+reports that as `Detected OpenGL version: 1.1`, `Detected renderer: GDI
+Generic`, and `Detected vendor: Microsoft Corporation`, alongside
+`Architecture: ARM64 process on ARM64 Windows`. Those GL strings are the GDI
+software fallback Windows uses when no ICD is present, not a driver that
+stopped short of 4.3.
+
+Install the free **OpenCL, OpenGL, and Vulkan Compatibility Pack** from the
+Microsoft Store, then restart noctty. The pack installs Microsoft's GLon12
+mapping layer, which implements desktop OpenGL on top of Direct3D 12 and
+supplies the ICD that is otherwise missing. Microsoft's own support statement
+for the pack promises OpenGL 3.3, below noctty's floor, but a measured report
+on an Adreno X1-85 shows it exposing a 4.6 core profile through the D3D12
+path, with the capabilities noctty's renderer needs (vertex-stage SSBOs,
+`GL_ARB_texture_rectangle`, and `GL_ARB_framebuffer_sRGB`):
+
+```text
+GL_VERSION  : 4.6 (Core Profile) Mesa 26.1.3
+GL_RENDERER : D3D12 (Qualcomm(R) Adreno(TM) X1-85 GPU)
+```
+
+The Mesa version is whatever the installed pack ships; only the `D3D12 (...)`
+renderer prefix and a version at or above 4.3 matter.
+
+This is required today: noctty still renders through OpenGL 4.3 over WGL and
+has no DirectX, ANGLE, or software fallback renderer of its own. On ARM64
+that OpenGL comes from a Microsoft mapping layer rather than a GPU vendor's
+driver, but noctty neither knows nor cares which supplied it.
+
+There is no AMD or NVIDIA driver to reinstall on ARM64 and no second GPU to
+select in Windows Graphics settings, so noctty's startup dialog leads with
+the Compatibility Pack when it detects an ARM64 native machine, and keeps the
+Remote Desktop and VM guidance, which applies on any architecture. The dialog
+and `noctty +version` both report the architecture: `ARM64` for a native
+build, or `x64 (running on ARM64)` if you installed the x64 build by mistake.
+Prefer the ARM64 artifacts on a Snapdragon PC.
 
 ### Stale installed build
 

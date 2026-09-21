@@ -64,6 +64,209 @@ pub fn driveTypeForLetter(letter: u8) windows.UINT {
     return GetDriveTypeW(&root);
 }
 
+/// `IMAGE_FILE_MACHINE_*` codes from `winnt.h`. `IsWow64Process2` reports the
+/// process and native architecture using these values.
+pub const IMAGE_FILE_MACHINE_UNKNOWN: u16 = 0x0000;
+pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+pub const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
+pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
+
+/// The `IMAGE_FILE_MACHINE_*` code this binary was built for. Comparing it
+/// against the native machine separates a native ARM64 build from an x64
+/// build running under Windows on ARM emulation, and it is the only
+/// architecture fact available when `IsWow64Process2` cannot be resolved.
+pub const build_machine: u16 = switch (builtin.target.cpu.arch) {
+    .x86_64 => IMAGE_FILE_MACHINE_AMD64,
+    .aarch64 => IMAGE_FILE_MACHINE_ARM64,
+    .x86 => IMAGE_FILE_MACHINE_I386,
+    .arm, .thumb => IMAGE_FILE_MACHINE_ARMNT,
+    else => IMAGE_FILE_MACHINE_UNKNOWN,
+};
+
+/// Name for an `IMAGE_FILE_MACHINE_*` code using the vocabulary Windows shows
+/// users and the release artifacts already use ("x64", not "AMD64").
+///
+/// Returns null for a code this build does not know so callers report the raw
+/// value instead of inventing a name. `IMAGE_FILE_MACHINE_UNKNOWN` maps to
+/// "unknown", which is only ever right for a native machine; a process
+/// machine must go through `resolveProcessArchitecture` first.
+pub fn machineArchitectureName(machine: u16) ?[]const u8 {
+    return switch (machine) {
+        IMAGE_FILE_MACHINE_UNKNOWN => "unknown",
+        IMAGE_FILE_MACHINE_I386 => "x86",
+        IMAGE_FILE_MACHINE_ARMNT => "ARM32",
+        IMAGE_FILE_MACHINE_AMD64 => "x64",
+        IMAGE_FILE_MACHINE_ARM64 => "ARM64",
+        else => null,
+    };
+}
+
+/// `machineArchitectureName` with a rendered fallback for codes this build
+/// does not name. A 24-byte `buf` always holds the fallback.
+pub fn machineArchitectureLabel(buf: []u8, machine: u16) []const u8 {
+    if (machineArchitectureName(machine)) |name| return name;
+    return std.fmt.bufPrint(buf, "machine 0x{x:0>4}", .{machine}) catch "unrecognized machine";
+}
+
+/// The architecture this process runs as and the architecture of the machine
+/// under it, after `IsWow64Process2`'s ambiguous process machine has been
+/// resolved by `resolveProcessArchitecture`.
+pub const ProcessArchitecture = struct {
+    process_machine: u16,
+    native_machine: u16,
+
+    /// Whether this process runs on a machine of a different architecture.
+    pub fn emulated(self: ProcessArchitecture) bool {
+        return self.native_machine != IMAGE_FILE_MACHINE_UNKNOWN and
+            self.process_machine != IMAGE_FILE_MACHINE_UNKNOWN and
+            self.process_machine != self.native_machine;
+    }
+};
+
+/// Turn a raw `IsWow64Process2` result into a `ProcessArchitecture`.
+///
+/// Windows documents `pProcessMachine` as `IMAGE_FILE_MACHINE_UNKNOWN` when
+/// "the target process is not a WOW64 process" and says nothing about which
+/// emulation modes count, so the field cannot be trusted to separate a native
+/// ARM64 process from an emulated x64 one on Windows on ARM: both may report
+/// UNKNOWN. `process_build_machine` is comptime-certain for the running
+/// binary, so resolving through it is right under either behaviour, and it
+/// keeps a native process from being shown the word "unknown".
+///
+/// Split out from `detectProcessArchitecture` so the resolution rule is
+/// testable without the Win32 call.
+pub fn resolveProcessArchitecture(
+    raw_process_machine: u16,
+    native_machine: u16,
+    process_build_machine: u16,
+) ProcessArchitecture {
+    return .{
+        .process_machine = if (raw_process_machine == IMAGE_FILE_MACHINE_UNKNOWN)
+            process_build_machine
+        else
+            raw_process_machine,
+        .native_machine = native_machine,
+    };
+}
+
+const IsWow64Process2Fn = *const fn (
+    hProcess: windows.HANDLE,
+    pProcessMachine: *u16,
+    pNativeMachine: *u16,
+) callconv(.winapi) windows.BOOL;
+
+/// Ask Windows for the process and native machine architecture, or null when
+/// it cannot be determined.
+///
+/// `IsWow64Process2` needs Windows 10 1709, below noctty's own Windows 10 1809
+/// floor, so this should always succeed in practice. It is still resolved
+/// through `GetProcAddress` rather than statically imported, because a static
+/// import turns a missing export into a process-load failure for every user,
+/// and a diagnostic aid must never be the reason noctty cannot start.
+pub fn detectProcessArchitecture() ?ProcessArchitecture {
+    if (comptime builtin.os.tag != .windows) return null;
+
+    const module = windows.kernel32.GetModuleHandleW(
+        std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll"),
+    ) orelse return null;
+    const entry = windows.kernel32.GetProcAddress(
+        module,
+        "IsWow64Process2",
+    ) orelse return null;
+    const isWow64Process2: IsWow64Process2Fn = @ptrCast(entry);
+
+    var process_machine: u16 = IMAGE_FILE_MACHINE_UNKNOWN;
+    var native_machine: u16 = IMAGE_FILE_MACHINE_UNKNOWN;
+    if (isWow64Process2(
+        windows.GetCurrentProcess(),
+        &process_machine,
+        &native_machine,
+    ) == 0) return null;
+
+    return resolveProcessArchitecture(process_machine, native_machine, build_machine);
+}
+
+test "Windows machine architecture names use the release artifact vocabulary" {
+    try std.testing.expectEqualStrings("x64", machineArchitectureName(IMAGE_FILE_MACHINE_AMD64).?);
+    try std.testing.expectEqualStrings("ARM64", machineArchitectureName(IMAGE_FILE_MACHINE_ARM64).?);
+    try std.testing.expectEqualStrings("x86", machineArchitectureName(IMAGE_FILE_MACHINE_I386).?);
+    try std.testing.expectEqualStrings("ARM32", machineArchitectureName(IMAGE_FILE_MACHINE_ARMNT).?);
+    try std.testing.expectEqualStrings("unknown", machineArchitectureName(IMAGE_FILE_MACHINE_UNKNOWN).?);
+    try std.testing.expect(machineArchitectureName(0x5032) == null);
+
+    // The raw code survives for anything unnamed so a bug report stays useful.
+    var buf: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("x64", machineArchitectureLabel(&buf, IMAGE_FILE_MACHINE_AMD64));
+    try std.testing.expectEqualStrings("machine 0x5032", machineArchitectureLabel(&buf, 0x5032));
+    try std.testing.expectEqualStrings("machine 0x0001", machineArchitectureLabel(&buf, 1));
+}
+
+test "Windows process architecture resolves the UNKNOWN process machine from the build target" {
+    // A native ARM64 process: Windows reports UNKNOWN for its own machine and
+    // the user must never be shown that as "unknown".
+    const native = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_ARM64,
+    );
+    try std.testing.expectEqual(IMAGE_FILE_MACHINE_ARM64, native.process_machine);
+    try std.testing.expect(!native.emulated());
+
+    // An x64 build on ARM64 Windows. Windows may report UNKNOWN here too,
+    // exactly as it does for the native case above, so only the build target
+    // separates them.
+    const emulated_silently = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_AMD64,
+    );
+    try std.testing.expectEqual(IMAGE_FILE_MACHINE_AMD64, emulated_silently.process_machine);
+    try std.testing.expect(emulated_silently.emulated());
+
+    // The same machine when Windows does name the WOW process type.
+    const emulated_reported = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_AMD64,
+        IMAGE_FILE_MACHINE_ARM64,
+        IMAGE_FILE_MACHINE_AMD64,
+    );
+    try std.testing.expectEqual(emulated_silently, emulated_reported);
+
+    // A 32-bit process under classic WOW64 on x64.
+    const wow64 = resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_I386,
+        IMAGE_FILE_MACHINE_AMD64,
+        IMAGE_FILE_MACHINE_I386,
+    );
+    try std.testing.expectEqual(IMAGE_FILE_MACHINE_I386, wow64.process_machine);
+    try std.testing.expect(wow64.emulated());
+
+    // Nothing is emulated when Windows did not name a native machine.
+    try std.testing.expect(!resolveProcessArchitecture(
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_UNKNOWN,
+        IMAGE_FILE_MACHINE_AMD64,
+    ).emulated());
+}
+
+test "Windows process architecture detection reaches IsWow64Process2" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expect(build_machine != IMAGE_FILE_MACHINE_UNKNOWN);
+
+    // IsWow64Process2 needs Windows 10 1709 and noctty's own floor is 1809,
+    // so on any machine that can run this suite the export exists and the
+    // call succeeds. Accepting null here would let a broken signature, a bad
+    // cast, or a misspelled export name pass unnoticed.
+    const detected = detectProcessArchitecture() orelse
+        return error.IsWow64Process2Unavailable;
+
+    // A wrong interop would leave these as garbage rather than a machine code
+    // Windows actually defines.
+    try std.testing.expect(detected.native_machine != IMAGE_FILE_MACHINE_UNKNOWN);
+    try std.testing.expect(machineArchitectureName(detected.native_machine) != null);
+    try std.testing.expectEqual(build_machine, detected.process_machine);
+}
+
 pub const KnownFolderPathError = error{
     BufferTooSmall,
 };
