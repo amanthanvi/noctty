@@ -301,7 +301,9 @@ fn nativeMachineOrBuild(arch: ?os_windows.ProcessArchitecture) u16 {
 fn detectedRemediationAdvice(remediation: Remediation) []const u8 {
     return switch (remediation) {
         .arm64 =>
-        \\This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. Install the free "OpenCL, OpenGL, and Vulkan Compatibility Pack" from the Microsoft Store and restart noctty: it is the only way to get a desktop OpenGL implementation here, and it supplies one that runs on Direct3D 12.
+        \\This is a Windows on ARM PC, and Qualcomm Snapdragon systems ship no desktop OpenGL driver at all. A detected renderer of "GDI Generic" at version 1.1 means none is installed: get the free "OpenCL, OpenGL, and Vulkan Compatibility Pack" from the Microsoft Store and restart noctty. It supplies a desktop OpenGL implementation that runs on Direct3D 12.
+        \\
+        \\If that pack is already installed and the detected version above is still below 4.3, it is not exposing enough OpenGL on this GPU and noctty cannot start on it. Microsoft's support statement for the pack promises only OpenGL 3.3, so a version between 3.3 and 4.3 is the pack working as documented rather than a broken install.
         \\
         \\If you are on Remote Desktop, end the session and launch noctty in a local console session. In a VM, enable 3D acceleration and install the guest graphics driver.
         ,
