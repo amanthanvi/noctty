@@ -102,7 +102,12 @@ pub fn add(
         },
         else => return err,
     };
-    defer file.close();
+    // On Windows this handle is also closed before `writeCacheFile` renames
+    // over it; see `release_before_rename`. `file_open` keeps that early close
+    // and this one mutually exclusive, so the handle is closed exactly once on
+    // every platform and every exit path.
+    var file_open = true;
+    defer if (file_open) file.close();
 
     // Lock
     // Causes a compile failure in the Zig std library on Windows, see:
@@ -134,9 +139,33 @@ pub fn add(
         break :update .updated;
     };
 
+    if (comptime release_before_rename) {
+        file.close();
+        file_open = false;
+    }
     try self.writeCacheFile(entries, null);
     return result;
 }
+
+/// Whether the open handle on the cache file must be released before
+/// `writeCacheFile` atomically renames the new contents over it.
+///
+/// On Windows it must. A Windows rename-with-replace fails with
+/// `error.AccessDenied` while *any* handle to the destination is open. Only
+/// the relaxed `FILE_RENAME_POSIX_SEMANTICS` rename tolerates that, and
+/// `std.posix.renameatW` only selects it when the build target *guarantees*
+/// Windows 10 1809 (`win10_rs5`) or newer. A build for an explicit target such
+/// as `-Dtarget=aarch64-windows-msvc` carries the default `win10` (build
+/// 10240) floor, so it always takes the strict path -- as do filesystems
+/// without `FileRenameInformationEx` support (exFAT, FAT32, many network
+/// shares), on any build. Those are exactly the configurations we ship.
+/// Releasing the handle early costs nothing here: Windows never took the
+/// advisory lock (see the `tryLock` comment above) and `fixupPermissions` is
+/// a no-op there.
+///
+/// Everywhere else the handle carries the exclusive advisory lock, so it has
+/// to outlive the rename or a concurrent writer could clobber the new file.
+const release_before_rename = builtin.os.tag == .windows;
 
 pub const RemoveError = std.fs.File.OpenError ||
     FixupPermissionsError ||
@@ -161,7 +190,12 @@ pub fn remove(
         error.FileNotFound => return,
         else => return err,
     };
-    defer file.close();
+    // On Windows this handle is also closed before `writeCacheFile` renames
+    // over it; see `release_before_rename`. `file_open` keeps that early close
+    // and this one mutually exclusive, so the handle is closed exactly once on
+    // every platform and every exit path.
+    var file_open = true;
+    defer if (file_open) file.close();
     try fixupPermissions(file);
 
     // Lock
@@ -181,6 +215,10 @@ pub fn remove(
         alloc.free(kv.value.terminfo_version);
     }
 
+    if (comptime release_before_rename) {
+        file.close();
+        file_open = false;
+    }
     try self.writeCacheFile(entries, null);
 }
 
@@ -235,6 +273,11 @@ pub const WriteCacheFileError = std.fs.Dir.OpenError ||
     Entry.FormatError ||
     error{InvalidCachePath};
 
+/// Rewrite the cache file from `entries`, atomically replacing whatever is at
+/// `self.path`.
+///
+/// Callers must not hold an open handle to `self.path` across this call on
+/// Windows; see `release_before_rename`.
 fn writeCacheFile(
     self: DiskCache,
     entries: std.StringHashMap(Entry),
