@@ -123,10 +123,17 @@ jobs:
         run: ./scripts/check-source-format.ps1
 
       - name: Full Zig test suite
-        run: zig build test -Demit-test-exe=true
-
-      - name: Custom shader compiler tests
-        run: zig build test -Dtest-filter=shadertoy -Dcustom-shaders=true
+        # -Dcustom-shaders=true because that is what ships: every release
+        # binary is built with it (scripts/build-package-windows.ps1), so the
+        # default-off config is one no user runs. It is also a superset,
+        # 4495 tests against 4491, the difference being the shadertoy tests
+        # that used to have a step of their own. That step ran
+        # -Dtest-filter=shadertoy, which matched nothing and executed 0 of
+        # them (measured); replacing it with a second full-suite run would
+        # have doubled this job's time to collect 4 tests. Compiling the
+        # default-off config is still covered by "Build executable" and
+        # "Verify default source-build shader mode" below.
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
