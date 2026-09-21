@@ -233,7 +233,7 @@ pub fn Buffer(comptime T: type) type {
     };
 }
 
-test "planSync keeps a partial upload partial while it fits ConPTY" {
+test "planSync keeps a partial upload partial while it fits" {
     const testing = std.testing;
 
     // Nothing has to grow, so only the dirty suffix goes up.
@@ -255,7 +255,7 @@ test "planSync keeps a partial upload partial while it fits ConPTY" {
     }, planSync(0, 0, 0));
 }
 
-test "planSync promotes a growth to a full upload ConPTY" {
+test "planSync promotes a growth to a full upload" {
     const testing = std.testing;
 
     // Growing calls glBufferData with a null pointer, which discards the
