@@ -126,7 +126,10 @@ jobs:
         run: zig build test -Demit-test-exe=true
 
       - name: Custom shader compiler tests
-        run: zig build test -Dtest-filter=shadertoy -Dcustom-shaders=true
+        # Runs the whole suite with custom shaders enabled rather than
+        # -Dtest-filter=shadertoy: a lone filter matches nothing here and the
+        # step passed while running 0 tests (measured).
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
