@@ -1682,7 +1682,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             const columns = @as(usize, self.cells.size.columns);
                             const start = range.start * columns;
                             const end = range.end * columns;
-                            try frame.cells_bg.syncRange(start, self.cells.bg_cells[start..end]);
+                            try frame.cells_bg.syncRange(
+                                self.cells.bg_cells,
+                                start,
+                                end,
+                            );
                         },
                     }
 

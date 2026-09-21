@@ -12,6 +12,39 @@ pub const Options = struct {
     usage: gl.Buffer.Usage = .dynamic_draw,
 };
 
+/// What a sync that wants to upload only part of a buffer must actually do.
+pub const SyncPlan = struct {
+    /// Element capacity to reallocate the data store to, or null to keep
+    /// the current allocation. Reallocating discards the buffer's contents.
+    grow_to: ?usize = null,
+
+    /// Element offset to start uploading at. Everything before it is
+    /// already resident in the buffer and can be left alone.
+    upload_from: usize = 0,
+};
+
+/// Plan a sync that would like to upload only the elements from
+/// `requested_from` onwards, leaving the earlier ones in place.
+///
+/// `total_len` is how many elements must be resident once the sync is done,
+/// and `capacity` is how many the buffer can hold right now.
+///
+/// Growing a buffer means calling `glBufferData` with a null pointer, which
+/// discards the entire existing data store and leaves the new one undefined.
+/// Any element we then decline to upload keeps whatever the driver happened
+/// to leave in that memory. Cell instances carry their own grid position, so
+/// stale instances draw glyphs at arbitrary places on screen rather than
+/// simply going missing (see issue #254). A growth therefore has to
+/// re-upload everything.
+pub fn planSync(
+    capacity: usize,
+    total_len: usize,
+    requested_from: usize,
+) SyncPlan {
+    if (total_len > capacity) return .{ .grow_to = total_len * 2 };
+    return .{ .upload_from = requested_from };
+}
+
 /// OpenGL data storage for a certain set of equal types. This is usually
 /// used for vertex buffers, etc. This helpful wrapper makes it easy to
 /// prealloc, shrink, grow, sync, buffers with OpenGL.
@@ -59,7 +92,10 @@ pub fn Buffer(comptime T: type) type {
             return .{
                 .buffer = buffer,
                 .opts = opts,
-                .len = data.len * @sizeOf(T),
+                // `len` counts elements, not bytes. This used to be
+                // multiplied by @sizeOf(T), which overstated the capacity
+                // and would let a later sync skip a reallocation it needed.
+                .len = data.len,
             };
         }
 
@@ -92,23 +128,31 @@ pub fn Buffer(comptime T: type) type {
             try binding.setSubData(0, data);
         }
 
-        /// Sync a contiguous subrange to the buffer starting at the given
-        /// element offset.
-        pub fn syncRange(self: *Self, offset: usize, data: []const T) !void {
+        /// Sync only the `all[start..end]` subrange to the buffer, leaving
+        /// the rest of the buffer's contents in place.
+        ///
+        /// `all` must be the complete contents the buffer should hold, since
+        /// growing the buffer discards everything (see `planSync`) and so
+        /// forces us to upload all of it.
+        pub fn syncRange(
+            self: *Self,
+            all: []const T,
+            start: usize,
+            end: usize,
+        ) !void {
+            const plan = planSync(self.len, all.len, start);
+
+            // Growing orphans the data store, which would leave everything
+            // outside [start, end) undefined, so upload the whole thing.
+            if (plan.grow_to != null) return self.sync(all);
+
+            const data = all[start..end];
+            if (data.len == 0) return;
+
             const binding = try self.buffer.bind(self.opts.target);
             defer binding.unbind();
 
-            const required_len = offset + data.len;
-            if (required_len > self.len) {
-                self.len = required_len * 2;
-                try binding.setDataNullManual(
-                    self.len * @sizeOf(T),
-                    self.opts.usage,
-                );
-            }
-
-            if (data.len == 0) return;
-            try binding.setSubData(offset * @sizeOf(T), data);
+            try binding.setSubData(plan.upload_from * @sizeOf(T), data);
         }
 
         /// Like Buffer.sync but takes data from an array of ArrayLists,
@@ -155,7 +199,7 @@ pub fn Buffer(comptime T: type) type {
             const binding = try self.buffer.bind(self.opts.target);
             defer binding.unbind();
 
-            const start = @min(start_index, lists.len);
+            var start = @min(start_index, lists.len);
 
             var total_len: usize = 0;
             var prefix_len: usize = 0;
@@ -164,15 +208,20 @@ pub fn Buffer(comptime T: type) type {
                 if (i < start) prefix_len += list.items.len;
             }
 
-            if (total_len > self.len) {
-                self.len = total_len * 2;
+            const plan = planSync(self.len, total_len, prefix_len);
+            if (plan.grow_to) |new_len| {
+                self.len = new_len;
                 try binding.setDataNullManual(
                     self.len * @sizeOf(T),
                     self.opts.usage,
                 );
+
+                // Reallocating discarded the prefix we were going to skip,
+                // so it has to be re-uploaded along with the suffix.
+                start = 0;
             }
 
-            var offset = prefix_len * @sizeOf(T);
+            var offset = plan.upload_from * @sizeOf(T);
             for (lists[start..]) |list| {
                 if (list.items.len == 0) continue;
                 try binding.setSubData(offset, list.items);
@@ -182,4 +231,60 @@ pub fn Buffer(comptime T: type) type {
             return total_len;
         }
     };
+}
+
+test "planSync keeps a partial upload partial while it fits ConPTY" {
+    const testing = std.testing;
+
+    // Nothing has to grow, so only the dirty suffix goes up.
+    try testing.expectEqual(SyncPlan{
+        .grow_to = null,
+        .upload_from = 1226,
+    }, planSync(1318, 1300, 1226));
+
+    // Exactly filling the buffer is still a fit.
+    try testing.expectEqual(SyncPlan{
+        .grow_to = null,
+        .upload_from = 1226,
+    }, planSync(1318, 1318, 1226));
+
+    // Nothing dirty before the end is a no-op offset, not a growth.
+    try testing.expectEqual(SyncPlan{
+        .grow_to = null,
+        .upload_from = 0,
+    }, planSync(0, 0, 0));
+}
+
+test "planSync promotes a growth to a full upload ConPTY" {
+    const testing = std.testing;
+
+    // Growing calls glBufferData with a null pointer, which discards the
+    // whole data store, so the prefix we meant to skip would be left as
+    // undefined driver memory. It has to be re-uploaded.
+    //
+    // These are the four growth events measured on a new tab printing
+    // ~100 lines with a bar cursor, which is issue #254: before the fix
+    // they skipped 0, 188, 564 and 1226 of the glyph instances.
+    try testing.expectEqual(SyncPlan{
+        .grow_to = 190,
+        .upload_from = 0,
+    }, planSync(1, 95, 0));
+    try testing.expectEqual(SyncPlan{
+        .grow_to = 566,
+        .upload_from = 0,
+    }, planSync(190, 283, 188));
+    try testing.expectEqual(SyncPlan{
+        .grow_to = 1318,
+        .upload_from = 0,
+    }, planSync(566, 659, 564));
+    try testing.expectEqual(SyncPlan{
+        .grow_to = 2644,
+        .upload_from = 0,
+    }, planSync(1318, 1322, 1226));
+
+    // An empty buffer can never take a partial upload of real data.
+    try testing.expectEqual(SyncPlan{
+        .grow_to = 2,
+        .upload_from = 0,
+    }, planSync(0, 1, 0));
 }
