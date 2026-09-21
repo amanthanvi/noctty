@@ -174,7 +174,12 @@ pub fn detectProcessArchitecture() ?ProcessArchitecture {
         module,
         "IsWow64Process2",
     ) orelse return null;
-    const isWow64Process2: IsWow64Process2Fn = @ptrCast(entry);
+    // @alignCast because a function pointer is more strictly aligned than
+    // the anyopaque GetProcAddress hands back. x86_64 tolerates the plain
+    // @ptrCast; aarch64 rejects it outright, which is how the ARM64 job
+    // caught this. Same form as the wglGetProcAddress casts in
+    // apprt/win32/pixel_format.zig.
+    const isWow64Process2: IsWow64Process2Fn = @ptrCast(@alignCast(entry));
 
     var process_machine: u16 = IMAGE_FILE_MACHINE_UNKNOWN;
     var native_machine: u16 = IMAGE_FILE_MACHINE_UNKNOWN;
