@@ -4,7 +4,7 @@
 
 ## Validation
 
-- [ ] `zig build test -Demit-test-exe=true` (full suite; report the test counts)
+- [ ] `zig build test -Demit-test-exe=true --summary all` (full suite; paste the `N/M tests passed` line)
 - [ ] `zig build -Demit-exe=true`
 
 ## Risks / Follow-ups

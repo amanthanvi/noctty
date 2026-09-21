@@ -233,7 +233,7 @@ jobs:
 
       - name: Run full test suite
         shell: pwsh
-        run: zig build test -Demit-test-exe=true
+        run: zig build test -Demit-test-exe=true --summary all
 
       - name: Run native Win32 compositor tests
         shell: pwsh

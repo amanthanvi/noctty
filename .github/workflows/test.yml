@@ -123,13 +123,13 @@ jobs:
         run: ./scripts/check-source-format.ps1
 
       - name: Full Zig test suite
-        run: zig build test -Demit-test-exe=true
+        run: zig build test -Demit-test-exe=true --summary all
 
       - name: Custom shader compiler tests
         # Runs the whole suite with custom shaders enabled rather than
         # -Dtest-filter=shadertoy: a lone filter matches nothing here and the
         # step passed while running 0 tests (measured).
-        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true
+        run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32

@@ -63,7 +63,7 @@ jobs:
         # tests, so this job reported ARM64 coverage it never had. The full
         # suite is the only invocation measured to run anything here.
         run: |
-          zig build test -Demit-test-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+          zig build test -Demit-test-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline --summary all
 
       - name: Build and package ARM64 binaries
         shell: pwsh

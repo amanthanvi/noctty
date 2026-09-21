@@ -6,14 +6,16 @@ Windows-only Ghostty fork.
 ## Commands
 
 - **Build:** `zig build`
-- **Test (Zig):** `zig build test -Demit-test-exe=true` (full suite, ~4.5k
-  tests, about a minute). This is the only invocation that is trustworthy on
-  its own.
+- **Test (Zig):** `zig build test -Demit-test-exe=true --summary all`
+  (full suite, ~4.5k tests, about a minute). This is the only invocation that
+  is trustworthy on its own, and `--summary all` is part of it: the count is
+  the evidence.
   - Bare `zig build test` errors in this fork.
   - `-Dtest-filter=<token>` is a local convenience only, and a silent trap:
-    a lone filter matches nothing and the build still reports success. Always
-    read the `tests passed` count from `--summary all`; no count means no
-    tests. See the 2026-09-21 Self-Correction Log entry.
+    a lone filter matches nothing and the build still reports success. Read
+    the `N/M tests passed` line every time; no count means no tests ran, and
+    `Build Summary: 41/41 steps succeeded` counts build steps, not tests. See
+    the 2026-09-21 Self-Correction Log entry.
 - **Formatting (Zig):** `zig fmt .`
 - **Formatting (other):** `prettier -w .`
 
