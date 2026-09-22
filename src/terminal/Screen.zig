@@ -3230,14 +3230,13 @@ pub fn selectWord(
 
     // If our cell is empty we can't select a word, because we can't select
     // areas where the screen is not yet written.
-    const start_cell = pin.rowAndCell().cell;
-    if (!start_cell.hasText()) return null;
+    const start_codepoint = selectWordCodepoint(pin) orelse return null;
 
     // Determine if we are a boundary or not to determine what our boundary is.
     const expect_boundary = std.mem.indexOfAny(
         u21,
         boundary_codepoints,
-        &[_]u21{start_cell.content.codepoint},
+        &[_]u21{start_codepoint},
     ) != null;
 
     // Go forwards to find our end boundary
@@ -3250,17 +3249,14 @@ pub fn selectWord(
                 break :end prev;
             }
 
-            const rac = p.rowAndCell();
-            const cell = rac.cell;
-
             // If we reached an empty cell its always a boundary
-            if (!cell.hasText()) break :end prev;
+            const codepoint = selectWordCodepoint(p) orelse break :end prev;
 
             // If we do not match our expected set, we hit a boundary
             const this_boundary = std.mem.indexOfAny(
                 u21,
                 boundary_codepoints,
-                &[_]u21{cell.content.codepoint},
+                &[_]u21{codepoint},
             ) != null;
             if (this_boundary != expect_boundary) break :end prev;
 
@@ -3276,7 +3272,6 @@ pub fn selectWord(
         var prev = it.next().?; // Consume one, our start
         while (it.next()) |p| {
             const rac = p.rowAndCell();
-            const cell = rac.cell;
 
             // If we are going to the next row and it isn't wrapped, we
             // return the previous.
@@ -3285,13 +3280,13 @@ pub fn selectWord(
             }
 
             // If we reached an empty cell its always a boundary
-            if (!cell.hasText()) break :start prev;
+            const codepoint = selectWordCodepoint(p) orelse break :start prev;
 
             // If we do not match our expected set, we hit a boundary
             const this_boundary = std.mem.indexOfAny(
                 u21,
                 boundary_codepoints,
-                &[_]u21{cell.content.codepoint},
+                &[_]u21{codepoint},
             ) != null;
             if (this_boundary != expect_boundary) break :start prev;
 
@@ -3302,6 +3297,22 @@ pub fn selectWord(
     };
 
     return .init(start, end, false);
+}
+
+/// Return the codepoint for word selection, following wide-character spacers.
+fn selectWordCodepoint(pin: Pin) ?u21 {
+    const rac = pin.rowAndCell();
+    const cell = switch (rac.cell.wide) {
+        .narrow, .wide => rac.cell,
+        .spacer_tail => pin.left(1).rowAndCell().cell,
+        .spacer_head => cell: {
+            const next_row = pin.down(1) orelse return null;
+            const owner = &next_row.cells(.all)[0];
+            if (owner.wide != .wide) return null;
+            break :cell owner;
+        },
+    };
+    return if (cell.hasText()) cell.content.codepoint else null;
 }
 
 /// Select the command output under the given point. The limits of the output
@@ -10377,6 +10388,67 @@ test "Screen: selectWord across soft-wrap at right edge" {
                 .x = 4,
                 .y = 1,
             } }, s.pages.pointFromPin(.screen, sel.end()).?);
+        }
+    }
+}
+
+test "Screen: selectWord wide characters" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const cases = [_]struct {
+        text: []const u8,
+        cols: size.CellCountInt = 10,
+        boundary_codepoints: []const u21 = &.{ 0, ' ' },
+        start: usize = 0,
+        end: usize,
+        expected: []const u8,
+    }{
+        .{ .text = "日本語", .end = 5, .expected = "日本語" },
+        .{ .text = "日本語", .end = 5, .expected = "日本語", .boundary_codepoints = &.{' '} },
+        .{ .text = "a日b語c", .end = 6, .expected = "a日b語c" },
+        .{ .text = " 日本語 ", .start = 1, .end = 6, .expected = "日本語" },
+        .{ .text = "日本語", .cols = 4, .end = 5, .expected = "日本語" },
+        .{ .text = "日本語", .cols = 5, .end = 6, .expected = "日本語" },
+        .{ .text = "日本\n語文", .cols = 4, .end = 3, .expected = "日本" },
+        .{ .text = "日本\n語文", .cols = 4, .start = 4, .end = 7, .expected = "語文" },
+        .{ .text = "a語b", .boundary_codepoints = &.{ 0, '語' }, .end = 0, .expected = "a" },
+        .{ .text = "a語b", .boundary_codepoints = &.{ 0, '語' }, .start = 1, .end = 2, .expected = "語" },
+        .{ .text = "a語b", .boundary_codepoints = &.{ 0, '語' }, .start = 3, .end = 3, .expected = "b" },
+        .{ .text = "abcd語ef", .cols = 5, .boundary_codepoints = &.{ 0, '語' }, .end = 3, .expected = "abcd" },
+        .{ .text = "abcd語ef", .cols = 5, .boundary_codepoints = &.{ 0, '語' }, .start = 4, .end = 6, .expected = "語" },
+        .{ .text = "abcd語ef", .cols = 5, .boundary_codepoints = &.{ 0, '語' }, .start = 7, .end = 8, .expected = "ef" },
+    };
+
+    for (cases) |case| {
+        var s = try init(alloc, .{
+            .cols = case.cols,
+            .rows = 4,
+            .max_scrollback = 0,
+        });
+        defer s.deinit();
+        try s.testWriteString(case.text);
+
+        // Selecting any cell in the word should select the whole word.
+        for (case.start..case.end + 1) |offset| {
+            const pin = s.pages.pin(.{ .active = .{
+                .x = @intCast(offset % case.cols),
+                .y = @intCast(offset / case.cols),
+            } }).?;
+            var sel = s.selectWord(pin, case.boundary_codepoints).?;
+            defer sel.deinit(&s);
+            try testing.expectEqual(point.Point{ .screen = .{
+                .x = @intCast(case.start % case.cols),
+                .y = @intCast(case.start / case.cols),
+            } }, s.pages.pointFromPin(.screen, sel.start()).?);
+            try testing.expectEqual(point.Point{ .screen = .{
+                .x = @intCast(case.end % case.cols),
+                .y = @intCast(case.end / case.cols),
+            } }, s.pages.pointFromPin(.screen, sel.end()).?);
+
+            const contents = try s.selectionString(alloc, .{ .sel = sel });
+            defer alloc.free(contents);
+            try testing.expectEqualStrings(case.expected, contents);
         }
     }
 }
