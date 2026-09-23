@@ -3055,6 +3055,17 @@ fn isPortableModeActive(alloc: Allocator) bool {
 }
 
 fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
+    // A unit test that constructs a real `App` must never read or write the
+    // developer's own profile. It used to: every full `zig build test` run
+    // appended an unfinished launch to the real `startup-attempts.json`
+    // through "win32 runtime can initialize config", and three runs in a row
+    // put the next real noctty launch into safe mode, which ignores the
+    // config file and `-e`. The same helper resolves the jump list, session
+    // state, palette history and layouts, so it is gated here rather than at
+    // the ledger. Every caller already treats null as "nothing to persist",
+    // and the ledger's own tests pass explicit temporary paths.
+    if (builtin.is_test) return null;
+
     if (internal_os.xdg.portableRoot(alloc) catch null) |root| {
         defer alloc.free(root);
         return std.fs.path.join(alloc, &.{ root, name }) catch null;
@@ -3767,12 +3778,19 @@ pub const App = struct {
         // keeps the manual `$PROFILE` fallback on a stable path even
         // though automatic injection now uses the resources-tree copy
         // for interactive PowerShell launches.
-        if (win32_powershell_install.resolveInstallPath(core_app.alloc)) |ps1_path| {
-            defer core_app.alloc.free(ps1_path);
-            const result = win32_powershell_install.installIfStale(core_app.alloc, ps1_path);
-            log.info("powershell integration install path={s} result={s}", .{ ps1_path, @tagName(result) });
-        } else |err| {
-            std.log.warn("powershell integration install path resolve failed err={}", .{err});
+        //
+        // Skipped in unit tests for the same reason `localAppDataPathAlloc`
+        // is: a test that starts a real `App` would otherwise overwrite the
+        // developer's own copy with whatever branch is under test, and that
+        // copy is what a hand-written `$PROFILE` dot-source loads.
+        if (!builtin.is_test) {
+            if (win32_powershell_install.resolveInstallPath(core_app.alloc)) |ps1_path| {
+                defer core_app.alloc.free(ps1_path);
+                const result = win32_powershell_install.installIfStale(core_app.alloc, ps1_path);
+                log.info("powershell integration install path={s} result={s}", .{ ps1_path, @tagName(result) });
+            } else |err| {
+                std.log.warn("powershell integration install path resolve failed err={}", .{err});
+            }
         }
 
         // Windows version probe. Win11 build 22000+ enables the
@@ -35545,6 +35563,61 @@ test "win32 runtime can initialize config" {
     defer app.terminate();
 
     try std.testing.expect(@intFromPtr(app.hinstance) != 0);
+}
+
+test "win32 runtime leaves the real profile alone when a test starts it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const fake_local = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(fake_local);
+
+    // Point LOCALAPPDATA at an empty directory for the length of this test,
+    // then put the real value back.
+    const saved: ?[:0]u8 = saved: {
+        const value = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => break :saved null,
+            else => return err,
+        };
+        defer alloc.free(value);
+        break :saved try alloc.dupeZ(u8, value);
+    };
+    defer if (saved) |value| alloc.free(value);
+    defer _ = if (saved) |value|
+        internal_os.setenv("LOCALAPPDATA", value)
+    else
+        internal_os.unsetenv("LOCALAPPDATA");
+    const fake_z = try alloc.dupeZ(u8, fake_local);
+    defer alloc.free(fake_z);
+    try std.testing.expectEqual(@as(c_int, 0), internal_os.setenv("LOCALAPPDATA", fake_z));
+
+    {
+        var core = try CoreApp.create(alloc);
+        defer core.destroy();
+        var app: App = undefined;
+        try app.init(core, .{});
+        defer app.terminate();
+    }
+
+    // Before the gates this left `noctty\startup-attempts.json` with an
+    // unfinished launch in it, which is how repeated test runs put the
+    // developer's next real launch into safe mode, and replaced the
+    // installed PowerShell integration script with the one under test.
+    var data_dir = tmp.dir.openDir(build_config.data_dir_name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer data_dir.close();
+    try std.testing.expectError(
+        error.FileNotFound,
+        data_dir.access("startup-attempts.json", .{}),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        data_dir.access("shell-integration", .{}),
+    );
 }
 
 test "win32 quitTimerDelayMs clamps to at least one second" {
