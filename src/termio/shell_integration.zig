@@ -554,11 +554,23 @@ fn setupPowerShell(
 }
 
 const cmd_default_prompt = "$P$G";
+// `redraw=0` tells the terminal that cmd will not redraw its prompt after a
+// resize. Without it the terminal clears the prompt rows on every resize,
+// expecting the shell to paint them again. Plain cmd never does and ConPTY
+// sends nothing after a resize, so the prompt vanished and left the cursor
+// alone on a blank row.
+const cmd_prompt_osc_a = "$E]133;A;redraw=0$E\\";
+// A prompt that already carries this bare start mark brings its own
+// integration, and is left alone as it always has been.
+const cmd_prompt_user_osc_a = "$E]133;A$E\\";
 // OSC 9;9 feeds the same cwd handler as OSC 7, so use its accepted URI form.
 // The kitty scheme keeps cmd's unescaped `$P` Windows path intact.
-const cmd_prompt_osc_a = "$E]133;A$E\\";
-const cmd_prompt_prefix = cmd_prompt_osc_a ++
-    "$E]9;9;kitty-shell-cwd://localhost/$P$E\\";
+const cmd_prompt_cwd = "$E]9;9;kitty-shell-cwd://localhost/$P$E\\";
+const cmd_prompt_prefix = cmd_prompt_osc_a ++ cmd_prompt_cwd;
+// What releases before `redraw=0` put in front of the prompt. A cmd started
+// from one of them inherits it through PROMPT, and gets today's prefix in its
+// place rather than a second wrapping.
+const cmd_prompt_legacy_prefix = cmd_prompt_user_osc_a ++ cmd_prompt_cwd;
 const cmd_prompt_suffix = "$E]133;B$E\\";
 const cmd_clink_executables = [_][]const u8{
     "clink.bat",
@@ -598,7 +610,17 @@ fn cmdPromptEndsInDanglingDollar(prompt: []const u8) bool {
 /// PROMPT syntax; ESC followed by `\\` terminates each OSC sequence.
 fn buildCmdPrompt(alloc: Allocator, existing: ?[]const u8) ![]u8 {
     if (existing) |current| {
-        if (std.mem.indexOf(u8, current, cmd_prompt_osc_a) != null) {
+        if (std.mem.indexOf(u8, current, cmd_prompt_prefix) != null) {
+            return try alloc.dupe(u8, current);
+        }
+        if (std.mem.indexOf(u8, current, cmd_prompt_legacy_prefix)) |at| {
+            return try std.mem.concat(alloc, u8, &.{
+                current[0..at],
+                cmd_prompt_prefix,
+                current[at + cmd_prompt_legacy_prefix.len ..],
+            });
+        }
+        if (std.mem.indexOf(u8, current, cmd_prompt_user_osc_a) != null) {
             return try alloc.dupe(u8, current);
         }
     }
@@ -832,7 +854,7 @@ test "cmd prompt construction defaults and preserves escapes" {
     defer testing.allocator.free(prompt);
 
     try testing.expectEqualStrings(
-        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
+        "$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
         prompt,
     );
 }
@@ -844,7 +866,7 @@ test "cmd prompt construction preserves user prompt" {
     defer testing.allocator.free(prompt);
 
     try testing.expectEqualStrings(
-        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
+        "$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
         prompt,
     );
 }
@@ -866,7 +888,7 @@ test "cmd prompt construction separates a dangling trailing dollar" {
     const dangling = try buildCmdPrompt(testing.allocator, "$P$G$");
     defer testing.allocator.free(dangling);
     try testing.expectEqualStrings(
-        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
+        "$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$S$E]133;B$E\\",
         dangling,
     );
 
@@ -874,7 +896,7 @@ test "cmd prompt construction separates a dangling trailing dollar" {
     const balanced = try buildCmdPrompt(testing.allocator, "$P$G$$");
     defer testing.allocator.free(balanced);
     try testing.expectEqualStrings(
-        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
+        "$E]133;A;redraw=0$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$$$E]133;B$E\\",
         balanced,
     );
 
@@ -905,6 +927,89 @@ test "cmd prompt construction is idempotent" {
 
     try testing.expectEqualStrings(prompt, repeated);
     try testing.expectEqualStrings(clink_prefixed, prefixed_repeated);
+}
+
+test "cmd prompt construction upgrades a prompt wrapped before redraw=0" {
+    const testing = std.testing;
+
+    // A cmd started from a release that wrapped the prompt without
+    // `redraw=0` inherits that PROMPT. Wrapping it again would double every
+    // mark, and leaving it alone would keep erasing it on every resize.
+    const legacy = "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\";
+    const upgraded = try buildCmdPrompt(testing.allocator, legacy);
+    defer testing.allocator.free(upgraded);
+    const fresh = try buildCmdPrompt(testing.allocator, "[$T] $P$_$$ ");
+    defer testing.allocator.free(fresh);
+    try testing.expectEqualStrings(fresh, upgraded);
+
+    // Clink hands the prompt back with its own prefix in front, so the
+    // upgrade happens in place.
+    const clink = "C\x08L\x08I\x08N\x08K\x08 \x08";
+    const clink_upgraded = try buildCmdPrompt(testing.allocator, clink ++ legacy);
+    defer testing.allocator.free(clink_upgraded);
+    const clink_fresh = try std.mem.concat(testing.allocator, u8, &.{ clink, fresh });
+    defer testing.allocator.free(clink_fresh);
+    try testing.expectEqualStrings(clink_fresh, clink_upgraded);
+}
+
+test "cmd prompt construction leaves a user's own prompt marks alone" {
+    const testing = std.testing;
+
+    const own = "$E]133;A$E\\$P$G$E]133;B$E\\";
+    const kept = try buildCmdPrompt(testing.allocator, own);
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings(own, kept);
+}
+
+/// Draw `prompt` the way cmd would at `C:\work`, into a fresh terminal, then
+/// resize it and return what is left on screen.
+fn cmdPromptAfterResizeForTest(alloc: Allocator, prompt: []const u8) ![]const u8 {
+    const terminalpkg = @import("../terminal/main.zig");
+
+    var drawn: std.ArrayList(u8) = .empty;
+    defer drawn.deinit(alloc);
+    var i: usize = 0;
+    while (i < prompt.len) : (i += 1) {
+        if (prompt[i] != '$') {
+            try drawn.append(alloc, prompt[i]);
+            continue;
+        }
+        i += 1;
+        switch (prompt[i]) {
+            'E' => try drawn.append(alloc, 0x1b),
+            'P' => try drawn.appendSlice(alloc, "C:\\work"),
+            'G' => try drawn.append(alloc, '>'),
+            else => return error.UnexpectedPromptCode,
+        }
+    }
+
+    var t: terminalpkg.Terminal = try .init(alloc, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("dir\r\nsome output\r\n");
+    stream.nextSlice(drawn.items);
+
+    try t.resize(alloc, 20, 8);
+    return try t.plainString(alloc);
+}
+
+test "cmd prompt survives a resize because it declares redraw=0" {
+    const testing = std.testing;
+
+    const prompt = try buildCmdPrompt(testing.allocator, null);
+    defer testing.allocator.free(prompt);
+    const screen = try cmdPromptAfterResizeForTest(testing.allocator, prompt);
+    defer testing.allocator.free(screen);
+    try testing.expectEqualStrings("dir\nsome output\nC:\\work>", screen);
+
+    // The control: the same prompt without `redraw=0`, which is what cmd
+    // got before. The terminal clears it expecting a redraw that never
+    // comes, leaving the cursor on an empty row.
+    const legacy = "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\";
+    const legacy_screen = try cmdPromptAfterResizeForTest(testing.allocator, legacy);
+    defer testing.allocator.free(legacy_screen);
+    try testing.expectEqualStrings("dir\nsome output", legacy_screen);
 }
 
 test "cmd Clink path composition prepends once and rejects semicolons" {

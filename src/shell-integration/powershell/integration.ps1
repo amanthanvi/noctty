@@ -597,8 +597,10 @@ function global:prompt {
         $cwd_uri = __ghostty_encode_cwd_uri
         __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
 
-        # OSC 133 A — mark prompt start (jump-to-prompt anchor)
-        __ghostty_write_osc "${Global:__ghostty_esc}]133;A;cl=line;aid=${Global:__ghostty_aid}${Global:__ghostty_bel}"
+        # OSC 133 A — mark prompt start (jump-to-prompt anchor).
+        # `redraw=0`: PowerShell never re-runs `prompt` after a resize, so the
+        # terminal must not clear the prompt rows expecting it to.
+        __ghostty_write_osc "${Global:__ghostty_esc}]133;A;cl=line;aid=${Global:__ghostty_aid};redraw=0${Global:__ghostty_bel}"
     } catch {
         # Deliberately silent: writing an error here would corrupt the
         # prompt line we are about to draw.
