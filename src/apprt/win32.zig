@@ -12247,9 +12247,22 @@ const Host = struct {
         lParam: LPARAM,
     ) ?LRESULT {
         if (!self.usingIntegratedTitlebar()) return null;
-        if (wParam == 0) return null; // FALSE case: untouched.
-        const params: *NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(lParam)));
-        const original = params.rgrc[0];
+        // `CreateWindowEx` sends this with wParam FALSE, and lParam then
+        // points at a bare RECT: the proposed window rect in, the client rect
+        // out. Frame changes and resizes send TRUE with NCCALCSIZE_PARAMS,
+        // whose first rect plays the same role. Both forms must take the
+        // integrated caption. Leaving the FALSE one to DefWindowProc gave
+        // every new host the stock caption's shorter client area until its
+        // first SWP_FRAMECHANGED. That comes from the core's init-time
+        // `size_limit` action, after the core has read the terminal's size
+        // and before it opens the pty, so each new window started short by
+        // the caption's height: one row at 150% with the default font.
+        const lparam_addr: usize = @bitCast(lParam);
+        const rect: *RECT = if (wParam == 0)
+            @ptrFromInt(lparam_addr)
+        else
+            &@as(*NCCALCSIZE_PARAMS, @ptrFromInt(lparam_addr)).rgrc[0];
+        const original = rect.*;
         // Let DWP compute the default side/bottom frame…
         _ = sys.DefWindowProcW(hwnd, c.WM_NCCALCSIZE, wParam, lParam);
         // …then compute the top edge through the shared NC-layout
@@ -12260,12 +12273,12 @@ const Host = struct {
         const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const adjusted = win32_nc_layout.calcNcClientRect(.{
-            .left = params.rgrc[0].left,
+            .left = rect.left,
             .top = original.top,
-            .right = params.rgrc[0].right,
-            .bottom = params.rgrc[0].bottom,
+            .right = rect.right,
+            .bottom = rect.bottom,
         }, metrics, state);
-        params.rgrc[0].top = adjusted.top;
+        rect.top = adjusted.top;
         return 0;
     }
 
@@ -27801,6 +27814,15 @@ pub const Surface = struct {
         self.core_initialized = true;
         self.destroy_on_wm_destroy = true;
         log.debug("surface.init core surface initialized", .{});
+        // The core read the child's size when its init began, and the core's
+        // own init-time actions can lay the host out again before it ends.
+        // `syncCoreSizeFromClientRect` recorded any such move in `self.size`
+        // but could not forward it yet, and from here on it compares against
+        // that record, so nothing would ever forward it. The core ignores a
+        // size it already has.
+        self.core_surface.sizeCallback(self.size) catch |err| {
+            log.err("win32 size callback failed err={}", .{err});
+        };
 
         // Same-host tabs/splits must stay hidden through init, but they still
         // need an initial occlusion sync so hidden child GL surfaces stop
@@ -31572,7 +31594,9 @@ pub const Surface = struct {
     /// Refresh `self.size` from `GetClientRect` and notify the core. Call this
     /// after `MoveWindow` from `Host.layout` as well as from `WM_SIZE`: with
     /// `bRepaint = false`, the child can receive `WM_PAINT` before `WM_SIZE`,
-    /// leaving a stale screen size until the next resize event.
+    /// leaving a stale screen size until the next resize event. Before the
+    /// core is initialized this only records the size; `Surface.init` hands
+    /// the core whatever it missed as soon as init finishes.
     fn syncCoreSizeFromClientRect(self: *Surface) void {
         const hwnd = self.hwnd orelse return;
         const next_size = self.app.clientSize(hwnd) catch return;
@@ -36595,6 +36619,68 @@ test "win32 host content rect keeps its size while the window is minimized" {
     _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
     try std.testing.expect(sys.IsIconic(hwnd) == 0);
     try std.testing.expectEqual(shown, try host.contentRect());
+}
+
+test "win32 new host starts with the client area its first frame change keeps" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    var core = try CoreApp.create(alloc);
+    defer core.destroy();
+    var app: App = undefined;
+    // Safe mode starts from the default config rather than the developer's
+    // own, whose tab bar or decoration settings could turn the integrated
+    // titlebar off.
+    try app.init(core, .{ .safe_mode = true });
+    const hinstance = app.hinstance;
+    defer {
+        app.terminate();
+        // `createHost` registers these and nothing unregisters them, so a
+        // later test could not create a host of its own.
+        _ = sys.UnregisterClassW(host_class_name, hinstance);
+        _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
+        _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
+    }
+    // The Windows 11 caption row lives inside the client area. Force it on so
+    // an older test machine takes the same path.
+    app.use_integrated_titlebar = true;
+
+    // The host stays hidden, so the test never touches the foreground.
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null);
+    const hwnd = host.hwnd.?;
+    try std.testing.expect(host.usingIntegratedTitlebar());
+    try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+
+    var created: RECT = undefined;
+    try std.testing.expect(sys.GetClientRect(hwnd, &created) != 0);
+    const content_created = try host.contentRect();
+
+    // The first surface of a new window reads its size from this content
+    // rect. The core's init-time `size_limit` action then refreshes the
+    // frame, and before the fix that grew the client by the stock caption's
+    // height while the core kept the old size: a grid one row short.
+    try std.testing.expect(sys.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
+    ) != 0);
+    var refreshed: RECT = undefined;
+    try std.testing.expect(sys.GetClientRect(hwnd, &refreshed) != 0);
+    try std.testing.expectEqual(created, refreshed);
+    try std.testing.expectEqual(content_created, try host.contentRect());
+
+    // And it is the integrated area: the client starts at the window's top
+    // edge, where the stock caption would otherwise be.
+    var window_rect: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);
+    var client_origin: POINT = .{ .x = 0, .y = 0 };
+    try std.testing.expect(sys.ClientToScreen(hwnd, &client_origin) != 0);
+    try std.testing.expectEqual(window_rect.top, client_origin.y);
 }
 
 test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" {
