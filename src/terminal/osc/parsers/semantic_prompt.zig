@@ -277,8 +277,10 @@ pub const PromptKind = enum {
 /// [1]: https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers
 pub const Redraw = enum(u2) {
     /// The shell supports redrawing the full prompt and all continuations.
-    /// This is the default value, it does not need to be explicitly set
-    /// unless it is to reset a prior other value.
+    /// This is the default value. It applies per prompt: an A mark without a
+    /// `redraw` option means this, whatever an earlier shell's mark said,
+    /// unless it arrives inside a prompt whose input is still pending (see
+    /// `Terminal.semanticPrompt`).
     true,
 
     /// The shell does NOT support redrawing. In this case, Ghostty will NOT
