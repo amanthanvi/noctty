@@ -59,6 +59,23 @@ pub fn layoutRectToWin32(rect: win32_layout.Rect) RECT {
     };
 }
 
+/// The client rect a host lays its children out against: the live one while
+/// it has an area, otherwise the last one that did. Null means no rect with
+/// an area has been seen yet, so there is nothing to lay out against.
+///
+/// A minimized window reports a 0x0 client rect. Laying the terminal out
+/// against it clamps every pane to 1x1 px, which the core turns into a 1x1
+/// grid and a 1x1 `ResizePseudoConsole` (#262). ConPTY keeps no scrollback, so
+/// that throws away its whole buffer and homes its cursor, while the terminal
+/// reflows its own copy down to one column and back. On restore the two
+/// disagree about where the cursor is, and the shell's next output lands on
+/// the top rows over the old text. Minimizing hides the window without
+/// changing the size it will come back at, so keep the size it had.
+pub fn hostLayoutClientRect(live: RECT, last_with_area: ?RECT) ?RECT {
+    if (live.right > live.left and live.bottom > live.top) return live;
+    return last_with_area;
+}
+
 pub fn centeredRect(rect: RECT, width: i32, height: i32) RECT {
     const outer_w = rect.right - rect.left;
     const outer_h = rect.bottom - rect.top;
@@ -402,6 +419,46 @@ pub fn overlayEditChildRectFromFrame(frame: RECT, inset_x: i32, inset_y: i32) RE
 
 fn scaledBy(base: i32, dpi: u32) i32 {
     return win32_chrome_state.scaled(base, dpi);
+}
+
+test "hostLayoutClientRect follows the live client rect while it has an area" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const before = RECT{ .left = 0, .top = 0, .right = 1258, .bottom = 789 };
+    const after = RECT{ .left = 0, .top = 0, .right = 1258, .bottom = 889 };
+
+    // A real resize is taken as is, whatever was laid out before it.
+    try std.testing.expectEqual(after, hostLayoutClientRect(after, before).?);
+    try std.testing.expectEqual(before, hostLayoutClientRect(before, null).?);
+
+    // One pixel each way is still a window the user can see.
+    const tiny = RECT{ .left = 0, .top = 0, .right = 1, .bottom = 1 };
+    try std.testing.expectEqual(tiny, hostLayoutClientRect(tiny, before).?);
+}
+
+test "hostLayoutClientRect keeps the last real rect while the window is minimized" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const restored = RECT{ .left = 0, .top = 0, .right = 1258, .bottom = 789 };
+
+    // `GetClientRect` on a minimized host, measured: 0x0 at the origin.
+    // Before this, layout clamped that to a 1x1 px pane, a 1x1 grid and a
+    // 1x1 pseudo console (#262).
+    const minimized = RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    try std.testing.expectEqual(restored, hostLayoutClientRect(minimized, restored).?);
+
+    // Losing either axis is just as collapsed.
+    const no_width = RECT{ .left = 0, .top = 0, .right = 0, .bottom = 789 };
+    const no_height = RECT{ .left = 0, .top = 0, .right = 1258, .bottom = 0 };
+    try std.testing.expectEqual(restored, hostLayoutClientRect(no_width, restored).?);
+    try std.testing.expectEqual(restored, hostLayoutClientRect(no_height, restored).?);
+}
+
+test "hostLayoutClientRect lays nothing out before the first real rect" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const minimized = RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    try std.testing.expectEqual(@as(?RECT, null), hostLayoutClientRect(minimized, null));
 }
 
 test "win32 overlay edit child rect preserves frame border" {
