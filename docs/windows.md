@@ -956,6 +956,74 @@ config.
 WSL fails to launch: set `command = wsl.exe` explicitly. If it still fails,
 verify the distribution starts in a normal PowerShell session first.
 
+### Neovim types base64 after an OSC 52 paste
+
+Neovim's OSC 52 clipboard pastes by asking the terminal for the clipboard.
+Neovim uses it when `vim.g.clipboard = 'osc52'` is set, and falls back to it
+when it finds no other clipboard tool and `'clipboard'` is empty, which is
+common over SSH and in WSL. noctty answers with one escape sequence that
+carries the clipboard as base64 and ends with `ESC \`. Neovim waits at most
+`'ttimeoutlen'` milliseconds for the next piece of an unfinished escape
+sequence. If a longer pause falls inside the answer, Neovim gives up and
+types what it has so far as keys. The paste fails, the keys run as
+Normal-mode commands, and the first one that starts Insert mode types the
+rest of the base64 into the buffer.
+
+With `'nottimeout'` or a negative `'ttimeoutlen'`, every OSC 52 paste fails
+this way, whatever the connection: Neovim splits the answer at the `ESC` of
+its terminator and gives up on the first part at once.
+
+Otherwise, what runs between noctty and Neovim decides how long the pauses
+are. Measured on Windows 11 with Neovim 0.10.4, 0.11.7 and 0.12.5:
+
+- Native Windows Neovim gets the answer from the bundled pseudo console
+  without pauses; a console test program received a 266 KB answer in 16 ms.
+  A `'ttimeoutlen'` of 0 did not leak.
+- Neovim in WSL gets it from `wsl.exe` in pieces of 16 to 32 bytes, mostly
+  less than a millisecond apart. A `'ttimeoutlen'` of 1 leaked every time,
+  and 2 in one of two runs.
+- Neovim over `ssh.exe` (OpenSSH for Windows 9.5) to a host on the same
+  machine got the last few bytes 25 to 43 ms after the rest. OpenSSH 9.5 and
+  later hold back small writes to hide keystroke timing
+  (`ObscureKeystrokeTiming`), and the end of the answer is a small write.
+  With nothing typed after the paste, a `'ttimeoutlen'` of 25 or less leaked
+  every time, and 30 to 40 in 4 of 7 runs.
+- Over SSH to a distant host, the answer can also arrive in bursts about one
+  round trip apart. `ssh.exe` sends it as many small packets, and after a
+  quiet spell TCP sends only a few packets per round trip until its window
+  grows. noctty's clipboard prompt (`clipboard-read = ask`, the default)
+  makes that quiet spell: the SSH connection sits idle while the prompt
+  waits for you. With the paste typed through `ssh.exe` and Allow clicked 3
+  seconds later over an emulated 60 or 100 ms round trip, the default
+  `'ttimeoutlen'` of 50 leaked every time (13 of 13, from 1 KB to 200 KB).
+  At 40 ms or less, none of 6 leaked, and with `clipboard-read = allow` or
+  Allow clicked within 300 ms, none of 17 leaked at 60 to 100 ms.
+
+With the default `'ttimeoutlen'` of 50, nothing leaked natively, in WSL, or
+over SSH to a host on the same machine, for clipboards from 64 KB to 700 KB.
+For an SSH host more than about 50 ms away, set `'ttimeoutlen'` above the
+round-trip time; 150 did not leak at 100 ms (0 of 6).
+`clipboard-read = allow` also avoided it, but lets any program in any tab
+read your clipboard without asking. If you lower `'ttimeoutlen'` below about
+45 for a nearby SSH host, `ObscureKeystrokeTiming no` in your SSH
+configuration removes the SSH client's pause, at the cost of that
+protection.
+
+Short timeouts also break Neovim's startup. With a `'ttimeoutlen'` of 20 or
+less over SSH, or 0 in WSL, the replies to Neovim's own startup queries
+arrive in pieces too and run as Normal-mode keys. One of them contains `r0`,
+which replaces the character under the cursor.
+
+noctty 1.3.130 and earlier could also drop part of a large answer when input
+arrived while it was being sent, which caused the same symptom at any
+`'ttimeoutlen'` (#261).
+
+Very large pastes into native Windows Neovim fail differently. Neovim reads
+console input one key event at a time, and a 700 KB paste was still not
+through after the 10 seconds Neovim waits; keys pressed after it reached
+Neovim 13 to 14 seconds later. The paste stops with `Timed out waiting for a
+clipboard response from the terminal`, and nothing is typed.
+
 ### ConPTY source
 
 `noctty +version` reports `ConPTY : bundled (<DLL path>)` or
