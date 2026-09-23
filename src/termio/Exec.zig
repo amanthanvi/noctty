@@ -22,7 +22,6 @@ const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const Command = @import("../Command.zig");
 const windows_shell = configpkg.windows_shell;
-const SegmentedPool = @import("../datastruct/main.zig").SegmentedPool;
 const ptypkg = @import("../pty.zig");
 const Pty = ptypkg.Pty;
 const EnvMap = std.process.EnvMap;
@@ -263,6 +262,7 @@ pub fn threadEnter(
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
         .termios_timer = termios_timer,
+        .write_pool = .init(alloc),
     } };
 
     // Start our process watcher. If we have an xev.Process use it.
@@ -518,17 +518,24 @@ pub fn queueWrite(
     linefeed: bool,
 ) !void {
     _ = self;
+    // The write pool owns its allocator; the parameter is kept for the
+    // backend interface.
+    _ = alloc;
     const exec = &td.backend.exec;
 
     // If our process is exited then we don't send any more writes.
     if (exec.exited) return;
 
     // We go through and chunk the data if necessary to fit into
-    // our cached buffers that we can queue to the stream.
+    // our cached buffers that we can queue to the stream. Every chunk
+    // checks out its own request+buffer and `ttyWrite` returns exactly
+    // that one, so a chunk can never be handed out again while it is
+    // still queued (see `ThreadData.Write`).
     var i: usize = 0;
     while (i < data.len) {
-        const req = try exec.write_req_pool.getGrow(alloc);
-        const buf = try exec.write_buf_pool.getGrow(alloc);
+        const w = try exec.write_pool.create();
+        w.td = exec;
+        const buf = &w.buf;
         const slice = slice: {
             // The maximum end index is either the end of our data or
             // the end of our buffer, whichever is smaller.
@@ -568,26 +575,27 @@ pub fn queueWrite(
         exec.write_stream.queueWrite(
             td.loop,
             &exec.write_queue,
-            req,
+            &w.req,
             .{ .slice = slice },
-            termio.Exec.ThreadData,
-            exec,
+            ThreadData.Write,
+            w,
             ttyWrite,
         );
     }
 }
 
 fn ttyWrite(
-    td_: ?*ThreadData,
+    w_: ?*ThreadData.Write,
     _: *xev.Loop,
     _: *xev.Completion,
     _: xev.Stream,
     _: xev.WriteBuffer,
     r: xev.WriteError!usize,
 ) xev.CallbackAction {
-    const td = td_.?;
-    td.write_req_pool.put();
-    td.write_buf_pool.put();
+    // xev has already popped this request off the write queue and does
+    // not touch it again after a `.disarm`, so it can go back now.
+    const w = w_.?;
+    w.td.write_pool.destroy(w);
 
     const d = r catch |err| {
         log.err("write error: {}", .{err});
@@ -601,9 +609,30 @@ fn ttyWrite(
 
 /// The thread local data for the exec implementation.
 pub const ThreadData = struct {
-    // The preallocation size for the write request pool. This should be big
-    // enough to satisfy most write requests. It must be a power of 2.
-    const WRITE_REQ_PREALLOC = std.math.pow(usize, 2, 5);
+    /// One queued pty write: the xev request and the bytes it writes.
+    /// Both must stay pointer-stable until the write completes, so they
+    /// are checked out together per chunk and returned by pointer.
+    ///
+    /// This replaced a ring of requests and a ring of buffers that were
+    /// handed out by index and returned by count. Growing that ring while
+    /// its oldest in-flight slot was not slot 0 made it later hand out a
+    /// slot that was still queued, which rewrote a pending request and
+    /// cut the write queue: whole 4 KiB chunks of a large paste or OSC 52
+    /// reply were dropped, including the reply's terminator, and later
+    /// input was spliced in its place. That is how an OSC 52 paste ended up
+    /// typed into Neovim as base64 (#261). Upstream Ghostty replaced the
+    /// same pool with `std.heap.MemoryPool` in e0ef934f7.
+    pub const Write = struct {
+        /// Back-pointer so the completion callback can return this
+        /// write to the pool it came from.
+        td: *ThreadData,
+
+        /// The libxev write request.
+        req: xev.WriteRequest,
+
+        /// The bytes being written.
+        buf: [WRITE_BUF_SIZE]u8,
+    };
 
     /// Process start time and boolean of whether its already exited.
     start: std.time.Instant,
@@ -618,12 +647,9 @@ pub const ThreadData = struct {
     /// Command backing the process watcher, if this is a local child.
     command: ?*Command = null,
 
-    /// This is the pool of available (unused) write requests. If you grab
-    /// one from the pool, you must put it back when you're done!
-    write_req_pool: SegmentedPool(xev.WriteRequest, WRITE_REQ_PREALLOC) = .{},
-
-    /// The pool of available buffers for writing to the pty.
-    write_buf_pool: SegmentedPool([WRITE_BUF_SIZE]u8, WRITE_REQ_PREALLOC) = .{},
+    /// Pool of pty write states. Every `create` must be matched by a
+    /// `destroy` of the same pointer once its write completes.
+    write_pool: std.heap.MemoryPool(Write),
 
     /// The write queue for the data stream.
     write_queue: xev.WriteQueue = .{},
@@ -653,11 +679,11 @@ pub const ThreadData = struct {
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         posix.close(self.read_thread_pipe);
 
-        // Clear our write pools. We know we aren't ever going to do
+        // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
         // drop this.
-        self.write_req_pool.deinit(alloc);
-        self.write_buf_pool.deinit(alloc);
+        _ = alloc;
+        self.write_pool.deinit();
 
         // Stop our process watcher
         if (self.process) |*p| p.deinit();
@@ -2210,4 +2236,191 @@ test "addGhosttyBinToPath prepends existing windows entry when not first" {
 
 test "Windows PTY read batches amortize high-volume output" {
     try std.testing.expectEqual(@as(usize, 64 * 1024), WINDOWS_READ_BUF_SIZE);
+}
+
+test "Windows pty writes stay whole and in order when large writes overlap" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const k32 = windows.kernel32;
+
+    // The same shape as the ConPTY input pipe in `pty.zig`: an overlapped,
+    // outbound server end with 4 KiB of buffering that xev writes to, and
+    // a synchronous client end, which stands in for OpenConsole.
+    var name_buf: [128]u8 = undefined;
+    const name = try std.fmt.bufPrint(
+        &name_buf,
+        "\\\\.\\pipe\\LOCAL\\noctty-exec-write-order-{d}-{d}",
+        .{ windows.GetCurrentProcessId(), std.time.nanoTimestamp() },
+    );
+    var name_w_buf: [128]u16 = undefined;
+    const name_w_len = try std.unicode.utf8ToUtf16Le(&name_w_buf, name);
+    name_w_buf[name_w_len] = 0;
+    const name_w = name_w_buf[0..name_w_len :0];
+
+    const server = k32.CreateNamedPipeW(
+        name_w.ptr,
+        windows.PIPE_ACCESS_OUTBOUND |
+            windows.exp.FILE_FLAG_FIRST_PIPE_INSTANCE |
+            windows.FILE_FLAG_OVERLAPPED,
+        windows.PIPE_TYPE_BYTE,
+        1,
+        4096,
+        4096,
+        0,
+        null,
+    );
+    if (server == windows.INVALID_HANDLE_VALUE) {
+        return windows.unexpectedError(k32.GetLastError());
+    }
+    defer _ = windows.CloseHandle(server);
+
+    const client = k32.CreateFileW(
+        name_w.ptr,
+        windows.GENERIC_READ,
+        0,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (client == windows.INVALID_HANDLE_VALUE) {
+        return windows.unexpectedError(k32.GetLastError());
+    }
+    defer _ = windows.CloseHandle(client);
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    // `queueWrite` only touches the loop and the exec write state.
+    var td: termio.Termio.ThreadData = .{
+        .alloc = alloc,
+        .loop = &loop,
+        .renderer_state = undefined,
+        .surface_mailbox = undefined,
+        .backend = .{ .exec = .{
+            .start = undefined,
+            .write_stream = xev.Stream.initFd(server),
+            .process = null,
+            .read_thread = undefined,
+            .read_thread_pipe = undefined,
+            .read_thread_fd = undefined,
+            .termios_timer = undefined,
+            .write_pool = .init(alloc),
+        } },
+        .mailbox = undefined,
+    };
+    defer td.backend.exec.write_pool.deinit();
+
+    // Two large writes of distinct bytes, each far more chunks than the
+    // old 32-slot preallocation.
+    const chunks = 40;
+    const big_a = try alloc.alloc(u8, chunks * WRITE_BUF_SIZE);
+    defer alloc.free(big_a);
+    const big_b = try alloc.alloc(u8, chunks * WRITE_BUF_SIZE);
+    defer alloc.free(big_b);
+    var prng = std.Random.DefaultPrng.init(261);
+    prng.random().bytes(big_a);
+    prng.random().bytes(big_b);
+
+    const small = "abcde";
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(alloc);
+    try expected.appendSlice(alloc, small);
+    try expected.appendSlice(alloc, big_a);
+    try expected.appendSlice(alloc, big_b);
+
+    const received = try alloc.alloc(u8, expected.items.len);
+    defer alloc.free(received);
+
+    // Reads the client end while running the loop. xev's `.no_wait`
+    // never polls the completion port, and `.once` blocks until something
+    // completes, so every wait is bounded by a short timer: a write that
+    // was dropped from the queue then fails the test instead of hanging it.
+    const Reader = struct {
+        loop: *xev.Loop,
+        pipe: windows.HANDLE,
+        out: []u8,
+        len: usize = 0,
+        timer: xev.Timer,
+        timer_c: xev.Completion = .{},
+        timer_armed: bool = false,
+
+        fn timerFired(
+            self_: ?*@This(),
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch {};
+            self_.?.timer_armed = false;
+            return .disarm;
+        }
+
+        fn waitOnce(self: *@This()) !void {
+            if (!self.timer_armed) {
+                self.timer_armed = true;
+                self.timer.run(self.loop, &self.timer_c, 5, @This(), self, timerFired);
+            }
+            try self.loop.run(.once);
+        }
+
+        /// Read until `target` bytes have arrived in total.
+        fn readTo(self: *@This(), target: usize) !void {
+            var idle: usize = 0;
+            while (self.len < target) {
+                var available: windows.DWORD = 0;
+                if (windows.exp.kernel32.PeekNamedPipe(self.pipe, null, 0, null, &available, null) == 0) {
+                    return windows.unexpectedError(k32.GetLastError());
+                }
+                if (available > 0) {
+                    idle = 0;
+                    const want: windows.DWORD = @intCast(@min(available, target - self.len));
+                    var got: windows.DWORD = 0;
+                    if (k32.ReadFile(self.pipe, self.out[self.len..].ptr, want, &got, null) == 0) {
+                        return windows.unexpectedError(k32.GetLastError());
+                    }
+                    self.len += got;
+                    continue;
+                }
+
+                // The pipe is empty, so any write in flight can complete.
+                idle += 1;
+                if (idle > 200) return error.PtyWriteStalled;
+                try self.waitOnce();
+            }
+        }
+
+        /// Let the wait timer expire so the loop can be torn down.
+        fn settle(self: *@This()) !void {
+            while (self.timer_armed) try self.loop.run(.once);
+        }
+    };
+
+    var reader: Reader = .{
+        .loop = &loop,
+        .pipe = client,
+        .out = received,
+        .timer = try xev.Timer.init(),
+    };
+    defer reader.timer.deinit();
+
+    // Keystroke-sized writes first, each drained, so the next large
+    // write does not start at the front of the write pool.
+    for (small) |ch| {
+        try queueWrite(undefined, alloc, &td, &.{ch}, false);
+        try reader.readTo(reader.len + 1);
+    }
+
+    // A large write that is only partly drained when the next large write
+    // is queued behind it: the shape of a paste or OSC 52 reply that is
+    // still flushing when more input is queued.
+    try queueWrite(undefined, alloc, &td, big_a, false);
+    try reader.readTo(small.len + 3 * WRITE_BUF_SIZE);
+    try queueWrite(undefined, alloc, &td, big_b, false);
+    try reader.readTo(expected.items.len);
+    try reader.settle();
+
+    try testing.expectEqualSlices(u8, expected.items, received);
 }
