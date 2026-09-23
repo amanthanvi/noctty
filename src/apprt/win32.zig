@@ -35569,6 +35569,15 @@ test "win32 runtime leaves the real profile alone when a test starts it" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
+
+    // A portable root beside the test executable takes precedence over
+    // LOCALAPPDATA for both the data directory and the PowerShell install,
+    // so redirecting LOCALAPPDATA below could not observe a leak and this
+    // test would pass without checking anything. Skip rather than pass.
+    if (try internal_os.xdg.portableRoot(alloc)) |root| {
+        alloc.free(root);
+        return error.SkipZigTest;
+    }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const fake_local = try tmp.dir.realpathAlloc(alloc, ".");
