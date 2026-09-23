@@ -971,7 +971,11 @@ rest of the base64 into the buffer.
 
 With `'nottimeout'` or a negative `'ttimeoutlen'`, every OSC 52 paste fails
 this way, whatever the connection: Neovim splits the answer at the `ESC` of
-its terminator and gives up on the first part at once.
+its terminator and gives up on the first part at once. Unlike Vim, Neovim's
+terminal input does not fall back to `'timeoutlen'` for a negative value; it
+waits for the rest of a sequence only while `'ttimeout'` is on and
+`'ttimeoutlen'` is 0 or more, and otherwise processes it immediately
+(`tk_getkeys` in `src/nvim/tui/input.c`, the same in 0.10 through 0.12).
 
 Otherwise, what runs between noctty and Neovim decides how long the pauses
 are. Measured on Windows 11 with Neovim 0.10.4, 0.11.7 and 0.12.5:
@@ -996,8 +1000,9 @@ are. Measured on Windows 11 with Neovim 0.10.4, 0.11.7 and 0.12.5:
   waits for you. With the paste typed through `ssh.exe` and Allow clicked 3
   seconds later over an emulated 60 or 100 ms round trip, the default
   `'ttimeoutlen'` of 50 leaked every time (13 of 13, from 1 KB to 200 KB).
-  At 40 ms or less, none of 6 leaked, and with `clipboard-read = allow` or
-  Allow clicked within 300 ms, none of 17 leaked at 60 to 100 ms.
+  With an emulated round trip of 40 ms or less, none of 6 leaked, and with
+  `clipboard-read = allow` or Allow clicked within 300 ms, none of 17 leaked
+  at a 60 to 100 ms round trip.
 
 With the default `'ttimeoutlen'` of 50, nothing leaked natively, in WSL, or
 over SSH to a host on the same machine, for clipboards from 64 KB to 700 KB.
