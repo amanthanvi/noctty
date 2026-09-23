@@ -2478,6 +2478,12 @@ pub fn semanticPromptInputSubmitted(self: *Screen) void {
     self.semantic_command.consumeInput(&self.pages);
 }
 
+/// Record an OSC 133;A and report whether it arrived inside a prompt that
+/// was already open. See `SemanticCommand.prompt_open`.
+pub fn semanticPromptOpen(self: *Screen) bool {
+    return self.semantic_command.openPrompt();
+}
+
 /// Discard B/C state when a new prompt begins without a completing D mark.
 pub fn semanticPromptAbortCommand(self: *Screen) void {
     self.semantic_command.abortCommand(&self.pages);

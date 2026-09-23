@@ -1012,6 +1012,86 @@ test "cmd prompt survives a resize because it declares redraw=0" {
     try testing.expectEqualStrings("dir\nsome output", legacy_screen);
 }
 
+/// Like `cmdPromptAfterResizeForTest`, but reads cmd's PROMPT codes
+/// case-insensitively, as cmd does (`$e` is `$E`), and can leave a command
+/// running with output still arriving when the window is resized.
+fn cmdScreenAfterResizeForTest(
+    alloc: Allocator,
+    prompt: []const u8,
+    running_output: []const u8,
+) ![]const u8 {
+    const terminalpkg = @import("../terminal/main.zig");
+
+    var drawn: std.ArrayList(u8) = .empty;
+    defer drawn.deinit(alloc);
+    var i: usize = 0;
+    while (i < prompt.len) : (i += 1) {
+        if (prompt[i] != '$') {
+            try drawn.append(alloc, prompt[i]);
+            continue;
+        }
+        i += 1;
+        switch (std.ascii.toUpper(prompt[i])) {
+            'E' => try drawn.append(alloc, 0x1b),
+            'P' => try drawn.appendSlice(alloc, "C:\\work"),
+            'G' => try drawn.append(alloc, '>'),
+            else => return error.UnexpectedPromptCode,
+        }
+    }
+
+    var t: terminalpkg.Terminal = try .init(alloc, .{ .cols = 30, .rows = 8 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("dir\r\nsome output\r\n");
+    stream.nextSlice(drawn.items);
+    if (running_output.len > 0) {
+        stream.nextSlice("ping -t x");
+        // noctty writes Enter; cmd has no C mark.
+        t.screens.active.semanticPromptInputSubmitted();
+        stream.nextSlice(running_output);
+    }
+
+    try t.resize(alloc, 24, 8);
+    return try t.plainString(alloc);
+}
+
+// The prompt the Windows Terminal shell-integration docs tell cmd users to
+// `setx`. Its `$e` is lowercase, so `buildCmdPrompt` does not recognise the
+// marks as the user's own and wraps it, and each prompt then carries
+// noctty's A;redraw=0 followed by the docs' D and bare A.
+const wt_docs_cmd_prompt = "$e]133;D$e\\$e]133;A$e\\$e]9;9;$P$e\\$P$G$e]133;B$e\\";
+
+test "cmd: the Windows Terminal docs' PROMPT survives a resize" {
+    const testing = std.testing;
+
+    const prompt = try buildCmdPrompt(testing.allocator, wt_docs_cmd_prompt);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.startsWith(u8, prompt, cmd_prompt_prefix));
+
+    const screen = try cmdScreenAfterResizeForTest(testing.allocator, prompt, "");
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "C:\\work>") != null);
+}
+
+test "cmd: the Windows Terminal docs' PROMPT keeps a running command's output through a resize" {
+    // cmd has no C mark, so a running command's output is still inside the
+    // prompt's input region. If the docs' bare A had switched prompt
+    // clearing back on, a resize would erase everything since the prompt.
+    const testing = std.testing;
+
+    const prompt = try buildCmdPrompt(testing.allocator, wt_docs_cmd_prompt);
+    defer testing.allocator.free(prompt);
+
+    const screen = try cmdScreenAfterResizeForTest(
+        testing.allocator,
+        prompt,
+        "\r\nReply one\r\nReply two\r\n",
+    );
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "Reply two") != null);
+}
+
 test "cmd Clink path composition prepends once and rejects semicolons" {
     const testing = std.testing;
 

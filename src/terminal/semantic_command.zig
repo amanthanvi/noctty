@@ -16,6 +16,15 @@ active: ?*Pin = null,
 /// Most recent command with a complete OSC 133;B..C..D lifecycle.
 completed: ?Completed = null,
 
+/// Whether a prompt is still being drawn. Every OSC 133;A opens it; only a
+/// submitted line (`consumeInput`) or a started command (`startOutput`)
+/// closes it. B and D marks leave it alone, because a prompt theme or a
+/// hand-written prompt can emit D, A and B of its own inside a prompt that a
+/// shell integration already marked. `Terminal.semanticPrompt` uses this to
+/// tell a second A mark in the same prompt from a new shell's first one. It
+/// is a plain flag rather than a pin so erasing rows cannot invalidate it.
+prompt_open: bool = false,
+
 const Completed = struct {
     prompt: *Pin,
     /// Inclusive last output cell at OSC 133;D, or null for empty output.
@@ -76,6 +85,7 @@ pub fn startOutput(
     semantic_prompt_seen: bool,
     cursor: Pin,
 ) Allocator.Error!void {
+    self.prompt_open = false;
     self.clearActive(pages);
     if (self.pending) |prompt| {
         self.active = prompt;
@@ -167,7 +177,16 @@ pub fn inputPending(self: *const SemanticCommand) bool {
 /// the prompt, and `startOutput` falls back to the prompt iterator when no
 /// pending pin exists, so C/D shells lose nothing.
 pub fn consumeInput(self: *SemanticCommand, pages: *PageList) void {
+    self.prompt_open = false;
     self.clearPending(pages);
+}
+
+/// Record an OSC 133;A. Returns whether a prompt was already open, meaning
+/// this mark belongs to the prompt being drawn rather than starting one.
+pub fn openPrompt(self: *SemanticCommand) bool {
+    const was_open = self.prompt_open;
+    self.prompt_open = true;
+    return was_open;
 }
 
 /// Discard B/C state when a new prompt begins without a completing D mark.

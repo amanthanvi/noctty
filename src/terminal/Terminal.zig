@@ -1171,9 +1171,8 @@ pub fn semanticPrompt(
         .fresh_line => try self.semanticPromptFreshLine(),
 
         .fresh_line_new_prompt => {
-            // Read before the abort below clears it. See the `redraw`
-            // handling further down.
-            const same_prompt = self.screens.active.semanticPromptInputPending();
+            // See the `redraw` handling further down.
+            const same_prompt = self.screens.active.semanticPromptOpen();
             self.screens.active.semanticPromptAbortCommand();
 
             // "First do a fresh-line."
@@ -1196,17 +1195,27 @@ pub fn semanticPrompt(
             // kept that setting, so on resize the terminal left its prompt in
             // place and the inner shell painted a second copy.
             //
-            // One exception keeps the previous value. A bare A that arrives
-            // while the previous prompt's input is still pending (its B seen,
-            // nothing submitted) is part of that same prompt, not a new
-            // shell: PowerShell's integration writes `A;redraw=0` and `B`
-            // before the user's prompt function output is drawn, and a prompt
-            // theme such as oh-my-posh, or marks added by hand the way the
-            // Windows Terminal docs suggest, then adds its own bare A.
-            // Resetting on that would switch prompt clearing back on for
-            // PowerShell itself. A nested shell's first mark always follows
-            // a submitted command line, which consumes the pending input
-            // (a C mark, or noctty writing Enter), so it still resets.
+            // One exception keeps the previous value: a bare A inside a
+            // prompt that is still open, meaning no submitted line and no C
+            // mark since the last A. That mark belongs to the same prompt,
+            // not to a new shell. PowerShell's integration writes
+            // `A;redraw=0` and `B` before the prompt function's output is
+            // drawn, and oh-my-posh with shell integration on, or marks added
+            // by hand the way the Windows Terminal docs suggest, then add a
+            // D, A and B of their own. The prompt those docs give cmd users
+            // does the same inside noctty's wrapped cmd PROMPT, and a user's
+            // own A inside Bash's PS1 would do it to `redraw=last`.
+            // Resetting on any of those switches prompt clearing back on for
+            // a shell that cannot redraw, and in cmd, which has no C mark, a
+            // resize during a running command then erases its output.
+            //
+            // A nested shell's first mark normally follows a submitted
+            // command line, which closes the prompt, so it resets. It does
+            // not when the Enter was consumed before the outer prompt was
+            // drawn (typeahead), or when the outer prompt was redrawn after
+            // Enter without a following C (PSReadLine keeps a repeated line
+            // out of history, so its C never fires). That shell's first
+            // prompt then keeps the outer setting until its next one.
             if (cmd.readOption(.redraw)) |v| {
                 self.flags.shell_redraws_prompt = v;
             } else if (!same_prompt) {
