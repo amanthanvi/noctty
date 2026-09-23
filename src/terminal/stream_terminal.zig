@@ -1205,6 +1205,115 @@ test "semantic prompt fresh line new prompt" {
     try testing.expect(t.flags.shell_redraws_prompt == .true);
 }
 
+test "semantic prompt redraw is scoped to the prompt that set it" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    // cmd.exe and PowerShell say they cannot redraw.
+    s.nextSlice("\x1b]133;A;redraw=0\x07\x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+
+    // A prompt theme's own bare A inside that same prompt, before anything
+    // is submitted, does not change it.
+    s.nextSlice("\x1b]133;A\x07PS> ");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+
+    // The user submits a command that starts another shell. Its first mark
+    // has no option, which is a shell that can redraw.
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("zsh\r\n\x1b]133;A;cl=line\x07% ");
+    try testing.expect(t.flags.shell_redraws_prompt == .true);
+
+    // Every prompt stands on its own, including Bash's `last`.
+    s.nextSlice("\x1b]133;B\x07");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("bash\r\n\x1b]133;A;redraw=last\x07$ \x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .last);
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("exit\r\n\x1b]133;A;redraw=0\x07PS> ");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+}
+
+fn semanticPromptScreenAfterNarrowingForTest(
+    alloc: std.mem.Allocator,
+    comptime steps: []const []const u8,
+) ![]const u8 {
+    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 6 });
+    defer t.deinit(alloc);
+
+    var s: Stream = .initAlloc(alloc, .init(&t));
+    defer s.deinit();
+
+    // An empty step stands for the user pressing Enter, which noctty
+    // records on the screen as it writes it to the pty.
+    inline for (steps) |step| {
+        if (step.len == 0) {
+            t.screens.active.semanticPromptInputSubmitted();
+        } else {
+            s.nextSlice(step);
+        }
+    }
+
+    try t.resize(alloc, 12, 6);
+    return try t.plainString(alloc);
+}
+
+test "semantic prompt: a shell nested in cmd has its prompt cleared on resize" {
+    // cmd.exe marks its prompt with A and B only; it has no C mark.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07",
+        "zsh",
+        "",
+        "\r\n\x1b]133;A;cl=line\x07inner% \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    // The outer prompt line is history and stays. The inner prompt is left
+    // for its own shell to redraw, which is what it will do.
+    try testing.expect(std.mem.indexOf(u8, screen, "C:\\>zsh") != null);
+    try testing.expect(std.mem.indexOf(u8, screen, "inner%") == null);
+}
+
+test "semantic prompt: a shell nested in PowerShell has its prompt cleared on resize" {
+    // PowerShell's integration marks the command start with C.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;A;redraw=0\x07\x1b]133;B\x07PS> zsh",
+        "",
+        "\r\n\x1b]133;C\x07\x1b]133;A;cl=line\x07inner% \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "PS> zsh") != null);
+    try testing.expect(std.mem.indexOf(u8, screen, "inner%") == null);
+}
+
+test "semantic prompt: a theme's own mark keeps the PowerShell prompt through a resize" {
+    // PowerShell's integration writes A and B, then the prompt function's
+    // output is drawn, and a theme such as oh-my-posh puts its own bare A
+    // at the start of it. That is still PowerShell's prompt, which cannot
+    // redraw.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;A;redraw=0\x07\x1b]133;B\x07",
+        "\x1b]133;A\x07themed> \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "themed>") != null);
+}
+
+test "semantic prompt: a prompt marked redraw=0 survives a resize" {
+    // The control for the tests above: a prompt from a shell that cannot
+    // redraw is kept.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07",
+        "zsh",
+        "",
+        "\r\n\x1b]133;A;redraw=0\x07inner% \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "inner%") != null);
+}
+
 test "semantic prompt end of input, then start output" {
     var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
     defer t.deinit(testing.allocator);

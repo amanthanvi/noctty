@@ -1171,6 +1171,9 @@ pub fn semanticPrompt(
         .fresh_line => try self.semanticPromptFreshLine(),
 
         .fresh_line_new_prompt => {
+            // Read before the abort below clears it. See the `redraw`
+            // handling further down.
+            const same_prompt = self.screens.active.semanticPromptInputPending();
             self.screens.active.semanticPromptAbortCommand();
 
             // "First do a fresh-line."
@@ -1184,11 +1187,30 @@ pub fn semanticPrompt(
                 .prompt = cmd.readOption(.prompt_kind) orelse .initial,
             });
 
-            // This is a kitty-specific flag that notes that the shell
-            // is NOT capable of redraw. Redraw defaults to true so this
-            // usually just disables it, but either is possible.
+            // `redraw` is a field of the A mark (kitty's extension), so it
+            // describes the prompt that mark starts. A mark without it is a
+            // shell that can redraw, and kitty resets the setting to that
+            // default on every A mark. Keeping the previous value for every
+            // later mark instead let a nested shell inherit it: a zsh or fish
+            // started from a cmd or PowerShell prompt that says `redraw=0`
+            // kept that setting, so on resize the terminal left its prompt in
+            // place and the inner shell painted a second copy.
+            //
+            // One exception keeps the previous value. A bare A that arrives
+            // while the previous prompt's input is still pending (its B seen,
+            // nothing submitted) is part of that same prompt, not a new
+            // shell: PowerShell's integration writes `A;redraw=0` and `B`
+            // before the user's prompt function output is drawn, and a prompt
+            // theme such as oh-my-posh, or marks added by hand the way the
+            // Windows Terminal docs suggest, then adds its own bare A.
+            // Resetting on that would switch prompt clearing back on for
+            // PowerShell itself. A nested shell's first mark always follows
+            // a submitted command line, which consumes the pending input
+            // (a C mark, or noctty writing Enter), so it still resets.
             if (cmd.readOption(.redraw)) |v| {
                 self.flags.shell_redraws_prompt = v;
+            } else if (!same_prompt) {
+                self.flags.shell_redraws_prompt = .true;
             }
 
             click: {
