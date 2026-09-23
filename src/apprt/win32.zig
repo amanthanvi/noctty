@@ -120,6 +120,7 @@ const rgb = win32_theme.rgb;
 const rectEquals = chrome_layout.rectEquals;
 const childRect = chrome_layout.childRect;
 const layoutRectToWin32 = chrome_layout.layoutRectToWin32;
+const hostLayoutClientRect = chrome_layout.hostLayoutClientRect;
 const centeredRect = chrome_layout.centeredRect;
 const overlayEditFrameRect = chrome_layout.overlayEditFrameRect;
 const overlayLabelReservation = chrome_layout.overlayLabelReservation;
@@ -11004,6 +11005,9 @@ const Host = struct {
     status_brush: HBRUSH = null,
     current_dpi: u32 = 96,
     pending_dpi_update: bool = false,
+    /// The last client rect with an area, which layout keeps using while the
+    /// window is minimized. See `chrome_layout.hostLayoutClientRect`.
+    last_layout_client_rect: ?RECT = null,
     chrome_font: ?*anyopaque = null, // HFONT, owned
     /// Monospace HFONT for the confirm preview. The chrome font is
     /// proportional, which would misrepresent whitespace and column
@@ -18105,12 +18109,24 @@ const Host = struct {
     }
 
     fn contentRect(self: *Host) !RECT {
-        const hwnd = self.hwnd orelse return error.InvalidHost;
-        var rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &rect) == 0) {
+        if (self.hwnd == null) return error.InvalidHost;
+        const rect = (try self.layoutClientRect()) orelse return error.NoClientArea;
+        return self.contentRectFromClient(rect);
+    }
+
+    /// The client rect to lay children out against. A minimized window
+    /// reports 0x0, and this keeps the last rect that had an area instead,
+    /// so minimizing never resizes a terminal (#262). Null only before the
+    /// window has had a client area at all.
+    fn layoutClientRect(self: *Host) !?RECT {
+        const hwnd = self.hwnd orelse return null;
+        var live: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &live) == 0) {
             return lastError();
         }
-        return self.contentRectFromClient(rect);
+        const rect = hostLayoutClientRect(live, self.last_layout_client_rect) orelse return null;
+        self.last_layout_client_rect = rect;
+        return rect;
     }
 
     fn close(self: *Host) void {
@@ -18613,10 +18629,9 @@ const Host = struct {
     fn syncTabButtons(self: *Host) !bool {
         const hwnd = self.hwnd orelse return false;
         try self.ensureChromeButtons();
-        var rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &rect) == 0) {
-            return lastError();
-        }
+        // Same rect `layout` uses, so a title change while minimized does not
+        // cut every label down to a 0 px strip that survives the restore.
+        const rect = (try self.layoutClientRect()) orelse return false;
         const width = @max(0, rect.right - rect.left);
         const right_buttons_width = self.rightButtonsWidth();
         const caption_buttons_w = self.captionButtonsWidth();
@@ -19229,15 +19244,11 @@ const Host = struct {
     }
 
     fn layout(self: *Host) !void {
-        const hwnd = self.hwnd orelse return;
-        var rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &rect) == 0) {
-            return lastError();
-        }
+        const rect = (try self.layoutClientRect()) orelse return;
         var chrome_layout_changed = false;
         if (!self.layoutChromeForRect(rect, &chrome_layout_changed)) return;
 
-        const content_rect = try self.contentRect();
+        const content_rect = self.contentRectFromClient(rect);
         const layout_content_rect: win32_layout.Rect = .{
             .left = content_rect.left,
             .top = content_rect.top,
@@ -36438,6 +36449,70 @@ fn testLayeredAlpha(hwnd: HWND) ?u8 {
     if (sys.GetLayeredWindowAttributes(hwnd, null, &alpha, &flags) == 0) return null;
     if ((flags & c.LWA_ALPHA) == 0) return null;
     return alpha;
+}
+
+test "win32 host content rect keeps its size while the window is minimized" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    // Off-screen plus WS_EX_TOOLWINDOW keeps the window off the desktop and
+    // out of the taskbar, and the NOACTIVATE show commands leave the
+    // foreground alone.
+    const hwnd = sys.CreateWindowExW(
+        c.WS_EX_TOOLWINDOW,
+        prompt_label_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_POPUP,
+        -32_000,
+        -32_000,
+        800,
+        600,
+        null,
+        null,
+        sys.GetModuleHandleW(null),
+        null,
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(hwnd);
+    _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+
+    var app: App = undefined;
+    app.config = try configpkg.Config.default(alloc);
+    defer app.config.deinit();
+    app.use_integrated_titlebar = false;
+
+    var surface: Surface = undefined;
+    surface.decorations_visible = true;
+    surface.inspector_visible = false;
+
+    var host: Host = .{ .app = &app, .id = 262 };
+    host.hwnd = hwnd;
+    host.current_dpi = 96;
+    host.tabs = .empty;
+    host.active_tab = 0;
+    defer deinitTestHostWindowFixture(&host);
+    try host.tabs.ensureTotalCapacity(alloc, 1);
+    host.tabs.appendAssumeCapacity(try Tab.init(alloc, 1, &surface));
+
+    const shown = try host.contentRect();
+    try std.testing.expectEqual(@as(i32, 800), shown.right - shown.left);
+    try std.testing.expect(shown.bottom - shown.top > 1);
+
+    // The premise of #262: a minimized window has no client area at all.
+    _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+    try std.testing.expect(sys.IsIconic(hwnd) != 0);
+    var live: RECT = undefined;
+    try std.testing.expect(sys.GetClientRect(hwnd, &live) != 0);
+    try std.testing.expectEqual(@as(i32, 0), live.right - live.left);
+    try std.testing.expectEqual(@as(i32, 0), live.bottom - live.top);
+
+    // Laid out against that, the terminal became 1x1 px and so did its grid
+    // and pseudo console. It keeps the size it had instead.
+    try std.testing.expectEqual(shown, try host.contentRect());
+
+    _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+    try std.testing.expect(sys.IsIconic(hwnd) == 0);
+    try std.testing.expectEqual(shown, try host.contentRect());
 }
 
 test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" {

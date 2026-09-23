@@ -152,7 +152,7 @@ try {
 
     Assert-True ($osc.Contains("]133;D;0;aid=$PID")) "Prompt output missing OSC 133 D aid metadata"
     Assert-True ($osc.Contains(']7;file://')) "Prompt output missing OSC 7 cwd"
-    Assert-True ($osc.Contains("]133;A;cl=line;aid=$PID")) "Prompt output missing OSC 133 A prompt metadata"
+    Assert-True ($osc.Contains("]133;A;cl=line;aid=$PID;redraw=0")) "Prompt output missing OSC 133 A prompt metadata (redraw=0)"
     Assert-True ($osc.Contains(']133;B')) "Prompt output missing OSC 133 B marker"
     Assert-True ($promptText.Contains('NOCTTYPROBE> ')) "Wrapped prompt dropped the user's prompt text: $promptText"
 

@@ -954,6 +954,16 @@ test "integration.ps1 hooks OSC 133 C through AddToHistoryHandler" {
     try std.testing.expect(codeContains("__ghostty_line_is_being_accepted $Line"));
 }
 
+test "integration.ps1 marks its prompt as one the shell will not redraw" {
+    // Without `redraw=0` the terminal clears the prompt rows on every resize
+    // and waits for the shell to paint them again. PowerShell never re-runs
+    // `prompt` after a resize, so every resize left the cursor alone on a
+    // blank row where the prompt had been.
+    try std.testing.expect(codeContains(
+        "]133;A;cl=line;aid=${Global:__ghostty_aid};redraw=0${Global:__ghostty_bel}",
+    ));
+}
+
 test "integration.ps1 removes only an ssh wrapper it installed" {
     // The unconditional `Remove-Item -Path Function:\ssh,Function:\global:ssh`
     // that used to sit ahead of the feature check deleted a user's own

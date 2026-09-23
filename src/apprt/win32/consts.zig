@@ -48,6 +48,7 @@ pub const MA_NOACTIVATE: LRESULT = 3;
 
 pub const SW_SHOW = 5;
 pub const SW_SHOWNOACTIVATE = 4;
+pub const SW_SHOWMINNOACTIVE = 7;
 pub const SW_RESTORE = 9;
 pub const SW_MAXIMIZE = 3;
 pub const SW_HIDE = 0;
