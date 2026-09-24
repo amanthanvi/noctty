@@ -219,6 +219,9 @@ try {
         # nor use up a wrapper id per attempt.
         Microsoft.PowerShell.Management\Set-Item -Path 'function:prompt' -Value { 'LOCKED> ' } -Options ReadOnly -Force
         try {
+            # Set-Item on the function drive changes the existing global prompt
+            # in place rather than shadowing it in script scope; make sure.
+            Assert-True ((& ${function:global:prompt}) -ceq 'LOCKED> ') "The ReadOnly test prompt is not the global prompt"
             $countBefore = $Global:__ghostty_prompt_count
             $errorsBefore = $Error.Count
             __ghostty_wrap_prompt
