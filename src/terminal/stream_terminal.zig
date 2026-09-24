@@ -1511,6 +1511,65 @@ test "semantic prompt: PowerShell with its B after the prompt text keeps redraw=
     try testing.expect(t.flags.shell_redraws_prompt == .false);
 }
 
+test "semantic prompt: a shell started by a pasted line in cmd has its prompt cleared on resize" {
+    // Pasting `cd x` and `nu` into cmd is one write that submits two lines.
+    // cmd runs the first, then reads the second at its next prompt, which
+    // therefore opens with that line already waiting.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07");
+    t.screens.active.semanticPromptLinesSubmitted(2);
+    s.nextSlice("cd x\r\n\x1b]133;A;redraw=0\x07C:\\x>\x1b]133;B\x07nu\r\n");
+    s.nextSlice("\x1b]133;A\x07nu> \x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .true);
+
+    try t.resize(testing.allocator, 12, 6);
+    const screen = try t.plainString(testing.allocator);
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "nu>") == null);
+}
+
+test "semantic prompt: each typed-ahead line in cmd is waiting for its own prompt" {
+    // Two lines typed while a command runs: `ver`, then `nu`. The prompt
+    // after the command reads `ver`, and the one after that reads `nu`.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 10 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07ping -t x");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\nReply\r\n");
+    t.screens.active.semanticPromptInputSubmitted(); // typed ahead: ver
+    t.screens.active.semanticPromptInputSubmitted(); // typed ahead: nu
+    s.nextSlice("\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07ver\r\nVersion 10\r\n");
+    s.nextSlice("\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07nu\r\n");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+    s.nextSlice("\x1b]133;A\x07nu> \x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .true);
+}
+
+test "semantic prompt: a P mark with an explicit redraw sets it inside an open prompt" {
+    // noctty's PowerShell integration marks a prompt it could not wrap in
+    // time this way: a theme's bare A already opened it, and an A of our
+    // own would fresh-line away from the end of the drawn prompt.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 10 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A\x07THEME> ");
+    try testing.expect(t.flags.shell_redraws_prompt == .true);
+    const x = t.screens.active.cursor.x;
+    s.nextSlice("\x1b]133;P;k=i;redraw=0\x07\x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+    // No fresh-line: the cursor is still at the end of the prompt.
+    try testing.expectEqual(x, t.screens.active.cursor.x);
+}
+
 test "semantic prompt: a prompt marked redraw=0 survives a resize" {
     // The control for the tests above: a prompt from a shell that cannot
     // redraw is kept.

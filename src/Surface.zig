@@ -211,6 +211,10 @@ config_conditional_state: configpkg.ConditionalState,
 /// This is used to determine if we need to confirm, hold open, etc.
 child_exited: bool = false,
 
+/// True while the chunks of a bracketed paste are being queued, so the line
+/// breaks inside it are not counted as submitted lines.
+writing_bracketed_paste: bool = false,
+
 /// We maintain our focus state and assume we're focused by default.
 /// If we're not initially focused then apprts can call focusCallback
 /// to let us know.
@@ -1145,13 +1149,19 @@ fn keySubmitsSeparately(
     return key == .enter or key == .numpad_enter;
 }
 
-/// True if `data`, about to be written to the pty, contains a line
-/// terminator. This is the legacy encoding of Enter, the end of a text
-/// binding or IME commit, and any multi-line paste; the Kitty keyboard
-/// protocol encodes Enter as `CSI 13 u` instead and is handled at the key
-/// level in `keyCallback`.
-fn submissionInBytes(data: []const u8) bool {
-    return std.mem.indexOfAny(u8, data, "\r\n") != null;
+/// How many lines `data`, about to be written to the pty, submits: one per
+/// CR, and one per LF that does not follow a CR. A CR is the legacy encoding
+/// of Enter, and it ends a text binding, an IME commit, and every line of a
+/// non-bracketed paste, which turns each newline into a CR (so a CRLF from
+/// the clipboard arrives as two, and the shell does read two lines). The Kitty
+/// keyboard protocol encodes Enter as `CSI 13 u` instead, which is handled at
+/// the key level in `keyCallback`.
+fn submissionsInBytes(data: []const u8) u32 {
+    var lines: u32 = 0;
+    for (data, 0..) |c, i| {
+        if (c == '\r' or (c == '\n' and (i == 0 or data[i - 1] != '\r'))) lines +|= 1;
+    }
+    return lines;
 }
 
 /// Consume the OSC 133;B input mark if `data` submits the line. See
@@ -1163,14 +1173,18 @@ fn noteSubmittedInput(
     data: []const u8,
     mutex: termio.Termio.MutexState,
 ) void {
-    if (!submissionInBytes(data)) return;
-    self.markInputSubmitted(mutex);
+    // The line breaks inside a bracketed paste are part of the pasted text:
+    // the shell inserts them into the line it is editing and submits nothing.
+    if (self.writing_bracketed_paste) return;
+    const lines = submissionsInBytes(data);
+    if (lines == 0) return;
+    self.markInputSubmitted(mutex, lines);
 }
 
-fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState) void {
+fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState, lines: u32) void {
     if (mutex == .unlocked) self.renderer_state.mutex.lock();
     defer if (mutex == .unlocked) self.renderer_state.mutex.unlock();
-    self.io.terminal.screens.active.semanticPromptInputSubmitted();
+    self.io.terminal.screens.active.semanticPromptLinesSubmitted(lines);
 }
 
 test "Surface: an Enter key press records one submission" {
@@ -1188,15 +1202,19 @@ test "Surface: an Enter key press records one submission" {
     try testing.expect(!keySubmitsSeparately(.press, .key_a, false));
 }
 
-test "Surface: submissionInBytes recognises line terminators" {
+test "Surface: submissionsInBytes counts the lines a write submits" {
     const testing = std.testing;
-    try testing.expect(submissionInBytes("\r"));
-    try testing.expect(submissionInBytes("\n"));
-    try testing.expect(submissionInBytes("\x1b[200~one\ntwo\x1b[201~"));
-    try testing.expect(!submissionInBytes(""));
-    try testing.expect(!submissionInBytes("ls -la"));
-    try testing.expect(!submissionInBytes("\x1b[A"));
-    try testing.expect(!submissionInBytes("\x1b[<0;10;20M"));
+    try testing.expectEqual(@as(u32, 1), submissionsInBytes("\r"));
+    try testing.expectEqual(@as(u32, 1), submissionsInBytes("\n"));
+    try testing.expectEqual(@as(u32, 1), submissionsInBytes("ls\r\n"));
+    // A non-bracketed paste of two clipboard lines: each CRLF became `\r\r`,
+    // and the shell reads each CR as Enter.
+    try testing.expectEqual(@as(u32, 4), submissionsInBytes("cd x\r\rnu\r\r"));
+    try testing.expectEqual(@as(u32, 2), submissionsInBytes("cd x\rnu\r"));
+    try testing.expectEqual(@as(u32, 0), submissionsInBytes(""));
+    try testing.expectEqual(@as(u32, 0), submissionsInBytes("ls -la"));
+    try testing.expectEqual(@as(u32, 0), submissionsInBytes("\x1b[A"));
+    try testing.expectEqual(@as(u32, 0), submissionsInBytes("\x1b[<0;10;20M"));
 }
 
 /// Forces the surface to render. This is useful for when the surface
@@ -3456,7 +3474,7 @@ pub fn keyCallback(
 
         errdefer write_req.deinit();
         // Read before `queueIo` takes ownership of the bytes.
-        const bytes_submit = submissionInBytes(write_req.slice());
+        const bytes_submit = submissionsInBytes(write_req.slice()) > 0;
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = v },
             .stable => |v| .{ .write_stable = v },
@@ -3464,7 +3482,7 @@ pub fn keyCallback(
         }, .unlocked);
 
         if (keySubmitsSeparately(event.action, event.key, bytes_submit)) {
-            self.markInputSubmitted(.unlocked);
+            self.markInputSubmitted(.unlocked, 1);
         }
     } else {
         // No valid request means that we didn't encode anything.
@@ -7477,6 +7495,8 @@ fn completeClipboardPaste(
         self.alloc.free(v);
     };
 
+    self.writing_bracketed_paste = encode_opts.bracketed;
+    defer self.writing_bracketed_paste = false;
     for (vecs) |vec| if (vec.len > 0) {
         self.queueIo(try termio.Message.writeReq(
             self.alloc,

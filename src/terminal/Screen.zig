@@ -2475,7 +2475,13 @@ pub fn semanticPromptInputPending(self: *const Screen) bool {
 /// Consume the outstanding OSC 133;B input mark because a line terminator or
 /// Enter key was just written to the pty. See `SemanticCommand.consumeInput`.
 pub fn semanticPromptInputSubmitted(self: *Screen) void {
-    self.semantic_command.consumeInput(&self.pages);
+    self.semanticPromptLinesSubmitted(1);
+}
+
+/// Record a write that submitted `lines` lines at once, such as a multi-line
+/// paste. See `SemanticCommand.consumeInput`.
+pub fn semanticPromptLinesSubmitted(self: *Screen, lines: u32) void {
+    self.semantic_command.consumeInput(&self.pages, lines);
 }
 
 /// Record a prompt-start mark and report whether it starts a new prompt. See
