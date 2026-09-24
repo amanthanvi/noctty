@@ -225,8 +225,29 @@ for confirmation or honours `-WhatIf`, so a profile's `$ConfirmPreference` or
 The C mark's `cmdline_url` label is left off when it would not fit the
 terminal's 2048-byte OSC buffer, which drops a longer mark whole.
 
-One visible side effect: `Start-Transcript` records the prompt string, so a
-transcript now carries the B mark after each prompt.
+Side effects and edge cases of the line-reader alias and the appended B,
+measured on both hosts:
+
+- A transcript records the prompt string, so it carries the B mark after each
+  prompt. That includes sessions transcribed by the "Turn on PowerShell
+  Transcription" group policy, not only `Start-Transcript`.
+- A prompt that returns more than one object, or a non-string, is left as it
+  is and gets B written directly, before its text: PSReadLine's
+  `InvokePrompt` (Ctrl+L, transient prompts) draws `PS>` for a prompt that
+  returns several objects, so a B appended to the first one would be lost
+  after a repaint.
+- `PSConsoleHostReadLine` is a global alias, so `Get-Command
+  PSConsoleHostReadLine` reports the alias, and `Export-Alias -As Script` or
+  `Import-Alias -Force` can copy it into a profile. A session without this
+  script that loads such a profile cannot resolve the alias's target, and the
+  host silently falls back to its own line reader, without PSReadLine. Remove
+  the `PSConsoleHostReadLine` line from an exported alias file.
+- If the user already has an alias named `PSConsoleHostReadLine`, it is left
+  alone, and no C marks are emitted.
+- A `ReadOnly` or `Constant` prompt function cannot be wrapped and is left as
+  it is, without D, cwd or `redraw=0` marks.
+- The user's prompt runs inside the wrapper, so it can read the wrapper's
+  local variables through PowerShell's dynamic scoping, as it could before.
 
 The `ssh` wrapper below is installed only when an `ssh-*` feature is enabled,
 and only a wrapper this script installed is ever removed — a `function ssh`

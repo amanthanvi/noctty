@@ -182,14 +182,21 @@ try {
     try {
         # What the host draws for the odd returns, measured on both hosts:
         # only the first object, and `PS>` for an empty string or no output
-        # at all. B has to follow exactly that text, and the rest passes
-        # through. `__ghostty_wrap_prompt` is what the line reader runs
-        # before each line, so a prompt defined here is wrapped the way a
-        # prompt defined at the command line would be.
+        # at all. B has to follow exactly that text. `__ghostty_wrap_prompt`
+        # is what the line reader runs before each line, so a prompt defined
+        # here is wrapped the way a prompt defined at the command line would
+        # be.
+        #
+        # A prompt that returns several objects passes through untouched and
+        # gets B written directly instead: PSReadLine's InvokePrompt (Ctrl+L,
+        # transient prompts) draws `PS>` for it, so a B appended to the first
+        # object would never reach the screen after a repaint.
         function global:prompt { 'first> '; 'second> ' }
         __ghostty_wrap_prompt
-        $multi = @((Invoke-TestPrompt).Text)
-        Assert-True ($multi.Count -eq 2 -and $multi[0] -ceq "first> $B" -and $multi[1] -ceq 'second> ') "A multi-object prompt was reshaped: $($multi -join '|')"
+        $multiDrawn = Invoke-TestPrompt
+        $multi = @($multiDrawn.Text)
+        Assert-True ($multi.Count -eq 2 -and $multi[0] -ceq 'first> ' -and $multi[1] -ceq 'second> ') "A multi-object prompt was reshaped: $($multi -join '|')"
+        Assert-True ($multiDrawn.Osc.Contains(']133;B')) "A multi-object prompt got no B written directly: $($multiDrawn.Osc -replace [char]27, '<ESC>')"
 
         function global:prompt { '' }
         __ghostty_wrap_prompt
@@ -206,6 +213,25 @@ try {
         $numeric = Invoke-TestPrompt
         Assert-True ($numeric.Text -is [int] -and $numeric.Text -eq 42) "A non-string prompt was reshaped: $($numeric.Text)"
         Assert-True ($numeric.Osc.EndsWith($B)) "A non-string prompt got no B"
+
+        # A ReadOnly prompt cannot be wrapped. The line reader tries before
+        # every line, and it must neither put an error in $Error each time
+        # nor use up a wrapper id per attempt.
+        Microsoft.PowerShell.Management\Set-Item -Path 'function:prompt' -Value { 'LOCKED> ' } -Options ReadOnly -Force
+        try {
+            $countBefore = $Global:__ghostty_prompt_count
+            $errorsBefore = $Error.Count
+            __ghostty_wrap_prompt
+            __ghostty_wrap_prompt
+            $lockedErrors = $Error.Count - $errorsBefore
+            $lockedIds = $Global:__ghostty_prompt_count - $countBefore
+            $lockedText = (Invoke-TestPrompt).Text
+        } finally {
+            Microsoft.PowerShell.Management\Remove-Item -Path 'function:prompt' -Force
+        }
+        Assert-True ($lockedErrors -eq 0) "Wrapping a ReadOnly prompt added $lockedErrors record(s) to `$Error"
+        Assert-True ($lockedIds -eq 0) "Wrapping a ReadOnly prompt used up $lockedIds wrapper id(s)"
+        Assert-True ($lockedText -ceq 'LOCKED> ') "A ReadOnly prompt was not left as it is: $lockedText"
 
         # A prompt replaced after load (`. $PROFILE`, a theme re-init) is
         # drawn once as it is, then wrapped again before the next line.

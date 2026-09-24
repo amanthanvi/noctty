@@ -576,10 +576,21 @@ function global:__ghostty_wrap_prompt {
         return
     }
     if ($null -eq $current -and -not $EvenIfMissing) { return }
+    if ($null -ne $current) {
+        # A ReadOnly or Constant prompt cannot be replaced, and trying puts
+        # an error in $Error on every line. Leave it unwrapped. The provider
+        # path takes no scope qualifier (`function:global:prompt` finds
+        # nothing), and from this global function `function:prompt` is the
+        # global one. String interpolation, not a type reference, so this
+        # also runs under ConstrainedLanguage.
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath 'function:prompt' -ErrorAction Ignore
+        if ($null -ne $item -and "$($item.Options)" -match 'ReadOnly|Constant') { return }
+    }
     $id = [int](__ghostty_read_global '__ghostty_prompt_count') + 1
+    $function:global:prompt = '$__ghostty_ok = $?; __ghostty_prompt_body $__ghostty_ok ' + $id
+    # Only once the assignment has taken.
     $Global:__ghostty_prompt_count = $id
     $Global:__ghostty_prompts[$id] = $current
-    $function:global:prompt = '$__ghostty_ok = $?; __ghostty_prompt_body $__ghostty_ok ' + $id
     $Global:__ghostty_prompt_installed = ${function:global:prompt}
 }
 
@@ -831,15 +842,18 @@ function global:__ghostty_append_input_mark {
     $mark = "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
     $items = @($Output)
     $first = if ($items.Count -gt 0) { $items[0] } else { $null }
-    if ($null -ne $first -and -not ($first -is [string])) {
+    # A non-string, or more than one object: write B directly, before the
+    # text, as before this was appended to the prompt. PSReadLine's
+    # InvokePrompt (Ctrl+L, transient prompts) draws `PS>` for a prompt that
+    # returns several objects, so a B appended to the first one would never
+    # reach the screen after such a repaint.
+    if ($items.Count -gt 1 -or ($null -ne $first -and -not ($first -is [string]))) {
         __ghostty_write_osc $mark
         return $Output
     }
     $text = [string]$first
     if ($text.Length -eq 0) { $text = 'PS>' }
-    if ($items.Count -le 1) { return ($text + $mark) }
-    $items[0] = $text + $mark
-    return $items
+    return ($text + $mark)
 }
 
 # ── The line reader: OSC 133 C ───────────────────────────────────────────
