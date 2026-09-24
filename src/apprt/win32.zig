@@ -540,6 +540,48 @@ fn startupHostWindowStyle(decorations_visible: bool, fullscreen: bool) u32 {
     return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, c.WS_VISIBLE);
 }
 
+/// The style to write back over the one `CreateWindowEx` gave a host
+/// created with `requested`, or null when it kept the request.
+///
+/// `WS_OVERLAPPED` is 0, so the undecorated host style is a top-level
+/// window with neither `WS_POPUP` nor `WS_CHILD`, and `CreateWindowEx`
+/// gives every such window `WS_CAPTION` whatever the request says.
+/// `SetWindowLongPtr` does not. So with `window-decoration = none`, every
+/// window created with no window to copy (the first one, the quick
+/// terminal, a restored or adopted window) had a title bar, and a
+/// `new_window` clone did not: it and every runtime toggle set the style
+/// afterwards through `Surface.applyWindowStyle`. Creating the host as `WS_POPUP` instead would
+/// avoid the added caption, but `CW_USEDEFAULT` puts a popup at (0, 0)
+/// rather than at the next default position, so the first window would
+/// move. Windows also forces `WS_CLIPSIBLINGS` on every top-level window,
+/// through either API, so that bit is ignored here.
+fn createdHostWindowStyleCorrection(requested: u32, created: u32) ?u32 {
+    const forced: u32 = c.WS_CLIPSIBLINGS;
+    if ((requested & ~forced) == (created & ~forced)) return null;
+    return requested;
+}
+
+/// Put back the host style `CreateWindowEx` altered (see
+/// `createdHostWindowStyleCorrection`). `App.createHost` calls this while
+/// the host is still hidden and has no tabs, so no terminal is sized
+/// against, or shown with, the frame Windows added.
+fn restoreRequestedHostWindowStyle(hwnd: HWND, requested: u32) void {
+    const created: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+    const style = createdHostWindowStyleCorrection(requested, created) orelse return;
+    _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(usize, style)));
+    if (sys.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
+    ) == 0) {
+        log.warn("win32 host style restore failed err={}", .{lastError()});
+    }
+}
+
 fn surfaceWindowStyle() u32 {
     // Keep the terminal child surface hidden until GL + core init complete,
     // then show it explicitly from Surface.init.
@@ -8160,12 +8202,13 @@ pub const App = struct {
         const startup_decorations_visible = initialDecorationsVisibleForSource(&self.config, clone_state_from);
         host.cached_decorations_visible = startup_decorations_visible;
         const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
+        const startup_style = startupHostWindowStyle(startup_decorations_visible, startup_fullscreen);
 
         const hwnd = sys.CreateWindowExW(
             0,
             host_class_name,
             title,
-            startupHostWindowStyle(startup_decorations_visible, startup_fullscreen),
+            startup_style,
             if (position) |v| v.x else c.CW_USEDEFAULT,
             if (position) |v| v.y else c.CW_USEDEFAULT,
             1280,
@@ -8188,6 +8231,12 @@ pub const App = struct {
         };
 
         self.attachShellCompositorWindow(hwnd);
+        // An undecorated host comes back from `CreateWindowEx` with a
+        // caption it did not ask for. Take it off while the host is still
+        // hidden and has no tabs. This goes after the compositor attach
+        // because the frame change resizes the client area, and the host's
+        // WM_SIZE resizes its compositor target, which must exist by then.
+        restoreRequestedHostWindowStyle(hwnd, startup_style);
 
         try self.hosts.append(self.core_app.alloc, host);
         host_registered = true;
@@ -36279,6 +36328,69 @@ test "win32 startupHostWindowStyle respects decoration and fullscreen frame stat
     try std.testing.expect((startupHostWindowStyle(true, false) & c.WS_VISIBLE) == 0);
 }
 
+test "win32 createdHostWindowStyleCorrection takes back only what CreateWindowEx added" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Measured: `CreateWindowEx` answers the undecorated request with
+    // 0x06C00000, i.e. the request plus WS_CAPTION and WS_CLIPSIBLINGS.
+    const undecorated = startupHostWindowStyle(false, false);
+    try std.testing.expectEqual(
+        @as(?u32, undecorated),
+        createdHostWindowStyleCorrection(undecorated, undecorated | c.WS_CAPTION | c.WS_CLIPSIBLINGS),
+    );
+    try std.testing.expectEqual(@as(?u32, null), createdHostWindowStyleCorrection(undecorated, undecorated));
+
+    // Decorated and fullscreen requests come back with only the
+    // WS_CLIPSIBLINGS every top-level window carries, and stay untouched.
+    const decorated = startupHostWindowStyle(true, false);
+    try std.testing.expectEqual(@as(?u32, null), createdHostWindowStyleCorrection(decorated, decorated | c.WS_CLIPSIBLINGS));
+    const fullscreen = startupHostWindowStyle(false, true);
+    try std.testing.expectEqual(@as(?u32, null), createdHostWindowStyleCorrection(fullscreen, fullscreen | c.WS_CLIPSIBLINGS));
+}
+
+fn testWindowStyle(hwnd: HWND) u32 {
+    return @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+}
+
+test "win32 restoreRequestedHostWindowStyle removes the caption CreateWindowEx adds" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Never shown, so it reaches neither the desktop nor the taskbar.
+    const requested = startupHostWindowStyle(false, false);
+    const hwnd = sys.CreateWindowExW(
+        0,
+        prompt_label_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        requested,
+        0,
+        0,
+        640,
+        400,
+        null,
+        null,
+        sys.GetModuleHandleW(null),
+        null,
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(hwnd);
+
+    // The premise of the bug: nothing in the request asks for a caption,
+    // and the window has one anyway, eating into the client area.
+    try std.testing.expectEqual(@as(u32, c.WS_CAPTION), testWindowStyle(hwnd) & c.WS_CAPTION);
+    var client: RECT = undefined;
+    try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
+    try std.testing.expect(client.bottom < 400);
+
+    restoreRequestedHostWindowStyle(hwnd, requested);
+    try std.testing.expectEqual(requested, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
+    try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
+    try std.testing.expectEqual(@as(i32, 640), client.right - client.left);
+    try std.testing.expectEqual(@as(i32, 400), client.bottom - client.top);
+
+    // Already right: nothing to do, and the style stays put.
+    restoreRequestedHostWindowStyle(hwnd, requested);
+    try std.testing.expectEqual(requested, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
+}
+
 test "win32 initialDecorationsVisible follows startup source" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -36681,6 +36793,62 @@ test "win32 new host starts with the client area its first frame change keeps" {
     var client_origin: POINT = .{ .x = 0, .y = 0 };
     try std.testing.expect(sys.ClientToScreen(hwnd, &client_origin) != 0);
     try std.testing.expectEqual(window_rect.top, client_origin.y);
+}
+
+test "win32 createHost gives an undecorated host the style applyWindowStyle writes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    var core = try CoreApp.create(alloc);
+    defer core.destroy();
+    var app: App = undefined;
+    try app.init(core, .{ .safe_mode = true });
+    const hinstance = app.hinstance;
+    defer {
+        app.terminate();
+        _ = sys.UnregisterClassW(host_class_name, hinstance);
+        _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
+        _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
+    }
+    app.config.@"window-decoration" = .none;
+
+    // What `Surface.applyWindowStyle` writes for an undecorated window: the
+    // style every `new_window` clone and runtime toggle already ended with.
+    const applied = effectiveHostWindowStyle(false, false, true) & ~@as(u32, c.WS_VISIBLE);
+
+    // `createHost` as a `new_window` clone calls it: the decoration state
+    // comes from the source window rather than the config. The rest of the
+    // clone path (`inheritWindowStateFrom`) is not exercised here.
+    var source: Surface = undefined;
+    source.host = null;
+    source.decorations_visible = false;
+    source.fullscreen = false;
+
+    // An undecorated host must take neither caption path, whether or not the
+    // app uses the Windows 11 integrated one.
+    for ([_]bool{ true, false }) |integrated| {
+        app.use_integrated_titlebar = integrated;
+        // Hosts stay hidden, so the test never touches the foreground.
+        const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null);
+        const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &source);
+        for ([_]*Host{ first, clone }) |host| {
+            const hwnd = host.hwnd.?;
+            try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+            try std.testing.expect(!host.usingIntegratedTitlebar());
+            // Before the fix both came back with WS_CAPTION and a client
+            // area short by the caption (1258x744 of 1280x800 at 150%). A
+            // clone lost it later, in `inheritWindowStateFrom`; a window with
+            // no source never did.
+            try std.testing.expectEqual(applied, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
+            var window_rect: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);
+            var client: RECT = undefined;
+            try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
+            try std.testing.expectEqual(window_rect.right - window_rect.left, client.right - client.left);
+            try std.testing.expectEqual(window_rect.bottom - window_rect.top, client.bottom - client.top);
+        }
+    }
 }
 
 test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" {
