@@ -185,7 +185,9 @@ line is read. The one prompt drawn before that, by the user's own function,
 gets its marks from the line reader instead: OSC 7 and `133;P;k=i;redraw=0`
 in place of its missing A (P does not fresh-line, so the cursor stays where
 the prompt ended), then B. A `ReadOnly` prompt, which cannot be wrapped, gets
-the same on every line. What that prompt still lacks is its D, which would
+the same on every line. Only the host's own read of a prompt line gets these
+marks: not a script that calls `PSConsoleHostReadLine` itself, whose command
+they would cut short, and not a remote prompt under `Enter-PSSession`. What that prompt still lacks is its D, which would
 have closed the command that replaced the prompt: that command's
 command-finished notification and exit status are lost (the next C restarts
 the command timer, so nothing else is thrown off). Its text also arrives

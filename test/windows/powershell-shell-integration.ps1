@@ -317,17 +317,25 @@ try {
         return $Global:__noctty_test_next_line
     }
     function Invoke-TestReadLine {
-        param([string]$Line, [switch]$AfterFailure, [switch]$Repaint)
+        # -AsHost: the host runs the reader with nothing else on the call
+        # stack (one frame per nested prompt level on top), which is how the
+        # reader tells the host's read from a script calling it. This call
+        # sits under this script and this function, so raise the level to
+        # match; without the switch it is a script calling the reader.
+        param([string]$Line, [switch]$AfterFailure, [switch]$Repaint, [switch]$AsHost)
         $Global:__noctty_test_next_line = $Line
         $Global:__noctty_test_repaint = [bool]$Repaint
+        $savedLevel = $global:NestedPromptLevel
         $capture = [System.IO.StringWriter]::new()
         [Console]::SetOut($capture)
         try {
+            if ($AsHost) { $global:NestedPromptLevel = @(Get-PSCallStack).Count }
             if ($AfterFailure) {
                 Get-Item -LiteralPath (Join-Path $script:TempDir 'nope-not-here') -ErrorAction SilentlyContinue
             }
             $returned = PSConsoleHostReadLine
         } finally {
+            $global:NestedPromptLevel = $savedLevel
             [Console]::Out.Flush()
             [Console]::SetOut($script:OriginalOut)
         }
@@ -352,7 +360,16 @@ try {
     # for the next prompt.
     function global:prompt { 'REPLACED> ' }
     [void](Invoke-TestPrompt)
-    $unmarked = Invoke-TestReadLine 'Get-Date'
+    # A script that calls the reader itself gets no reader marks for an
+    # unmarked prompt: written into its running command, a B would end it
+    # and make the answer typed at the script the terminal's last command.
+    $direct = Invoke-TestReadLine 'answer'
+    Assert-True (-not ($direct.Osc -match '\]133;[PB]|\]7;')) "A script's own call to the reader got prompt marks: $($direct.Osc -replace [char]27, '<ESC>')"
+    Assert-True ($direct.Osc.Contains(']133;C;')) "A script's own call to the reader lost its C"
+    # The prompt is ours again now (that read wrapped it); replace it anew.
+    function global:prompt { 'REPLACED> ' }
+    [void](Invoke-TestPrompt)
+    $unmarked = Invoke-TestReadLine 'Get-Date' -AsHost
     Assert-True ($unmarked.Osc -match "^$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get OSC 7, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
     Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
     [void](Invoke-TestPrompt)

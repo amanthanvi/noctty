@@ -925,13 +925,27 @@ function global:__ghostty_readline {
     # way A does, so the cursor stays put after the drawn text. Its D is
     # lost, which costs the replacing command its command-finished
     # notification and exit status; the next C restarts the command timer.
+    #
+    # An unmarked read gets no marks at all in two cases, as before this
+    # wrote any. A script that calls PSConsoleHostReadLine itself is not the
+    # host reading a prompt line: the host's own read sits alone on the call
+    # stack (one frame, one more per nested prompt; measured on both hosts),
+    # and marks written into a running command would end it early. And under
+    # Enter-PSSession the prompt on screen is the remote one, drawn remotely:
+    # a P and B there would be dated with this machine's directory and turn
+    # remote prompts into local ones. Both checks run only for an unmarked
+    # prompt, so the usual read costs nothing more.
     try {
-        if (-not $marked) {
-            $cwd_uri = __ghostty_encode_cwd_uri
-            __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
-            __ghostty_write_osc "${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"
+        $from_host = $marked -or ((-not $Host.IsRunspacePushed) -and
+            (@(Get-PSCallStack).Count -le (1 + $NestedPromptLevel)))
+        if ($from_host) {
+            if (-not $marked) {
+                $cwd_uri = __ghostty_encode_cwd_uri
+                __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
+                __ghostty_write_osc "${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"
+            }
+            __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
         }
-        __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
     } catch {
         # A missing mark costs the terminal a prompt boundary, never a line.
     }
@@ -939,13 +953,13 @@ function global:__ghostty_readline {
     # A prompt drawn while the line is being read is PSReadLine's repaint
     # (Ctrl+L, a transient prompt): the prompt then carries its own B.
     #
-    # No try/finally around the call. When the reader throws (PSReadLine
-    # does, with stdin redirected), the host must see the throw and read the
-    # line itself; inside a try, measured on pwsh 7.6, the function instead
-    # ran on and returned $null, which the host takes for end of input and
-    # exits. A throw leaves the flag set, so the next prompt appends its own
-    # B as well as getting this one: a repeated B at the same spot, which
-    # the terminal takes as the same input start.
+    # No try/finally around the call. PSReadLine throws when stdin is
+    # redirected. As written, the wrapper runs on past the throw, clears both
+    # flags, and the host goes on to read the line itself. With the call
+    # inside `try { } finally { }` the host instead took the wrapper's return
+    # for end of input and the session exited after its first prompt.
+    # Measured on both hosts; why the host tells the two apart is not
+    # established.
     $Global:__ghostty_in_readline = $true
     # Hand on the $? the command left, as the last statement before the
     # call; see __ghostty_prompt_body.
