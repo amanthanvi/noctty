@@ -1129,6 +1129,22 @@ fn queueIo(
     self.io.queueMessage(msg, mutex);
 }
 
+/// Whether a key press has to record its own submission. Enter submits the
+/// line whatever its encoding. The legacy encoding is a CR, which `queueIo`
+/// already recorded from the bytes; the Kitty keyboard protocol sends
+/// `CSI 13 u`, which carries no line terminator, so that one is recorded
+/// here. One key press must record exactly one submission: the terminal
+/// counts a second one, made after the first has closed the prompt, as a line
+/// typed ahead for the next prompt (`SemanticCommand.consumeInput`).
+fn keySubmitsSeparately(
+    action: input.Action,
+    key: input.Key,
+    bytes_submit: bool,
+) bool {
+    if (action == .release or bytes_submit) return false;
+    return key == .enter or key == .numpad_enter;
+}
+
 /// True if `data`, about to be written to the pty, contains a line
 /// terminator. This is the legacy encoding of Enter, the end of a text
 /// binding or IME commit, and any multi-line paste; the Kitty keyboard
@@ -1155,6 +1171,21 @@ fn markInputSubmitted(self: *Surface, mutex: termio.Termio.MutexState) void {
     if (mutex == .unlocked) self.renderer_state.mutex.lock();
     defer if (mutex == .unlocked) self.renderer_state.mutex.unlock();
     self.io.terminal.screens.active.semanticPromptInputSubmitted();
+}
+
+test "Surface: an Enter key press records one submission" {
+    const testing = std.testing;
+
+    // Legacy Enter: the CR in the bytes already counted it.
+    try testing.expect(!keySubmitsSeparately(.press, .enter, true));
+    try testing.expect(!keySubmitsSeparately(.repeat, .numpad_enter, true));
+
+    // Kitty keyboard protocol Enter, `CSI 13 u`: no terminator in the bytes.
+    try testing.expect(keySubmitsSeparately(.press, .enter, false));
+    try testing.expect(keySubmitsSeparately(.press, .numpad_enter, false));
+
+    try testing.expect(!keySubmitsSeparately(.release, .enter, false));
+    try testing.expect(!keySubmitsSeparately(.press, .key_a, false));
 }
 
 test "Surface: submissionInBytes recognises line terminators" {
@@ -3424,18 +3455,15 @@ pub fn keyCallback(
         }
 
         errdefer write_req.deinit();
+        // Read before `queueIo` takes ownership of the bytes.
+        const bytes_submit = submissionInBytes(write_req.slice());
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = v },
             .stable => |v| .{ .write_stable = v },
             .alloc => |v| .{ .write_alloc = v },
         }, .unlocked);
 
-        // Enter submits the line whatever its encoding. The legacy `\r` is
-        // caught by `queueIo`'s byte scan; the Kitty keyboard protocol sends
-        // `CSI 13 u`, which is not, so consume the OSC 133;B mark here too.
-        if (event.action != .release and
-            (event.key == .enter or event.key == .numpad_enter))
-        {
+        if (keySubmitsSeparately(event.action, event.key, bytes_submit)) {
             self.markInputSubmitted(.unlocked);
         }
     } else {
