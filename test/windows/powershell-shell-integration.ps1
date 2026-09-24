@@ -292,27 +292,34 @@ try {
         $function:global:prompt = $savedPrompt
     }
 
-    # ── OSC 133 C comes from the line reader ─────────────────────────────
+    # ── B and C come from the line reader ────────────────────────────────
     #
     # The console host reads each line by running the command
     # `PSConsoleHostReadLine`, which PSReadLine defines. The integration's
-    # alias of that name calls whatever function is there and emits C once
-    # the line is accepted. That covers a line equal to the previous history
-    # entry, which PSReadLine keeps away from AddToHistoryHandler (the hook
-    # this used to ride on), and never fires for history replay.
+    # alias of that name calls whatever function is there. Before it does, the
+    # host has drawn the prompt, so it writes B there, where input really
+    # begins; once the line is accepted it writes C. That covers a line equal
+    # to the previous history entry, which PSReadLine keeps away from
+    # AddToHistoryHandler (the hook C used to ride on), and never fires for
+    # history replay.
     #
     # A non-interactive host cannot run PSReadLine's real ReadLine, so a
     # stand-in function of that name returns the line. What PSReadLine does
     # with a live console is covered by the pseudo-console recordings.
     Assert-True ((Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue).CommandType -eq 'Alias') "PSConsoleHostReadLine is not hooked through an alias"
     $Global:__noctty_test_status = New-Object System.Collections.ArrayList
+    $Global:__noctty_test_repaint = $null
     function global:PSConsoleHostReadLine {
         [void]$Global:__noctty_test_status.Add($?)
+        # Stands in for PSReadLine's InvokePrompt (Ctrl+L, a transient
+        # prompt), which runs `prompt` while the line is being read.
+        if ($Global:__noctty_test_repaint) { $Global:__noctty_test_repaint = prompt }
         return $Global:__noctty_test_next_line
     }
     function Invoke-TestReadLine {
-        param([string]$Line, [switch]$AfterFailure)
+        param([string]$Line, [switch]$AfterFailure, [switch]$Repaint)
         $Global:__noctty_test_next_line = $Line
+        $Global:__noctty_test_repaint = [bool]$Repaint
         $capture = [System.IO.StringWriter]::new()
         [Console]::SetOut($capture)
         try {
@@ -326,16 +333,50 @@ try {
         }
         return [pscustomobject]@{ Returned = $returned; Osc = $capture.ToString() }
     }
+    $C = "$([char]27)]133;C;aid=$PID"
 
+    # With a line reader to hook, the prompt returns exactly the user's
+    # text: a transcript records that string, so B stays out of it. The
+    # reader then writes B after the drawn prompt, and nothing else when the
+    # prompt was ours.
+    $drawn = Invoke-TestPrompt
+    Assert-True ($drawn.Text -ceq 'NOCTTYPROBE> ') "The prompt returned more than the user's text: $($drawn.Text -replace [char]27, '<ESC>')"
+    Assert-True ($drawn.Osc.Contains($A) -and -not $drawn.Osc.Contains(']133;B')) "The prompt wrote B itself: $($drawn.Osc -replace [char]27, '<ESC>')"
     $read = Invoke-TestReadLine "Get-ChildItem 'a;b'"
     Assert-True ($read.Returned -ceq "Get-ChildItem 'a;b'") "The line reader changed the line: $($read.Returned)"
-    Assert-True ($read.Osc -ceq "$([char]27)]133;C;aid=$PID;cmdline_url=Get-ChildItem%20%27a%3Bb%27$([char]7)") "The line reader did not emit exactly one OSC 133 C: $($read.Osc -replace [char]27, '<ESC>')"
+    Assert-True ($read.Osc -ceq "$B${C};cmdline_url=Get-ChildItem%20%27a%3Bb%27$([char]7)") "The line reader did not write exactly B, then one C: $($read.Osc -replace [char]27, '<ESC>')"
+
+    # A prompt that is not ours was drawn without D, cwd or A. The reader
+    # gives it OSC 7 and a P mark with redraw=0 before its B (P does not
+    # fresh-line, so the cursor stays where the prompt ended), and wraps it
+    # for the next prompt.
+    function global:prompt { 'REPLACED> ' }
+    [void](Invoke-TestPrompt)
+    $unmarked = Invoke-TestReadLine 'Get-Date'
+    Assert-True ($unmarked.Osc -match "^$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get OSC 7, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
+    Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
+    [void](Invoke-TestPrompt)
+    $marked = Invoke-TestReadLine 'Get-Date'
+    Assert-True ($marked.Osc.StartsWith("$B$C")) "A re-wrapped prompt still got a P mark: $($marked.Osc -replace [char]27, '<ESC>')"
+
+    # A prompt drawn while the line is read is PSReadLine repainting it, and
+    # nothing writes B after that repaint but the prompt itself. Afterwards
+    # the next prompt is back to plain text.
+    [void](Invoke-TestPrompt)
+    $repainted = Invoke-TestReadLine 'Get-Date' -Repaint
+    Assert-True ($Global:__noctty_test_repaint -ceq "REPLACED> $B") "A repaint did not carry its own B: $($Global:__noctty_test_repaint -replace [char]27, '<ESC>')"
+    Assert-True ([regex]::Matches($repainted.Osc, '\]133;P').Count -eq 0) "A repaint turned the next line into an unmarked one"
+    Assert-True ((Invoke-TestPrompt).Text -ceq 'REPLACED> ') "After a repaint the prompt still carries B"
+    function global:prompt { 'NOCTTYPROBE> ' }
+    __ghostty_wrap_prompt
+    [void](Invoke-TestPrompt)
+
     $again = Invoke-TestReadLine "Get-ChildItem 'a;b'"
     Assert-True ($again.Osc.Contains(']133;C;')) "A repeated line got no OSC 133 C"
     foreach ($blank in @('', '   ', "`t")) {
         $none = Invoke-TestReadLine $blank
         Assert-True ($none.Returned -ceq $blank) "The line reader changed a blank line"
-        Assert-True ($none.Osc.Length -eq 0) "A blank line emitted OSC 133 C: $($none.Osc -replace [char]27, '<ESC>')"
+        Assert-True (-not $none.Osc.Contains(']133;C')) "A blank line emitted OSC 133 C: $($none.Osc -replace [char]27, '<ESC>')"
     }
     $multiLine = Invoke-TestReadLine "if (`$true) {`n  'x'`n}"
     Assert-True ($multiLine.Osc.Contains('cmdline_url=if%20%28%24true%29%20%7B%0A%20%20%27x%27%0A%7D') -or
@@ -343,9 +384,9 @@ try {
     # The terminal drops an OSC 133 mark longer than its 2048-byte buffer
     # whole, so a label that would not fit is left off and C still goes out.
     $quoted = Invoke-TestReadLine ('"' * 800)
-    Assert-True ($quoted.Osc -ceq "$([char]27)]133;C;aid=$PID$([char]7)") "A line whose label would not fit did not get a bare C: $($quoted.Osc.Substring(0, [Math]::Min(80, $quoted.Osc.Length)))"
+    Assert-True ($quoted.Osc.EndsWith("$C$([char]7)")) "A line whose label would not fit did not get a bare C: $($quoted.Osc.Substring(0, [Math]::Min(80, $quoted.Osc.Length)))"
     $huge = Invoke-TestReadLine ('x' * 40000)
-    Assert-True ($huge.Osc -ceq "$([char]27)]133;C;aid=$PID$([char]7)") "An oversized line did not get a C without its label: $($huge.Osc.Substring(0, [Math]::Min(80, $huge.Osc.Length)))"
+    Assert-True ($huge.Osc.EndsWith("$C$([char]7)")) "An oversized line did not get a C without its label: $($huge.Osc.Substring(0, [Math]::Min(80, $huge.Osc.Length)))"
 
     # PSReadLine's own PSConsoleHostReadLine reads $? first and hands it to
     # predictors as the previous command's status; ours must pass it on.
@@ -354,21 +395,14 @@ try {
     [void](Invoke-TestReadLine 'Get-Date' -AfterFailure)
     Assert-True (($Global:__noctty_test_status -join ',') -eq 'True,False') "The line reader did not pass `$? through: $($Global:__noctty_test_status -join ',')"
 
-    # The line reader is where a prompt replaced by the previous command is
-    # wrapped again, before the next prompt is drawn.
-    function global:prompt { 'VIA-READLINE> ' }
-    [void](Invoke-TestReadLine 'Get-Date')
-    Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
-    Assert-True ((Invoke-TestPrompt).Text -ceq "VIA-READLINE> $B") "The prompt the line reader wrapped is drawn wrong"
-    function global:prompt { 'NOCTTYPROBE> ' }
-    __ghostty_wrap_prompt
-
     # With no function of that name the host reads the line itself; called
-    # by hand, the alias must produce nothing rather than an error.
+    # by hand, the alias must produce nothing rather than an error. The
+    # prompt then carries B itself, as in the checks further up.
     Remove-Item -LiteralPath 'Function:\PSConsoleHostReadLine' -Force
     $errorsBefore = $Error.Count
     $orphan = @(PSConsoleHostReadLine)
     Assert-True ($orphan.Count -eq 0 -and $Error.Count -eq $errorsBefore) "The line reader without PSConsoleHostReadLine produced output or an error"
+    Assert-True ((Invoke-TestPrompt).Text -ceq "NOCTTYPROBE> $B") "Without a line reader the prompt did not carry B"
 
     # ── The user's history handler is not ours to touch ─────────────────
     #
@@ -418,7 +452,9 @@ try {
         [Console]::SetOut([System.IO.StringWriter]::new())
         $legacyPrompt = prompt
         [Console]::SetOut($script:OriginalOut)
-        Assert-True ($legacyPrompt -ceq "LEGACY-USER> $B") "The prompt after retiring the previous version is wrong: $($legacyPrompt -replace [char]27, '<ESC>')"
+        # PSReadLine is loaded here, so its PSConsoleHostReadLine is what
+        # writes B; the prompt returns the user's text alone.
+        Assert-True ($legacyPrompt -ceq 'LEGACY-USER> ') "The prompt after retiring the previous version is wrong: $($legacyPrompt -replace [char]27, '<ESC>')"
         $function:global:prompt = { 'NOCTTYPROBE> ' }
         __ghostty_wrap_prompt
     }

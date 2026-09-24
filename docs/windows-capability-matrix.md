@@ -107,14 +107,17 @@ that:
   `%LOCALAPPDATA%\noctty\shell-integration\powershell\integration.ps1`.
 - PowerShell emits OSC 7 cwd URIs and OSC 133 A / B prompt marks plus
   OSC 133 D command-finish status, around whatever `prompt` is current
-  (starship, oh-my-posh, hand-written). B follows the visible prompt text: it
-  rides at the end of the string the prompt returns, so the prompt's cells are
-  marked as prompt rather than input.
+  (starship, oh-my-posh, hand-written). B follows the visible prompt text: the
+  line reader writes it after the host has drawn the prompt, so the prompt's
+  cells are marked as prompt rather than input, and the prompt string a
+  transcript records carries no mark (without PSReadLine, B still rides in
+  that string).
 - The prompt is wrapped in a generated `function prompt`, and the line reader
   through a global alias (`PSConsoleHostReadLine`). A prompt replaced after
   startup (`. $PROFILE`, a theme re-init, a venv's `Activate.ps1`) is wrapped
-  again before the next line is read, so one prompt after the replacement is
-  drawn without noctty's marks. `Get-Command prompt` stays a Function.
+  again before the next line is read; the one prompt drawn before that gets
+  OSC 7, a `133;P;k=i;redraw=0` mark and B from the line reader, but no D.
+  `Get-Command prompt` stays a Function.
 - OSC 133 C (pre-execution mark, carrying a `cmdline_url` of the command being
   accepted) goes out when the line reader returns an accepted line, once per
   line, including a line that repeats the previous history entry, and never

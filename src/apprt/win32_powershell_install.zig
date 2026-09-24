@@ -1001,12 +1001,45 @@ test "integration.ps1 wraps the prompt in a generated function the line reader r
     ));
 }
 
-test "integration.ps1 puts OSC 133 B after the prompt text" {
-    // The host draws the string `prompt` returns only after it returns, so
-    // a B written directly lands ahead of the whole visible prompt and the
-    // terminal records the prompt's cells as input. B has to ride at the end
-    // of the returned string, and exactly one code line may spell it.
-    try std.testing.expect(codeContains("$out = __ghostty_append_input_mark $out"));
+test "integration.ps1 writes OSC 133 B from the line reader" {
+    // The host draws the string `prompt` returns only after it returns, so a
+    // B written from the prompt lands ahead of the visible prompt and the
+    // terminal records the prompt's cells as input. Appending B to the
+    // returned string put it in every transcript. The line reader writes it
+    // instead: the host has drawn the prompt by then, whatever it returned,
+    // and PSReadLine has not started.
+    const readline = std.mem.indexOf(u8, integration_script, "function global:__ghostty_readline {").?;
+    const b_write = std.mem.indexOfPos(
+        u8,
+        integration_script,
+        readline,
+        "__ghostty_write_osc \"${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}\"",
+    ).?;
+    const read = std.mem.indexOfPos(u8, integration_script, readline, "    $line = & $read_line").?;
+    try std.testing.expect(b_write < read);
+    // A prompt our wrapper did not draw (replaced by the last command, or a
+    // ReadOnly one) gets OSC 7 and a P mark with redraw=0 in place of its
+    // missing A. P, unlike A, does not fresh-line.
+    const p_write = std.mem.indexOfPos(
+        u8,
+        integration_script,
+        readline,
+        "__ghostty_write_osc \"${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}\"",
+    ).?;
+    try std.testing.expect(p_write < b_write);
+    try std.testing.expect(codeContains("$Global:__ghostty_prompt_marked = $true"));
+    // The prompt appends B itself only where no line read follows a host
+    // draw: a PSReadLine repaint, which runs inside the reader, or a session
+    // with no PSConsoleHostReadLine function to hook.
+    try std.testing.expect(codeContains("if (-not $reader_marks_input) { $out = __ghostty_append_input_mark $out }"));
+    try std.testing.expect(codeContains("(-not (__ghostty_read_global '__ghostty_in_readline')) -and"));
+    // The reader must not be wrapped in try/finally: a throw from it has to
+    // reach the host, which then reads the line itself. Inside a try the
+    // function ran on and returned $null, which the host takes for end of
+    // input and exits.
+    try std.testing.expect(std.mem.indexOf(u8, integration_script, "    $line = & $read_line\n    $Global:__ghostty_in_readline = $false\n") != null);
+    // B is spelled in exactly two code lines: the reader's, and the
+    // prompt's own for those two cases.
     var b_lines: usize = 0;
     var lines = std.mem.splitScalar(u8, integration_script, '\n');
     while (lines.next()) |raw| {
@@ -1014,10 +1047,7 @@ test "integration.ps1 puts OSC 133 B after the prompt text" {
         if (line.len == 0 or line[0] == '#') continue;
         if (std.mem.indexOf(u8, line, "]133;B") != null) b_lines += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), b_lines);
-    try std.testing.expect(codeContains(
-        "$mark = \"${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}\"",
-    ));
+    try std.testing.expectEqual(@as(usize, 2), b_lines);
 }
 
 test "integration.ps1 marks its prompt as one the shell will not redraw" {
@@ -1347,7 +1377,8 @@ test "installIfStale: different content on disk triggers reinstall" {
 const terminal_for_tests = @import("../terminal/main.zig");
 
 /// The prompt the script draws: D, OSC 7 and `A;redraw=0` written directly
-/// while `prompt` runs, then the string it returns, which carries B.
+/// while `prompt` runs; the host then draws the string it returns, and the
+/// line reader writes B after it.
 const pwsh_prompt_marks = "\x1b]133;D;0;aid=1\x07\x1b]7;file://h/C:/\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07";
 
 fn pwshReplay(
@@ -1450,4 +1481,37 @@ test "PowerShell marks: a shell started by a repeated line gets its prompt clear
     const broken = try pwshNestedShellAfterTransientRepeat(alloc, "\x1b[0m");
     defer alloc.free(broken);
     try std.testing.expect(std.mem.indexOf(u8, broken, "inner$") != null);
+}
+
+test "PowerShell marks: a prompt the wrapper did not draw gets its marks from the line reader" {
+    // `. $PROFILE` replaced the prompt, so the next prompt is drawn by the
+    // user's own function: no D, no OSC 7, no A. The line reader then writes
+    // OSC 7 and `P;k=i;redraw=0` in place of the A, and B. Trimmed from the
+    // pwsh 7.6.6 recording of that exact sequence.
+    const alloc = std.testing.allocator;
+    const before = pwsh_prompt_marks ++ "PS> \x1b]133;B\x07. $PROFILE";
+    const reload = "\r\n\x1b]133;C;aid=1;cmdline_url=.%20%24PROFILE\x07RELOADED> ";
+    {
+        var t = try pwshReplay(alloc, 40, &.{
+            before,
+            "",
+            reload ++ "\x1b]7;file://h/C:/\x07\x1b]133;P;k=i;redraw=0\x07\x1b]133;B\x07",
+        });
+        defer t.deinit(alloc);
+        // Input is marked, so noctty knows a line editor is reading here...
+        try std.testing.expect(t.screens.active.semanticPromptInputPending());
+        // ...and the prompt says it cannot redraw, so a resize keeps it.
+        try std.testing.expect(t.flags.shell_redraws_prompt == .false);
+        try t.resize(alloc, 20, 8);
+        const screen = try t.plainString(alloc);
+        defer alloc.free(screen);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "RELOADED>") != null);
+    }
+    // Control: the same prompt without the reader's marks, as before. No
+    // input mark, so `insert_last_command` has nothing to type into.
+    {
+        var t = try pwshReplay(alloc, 40, &.{ before, "", reload });
+        defer t.deinit(alloc);
+        try std.testing.expect(!t.screens.active.semanticPromptInputPending());
+    }
 }
