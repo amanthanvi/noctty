@@ -158,28 +158,75 @@ disabled or the command shape is unsupported.
 
 The PowerShell script emits OSC 7 as a full `file://` URI with each path
 segment percent-encoded, and OSC 133 A / B / D prompt marks with a stable
-`aid=$PID`, wrapped around whatever `prompt` the profile installed. The
-command-start mark (OSC 133 C, with URL-encoded `cmdline_url` metadata) rides
-on PSReadLine's `AddToHistoryHandler`, which PSReadLine invokes for every
-accepted line whatever Enter is bound to, and invokes before the host executes
-the line. It used to ride on `CommandValidationHandler`, which only
-`ValidateAndAcceptLine` invokes; since the default Enter binding is
-`AcceptLine`, no OSC 133 C was emitted at all unless the user had rebound
-Enter. Both command-palette actions that need a C mark — copying the last
-completed command output and inserting the last recoverable command —
-therefore now work by default on PowerShell.
+`aid=$PID`, around whatever `prompt` the profile installed. D, OSC 7 and
+`A;redraw=0` are written while the prompt function runs, so anything the
+user's prompt writes itself lands after A. B rides at the end of the string
+the prompt returns, because the host draws that string only after the function
+returns: a B written directly would land ahead of the visible prompt and mark
+its cells as input, which made `insert_last_command` type the old prompt back
+in front of the command.
 
-The integration chains to whatever `AddToHistoryHandler` was already installed
-and returns its answer unchanged rather than replacing it. PSReadLine always
-has one: 2.4.x and 2.0.x both ship a default handler that keeps
-credential-shaped lines out of the on-disk history file, so an unchained
-override would start writing secrets there. Re-sourcing the script rebinds to
-the saved original instead of chaining to itself, so the mark is never
-duplicated. On PSReadLine 2.0.x (Windows PowerShell 5.1) the handler is also
-called for every line replayed from the shared `ConsoleHost_history.txt` and
-for lines other live sessions append; OSC 133 C is emitted only when
-PSReadLine's edit buffer matches the line, so those replays reach the chained
-handler without producing a command mark.
+The prompt hook is a generated `function prompt` of one line: it captures
+`$?` and calls `__ghostty_prompt_body` with the id of the prompt it wraps. The
+id is part of the function's text, so a copy of it (a venv's `Activate.ps1`
+saving the prompt with `Copy-Item`, a profile chaining to `$function:prompt` or
+`(Get-Command prompt).ScriptBlock`) still wraps the same prompt, and a copy
+called from inside a newer wrapper passes straight through without a second
+set of marks. A prompt replaced after startup (`. $PROFILE`, an oh-my-posh or
+Starship re-init, a venv) is wrapped again by the line reader before the next
+line is read, so exactly one prompt after the replacement is drawn without
+noctty's marks. (For a venv that one prompt is `(venv) ` followed by the saved
+copy of our wrapper, so its marks land after `(venv) ` instead of before it.)
+That needs PSReadLine; without it a replaced prompt stays unwrapped, as
+before.
+
+Hooking `prompt` through a global alias instead, which PowerShell resolves
+before a function of the same name, would catch that one prompt too. It was
+tried and measured, and it costs more than it saves: `Get-Command prompt` then
+returns the alias, whose missing `ScriptBlock` breaks a profile that chains to
+the prompt that way on every later `. $PROFILE`, and PSReadLine then sees the
+user's own prompt, derives a `PromptText` such as `> ` from a plain prompt like
+PowerShell's default, and repaints it after the B mark on every parse error, so
+the terminal takes those cells for input.
+
+The line reader is hooked through a global alias, `PSConsoleHostReadLine` ->
+`__ghostty_readline`. The console host reads each line by running that
+command, but only when a function (or cmdlet) of that name exists, which
+PSReadLine defines. The alias wraps whatever function is current: PSReadLine's
+own, a profile's wrapper of it, or a re-imported PSReadLine's; without
+PSReadLine the host reads the line itself and the alias is idle.
+
+The command-start mark (OSC 133 C, with URL-encoded `cmdline_url` metadata)
+goes out when the host's line reader returns an accepted line, just before the
+host runs it: once per line, including a line equal to the previous history
+entry, and never for lines PSReadLine 2.0.x replays from the history file. An
+empty or whitespace-only line gets no C, as with the clink, zsh and bash
+integrations, so it does not replace the command that `insert_last_command`
+and copying the last command output work on. The host only calls
+`PSConsoleHostReadLine` when PSReadLine (or a profile) defines that function,
+so without PSReadLine there is no C and nothing else changes.
+
+Earlier versions hung C off PSReadLine's `AddToHistoryHandler`, which
+PSReadLine skips for a line equal to the previous history entry under the
+default `HistoryNoDuplicates`, and for whitespace-only lines, so running the
+same command twice got no C the second time. noctty no longer touches the
+`AddToHistoryHandler` at all: the user's handler, and PSReadLine's default one
+that keeps credential-shaped lines out of the history file, stay exactly as
+they were. Loading the script into a session that already ran an older copy
+puts back the prompt function and history handler that copy replaced.
+
+Both wrappers hand `$?` on: the user's prompt sees the status their command
+left, which Starship and oh-my-posh read for their error indicator (under the
+old wrapper it always read `True`), and PSReadLine's `PSConsoleHostReadLine`
+gets the same value it passes to predictors. Nothing the script installs asks
+for confirmation or honours `-WhatIf`, so a profile's `$ConfirmPreference` or
+`$WhatIfPreference` cannot stop the launch or disable the hooks.
+
+The C mark's `cmdline_url` label is left off when it would not fit the
+terminal's 2048-byte OSC buffer, which drops a longer mark whole.
+
+One visible side effect: `Start-Transcript` records the prompt string, so a
+transcript now carries the B mark after each prompt.
 
 The `ssh` wrapper below is installed only when an `ssh-*` feature is enabled,
 and only a wrapper this script installed is ever removed — a `function ssh`
@@ -190,8 +237,9 @@ The exit code carried by OSC 133 D is derived without ever writing to
 `$LASTEXITCODE`, which users read. PowerShell only updates that variable for
 native executables and scripts and never clears it, while `$?` goes false for
 any failure, so the prompt combines three readings taken at the top of each
-draw: `$?`, `$LASTEXITCODE` against the value snapshotted at the end of the
-previous draw, and the head of `$Error` against its own snapshot.
+draw: `$?`, `$LASTEXITCODE` against the value snapshotted when the previous
+line was accepted (at the end of the previous draw without PSReadLine), and
+the head of `$Error` against its own snapshot.
 
 When `$?` is true, a changed `$LASTEXITCODE` is reported and an unchanged one
 means `0`. When `$?` is false and `$LASTEXITCODE` changed to a nonzero value,
@@ -220,8 +268,12 @@ still reads as a failure:
 - A command silenced with `-ErrorAction Ignore` records nothing anywhere, so
   it is reported with the stale native code rather than `1`.
 - PowerShell does not reset `$?` for an empty command line, so pressing Enter
-  after a failed native command re-reports its code.
-- Ctrl-C at the prompt is not distinguished from the previous failure.
+  after a failed native command re-reports its code. No C precedes that D, so
+  the terminal attaches it to no command.
+- Ctrl-C at the prompt is not distinguished from the previous failure, with
+  the same effect.
+- A line that does not parse leaves `$?` true, so it is recognised by a new
+  bare `ParseException` at the head of `$Error` and marked `1`.
 - `$?` does not propagate out of a function, `& { }`, `. { }` or
   `Invoke-Expression`, and Windows PowerShell 5.1 leaves it true for a parse
   error, so `function f { cmd /c exit 5 }; f` marks `0`. These take the

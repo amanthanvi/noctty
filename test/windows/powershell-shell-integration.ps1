@@ -18,7 +18,7 @@ $script:OriginalPrompt = $function:global:prompt
 $script:OriginalOut = [Console]::Out
 $script:OriginalFeatures = $env:GHOSTTY_SHELL_FEATURES
 # PSReadLine is not auto-loaded in a non-interactive host, so this is $null
-# until the AddToHistoryHandler section below imports the module itself.
+# until the history-handler section below imports the module itself.
 $script:PSReadLineImported = $false
 $script:OriginalAddToHistoryHandler = $null
 $script:IntegrationPath = Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1'
@@ -144,169 +144,254 @@ try {
     . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
     Assert-True ($null -eq (Get-Command ssh -CommandType Function -ErrorAction SilentlyContinue)) "ssh wrapper was not removed when ssh features were disabled"
 
-    $capture = [System.IO.StringWriter]::new()
-    [Console]::SetOut($capture)
-    $promptText = (prompt | Out-String)
-    [Console]::Out.Flush()
-    $osc = $capture.ToString()
-
-    Assert-True ($osc.Contains("]133;D;0;aid=$PID")) "Prompt output missing OSC 133 D aid metadata"
-    Assert-True ($osc.Contains(']7;file://')) "Prompt output missing OSC 7 cwd"
-    Assert-True ($osc.Contains("]133;A;cl=line;aid=$PID;redraw=0")) "Prompt output missing OSC 133 A prompt metadata (redraw=0)"
-    Assert-True ($osc.Contains(']133;B')) "Prompt output missing OSC 133 B marker"
-    Assert-True ($promptText.Contains('NOCTTYPROBE> ')) "Wrapped prompt dropped the user's prompt text: $promptText"
-
-    [Console]::SetOut($script:OriginalOut)
-
-    # ── OSC 133 C rides on PSReadLine's AddToHistoryHandler ──────────────
+    # ── The prompt: D / OSC 7 / A written directly, B in the returned text ─
     #
-    # It used to ride on `CommandValidationHandler`, which PSReadLine invokes
-    # only from its `ValidateAndAcceptLine` function. The default Enter
-    # binding on both pwsh 7 and Windows PowerShell 5.1 is `AcceptLine`, so
-    # that hook never fired for a user who had not rebound Enter and no OSC
-    # 133 C was emitted at all. `AddToHistoryHandler` runs for every accepted
-    # line whatever Enter is bound to, and runs before the host executes it.
+    # The host draws the string `prompt` returns only AFTER it returns, so a
+    # B written directly lands ahead of the whole visible prompt and the
+    # terminal records the prompt's cells as input. B rides at the end of the
+    # returned string instead.
+    function Invoke-TestPrompt {
+        # Returns what the host would draw, and what went straight to the
+        # console while it ran.
+        $capture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($capture)
+        try {
+            $text = prompt
+        } finally {
+            [Console]::Out.Flush()
+            [Console]::SetOut($script:OriginalOut)
+        }
+        return [pscustomobject]@{ Text = $text; Osc = $capture.ToString() }
+    }
+    $B = "$([char]27)]133;B$([char]7)"
+    $A = "]133;A;cl=line;aid=$PID;redraw=0"
+
+    $drawn = Invoke-TestPrompt
+    # A generated function, not an alias: `Get-Command prompt` stays a
+    # Function as about_Prompts documents, and PSReadLine sees a prompt that
+    # calls a command, so it derives no PromptText to repaint after B.
+    Assert-True ((Get-Command prompt).CommandType -eq 'Function') "prompt is not a function: $((Get-Command prompt).CommandType)"
+    Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The integration did not wrap the prompt"
+    Assert-True ($drawn.Osc.Contains("]133;D;0;aid=$PID")) "Prompt output missing OSC 133 D aid metadata"
+    Assert-True ($drawn.Osc.Contains(']7;file://')) "Prompt output missing OSC 7 cwd"
+    Assert-True ($drawn.Osc.Contains($A)) "Prompt output missing OSC 133 A prompt metadata (redraw=0)"
+    Assert-True (-not $drawn.Osc.Contains(']133;B')) "OSC 133 B was written directly, ahead of the prompt text: $($drawn.Osc -replace [char]27, '<ESC>')"
+    Assert-True ($drawn.Text -ceq "NOCTTYPROBE> $B") "The returned prompt is not the user's text followed by B: $($drawn.Text -replace [char]27, '<ESC>')"
+
+    $savedPrompt = $function:global:prompt
+    try {
+        # What the host draws for the odd returns, measured on both hosts:
+        # only the first object, and `PS>` for an empty string or no output
+        # at all. B has to follow exactly that text, and the rest passes
+        # through. `__ghostty_wrap_prompt` is what the line reader runs
+        # before each line, so a prompt defined here is wrapped the way a
+        # prompt defined at the command line would be.
+        function global:prompt { 'first> '; 'second> ' }
+        __ghostty_wrap_prompt
+        $multi = @((Invoke-TestPrompt).Text)
+        Assert-True ($multi.Count -eq 2 -and $multi[0] -ceq "first> $B" -and $multi[1] -ceq 'second> ') "A multi-object prompt was reshaped: $($multi -join '|')"
+
+        function global:prompt { '' }
+        __ghostty_wrap_prompt
+        Assert-True ((Invoke-TestPrompt).Text -ceq "PS>$B") "An empty prompt did not become the host's PS> followed by B"
+
+        function global:prompt { }
+        __ghostty_wrap_prompt
+        Assert-True ((Invoke-TestPrompt).Text -ceq "PS>$B") "A prompt with no output did not become the host's PS> followed by B"
+
+        # A non-string is drawn with its own ToString(); leave it alone and
+        # write B directly, as before.
+        function global:prompt { 42 }
+        __ghostty_wrap_prompt
+        $numeric = Invoke-TestPrompt
+        Assert-True ($numeric.Text -is [int] -and $numeric.Text -eq 42) "A non-string prompt was reshaped: $($numeric.Text)"
+        Assert-True ($numeric.Osc.EndsWith($B)) "A non-string prompt got no B"
+
+        # A prompt replaced after load (`. $PROFILE`, a theme re-init) is
+        # drawn once as it is, then wrapped again before the next line.
+        function global:prompt { 'REPLACED> ' }
+        $unwrapped = Invoke-TestPrompt
+        Assert-True ($unwrapped.Text -ceq 'REPLACED> ' -and $unwrapped.Osc.Length -eq 0) "A replaced prompt was not drawn as-is"
+        __ghostty_wrap_prompt
+        $rewrapped = Invoke-TestPrompt
+        Assert-True ($rewrapped.Text -ceq "REPLACED> $B") "A replaced prompt was not wrapped again: $($rewrapped.Text -replace [char]27, '<ESC>')"
+        Assert-True ($rewrapped.Osc.Contains($A)) "A re-wrapped prompt lost the A mark"
+        $sameWrapper = $function:global:prompt
+        __ghostty_wrap_prompt
+        Assert-True ([object]::ReferenceEquals($sameWrapper, $function:global:prompt)) "Wrapping an already wrapped prompt replaced it again"
+
+        # Chaining to the prompt by value, the way about_Prompts shows how to
+        # get it, and the way a venv's Activate.ps1 saves and restores it:
+        # the copy of our wrapper runs nested inside the new wrapper and
+        # passes straight through, so exactly one D / A pair is written.
+        function global:prompt { 'BASE> ' }
+        __ghostty_wrap_prompt
+        $Global:__noctty_test_chained = (Get-Command prompt).ScriptBlock
+        function global:prompt { 'W:' + (& $Global:__noctty_test_chained) }
+        __ghostty_wrap_prompt
+        $chained = Invoke-TestPrompt
+        Assert-True ($chained.Text -ceq "W:BASE> $B") "A prompt chained through Get-Command was drawn wrong: $($chained.Text -replace [char]27, '<ESC>')"
+        Assert-True ([regex]::Matches($chained.Osc, [regex]::Escape($A)).Count -eq 1) "A chained prompt wrote the A mark more than once"
+
+        function global:_OLD_VIRTUAL_PROMPT { '' }
+        Copy-Item -Path function:prompt -Destination function:_OLD_VIRTUAL_PROMPT
+        function global:prompt { '(venv) ' + (_OLD_VIRTUAL_PROMPT) }
+        __ghostty_wrap_prompt
+        $venv = Invoke-TestPrompt
+        Assert-True ($venv.Text -ceq "(venv) W:BASE> $B") "An activated venv prompt was drawn wrong: $($venv.Text -replace [char]27, '<ESC>')"
+        Assert-True ([regex]::Matches($venv.Osc, [regex]::Escape($A)).Count -eq 1) "An activated venv prompt wrote the A mark more than once"
+        Copy-Item -Path function:_OLD_VIRTUAL_PROMPT -Destination function:prompt
+        __ghostty_wrap_prompt
+        Assert-True ((Invoke-TestPrompt).Text -ceq "W:BASE> $B") "Deactivating the venv did not restore the prompt"
+        Remove-Item -LiteralPath 'Function:\_OLD_VIRTUAL_PROMPT' -Force
+
+        # The user's prompt sees the $? their command left, not ours:
+        # Starship and oh-my-posh read it first thing for their status.
+        function global:prompt { "Q=$?> " }
+        __ghostty_wrap_prompt
+        [Console]::SetOut([System.IO.StringWriter]::new())
+        Get-Item -LiteralPath (Join-Path $script:TempDir 'nope-not-here') -ErrorAction SilentlyContinue
+        $afterFailure = prompt
+        Get-Date | Out-Null
+        $afterSuccess = prompt
+        [Console]::SetOut($script:OriginalOut)
+        Assert-True ($afterFailure -ceq "Q=False> $B") "The user's prompt did not see `$? false after a failure: $afterFailure"
+        Assert-True ($afterSuccess -ceq "Q=True> $B") "The user's prompt did not see `$? true after a success: $afterSuccess"
+    } finally {
+        [Console]::SetOut($script:OriginalOut)
+        Remove-Variable -Name '__noctty_test_chained' -Scope Global -ErrorAction Ignore
+        $function:global:prompt = $savedPrompt
+    }
+
+    # ── OSC 133 C comes from the line reader ─────────────────────────────
     #
-    # PSReadLine is not auto-loaded in a non-interactive host, so the module
-    # has to be imported explicitly here; that is also why every dot-source
-    # above installed no handler. Driving a real Enter keypress needs a real
-    # console, so this exercises the registered handler object directly --
-    # `(Get-PSReadLineOption).AddToHistoryHandler` is exactly what PSReadLine
-    # itself calls.
+    # The console host reads each line by running the command
+    # `PSConsoleHostReadLine`, which PSReadLine defines. The integration's
+    # alias of that name calls whatever function is there and emits C once
+    # the line is accepted. That covers a line equal to the previous history
+    # entry, which PSReadLine keeps away from AddToHistoryHandler (the hook
+    # this used to ride on), and never fires for history replay.
+    #
+    # A non-interactive host cannot run PSReadLine's real ReadLine, so a
+    # stand-in function of that name returns the line. What PSReadLine does
+    # with a live console is covered by the pseudo-console recordings.
+    Assert-True ((Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue).CommandType -eq 'Alias') "PSConsoleHostReadLine is not hooked through an alias"
+    $Global:__noctty_test_status = New-Object System.Collections.ArrayList
+    function global:PSConsoleHostReadLine {
+        [void]$Global:__noctty_test_status.Add($?)
+        return $Global:__noctty_test_next_line
+    }
+    function Invoke-TestReadLine {
+        param([string]$Line, [switch]$AfterFailure)
+        $Global:__noctty_test_next_line = $Line
+        $capture = [System.IO.StringWriter]::new()
+        [Console]::SetOut($capture)
+        try {
+            if ($AfterFailure) {
+                Get-Item -LiteralPath (Join-Path $script:TempDir 'nope-not-here') -ErrorAction SilentlyContinue
+            }
+            $returned = PSConsoleHostReadLine
+        } finally {
+            [Console]::Out.Flush()
+            [Console]::SetOut($script:OriginalOut)
+        }
+        return [pscustomobject]@{ Returned = $returned; Osc = $capture.ToString() }
+    }
+
+    $read = Invoke-TestReadLine "Get-ChildItem 'a;b'"
+    Assert-True ($read.Returned -ceq "Get-ChildItem 'a;b'") "The line reader changed the line: $($read.Returned)"
+    Assert-True ($read.Osc -ceq "$([char]27)]133;C;aid=$PID;cmdline_url=Get-ChildItem%20%27a%3Bb%27$([char]7)") "The line reader did not emit exactly one OSC 133 C: $($read.Osc -replace [char]27, '<ESC>')"
+    $again = Invoke-TestReadLine "Get-ChildItem 'a;b'"
+    Assert-True ($again.Osc.Contains(']133;C;')) "A repeated line got no OSC 133 C"
+    foreach ($blank in @('', '   ', "`t")) {
+        $none = Invoke-TestReadLine $blank
+        Assert-True ($none.Returned -ceq $blank) "The line reader changed a blank line"
+        Assert-True ($none.Osc.Length -eq 0) "A blank line emitted OSC 133 C: $($none.Osc -replace [char]27, '<ESC>')"
+    }
+    $multiLine = Invoke-TestReadLine "if (`$true) {`n  'x'`n}"
+    Assert-True ($multiLine.Osc.Contains('cmdline_url=if%20%28%24true%29%20%7B%0A%20%20%27x%27%0A%7D') -or
+        $multiLine.Osc.Contains('cmdline_url=if%20(%24true)%20%7B%0A%20%20%27x%27%0A%7D')) "A multi-line command did not produce one C with the whole line: $($multiLine.Osc -replace [char]27, '<ESC>')"
+    # The terminal drops an OSC 133 mark longer than its 2048-byte buffer
+    # whole, so a label that would not fit is left off and C still goes out.
+    $quoted = Invoke-TestReadLine ('"' * 800)
+    Assert-True ($quoted.Osc -ceq "$([char]27)]133;C;aid=$PID$([char]7)") "A line whose label would not fit did not get a bare C: $($quoted.Osc.Substring(0, [Math]::Min(80, $quoted.Osc.Length)))"
+    $huge = Invoke-TestReadLine ('x' * 40000)
+    Assert-True ($huge.Osc -ceq "$([char]27)]133;C;aid=$PID$([char]7)") "An oversized line did not get a C without its label: $($huge.Osc.Substring(0, [Math]::Min(80, $huge.Osc.Length)))"
+
+    # PSReadLine's own PSConsoleHostReadLine reads $? first and hands it to
+    # predictors as the previous command's status; ours must pass it on.
+    $Global:__noctty_test_status.Clear()
+    [void](Invoke-TestReadLine 'Get-Date')
+    [void](Invoke-TestReadLine 'Get-Date' -AfterFailure)
+    Assert-True (($Global:__noctty_test_status -join ',') -eq 'True,False') "The line reader did not pass `$? through: $($Global:__noctty_test_status -join ',')"
+
+    # The line reader is where a prompt replaced by the previous command is
+    # wrapped again, before the next prompt is drawn.
+    function global:prompt { 'VIA-READLINE> ' }
+    [void](Invoke-TestReadLine 'Get-Date')
+    Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
+    Assert-True ((Invoke-TestPrompt).Text -ceq "VIA-READLINE> $B") "The prompt the line reader wrapped is drawn wrong"
+    function global:prompt { 'NOCTTYPROBE> ' }
+    __ghostty_wrap_prompt
+
+    # With no function of that name the host reads the line itself; called
+    # by hand, the alias must produce nothing rather than an error.
+    Remove-Item -LiteralPath 'Function:\PSConsoleHostReadLine' -Force
+    $errorsBefore = $Error.Count
+    $orphan = @(PSConsoleHostReadLine)
+    Assert-True ($orphan.Count -eq 0 -and $Error.Count -eq $errorsBefore) "The line reader without PSConsoleHostReadLine produced output or an error"
+
+    # ── The user's history handler is not ours to touch ─────────────────
+    #
+    # PSReadLine is not auto-loaded in a non-interactive host, so import it.
+    # Both 2.4.x and 2.0.x ship a default AddToHistoryHandler that keeps
+    # credential-shaped lines out of the history file; loading the
+    # integration must leave it, or any handler a profile set, as it was.
     if ($null -ne (Get-Module PSReadLine -ListAvailable | Select-Object -First 1)) {
         Import-Module PSReadLine -ErrorAction Stop
         $script:PSReadLineImported = $true
         $script:OriginalAddToHistoryHandler = (Get-PSReadLineOption).AddToHistoryHandler
 
-        # PSReadLine ships its own handler (the sensitive-history scrubber) on
-        # both 2.0.x and 2.4.x, so there is always something to chain to and
-        # an unchained override would silently start writing secrets to the
-        # history file.
-        Assert-True ($null -ne $script:OriginalAddToHistoryHandler) "PSReadLine was expected to ship a default AddToHistoryHandler"
+        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+        Assert-True ([object]::ReferenceEquals((Get-PSReadLineOption).AddToHistoryHandler, $script:OriginalAddToHistoryHandler)) "Loading the integration replaced PSReadLine's default AddToHistoryHandler"
 
-        # Stand in for a profile that installed its own handler.
-        $Global:__noctty_test_handler_lines = New-Object System.Collections.ArrayList
         Set-PSReadLineOption -AddToHistoryHandler {
             param([string]$Line)
-            [void]$Global:__noctty_test_handler_lines.Add($Line)
             return [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly
         }
         $userHandler = (Get-PSReadLineOption).AddToHistoryHandler
-        Assert-True ($null -ne $userHandler) "Test handler was not registered"
-
         . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
-        $nocttyHandler = (Get-PSReadLineOption).AddToHistoryHandler
-        Assert-True (-not [object]::ReferenceEquals($nocttyHandler, $userHandler)) "Integration did not install its own AddToHistoryHandler"
+        Assert-True ([object]::ReferenceEquals((Get-PSReadLineOption).AddToHistoryHandler, $userHandler)) "Loading the integration replaced the profile's AddToHistoryHandler"
 
-        # ── Replayed history line ───────────────────────────────────────
+        # ── A session that already ran the previous version ─────────────
         #
-        # PSReadLine 2.0.0 (Windows PowerShell 5.1) calls AddToHistoryHandler
-        # for every line it replays out of the on-disk history file, not only
-        # for lines the user accepts -- measured at 1790 invocations before a
-        # keypress on a fresh session, plus lines other live sessions append.
-        # Those must produce no OSC 133 C, and must still reach the chained
-        # handler: suppressing the terminal report may not change the history
-        # decision. A non-interactive host has an empty PSReadLine buffer, so
-        # this invocation IS the replay shape.
-        $replayCapture = [System.IO.StringWriter]::new()
-        [Console]::SetOut($replayCapture)
-        $replayResult = $nocttyHandler.Invoke('Get-Date')
-        [Console]::Out.Flush()
-        [Console]::SetOut($script:OriginalOut)
-        $replayOsc = $replayCapture.ToString()
-
-        Assert-True (-not $replayOsc.Contains(']133;C')) "A replayed history line emitted OSC 133 C: $($replayOsc -replace [char]27, '<ESC>')"
-        Assert-True ($Global:__noctty_test_handler_lines.Count -eq 1) "A replayed history line did not reach the chained handler"
-        Assert-True ($replayResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "A replayed history line did not return the chained result: $replayResult"
-
-        # The discriminator itself: PSReadLine's buffer must equal the line.
-        Assert-True (-not (__ghostty_line_is_being_accepted 'Get-Date')) "Discriminator accepted a line that is not in PSReadLine's buffer"
-        Assert-True (-not (__ghostty_line_is_being_accepted '')) "Discriminator matched an empty line against an empty buffer"
-
-        # ── Accepted line ───────────────────────────────────────────────
-        #
-        # A non-interactive host cannot put text in PSReadLine's buffer --
-        # `[Microsoft.PowerShell.PSConsoleReadLine]::Insert` throws
-        # NullReferenceException with no console attached, on both hosts -- so
-        # the accept shape is produced by overriding the discriminator. The
-        # real one is exercised directly above; everything below is about what
-        # the handler does once it has decided a line was accepted.
-        function global:__ghostty_line_is_being_accepted {
-            param([AllowNull()][string]$Line)
-            return $true
-        }
-
-        $handlerCapture = [System.IO.StringWriter]::new()
-        [Console]::SetOut($handlerCapture)
-        $handlerResult = $nocttyHandler.Invoke("Get-ChildItem 'a;b'")
-        [Console]::Out.Flush()
-        [Console]::SetOut($script:OriginalOut)
-        $handlerOsc = $handlerCapture.ToString()
-
-        Assert-True ($handlerOsc.Contains("]133;C;aid=$PID;cmdline_url=Get-ChildItem%20%27a%3Bb%27")) "AddToHistoryHandler did not emit OSC 133 C with URL-encoded cmdline: $($handlerOsc -replace [char]27, '<ESC>')"
-        Assert-True ($Global:__noctty_test_handler_lines.Count -eq 2) "Pre-existing AddToHistoryHandler was not chained"
-        Assert-True ($Global:__noctty_test_handler_lines[1] -eq "Get-ChildItem 'a;b'") "Chained handler received the wrong line: $($Global:__noctty_test_handler_lines[1])"
-        # The chained handler's answer must reach PSReadLine unchanged, or the
-        # user's history policy silently changes -- PSReadLine's own default
-        # handler is the sensitive-history scrubber. A scriptblock-derived
-        # Func[string, object] returns the block's whole output collection, so
-        # this also catches a stray value on our handler's pipeline.
-        Assert-True ($handlerResult -is [Microsoft.PowerShell.AddToHistoryOption]) "Chained handler result was reshaped: $($handlerResult.GetType().FullName)"
-        Assert-True ($handlerResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "Chained handler result was not returned unchanged: $handlerResult"
-
-        # ── Re-source ───────────────────────────────────────────────────
-        #
-        # We must rebind to the SAVED original rather than chain to ourselves,
-        # or every accepted line would emit 133;C once per source.
-        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
-        $resourcedHandler = (Get-PSReadLineOption).AddToHistoryHandler
-        function global:__ghostty_line_is_being_accepted {
-            param([AllowNull()][string]$Line)
-            return $true
-        }
-
-        $resourceCapture = [System.IO.StringWriter]::new()
-        [Console]::SetOut($resourceCapture)
-        $resourcedResult = $resourcedHandler.Invoke('Get-Date')
-        [Console]::Out.Flush()
-        [Console]::SetOut($script:OriginalOut)
-        $resourcedOsc = $resourceCapture.ToString()
-
-        $cMarks = [regex]::Matches($resourcedOsc, [regex]::Escape(']133;C')).Count
-        Assert-True ($cMarks -eq 1) "Re-sourcing stacked the AddToHistoryHandler: $cMarks OSC 133 C marks for one line"
-        Assert-True ($Global:__noctty_test_handler_lines.Count -eq 3) "Re-sourced handler called the chained handler $($Global:__noctty_test_handler_lines.Count - 2) times for one line"
-        Assert-True ($Global:__noctty_test_handler_lines[2] -eq 'Get-Date') "Re-sourced handler passed the wrong line on: $($Global:__noctty_test_handler_lines[2])"
-        Assert-True ($resourcedResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "Re-sourced handler did not return the chained result unchanged: $resourcedResult"
-
-        # ── A predecessor that throws must fail CLOSED ──────────────────
-        #
-        # The predecessor is PSReadLine's sensitive-history scrubber unless a
-        # profile replaced it, so answering `$true` (== MemoryAndFile) when it
-        # throws would write to the on-disk history file a line it may have
-        # been about to hold back. MemoryOnly keeps the line usable in the
-        # session without persisting it.
+        # That version replaced `function prompt` with a wrapper holding the
+        # user's prompt in `$__ghostty_original_prompt`, and installed an
+        # AddToHistoryHandler of its own. Loading this version over it must
+        # put both back, or every mark would be doubled.
+        $Global:__ghostty_original_prompt = { 'LEGACY-USER> ' }
+        function global:prompt { & $Global:__ghostty_original_prompt }
         Set-PSReadLineOption -AddToHistoryHandler {
             param([string]$Line)
-            throw 'predecessor exploded'
-        }
-        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
-        $throwingChainHandler = (Get-PSReadLineOption).AddToHistoryHandler
-        function global:__ghostty_line_is_being_accepted {
-            param([AllowNull()][string]$Line)
             return $true
         }
-
-        $throwCapture = [System.IO.StringWriter]::new()
-        [Console]::SetOut($throwCapture)
-        $throwResult = $throwingChainHandler.Invoke('Connect-Thing -Token hunter2')
-        [Console]::Out.Flush()
+        $Global:__ghostty_addtohistory_handler = (Get-PSReadLineOption).AddToHistoryHandler
+        $Global:__ghostty_addtohistory_original = $userHandler
+        $errorsBefore = $Error.Count
+        . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+        Assert-True ($Error.Count -eq $errorsBefore) "Retiring the previous version's hooks pushed records into `$Error"
+        Assert-True ([object]::ReferenceEquals((Get-PSReadLineOption).AddToHistoryHandler, $userHandler)) "The previous version's AddToHistoryHandler was not replaced by the one it had chained to"
+        Assert-True (-not ([string]$function:global:prompt).Contains('__ghostty_original_prompt')) "The previous version's prompt wrapper was left in place"
+        Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The user's prompt was not wrapped after retiring the previous version"
+        foreach ($name in @('__ghostty_original_prompt', '__ghostty_addtohistory_handler', '__ghostty_addtohistory_original')) {
+            Assert-True ($null -eq (Get-Variable -Name $name -Scope Global -ErrorAction Ignore)) "The previous version's `$$name was left behind"
+        }
+        [Console]::SetOut([System.IO.StringWriter]::new())
+        $legacyPrompt = prompt
         [Console]::SetOut($script:OriginalOut)
-
-        Assert-True ($throwResult -eq [Microsoft.PowerShell.AddToHistoryOption]::MemoryOnly) "A throwing chained handler must fail closed to MemoryOnly, got: $throwResult"
-        Assert-True ($throwCapture.ToString().Contains(']133;C')) "A throwing chained handler suppressed the OSC 133 C mark"
-
-
-        Remove-Variable -Name '__noctty_test_handler_lines' -Scope Global -ErrorAction SilentlyContinue
+        Assert-True ($legacyPrompt -ceq "LEGACY-USER> $B") "The prompt after retiring the previous version is wrong: $($legacyPrompt -replace [char]27, '<ESC>')"
+        $function:global:prompt = { 'NOCTTYPROBE> ' }
+        __ghostty_wrap_prompt
     }
 
     # ── Injected-block scope contract (issue #231) ───────────────────────
@@ -401,7 +486,23 @@ try {
         foreach ($marker in @(']133;A;cl=line;aid=', ']133;B', ']133;D;', ']7;file://')) {
             Assert-True ($childOut.Contains($marker)) "$where Injected block emitted no $marker : $shown"
         }
+        # The host drew the returned prompt, so B follows its text.
+        Assert-True ($childOut -match "\]133;A;cl=line;aid=\d+;redraw=0$([char]7)NOCTTYPROBE> $([char]27)\]133;B$([char]7)") "$where The prompt was not drawn as A, prompt text, B: $shown"
     }
+
+    # A prompt replaced after startup, the way `. $PROFILE` or a theme's
+    # re-init does it, is drawn once as it is and wrapped again when the
+    # next line is read. The host still calls the line reader with stdin
+    # piped (PSReadLine then fails inside it and the host reads the pipe).
+    $replacedOut = Invoke-NocttyInjectedChild -Lines @(
+        "function global:prompt { 'RE' + 'PLACED> ' }",
+        "'fil' + 'ler'",
+        'exit'
+    )
+    $replacedShown = $replacedOut -replace [char]27, '<ESC>'
+    $wrappedReplaced = [regex]::Matches($replacedOut, "\]133;A;cl=line;aid=\d+;redraw=0$([char]7)REPLACED> $([char]27)\]133;B$([char]7)").Count
+    $allReplaced = [regex]::Matches($replacedOut, 'REPLACED> ').Count
+    Assert-True ($allReplaced -eq 2 -and $wrappedReplaced -eq 1) "A prompt replaced after startup was not wrapped again from the next prompt (wrapped $wrappedReplaced of $allReplaced): $replacedShown"
 
     # The exit-status logic must survive the StrictMode rewrite: a fresh
     # native exit code still has to reach OSC 133;D, and a clean draw must
@@ -571,6 +672,15 @@ try {
     [Console]::SetOut($script:OriginalOut)
     Pop-Location -ErrorAction SilentlyContinue
     $function:global:prompt = $script:OriginalPrompt
+    # The integration's hooks are global aliases; do not leave them behind in
+    # a session that ran this harness, nor the stand-in line reader.
+    foreach ($alias in @('prompt', 'PSConsoleHostReadLine')) {
+        $installed = Get-Alias -Name $alias -Scope Global -ErrorAction Ignore
+        if ($null -ne $installed -and $installed.Definition -like '__ghostty_*') {
+            Remove-Item -LiteralPath "Alias:\$alias" -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Remove-Variable -Name '__noctty_test_status', '__noctty_test_next_line' -Scope Global -ErrorAction Ignore
     if ($script:PSReadLineImported) {
         Set-PSReadLineOption -AddToHistoryHandler $script:OriginalAddToHistoryHandler
     }
