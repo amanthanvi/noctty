@@ -514,8 +514,10 @@ The dark caption is chosen at runtime, not by build number:
 (19) is used when DWM rejects it. Windows 11 additionally gets an integrated
 title bar (app-owned caption with native caption actions and Snap Layout
 hover) while the tab bar and window decorations are visible;
-`window-show-tab-bar = never` or hidden decorations fall back to the stock
-caption, as do older builds.
+`window-show-tab-bar = never` falls back to the stock caption, as do older
+builds. `window-decoration = none` removes the caption and the window frame:
+the window has no title bar, border, or shadow, and cannot be moved or
+resized with the mouse or from the Alt+Space window menu.
 
 The universal palette puts actions, live tabs, panes, Windows profiles,
 named layouts, and native settings in one fuzzy-ranked, keyboard-driven
