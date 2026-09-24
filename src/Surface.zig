@@ -211,10 +211,6 @@ config_conditional_state: configpkg.ConditionalState,
 /// This is used to determine if we need to confirm, hold open, etc.
 child_exited: bool = false,
 
-/// True while the chunks of a bracketed paste are being queued, so the line
-/// breaks inside it are not counted as submitted lines.
-writing_bracketed_paste: bool = false,
-
 /// We maintain our focus state and assume we're focused by default.
 /// If we're not initially focused then apprts can call focusCallback
 /// to let us know.
@@ -1149,19 +1145,15 @@ fn keySubmitsSeparately(
     return key == .enter or key == .numpad_enter;
 }
 
-/// How many lines `data`, about to be written to the pty, submits: one per
-/// CR, and one per LF that does not follow a CR. A CR is the legacy encoding
-/// of Enter, and it ends a text binding, an IME commit, and every line of a
-/// non-bracketed paste, which turns each newline into a CR (so a CRLF from
-/// the clipboard arrives as two, and the shell does read two lines). The Kitty
-/// keyboard protocol encodes Enter as `CSI 13 u` instead, which is handled at
-/// the key level in `keyCallback`.
+/// How many lines `data`, about to be written to the pty, submits: one per CR.
+/// A CR is the legacy encoding of Enter, and it ends a text binding, an IME
+/// commit, and every line of a non-bracketed paste, which turns each newline
+/// into a CR. A bare LF submits nothing: the console host turns it into
+/// Ctrl+Enter, which cmd and PowerShell do not run. The Kitty keyboard
+/// protocol encodes Enter as `CSI 13 u` instead, which is handled at the key
+/// level in `keyCallback`.
 fn submissionsInBytes(data: []const u8) u32 {
-    var lines: u32 = 0;
-    for (data, 0..) |c, i| {
-        if (c == '\r' or (c == '\n' and (i == 0 or data[i - 1] != '\r'))) lines +|= 1;
-    }
-    return lines;
+    return @intCast(@min(std.mem.count(u8, data, "\r"), std.math.maxInt(u32)));
 }
 
 /// Consume the OSC 133;B input mark if `data` submits the line. See
@@ -1173,9 +1165,6 @@ fn noteSubmittedInput(
     data: []const u8,
     mutex: termio.Termio.MutexState,
 ) void {
-    // The line breaks inside a bracketed paste are part of the pasted text:
-    // the shell inserts them into the line it is editing and submits nothing.
-    if (self.writing_bracketed_paste) return;
     const lines = submissionsInBytes(data);
     if (lines == 0) return;
     self.markInputSubmitted(mutex, lines);
@@ -1205,12 +1194,12 @@ test "Surface: an Enter key press records one submission" {
 test "Surface: submissionsInBytes counts the lines a write submits" {
     const testing = std.testing;
     try testing.expectEqual(@as(u32, 1), submissionsInBytes("\r"));
-    try testing.expectEqual(@as(u32, 1), submissionsInBytes("\n"));
     try testing.expectEqual(@as(u32, 1), submissionsInBytes("ls\r\n"));
-    // A non-bracketed paste of two clipboard lines: each CRLF became `\r\r`,
-    // and the shell reads each CR as Enter.
-    try testing.expectEqual(@as(u32, 4), submissionsInBytes("cd x\r\rnu\r\r"));
+    // A non-bracketed paste of two lines: each newline became a CR.
     try testing.expectEqual(@as(u32, 2), submissionsInBytes("cd x\rnu\r"));
+    // Under ConPTY a bare LF is Ctrl+Enter, which runs nothing.
+    try testing.expectEqual(@as(u32, 0), submissionsInBytes("\n"));
+    try testing.expectEqual(@as(u32, 0), submissionsInBytes("one\ntwo"));
     try testing.expectEqual(@as(u32, 0), submissionsInBytes(""));
     try testing.expectEqual(@as(u32, 0), submissionsInBytes("ls -la"));
     try testing.expectEqual(@as(u32, 0), submissionsInBytes("\x1b[A"));
@@ -7495,8 +7484,6 @@ fn completeClipboardPaste(
         self.alloc.free(v);
     };
 
-    self.writing_bracketed_paste = encode_opts.bracketed;
-    defer self.writing_bracketed_paste = false;
     for (vecs) |vec| if (vec.len > 0) {
         self.queueIo(try termio.Message.writeReq(
             self.alloc,
