@@ -25,6 +25,16 @@ completed: ?Completed = null,
 /// is a plain flag rather than a pin so erasing rows cannot invalidate it.
 prompt_open: bool = false,
 
+/// A line was submitted while no prompt was open: typed ahead while a command
+/// was still running. The next prompt to open consumes it without noctty
+/// writing a submission of its own. Cleared by the prompt that takes it and by
+/// a C mark, which means a command started from it.
+typeahead_submitted: bool = false,
+
+/// The open prompt began with typed-ahead input waiting for it, so its line is
+/// submitted without `consumeInput` ever closing it. See `markPromptStart`.
+prompt_presubmitted: bool = false,
+
 const Completed = struct {
     prompt: *Pin,
     /// Inclusive last output cell at OSC 133;D, or null for empty output.
@@ -86,6 +96,8 @@ pub fn startOutput(
     cursor: Pin,
 ) Allocator.Error!void {
     self.prompt_open = false;
+    self.prompt_presubmitted = false;
+    self.typeahead_submitted = false;
     self.clearActive(pages);
     if (self.pending) |prompt| {
         self.active = prompt;
@@ -177,16 +189,39 @@ pub fn inputPending(self: *const SemanticCommand) bool {
 /// the prompt, and `startOutput` falls back to the prompt iterator when no
 /// pending pin exists, so C/D shells lose nothing.
 pub fn consumeInput(self: *SemanticCommand, pages: *PageList) void {
-    self.prompt_open = false;
+    if (self.prompt_open) {
+        self.prompt_open = false;
+        self.prompt_presubmitted = false;
+    } else {
+        // Nothing is reading a line right now, so the shell will read this
+        // one at its next prompt.
+        self.typeahead_submitted = true;
+    }
     self.clearPending(pages);
 }
 
-/// Record an OSC 133;A. Returns whether a prompt was already open, meaning
-/// this mark belongs to the prompt being drawn rather than starting one.
-pub fn openPrompt(self: *SemanticCommand) bool {
-    const was_open = self.prompt_open;
+/// Record a mark that starts a prompt: OSC 133;A, or 133;P for an initial
+/// prompt. Returns whether it starts a new prompt rather than adding to the
+/// one being drawn. Call before `abortCommand`, which clears the input mark
+/// this reads.
+///
+/// A mark starts a new prompt when no prompt is open. It also does in one
+/// case where a prompt is open: that prompt began with typed-ahead input
+/// waiting for it, and has already reached its B. The shell then reads the
+/// queued line without anything being submitted, so the prompt stays open
+/// while the command in it runs, and a mark after its B can only come from
+/// that command, a shell started from it. A mark before the B is part of the
+/// prompt, which is where the Windows Terminal docs' cmd PROMPT and prompt
+/// themes put theirs.
+pub fn markPromptStart(self: *SemanticCommand) bool {
+    const new_prompt = !self.prompt_open or
+        (self.prompt_presubmitted and self.inputPending());
+    if (new_prompt) {
+        self.prompt_presubmitted = self.typeahead_submitted;
+        self.typeahead_submitted = false;
+    }
     self.prompt_open = true;
-    return was_open;
+    return new_prompt;
 }
 
 /// Discard B/C state when a new prompt begins without a completing D mark.

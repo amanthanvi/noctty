@@ -1355,6 +1355,74 @@ test "semantic prompt: bash's redraw=last survives a user's own A inside PS1" {
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 }
 
+test "semantic prompt: a shell started by typeahead in cmd has its prompt cleared on resize" {
+    // The user typed `nu` and Enter while the previous command was still
+    // running. cmd reads that line at its next prompt, so nothing is
+    // submitted after the prompt opens and cmd has no C mark to close it.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07ping -t x",
+        "",
+        "\r\nReply one\r\n",
+        "", // typed ahead: nu, Enter
+        "Reply two\r\n\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07nu\r\n",
+        "\x1b]133;A\x07nu> \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "C:\\>nu") != null);
+    try testing.expect(std.mem.indexOf(u8, screen, "nu>") == null);
+}
+
+test "semantic prompt: typeahead does not reset a theme's mark before B" {
+    // A typed-ahead Enter can be read by the running program instead, for
+    // example `pause`, and the next prompt is then marked as having input
+    // waiting when it has none. Marks inside that prompt before its B,
+    // where themes and the Windows Terminal docs' cmd PROMPT put theirs,
+    // still belong to it.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07pause");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\nPress any key\r\n");
+    t.screens.active.semanticPromptInputSubmitted(); // read by pause
+    s.nextSlice("\x1b]133;A;redraw=0\x07\x1b]133;D\x07\x1b]133;A\x07C:\\>");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+    s.nextSlice("\x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+}
+
+test "semantic prompt: bash under ble.sh nested in PowerShell resets on its P mark" {
+    // Ghostty's bash integration marks a ble.sh prompt with 133;P;k=i and
+    // never sends an A.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A;redraw=0\x07\x1b]133;B\x07PS> bash");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\n\x1b]133;C\x07");
+    s.nextSlice("\x1b]133;P;k=i\x07ble$ \x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .true);
+}
+
+test "semantic prompt: bash's PS1 P marks keep redraw=last across readline redraws" {
+    // Ghostty's bash integration: A;redraw=last from PROMPT_COMMAND, then a
+    // PS1 wrapped in P;k=i ... B. Readline reprints PS1, P mark included,
+    // after a completion listing while the line is still being edited.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice("\x1b]133;A;redraw=last;cl=line;aid=1\x07\x1b]133;P;k=i\x07$ \x1b]133;B\x07gi");
+    try testing.expect(t.flags.shell_redraws_prompt == .last);
+    s.nextSlice("\r\ngit  gio\r\n\x1b]133;P;k=i\x07$ \x1b]133;B\x07gi");
+    try testing.expect(t.flags.shell_redraws_prompt == .last);
+}
+
 test "semantic prompt: a prompt marked redraw=0 survives a resize" {
     // The control for the tests above: a prompt from a shell that cannot
     // redraw is kept.

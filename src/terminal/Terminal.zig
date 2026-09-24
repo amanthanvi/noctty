@@ -1171,8 +1171,9 @@ pub fn semanticPrompt(
         .fresh_line => try self.semanticPromptFreshLine(),
 
         .fresh_line_new_prompt => {
-            // See the `redraw` handling further down.
-            const same_prompt = self.screens.active.semanticPromptOpen();
+            // Before the abort below, which clears the input mark this
+            // reads. See the `redraw` handling further down.
+            const new_prompt = self.screens.active.semanticPromptMarkStart();
             self.screens.active.semanticPromptAbortCommand();
 
             // "First do a fresh-line."
@@ -1198,27 +1199,24 @@ pub fn semanticPrompt(
             // One exception keeps the previous value: a bare A inside a
             // prompt that is still open, meaning no submitted line and no C
             // mark since the last A. That mark belongs to the same prompt,
-            // not to a new shell. PowerShell's integration writes
-            // `A;redraw=0` and `B` before the prompt function's output is
-            // drawn, and oh-my-posh with shell integration on, or marks added
-            // by hand the way the Windows Terminal docs suggest, then add a
-            // D, A and B of their own. The prompt those docs give cmd users
-            // does the same inside noctty's wrapped cmd PROMPT, and a user's
-            // own A inside Bash's PS1 would do it to `redraw=last`.
-            // Resetting on any of those switches prompt clearing back on for
-            // a shell that cannot redraw, and in cmd, which has no C mark, a
-            // resize during a running command then erases its output.
+            // not to a new shell. oh-my-posh with shell integration on, or
+            // marks added by hand the way the Windows Terminal docs suggest,
+            // add a D, A and B of their own inside the prompt PowerShell's
+            // integration marked. The prompt those docs give cmd users does
+            // the same inside noctty's wrapped cmd PROMPT, and a user's own A
+            // inside Bash's PS1 would do it to `redraw=last`. Resetting on
+            // any of those switches prompt clearing back on for a shell that
+            // cannot redraw, and in cmd, which has no C mark, a resize during
+            // a running command then erases its output.
             //
-            // A nested shell's first mark normally follows a submitted
-            // command line, which closes the prompt, so it resets. It does
-            // not when the Enter was consumed before the outer prompt was
-            // drawn (typeahead), or when the outer prompt was redrawn after
-            // Enter without a following C (PSReadLine keeps a repeated line
-            // out of history, so its C never fires). That shell's first
-            // prompt then keeps the outer setting until its next one.
+            // A nested shell's first mark follows a submitted command line,
+            // which closes the prompt, so it resets. Typeahead is the case
+            // where it does not: the line was submitted before the outer
+            // prompt opened, so nothing closes that prompt. `markPromptStart`
+            // covers it by treating a mark after such a prompt's B as new.
             if (cmd.readOption(.redraw)) |v| {
                 self.flags.shell_redraws_prompt = v;
-            } else if (!same_prompt) {
+            } else if (new_prompt) {
                 self.flags.shell_redraws_prompt = .true;
             }
 
@@ -1268,9 +1266,21 @@ pub fn semanticPrompt(
             // The k (kind) option specifies the type of prompt:
             // regular primary prompt (k=i or default),
             // right-side prompts (k=r), or prompts for continuation lines (k=c or k=s).
-            self.screens.active.cursorSetSemanticContent(.{
-                .prompt = cmd.readOption(.prompt_kind) orelse .initial,
-            });
+            const kind = cmd.readOption(.prompt_kind) orelse .initial;
+
+            // Some shells start an initial prompt with P and never send an
+            // A: Ghostty's bash integration does exactly that under ble.sh,
+            // whose own cursor tracking an A's fresh-line would upset. When
+            // that P starts a new prompt it gets the same `redraw` handling
+            // an A does (see the A arm above), so bash with ble.sh nested in
+            // a cmd or PowerShell tab stops inheriting their `redraw=0`. A P
+            // inside a prompt an A already opened, which is how bash and zsh
+            // mark PS1 on every redraw, changes nothing.
+            if (kind == .initial and self.screens.active.semanticPromptMarkStart()) {
+                self.flags.shell_redraws_prompt = cmd.readOption(.redraw) orelse .true;
+            }
+
+            self.screens.active.cursorSetSemanticContent(.{ .prompt = kind });
         },
 
         .end_prompt_start_input => {
