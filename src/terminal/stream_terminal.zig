@@ -1423,6 +1423,94 @@ test "semantic prompt: bash's PS1 P marks keep redraw=last across readline redra
     try testing.expect(t.flags.shell_redraws_prompt == .last);
 }
 
+// Ghostty's bash integration as noctty injects it for Git Bash: A;redraw=last
+// from PROMPT_COMMAND, then a PS1 wrapped in P;k=i ... B with P;k=s after each
+// `\n`. Git for Windows' default PS1 has several lines.
+const bash_prompt_a = "\x1b]133;A;redraw=last;cl=line;aid=1\x07";
+const bash_ps1 = "\x1b]133;P;k=i\x07\r\n\x1b]133;P;k=s\x07u@h ~\r\n\x1b]133;P;k=s\x07$ \x1b]133;B\x07";
+
+test "semantic prompt: bash keeps redraw=last after a program reads an Enter" {
+    // `read x` takes an Enter while no prompt is open, so the next prompt
+    // looks as if a line were typed ahead for it. Bash marks commands with
+    // C, and its readline reprints PS1, P mark after B included, after a
+    // completion listing. That must not look like a new shell.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 20 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice(bash_prompt_a ++ bash_ps1 ++ "read x");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\n\x1b]133;C;\x07bob");
+    t.screens.active.semanticPromptInputSubmitted(); // read by `read`
+    s.nextSlice("\r\n\x1b]133;D;0;aid=1\x07" ++ bash_prompt_a ++ bash_ps1);
+    s.nextSlice("git ch\r\ncheckout  cherry\r\n" ++ bash_ps1 ++ "git ch");
+    try testing.expect(t.flags.shell_redraws_prompt == .last);
+
+    // Narrowing clears only the last line, the one bash redraws, so all
+    // three renderings of the upper prompt line survive.
+    try t.resize(testing.allocator, 20, 20);
+    const screen = try t.plainString(testing.allocator);
+    defer testing.allocator.free(screen);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, screen, "u@h ~"));
+}
+
+test "semantic prompt: oh-my-posh keeps the PowerShell prompt after Read-Host reads an Enter" {
+    // PowerShell's integration today writes D, OSC 7, A;redraw=0 and B
+    // directly, then the host draws oh-my-posh's own D, A, text and B.
+    const ps = "\x1b]133;D;0;aid=1\x07\x1b]7;file://h/C:/\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07\x1b]133;B\x07";
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 20 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice(ps ++ "\x1b]133;D;0\x07\x1b]133;A\x07p1> \x1b[K\x1b]133;B\x07./ask.ps1");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\n\x1b]133;C;aid=1;cmdline_url=.%2Fask.ps1\x07Name: bob");
+    t.screens.active.semanticPromptInputSubmitted(); // read by Read-Host
+    s.nextSlice("\r\n" ++ ps ++ "\x1b]133;D;0\x07\x1b]133;A\x07p2> \x1b[K\x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+
+    try t.resize(testing.allocator, 20, 20);
+    const screen = try t.plainString(testing.allocator);
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "p2>") != null);
+}
+
+test "semantic prompt: PowerShell with hand-added marks keeps redraw=0 after a repeated command" {
+    // The Windows Terminal docs' marks inside PowerShell's prompt. The
+    // second `ls` repeats the first, and a C that comes from PSReadLine's
+    // AddToHistoryHandler is skipped for such a line.
+    const ps = "\x1b]133;D;0;aid=1\x07\x1b]7;file://h/C:/\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07\x1b]133;B\x07";
+    const wt = "\x1b]133;D;0\x07\x1b]133;A\x07\x1b]9;9;\"C:\\\"\x07PS> \x1b]133;B\x07";
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 20 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice(ps ++ wt ++ "ls");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\n\x1b]133;C;aid=1;cmdline_url=ls\x07out\r\n" ++ ps ++ wt ++ "ls");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\nout\r\n" ++ ps ++ wt);
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+}
+
+test "semantic prompt: PowerShell with its B after the prompt text keeps redraw=0" {
+    // The ordering where PowerShell's B follows the prompt function's
+    // output, with a theme's marks inside it.
+    const a = "\x1b]133;D;0;aid=1\x07\x1b]7;file://h/C:/\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07";
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 20 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice(a ++ "\x1b]133;D;0\x07\x1b]133;A\x07p1> \x1b[K\x1b]133;B\x07\x1b]133;B\x07");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\n" ++ a ++ "\x1b]133;D\x07\x1b]133;A\x07p2> \x1b[K\x1b]133;B\x07\x1b]133;B\x07");
+    try testing.expect(t.flags.shell_redraws_prompt == .false);
+}
+
 test "semantic prompt: a prompt marked redraw=0 survives a resize" {
     // The control for the tests above: a prompt from a shell that cannot
     // redraw is kept.

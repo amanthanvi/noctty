@@ -35,6 +35,15 @@ typeahead_submitted: bool = false,
 /// submitted without `consumeInput` ever closing it. See `markPromptStart`.
 prompt_presubmitted: bool = false,
 
+/// A C mark has been seen on this screen. A shell that marks command starts
+/// closes a typed-ahead prompt with its C before anything the line runs can
+/// draw a prompt, so the typeahead inference in `markPromptStart` is only
+/// needed, and only applied, while none has been seen: in practice cmd.exe
+/// without Clink. Leaving it on for shells with C marks misread their own
+/// redraws as new shells whenever a running program had read an Enter (bash
+/// reprints its PS1 marks after a completion listing).
+output_mark_seen: bool = false,
+
 const Completed = struct {
     prompt: *Pin,
     /// Inclusive last output cell at OSC 133;D, or null for empty output.
@@ -98,6 +107,7 @@ pub fn startOutput(
     self.prompt_open = false;
     self.prompt_presubmitted = false;
     self.typeahead_submitted = false;
+    self.output_mark_seen = true;
     self.clearActive(pages);
     if (self.pending) |prompt| {
         self.active = prompt;
@@ -206,16 +216,17 @@ pub fn consumeInput(self: *SemanticCommand, pages: *PageList) void {
 /// this reads.
 ///
 /// A mark starts a new prompt when no prompt is open. It also does in one
-/// case where a prompt is open: that prompt began with typed-ahead input
-/// waiting for it, and has already reached its B. The shell then reads the
-/// queued line without anything being submitted, so the prompt stays open
-/// while the command in it runs, and a mark after its B can only come from
-/// that command, a shell started from it. A mark before the B is part of the
-/// prompt, which is where the Windows Terminal docs' cmd PROMPT and prompt
-/// themes put theirs.
+/// case where a prompt is open, for shells without C marks: that prompt began
+/// with typed-ahead input waiting for it, and has already reached its B. cmd
+/// then reads the queued line without anything being submitted, so the prompt
+/// stays open while the command in it runs, and a mark after its B can only
+/// come from that command, a shell started from it. A mark before the B is
+/// part of the prompt, which is where the Windows Terminal docs' cmd PROMPT
+/// and prompt themes put theirs. See `output_mark_seen` for why shells with C
+/// marks are left out.
 pub fn markPromptStart(self: *SemanticCommand) bool {
     const new_prompt = !self.prompt_open or
-        (self.prompt_presubmitted and self.inputPending());
+        (self.prompt_presubmitted and !self.output_mark_seen and self.inputPending());
     if (new_prompt) {
         self.prompt_presubmitted = self.typeahead_submitted;
         self.typeahead_submitted = false;

@@ -1199,10 +1199,11 @@ pub fn semanticPrompt(
             // One exception keeps the previous value: a bare A inside a
             // prompt that is still open, meaning no submitted line and no C
             // mark since the last A. That mark belongs to the same prompt,
-            // not to a new shell. oh-my-posh with shell integration on, or
-            // marks added by hand the way the Windows Terminal docs suggest,
-            // add a D, A and B of their own inside the prompt PowerShell's
-            // integration marked. The prompt those docs give cmd users does
+            // not to a new shell. PowerShell's integration writes
+            // `A;redraw=0` and `B` before the prompt function's output is
+            // drawn, and oh-my-posh with shell integration on, or marks added
+            // by hand the way the Windows Terminal docs suggest, then add a
+            // D, A and B of their own. The prompt those docs give cmd users does
             // the same inside noctty's wrapped cmd PROMPT, and a user's own A
             // inside Bash's PS1 would do it to `redraw=last`. Resetting on
             // any of those switches prompt clearing back on for a shell that
@@ -1212,8 +1213,13 @@ pub fn semanticPrompt(
             // A nested shell's first mark follows a submitted command line,
             // which closes the prompt, so it resets. Typeahead is the case
             // where it does not: the line was submitted before the outer
-            // prompt opened, so nothing closes that prompt. `markPromptStart`
-            // covers it by treating a mark after such a prompt's B as new.
+            // prompt opened, so nothing closes that prompt. A shell with C
+            // marks closes it with the C; for cmd, which has none,
+            // `markPromptStart` treats a mark after such a prompt's B as new.
+            // A line PSReadLine keeps out of history (a repeat of the last
+            // one) gets no C from an integration that marks C from its
+            // AddToHistoryHandler, so a shell started from it keeps the outer
+            // setting until its next prompt.
             if (cmd.readOption(.redraw)) |v| {
                 self.flags.shell_redraws_prompt = v;
             } else if (new_prompt) {
