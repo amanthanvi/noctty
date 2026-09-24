@@ -807,8 +807,8 @@ test "integration.ps1 honours the injected block scope" {
     }
     // Guard the guard: if either scan stops matching, everything above turns
     // vacuous. These are the live counts; bump them when the script grows.
-    try std.testing.expectEqual(@as(usize, 19), declarations);
-    try std.testing.expectEqual(@as(usize, 10), top_level_variables);
+    try std.testing.expectEqual(@as(usize, 23), declarations);
+    try std.testing.expectEqual(@as(usize, 11), top_level_variables);
     // Unbalanced braces here mean the tracker desynced (an unterminated
     // string, a here-string, nesting past the stack), which would silently
     // mis-classify every line after it.
@@ -844,27 +844,28 @@ test "integration.ps1 honours the injected block scope" {
         "$Global:__ghostty_bel",
     ) != null);
 
-    // The helper set the prompt calls must all be global, and the prompt
-    // itself must stay global.
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        integration_script,
-        "\nfunction global:prompt {",
-    ) != null);
+    // The hook targets and every helper they call must be global. The
+    // generated `prompt` function calls `__ghostty_prompt_body` by name, and
+    // the global alias `PSConsoleHostReadLine` points at `__ghostty_readline`;
+    // the host runs both on every prompt and every line, long after the
+    // injected `& { }` is gone, so a target that died with the block would
+    // make the host fall back to its built-in prompt and its own line reader.
     for ([_][]const u8{
+        "__ghostty_prompt_body",
+        "__ghostty_wrap_prompt",
+        "__ghostty_prompt_is_ours",
+        "__ghostty_same_object",
+        "__ghostty_readline",
+        "__ghostty_append_input_mark",
+        "__ghostty_read_global",
+        "__ghostty_error_head",
+        "__ghostty_is_native_error",
         "__ghostty_write_osc",
         "__ghostty_encode_osc133_value",
         "__ghostty_encode_cwd_uri",
-        // PSReadLine calls this one through a `Func[string, object]` it
-        // built from a scriptblock we hand it at load time. The scriptblock
-        // outlives the injected `& { }` inside PSReadLine's options object,
-        // so if the function it calls is not global the handler throws
-        // CommandNotFoundException on the first accepted line and PSReadLine
-        // silently falls back to its default history decision.
-        "__ghostty_add_to_history",
-        "__ghostty_install_add_to_history_handler",
         "__ghostty_ssh_wrapper_is_ours",
-        "__ghostty_line_is_being_accepted",
+        "__ghostty_install_alias",
+        "__ghostty_retire_legacy_hooks",
     }) |name| {
         var buf: [96]u8 = undefined;
         const decl = try std.fmt.bufPrint(&buf, "\nfunction global:{s} {{", .{name});
@@ -924,34 +925,99 @@ test "integration.ps1 keeps trailing comments off code lines" {
     }
 }
 
-test "integration.ps1 hooks OSC 133 C through AddToHistoryHandler" {
-    // PSReadLine invokes `CommandValidationHandler` from exactly one place,
-    // its `ValidateAndAcceptLine` function, and the default Enter binding on
-    // both pwsh 7 and Windows PowerShell 5.1 is `AcceptLine` -- so the old
-    // hook never fired for a user who had not rebound Enter and PowerShell
-    // emitted no OSC 133 C at all. `AddToHistoryHandler` runs for every
-    // accepted line whatever Enter is bound to, and runs before the host
-    // executes the line.
-    try std.testing.expect(codeContains("Set-PSReadLineOption -AddToHistoryHandler"));
-    // The old hook has to be gone rather than merely redundant: left
-    // registered, it would double-emit 133;C for the users who DO bind
-    // ValidateAndAcceptLine.
+test "integration.ps1 emits OSC 133 C from the line reader" {
+    // C used to hang off PSReadLine's AddToHistoryHandler, which PSReadLine
+    // skips for a line equal to the previous history entry (the default
+    // HistoryNoDuplicates) and for a whitespace-only line, so running the
+    // same command twice got no C the second time. The console host reads
+    // every line through the `PSConsoleHostReadLine` command, and our alias
+    // of that name wraps whatever function PSReadLine (or a profile) put
+    // there, so C now goes out once per accepted line.
+    try std.testing.expect(codeContains(
+        "__ghostty_install_alias 'PSConsoleHostReadLine' '__ghostty_readline'",
+    ));
+    try std.testing.expect(codeContains("$line = & $read_line"));
+    // noctty must leave the user's AddToHistoryHandler, and PSReadLine's
+    // default sensitive-history filter, exactly as it found them. The only
+    // place the option is still set is where a session's OLDER copy of this
+    // script installed a handler and we put the original back.
+    try std.testing.expect(!codeContains("-AddToHistoryHandler {"));
+    try std.testing.expect(!codeContains("GetBufferState"));
+    try std.testing.expect(codeContains(
+        "Set-PSReadLineOption -AddToHistoryHandler (__ghostty_read_global '__ghostty_addtohistory_original')",
+    ));
+    // CommandValidationHandler, the hook before that, only fires for
+    // `ValidateAndAcceptLine`, which Enter is not bound to by default.
     try std.testing.expect(!codeContains("-CommandValidationHandler"));
-    // Chaining is not optional. Both hosts ship a non-null default handler
-    // (PSReadLine's sensitive-history scrubber), so an unchained override
-    // would start writing to the history file the secrets it skips.
-    try std.testing.expect(codeContains("__ghostty_addtohistory_original"));
-    // The re-source identity check. The option is a `Func[string, object]`
-    // with no recoverable script text, so reference equality against the
-    // delegate we read back after installing is the only marker available.
-    try std.testing.expect(codeContains("[object]::ReferenceEquals"));
-    // PSReadLine 2.0.0 also calls the handler for every line it replays out of
-    // the history file (measured: 1790 invocations before a keypress on a
-    // fresh 5.1 session, plus lines other live sessions append), so the
-    // emission is gated on PSReadLine's own buffer matching the line we were
-    // handed. The chained handler still runs for every invocation.
-    try std.testing.expect(codeContains("GetBufferState"));
-    try std.testing.expect(codeContains("__ghostty_line_is_being_accepted $Line"));
+    // The terminal reads OSC 133 into a 2048-byte buffer and drops a longer
+    // mark whole, so an oversized label is left off rather than costing C.
+    try std.testing.expect(codeContains("if ($encoded.Length -le 2000) { $cmdline = ';cmdline_url=' + $encoded }"));
+    // A blank line runs nothing; a C there would make it the terminal's "last
+    // command" and cost `insert_last_command` the real one.
+    try std.testing.expect(codeContains(
+        "if ($line -is [string] -and -not [string]::IsNullOrWhiteSpace($line)) {",
+    ));
+    // PSReadLine's own PSConsoleHostReadLine reads $? first and hands it to
+    // predictors, so our wrapper must read it first and hand it on.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        integration_script,
+        "function global:__ghostty_readline {\n    # $? FIRST",
+    ) != null);
+}
+
+test "integration.ps1 wraps the prompt in a generated function the line reader renews" {
+    // `function prompt` becomes one line that captures $? and calls the body
+    // with the id of the prompt it wraps. The id lives in the function's own
+    // text, so a copy (a venv's Copy-Item, a profile chaining to
+    // `$function:prompt` or `(Get-Command prompt).ScriptBlock`) still wraps
+    // the same prompt.
+    try std.testing.expect(codeContains(
+        "$function:global:prompt = '$__ghostty_ok = $?; __ghostty_prompt_body $__ghostty_ok ' + $id",
+    ));
+    try std.testing.expect(codeContains("__ghostty_wrap_prompt -EvenIfMissing"));
+    // Not an alias: `Get-Command prompt` has to stay a Function with a
+    // ScriptBlock, and PSReadLine must not see the user's own plain prompt,
+    // or it derives a PromptText and repaints it after our B mark.
+    try std.testing.expect(!codeContains("__ghostty_install_alias 'prompt'"));
+    try std.testing.expect(!codeContains("function global:prompt {"));
+    // The line reader renews the wrapper before the line is read, so a
+    // prompt replaced by the previous command is drawn unwrapped only once.
+    const readline = std.mem.indexOf(u8, integration_script, "function global:__ghostty_readline {").?;
+    const rewrap = std.mem.indexOfPos(u8, integration_script, readline, "        __ghostty_wrap_prompt\n").?;
+    const read = std.mem.indexOfPos(u8, integration_script, readline, "    $line = & $read_line").?;
+    try std.testing.expect(rewrap < read);
+    // A copy of an earlier wrapper, called from inside a newer one, passes
+    // straight through instead of writing a second D / A pair.
+    try std.testing.expect(codeContains("if (__ghostty_read_global '__ghostty_in_prompt') {"));
+    // The user's prompt must see the $? their command left, not ours.
+    try std.testing.expect(codeContains(
+        "Microsoft.PowerShell.Utility\\Write-Error -Message '' -ErrorAction Ignore",
+    ));
+    // A profile's `$ConfirmPreference = 'Low'` or `$WhatIfPreference` must
+    // neither stop the launch at a prompt nor turn the install into a no-op.
+    try std.testing.expect(codeContains(
+        "Set-Alias -Name $Name -Value $Target -Scope Global -Force -ErrorAction Ignore -Confirm:$false -WhatIf:$false -Verbose:$false",
+    ));
+}
+
+test "integration.ps1 puts OSC 133 B after the prompt text" {
+    // The host draws the string `prompt` returns only after it returns, so
+    // a B written directly lands ahead of the whole visible prompt and the
+    // terminal records the prompt's cells as input. B has to ride at the end
+    // of the returned string, and exactly one code line may spell it.
+    try std.testing.expect(codeContains("$out = __ghostty_append_input_mark $out"));
+    var b_lines: usize = 0;
+    var lines = std.mem.splitScalar(u8, integration_script, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (std.mem.indexOf(u8, line, "]133;B") != null) b_lines += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), b_lines);
+    try std.testing.expect(codeContains(
+        "$mark = \"${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}\"",
+    ));
 }
 
 test "integration.ps1 marks its prompt as one the shell will not redraw" {
@@ -1266,4 +1332,122 @@ test "installIfStale: different content on disk triggers reinstall" {
     const contents = try verify.readToEndAlloc(std.testing.allocator, 1024 * 1024);
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings(integration_script, contents);
+}
+
+// ── What the terminal makes of the script's marks ───────────────────
+//
+// The tests above pin the script's text; these pin what its byte shapes mean
+// to the terminal. Each sequence is trimmed from a recording of pwsh 7.6.6
+// through the bundled pseudo console (Windows PowerShell 5.1 produces the
+// same mark order): PSReadLine's per-keystroke re-render is cut to its final
+// frame and the aid, cwd and command are shortened. An empty step stands for
+// the user pressing Enter, which noctty records on the screen as it writes it
+// to the pty.
+
+const terminal_for_tests = @import("../terminal/main.zig");
+
+/// The prompt the script draws: D, OSC 7 and `A;redraw=0` written directly
+/// while `prompt` runs, then the string it returns, which carries B.
+const pwsh_prompt_marks = "\x1b]133;D;0;aid=1\x07\x1b]7;file://h/C:/\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07";
+
+fn pwshReplay(
+    alloc: Allocator,
+    cols: u16,
+    steps: []const []const u8,
+) !terminal_for_tests.Terminal {
+    var t = try terminal_for_tests.Terminal.init(alloc, .{ .cols = cols, .rows = 8 });
+    errdefer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    for (steps) |step| {
+        if (step.len == 0) {
+            t.screens.active.semanticPromptInputSubmitted();
+        } else {
+            stream.nextSlice(step);
+        }
+    }
+    return t;
+}
+
+test "PowerShell marks: the prompt text is prompt and the last command is recovered without it" {
+    const alloc = std.testing.allocator;
+    const command = "\x1b[93mGet-Date\x1b[0m";
+    const output = "\r\n\x1b]133;C;aid=1;cmdline_url=Get-Date\x07\r\nWednesday\r\n\r\n";
+
+    // B after the prompt text, as the script now writes it.
+    {
+        var t = try pwshReplay(alloc, 40, &.{
+            pwsh_prompt_marks ++ "PS C:\\> \x1b]133;B\x07" ++ command,
+            "",
+            output ++ pwsh_prompt_marks ++ "PS C:\\> \x1b]133;B\x07",
+        });
+        defer t.deinit(alloc);
+
+        const recovered = (try t.screens.active.lastCommandString(alloc)).?;
+        defer alloc.free(recovered);
+        try std.testing.expectEqualStrings("Get-Date", recovered);
+
+        const pages = &t.screens.active.pages;
+        const prompt_cell = pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
+        const input_cell = pages.pin(.{ .active = .{ .x = 8, .y = 0 } }).?;
+        try std.testing.expectEqual(.prompt, prompt_cell.rowAndCell().cell.semantic_content);
+        try std.testing.expectEqual(.input, input_cell.rowAndCell().cell.semantic_content);
+    }
+
+    // Control: B written directly, ahead of the prompt text, as it used to
+    // be. The prompt's own cells become input, so `insert_last_command`
+    // would type the old prompt back in front of the command.
+    {
+        var t = try pwshReplay(alloc, 40, &.{
+            pwsh_prompt_marks ++ "\x1b]133;B\x07PS C:\\> " ++ command,
+            "",
+            output ++ pwsh_prompt_marks ++ "\x1b]133;B\x07PS C:\\> ",
+        });
+        defer t.deinit(alloc);
+
+        const recovered = (try t.screens.active.lastCommandString(alloc)).?;
+        defer alloc.free(recovered);
+        try std.testing.expectEqualStrings("PS C:\\> Get-Date", recovered);
+    }
+}
+
+fn pwshNestedShellAfterTransientRepeat(alloc: Allocator, c_mark: []const u8) ![]const u8 {
+    // A prompt theme's transient prompt (Starship's Enable-TransientPrompt,
+    // oh-my-posh's) redraws the prompt from its Enter handler, AFTER noctty
+    // wrote the Enter, so the redrawn prompt's A opens a prompt again, and
+    // only a C mark closes it. The line repeats the previous history entry,
+    // so the old AddToHistoryHandler hook sent no C, and the nested shell's
+    // bare A then read as part of PowerShell's prompt and inherited
+    // `redraw=0`.
+    var t = try pwshReplay(alloc, 40, &.{
+        pwsh_prompt_marks ++ "STAR> \x1b]133;B\x07\x1b[93mwsl\x1b[0m",
+        "",
+        "\r" ++ pwsh_prompt_marks ++ "T> \x1b]133;B\x07\x1b[93mwsl\x1b[0m\r\n",
+        c_mark,
+        "\x1b]133;A;cl=line\x07\x1b[?2004hinner$ ",
+    });
+    defer t.deinit(alloc);
+    try t.resize(alloc, 20, 8);
+    return try t.plainString(alloc);
+}
+
+test "PowerShell marks: a shell started by a repeated line gets its prompt cleared on resize" {
+    const alloc = std.testing.allocator;
+
+    // The script now sends C for every accepted line: the nested shell's
+    // prompt is left for it to redraw, which it will.
+    const fixed = try pwshNestedShellAfterTransientRepeat(
+        alloc,
+        "\x1b]133;C;aid=1;cmdline_url=wsl\x07",
+    );
+    defer alloc.free(fixed);
+    try std.testing.expect(std.mem.indexOf(u8, fixed, "T> wsl") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixed, "inner$") == null);
+
+    // Control: the same bytes without C, which is what the old script sent
+    // for this exact sequence. The nested prompt survives the resize, and
+    // the nested shell then paints a second copy.
+    const broken = try pwshNestedShellAfterTransientRepeat(alloc, "\x1b[0m");
+    defer alloc.free(broken);
+    try std.testing.expect(std.mem.indexOf(u8, broken, "inner$") != null);
 }
