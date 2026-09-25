@@ -907,7 +907,6 @@ function global:__ghostty_readline {
     # just ran replaced `function prompt` (`. $PROFILE`, a theme re-init), or
     # when a prompt is ReadOnly and cannot be wrapped at all.
     $marked = [bool](__ghostty_read_global '__ghostty_prompt_marked')
-    $Global:__ghostty_prompt_marked = $false
 
     # Wrap a replaced prompt so the next one carries all of our marks.
     # Costs a reference comparison when nothing changed.
@@ -926,19 +925,23 @@ function global:__ghostty_readline {
     # lost, which costs the replacing command its command-finished
     # notification and exit status; the next C restarts the command timer.
     #
-    # An unmarked read gets no marks at all in two cases, as before this
-    # wrote any. A script that calls PSConsoleHostReadLine itself is not the
-    # host reading a prompt line: the host's own read sits alone on the call
-    # stack (one frame, one more per nested prompt; measured on both hosts),
-    # and marks written into a running command would end it early. And under
-    # Enter-PSSession the prompt on screen is the remote one, drawn remotely:
-    # a P and B there would be dated with this machine's directory and turn
-    # remote prompts into local ones. Both checks run only for an unmarked
-    # prompt, so the usual read costs nothing more.
+    # Only the host's own read of a prompt line gets marks or consumes the
+    # flag. A script that calls PSConsoleHostReadLine itself is not that
+    # read: the host's sits alone on the call stack (one frame, one more per
+    # nested prompt; measured on both hosts), and marks written into a
+    # running command would end it early. That includes a prompt function
+    # calling the reader, which runs after our wrapper has set the flag, so
+    # the flag cannot vouch for the caller. And under Enter-PSSession the
+    # prompt on screen is the remote one, drawn remotely: a P and B there
+    # would be dated with this machine's directory and turn remote prompts
+    # into local ones. The check costs 10-70 microseconds a line (measured
+    # on both hosts).
+    $from_host = $false
     try {
-        $from_host = $marked -or ((-not $Host.IsRunspacePushed) -and
-            (@(Get-PSCallStack).Count -le (1 + $NestedPromptLevel)))
+        $from_host = (-not $Host.IsRunspacePushed) -and
+            (@(Get-PSCallStack).Count -le (1 + $NestedPromptLevel))
         if ($from_host) {
+            $Global:__ghostty_prompt_marked = $false
             if (-not $marked) {
                 $cwd_uri = __ghostty_encode_cwd_uri
                 __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
@@ -954,7 +957,7 @@ function global:__ghostty_readline {
     # (Ctrl+L, a transient prompt): the prompt then carries its own B.
     #
     # No try/finally around the call. PSReadLine throws when stdin is
-    # redirected. As written, the wrapper runs on past the throw, clears both
+    # redirected. As written, the wrapper runs on past the throw, clears the
     # flags, and the host goes on to read the line itself. With the call
     # inside `try { } finally { }` the host instead took the wrapper's return
     # for end of input and the session exited after its first prompt.
@@ -968,7 +971,7 @@ function global:__ghostty_readline {
     }
     $line = & $read_line
     $Global:__ghostty_in_readline = $false
-    $Global:__ghostty_prompt_marked = $false
+    if ($from_host) { $Global:__ghostty_prompt_marked = $false }
 
     try {
         if ($line -is [string] -and -not [string]::IsNullOrWhiteSpace($line)) {

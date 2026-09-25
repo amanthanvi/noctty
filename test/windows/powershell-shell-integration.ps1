@@ -350,7 +350,7 @@ try {
     $drawn = Invoke-TestPrompt
     Assert-True ($drawn.Text -ceq 'NOCTTYPROBE> ') "The prompt returned more than the user's text: $($drawn.Text -replace [char]27, '<ESC>')"
     Assert-True ($drawn.Osc.Contains($A) -and -not $drawn.Osc.Contains(']133;B')) "The prompt wrote B itself: $($drawn.Osc -replace [char]27, '<ESC>')"
-    $read = Invoke-TestReadLine "Get-ChildItem 'a;b'"
+    $read = Invoke-TestReadLine "Get-ChildItem 'a;b'" -AsHost
     Assert-True ($read.Returned -ceq "Get-ChildItem 'a;b'") "The line reader changed the line: $($read.Returned)"
     Assert-True ($read.Osc -ceq "$B${C};cmdline_url=Get-ChildItem%20%27a%3Bb%27$([char]7)") "The line reader did not write exactly B, then one C: $($read.Osc -replace [char]27, '<ESC>')"
 
@@ -373,17 +373,29 @@ try {
     Assert-True ($unmarked.Osc -match "^$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get OSC 7, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
     Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
     [void](Invoke-TestPrompt)
-    $marked = Invoke-TestReadLine 'Get-Date'
+    $marked = Invoke-TestReadLine 'Get-Date' -AsHost
     Assert-True ($marked.Osc.StartsWith("$B$C")) "A re-wrapped prompt still got a P mark: $($marked.Osc -replace [char]27, '<ESC>')"
 
     # A prompt drawn while the line is read is PSReadLine repainting it, and
     # nothing writes B after that repaint but the prompt itself. Afterwards
     # the next prompt is back to plain text.
     [void](Invoke-TestPrompt)
-    $repainted = Invoke-TestReadLine 'Get-Date' -Repaint
+    $repainted = Invoke-TestReadLine 'Get-Date' -Repaint -AsHost
     Assert-True ($Global:__noctty_test_repaint -ceq "REPLACED> $B") "A repaint did not carry its own B: $($Global:__noctty_test_repaint -replace [char]27, '<ESC>')"
     Assert-True ([regex]::Matches($repainted.Osc, '\]133;P').Count -eq 0) "A repaint turned the next line into an unmarked one"
     Assert-True ((Invoke-TestPrompt).Text -ceq 'REPLACED> ') "After a repaint the prompt still carries B"
+
+    # A prompt that calls the reader itself is a script calling it: no
+    # marks inside the prompt, and the host's read that follows still finds
+    # the prompt ours.
+    function global:prompt { $null = PSConsoleHostReadLine; 'ASKS> ' }
+    __ghostty_wrap_prompt
+    $Global:__noctty_test_next_line = 'answer'
+    $Global:__noctty_test_repaint = $false
+    $asking = Invoke-TestPrompt
+    Assert-True (-not ($asking.Osc -match '\]133;[PB]|\]133;A.*\]7;')) "A prompt's own call to the reader got prompt marks: $($asking.Osc -replace [char]27, '<ESC>')"
+    $afterAsking = Invoke-TestReadLine 'Get-Date' -AsHost
+    Assert-True ($afterAsking.Osc.StartsWith("$B$C")) "The host's read after a prompt's own reader call did not get exactly B, then C: $($afterAsking.Osc -replace [char]27, '<ESC>')"
     function global:prompt { 'NOCTTYPROBE> ' }
     __ghostty_wrap_prompt
     [void](Invoke-TestPrompt)

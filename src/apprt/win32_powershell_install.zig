@@ -1030,9 +1030,12 @@ test "integration.ps1 writes OSC 133 B from the line reader" {
     try std.testing.expect(codeContains("$Global:__ghostty_prompt_marked = $true"));
     // Only the host's own read gets those marks: not a script calling the
     // reader itself (more than one frame per prompt level on the stack),
-    // and not a remote prompt under Enter-PSSession.
-    try std.testing.expect(codeContains("$from_host = $marked -or ((-not $Host.IsRunspacePushed) -and"));
-    try std.testing.expect(codeContains("(@(Get-PSCallStack).Count -le (1 + $NestedPromptLevel)))"));
+    // and not a remote prompt under Enter-PSSession. The flag cannot vouch
+    // for the caller: a prompt that calls the reader runs after it is set,
+    // so only the host's read consumes it.
+    try std.testing.expect(codeContains("$from_host = (-not $Host.IsRunspacePushed) -and"));
+    try std.testing.expect(codeContains("(@(Get-PSCallStack).Count -le (1 + $NestedPromptLevel))"));
+    try std.testing.expect(codeContains("if ($from_host) { $Global:__ghostty_prompt_marked = $false }"));
     // The prompt appends B itself only where no line read follows a host
     // draw: a PSReadLine repaint, which runs inside the reader, or a session
     // with no PSConsoleHostReadLine function to hook.
