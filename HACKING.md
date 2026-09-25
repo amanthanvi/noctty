@@ -14,20 +14,25 @@ or interaction changes.
 
 Use the standard Zig workflow from the repository root:
 
-| Command                                | Description                                |
-| -------------------------------------- | ------------------------------------------ |
-| `zig build`                            | Build the Win32 app and bundled resources  |
-| `zig build -Demit-exe=true`            | Force-install `zig-out/bin/noctty.exe`     |
-| `zig build test -Dtest-filter=<name>`  | Run targeted tests (preferred)             |
-| `zig build test -Demit-test-exe=true`  | Run the full test suite (slow)             |
-| `zig build test -Dtest-filter=win32`   | Run Win32-focused tests                    |
-| `zig build test -Dtest-filter=scroll`  | Run scroll/input regression tests          |
-| `zig build test -Dtest-filter=keybind` | Run keybinding/default-behavior tests      |
-| `zig build -Demit-lib-vt`              | Build the retained `libghostty-vt` library |
+| Command                                             | Description                                    |
+| --------------------------------------------------- | ---------------------------------------------- |
+| `zig build`                                         | Build the Win32 app and bundled resources      |
+| `zig build -Demit-exe=true`                         | Force-install `zig-out/bin/noctty.exe`         |
+| `zig build test -Demit-test-exe=true --summary all` | Run the full test suite (about 4,500 tests)    |
+| `zig build test -Dtest-filter=<name> --summary all` | Run matching tests while iterating (see below) |
+| `zig build -Demit-lib-vt`                           | Build the retained `libghostty-vt` library     |
 
-Bare `zig build test` errors in this fork; pass `-Dtest-filter=<name>` or
-`-Demit-test-exe=true` (enforced in `build.zig`). For normal development,
-prefer the narrowest verification that covers your change, then run
+Bare `zig build test` errors in this fork; pass `-Demit-test-exe=true` or
+`-Dtest-filter=<name>` (enforced in `build.zig`).
+
+The full suite is the only test run to trust on its own, and `--summary all`
+is part of it: read the `N/M tests passed` line. `Build Summary: 41/41 steps
+succeeded` counts build steps, not tests.
+
+`-Dtest-filter=<name>` is a local convenience, not evidence. Many single-token
+filters, including `win32`, `scroll`, and `keybind`, run zero tests and still
+report success. A run with no `N/M tests passed` line ran nothing, however
+green it looks. Iterate with a filter if it helps, then run the full suite and
 `zig build` before you finish.
 
 ## Toolchain
