@@ -771,7 +771,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .uniforms = .{
                     .projection_matrix = undefined,
                     .cell_size = undefined,
-                    .grid_size = undefined,
+                    // No cells exist until the first `rebuildCells`, which
+                    // is also what sets the real grid size.
+                    .grid_size = .{ 0, 0 },
                     .grid_padding = undefined,
                     .screen_size = undefined,
                     .padding_extend = .{},
@@ -901,8 +903,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :err &.{};
             };
 
-            const has_custom_shaders = custom_shaders.len > 0;
-
             var shaders = try self.api.initShaders(
                 self.alloc,
                 custom_shaders,
@@ -910,7 +910,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer shaders.deinit(self.alloc);
 
             self.shaders = shaders;
-            self.has_custom_shaders = has_custom_shaders;
+            // Count the pipelines that linked, not the sources that loaded: a
+            // shader that compiles but fails to link leaves no post pipeline,
+            // and treating it as present would draw into a target nothing
+            // copies to the screen (a black terminal) and animate forever.
+            self.has_custom_shaders = shaders.post_pipelines.len > 0;
         }
 
         /// This is called early right after surface creation.
@@ -1594,9 +1598,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
             self.cells_rebuilt = false;
 
-            // Wait for a frame to be available.
+            // Wait for a frame to be available. Once `beginFrame` succeeds the
+            // frame context owns the frame and `complete` releases it on every
+            // path, so this errdefer must not release it a second time.
             const frame = try self.swap_chain.nextFrame();
-            errdefer self.swap_chain.releaseFrame();
+            var frame_owned_by_ctx = false;
+            errdefer if (!frame_owned_by_ctx) self.swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{self.swap_chain.frame_index});
 
             // If we need to reinitialize our shaders, do so.
@@ -1739,8 +1746,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Get a frame context from the graphics API.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
-            if (apprt.runtime == apprt.win32) log.debug("drawFrame beginFrame ok", .{});
+            frame_owned_by_ctx = true;
             defer frame_ctx.complete(sync);
+            if (apprt.runtime == apprt.win32) log.debug("drawFrame beginFrame ok", .{});
 
             {
                 var pass = frame_ctx.renderPass(&.{.{
@@ -1805,8 +1813,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     return err;
                 };
 
-                // Then we draw any opaque cell backgrounds.
-                pass.step(.{
+                // Then we draw any opaque cell backgrounds. A synchronous
+                // draw can arrive before the first `rebuildCells`; with no
+                // cells the shader's `grid_size - 1` bounds check underflows
+                // and it would index past the one-element buffer.
+                if (self.cells.size.columns > 0) pass.step(.{
                     .pipeline = self.shaders.pipelines.cell_bg,
                     .uniforms = frame.uniforms.buffer,
                     .buffers = &.{ null, frame.cells_bg.buffer },
