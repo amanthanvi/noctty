@@ -31,9 +31,16 @@ succeeded` counts build steps, not tests.
 
 `-Dtest-filter=<name>` is a local convenience, not evidence. Many single-token
 filters, including `win32`, `scroll`, and `keybind`, run zero tests and still
-report success. A run with no `N/M tests passed` line ran nothing, however
-green it looks. Iterate with a filter if it helps, then run the full suite and
-`zig build` before you finish.
+report success: the `run test ghostty-test` line says `success` with no count.
+Iterate with a filter if it helps, then run the full suite and `zig build`
+before you finish.
+
+A `run test ghostty-test cached` line also has no count. Zig prints it when it
+reuses an earlier test run instead of running the tests again: under
+`zig build --watch`, or when you pin `zig build --seed` and repeat an
+identical run. A plain `zig build` picks a new seed and reruns the tests. A
+cached result repeats whatever that earlier run did, including running
+nothing, so rerun without `--seed` or `--watch` when you need the count.
 
 ## Toolchain
 
