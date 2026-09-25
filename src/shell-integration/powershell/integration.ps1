@@ -507,8 +507,9 @@ function global:__ghostty_encode_cwd_uri {
 #
 # A prompt replaced after startup (`. $PROFILE`, an oh-my-posh or Starship
 # re-init, a venv) is wrapped again by `__ghostty_readline` before the next
-# line is read, so exactly ONE prompt after the replacement is drawn without
-# our marks: the one the replacing command's own prompt draw produces. Hooking
+# line is read. The ONE prompt drawn before that, by the user's own function,
+# gets OSC 7, a P mark and B from `__ghostty_readline` instead, and lacks only
+# its D. Hooking
 # `prompt` through an alias instead catches that one too, since an alias
 # resolves before a function of the same name, but it was measured to cost
 # more than it saves: `Get-Command prompt` then returns the alias, whose
@@ -753,6 +754,8 @@ function global:__ghostty_prompt_body {
             # Deliberately silent: writing an error here would corrupt the
             # prompt line we are about to draw.
         }
+        # Tells `__ghostty_readline` this prompt was ours; see there.
+        $Global:__ghostty_prompt_marked = $true
 
         # Delegate to the user's prompt. This can internally run native
         # helpers (git-aware prompts are the common case) which overwrite
@@ -793,15 +796,21 @@ function global:__ghostty_prompt_body {
         }
 
         # OSC 133 B — end of prompt, start of user input. It must follow
-        # the prompt TEXT, and that text is not on screen yet: the host
-        # draws the string this function returns after it returns. Writing
-        # B directly, as this script used to, put B ahead of the whole
-        # visible prompt, so the terminal marked the prompt's cells as
-        # input and `insert_last_command` typed the old prompt back in front
-        # of the command. So B rides at the end of the returned string, the
-        # way VS Code's integration does it.
+        # the prompt TEXT, which is not on screen yet: the host draws the
+        # string this function returns after it returns. `__ghostty_readline`
+        # writes B once the host has drawn it and before the line is read,
+        # so the returned string stays exactly the user's (a transcript
+        # records it) and B lands after whatever the host drew. B rides at
+        # the end of the returned string only where no line read follows a
+        # host draw: a PSReadLine repaint (Ctrl+L, a transient prompt), which
+        # runs this INSIDE the line reader, and a session with no
+        # PSConsoleHostReadLine function to hook, where the host reads the
+        # line itself.
         try {
-            $out = __ghostty_append_input_mark $out
+            $reader_marks_input = (-not (__ghostty_read_global '__ghostty_in_readline')) -and
+                ($null -ne ${function:global:PSConsoleHostReadLine}) -and
+                (${alias:PSConsoleHostReadLine} -eq '__ghostty_readline')
+            if (-not $reader_marks_input) { $out = __ghostty_append_input_mark $out }
         } catch {
             # See above: never let a reporting failure eat the user's prompt.
         }
@@ -825,18 +834,18 @@ function global:__ghostty_prompt_body {
     }
 }
 
-# Put OSC 133 B at the end of the prompt text the host is about to draw.
+# Put OSC 133 B at the end of the prompt text about to be drawn, for the two
+# cases where `__ghostty_readline` cannot write it (see the caller).
 #
 # Measured on both hosts: the host draws only the FIRST object a prompt
 # outputs (`'A> '; 'B> '` draws `A> `) and draws `PS>` for an empty string or
 # no output at all; PSReadLine's InvokePrompt draws the prompt only when there
-# is exactly one object, else `PS>`. So B goes on the first object, the rest
-# of the output passes through untouched, and an empty prompt becomes that
-# same `PS>` with B after it. Anything but a string is left alone and B is
-# written directly, as before: its drawn text is not ours to reproduce.
+# is exactly one object, else `PS>`. So an empty prompt becomes that same
+# `PS>` with B after it. Anything but a single string is left alone and B is
+# written directly: its drawn text is not ours to reproduce.
 #
-# The one visible change: `Start-Transcript` records the prompt string, so a
-# transcript now carries the B mark after each prompt.
+# Without PSReadLine a transcript records this B with the prompt; a
+# PSReadLine repaint is not transcribed.
 function global:__ghostty_append_input_mark {
     param($Output)
     $mark = "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
@@ -894,9 +903,13 @@ function global:__ghostty_readline {
     # such function.
     if ($null -eq $read_line) { return }
 
-    # The command that just ran may have replaced `function prompt`; wrap
-    # the new one so the next prompt carries our marks again. Costs a
-    # reference comparison when nothing changed.
+    # Did our wrapper draw the prompt on screen? Not when the command that
+    # just ran replaced `function prompt` (`. $PROFILE`, a theme re-init), or
+    # when a prompt is ReadOnly and cannot be wrapped at all.
+    $marked = [bool](__ghostty_read_global '__ghostty_prompt_marked')
+
+    # Wrap a replaced prompt so the next one carries all of our marks.
+    # Costs a reference comparison when nothing changed.
     try {
         __ghostty_wrap_prompt
     } catch {
@@ -904,10 +917,61 @@ function global:__ghostty_readline {
         # left; a missed re-wrap only costs marks.
     }
 
+    # OSC 133 B, where input really begins: the host has drawn the prompt,
+    # whatever it returned, and PSReadLine has not started. An unmarked
+    # prompt first gets OSC 7 and a P mark in place of its missing A, with
+    # `redraw=0` for the same reason A carries it. P does not fresh-line the
+    # way A does, so the cursor stays put after the drawn text. Its D is
+    # lost, which costs the replacing command its command-finished
+    # notification and exit status; the next C restarts the command timer.
+    #
+    # Only the host's own read of a prompt line gets marks or consumes the
+    # flag. A script that calls PSConsoleHostReadLine itself is not that
+    # read: the host's sits alone on the call stack (one frame, one more per
+    # nested prompt; measured on both hosts), and marks written into a
+    # running command would end it early. That includes a prompt function
+    # calling the reader, which runs after our wrapper has set the flag, so
+    # the flag cannot vouch for the caller. And under Enter-PSSession the
+    # prompt on screen is the remote one, drawn remotely: a P and B there
+    # would be dated with this machine's directory and turn remote prompts
+    # into local ones. The check costs 10-70 microseconds a line (measured
+    # on both hosts).
+    $from_host = $false
+    try {
+        $from_host = (-not $Host.IsRunspacePushed) -and
+            (@(Get-PSCallStack).Count -le (1 + $NestedPromptLevel))
+        if ($from_host) {
+            $Global:__ghostty_prompt_marked = $false
+            if (-not $marked) {
+                $cwd_uri = __ghostty_encode_cwd_uri
+                __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
+                __ghostty_write_osc "${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"
+            }
+            __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
+        }
+    } catch {
+        # A missing mark costs the terminal a prompt boundary, never a line.
+    }
+
+    # A prompt drawn while the line is being read is PSReadLine's repaint
+    # (Ctrl+L, a transient prompt): the prompt then carries its own B.
+    #
+    # No try/finally around the call. PSReadLine throws when stdin is
+    # redirected. As written, the wrapper runs on past the throw, clears the
+    # flags, and the host goes on to read the line itself. With the call
+    # inside `try { } finally { }` the host instead took the wrapper's return
+    # for end of input and the session exited after its first prompt.
+    # Measured on both hosts; why the host tells the two apart is not
+    # established.
+    $Global:__ghostty_in_readline = $true
+    # Hand on the $? the command left, as the last statement before the
+    # call; see __ghostty_prompt_body.
     if (-not $ok) {
         Microsoft.PowerShell.Utility\Write-Error -Message '' -ErrorAction Ignore
     }
     $line = & $read_line
+    $Global:__ghostty_in_readline = $false
+    if ($from_host) { $Global:__ghostty_prompt_marked = $false }
 
     try {
         if ($line -is [string] -and -not [string]::IsNullOrWhiteSpace($line)) {

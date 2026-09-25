@@ -160,11 +160,18 @@ The PowerShell script emits OSC 7 as a full `file://` URI with each path
 segment percent-encoded, and OSC 133 A / B / D prompt marks with a stable
 `aid=$PID`, around whatever `prompt` the profile installed. D, OSC 7 and
 `A;redraw=0` are written while the prompt function runs, so anything the
-user's prompt writes itself lands after A. B rides at the end of the string
-the prompt returns, because the host draws that string only after the function
-returns: a B written directly would land ahead of the visible prompt and mark
-its cells as input, which made `insert_last_command` type the old prompt back
-in front of the command.
+user's prompt writes itself lands after A. B is written by the line reader
+(below), after the host has drawn the prompt and before PSReadLine starts, so
+it lands where input begins whatever the prompt returned, and the returned
+string stays exactly the user's: a transcript, including one the "Turn on
+PowerShell Transcription" group policy starts, records the prompt without it.
+A B written from inside the prompt function would land ahead of the visible
+prompt, because the host draws the returned string only after the function
+returns, and the prompt's cells would be taken for input. Two cases have no
+line read after the host's draw, and there the prompt appends B to its own
+string: a PSReadLine repaint (Ctrl+L, a transient prompt), which is not
+transcribed, and a session without PSReadLine, whose transcript does record
+it.
 
 The prompt hook is a generated `function prompt` of one line: it captures
 `$?` and calls `__ghostty_prompt_body` with the id of the prompt it wraps. The
@@ -174,11 +181,21 @@ saving the prompt with `Copy-Item`, a profile chaining to `$function:prompt` or
 called from inside a newer wrapper passes straight through without a second
 set of marks. A prompt replaced after startup (`. $PROFILE`, an oh-my-posh or
 Starship re-init, a venv) is wrapped again by the line reader before the next
-line is read, so exactly one prompt after the replacement is drawn without
-noctty's marks. (For a venv that one prompt is `(venv) ` followed by the saved
-copy of our wrapper, so its marks land after `(venv) ` instead of before it.)
-That needs PSReadLine; without it a replaced prompt stays unwrapped, as
-before.
+line is read. The one prompt drawn before that, by the user's own function,
+gets its marks from the line reader instead: OSC 7 and `133;P;k=i;redraw=0`
+in place of its missing A (P does not fresh-line, so the cursor stays where
+the prompt ended), then B. A `ReadOnly` prompt, which cannot be wrapped, gets
+the same on every line. Only the host's own read of a prompt line gets these
+marks: not a script that calls `PSConsoleHostReadLine` itself, whose command
+they would cut short, and not a remote prompt under `Enter-PSSession`. What that prompt still lacks is its D, which would
+have closed the command that replaced the prompt: that command's
+command-finished notification and exit status are lost (the next C restarts
+the command timer, so nothing else is thrown off). Its text also arrives
+before any prompt mark, so the terminal records it as the previous command's
+output, and copying the output of the next command returns that prompt text.
+(For a venv that one prompt is `(venv) ` followed by the saved copy of our
+wrapper, so its marks land after `(venv) ` instead of before it.) All of this
+needs PSReadLine; without it a replaced prompt stays unwrapped, as before.
 
 Hooking `prompt` through a global alias instead, which PowerShell resolves
 before a function of the same name, would catch that one prompt too. It was
@@ -225,17 +242,14 @@ for confirmation or honours `-WhatIf`, so a profile's `$ConfirmPreference` or
 The C mark's `cmdline_url` label is left off when it would not fit the
 terminal's 2048-byte OSC buffer, which drops a longer mark whole.
 
-Side effects and edge cases of the line-reader alias and the appended B,
-measured on both hosts:
+Side effects and edge cases of the line-reader alias, measured on both
+hosts:
 
-- A transcript records the prompt string, so it carries the B mark after each
-  prompt. That includes sessions transcribed by the "Turn on PowerShell
-  Transcription" group policy, not only `Start-Transcript`.
-- A prompt that returns more than one object, or a non-string, is left as it
-  is and gets B written directly, before its text: PSReadLine's
+- When PSReadLine repaints a prompt that returns more than one object, or a
+  non-string, B is written directly, before its text: PSReadLine's
   `InvokePrompt` (Ctrl+L, transient prompts) draws `PS>` for a prompt that
-  returns several objects, so a B appended to the first one would be lost
-  after a repaint.
+  returns several objects, so a B appended to the first one would be lost.
+  Prompts the host draws get B from the line reader, after their text.
 - `PSConsoleHostReadLine` is a global alias, so `Get-Command
   PSConsoleHostReadLine` reports the alias, and `Export-Alias -As Script` or
   `Import-Alias -Force` can copy it into a profile. A session without this
@@ -243,9 +257,10 @@ measured on both hosts:
   host silently falls back to its own line reader, without PSReadLine. Remove
   the `PSConsoleHostReadLine` line from an exported alias file.
 - If the user already has an alias named `PSConsoleHostReadLine`, it is left
-  alone, and no C marks are emitted.
+  alone, no C marks are emitted, and B rides in the prompt string as it does
+  without PSReadLine.
 - A `ReadOnly` or `Constant` prompt function cannot be wrapped and is left as
-  it is, without D, cwd or `redraw=0` marks.
+  it is. It gets OSC 7, P and B from the line reader, but no D.
 - The user's prompt runs inside the wrapper, so it can read the wrapper's
   local variables through PowerShell's dynamic scoping, as it could before.
 
