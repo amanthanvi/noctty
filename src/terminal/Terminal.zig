@@ -1281,9 +1281,15 @@ pub fn semanticPrompt(
             // an A does (see the A arm above), so bash with ble.sh nested in
             // a cmd or PowerShell tab stops inheriting their `redraw=0`. A P
             // inside a prompt an A already opened, which is how bash and zsh
-            // mark PS1 on every redraw, changes nothing.
-            if (kind == .initial and self.screens.active.semanticPromptMarkStart()) {
-                self.flags.shell_redraws_prompt = cmd.readOption(.redraw) orelse .true;
+            // mark PS1 on every redraw, changes nothing. An explicit
+            // `redraw` option applies either way, as on an A: noctty's
+            // PowerShell integration uses one to mark a prompt it could not
+            // wrap in time, where an A's fresh-line would break the line.
+            const new_prompt = kind == .initial and self.screens.active.semanticPromptMarkStart();
+            if (cmd.readOption(.redraw)) |v| {
+                self.flags.shell_redraws_prompt = v;
+            } else if (new_prompt) {
+                self.flags.shell_redraws_prompt = .true;
             }
 
             self.screens.active.cursorSetSemanticContent(.{ .prompt = kind });

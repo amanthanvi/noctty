@@ -582,6 +582,35 @@ fn restoreRequestedHostWindowStyle(hwnd: HWND, requested: u32) void {
     }
 }
 
+/// Windows clipboard text ends its lines with CRLF; the core, and whatever
+/// reads an OSC 52 reply, expect LF. A paste turns each LF into one CR, the
+/// shell's Enter, so a CRLF left in place arrived as two: an extra empty line
+/// after every pasted one, which cmd answers with an extra prompt. Takes
+/// ownership of `text` and returns it, or a replacement when it had a CRLF.
+fn lfLineEndings(alloc: std.mem.Allocator, text: [:0]u8) ![:0]u8 {
+    const size = std.mem.replacementSize(u8, text, "\r\n", "\n");
+    if (size == text.len) return text;
+    defer alloc.free(text);
+    const out = try alloc.allocSentinel(u8, size, 0);
+    _ = std.mem.replace(u8, text, "\r\n", "\n", out);
+    return out;
+}
+
+test "win32 clipboard text gets LF line endings" {
+    const alloc = std.testing.allocator;
+
+    const crlf = try lfLineEndings(alloc, try alloc.dupeZ(u8, "cd x\r\nnu\r\n"));
+    defer alloc.free(crlf);
+    try std.testing.expectEqualStrings("cd x\nnu\n", crlf);
+
+    // A lone CR or LF is left alone, and text without a CRLF is returned as is.
+    const plain = try alloc.dupeZ(u8, "a\rb\nc");
+    const same = try lfLineEndings(alloc, plain);
+    defer alloc.free(same);
+    try std.testing.expectEqual(plain.ptr, same.ptr);
+    try std.testing.expectEqualStrings("a\rb\nc", same);
+}
+
 fn surfaceWindowStyle() u32 {
     // Keep the terminal child surface hidden until GL + core init complete,
     // then show it explicitly from Surface.init.
@@ -32558,7 +32587,8 @@ pub const Surface = struct {
 
         const text_w: [*:0]const u16 = @ptrCast(@alignCast(locked));
         const slice_w = std.mem.sliceTo(text_w, 0);
-        return try std.unicode.utf16LeToUtf8AllocZ(self.app.core_app.alloc, slice_w);
+        const alloc = self.app.core_app.alloc;
+        return try lfLineEndings(alloc, try std.unicode.utf16LeToUtf8AllocZ(alloc, slice_w));
     }
 
     fn writeClipboardText(self: *const Surface, text: []const u8) !void {

@@ -25,11 +25,12 @@ completed: ?Completed = null,
 /// is a plain flag rather than a pin so erasing rows cannot invalidate it.
 prompt_open: bool = false,
 
-/// A line was submitted while no prompt was open: typed ahead while a command
-/// was still running. The next prompt to open consumes it without noctty
-/// writing a submission of its own. Cleared by the prompt that takes it and by
-/// a C mark, which means a command started from it.
-typeahead_submitted: bool = false,
+/// Lines submitted that no open prompt has read yet: typed ahead while a
+/// command was still running, or the lines after the first in a multi-line
+/// paste. Each prompt that opens takes one without noctty writing a
+/// submission of its own. Cleared by a C mark, which means a command started
+/// from queued input.
+typeahead_lines: u32 = 0,
 
 /// The open prompt began with typed-ahead input waiting for it, so its line is
 /// submitted without `consumeInput` ever closing it. See `markPromptStart`.
@@ -106,7 +107,7 @@ pub fn startOutput(
 ) Allocator.Error!void {
     self.prompt_open = false;
     self.prompt_presubmitted = false;
-    self.typeahead_submitted = false;
+    self.typeahead_lines = 0;
     self.output_mark_seen = true;
     self.clearActive(pages);
     if (self.pending) |prompt| {
@@ -198,15 +199,18 @@ pub fn inputPending(self: *const SemanticCommand) bool {
 /// `active` and `completed` are untouched: a following C still has to find
 /// the prompt, and `startOutput` falls back to the prompt iterator when no
 /// pending pin exists, so C/D shells lose nothing.
-pub fn consumeInput(self: *SemanticCommand, pages: *PageList) void {
-    if (self.prompt_open) {
+///
+/// `lines` is how many lines the write submitted. The first submits the open
+/// prompt, if there is one; any others, or all of them when nothing is reading
+/// a line, wait for the prompts that follow.
+pub fn consumeInput(self: *SemanticCommand, pages: *PageList, lines: u32) void {
+    var queued = lines;
+    if (self.prompt_open and queued > 0) {
         self.prompt_open = false;
         self.prompt_presubmitted = false;
-    } else {
-        // Nothing is reading a line right now, so the shell will read this
-        // one at its next prompt.
-        self.typeahead_submitted = true;
+        queued -= 1;
     }
+    self.typeahead_lines +|= queued;
     self.clearPending(pages);
 }
 
@@ -228,8 +232,8 @@ pub fn markPromptStart(self: *SemanticCommand) bool {
     const new_prompt = !self.prompt_open or
         (self.prompt_presubmitted and !self.output_mark_seen and self.inputPending());
     if (new_prompt) {
-        self.prompt_presubmitted = self.typeahead_submitted;
-        self.typeahead_submitted = false;
+        self.prompt_presubmitted = self.typeahead_lines > 0;
+        self.typeahead_lines -|= 1;
     }
     self.prompt_open = true;
     return new_prompt;
