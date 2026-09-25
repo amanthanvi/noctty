@@ -318,6 +318,8 @@ pub extern "user32" fn LoadImageW(hInst: HINSTANCE, name: INTRESOURCE, @"type": 
 
 pub extern "user32" fn GetSystemMetrics(nIndex: i32) callconv(.winapi) i32;
 
+pub extern "user32" fn SetThreadDpiAwarenessContext(dpiContext: isize) callconv(.winapi) isize;
+
 pub extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) BOOL;
 
 pub extern "user32" fn InvalidateRect(hWnd: HWND, lpRect: ?*const RECT, bErase: BOOL) callconv(.winapi) BOOL;

@@ -515,9 +515,17 @@ The dark caption is chosen at runtime, not by build number:
 title bar (app-owned caption with native caption actions and Snap Layout
 hover) while the tab bar and window decorations are visible;
 `window-show-tab-bar = never` falls back to the stock caption, as do older
-builds. `window-decoration = none` removes the caption and the window frame:
-the window has no title bar, border, or shadow, and cannot be moved or
-resized with the mouse or from the Alt+Space window menu.
+builds.
+
+`window-decoration = none` removes the title bar and the window border. On
+Windows 11 the window keeps its frame otherwise: it resizes from its edges
+(the top edge is a thin band along the top of the window), keeps its shadow
+and rounded corners, snaps, maximizes to the work area, and has the Alt+Space
+window menu. With no title bar to drag, move it with Snap (Win+arrow keys) or
+Alt+Space, then Move. On Windows 10 the window is frameless: no border,
+shadow, or resize edges, no Alt+Space menu, and maximizing it covers the
+taskbar. The quick terminal is frameless on both, so it sits flush with its
+screen edge.
 
 The universal palette puts actions, live tabs, panes, Windows profiles,
 named layouts, and native settings in one fuzzy-ranked, keyboard-driven

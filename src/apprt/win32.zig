@@ -432,6 +432,19 @@ fn shouldUseIntegratedTitlebar(
     return os_build >= c.OS_BUILD_WIN11_21H2 and show_tab_bar != .never;
 }
 
+/// Whether `window-decoration = none` keeps the system frame and only
+/// collapses its caption, the integrated titlebar's mechanism with a 0 px
+/// row. The frame gives the window its resize edges, shadow, Snap,
+/// work-area maximize and the Alt+Space window menu, with nothing to
+/// paint. Windows 11 only: Windows 10 draws its window border inside the
+/// non-client top this would remove, and stays frameless. So does the
+/// quick terminal, which is sized from config and placed flush with a
+/// screen edge by its window rect: the frame's invisible resize margins
+/// would pull it in from that edge.
+fn undecoratedKeepsFrame(os_build: u32, quick_terminal: bool) bool {
+    return os_build >= c.OS_BUILD_WIN11_21H2 and !quick_terminal;
+}
+
 fn dispatchDwmNcMessage(
     hwnd: HWND,
     msg: UINT,
@@ -536,16 +549,17 @@ fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visi
     return active_surface_visible orelse cached_visible;
 }
 
-fn startupHostWindowStyle(decorations_visible: bool, fullscreen: bool) u32 {
-    return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, c.WS_VISIBLE);
+fn startupHostWindowStyle(framed: bool, fullscreen: bool) u32 {
+    return effectiveHostWindowStyle(framed, fullscreen, true) & ~@as(u32, c.WS_VISIBLE);
 }
 
 /// The style to write back over the one `CreateWindowEx` gave a host
 /// created with `requested`, or null when it kept the request.
 ///
-/// `WS_OVERLAPPED` is 0, so the undecorated host style is a top-level
-/// window with neither `WS_POPUP` nor `WS_CHILD`, and `CreateWindowEx`
-/// gives every such window `WS_CAPTION` whatever the request says.
+/// `WS_OVERLAPPED` is 0, so the undecorated host style on Windows 10 (see
+/// `undecoratedKeepsFrame`) is a top-level window with neither `WS_POPUP`
+/// nor `WS_CHILD`, and `CreateWindowEx` gives every such window
+/// `WS_CAPTION` whatever the request says.
 /// `SetWindowLongPtr` does not. So with `window-decoration = none`, every
 /// window created with no window to copy (the first one, the quick
 /// terminal, a restored or adopted window) had a title bar, and a
@@ -617,8 +631,10 @@ fn surfaceWindowStyle() u32 {
     return c.WS_CHILD | c.WS_CLIPSIBLINGS;
 }
 
+/// `framed` picks the system frame: decorated windows, and on Windows 11
+/// undecorated ones too (`undecoratedKeepsFrame`).
 fn effectiveHostWindowStyle(
-    decorations_visible: bool,
+    framed: bool,
     fullscreen: bool,
     hosted: bool,
 ) u32 {
@@ -629,7 +645,7 @@ fn effectiveHostWindowStyle(
             c.WS_VISIBLE | c.WS_POPUP;
     }
 
-    if (decorations_visible) {
+    if (framed) {
         return if (hosted)
             c.WS_VISIBLE | WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN
         else
@@ -662,15 +678,9 @@ fn shouldResizeHostForInitialSize(host_surface_count: usize) bool {
 }
 
 fn sharedHostWindowFrameStateEquals(a: *const Surface, b: *const Surface) bool {
-    return effectiveHostWindowStyle(
-        a.decorations_visible,
-        a.fullscreen,
-        true,
-    ) == effectiveHostWindowStyle(
-        b.decorations_visible,
-        b.fullscreen,
-        true,
-    ) and sizeLimitEquals(a.size_limit, b.size_limit);
+    return a.decorations_visible == b.decorations_visible and
+        a.fullscreen == b.fullscreen and
+        sizeLimitEquals(a.size_limit, b.size_limit);
 }
 
 fn sharedHostWindowTopmostEquals(a: *const Surface, b: *const Surface) bool {
@@ -8206,7 +8216,7 @@ pub const App = struct {
         if (mapped_hosts != state.windows.items.len) return error.WindowCountMismatch;
     }
 
-    fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface) !*Host {
+    fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface, quick_terminal: bool) !*Host {
         try self.ensureHostWindowClass();
         try self.ensurePaletteListClass();
         try self.ensureScrollbarClass();
@@ -8217,6 +8227,7 @@ pub const App = struct {
         host.* = .{
             .app = self,
             .id = self.allocateHostId(),
+            .quick_terminal = quick_terminal,
         };
         host.palette_catalog = try PaletteCatalog.init(
             &host.palette_catalog_items,
@@ -8231,7 +8242,8 @@ pub const App = struct {
         const startup_decorations_visible = initialDecorationsVisibleForSource(&self.config, clone_state_from);
         host.cached_decorations_visible = startup_decorations_visible;
         const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
-        const startup_style = startupHostWindowStyle(startup_decorations_visible, startup_fullscreen);
+        const keeps_frame = startup_decorations_visible or undecoratedKeepsFrame(self.os_build, quick_terminal);
+        const startup_style = startupHostWindowStyle(keeps_frame, startup_fullscreen);
 
         const hwnd = sys.CreateWindowExW(
             0,
@@ -8250,6 +8262,9 @@ pub const App = struct {
         host.hwnd = hwnd;
         setWindowIcon(hwnd, self.hinstance);
         applyDwmThemeWithBuild(hwnd, &self.resolved_theme, &self.config, self.os_build);
+        if (!startup_decorations_visible and keeps_frame) {
+            win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, false);
+        }
         host.current_dpi = sys.GetDpiForWindow(hwnd);
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
@@ -8260,11 +8275,12 @@ pub const App = struct {
         };
 
         self.attachShellCompositorWindow(hwnd);
-        // An undecorated host comes back from `CreateWindowEx` with a
-        // caption it did not ask for. Take it off while the host is still
-        // hidden and has no tabs. This goes after the compositor attach
-        // because the frame change resizes the client area, and the host's
-        // WM_SIZE resizes its compositor target, which must exist by then.
+        // On Windows 10, an undecorated host comes back from
+        // `CreateWindowEx` with a caption it did not ask for. Take it off
+        // while the host is still hidden and has no tabs. This goes after the
+        // compositor attach because the frame change resizes the client area,
+        // and the host's WM_SIZE resizes its compositor target, which must
+        // exist by then.
         restoreRequestedHostWindowStyle(hwnd, startup_style);
 
         try self.hosts.append(self.core_app.alloc, host);
@@ -11015,6 +11031,7 @@ const Host = struct {
     surfaces_visible: bool = true,
     dwm_cloaked: bool = false,
     cached_decorations_visible: bool = true,
+    quick_terminal: bool = false,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     active_tab: usize = 0,
     next_tab_id: u32 = 1,
@@ -12324,7 +12341,7 @@ const Host = struct {
         wParam: WPARAM,
         lParam: LPARAM,
     ) ?LRESULT {
-        if (!self.usingIntegratedTitlebar()) return null;
+        if (self.clientCaptionHeight() == null) return null;
         // `CreateWindowEx` sends this with wParam FALSE, and lParam then
         // points at a bare RECT: the proposed window rect in, the client rect
         // out. Frame changes and resizes send TRUE with NCCALCSIZE_PARAMS,
@@ -12348,7 +12365,14 @@ const Host = struct {
         // widths survive, while the integrated-caption policy
         // (caption row inside client + maximized invisible-margin
         // compensation) stays centralized in `win32_nc_layout`.
-        const metrics = self.ncMetrics();
+        var metrics = self.ncMetrics();
+        // A maximized window overhangs its monitor by the system's frame,
+        // the one DWP has just put on its sides. `metricsDefault` scales the
+        // 96-DPI frame linearly, 12 px at 144 DPI where Windows uses 11,
+        // which left a 1 px sliver of frame across the top of the monitor
+        // (6 px at 288 DPI).
+        metrics.size_frame_y = rect.left - original.left;
+        metrics.padded_border = 0;
         const state: win32_nc_layout.WindowState = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const adjusted = win32_nc_layout.calcNcClientRect(.{
             .left = rect.left,
@@ -12361,7 +12385,7 @@ const Host = struct {
     }
 
     fn handleNcHitTest(self: *Host, hwnd: HWND, lParam: LPARAM) ?LRESULT {
-        if (!self.usingIntegratedTitlebar()) return null;
+        const caption_height = self.clientCaptionHeight() orelse return null;
 
         // lParam is the cursor in SCREEN coords (WM_NCHITTEST is
         // special-cased — NOT client-relative).
@@ -12389,7 +12413,7 @@ const Host = struct {
             .bottom = client_origin.y + (client_rect.bottom - client_rect.top),
         };
         const cursor: win32_nc_layout.Point = .{ .x = cx, .y = cy };
-        const metrics = self.ncMetrics();
+        const metrics = win32_nc_layout.metricsDefault(self.current_dpi, caption_height);
         const state: win32_nc_layout.WindowState =
             if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const ht = win32_nc_layout.hitTest(window_rect, client_screen_rect, cursor, metrics, state);
@@ -18016,6 +18040,29 @@ const Host = struct {
             self.shouldShowTabBar(),
             self.decorationVisibilityForChrome(),
         );
+    }
+
+    /// Height (96 DPI) of the caption row this host keeps inside its client
+    /// area, owning `WM_NCCALCSIZE` and `WM_NCHITTEST`, or null when Windows
+    /// owns the non-client area. The integrated titlebar paints its row
+    /// there; an undecorated window that keeps its frame has a 0 px row, so
+    /// the hit test finds only resize edges and client.
+    fn clientCaptionHeight(self: *const Host) ?i32 {
+        if (self.usingIntegratedTitlebar()) return host_caption_button_h;
+        const fullscreen = if (self.activeSurface()) |surface| surface.fullscreen else false;
+        if (undecoratedKeepsFrame(self.app.os_build, self.quick_terminal) and
+            !self.decorationVisibilityForChrome() and
+            !fullscreen) return 0;
+        return null;
+    }
+
+    /// Whether a `WM_NCHITTEST` point is on a resize edge of this host with
+    /// a 0 px caption row. Its top band lies inside the client area, where
+    /// a terminal pane with no tab bar above it covers the band.
+    fn resizesFrom(self: *Host, lParam: LPARAM) bool {
+        if ((self.clientCaptionHeight() orelse return false) != 0) return false;
+        const ht = self.handleNcHitTest(self.hwnd orelse return false, lParam) orelse return false;
+        return ht >= c.HTLEFT and ht <= c.HTBOTTOMRIGHT;
     }
 
     fn tabBarHeight(self: *Host) i32 {
@@ -26738,6 +26785,11 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
     switch (msg) {
         c.WM_WINHOSTTY_WAKE => return 0,
 
+        c.WM_NCHITTEST => {
+            if (surface) |v| if (v.host) |host| if (host.resizesFrom(lParam)) return c.HTTRANSPARENT;
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+
         c.WM_WINHOSTTY_RENDER_TRACE_SNAPSHOT => {
             if (surface) |v| v.render_trace.requestSnapshot();
             return 0;
@@ -27687,7 +27739,7 @@ pub const Surface = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const host = existing_host orelse
-            try app.createHost(title, opts.clone_state_from);
+            try app.createHost(title, opts.clone_state_from, opts.quick_terminal);
         const created_host = existing_host == null;
         errdefer if (created_host) app.removeHost(host);
         self.* = .{
@@ -28402,8 +28454,9 @@ pub const Surface = struct {
         return self.hwnd;
     }
 
-    /// Whether the top-level window carries `WS_SYSMENU`: fullscreen and
-    /// `window-decoration = none` strip it (`effectiveHostWindowStyle`), and
+    /// Whether the top-level window carries `WS_SYSMENU`: fullscreen strips
+    /// it, and so does `window-decoration = none` on a frameless window, on
+    /// Windows 10 and for the quick terminal (`undecoratedKeepsFrame`).
     /// `SC_KEYMENU` on such a window has no menu to open.
     fn hasWindowMenu(self: *const Surface) bool {
         const top = self.windowHwnd() orelse return false;
@@ -31478,6 +31531,9 @@ pub const Surface = struct {
         const hwnd = self.windowHwnd() orelse return;
         const host = self.host orelse return;
         if (host.activeSurface() != self) return;
+        if (self.keepsFrameUndecorated()) {
+            win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, self.decorations_visible);
+        }
 
         _ = sys.SetWindowPos(
             hwnd,
@@ -31554,15 +31610,34 @@ pub const Surface = struct {
         }
     }
 
+    /// `undecoratedKeepsFrame` for this surface's host window. The quick
+    /// terminal flag is the host's: a split or tab opened inside the quick
+    /// terminal is an ordinary surface in the quick terminal's window.
+    fn keepsFrameUndecorated(self: *const Surface) bool {
+        const quick_terminal = if (self.host) |host| host.quick_terminal else self.quick_terminal;
+        return undecoratedKeepsFrame(self.app.os_build, quick_terminal);
+    }
+
     fn applyWindowStyle(self: *Surface) !void {
         const hwnd = self.activeSharedHostWindowHwnd() orelse return;
-        const style = effectiveHostWindowStyle(
-            self.decorations_visible,
+        const keeps_frame = self.keepsFrameUndecorated();
+        const current: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+        // The write keeps the window's own visibility. Forcing WS_VISIBLE on
+        // showed a hidden quick terminal on a config reload without its
+        // surface knowing (see `App.toggleQuickTerminal`).
+        const style = (effectiveHostWindowStyle(
+            self.decorations_visible or keeps_frame,
             self.fullscreen,
             self.host != null,
-        );
-
-        _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(isize, @intCast(style))));
+        ) & ~@as(u32, c.WS_VISIBLE)) | (current & c.WS_VISIBLE);
+        // On Windows 11 a decoration toggle keeps the frame, so the style is
+        // already right, and writing it anyway would drop WS_MAXIMIZE: a
+        // maximized window left un-maximized in its maximized rect.
+        const state_bits: u32 = c.WS_VISIBLE | c.WS_MAXIMIZE | c.WS_MINIMIZE | c.WS_CLIPSIBLINGS;
+        if ((current & ~state_bits) != (style & ~state_bits)) {
+            _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(isize, @intCast(style))));
+        }
+        if (keeps_frame) win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, self.decorations_visible);
         if (sys.SetWindowPos(
             hwnd,
             null,
@@ -36789,7 +36864,7 @@ test "win32 new host starts with the client area its first frame change keeps" {
     app.use_integrated_titlebar = true;
 
     // The host stays hidden, so the test never touches the foreground.
-    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null);
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null, false);
     const hwnd = host.hwnd.?;
     try std.testing.expect(host.usingIntegratedTitlebar());
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
@@ -36825,10 +36900,16 @@ test "win32 new host starts with the client area its first frame change keeps" {
     try std.testing.expectEqual(window_rect.top, client_origin.y);
 }
 
-test "win32 createHost gives an undecorated host the style applyWindowStyle writes" {
+test "win32 createHost frames an undecorated host for its Windows build" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
+
+    // Per-monitor aware, so the hosts are laid out at the monitor's DPI. A
+    // DPI-unaware thread gets 96, where the linearly scaled frame happens to
+    // equal the system's and the maximized check below could not fail.
+    const previous_dpi_context = sys.SetThreadDpiAwarenessContext(-4);
+    defer _ = sys.SetThreadDpiAwarenessContext(previous_dpi_context);
 
     var core = try CoreApp.create(alloc);
     defer core.destroy();
@@ -36843,10 +36924,6 @@ test "win32 createHost gives an undecorated host the style applyWindowStyle writ
     }
     app.config.@"window-decoration" = .none;
 
-    // What `Surface.applyWindowStyle` writes for an undecorated window: the
-    // style every `new_window` clone and runtime toggle already ended with.
-    const applied = effectiveHostWindowStyle(false, false, true) & ~@as(u32, c.WS_VISIBLE);
-
     // `createHost` as a `new_window` clone calls it: the decoration state
     // comes from the source window rather than the config. The rest of the
     // clone path (`inheritWindowStateFrom`) is not exercised here.
@@ -36855,30 +36932,82 @@ test "win32 createHost gives an undecorated host the style applyWindowStyle writ
     source.decorations_visible = false;
     source.fullscreen = false;
 
-    // An undecorated host must take neither caption path, whether or not the
-    // app uses the Windows 11 integrated one.
-    for ([_]bool{ true, false }) |integrated| {
-        app.use_integrated_titlebar = integrated;
-        // Hosts stay hidden, so the test never touches the foreground.
-        const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null);
-        const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &source);
-        for ([_]*Host{ first, clone }) |host| {
-            const hwnd = host.hwnd.?;
-            try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
-            try std.testing.expect(!host.usingIntegratedTitlebar());
-            // Before the fix both came back with WS_CAPTION and a client
-            // area short by the caption (1258x744 of 1280x800 at 150%). A
-            // clone lost it later, in `inheritWindowStateFrom`; a window with
-            // no source never did.
-            try std.testing.expectEqual(applied, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
-            var window_rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);
-            var client: RECT = undefined;
-            try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
-            try std.testing.expectEqual(window_rect.right - window_rect.left, client.right - client.left);
-            try std.testing.expectEqual(window_rect.bottom - window_rect.top, client.bottom - client.top);
+    // Both builds run against this machine's window manager; only the
+    // build-gated choices differ.
+    for ([_]u32{ 19045, c.OS_BUILD_WIN11_21H2 }) |os_build| {
+        app.os_build = os_build;
+        for ([_]bool{ true, false }) |integrated| {
+            app.use_integrated_titlebar = integrated;
+            // Hosts stay hidden, so the test never touches the foreground.
+            const first = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null, false);
+            const clone = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), &source, false);
+            const quick = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null, true);
+            for ([_]*Host{ first, clone, quick }) |host| {
+                const hwnd = host.hwnd.?;
+                const keeps_frame = undecoratedKeepsFrame(os_build, host.quick_terminal);
+                try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+                try std.testing.expect(!host.usingIntegratedTitlebar());
+                // What `Surface.applyWindowStyle` writes for an undecorated
+                // window, the style every clone and runtime toggle ends with.
+                // Before #270 the first window came back with WS_CAPTION.
+                const applied = effectiveHostWindowStyle(keeps_frame, false, true) & ~@as(u32, c.WS_VISIBLE);
+                try std.testing.expectEqual(applied, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
+                var window_rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &window_rect) != 0);
+                var client: RECT = undefined;
+                try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
+                var client_origin: POINT = .{ .x = 0, .y = 0 };
+                try std.testing.expect(sys.ClientToScreen(hwnd, &client_origin) != 0);
+                // No caption either way: the client starts at the top edge.
+                try std.testing.expectEqual(window_rect.top, client_origin.y);
+                const mid_x = @divTrunc(window_rect.left + window_rect.right, 2);
+                const mid_y = @divTrunc(window_rect.top + window_rect.bottom, 2);
+                if (!keeps_frame) {
+                    // Windows 10, and the quick terminal: frameless, as before.
+                    try std.testing.expectEqual(@as(?i32, null), host.clientCaptionHeight());
+                    try std.testing.expectEqual(window_rect.right - window_rect.left, client.right - client.left);
+                    try std.testing.expectEqual(window_rect.bottom - window_rect.top, client.bottom - client.top);
+                    try std.testing.expect(!host.resizesFrom(testPoint(mid_x, window_rect.top + 1)));
+                    continue;
+                }
+                // Windows 11 keeps the side and bottom frame, whose invisible
+                // margins resize the window, and a top band inside the client.
+                try std.testing.expectEqual(@as(?i32, 0), host.clientCaptionHeight());
+                try std.testing.expect(client.right - client.left < window_rect.right - window_rect.left);
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOPLEFT), testHitTest(hwnd, window_rect.left + 1, window_rect.top + 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, window_rect.left + 1, mid_y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTBOTTOMRIGHT), testHitTest(hwnd, window_rect.right - 2, window_rect.bottom - 2));
+                // No caption row: just below the top band is terminal.
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, client_origin.y + host.scaled(16)));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, mid_y));
+                // With no tab bar the terminal pane covers the top band, so it
+                // hands those points to the host; everywhere else it keeps them.
+                try std.testing.expect(host.resizesFrom(testPoint(mid_x, window_rect.top + 1)));
+                try std.testing.expect(!host.resizesFrom(testPoint(mid_x, mid_y)));
+
+                // Maximized, the client starts where the monitor does: the top
+                // inset equals the frame the window overhangs it by, which is
+                // the side frame DWP lays out. Only the zoom bit is set, so the
+                // window stays hidden.
+                _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(usize, testWindowStyle(hwnd) | c.WS_MAXIMIZE)));
+                var rect: RECT = window_rect;
+                _ = sys.SendMessageW(hwnd, c.WM_NCCALCSIZE, 0, @bitCast(@intFromPtr(&rect)));
+                try std.testing.expect(rect.left > window_rect.left);
+                try std.testing.expectEqual(rect.left - window_rect.left, rect.top - window_rect.top);
+            }
         }
     }
+}
+
+fn testPoint(x: i32, y: i32) LPARAM {
+    const point: u32 = @as(u32, @as(u16, @bitCast(@as(i16, @intCast(x))))) |
+        (@as(u32, @as(u16, @bitCast(@as(i16, @intCast(y))))) << 16);
+    return @intCast(point);
+}
+
+fn testHitTest(hwnd: HWND, x: i32, y: i32) LRESULT {
+    return sys.SendMessageW(hwnd, c.WM_NCHITTEST, 0, testPoint(x, y));
 }
 
 test "win32 layoutChromeForRect hides tab-strip chrome when the tab bar is off" {

@@ -190,6 +190,7 @@ const HWND = win32_types.HWND;
 const E_INVALIDARG: i32 = @bitCast(@as(u32, 0x80070057));
 const DWMWA_USE_IMMERSIVE_DARK_MODE_V1: u32 = 19;
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+const DWMWA_BORDER_COLOR: u32 = 34;
 const DWMWA_CAPTION_COLOR: u32 = 35;
 const DWMWA_TEXT_COLOR: u32 = 36;
 const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
@@ -205,6 +206,7 @@ extern "uxtheme" fn SetWindowTheme(HWND, ?[*:0]const u16, ?[*:0]const u16) callc
 const WindowKind = enum { host, settings };
 const NativeControlTheme = enum { system, explorer_light, explorer_dark };
 pub const dwm_color_default: u32 = 0xffff_ffff;
+const dwm_color_none: u32 = 0xffff_fffe;
 
 const WindowThemePolicy = struct {
     immersive_dark: u32,
@@ -262,6 +264,14 @@ pub const WindowThemeAdapter = struct {
             text_color,
             backdrop_type,
         ), supports_backdrop);
+    }
+
+    /// Show or hide the border Windows 11 draws around a framed window. An
+    /// undecorated host keeps the frame for its resize edges and shadow, but
+    /// `window-decoration = none` promises no border.
+    pub fn setHostBorderVisible(hwnd: HWND, visible: bool) void {
+        const color = if (visible) dwm_color_default else dwm_color_none;
+        _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, @ptrCast(&color), @sizeOf(u32));
     }
 
     pub fn applySettings(hwnd: HWND, colors: SettingsColors) void {
