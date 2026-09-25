@@ -614,9 +614,9 @@ pub const NewWindowElevated = struct {
     }
 };
 
-/// The tab to jump to. This is non-exhaustive so that integer values represent
-/// the index (zero-based) of the tab to jump to. Negative values are special
-/// values.
+/// The tab to jump to. This is non-exhaustive so that positive integer values
+/// represent the tab number (one-based, as `goto_tab:N` is configured) to jump
+/// to. Zero selects no tab. Negative values are special values.
 pub const GotoTab = enum(c_int) {
     previous = -1,
     next = -2,
