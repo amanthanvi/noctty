@@ -25238,7 +25238,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                                 return 0;
                             },
                             .first => {
-                                _ = v.activateTabByDirection(@enumFromInt(0));
+                                _ = v.activateTabByDirection(@enumFromInt(1));
                                 v.restoreTabStripFocus();
                                 return 0;
                             },
@@ -26331,10 +26331,11 @@ fn desiredTabIndex(total: usize, current: usize, goto: apprt.action.GotoTab) ?us
         .previous => if (current == 0) total - 1 else current - 1,
         .next => (current + 1) % total,
         .last => total - 1,
+        // `goto_tab:N` is 1-based, as the GTK and macOS apprts read it.
         _ => blk: {
             const raw: c_int = @intFromEnum(goto);
-            if (raw < 0) return null;
-            const idx: usize = @intCast(raw);
+            if (raw < 1) return null;
+            const idx: usize = @intCast(raw - 1);
             break :blk @min(idx, total - 1);
         },
     };
@@ -42834,8 +42835,10 @@ test "win32 desiredTabIndex cycles and clamps" {
     try std.testing.expectEqual(@as(?usize, 2), desiredTabIndex(3, 1, .next));
     try std.testing.expectEqual(@as(?usize, 0), desiredTabIndex(3, 2, .next));
     try std.testing.expectEqual(@as(?usize, 2), desiredTabIndex(3, 0, .last));
-    try std.testing.expectEqual(@as(?usize, 0), desiredTabIndex(3, 1, @enumFromInt(0)));
+    try std.testing.expectEqual(@as(?usize, 0), desiredTabIndex(3, 1, @enumFromInt(1)));
+    try std.testing.expectEqual(@as(?usize, 1), desiredTabIndex(3, 0, @enumFromInt(2)));
     try std.testing.expectEqual(@as(?usize, 2), desiredTabIndex(3, 1, @enumFromInt(9)));
+    try std.testing.expectEqual(@as(?usize, null), desiredTabIndex(3, 1, @enumFromInt(0)));
 }
 
 test "win32 tab button mouse-up still activates tab after capture release" {
