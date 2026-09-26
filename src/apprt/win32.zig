@@ -11054,6 +11054,10 @@ const Host = struct {
     /// outside this host-local gesture state.
     drag_state: win32_tab_drag.DragState = .{},
     overlay_mode: HostOverlayMode = .none,
+    /// Surface a title prompt's text was last filled from, while
+    /// `overlayTextFollowsActiveSurface(overlay_mode)`. Only compared with
+    /// `activeSurface()`, never dereferenced.
+    overlay_text_surface: ?*const Surface = null,
     /// Active confirm overlay payload when `overlay_mode == .confirm`.
     /// Owned byte slices (`title`, `body`, `accept_label`,
     /// `cancel_label`) are allocated via `app.core_app.alloc` and
@@ -15892,6 +15896,7 @@ const Host = struct {
 
         const initial_text = initial orelse "";
         _ = try self.setOverlayEditText(initial_text);
+        self.overlay_text_surface = if (overlayTextFollowsActiveSurface(mode)) self.activeSurface() else null;
 
         // Keep the syncs: their return values still drive `refreshChrome`,
         // and the control text they write is what the confirm prompt's
@@ -15954,6 +15959,7 @@ const Host = struct {
         );
         self.revertPaletteThemePreview();
         self.overlay_mode = .none;
+        self.overlay_text_surface = null;
         self.clearOverlayCompletion();
         runUiActionOrLog("overlay banner clear failed", self.setBanner(.none, null));
         // Drop any active confirm payload. Both accept and cancel
@@ -18451,12 +18457,28 @@ const Host = struct {
         return null;
     }
 
+    /// The tab and window title prompts are filled from the active surface
+    /// and submit to whichever surface is active at Enter. Their label
+    /// already follows a tab switch ("Rename tab n/N"); refill the text with
+    /// the new tab's title too, so submit never writes one tab's title onto
+    /// another.
+    fn syncOverlayTextToActiveSurface(self: *Host) !bool {
+        if (!overlayTextFollowsActiveSurface(self.overlay_mode)) return false;
+        const surface = self.activeSurface() orelse return false;
+        if (self.overlay_text_surface == surface) return false;
+        self.overlay_text_surface = surface;
+        const text = self.overlayInitialText(self.overlay_mode) orelse return false;
+        defer self.app.core_app.alloc.free(text);
+        return try self.setOverlayEditText(text);
+    }
+
     fn refreshChrome(self: *Host) !void {
         var invalidate = self.chrome_repaint_dirty;
         _ = try self.syncWindowTitle();
         invalidate = (try self.syncTabButtons()) or invalidate;
         try self.syncChromeButtons();
         if (self.overlay_mode != .none) {
+            invalidate = (try self.syncOverlayTextToActiveSurface()) or invalidate;
             invalidate = (try self.syncOverlayLabel()) or invalidate;
             invalidate = (try self.syncOverlayHint()) or invalidate;
             _ = try self.syncOverlayPreview();
@@ -23992,6 +24014,7 @@ const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
 const overlayEditFrameVisible = labels.overlayEditFrameVisible;
 const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
+const overlayTextFollowsActiveSurface = labels.overlayTextFollowsActiveSurface;
 
 const OverlayFocusSlot = labels.OverlayFocusSlot;
 

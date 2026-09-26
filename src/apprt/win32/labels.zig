@@ -387,6 +387,18 @@ pub fn overlayEmptySubmitDismisses(mode: HostOverlayMode) bool {
     };
 }
 
+/// Whether the overlay's text is prefilled from the active surface and
+/// written back to the active surface on submit. Those prompts must refill
+/// when the active tab changes while they are open, or submit writes one
+/// tab's title onto another. Exhaustive for the same reason as
+/// `overlayEmptySubmitDismisses`.
+pub fn overlayTextFollowsActiveSurface(mode: HostOverlayMode) bool {
+    return switch (mode) {
+        .surface_title, .tab_title => true,
+        .none, .command_palette, .profile, .search, .tab_overview, .confirm => false,
+    };
+}
+
 pub fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
     return mode != .confirm;
 }
@@ -4238,6 +4250,23 @@ test "win32 overlayEmptySubmitDismisses spares prompts with no query field" {
     try std.testing.expect(overlayEmptySubmitDismisses(.tab_title));
     try std.testing.expect(overlayEmptySubmitDismisses(.tab_overview));
     try std.testing.expect(overlayEmptySubmitDismisses(.none));
+}
+
+test "win32 overlayTextFollowsActiveSurface covers only the title prompts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Prefilled from the active surface and written back to it on submit.
+    try std.testing.expect(overlayTextFollowsActiveSurface(.tab_title));
+    try std.testing.expect(overlayTextFollowsActiveSurface(.surface_title));
+
+    // A search query, a profile key or a tab number is what the user is
+    // typing, not a property of the tab, so switching tabs keeps it.
+    try std.testing.expect(!overlayTextFollowsActiveSurface(.search));
+    try std.testing.expect(!overlayTextFollowsActiveSurface(.profile));
+    try std.testing.expect(!overlayTextFollowsActiveSurface(.command_palette));
+    try std.testing.expect(!overlayTextFollowsActiveSurface(.tab_overview));
+    try std.testing.expect(!overlayTextFollowsActiveSurface(.confirm));
+    try std.testing.expect(!overlayTextFollowsActiveSurface(.none));
 }
 
 test "win32 confirm preview truncates on a codepoint boundary" {
