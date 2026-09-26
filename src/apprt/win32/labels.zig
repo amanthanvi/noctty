@@ -399,6 +399,20 @@ pub fn overlayTextFollowsActiveSurface(mode: HostOverlayMode) bool {
     };
 }
 
+/// Whether an open title prompt has to refill its text: the prompt follows
+/// the active surface, there is one, and it is not the surface the text was
+/// last filled from. A refresh on the same surface leaves what the user
+/// typed alone. Surfaces are compared by identity only.
+pub fn overlayTextNeedsRefill(
+    mode: HostOverlayMode,
+    filled_from: ?*const anyopaque,
+    active: ?*const anyopaque,
+) bool {
+    if (!overlayTextFollowsActiveSurface(mode)) return false;
+    const surface = active orelse return false;
+    return filled_from != surface;
+}
+
 pub fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
     return mode != .confirm;
 }
@@ -4267,6 +4281,33 @@ test "win32 overlayTextFollowsActiveSurface covers only the title prompts" {
     try std.testing.expect(!overlayTextFollowsActiveSurface(.tab_overview));
     try std.testing.expect(!overlayTextFollowsActiveSurface(.confirm));
     try std.testing.expect(!overlayTextFollowsActiveSurface(.none));
+}
+
+test "win32 overlayTextNeedsRefill refills on a tab switch and keeps typing otherwise" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tab_one: u8 = 0;
+    var tab_two: u8 = 0;
+    const one: *const anyopaque = &tab_one;
+    const two: *const anyopaque = &tab_two;
+
+    // The prompt was filled from tab one and tab two became active: refill.
+    try std.testing.expect(overlayTextNeedsRefill(.tab_title, one, two));
+    try std.testing.expect(overlayTextNeedsRefill(.surface_title, one, two));
+
+    // Still on tab one: a chrome refresh must not replace what was typed.
+    try std.testing.expect(!overlayTextNeedsRefill(.tab_title, one, one));
+
+    // Nothing recorded yet (or a failed refill left it unrecorded): fill.
+    try std.testing.expect(overlayTextNeedsRefill(.tab_title, null, one));
+
+    // No active surface: nothing to fill from.
+    try std.testing.expect(!overlayTextNeedsRefill(.tab_title, one, null));
+
+    // Prompts whose text is the user's own query never refill.
+    try std.testing.expect(!overlayTextNeedsRefill(.search, one, two));
+    try std.testing.expect(!overlayTextNeedsRefill(.command_palette, one, two));
+    try std.testing.expect(!overlayTextNeedsRefill(.tab_overview, one, two));
 }
 
 test "win32 confirm preview truncates on a codepoint boundary" {

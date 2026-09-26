@@ -18463,13 +18463,16 @@ const Host = struct {
     /// the new tab's title too, so submit never writes one tab's title onto
     /// another.
     fn syncOverlayTextToActiveSurface(self: *Host) !bool {
-        if (!overlayTextFollowsActiveSurface(self.overlay_mode)) return false;
-        const surface = self.activeSurface() orelse return false;
-        if (self.overlay_text_surface == surface) return false;
-        self.overlay_text_surface = surface;
+        const surface = self.activeSurface();
+        if (!overlayTextNeedsRefill(self.overlay_mode, self.overlay_text_surface, surface)) return false;
         const text = self.overlayInitialText(self.overlay_mode) orelse return false;
         defer self.app.core_app.alloc.free(text);
-        return try self.setOverlayEditText(text);
+        const changed = try self.setOverlayEditText(text);
+        // Only after the text box really holds the new title: marking the
+        // surface first would make a failed refill look done, and the next
+        // refresh would never retry.
+        self.overlay_text_surface = surface;
+        return changed;
     }
 
     fn refreshChrome(self: *Host) !void {
@@ -24015,6 +24018,7 @@ const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 const overlayEditFrameVisible = labels.overlayEditFrameVisible;
 const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
 const overlayTextFollowsActiveSurface = labels.overlayTextFollowsActiveSurface;
+const overlayTextNeedsRefill = labels.overlayTextNeedsRefill;
 
 const OverlayFocusSlot = labels.OverlayFocusSlot;
 
