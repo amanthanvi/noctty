@@ -183,11 +183,14 @@ pub const Windows = struct {
         }
 
         // Stable so that faces the scan saw in a fixed order keep that
-        // order when they score identically.
-        const Order = struct { desc: Descriptor, preferred: ?Preferred };
-        std.mem.sort(Record, filtered, Order{ .desc = desc, .preferred = preferred }, struct {
-            fn lessThan(order: Order, lhs: Record, rhs: Record) bool {
-                return fallbackRank(order.desc, lhs, order.preferred) > fallbackRank(order.desc, rhs, order.preferred);
+        // order when they score identically. The preferred face is found
+        // once, by path, and then identified by its (owned, unique) path
+        // buffer, so the comparator never compares strings.
+        const Order = struct { desc: Descriptor, preferred: ?[*]const u8 };
+        const order: Order = .{ .desc = desc, .preferred = preferredPath(filtered, preferred) };
+        std.mem.sort(Record, filtered, order, struct {
+            fn lessThan(o: Order, lhs: Record, rhs: Record) bool {
+                return fallbackRank(o.desc, lhs, o.preferred) > fallbackRank(o.desc, rhs, o.preferred);
             }
         }.lessThan);
 
@@ -218,7 +221,7 @@ pub const Windows = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         _ = collection;
-        var mapped = self.systemFallbackFor(alloc, desc);
+        var mapped = try self.systemFallbackFor(alloc, desc);
         defer if (mapped) |*value| value.deinit(alloc);
         const preferred: ?Preferred = if (mapped) |value|
             .{ .path = value.path, .face_index = value.face_index }
@@ -227,16 +230,16 @@ pub const Windows = struct {
         return try self.discoverRanked(alloc, desc, preferred);
     }
 
-    fn systemFallbackFor(self: *Windows, alloc: Allocator, desc: Descriptor) ?dwrite.Mapped {
+    /// DirectWrite's answer for a pure codepoint query, or null when it has
+    /// none. DirectWrite failures mean "no answer"; only running out of
+    /// memory is an error.
+    fn systemFallbackFor(self: *Windows, alloc: Allocator, desc: Descriptor) Allocator.Error!?dwrite.Mapped {
         // Only a pure codepoint query: a named family keeps its own matching.
         if (desc.family != null or desc.codepoint == 0) return null;
         const codepoint = std.math.cast(u21, desc.codepoint) orelse return null;
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.system_fallback.map(alloc, codepoint, desc.bold, desc.italic) catch |err| {
-            log.warn("windows system font fallback failed err={}", .{err});
-            return null;
-        };
+        return try self.system_fallback.map(alloc, codepoint, desc.bold, desc.italic);
     }
 
     /// The face DirectWrite named for a fallback query.
@@ -249,12 +252,22 @@ pub const Windows = struct {
         }
     };
 
+    /// The path buffer of the record `preferred` names, which identifies
+    /// that record for the rest of the sort, or null when none matches.
+    fn preferredPath(records: []const Record, preferred: ?Preferred) ?[*]const u8 {
+        const value = preferred orelse return null;
+        for (records) |record| {
+            if (value.matches(record)) return record.path.ptr;
+        }
+        return null;
+    }
+
     /// `score`, plus a bit above all of its own for the face Windows would
     /// pick. Every other record keeps its relative order.
-    fn fallbackRank(desc: Descriptor, record: Record, preferred: ?Preferred) u32 {
+    fn fallbackRank(desc: Descriptor, record: Record, preferred: ?[*]const u8) u32 {
         var result = score(desc, record);
-        if (preferred) |value| {
-            if (value.matches(record)) result |= 1 << 21;
+        if (preferred) |path| {
+            if (record.path.ptr == path) result |= 1 << 21;
         }
         return result;
     }
@@ -1290,17 +1303,24 @@ test "windowsSystemFallbackPreferenceBreaksTies" {
     third.path = "C:\\Windows\\Fonts\\ccc-ui.ttf";
     const desc: Descriptor = .{ .codepoint = 0x4E2D, .size = 12, .bold = true, .italic = true };
 
+    // Path matching uses CompareStringOrdinal, so Windows only.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
     try testing.expectEqual(Windows.fallbackRank(desc, first, null), Windows.fallbackRank(desc, third, null));
 
     // DirectWrite reports its own casing and separators.
-    const preferred: Windows.Preferred = .{ .path = "c:/windows/fonts/CCC-UI.TTF", .face_index = 0 };
+    const records = [_]Windows.Record{ first, second, third };
+    const preferred = Windows.preferredPath(&records, .{ .path = "c:/windows/fonts/CCC-UI.TTF", .face_index = 0 });
+    try testing.expectEqual(@as(?[*]const u8, third.path.ptr), preferred);
     try testing.expect(Windows.fallbackRank(desc, third, preferred) > Windows.fallbackRank(desc, first, preferred));
     try testing.expectEqual(Windows.fallbackRank(desc, first, null), Windows.fallbackRank(desc, first, preferred));
     try testing.expectEqual(Windows.fallbackRank(desc, second, null), Windows.fallbackRank(desc, second, preferred));
 
     // Same file, other face of a collection: not the one Windows named.
-    const other_face: Windows.Preferred = .{ .path = second.path, .face_index = 0 };
-    try testing.expect(!other_face.matches(second));
+    try testing.expectEqual(@as(?[*]const u8, null), Windows.preferredPath(&records, .{ .path = second.path, .face_index = 0 }));
+
+    // A face the scan never indexed changes nothing.
+    try testing.expectEqual(@as(?[*]const u8, null), Windows.preferredPath(&records, .{ .path = "C:\\elsewhere\\x.ttf", .face_index = 0 }));
 
     // The preference outranks everything `score` can express, including a
     // face that matches the requested style better.
@@ -1308,9 +1328,31 @@ test "windowsSystemFallbackPreferenceBreaksTies" {
     plain.bold = false;
     plain.italic = false;
     plain.weight = 400;
-    const plain_preferred: Windows.Preferred = .{ .path = plain.path, .face_index = 0 };
     try testing.expect(Windows.fallbackRank(desc, first, null) > Windows.fallbackRank(desc, plain, null));
-    try testing.expect(Windows.fallbackRank(desc, plain, plain_preferred) > Windows.fallbackRank(desc, first, plain_preferred));
+    try testing.expect(Windows.fallbackRank(desc, plain, plain.path.ptr) > Windows.fallbackRank(desc, first, plain.path.ptr));
+}
+
+test "windows system fallback puts DirectWrite's face first end to end" {
+    // Real scan, real DirectWrite. The face Windows names for a CJK
+    // ideograph must be one the scan indexed, and discovery must return it
+    // first. Which font that is depends on the machine and locale, so it
+    // is not asserted.
+    if (comptime builtin.os.tag == .windows) {
+        const alloc = testing.allocator;
+        var disco = Windows.init();
+        defer disco.deinit();
+        disco.refresh();
+
+        const desc: Descriptor = .{ .codepoint = 0x4E2D, .size = 12 };
+        var mapped = (try disco.systemFallbackFor(alloc, desc)) orelse return error.TestUnexpectedResult;
+        defer mapped.deinit(alloc);
+
+        var it = try disco.discoverRanked(alloc, desc, .{ .path = mapped.path, .face_index = mapped.face_index });
+        defer it.deinit();
+        try testing.expect(it.records.len > 0);
+        try testing.expect(dwrite.samePath(it.records[0].path, mapped.path));
+        try testing.expectEqual(mapped.face_index, it.records[0].face_index);
+    } else return error.SkipZigTest;
 }
 
 test {

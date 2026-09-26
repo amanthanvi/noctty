@@ -61,7 +61,9 @@ pub const SystemFallback = struct {
         };
         self.module = module;
         const create = k32.GetProcAddress(module, "DWriteCreateFactory") orelse return false;
-        const create_factory: *const DWriteCreateFactoryFn = @ptrCast(create);
+        // Function pointers are 4-byte aligned on ARM64; GetProcAddress
+        // returns an unaligned `*const anyopaque`.
+        const create_factory: *const DWriteCreateFactoryFn = @ptrCast(@alignCast(create));
 
         var factory: ?*anyopaque = null;
         if (create_factory(dwrite_factory_type_shared, &IID_IDWriteFactory2, &factory) < 0) {
@@ -93,7 +95,7 @@ pub const SystemFallback = struct {
         codepoint: u21,
         bold: bool,
         italic: bool,
-    ) !?Mapped {
+    ) Allocator.Error!?Mapped {
         if (!self.ensure()) return null;
         const fallback = self.fallback.?;
 
@@ -126,7 +128,7 @@ pub const SystemFallback = struct {
     }
 };
 
-fn localFileOf(alloc: Allocator, font: *IDWriteFont) !?Mapped {
+fn localFileOf(alloc: Allocator, font: *IDWriteFont) Allocator.Error!?Mapped {
     var face: ?*IDWriteFontFace = null;
     if (font.vtbl.CreateFontFace(font, &face) < 0) return null;
     const font_face = face orelse return null;
@@ -162,16 +164,56 @@ fn localFileOf(alloc: Allocator, font: *IDWriteFont) !?Mapped {
     defer alloc.free(wide);
     if (local_loader.vtbl.GetFilePathFromKey(local_loader, key, key_size, wide.ptr, path_len + 1) < 0) return null;
 
-    const path = std.unicode.utf16LeToUtf8AllocZ(alloc, wide[0..path_len]) catch return null;
-    return .{
-        .path = path,
-        .face_index = @intCast(font_face.vtbl.GetIndex(font_face)),
+    const face_index = std.math.cast(i32, font_face.vtbl.GetIndex(font_face)) orelse return null;
+    const path = std.unicode.utf16LeToUtf8AllocZ(alloc, wide[0..path_len]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // A path Windows handed back that is not valid UTF-16 cannot match
+        // a scanned record anyway.
+        else => return null,
     };
+    return .{ .path = path, .face_index = face_index };
 }
 
-/// Whether a scanned font file is the one DirectWrite named. Paths from
-/// the two sources differ in case and possibly in separator.
+/// Longest path, in UTF-16 units, that `samePath` compares with Windows'
+/// own rules; longer paths fall back to an ASCII-only comparison.
+const compare_path_max = 1024;
+
+/// Whether a scanned font file is the one DirectWrite named. The two
+/// sources can differ in case and separator, so compare the way the file
+/// system does: `CompareStringOrdinal` with case ignored, which folds
+/// non-ASCII letters too (e.g. a Cyrillic user name in a per-user path).
 pub fn samePath(a: []const u8, b: []const u8) bool {
+    var wide_a: [compare_path_max]u16 = undefined;
+    var wide_b: [compare_path_max]u16 = undefined;
+    const len_a = widePathForCompare(a, &wide_a) orelse return asciiSamePath(a, b);
+    const len_b = widePathForCompare(b, &wide_b) orelse return asciiSamePath(a, b);
+    return k32.CompareStringOrdinal(&wide_a, len_a, &wide_b, len_b, 1) == cstr_equal;
+}
+
+/// UTF-16 copy of `path` with `/` as `\`, or null when it is not valid
+/// UTF-8 or does not fit.
+fn widePathForCompare(path: []const u8, out: *[compare_path_max]u16) ?i32 {
+    const view = std.unicode.Utf8View.init(path) catch return null;
+    var it = view.iterator();
+    var len: usize = 0;
+    while (it.nextCodepoint()) |raw| {
+        const codepoint: u21 = if (raw == '/') '\\' else raw;
+        if (codepoint < 0x10000) {
+            if (len + 1 > out.len) return null;
+            out[len] = @intCast(codepoint);
+            len += 1;
+        } else {
+            if (len + 2 > out.len) return null;
+            const high = codepoint - 0x10000;
+            out[len] = @intCast(0xD800 + (high >> 10));
+            out[len + 1] = @intCast(0xDC00 + (high & 0x3FF));
+            len += 2;
+        }
+    }
+    return @intCast(len);
+}
+
+fn asciiSamePath(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
         const nx = if (x == '/') '\\' else std.ascii.toLower(x);
@@ -275,6 +317,7 @@ const text_source_vtbl: IDWriteTextAnalysisSourceVtbl = .{
 const HRESULT = i32;
 const S_OK: HRESULT = 0;
 const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
+const cstr_equal: i32 = 2; // CSTR_EQUAL
 
 const locale_name_max = 85; // LOCALE_NAME_MAX_LENGTH
 const dwrite_factory_type_shared: u32 = 0;
@@ -409,6 +452,7 @@ const k32 = struct {
     extern "kernel32" fn FreeLibrary(module: *anyopaque) callconv(.winapi) i32;
     extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
     extern "kernel32" fn GetUserDefaultLocaleName(name: [*]u16, len: i32) callconv(.winapi) i32;
+    extern "kernel32" fn CompareStringOrdinal(a: [*]const u16, len_a: i32, b: [*]const u16, len_b: i32, ignore_case: i32) callconv(.winapi) i32;
 };
 
 //-----------------------------------------------------------------------
@@ -417,9 +461,25 @@ const testing = std.testing;
 const builtin = @import("builtin");
 
 test "windowsDwriteSamePathIgnoresCaseAndSeparator" {
-    try testing.expect(samePath("C:\\Windows\\Fonts\\arial.ttf", "c:/WINDOWS/FONTS/ARIAL.TTF"));
-    try testing.expect(!samePath("C:\\Windows\\Fonts\\arial.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"));
-    try testing.expect(!samePath("C:\\a.ttf", "C:\\a.ttc"));
+    // Calls CompareStringOrdinal, so Windows only.
+    if (comptime builtin.os.tag == .windows) {
+        try testing.expect(samePath("C:\\Windows\\Fonts\\arial.ttf", "c:/WINDOWS/FONTS/ARIAL.TTF"));
+        try testing.expect(!samePath("C:\\Windows\\Fonts\\arial.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"));
+        try testing.expect(!samePath("C:\\a.ttf", "C:\\a.ttc"));
+
+        // Case differs only in non-ASCII letters, as in a per-user font
+        // path under a non-Latin user name.
+        try testing.expect(samePath(
+            "C:\\Users\\Юрий\\AppData\\Local\\Microsoft\\Windows\\Fonts\\font.ttf",
+            "c:/users/юрий/appdata/local/microsoft/windows/fonts/FONT.TTF",
+        ));
+        try testing.expect(!samePath("C:\\Users\\Юрий\\a.ttf", "C:\\Users\\Юрий\\b.ttf"));
+
+        // Outside UTF-16 range for the comparison buffer: ASCII fallback.
+        const long_a = "C:\\" ++ "a" ** (compare_path_max + 8) ++ ".ttf";
+        const long_b = "c:/" ++ "A" ** (compare_path_max + 8) ++ ".TTF";
+        try testing.expect(samePath(long_a, long_b));
+    } else return error.SkipZigTest;
 }
 
 test "windowsDwriteGuidLayoutMatchesSdk" {
