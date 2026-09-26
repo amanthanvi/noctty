@@ -57,6 +57,11 @@ pub const ThemeColors = struct {
     accent_hover: u32,
     chrome_accent_idle: u32,
     edit_border_unfocused: u32,
+    /// Accent for the tab strip: the active tab's border and underline and
+    /// the accent strip above a separate tab row. Null means `accent`;
+    /// `accent-follow-system` sets it from the Windows accent color. Read it
+    /// through `tabAccent`.
+    tab_accent: ?u32 = null,
 
     // Buttons - idle
     button_bg: u32,
@@ -636,6 +641,12 @@ pub fn adjustColor(base: u32, dr: i16, dg: i16, db: i16) u32 {
     const g: u8 = @intCast(@as(u16, @intCast(std.math.clamp(@as(i16, @intCast((base >> 8) & 0xFF)) + dg, 0, 255))));
     const b: u8 = @intCast(@as(u16, @intCast(std.math.clamp(@as(i16, @intCast((base >> 16) & 0xFF)) + db, 0, 255))));
     return rgb(r, g, b);
+}
+
+/// The tab strip's accent: the followed Windows accent when one was
+/// resolved, otherwise the theme's own.
+pub fn tabAccent(theme: *const ThemeColors) u32 {
+    return theme.tab_accent orelse theme.accent;
 }
 
 // ── Button color derivation ─────────────────────────────────────────────
