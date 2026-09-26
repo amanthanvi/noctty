@@ -6,6 +6,7 @@ const Collection = @import("main.zig").Collection;
 const DeferredFace = @import("main.zig").DeferredFace;
 pub const Descriptor = @import("descriptor.zig").Descriptor;
 const Variation = @import("variation.zig").Variation;
+const dwrite = @import("discovery_windows_dwrite.zig");
 
 const log = std.log.scoped(.discovery);
 
@@ -43,6 +44,11 @@ pub const Windows = struct {
     /// scan; used by `refresh` to skip rescanning when nothing changed.
     /// Null means we have never scanned.
     state: ?ScanState,
+
+    /// DirectWrite's system font fallback, asked which installed font
+    /// Windows would use for a codepoint the loaded fonts lack. Created on
+    /// first use and guarded by `mutex`.
+    system_fallback: dwrite.SystemFallback = .{},
 
     const Record = struct {
         path: [:0]const u8,
@@ -106,6 +112,7 @@ pub const Windows = struct {
         alloc.free(self.records);
         if (self.system_dir) |dir| alloc.free(dir);
         if (self.user_dir) |dir| alloc.free(dir);
+        self.system_fallback.deinit();
         self.* = undefined;
     }
 
@@ -148,6 +155,17 @@ pub const Windows = struct {
         alloc: Allocator,
         desc: Descriptor,
     ) !DiscoverIterator {
+        return try self.discoverRanked(alloc, desc, null);
+    }
+
+    /// `discover`, with `preferred` ranked ahead of every other record that
+    /// matches `desc`. Null keeps the plain score order.
+    fn discoverRanked(
+        self: *Windows,
+        alloc: Allocator,
+        desc: Descriptor,
+        preferred: ?Preferred,
+    ) !DiscoverIterator {
         // Some consumers (e.g. the +list-fonts CLI action) use
         // init()+discover() directly and never call refresh(); make the
         // first scan self-healing so they still see fonts. Concurrent
@@ -166,9 +184,10 @@ pub const Windows = struct {
 
         // Stable so that faces the scan saw in a fixed order keep that
         // order when they score identically.
-        std.mem.sort(Record, filtered, desc, struct {
-            fn lessThan(desc_inner: Descriptor, lhs: Record, rhs: Record) bool {
-                return score(desc_inner, lhs) > score(desc_inner, rhs);
+        const Order = struct { desc: Descriptor, preferred: ?Preferred };
+        std.mem.sort(Record, filtered, Order{ .desc = desc, .preferred = preferred }, struct {
+            fn lessThan(order: Order, lhs: Record, rhs: Record) bool {
+                return fallbackRank(order.desc, lhs, order.preferred) > fallbackRank(order.desc, rhs, order.preferred);
             }
         }.lessThan);
 
@@ -186,6 +205,12 @@ pub const Windows = struct {
         return self.state != null;
     }
 
+    /// Every installed face that covers a missing codepoint ties on style
+    /// and weight, and the tie used to fall to scan order, i.e. file name.
+    /// Ask DirectWrite which font Windows itself would use for it, in the
+    /// user's locale, and rank that face first. Without an answer (no
+    /// DirectWrite fallback, a font that is not a local file, or one the
+    /// scan did not index) the order is exactly `discover`'s.
     pub fn discoverFallback(
         self: *Windows,
         alloc: Allocator,
@@ -193,7 +218,45 @@ pub const Windows = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         _ = collection;
-        return try self.discover(alloc, desc);
+        var mapped = self.systemFallbackFor(alloc, desc);
+        defer if (mapped) |*value| value.deinit(alloc);
+        const preferred: ?Preferred = if (mapped) |value|
+            .{ .path = value.path, .face_index = value.face_index }
+        else
+            null;
+        return try self.discoverRanked(alloc, desc, preferred);
+    }
+
+    fn systemFallbackFor(self: *Windows, alloc: Allocator, desc: Descriptor) ?dwrite.Mapped {
+        // Only a pure codepoint query: a named family keeps its own matching.
+        if (desc.family != null or desc.codepoint == 0) return null;
+        const codepoint = std.math.cast(u21, desc.codepoint) orelse return null;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.system_fallback.map(alloc, codepoint, desc.bold, desc.italic) catch |err| {
+            log.warn("windows system font fallback failed err={}", .{err});
+            return null;
+        };
+    }
+
+    /// The face DirectWrite named for a fallback query.
+    const Preferred = struct {
+        path: []const u8,
+        face_index: i32,
+
+        fn matches(self: Preferred, record: Record) bool {
+            return record.face_index == self.face_index and dwrite.samePath(record.path, self.path);
+        }
+    };
+
+    /// `score`, plus a bit above all of its own for the face Windows would
+    /// pick. Every other record keeps its relative order.
+    fn fallbackRank(desc: Descriptor, record: Record, preferred: ?Preferred) u32 {
+        var result = score(desc, record);
+        if (preferred) |value| {
+            if (value.matches(record)) result |= 1 << 21;
+        }
+        return result;
     }
 
     pub const DiscoverIterator = struct {
@@ -1211,6 +1274,47 @@ fn nerdFontRecords() [4]Windows.Record {
 
     // Scan order is directory order, which puts Bold ahead of Regular.
     return .{ bold, bold_italic, italic, base };
+}
+
+test "windowsSystemFallbackPreferenceBreaksTies" {
+    // Three faces that all cover the codepoint and score the same, the way
+    // every regular-weight font containing a missing CJK or Thai codepoint
+    // does. Without a preference the first one wins (scan order, i.e. file
+    // name); with one, the face Windows named wins and nothing else moves.
+    var first = testRecord();
+    first.path = "C:\\Windows\\Fonts\\aaa-display.ttf";
+    var second = testRecord();
+    second.path = "C:\\Windows\\Fonts\\bbb-serif.ttc";
+    second.face_index = 1;
+    var third = testRecord();
+    third.path = "C:\\Windows\\Fonts\\ccc-ui.ttf";
+    const desc: Descriptor = .{ .codepoint = 0x4E2D, .size = 12, .bold = true, .italic = true };
+
+    try testing.expectEqual(Windows.fallbackRank(desc, first, null), Windows.fallbackRank(desc, third, null));
+
+    // DirectWrite reports its own casing and separators.
+    const preferred: Windows.Preferred = .{ .path = "c:/windows/fonts/CCC-UI.TTF", .face_index = 0 };
+    try testing.expect(Windows.fallbackRank(desc, third, preferred) > Windows.fallbackRank(desc, first, preferred));
+    try testing.expectEqual(Windows.fallbackRank(desc, first, null), Windows.fallbackRank(desc, first, preferred));
+    try testing.expectEqual(Windows.fallbackRank(desc, second, null), Windows.fallbackRank(desc, second, preferred));
+
+    // Same file, other face of a collection: not the one Windows named.
+    const other_face: Windows.Preferred = .{ .path = second.path, .face_index = 0 };
+    try testing.expect(!other_face.matches(second));
+
+    // The preference outranks everything `score` can express, including a
+    // face that matches the requested style better.
+    var plain = third;
+    plain.bold = false;
+    plain.italic = false;
+    plain.weight = 400;
+    const plain_preferred: Windows.Preferred = .{ .path = plain.path, .face_index = 0 };
+    try testing.expect(Windows.fallbackRank(desc, first, null) > Windows.fallbackRank(desc, plain, null));
+    try testing.expect(Windows.fallbackRank(desc, plain, plain_preferred) > Windows.fallbackRank(desc, first, plain_preferred));
+}
+
+test {
+    _ = dwrite;
 }
 
 /// Mirror of discover(): filter, then take the highest score, the first
