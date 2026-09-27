@@ -44,6 +44,9 @@ pub const HTBOTTOMLEFT = 16;
 pub const HTBOTTOMRIGHT = 17;
 pub const HTCLOSE = 20;
 pub const HTTRANSPARENT: LRESULT = -1;
+pub const CWP_SKIPINVISIBLE = 0x0001;
+pub const CWP_SKIPDISABLED = 0x0002;
+pub const CWP_SKIPTRANSPARENT = 0x0004;
 pub const MA_NOACTIVATE: LRESULT = 3;
 
 pub const SW_SHOW = 5;

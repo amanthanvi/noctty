@@ -394,6 +394,8 @@ pub extern "user32" fn DestroyMenu(hMenu: HMENU) callconv(.winapi) BOOL;
 
 pub extern "user32" fn ClientToScreen(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) BOOL;
 
+pub extern "user32" fn ChildWindowFromPointEx(hWndParent: HWND, pt: POINT, uFlags: UINT) callconv(.winapi) ?HWND;
+
 pub extern "user32" fn ToUnicode(
     wVirtKey: UINT,
     wScanCode: UINT,

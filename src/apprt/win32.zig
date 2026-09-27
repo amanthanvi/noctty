@@ -12417,6 +12417,13 @@ const Host = struct {
         const state: win32_nc_layout.WindowState =
             if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const ht = win32_nc_layout.hitTest(window_rect, client_screen_rect, cursor, metrics, state);
+        // With no caption row, the empty part of the tab strip stands in for
+        // the title bar: drag to move, double-click to maximize, right-click
+        // for the system menu. The tabs and the [+] / [▾] buttons are child
+        // windows and answer their own hit tests before this one runs.
+        if (ht == .client and caption_height == 0 and cy < client_screen_rect.top + self.tabBarHeight()) {
+            return c.HTCAPTION;
+        }
         return switch (ht) {
             .nowhere => c.HTNOWHERE,
             .client => c.HTCLIENT,
@@ -36943,6 +36950,22 @@ test "win32 new host starts with the client area its first frame change keeps" {
     var client_origin: POINT = .{ .x = 0, .y = 0 };
     try std.testing.expect(sys.ClientToScreen(hwnd, &client_origin) != 0);
     try std.testing.expectEqual(window_rect.top, client_origin.y);
+
+    // Its hit test is the one an undecorated frame leaves alone: an 8 DIP
+    // top band over a caption row as tall as the tab strip, and the caption
+    // buttons at the row's right end.
+    const mid_x = @divTrunc(window_rect.left + window_rect.right, 2);
+    const edge = host.scaled(8);
+    try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + edge - 1));
+    try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, window_rect.top + edge));
+    try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, client_origin.y + host.tabBarHeight() - 1));
+    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, client_origin.y + host.tabBarHeight()));
+    const caption_button_w = host.scaled(46);
+    try std.testing.expectEqual(@as(LRESULT, c.HTMAXBUTTON), testHitTest(
+        hwnd,
+        client_origin.x + created.right - caption_button_w - @divTrunc(caption_button_w, 2),
+        client_origin.y + @divTrunc(host.tabBarHeight(), 2),
+    ));
 }
 
 test "win32 createHost frames an undecorated host for its Windows build" {
@@ -37016,20 +37039,75 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                     continue;
                 }
                 // Windows 11 keeps the side and bottom frame, whose invisible
-                // margins resize the window, and a top band inside the client.
+                // margins resize the window, and a 4 DIP top band inside the
+                // client. The corners keep their 8 DIP square.
                 try std.testing.expectEqual(@as(?i32, 0), host.clientCaptionHeight());
                 try std.testing.expect(client.right - client.left < window_rect.right - window_rect.left);
-                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + 1));
-                try std.testing.expectEqual(@as(LRESULT, c.HTTOPLEFT), testHitTest(hwnd, window_rect.left + 1, window_rect.top + 1));
-                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, window_rect.left + 1, mid_y));
+                const dpi: i32 = @intCast(host.current_dpi);
+                const band = @divTrunc(4 * dpi + 48, 96);
+                const corner = @divTrunc(8 * dpi + 48, 96);
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + band - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOPLEFT), testHitTest(hwnd, window_rect.left + corner - 1, window_rect.top + corner - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOPRIGHT), testHitTest(hwnd, window_rect.right - corner, window_rect.top + corner - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, window_rect.left + 1, window_rect.top + corner));
+                try std.testing.expectEqual(@as(LRESULT, c.HTRIGHT), testHitTest(hwnd, window_rect.right - 2, mid_y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTBOTTOM), testHitTest(hwnd, mid_x, window_rect.bottom - 2));
                 try std.testing.expectEqual(@as(LRESULT, c.HTBOTTOMRIGHT), testHitTest(hwnd, window_rect.right - 2, window_rect.bottom - 2));
-                // No caption row: just below the top band is terminal.
-                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, client_origin.y + host.scaled(16)));
+                // No caption row: below the band, the tab strip (shown by
+                // default) stands in for the title bar; below it is terminal.
+                const strip_bottom = client_origin.y + host.tabBarHeight();
+                try std.testing.expect(client_origin.y + band < strip_bottom);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, window_rect.top + band));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, strip_bottom - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, strip_bottom));
                 try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, mid_y));
-                // With no tab bar the terminal pane covers the top band, so it
-                // hands those points to the host; everywhere else it keeps them.
-                try std.testing.expect(host.resizesFrom(testPoint(mid_x, window_rect.top + 1)));
-                try std.testing.expect(!host.resizesFrom(testPoint(mid_x, mid_y)));
+                try std.testing.expect(!host.resizesFrom(testPoint(mid_x, window_rect.top + band)));
+
+                // The strip has no caption buttons: its right end, where the
+                // integrated titlebar puts [x], is caption up to the edge.
+                const strip_mid_y = client_origin.y + @divTrunc(host.tabBarHeight(), 2);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, window_rect.right - corner - 1, strip_mid_y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTRIGHT), testHitTest(hwnd, window_rect.right - corner, strip_mid_y));
+                // The tabs and the [+] / [▾] buttons are BUTTON children over
+                // the strip. Windows asks the topmost visible, enabled child
+                // under the point first and a button answers HTCLIENT, so the
+                // caption never reaches it. A stand-in: the real strip's
+                // tab container is a layered child, which a test binary
+                // without the app manifest cannot create.
+                const button = try createTestChromeChild(hwnd, prompt_button_class);
+                defer _ = sys.DestroyWindow(button);
+                try std.testing.expect(sys.SetWindowPos(
+                    button,
+                    null,
+                    0,
+                    host.scaled(3),
+                    host.scaled(host_tab_max_button_width),
+                    host.tabBarHeight() - host.scaled(6),
+                    c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+                ) != 0);
+                var button_point: POINT = .{ .x = host.scaled(10), .y = strip_mid_y - client_origin.y };
+                try std.testing.expectEqual(@as(?HWND, button), sys.ChildWindowFromPointEx(
+                    hwnd,
+                    button_point,
+                    c.CWP_SKIPINVISIBLE | c.CWP_SKIPDISABLED | c.CWP_SKIPTRANSPARENT,
+                ));
+                try std.testing.expect(sys.ClientToScreen(hwnd, &button_point) != 0);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, button_point.y));
+
+                // With the tab bar off there is no drag handle: the terminal
+                // pane covers the band and hands only the band to the host.
+                {
+                    const show_tab_bar = app.config.@"window-show-tab-bar";
+                    app.config.@"window-show-tab-bar" = .never;
+                    defer app.config.@"window-show-tab-bar" = show_tab_bar;
+                    try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + band - 1));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, window_rect.top + band));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, strip_bottom - 1));
+                    try std.testing.expect(host.resizesFrom(testPoint(mid_x, window_rect.top + band - 1)));
+                    try std.testing.expect(host.resizesFrom(testPoint(window_rect.left + corner - 1, window_rect.top + corner - 1)));
+                    try std.testing.expect(!host.resizesFrom(testPoint(mid_x, window_rect.top + band)));
+                    try std.testing.expect(!host.resizesFrom(testPoint(mid_x, mid_y)));
+                }
 
                 // Maximized, the client starts where the monitor does: the top
                 // inset equals the frame the window overhangs it by, which is
@@ -37040,6 +37118,9 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 _ = sys.SendMessageW(hwnd, c.WM_NCCALCSIZE, 0, @bitCast(@intFromPtr(&rect)));
                 try std.testing.expect(rect.left > window_rect.left);
                 try std.testing.expectEqual(rect.left - window_rect.left, rect.top - window_rect.top);
+                // Nothing resizes a maximized window, so the strip drags from
+                // its top row; the drag restores the window.
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, window_rect.top));
             }
         }
     }

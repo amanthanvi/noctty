@@ -24,6 +24,10 @@
 //! bezel. Edge-resize strips are suppressed (everything maps to
 //! .client) because the window already fills the work area.
 //!
+//! An undecorated Win11 window keeps the same frame with a 0 px caption
+//! row. Its top resize band then lies over the tab strip or the terminal,
+//! so it is shallower (`Metrics.top_resize_height`).
+//!
 //! This module is allocation-free, has no Win32 API calls, and takes
 //! all system metrics as caller-resolved inputs so it is fully
 //! testable with synthetic values.
@@ -75,18 +79,28 @@ pub const Metrics = struct {
     caption_button_h: i32,
     /// Edge-resize strip width. Includes the padded invisible border.
     edge_resize_width: i32,
+    /// Height of the top resize band. The top margin is zeroed, so the
+    /// band lies inside the client area: over the caption row when there
+    /// is one, and over the tab strip or the terminal when there is not.
+    /// Without a caption row it is `size_frame_y` (4 DIP), as in WezTerm,
+    /// which uses SM_CYFRAME for the same frame; the corners keep the full
+    /// `edge_resize_width` square either way.
+    top_resize_height: i32,
 };
 
 /// Return default metrics scaled linearly from 96 dpi base values.
 pub fn metricsDefault(dpi: u32, caption_button_height: i32) Metrics {
     const scale = @as(i32, @intCast(dpi));
+    const size_frame = scaleDim(4, scale);
+    const edge_resize_width = scaleDim(8, scale);
     return .{
-        .size_frame_y = scaleDim(4, scale),
-        .size_frame_x = scaleDim(4, scale),
+        .size_frame_y = size_frame,
+        .size_frame_x = size_frame,
         .padded_border = scaleDim(4, scale),
         .caption_button_w = scaleDim(46, scale),
         .caption_button_h = scaleDim(caption_button_height, scale),
-        .edge_resize_width = scaleDim(8, scale),
+        .edge_resize_width = edge_resize_width,
+        .top_resize_height = if (caption_button_height == 0) size_frame else edge_resize_width,
     };
 }
 
@@ -191,7 +205,8 @@ pub fn captionButtonsRect(client: Rect, metrics: Metrics) CaptionButtons {
 ///   1. Resize corners (suppressed when maximized)
 ///   2. Close / Max / Min button rects
 ///   3. Sysmenu rect (leftmost caption-row square)
-///   4. Edge-resize strips (suppressed when maximized)
+///   4. Edge-resize strips (suppressed when maximized); the top strip is
+///      `top_resize_height` deep, the others `edge_resize_width`
 ///   5. Caption row (top `caption_button_h` pixels of the client area)
 ///   6. Client area
 pub fn hitTest(
@@ -205,7 +220,7 @@ pub fn hitTest(
     if (!window.contains(cursor.x, cursor.y)) return .nowhere;
 
     const edge_hit = if (state == .normal)
-        edgeHitTest(window, cursor, metrics.edge_resize_width)
+        edgeHitTest(window, cursor, metrics)
     else
         null;
 
@@ -274,7 +289,8 @@ pub fn contentBands(
     };
 }
 
-fn edgeHitTest(window: Rect, cursor: Point, ew: i32) ?HitTest {
+fn edgeHitTest(window: Rect, cursor: Point, metrics: Metrics) ?HitTest {
+    const ew = metrics.edge_resize_width;
     const in_left = cursor.x < window.left + ew;
     const in_right = cursor.x >= window.right - ew;
     const in_top = cursor.y < window.top + ew;
@@ -284,7 +300,7 @@ fn edgeHitTest(window: Rect, cursor: Point, ew: i32) ?HitTest {
     if (in_top and in_right) return .topright;
     if (in_bottom and in_left) return .bottomleft;
     if (in_bottom and in_right) return .bottomright;
-    if (in_top) return .top;
+    if (cursor.y < window.top + metrics.top_resize_height) return .top;
     if (in_bottom) return .bottom;
     if (in_left) return .left;
     if (in_right) return .right;
@@ -324,6 +340,56 @@ test "metricsDefault: 192 dpi (200%)" {
     try std.testing.expectEqual(@as(i32, 8), m.size_frame_x);
     try std.testing.expectEqual(@as(i32, 92), m.caption_button_w);
     try std.testing.expectEqual(@as(i32, 80), m.caption_button_h);
+}
+
+test "metricsDefault: top resize band is 4 DIP only without a caption row" {
+    const dpis = [_]u32{ 96, 144, 192 };
+    const bands = [_]i32{ 4, 6, 8 };
+    for (dpis, bands) |dpi, band| {
+        try std.testing.expectEqual(band, metricsDefault(dpi, 0).top_resize_height);
+        const integrated = metricsDefault(dpi, 40);
+        try std.testing.expectEqual(integrated.edge_resize_width, integrated.top_resize_height);
+    }
+}
+
+test "no caption row: 4 DIP top band, corners and other edges unchanged" {
+    const m = metricsDefault(144, 0);
+    const win = Rect{ .left = 38, .top = 38, .right = 1318, .bottom = 838 };
+    const client = testClient(win, m, .normal);
+    const ew = m.edge_resize_width;
+    const mid_x = @divTrunc(win.left + win.right, 2);
+    const mid_y = @divTrunc(win.top + win.bottom, 2);
+
+    // The band lies inside the client area and ends 6 px down at 150%.
+    try std.testing.expectEqual(win.top, client.top);
+    try std.testing.expectEqual(HitTest.top, hitTest(win, client, .{ .x = mid_x, .y = win.top + 5 }, m, .normal));
+    try std.testing.expectEqual(HitTest.client, hitTest(win, client, .{ .x = mid_x, .y = win.top + 6 }, m, .normal));
+
+    // The corners keep the full edge-width square.
+    try std.testing.expectEqual(HitTest.topleft, hitTest(win, client, .{ .x = win.left + ew - 1, .y = win.top + ew - 1 }, m, .normal));
+    try std.testing.expectEqual(HitTest.topright, hitTest(win, client, .{ .x = win.right - ew, .y = win.top + ew - 1 }, m, .normal));
+    try std.testing.expectEqual(HitTest.bottomleft, hitTest(win, client, .{ .x = win.left, .y = win.bottom - ew }, m, .normal));
+    try std.testing.expectEqual(HitTest.bottomright, hitTest(win, client, .{ .x = win.right - 1, .y = win.bottom - 1 }, m, .normal));
+
+    // The side and bottom strips keep their full width.
+    try std.testing.expectEqual(HitTest.left, hitTest(win, client, .{ .x = win.left + ew - 1, .y = win.top + ew }, m, .normal));
+    try std.testing.expectEqual(HitTest.right, hitTest(win, client, .{ .x = win.right - ew, .y = mid_y }, m, .normal));
+    try std.testing.expectEqual(HitTest.bottom, hitTest(win, client, .{ .x = mid_x, .y = win.bottom - ew }, m, .normal));
+    try std.testing.expectEqual(HitTest.client, hitTest(win, client, .{ .x = win.left + ew, .y = mid_y }, m, .normal));
+
+    // Maximized: no band at all.
+    const max_client = testClient(win, m, .maximized);
+    try std.testing.expectEqual(HitTest.client, hitTest(win, max_client, .{ .x = mid_x, .y = max_client.top }, m, .maximized));
+}
+
+test "integrated titlebar keeps its 8 DIP top band over the caption row" {
+    const m = metricsDefault(144, 40);
+    const win = Rect{ .left = 38, .top = 38, .right = 1318, .bottom = 838 };
+    const client = testClient(win, m, .normal);
+    const x = @divTrunc(win.left + win.right, 2);
+
+    try std.testing.expectEqual(HitTest.top, hitTest(win, client, .{ .x = x, .y = win.top + m.edge_resize_width - 1 }, m, .normal));
+    try std.testing.expectEqual(HitTest.caption, hitTest(win, client, .{ .x = x, .y = win.top + m.edge_resize_width }, m, .normal));
 }
 
 // -- calcNcClientRect -------------------------------------------------------
