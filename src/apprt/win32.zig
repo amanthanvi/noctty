@@ -18129,7 +18129,8 @@ const Host = struct {
 
     /// Whether a `WM_NCHITTEST` point is on a resize edge of this host with
     /// a 0 px caption row. Its top band lies inside the client area, where
-    /// a terminal pane with no tab bar above it covers the band.
+    /// a terminal pane or a tab-strip button covers it; those children
+    /// answer `HTTRANSPARENT` there so the band reaches the host.
     fn resizesFrom(self: *Host, lParam: LPARAM) bool {
         if ((self.clientCaptionHeight() orelse return false) != 0) return false;
         const ht = self.handleNcHitTest(self.hwnd orelse return false, lParam) orelse return false;
@@ -25019,6 +25020,7 @@ fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) 
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
+        if (msg == c.WM_NCHITTEST and v.resizesFrom(lParam)) return c.HTTRANSPARENT;
         if (msg == c.WM_GETOBJECT) {
             if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
                 if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
@@ -25164,6 +25166,7 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
+        if (msg == c.WM_NCHITTEST and v.resizesFrom(lParam)) return c.HTTRANSPARENT;
         if (v.tabIndexForButton(hwnd)) |index| {
             if (msg == c.WM_GETOBJECT) {
                 if (v.tabs.items[index].uia_provider) |provider| {
@@ -37147,10 +37150,11 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 try std.testing.expectEqual(@as(LRESULT, c.HTRIGHT), testHitTest(hwnd, window_rect.right - corner, strip_mid_y));
                 // The tabs and the [+] / [▾] buttons are BUTTON children over
                 // the strip. Windows asks the topmost visible, enabled child
-                // under the point first and a button answers HTCLIENT, so the
-                // caption never reaches it. A stand-in: the real strip's
-                // tab container is a layered child, which a test binary
-                // without the app manifest cannot create.
+                // under the point first, so the caption never reaches them,
+                // and they hand the band's rows above them back to the host.
+                // A stand-in running their window procedures: the real
+                // strip's tab container is a layered child, which a test
+                // binary without the app manifest cannot create.
                 const button = try createTestChromeChild(hwnd, prompt_button_class);
                 defer _ = sys.DestroyWindow(button);
                 try std.testing.expect(sys.SetWindowPos(
@@ -37169,7 +37173,15 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                     c.CWP_SKIPINVISIBLE | c.CWP_SKIPDISABLED | c.CWP_SKIPTRANSPARENT,
                 ));
                 try std.testing.expect(sys.ClientToScreen(hwnd, &button_point) != 0);
-                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, button_point.y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, button_point.x, window_rect.top + band - 1));
+                for ([_]WNDPROC{ &tabButtonProc, &hostButtonProc }) |proc| {
+                    var previous: ?*const anyopaque = null;
+                    host.subclassButton(button, proc, &previous);
+                    defer _ = sys.SetWindowLongPtrW(button, c.GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(previous))));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTTRANSPARENT), testHitTest(button, button_point.x, window_rect.top + band - 1));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, window_rect.top + band));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, button_point.y));
+                }
 
                 // With the tab bar off there is no drag handle: the terminal
                 // pane covers the band and hands only the band to the host.
@@ -37197,7 +37209,21 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 try std.testing.expectEqual(rect.left - window_rect.left, rect.top - window_rect.top);
                 // Nothing resizes a maximized window, so the strip drags from
                 // its top row; the drag restores the window.
-                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, window_rect.top));
+                try std.testing.expect(sys.SetWindowPos(
+                    hwnd,
+                    null,
+                    0,
+                    0,
+                    0,
+                    0,
+                    c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
+                ) != 0);
+                var zoomed_origin: POINT = .{ .x = 0, .y = 0 };
+                try std.testing.expect(sys.ClientToScreen(hwnd, &zoomed_origin) != 0);
+                try std.testing.expectEqual(rect.top, zoomed_origin.y);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, zoomed_origin.y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, zoomed_origin.y + host.tabBarHeight() - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, zoomed_origin.y + host.tabBarHeight()));
             }
         }
     }
