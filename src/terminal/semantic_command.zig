@@ -28,21 +28,29 @@ prompt_open: bool = false,
 /// Lines submitted that no open prompt has read yet: typed ahead while a
 /// command was still running, or the lines after the first in a multi-line
 /// paste. Each prompt that opens takes one without noctty writing a
-/// submission of its own. Cleared by a C mark, which means a command started
-/// from queued input.
+/// submission of its own. A C mark leaves the count alone, so `exit` and
+/// `nu` pasted at a nested PowerShell's prompt leave `nu` counted for the
+/// cmd prompt that follows PowerShell's C.
+///
+/// A D mark outside a prompt, on a screen that has seen a C, drops them all.
+/// Some went to the command the D ends (PowerShell's `Read-Host`) or to the
+/// shell's own line editor (a `>>` continuation line cancelled with Ctrl+C),
+/// which ends them with a D but no C; some were typed ahead for the next
+/// prompt, and the D cannot tell. Dropping them keeps PowerShell's own prompt
+/// from opening as presubmitted with nothing queued, which a repaint that
+/// writes B before a theme's bare A would misread as a new shell. Without
+/// PSReadLine, noctty's PowerShell integration writes D marks but no C, so
+/// its D must not drop the lines its prompts read; `output_mark_seen` tells
+/// the two apart. A D inside a prompt is part of it, like the one the Windows
+/// Terminal docs' cmd PROMPT writes.
 typeahead_lines: u32 = 0,
 
 /// The open prompt began with typed-ahead input waiting for it, so its line is
 /// submitted without `consumeInput` ever closing it. See `markPromptStart`.
 prompt_presubmitted: bool = false,
 
-/// A C mark has been seen on this screen. A shell that marks command starts
-/// closes a typed-ahead prompt with its C before anything the line runs can
-/// draw a prompt, so the typeahead inference in `markPromptStart` is only
-/// needed, and only applied, while none has been seen: in practice cmd.exe
-/// without Clink. Leaving it on for shells with C marks misread their own
-/// redraws as new shells whenever a running program had read an Enter (bash
-/// reprints its PS1 marks after a completion listing).
+/// A C mark has been seen on this screen, so a shell that marks its command
+/// starts has run here. See `typeahead_lines` for what that changes.
 output_mark_seen: bool = false,
 
 const Completed = struct {
@@ -107,7 +115,6 @@ pub fn startOutput(
 ) Allocator.Error!void {
     self.prompt_open = false;
     self.prompt_presubmitted = false;
-    self.typeahead_lines = 0;
     self.output_mark_seen = true;
     self.clearActive(pages);
     if (self.pending) |prompt| {
@@ -128,6 +135,7 @@ pub fn endCommand(
     pages: *PageList,
     cursor: Pin,
 ) Allocator.Error!void {
+    if (!self.prompt_open and self.output_mark_seen) self.typeahead_lines = 0;
     const prompt = self.active orelse return;
     if (!pinIsValid(prompt)) {
         self.clearActive(pages);
@@ -220,19 +228,29 @@ pub fn consumeInput(self: *SemanticCommand, pages: *PageList, lines: u32) void {
 /// this reads.
 ///
 /// A mark starts a new prompt when no prompt is open. It also does in one
-/// case where a prompt is open, for shells without C marks: that prompt began
-/// with typed-ahead input waiting for it, and has already reached its B. cmd
-/// then reads the queued line without anything being submitted, so the prompt
-/// stays open while the command in it runs, and a mark after its B can only
-/// come from that command, a shell started from it. A mark before the B is
-/// part of the prompt, which is where the Windows Terminal docs' cmd PROMPT
-/// and prompt themes put theirs. See `output_mark_seen` for why shells with C
-/// marks are left out.
-pub fn markPromptStart(self: *SemanticCommand) bool {
+/// case where a prompt is open: that prompt began with typed-ahead input
+/// waiting for it, and has already reached its B. cmd then reads the queued
+/// line without anything being submitted, so the prompt stays open while the
+/// command in it runs, and a mark after its B can only come from that
+/// command, a shell started from it. A mark before the B is part of the
+/// prompt, which is where the Windows Terminal docs' cmd PROMPT and prompt
+/// themes put theirs.
+///
+/// `cannot_redraw` is the mark's `redraw=0`. Only such a prompt is treated
+/// as presubmitted: the inference exists to give a shell started from it its
+/// own redraw setting, which a prompt that redraws leaves nothing to change.
+/// The shells that mark `redraw=last` (bash) or nothing (zsh, fish, nu) mark
+/// C for the lines they run (bash for the ones it records in history), which
+/// closes the prompt before anything the line runs can draw one, so
+/// presubmitting their prompts could only misread their own redraws as new
+/// shells: bash's first prompt after a line that `ssh` or `read` consumed
+/// would take readline's reprint of PS1's P marks after a completion listing
+/// for a new shell.
+pub fn markPromptStart(self: *SemanticCommand, cannot_redraw: bool) bool {
     const new_prompt = !self.prompt_open or
-        (self.prompt_presubmitted and !self.output_mark_seen and self.inputPending());
+        (self.prompt_presubmitted and self.inputPending());
     if (new_prompt) {
-        self.prompt_presubmitted = self.typeahead_lines > 0;
+        self.prompt_presubmitted = cannot_redraw and self.typeahead_lines > 0;
         self.typeahead_lines -|= 1;
     }
     self.prompt_open = true;

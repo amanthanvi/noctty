@@ -2486,8 +2486,8 @@ pub fn semanticPromptLinesSubmitted(self: *Screen, lines: u32) void {
 
 /// Record a prompt-start mark and report whether it starts a new prompt. See
 /// `SemanticCommand.markPromptStart`.
-pub fn semanticPromptMarkStart(self: *Screen) bool {
-    return self.semantic_command.markPromptStart();
+pub fn semanticPromptMarkStart(self: *Screen, cannot_redraw: bool) bool {
+    return self.semantic_command.markPromptStart(cannot_redraw);
 }
 
 /// Discard B/C state when a new prompt begins without a completing D mark.
