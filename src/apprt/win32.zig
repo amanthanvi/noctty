@@ -25125,6 +25125,15 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // this, whatever hid the button.
                 if (wParam == 0) v.hideButtonTooltip(hwnd);
             },
+            c.WM_DESTROY => {
+                // A surface closing while the host stays open destroys its
+                // search buttons without hiding them first, so neither message
+                // above arrives. The popup belongs to the host and would keep
+                // naming a button that is gone. Host teardown never gets here:
+                // `destroyChildControls` clears the host's window data first,
+                // so `getHost` returns null for its children.
+                v.hideButtonTooltip(hwnd);
+            },
             c.WM_RBUTTONUP => {
                 if (v.new_tab_hwnd != null and hwnd == v.new_tab_hwnd.?) {
                     if (v.openSelectedProfileOrFallback(.window)) return 0;
