@@ -131,8 +131,6 @@ pub const Variable = enum {
     keypad_flag,
     /// Pane mouse all flag.
     mouse_all_flag,
-    /// Pane mouse any flag.
-    mouse_any_flag,
     /// Pane mouse button flag.
     mouse_button_flag,
     /// Pane mouse SGR flag.
@@ -183,7 +181,6 @@ pub const Variable = enum {
             .keypad_cursor_flag,
             .keypad_flag,
             .mouse_all_flag,
-            .mouse_any_flag,
             .mouse_button_flag,
             .mouse_sgr_flag,
             .mouse_standard_flag,
@@ -233,7 +230,6 @@ pub const Variable = enum {
             .keypad_cursor_flag,
             .keypad_flag,
             .mouse_all_flag,
-            .mouse_any_flag,
             .mouse_button_flag,
             .mouse_sgr_flag,
             .mouse_standard_flag,
@@ -378,13 +374,6 @@ test "parse keypad_flag" {
     try testing.expectEqual(false, try Variable.parse(.keypad_flag, "0"));
     try testing.expectEqual(false, try Variable.parse(.keypad_flag, ""));
     try testing.expectEqual(false, try Variable.parse(.keypad_flag, "true"));
-}
-
-test "parse mouse_any_flag" {
-    try testing.expectEqual(true, try Variable.parse(.mouse_any_flag, "1"));
-    try testing.expectEqual(false, try Variable.parse(.mouse_any_flag, "0"));
-    try testing.expectEqual(false, try Variable.parse(.mouse_any_flag, ""));
-    try testing.expectEqual(false, try Variable.parse(.mouse_any_flag, "true"));
 }
 
 test "parse mouse_button_flag" {

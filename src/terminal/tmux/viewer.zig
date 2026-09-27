@@ -1001,9 +1001,8 @@ pub const Viewer = struct {
 
             // Mouse modes
             t.modes.set(.mouse_event_any, data.mouse_all_flag);
-            t.modes.set(.mouse_event_button, data.mouse_any_flag);
-            t.modes.set(.mouse_event_normal, data.mouse_button_flag);
-            t.modes.set(.mouse_event_x10, data.mouse_standard_flag);
+            t.modes.set(.mouse_event_button, data.mouse_button_flag);
+            t.modes.set(.mouse_event_normal, data.mouse_standard_flag);
             t.modes.set(.mouse_format_utf8, data.mouse_utf8_flag);
             t.modes.set(.mouse_format_sgr, data.mouse_sgr_flag);
 
@@ -1382,7 +1381,6 @@ const Format = struct {
             .origin_flag,
             // Mouse modes
             .mouse_all_flag,
-            .mouse_any_flag,
             .mouse_button_flag,
             .mouse_standard_flag,
             .mouse_utf8_flag,
@@ -2257,8 +2255,8 @@ test "two pane flow with pane state" {
         .{
             .input = .{ .tmux = .{
                 .block_end =
-                \\%0;42;0;1;;;;0;4294967295;4294967295;0;1;0;0;0;0;0;0;0;0;0;;;0;39;8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160
-                \\%4;10;5;1;;;;0;4294967295;4294967295;0;1;0;0;0;0;0;0;0;0;0;;;0;37;8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160
+                \\%0;42;0;1;;;;0;4294967295;4294967295;0;1;0;0;0;0;1;0;0;1;;;0;39;8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160
+                \\%4;10;5;1;;;;0;4294967295;4294967295;0;1;0;0;0;0;0;0;0;0;;;0;37;8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160
                 ,
             } },
             .check = (struct {
@@ -2276,6 +2274,9 @@ test "two pane flow with pane state" {
                         try testing.expect(!t.modes.get(.origin));
                         try testing.expect(!t.modes.get(.keypad_keys));
                         try testing.expect(!t.modes.get(.cursor_keys));
+                        try testing.expect(t.modes.get(.mouse_event_button));
+                        try testing.expect(!t.modes.get(.mouse_event_normal));
+                        try testing.expect(t.modes.get(.mouse_format_sgr));
                     }
                     // Pane 4: cursor at (10, 5), cursor visible, wraparound on
                     {
