@@ -19399,6 +19399,36 @@ const Host = struct {
         return true;
     }
 
+    /// Where `layout` puts the pane at `handle` while its tab is active
+    /// and not zoomed.
+    fn splitPanePlacement(
+        self: *const Host,
+        content_rect: RECT,
+        spatial: SplitTreeSurface.Spatial,
+        handle: SplitTreeSurface.Node.Handle,
+        has_multi_panes: bool,
+        search_visible: bool,
+    ) win32_layout.SurfacePlacement {
+        const slot = spatial.slots[handle.idx()];
+        return win32_layout.splitSurfacePlacement(
+            .{
+                .left = content_rect.left,
+                .top = content_rect.top,
+                .right = content_rect.right,
+                .bottom = content_rect.bottom,
+            },
+            .{
+                .x = @floatCast(slot.x),
+                .y = @floatCast(slot.y),
+                .width = @floatCast(slot.width),
+                .height = @floatCast(slot.height),
+            },
+            has_multi_panes,
+            search_visible,
+            self.scaled(host_search_bar_height),
+        );
+    }
+
     fn layout(self: *Host) !void {
         const rect = (try self.layoutClientRect()) orelse return;
         var chrome_layout_changed = false;
@@ -19484,18 +19514,12 @@ const Host = struct {
                 content_layout_changed = content_layout_changed or visibility_changed;
                 entry.view.setVisible(true);
                 if (entry.view.hwnd) |surface_hwnd| {
-                    const slot = spatial.slots[entry.handle.idx()];
-                    const placement = win32_layout.splitSurfacePlacement(
-                        layout_content_rect,
-                        .{
-                            .x = @floatCast(slot.x),
-                            .y = @floatCast(slot.y),
-                            .width = @floatCast(slot.width),
-                            .height = @floatCast(slot.height),
-                        },
+                    const placement = self.splitPanePlacement(
+                        content_rect,
+                        spatial,
+                        entry.handle,
                         has_multi_panes,
                         entry.view.search_bar.visible,
-                        search_bar_height,
                     );
                     if (placement.search_frame_rect) |search_frame_rect| {
                         content_layout_changed = (try entry.view.layoutSearchBarControls(
@@ -27849,9 +27873,6 @@ pub const Surface = struct {
         self.noteBenchmarkMemoryStage(.gl_context_created, null);
         log.debug("surface.init gl context created", .{});
 
-        self.size = try app.clientSize(hwnd);
-        log.debug("surface.init client size width={} height={}", .{ self.size.width, self.size.height });
-
         try app.windows.append(app.core_app.alloc, self);
         errdefer app.removeWindow(self);
         log.debug("surface.init appended to app windows", .{});
@@ -27922,6 +27943,29 @@ pub const Surface = struct {
                 &split_rollback,
             );
         }
+
+        // The core opens the pty at the size read below. Give a new split its
+        // pane's rect now, as `layout` will when activation shows it: the
+        // split reset zoom, and the new pane, which the tab now focuses, has
+        // no search bar. Otherwise the pty starts at the whole content size
+        // and is resized ~40 ms after spawn, and a prompt drawn before that
+        // resize is left with a misplaced cursor. The content rect is the
+        // active tab's, so a split made in a background tab whose inspector
+        // or decorations differ is still resized once on activation.
+        if (split_rollback) |attach| {
+            var spatial = try attach.tab.tree.spatial(app.core_app.alloc);
+            defer spatial.deinit(app.core_app.alloc);
+            const placement = host.splitPanePlacement(
+                content_rect,
+                spatial,
+                attach.tab.focused,
+                true,
+                false,
+            );
+            _ = applyChildRect(hwnd, &self.placement, layoutRectToWin32(placement.pane_rect));
+        }
+        self.size = try app.clientSize(hwnd);
+        log.debug("surface.init client size width={} height={}", .{ self.size.width, self.size.height });
 
         // Set initial content_scale from host DPI before core init
         self.content_scale = .{
