@@ -20,6 +20,7 @@ const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
+const font_embedded = @import("../font/embedded.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
 const win32_theme = @import("win32_theme.zig");
@@ -10676,6 +10677,50 @@ fn titlebarFallbackIcon(kind: TitlebarGlyphKind) win32_icons.Kind {
     };
 }
 
+/// The search bar's icons are VS Code's (Codicons), drawn from the Symbols
+/// Nerd Font that noctty already embeds for the terminal (Nerd Fonts bundles
+/// Codicons). The system icon fonts have no regex, match-case or whole-word
+/// glyph, and taking all six from one set keeps them the same weight and
+/// size. `win32_icons` stays the fallback when the font is unavailable.
+const search_icon_font_face = std.unicode.utf8ToUtf16LeStringLiteral("Symbols Nerd Font");
+
+/// Codicons are drawn on a 16 px grid, the size VS Code uses them at.
+const search_icon_font_px = 16;
+
+/// GDI cannot draw from font bytes in memory until they are registered, so
+/// the embedded Symbols Nerd Font is added once as a private font: only this
+/// process can see it, and Windows removes it when the process exits.
+fn registerSearchIconFont() void {
+    const bytes = font_embedded.symbols_nerd_font;
+    var count: DWORD = 0;
+    _ = sys.AddFontMemResourceEx(@constCast(bytes.ptr), @intCast(bytes.len), null, &count);
+}
+var search_icon_font_registration = std.once(registerSearchIconFont);
+
+/// Whether two font face names are the same face. GDI matches face names
+/// without regard to ASCII case.
+fn fontFaceNamesEqual(a: []const u16, b: []const u16) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        const lx = if (x < 0x80) std.ascii.toLower(@intCast(x)) else x;
+        const ly = if (y < 0x80) std.ascii.toLower(@intCast(y)) else y;
+        if (lx != ly) return false;
+    }
+    return true;
+}
+
+/// The Codicon for each search bar button, by its Nerd Fonts code point.
+fn searchButtonCodicon(role: SearchBarButtonRole) [:0]const u16 {
+    return switch (role) {
+        .prev => std.unicode.utf8ToUtf16LeStringLiteral("\u{EAA1}"), // arrow-up
+        .next => std.unicode.utf8ToUtf16LeStringLiteral("\u{EA9A}"), // arrow-down
+        .close => std.unicode.utf8ToUtf16LeStringLiteral("\u{EA76}"), // close
+        .regex => std.unicode.utf8ToUtf16LeStringLiteral("\u{EB38}"), // regex
+        .case_sensitive => std.unicode.utf8ToUtf16LeStringLiteral("\u{EAB1}"), // case-sensitive
+        .whole_word => std.unicode.utf8ToUtf16LeStringLiteral("\u{EB7E}"), // whole-word
+    };
+}
+
 fn titlebarRoleFromCaption(button: CaptionButton) TitlebarButtonRole {
     return switch (button) {
         .none => .none,
@@ -11128,6 +11173,9 @@ const Host = struct {
     preview_font: ?*anyopaque = null, // HFONT, owned
     titlebar_caption_icon_font: ?*anyopaque = null, // HFONT, owned
     titlebar_action_icon_font: ?*anyopaque = null, // HFONT, owned
+    /// Codicons for the search bar buttons (`search_icon_font_face`). Null
+    /// when the embedded font could not be registered.
+    search_icon_font: ?*anyopaque = null, // HFONT, owned
 
     // Cached chrome paint strings — rebuilt only when their per-zone
     // dirty bits are set, so WM_PAINT can skip unrelated UTF-16 churn.
@@ -13755,6 +13803,7 @@ const Host = struct {
         if (self.preview_font) |font| _ = sys.DeleteObject(font);
         if (self.titlebar_caption_icon_font) |font| _ = sys.DeleteObject(font);
         if (self.titlebar_action_icon_font) |font| _ = sys.DeleteObject(font);
+        if (self.search_icon_font) |font| _ = sys.DeleteObject(font);
         self.clearStructuralHistory(.host_destroy);
         self.structural_undo_entries.deinit(self.app.core_app.alloc);
         self.structural_redo_entries.deinit(self.app.core_app.alloc);
@@ -16551,6 +16600,35 @@ const Host = struct {
         return sys.CreateFontIndirectW(&lf);
     }
 
+    /// The Codicons font for the search bar, or null when it is unavailable.
+    /// GDI never fails a missing face: it hands back a substitute such as
+    /// Arial, which has none of these private-use code points and would draw
+    /// empty boxes. So the font is kept only if it really is the embedded
+    /// face, and `win32_icons` draws the buttons otherwise.
+    fn createSearchIconFont(self: *Host) ?*anyopaque {
+        search_icon_font_registration.call();
+        const font = self.createTitlebarIconFontForFace(search_icon_font_face, search_icon_font_px) orelse
+            return null;
+        if (!self.fontSelectsFace(font, search_icon_font_face)) {
+            _ = sys.DeleteObject(font);
+            return null;
+        }
+        return font;
+    }
+
+    /// Whether `font`, once selected, is `face` and not a GDI substitute.
+    /// Without a window to measure on, it is assumed to be.
+    fn fontSelectsFace(self: *Host, font: *anyopaque, face: []const u16) bool {
+        const hwnd = self.hwnd orelse return true;
+        const hdc = sys.GetDC(hwnd) orelse return true;
+        defer _ = sys.ReleaseDC(hwnd, hdc);
+        const old_font = sys.SelectObject(hdc, font) orelse return true;
+        defer _ = sys.SelectObject(hdc, old_font);
+        var actual = [_]u16{0} ** c.LF_FACESIZE;
+        if (sys.GetTextFaceW(hdc, actual.len, &actual) <= 0) return true;
+        return fontFaceNamesEqual(std.mem.sliceTo(&actual, 0), face);
+    }
+
     /// Monospace font for the confirm preview. `window-title-font-family`
     /// is deliberately not consulted: that option names a UI font, and a
     /// proportional face would misrepresent the whitespace and column
@@ -16569,8 +16647,10 @@ const Host = struct {
     fn recreateTitlebarIconFonts(self: *Host) void {
         if (self.titlebar_caption_icon_font) |old| _ = sys.DeleteObject(old);
         if (self.titlebar_action_icon_font) |old| _ = sys.DeleteObject(old);
+        if (self.search_icon_font) |old| _ = sys.DeleteObject(old);
         self.titlebar_caption_icon_font = self.createTitlebarIconFont(10);
         self.titlebar_action_icon_font = self.createTitlebarIconFont(12);
+        self.search_icon_font = self.createSearchIconFont();
     }
 
     fn recreateChromeFont(self: *Host) void {
@@ -17362,12 +17442,7 @@ const Host = struct {
                 .right = content_rect.left + icon_box_w,
                 .bottom = content_rect.bottom,
             };
-            win32_icons.drawIcon(icon, draw.hDC.?, .{
-                .left = icon_rect.left,
-                .top = icon_rect.top,
-                .right = icon_rect.right,
-                .bottom = icon_rect.bottom,
-            }, colors.fg, isHighContrastActive());
+            self.drawSearchButtonGlyph(draw.hDC, icon_rect, role, icon, colors.fg);
 
             var label_rect = content_rect;
             label_rect.left = icon_rect.right + self.scaled(5);
@@ -17381,12 +17456,7 @@ const Host = struct {
             return;
         }
 
-        win32_icons.drawIcon(icon, draw.hDC.?, .{
-            .left = content_rect.left,
-            .top = content_rect.top,
-            .right = content_rect.right,
-            .bottom = content_rect.bottom,
-        }, colors.fg, isHighContrastActive());
+        self.drawSearchButtonGlyph(draw.hDC, content_rect, role, icon, colors.fg);
 
         if (active and (role == .regex or role == .case_sensitive or role == .whole_word)) {
             fillSolidRect(draw.hDC, .{
@@ -17396,6 +17466,44 @@ const Host = struct {
                 .bottom = bg_rect.bottom - self.scaled(1),
             }, overlayAccentColor(.search, theme.is_dark));
         }
+    }
+
+    /// Draw a search button's Codicon centred in `rect`, falling back to the
+    /// geometric `fallback` icon when the font is missing or the glyph cannot
+    /// be drawn.
+    fn drawSearchButtonGlyph(
+        self: *Host,
+        hdc: HDC,
+        rect: RECT,
+        role: SearchBarButtonRole,
+        fallback: win32_icons.Kind,
+        color: u32,
+    ) void {
+        const hdc_nn: *anyopaque = hdc orelse return;
+        if (self.search_icon_font) |font_handle| {
+            const glyph = searchButtonCodicon(role);
+            if (sys.SelectObject(hdc, font_handle)) |old_font| {
+                defer _ = sys.SelectObject(hdc, old_font);
+                _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+                _ = sys.SetTextColor(hdc, color);
+                var glyph_rect = rect;
+                // The 16 px glyph is taller than the padded content box;
+                // clipping to it cut off the foot of whole-word's bracket.
+                if (sys.DrawTextW(
+                    hdc,
+                    glyph.ptr,
+                    @intCast(glyph.len),
+                    &glyph_rect,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_NOCLIP,
+                ) != 0) return;
+            }
+        }
+        win32_icons.drawIcon(fallback, hdc_nn, .{
+            .left = rect.left,
+            .top = rect.top,
+            .right = rect.right,
+            .bottom = rect.bottom,
+        }, color, isHighContrastActive());
     }
 
     fn isOverlayStyledButton(self: *const Host, child: HWND) bool {
@@ -42944,6 +43052,49 @@ test "win32 titlebar glyph mapping uses Win11 glyph codepoints" {
     try std.testing.expectEqual(@as(u16, 0xE8BB), titlebarGlyphCodepoint(.close));
     try std.testing.expectEqual(@as(u16, 0xE710), titlebarGlyphCodepoint(.new_tab));
     try std.testing.expectEqual(@as(u16, 0xE70D), titlebarGlyphCodepoint(.dropdown));
+}
+
+test "win32 search bar codicons exist in the embedded symbols font" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    search_icon_font_registration.call();
+    var lf: LOGFONTW = .{};
+    lf.lfHeight = -search_icon_font_px;
+    @memcpy(lf.lfFaceName[0..search_icon_font_face.len], search_icon_font_face);
+    const font = sys.CreateFontIndirectW(&lf) orelse return error.FontCreateFailed;
+    defer _ = sys.DeleteObject(font);
+    const hdc = sys.CreateCompatibleDC(null) orelse return error.DcCreateFailed;
+    defer _ = sys.DeleteDC(hdc);
+    const old_font = sys.SelectObject(hdc, font) orelse return error.FontSelectFailed;
+    defer _ = sys.SelectObject(hdc, old_font);
+
+    // The private font is the one selected, not a GDI substitute.
+    var face = [_]u16{0} ** c.LF_FACESIZE;
+    try std.testing.expect(sys.GetTextFaceW(hdc, face.len, &face) > 0);
+    try std.testing.expect(fontFaceNamesEqual(std.mem.sliceTo(&face, 0), search_icon_font_face));
+
+    // Every button's code point has a glyph, so a Nerd Fonts update that
+    // renumbers a Codicon fails here rather than drawing an empty box.
+    for (search_bar_button_roles) |role| {
+        const glyph = searchButtonCodicon(role);
+        try std.testing.expectEqual(@as(usize, 1), glyph.len);
+        var index: [1]u16 = undefined;
+        try std.testing.expectEqual(@as(DWORD, 1), sys.GetGlyphIndicesW(
+            hdc,
+            glyph.ptr,
+            1,
+            &index,
+            c.GGI_MARK_NONEXISTING_GLYPHS,
+        ));
+        try std.testing.expect(index[0] != 0xFFFF);
+    }
+}
+
+test "win32 font face names compare without ASCII case" {
+    const utf16 = std.unicode.utf8ToUtf16LeStringLiteral;
+    try std.testing.expect(fontFaceNamesEqual(utf16("Symbols Nerd Font"), utf16("symbols nerd font")));
+    try std.testing.expect(!fontFaceNamesEqual(utf16("Symbols Nerd Font"), utf16("Arial")));
+    try std.testing.expect(!fontFaceNamesEqual(utf16("Symbols Nerd Font"), utf16("Symbols Nerd Font Mono")));
 }
 
 test "win32 titlebar hover fade decays linearly and snaps at zero duration" {
