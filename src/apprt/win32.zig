@@ -10694,6 +10694,70 @@ fn titlebarCaptionFromHitTest(ht: i32) CaptionButton {
     };
 }
 
+/// Whether a right-click the host received as `WM_NCRBUTTONUP` opens the
+/// window menu here. Only on a caption row the host keeps in its client
+/// area (`Host.clientCaptionHeight` non-null): DefWindowProc turns the
+/// right-click into `WM_CONTEXTMENU`, whose handler looks for the caption
+/// in the stock frame's geometry instead of asking `WM_NCHITTEST`, and
+/// `WM_NCCALCSIZE` has made that row client area, so it opens nothing.
+/// Where Windows draws the caption (null) it keeps the right-click.
+fn captionRightClickOpensWindowMenu(ht: i32, client_caption_height: ?i32) bool {
+    return ht == c.HTCAPTION and client_caption_height != null;
+}
+
+/// Which window-menu commands a window style allows, and the bold default,
+/// by the rules DefWindowProc applies before it opens the menu from a stock
+/// caption. The menu `GetSystemMenu` returns keeps whatever state it was
+/// last given, and `TrackPopupMenu` does not refresh it: without this a
+/// maximized window offered Maximize, Move and Size and grayed Restore.
+/// Close is left as Windows keeps it.
+const WindowMenuState = struct {
+    restore: bool,
+    move: bool,
+    size: bool,
+    minimize: bool,
+    maximize: bool,
+    default_command: WPARAM,
+};
+
+fn windowMenuState(style: u32) WindowMenuState {
+    const maximized = style & c.WS_MAXIMIZE != 0;
+    const minimized = style & c.WS_MINIMIZE != 0;
+    return .{
+        .restore = maximized or minimized,
+        .move = !maximized,
+        .size = style & c.WS_THICKFRAME != 0 and !maximized and !minimized,
+        .minimize = style & c.WS_MINIMIZEBOX != 0 and !minimized,
+        .maximize = style & c.WS_MAXIMIZEBOX != 0 and !maximized,
+        .default_command = if (maximized or minimized) c.SC_RESTORE else c.SC_MAXIMIZE,
+    };
+}
+
+/// Shows the window menu at the screen point of a `WM_NCRBUTTONUP` and
+/// runs the chosen command. `TPM_RETURNCMD` and a posted `WM_SYSCOMMAND`
+/// run it after the menu loop has returned, as Windows Terminal does for
+/// its own caption.
+fn openWindowMenuAt(hwnd: HWND, lParam: LPARAM) void {
+    const bits: u32 = @truncate(@as(u64, @bitCast(lParam)));
+    const x: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits))));
+    const y: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16))));
+    const menu = sys.GetSystemMenu(hwnd, 0) orelse return;
+    const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+    const state = windowMenuState(style);
+    for ([_]struct { WPARAM, bool }{
+        .{ c.SC_RESTORE, state.restore },
+        .{ c.SC_MOVE, state.move },
+        .{ c.SC_SIZE, state.size },
+        .{ c.SC_MINIMIZE, state.minimize },
+        .{ c.SC_MAXIMIZE, state.maximize },
+    }) |item| {
+        _ = sys.EnableMenuItem(menu, @intCast(item[0]), c.MF_BYCOMMAND | if (item[1]) c.MF_ENABLED else c.MF_GRAYED);
+    }
+    _ = sys.SetMenuDefaultItem(menu, @intCast(state.default_command), 0);
+    const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON, x, y, 0, hwnd, null);
+    if (cmd > 0) _ = sys.PostMessageW(hwnd, c.WM_SYSCOMMAND, @intCast(cmd), 0);
+}
+
 fn captionButtonSysCommand(ht: i32, is_zoomed: bool) ?WPARAM {
     return switch (ht) {
         c.HTMINBUTTON => c.SC_MINIMIZE,
@@ -25771,6 +25835,19 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         },
                         else => v.clearCaptionPressed(),
                     }
+                }
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        // Right-click on the integrated titlebar's empty strip or on an
+        // undecorated window's tab strip: the window menu, as on a stock
+        // caption. See `captionRightClickOpensWindowMenu`.
+        c.WM_NCRBUTTONUP => {
+            if (host) |v| {
+                const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
+                if (captionRightClickOpensWindowMenu(ht, v.clientCaptionHeight())) {
+                    openWindowMenuAt(hwnd, lParam);
+                    return 0;
                 }
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -43058,6 +43135,49 @@ test "win32 captionButtonSysCommand ignores non minimize/maximize hit tests" {
     try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCLIENT, false));
     try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCAPTION, false));
     try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCLOSE, false));
+}
+
+test "win32 windowMenuState follows the window style like a stock caption" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const restored = windowMenuState(WS_OVERLAPPEDWINDOW);
+    try std.testing.expectEqual(WindowMenuState{
+        .restore = false,
+        .move = true,
+        .size = true,
+        .minimize = true,
+        .maximize = true,
+        .default_command = c.SC_MAXIMIZE,
+    }, restored);
+    const maximized = windowMenuState(WS_OVERLAPPEDWINDOW | c.WS_MAXIMIZE);
+    try std.testing.expectEqual(WindowMenuState{
+        .restore = true,
+        .move = false,
+        .size = false,
+        .minimize = true,
+        .maximize = false,
+        .default_command = c.SC_RESTORE,
+    }, maximized);
+    // A style without a sizing frame or maximize box offers neither.
+    const fixed = windowMenuState(c.WS_CAPTION | c.WS_SYSMENU | c.WS_MINIMIZEBOX);
+    try std.testing.expect(!fixed.size);
+    try std.testing.expect(!fixed.maximize);
+    try std.testing.expect(fixed.minimize and fixed.move and !fixed.restore);
+}
+
+test "win32 right-click opens the window menu only on a client-area caption" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Undecorated (0 px row) and integrated (its caption height) hosts.
+    try std.testing.expect(captionRightClickOpensWindowMenu(c.HTCAPTION, 0));
+    try std.testing.expect(captionRightClickOpensWindowMenu(c.HTCAPTION, host_caption_button_h));
+    // Windows owns a stock caption and its right-click.
+    try std.testing.expect(!captionRightClickOpensWindowMenu(c.HTCAPTION, null));
+    // Resize edges and the caption buttons keep DefWindowProc's handling.
+    for ([_]i32{ c.HTTOP, c.HTTOPLEFT, c.HTRIGHT, c.HTMAXBUTTON, c.HTCLOSE, c.HTSYSMENU, c.HTCLIENT }) |ht| {
+        try std.testing.expect(!captionRightClickOpensWindowMenu(ht, 0));
+        try std.testing.expect(!captionRightClickOpensWindowMenu(ht, host_caption_button_h));
+    }
 }
 
 test "win32 titlebar glyph mapping uses Win11 glyph codepoints" {

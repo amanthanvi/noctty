@@ -388,6 +388,12 @@ pub extern "user32" fn CreatePopupMenu() callconv(.winapi) HMENU;
 
 pub extern "user32" fn AppendMenuW(hMenu: HMENU, uFlags: UINT, uIDNewItem: usize, lpNewItem: ?LPCWSTR) callconv(.winapi) BOOL;
 
+pub extern "user32" fn GetSystemMenu(hWnd: HWND, bRevert: BOOL) callconv(.winapi) HMENU;
+
+pub extern "user32" fn EnableMenuItem(hMenu: HMENU, uIDEnableItem: UINT, uEnable: UINT) callconv(.winapi) BOOL;
+
+pub extern "user32" fn SetMenuDefaultItem(hMenu: HMENU, uItem: UINT, fByPos: UINT) callconv(.winapi) BOOL;
+
 pub extern "user32" fn TrackPopupMenu(hMenu: HMENU, uFlags: UINT, x: i32, y: i32, nReserved: i32, hWnd: HWND, prcRect: ?*const RECT) callconv(.winapi) BOOL;
 
 pub extern "user32" fn DestroyMenu(hMenu: HMENU) callconv(.winapi) BOOL;
