@@ -1351,8 +1351,10 @@ test "windows system fallback puts DirectWrite's face first end to end" {
 
         var ranked = try disco.discoverRanked(alloc, desc, preferred);
         defer ranked.deinit();
-        try testing.expect(ranked.records.len > 0);
 
+        // No emptiness check here: when the named face was not indexed and
+        // no scanned face covers the codepoint either, an empty result is
+        // the correct one, and the plain-order comparison below accepts it.
         if (Windows.preferredPath(ranked.records, preferred) != null) {
             try testing.expect(dwrite.samePath(ranked.records[0].path, mapped.path));
             try testing.expectEqual(mapped.face_index, ranked.records[0].face_index);
