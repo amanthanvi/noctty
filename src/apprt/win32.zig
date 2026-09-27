@@ -10697,14 +10697,29 @@ fn registerSearchIconFont() void {
 }
 var search_icon_font_registration = std.once(registerSearchIconFont);
 
-/// Whether two font face names are the same face. GDI matches face names
-/// without regard to ASCII case.
-fn fontFaceNamesEqual(a: []const u16, b: []const u16) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        const lx = if (x < 0x80) std.ascii.toLower(@intCast(x)) else x;
-        const ly = if (y < 0x80) std.ascii.toLower(@intCast(y)) else y;
-        if (lx != ly) return false;
+/// Whether `font` has a glyph for every search bar button. This, not the
+/// face name, decides whether the Codicons font is used: GDI never fails a
+/// missing face but hands back a substitute such as Arial, which has none of
+/// these private-use code points, and an older "Symbols Nerd Font" installed
+/// on the system can shadow the registered one without having them all.
+/// Any GDI failure counts as missing, so the buttons fall back to
+/// `win32_icons` rather than risk empty boxes.
+fn fontHasSearchCodicons(font: *anyopaque) bool {
+    const hdc = sys.CreateCompatibleDC(null) orelse return false;
+    defer _ = sys.DeleteDC(hdc);
+    const old_font = sys.SelectObject(hdc, font) orelse return false;
+    defer _ = sys.SelectObject(hdc, old_font);
+    for (search_bar_button_roles) |role| {
+        const glyph = searchButtonCodicon(role);
+        var index: [1]u16 = undefined;
+        if (sys.GetGlyphIndicesW(
+            hdc,
+            glyph.ptr,
+            1,
+            &index,
+            c.GGI_MARK_NONEXISTING_GLYPHS,
+        ) != 1) return false;
+        if (index[0] == 0xFFFF) return false;
     }
     return true;
 }
@@ -16600,33 +16615,17 @@ const Host = struct {
         return sys.CreateFontIndirectW(&lf);
     }
 
-    /// The Codicons font for the search bar, or null when it is unavailable.
-    /// GDI never fails a missing face: it hands back a substitute such as
-    /// Arial, which has none of these private-use code points and would draw
-    /// empty boxes. So the font is kept only if it really is the embedded
-    /// face, and `win32_icons` draws the buttons otherwise.
+    /// The Codicons font for the search bar, or null when it is unavailable,
+    /// in which case `win32_icons` draws the buttons.
     fn createSearchIconFont(self: *Host) ?*anyopaque {
         search_icon_font_registration.call();
         const font = self.createTitlebarIconFontForFace(search_icon_font_face, search_icon_font_px) orelse
             return null;
-        if (!self.fontSelectsFace(font, search_icon_font_face)) {
+        if (!fontHasSearchCodicons(font)) {
             _ = sys.DeleteObject(font);
             return null;
         }
         return font;
-    }
-
-    /// Whether `font`, once selected, is `face` and not a GDI substitute.
-    /// Without a window to measure on, it is assumed to be.
-    fn fontSelectsFace(self: *Host, font: *anyopaque, face: []const u16) bool {
-        const hwnd = self.hwnd orelse return true;
-        const hdc = sys.GetDC(hwnd) orelse return true;
-        defer _ = sys.ReleaseDC(hwnd, hdc);
-        const old_font = sys.SelectObject(hdc, font) orelse return true;
-        defer _ = sys.SelectObject(hdc, old_font);
-        var actual = [_]u16{0} ** c.LF_FACESIZE;
-        if (sys.GetTextFaceW(hdc, actual.len, &actual) <= 0) return true;
-        return fontFaceNamesEqual(std.mem.sliceTo(&actual, 0), face);
     }
 
     /// Monospace font for the confirm preview. `window-title-font-family`
@@ -43054,47 +43053,36 @@ test "win32 titlebar glyph mapping uses Win11 glyph codepoints" {
     try std.testing.expectEqual(@as(u16, 0xE70D), titlebarGlyphCodepoint(.dropdown));
 }
 
+fn testCreateFaceFont(face: []const u16, px: i32) !*anyopaque {
+    var lf: LOGFONTW = .{};
+    lf.lfHeight = -px;
+    @memcpy(lf.lfFaceName[0..face.len], face);
+    return sys.CreateFontIndirectW(&lf) orelse error.FontCreateFailed;
+}
+
 test "win32 search bar codicons exist in the embedded symbols font" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    search_icon_font_registration.call();
-    var lf: LOGFONTW = .{};
-    lf.lfHeight = -search_icon_font_px;
-    @memcpy(lf.lfFaceName[0..search_icon_font_face.len], search_icon_font_face);
-    const font = sys.CreateFontIndirectW(&lf) orelse return error.FontCreateFailed;
-    defer _ = sys.DeleteObject(font);
-    const hdc = sys.CreateCompatibleDC(null) orelse return error.DcCreateFailed;
-    defer _ = sys.DeleteDC(hdc);
-    const old_font = sys.SelectObject(hdc, font) orelse return error.FontSelectFailed;
-    defer _ = sys.SelectObject(hdc, old_font);
-
-    // The private font is the one selected, not a GDI substitute.
-    var face = [_]u16{0} ** c.LF_FACESIZE;
-    try std.testing.expect(sys.GetTextFaceW(hdc, face.len, &face) > 0);
-    try std.testing.expect(fontFaceNamesEqual(std.mem.sliceTo(&face, 0), search_icon_font_face));
-
-    // Every button's code point has a glyph, so a Nerd Fonts update that
-    // renumbers a Codicon fails here rather than drawing an empty box.
+    // Each button is one UTF-16 unit, which `fontHasSearchCodicons` looks up.
     for (search_bar_button_roles) |role| {
-        const glyph = searchButtonCodicon(role);
-        try std.testing.expectEqual(@as(usize, 1), glyph.len);
-        var index: [1]u16 = undefined;
-        try std.testing.expectEqual(@as(DWORD, 1), sys.GetGlyphIndicesW(
-            hdc,
-            glyph.ptr,
-            1,
-            &index,
-            c.GGI_MARK_NONEXISTING_GLYPHS,
-        ));
-        try std.testing.expect(index[0] != 0xFFFF);
+        try std.testing.expectEqual(@as(usize, 1), searchButtonCodicon(role).len);
     }
+
+    // The registered font has every button's glyph, so a Nerd Fonts update
+    // that renumbers a Codicon fails here rather than drawing an empty box.
+    search_icon_font_registration.call();
+    const font = try testCreateFaceFont(search_icon_font_face, search_icon_font_px);
+    defer _ = sys.DeleteObject(font);
+    try std.testing.expect(fontHasSearchCodicons(font));
 }
 
-test "win32 font face names compare without ASCII case" {
-    const utf16 = std.unicode.utf8ToUtf16LeStringLiteral;
-    try std.testing.expect(fontFaceNamesEqual(utf16("Symbols Nerd Font"), utf16("symbols nerd font")));
-    try std.testing.expect(!fontFaceNamesEqual(utf16("Symbols Nerd Font"), utf16("Arial")));
-    try std.testing.expect(!fontFaceNamesEqual(utf16("Symbols Nerd Font"), utf16("Symbols Nerd Font Mono")));
+test "win32 search bar codicons are rejected in a substitute font" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Arial is what GDI substituted for a missing icon face on Windows 10.
+    const font = try testCreateFaceFont(std.unicode.utf8ToUtf16LeStringLiteral("Arial"), search_icon_font_px);
+    defer _ = sys.DeleteObject(font);
+    try std.testing.expect(!fontHasSearchCodicons(font));
 }
 
 test "win32 titlebar hover fade decays linearly and snaps at zero duration" {
