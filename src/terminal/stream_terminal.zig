@@ -1455,6 +1455,33 @@ test "semantic prompt: bash keeps redraw=last after a program reads an Enter" {
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, screen, "u@h ~"));
 }
 
+test "semantic prompt: bash keeps redraw=last after a program reads two Enters and an empty line" {
+    // As above with two Enters read by `python3`, then an empty line, which
+    // bash answers with D and A but no C. Its prompt must not take the second
+    // Enter as typed ahead for it.
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 30, .rows = 20 });
+    defer t.deinit(testing.allocator);
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    s.nextSlice(bash_prompt_a ++ bash_ps1 ++ "python3");
+    t.screens.active.semanticPromptInputSubmitted();
+    s.nextSlice("\r\n\x1b]133;C;\x07>>> 1");
+    t.screens.active.semanticPromptInputSubmitted(); // read by python3
+    s.nextSlice("\r\n1\r\n>>> exit()");
+    t.screens.active.semanticPromptInputSubmitted(); // read by python3
+    s.nextSlice("\r\n\x1b]133;D;0;aid=1\x07" ++ bash_prompt_a ++ bash_ps1);
+    t.screens.active.semanticPromptInputSubmitted(); // an empty line
+    s.nextSlice("\r\n\x1b]133;D;0;aid=1\x07" ++ bash_prompt_a ++ bash_ps1);
+    s.nextSlice("git ch\r\ncheckout  cherry\r\n" ++ bash_ps1 ++ "git ch");
+    try testing.expect(t.flags.shell_redraws_prompt == .last);
+
+    try t.resize(testing.allocator, 20, 20);
+    const screen = try t.plainString(testing.allocator);
+    defer testing.allocator.free(screen);
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, screen, "u@h ~"));
+}
+
 test "semantic prompt: oh-my-posh keeps the PowerShell prompt after Read-Host reads an Enter" {
     // PowerShell's integration today writes D, OSC 7, A;redraw=0 and B
     // directly, then the host draws oh-my-posh's own D, A, text and B.
@@ -1550,6 +1577,42 @@ test "semantic prompt: each typed-ahead line in cmd is waiting for its own promp
     try testing.expect(t.flags.shell_redraws_prompt == .false);
     s.nextSlice("\x1b]133;A\x07nu> \x1b]133;B\x07");
     try testing.expect(t.flags.shell_redraws_prompt == .true);
+}
+
+test "semantic prompt: typeahead in cmd starts a shell after a shell with C marks has exited" {
+    // `wsl` from cmd, then `exit` in bash there, which bash marks with C.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07wsl",
+        "",
+        "\r\n" ++ bash_prompt_a ++ "\x1b]133;P;k=i\x07$ \x1b]133;B\x07exit",
+        "",
+        "\r\n\x1b]133;C;\x07\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07ping -t x",
+        "",
+        "\r\nReply\r\n",
+        "", // typed ahead: nu, Enter
+        "\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07nu\r\n",
+        "\x1b]133;A\x07nu> \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "C:\\>nu") != null);
+    try testing.expect(std.mem.indexOf(u8, screen, "nu>") == null);
+}
+
+test "semantic prompt: typeahead in cmd started from PowerShell starts a shell" {
+    // PowerShell marks `cmd` with C.
+    const screen = try semanticPromptScreenAfterNarrowingForTest(testing.allocator, &.{
+        "\x1b]133;D;0;aid=1\x07\x1b]133;A;cl=line;aid=1;redraw=0\x07PS> \x1b]133;B\x07cmd",
+        "",
+        "\r\n\x1b]133;C;aid=1;cmdline_url=cmd\x07\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07ping -t x",
+        "",
+        "\r\nReply\r\n",
+        "", // typed ahead: nu, Enter
+        "\x1b]133;A;redraw=0\x07C:\\>\x1b]133;B\x07nu\r\n",
+        "\x1b]133;A\x07nu> \x1b]133;B\x07",
+    });
+    defer testing.allocator.free(screen);
+    try testing.expect(std.mem.indexOf(u8, screen, "C:\\>nu") != null);
+    try testing.expect(std.mem.indexOf(u8, screen, "nu>") == null);
 }
 
 test "semantic prompt: a P mark with an explicit redraw sets it inside an open prompt" {

@@ -36,13 +36,14 @@ typeahead_lines: u32 = 0,
 /// submitted without `consumeInput` ever closing it. See `markPromptStart`.
 prompt_presubmitted: bool = false,
 
-/// A C mark has been seen on this screen. A shell that marks command starts
-/// closes a typed-ahead prompt with its C before anything the line runs can
-/// draw a prompt, so the typeahead inference in `markPromptStart` is only
-/// needed, and only applied, while none has been seen: in practice cmd.exe
-/// without Clink. Leaving it on for shells with C marks misread their own
-/// redraws as new shells whenever a running program had read an Enter (bash
-/// reprints its PS1 marks after a completion listing).
+/// A C mark has been seen since the last new prompt. Lines submitted after it
+/// were most likely read by the command it marks (bash's `read`, PowerShell's
+/// `Read-Host`), so the next new prompt drops them instead of taking one as
+/// typed ahead for itself. Taking them misread a shell's own redraws as new
+/// shells (bash reprints its PS1 marks after a completion listing). Prompts
+/// after that one count lines again, so cmd.exe keeps the typeahead inference
+/// in `markPromptStart` after it has run a shell with C marks, or while it
+/// runs under one.
 output_mark_seen: bool = false,
 
 const Completed = struct {
@@ -226,12 +227,14 @@ pub fn consumeInput(self: *SemanticCommand, pages: *PageList, lines: u32) void {
 /// stays open while the command in it runs, and a mark after its B can only
 /// come from that command, a shell started from it. A mark before the B is
 /// part of the prompt, which is where the Windows Terminal docs' cmd PROMPT
-/// and prompt themes put theirs. See `output_mark_seen` for why shells with C
-/// marks are left out.
+/// and prompt themes put theirs. A shell with C marks closes the prompt with
+/// its C instead; see `output_mark_seen` for the lines its commands read.
 pub fn markPromptStart(self: *SemanticCommand) bool {
     const new_prompt = !self.prompt_open or
-        (self.prompt_presubmitted and !self.output_mark_seen and self.inputPending());
+        (self.prompt_presubmitted and self.inputPending());
     if (new_prompt) {
+        if (self.output_mark_seen) self.typeahead_lines = 0;
+        self.output_mark_seen = false;
         self.prompt_presubmitted = self.typeahead_lines > 0;
         self.typeahead_lines -|= 1;
     }
