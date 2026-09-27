@@ -1333,10 +1333,11 @@ test "windowsSystemFallbackPreferenceBreaksTies" {
 }
 
 test "windows system fallback puts DirectWrite's face first end to end" {
-    // Real scan, real DirectWrite. The face Windows names for a CJK
-    // ideograph must be one the scan indexed, and discovery must return it
-    // first. Which font that is depends on the machine and locale, so it
-    // is not asserted.
+    // Real scan, real DirectWrite, for a CJK ideograph. If the scan indexed
+    // the face Windows names, discovery returns it first; if it did not
+    // (a font outside the scanned sources), the order is exactly the plain
+    // `discover` order. Which font Windows names depends on the machine
+    // and locale, so it is not asserted.
     if (comptime builtin.os.tag == .windows) {
         const alloc = testing.allocator;
         var disco = Windows.init();
@@ -1346,12 +1347,24 @@ test "windows system fallback puts DirectWrite's face first end to end" {
         const desc: Descriptor = .{ .codepoint = 0x4E2D, .size = 12 };
         var mapped = (try disco.systemFallbackFor(alloc, desc)) orelse return error.TestUnexpectedResult;
         defer mapped.deinit(alloc);
+        const preferred: Windows.Preferred = .{ .path = mapped.path, .face_index = mapped.face_index };
 
-        var it = try disco.discoverRanked(alloc, desc, .{ .path = mapped.path, .face_index = mapped.face_index });
-        defer it.deinit();
-        try testing.expect(it.records.len > 0);
-        try testing.expect(dwrite.samePath(it.records[0].path, mapped.path));
-        try testing.expectEqual(mapped.face_index, it.records[0].face_index);
+        var ranked = try disco.discoverRanked(alloc, desc, preferred);
+        defer ranked.deinit();
+        try testing.expect(ranked.records.len > 0);
+
+        if (Windows.preferredPath(ranked.records, preferred) != null) {
+            try testing.expect(dwrite.samePath(ranked.records[0].path, mapped.path));
+            try testing.expectEqual(mapped.face_index, ranked.records[0].face_index);
+        } else {
+            var plain = try disco.discover(alloc, desc);
+            defer plain.deinit();
+            try testing.expectEqual(plain.records.len, ranked.records.len);
+            for (plain.records, ranked.records) |expected, actual| {
+                try testing.expectEqualStrings(expected.path, actual.path);
+                try testing.expectEqual(expected.face_index, actual.face_index);
+            }
+        }
     } else return error.SkipZigTest;
 }
 

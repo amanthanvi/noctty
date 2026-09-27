@@ -174,45 +174,65 @@ fn localFileOf(alloc: Allocator, font: *IDWriteFont) Allocator.Error!?Mapped {
     return .{ .path = path, .face_index = face_index };
 }
 
-/// Longest path, in UTF-16 units, that `samePath` compares with Windows'
-/// own rules; longer paths fall back to an ASCII-only comparison.
-const compare_path_max = 1024;
+/// UTF-16 units `samePath` hands to `CompareStringOrdinal` at a time.
+const compare_chunk = 128;
 
 /// Whether a scanned font file is the one DirectWrite named. The two
 /// sources can differ in case and separator, so compare the way the file
 /// system does: `CompareStringOrdinal` with case ignored, which folds
 /// non-ASCII letters too (e.g. a Cyrillic user name in a per-user path).
+/// That comparison upper-cases each UTF-16 unit on its own, so comparing
+/// equal-length chunks in step is the same as comparing the whole paths,
+/// at any length.
 pub fn samePath(a: []const u8, b: []const u8) bool {
-    var wide_a: [compare_path_max]u16 = undefined;
-    var wide_b: [compare_path_max]u16 = undefined;
-    const len_a = widePathForCompare(a, &wide_a) orelse return asciiSamePath(a, b);
-    const len_b = widePathForCompare(b, &wide_b) orelse return asciiSamePath(a, b);
-    return k32.CompareStringOrdinal(&wide_a, len_a, &wide_b, len_b, 1) == cstr_equal;
-}
-
-/// UTF-16 copy of `path` with `/` as `\`, or null when it is not valid
-/// UTF-8 or does not fit.
-fn widePathForCompare(path: []const u8, out: *[compare_path_max]u16) ?i32 {
-    const view = std.unicode.Utf8View.init(path) catch return null;
-    var it = view.iterator();
-    var len: usize = 0;
-    while (it.nextCodepoint()) |raw| {
-        const codepoint: u21 = if (raw == '/') '\\' else raw;
-        if (codepoint < 0x10000) {
-            if (len + 1 > out.len) return null;
-            out[len] = @intCast(codepoint);
-            len += 1;
-        } else {
-            if (len + 2 > out.len) return null;
-            const high = codepoint - 0x10000;
-            out[len] = @intCast(0xD800 + (high >> 10));
-            out[len + 1] = @intCast(0xDC00 + (high & 0x3FF));
-            len += 2;
-        }
+    var units_a = WidePathUnits.init(a) orelse return asciiSamePath(a, b);
+    var units_b = WidePathUnits.init(b) orelse return asciiSamePath(a, b);
+    var chunk_a: [compare_chunk]u16 = undefined;
+    var chunk_b: [compare_chunk]u16 = undefined;
+    while (true) {
+        const len_a = units_a.fill(&chunk_a);
+        const len_b = units_b.fill(&chunk_b);
+        if (len_a != len_b) return false;
+        if (len_a == 0) return true;
+        if (k32.CompareStringOrdinal(&chunk_a, @intCast(len_a), &chunk_b, @intCast(len_b), 1) != cstr_equal) return false;
     }
-    return @intCast(len);
 }
 
+/// The UTF-16 units of a UTF-8 path, with `/` read as `\`.
+const WidePathUnits = struct {
+    it: std.unicode.Utf8Iterator,
+    /// Low surrogate still owed from the last supplementary codepoint.
+    pending: ?u16 = null,
+
+    fn init(path: []const u8) ?WidePathUnits {
+        const view = std.unicode.Utf8View.init(path) catch return null;
+        return .{ .it = view.iterator() };
+    }
+
+    fn next(self: *WidePathUnits) ?u16 {
+        if (self.pending) |low| {
+            self.pending = null;
+            return low;
+        }
+        const raw = self.it.nextCodepoint() orelse return null;
+        const codepoint: u21 = if (raw == '/') '\\' else raw;
+        if (codepoint < 0x10000) return @intCast(codepoint);
+        const offset = codepoint - 0x10000;
+        self.pending = @intCast(0xDC00 + (offset & 0x3FF));
+        return @intCast(0xD800 + (offset >> 10));
+    }
+
+    fn fill(self: *WidePathUnits, out: []u16) usize {
+        var len: usize = 0;
+        while (len < out.len) : (len += 1) {
+            out[len] = self.next() orelse break;
+        }
+        return len;
+    }
+};
+
+/// Only for input that is not valid UTF-8, which a path from either source
+/// should never be.
 fn asciiSamePath(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| {
@@ -475,10 +495,21 @@ test "windowsDwriteSamePathIgnoresCaseAndSeparator" {
         ));
         try testing.expect(!samePath("C:\\Users\\Юрий\\a.ttf", "C:\\Users\\Юрий\\b.ttf"));
 
-        // Outside UTF-16 range for the comparison buffer: ASCII fallback.
-        const long_a = "C:\\" ++ "a" ** (compare_path_max + 8) ++ ".ttf";
-        const long_b = "c:/" ++ "A" ** (compare_path_max + 8) ++ ".TTF";
+        // Paths spanning many comparison chunks still fold non-ASCII case,
+        // including where a letter sits on a chunk boundary.
+        const long_a = "C:\\" ++ "ю" ** (compare_chunk * 3 + 5) ++ ".ttf";
+        const long_b = "c:/" ++ "Ю" ** (compare_chunk * 3 + 5) ++ ".TTF";
         try testing.expect(samePath(long_a, long_b));
+        const long_c = "c:/" ++ "Ю" ** (compare_chunk * 3 + 4) ++ "Я.TTF";
+        try testing.expect(!samePath(long_a, long_c));
+
+        // One unit longer, right at a chunk boundary: not the same path.
+        const exact = "x" ** compare_chunk;
+        try testing.expect(!samePath(exact, exact ++ "x"));
+        try testing.expect(samePath(exact, "X" ** compare_chunk));
+
+        // A supplementary-plane letter (a surrogate pair in UTF-16).
+        try testing.expect(samePath("C:\\𝒳\\a.ttf", "c:/𝒳/A.TTF"));
     } else return error.SkipZigTest;
 }
 
