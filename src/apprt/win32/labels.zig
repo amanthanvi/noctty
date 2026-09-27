@@ -1253,6 +1253,20 @@ pub fn searchBarButtonLabel(role: SearchBarButtonRole) LPCWSTR {
     };
 }
 
+/// What a search bar button does, in words: its UIA name, and the hover
+/// tooltip that spells out its icon. One source, so a screen reader and a
+/// sighted user are told the same thing.
+pub fn searchBarButtonName(role: SearchBarButtonRole) []const u8 {
+    return switch (role) {
+        .prev => "Previous match",
+        .next => "Next match",
+        .regex => "Regular expression",
+        .case_sensitive => "Case sensitive",
+        .whole_word => "Whole word",
+        .close => "Close search",
+    };
+}
+
 pub fn showSearchBarResults(bar: *const win32_search_bar.SearchBar) bool {
     return bar.query.len > 0;
 }
@@ -4221,6 +4235,24 @@ test "win32 confirm preview replaces bidirectional formatting characters" {
         defer one.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings(buf[0..len], one.text);
     }
+}
+
+test "win32 searchBarButtonName names every search button distinctly" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Each button's tooltip and UIA name come from here, so every role needs
+    // its own non-empty name; two icons sharing a name would defeat the
+    // tooltip that exists to tell them apart.
+    const roles = std.enums.values(SearchBarButtonRole);
+    for (roles, 0..) |role, i| {
+        const name = searchBarButtonName(role);
+        try std.testing.expect(name.len > 0);
+        for (roles[i + 1 ..]) |other| {
+            try std.testing.expect(!std.mem.eql(u8, name, searchBarButtonName(other)));
+        }
+    }
+    try std.testing.expectEqualStrings("Previous match", searchBarButtonName(.prev));
+    try std.testing.expectEqualStrings("Regular expression", searchBarButtonName(.regex));
 }
 
 test "win32 overlayEmptySubmitDismisses spares prompts with no query field" {
