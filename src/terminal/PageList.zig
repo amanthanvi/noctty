@@ -1273,6 +1273,9 @@ const ReflowCursor = struct {
 
         // Handle tracked pin adjustments.
         {
+            // Deferred line breaks and pending wrap reset the destination column.
+            const dst_x = if (self.new_rows > 0 or self.pending_wrap) 0 else self.x;
+
             const pin_keys = list.tracked_pins.keys();
             for (pin_keys) |p| {
                 if (&p.node.data != src_page or
@@ -1285,7 +1288,7 @@ const ReflowCursor = struct {
                 // col width instead.
                 if (p.x >= cols_len) p.x = @min(
                     p.x,
-                    self.page.size.cols - 1 - self.x,
+                    self.page.size.cols - 1 - dst_x,
                 );
 
                 // We increase our col len to at least include this pin.
@@ -12952,6 +12955,58 @@ test "PageList resize reflow less cols cursor in final blank cell" {
         .x = 3,
         .y = 0,
     } }, s.pointFromPin(.active, p.*).?);
+}
+
+test "PageList resize reflow pin in blank cells after line break" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const cases = [_]struct {
+        first: []const u8,
+        wrap: bool,
+        pin_x: size.CellCountInt,
+        cols: size.CellCountInt,
+        expected: point.Coordinate,
+    }{
+        // A hard line break starts the pin row at column zero.
+        .{ .first = "abc", .wrap = false, .pin_x = 5, .cols = 8, .expected = .{ .x = 5, .y = 1 } },
+        // A soft continuation uses the remaining destination columns.
+        .{ .first = "abcdef", .wrap = true, .pin_x = 3, .cols = 8, .expected = .{ .x = 7, .y = 0 } },
+        // Pending wrap starts the continuation at column zero.
+        .{ .first = "abcdef", .wrap = true, .pin_x = 2, .cols = 3, .expected = .{ .x = 2, .y = 2 } },
+    };
+
+    for (cases) |case| {
+        var s = try init(alloc, 6, 4, null);
+        defer s.deinit();
+        const page = &s.pages.first.?.data;
+        page.getRow(0).wrap = case.wrap;
+        for (case.first, 0..) |cp, x| {
+            page.getRowAndCell(x, 0).cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = cp },
+            };
+        }
+        const rac = page.getRowAndCell(0, 1);
+        rac.row.wrap_continuation = case.wrap;
+        rac.cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = 'g' },
+        };
+
+        const p = try s.trackPin(s.pin(.{ .active = .{
+            .x = case.pin_x,
+            .y = 1,
+        } }).?);
+        defer s.untrackPin(p);
+
+        try s.resize(.{ .cols = case.cols, .reflow = true });
+        try testing.expectEqual(
+            point.Point{ .active = case.expected },
+            s.pointFromPin(.active, p.*).?,
+        );
+        try testing.expect(p.rowAndCell().cell.isEmpty());
+    }
 }
 
 test "PageList resize reflow less cols cursor in wrapped blank cell" {
