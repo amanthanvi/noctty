@@ -10705,6 +10705,25 @@ fn captionRightClickOpensWindowMenu(ht: i32, client_caption_height: ?i32) bool {
     return ht == c.HTCAPTION and client_caption_height != null;
 }
 
+/// What the host does with a right-button message on a client-area caption,
+/// or null to leave it to DefWindowProc. The press is swallowed, not only
+/// the release: measured on build 26200, DefWindowProc given
+/// `WM_NCRBUTTONDOWN` HTCAPTION on an active window runs a modal loop that
+/// ends only when it removes the `WM_RBUTTONUP` the captured release turns
+/// into, and neither `WM_NCRBUTTONUP` nor `WM_CONTEXTMENU` follows, so the
+/// release never reached the menu. A quick second press arrives as
+/// `WM_NCRBUTTONDBLCLK`, which needs no `CS_DBLCLKS`.
+const CaptionRightClick = enum { swallow, open_menu };
+
+fn captionRightClick(msg: UINT, ht: i32, client_caption_height: ?i32) ?CaptionRightClick {
+    if (!captionRightClickOpensWindowMenu(ht, client_caption_height)) return null;
+    return switch (msg) {
+        c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONDBLCLK => .swallow,
+        c.WM_NCRBUTTONUP => .open_menu,
+        else => null,
+    };
+}
+
 /// Which window-menu commands a window style allows, and the bold default,
 /// by the rules DefWindowProc applies before it opens the menu from a stock
 /// caption. The menu `GetSystemMenu` returns keeps whatever state it was
@@ -25856,12 +25875,14 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
         // Right-click on the integrated titlebar's empty strip or on an
         // undecorated window's tab strip: the window menu, as on a stock
-        // caption. See `captionRightClickOpensWindowMenu`.
-        c.WM_NCRBUTTONUP => {
+        // caption. See `captionRightClick`. No DwmDefWindowProc first:
+        // only HTCAPTION is handled here, and every other code, the
+        // caption buttons included, goes to DefWindowProc as before.
+        c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONDBLCLK, c.WM_NCRBUTTONUP => {
             if (host) |v| {
                 const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
-                if (captionRightClickOpensWindowMenu(ht, v.clientCaptionHeight())) {
-                    openWindowMenuAt(hwnd, lParam);
+                if (captionRightClick(msg, ht, v.clientCaptionHeight())) |action| {
+                    if (action == .open_menu) openWindowMenuAt(hwnd, lParam);
                     return 0;
                 }
             }
@@ -43244,6 +43265,27 @@ test "win32 right-click opens the window menu only on a client-area caption" {
     for ([_]i32{ c.HTTOP, c.HTTOPLEFT, c.HTRIGHT, c.HTMAXBUTTON, c.HTCLOSE, c.HTSYSMENU, c.HTCLIENT }) |ht| {
         try std.testing.expect(!captionRightClickOpensWindowMenu(ht, 0));
         try std.testing.expect(!captionRightClickOpensWindowMenu(ht, host_caption_button_h));
+    }
+}
+
+test "win32 client-area caption swallows the right press and opens the menu on release" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Not sent to a window: a press handed to DefWindowProc on an active
+    // window waits in a modal loop for a real release, so a regression
+    // would hang the suite instead of failing it.
+    for ([_]?i32{ 0, host_caption_button_h }) |height| {
+        try std.testing.expectEqual(@as(?CaptionRightClick, .swallow), captionRightClick(c.WM_NCRBUTTONDOWN, c.HTCAPTION, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, .swallow), captionRightClick(c.WM_NCRBUTTONDBLCLK, c.HTCAPTION, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, .open_menu), captionRightClick(c.WM_NCRBUTTONUP, c.HTCAPTION, height));
+        // Other hit-test codes and other messages keep DefWindowProc.
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(c.WM_NCRBUTTONDOWN, c.HTTOP, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(c.WM_NCRBUTTONUP, c.HTCLOSE, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(c.WM_NCLBUTTONDOWN, c.HTCAPTION, height));
+    }
+    // A caption Windows draws keeps the whole right-click.
+    for ([_]UINT{ c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONDBLCLK, c.WM_NCRBUTTONUP }) |msg| {
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(msg, c.HTCAPTION, null));
     }
 }
 
