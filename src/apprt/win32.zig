@@ -18129,12 +18129,22 @@ const Host = struct {
 
     /// Whether a `WM_NCHITTEST` point is on a resize edge of this host with
     /// a 0 px caption row. Its top band lies inside the client area, where
-    /// a terminal pane or a tab-strip button covers it; those children
-    /// answer `HTTRANSPARENT` there so the band reaches the host.
+    /// a terminal pane with no tab bar above it covers the band.
     fn resizesFrom(self: *Host, lParam: LPARAM) bool {
         if ((self.clientCaptionHeight() orelse return false) != 0) return false;
         const ht = self.handleNcHitTest(self.hwnd orelse return false, lParam) orelse return false;
         return ht >= c.HTLEFT and ht <= c.HTBOTTOMRIGHT;
+    }
+
+    /// `resizesFrom` for the top band and its corners only, which the
+    /// tab-strip buttons begin inside. The side strips are measured from the
+    /// window rect, scaled linearly, while the client starts at DWP's frame,
+    /// which is narrower above 96 DPI (13 vs 16 px at 192), so a side strip
+    /// overlaps a button's outer columns there; the button keeps those.
+    fn resizesFromTop(self: *Host, lParam: LPARAM) bool {
+        if ((self.clientCaptionHeight() orelse return false) != 0) return false;
+        const ht = self.handleNcHitTest(self.hwnd orelse return false, lParam) orelse return false;
+        return ht == c.HTTOP or ht == c.HTTOPLEFT or ht == c.HTTOPRIGHT;
     }
 
     fn tabBarHeight(self: *Host) i32 {
@@ -25020,7 +25030,7 @@ fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) 
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
-        if (msg == c.WM_NCHITTEST and v.resizesFrom(lParam)) return c.HTTRANSPARENT;
+        if (msg == c.WM_NCHITTEST and v.resizesFromTop(lParam)) return c.HTTRANSPARENT;
         if (msg == c.WM_GETOBJECT) {
             if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
                 if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
@@ -25166,7 +25176,7 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
-        if (msg == c.WM_NCHITTEST and v.resizesFrom(lParam)) return c.HTTRANSPARENT;
+        if (msg == c.WM_NCHITTEST and v.resizesFromTop(lParam)) return c.HTTRANSPARENT;
         if (v.tabIndexForButton(hwnd)) |index| {
             if (msg == c.WM_GETOBJECT) {
                 if (v.tabs.items[index].uia_provider) |provider| {
@@ -37174,6 +37184,14 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 ));
                 try std.testing.expect(sys.ClientToScreen(hwnd, &button_point) != 0);
                 try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, button_point.x, window_rect.top + band - 1));
+                // Only the top band: the left strip is measured linearly from
+                // the window rect and the client starts at DWP's frame, so
+                // above 96 DPI the strip's inner columns are the button's
+                // first, which keeps them. At 96 DPI the two are equally wide
+                // and this point lies in the frame left of the button, so it
+                // pins the procedures' answer rather than that overlap.
+                const side_x = window_rect.left + corner - 1;
+                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, side_x, button_point.y));
                 for ([_]WNDPROC{ &tabButtonProc, &hostButtonProc }) |proc| {
                     var previous: ?*const anyopaque = null;
                     host.subclassButton(button, proc, &previous);
@@ -37181,6 +37199,7 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                     try std.testing.expectEqual(@as(LRESULT, c.HTTRANSPARENT), testHitTest(button, button_point.x, window_rect.top + band - 1));
                     try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, window_rect.top + band));
                     try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, button_point.y));
+                    try std.testing.expect(testHitTest(button, side_x, button_point.y) != c.HTTRANSPARENT);
                 }
 
                 // With the tab bar off there is no drag handle: the terminal
