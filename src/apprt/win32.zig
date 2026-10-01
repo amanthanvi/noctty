@@ -11055,8 +11055,10 @@ const Host = struct {
     drag_state: win32_tab_drag.DragState = .{},
     overlay_mode: HostOverlayMode = .none,
     /// Surface a title prompt's text was last filled from, while
-    /// `overlayTextFollowsActiveSurface(overlay_mode)`. Only compared with
-    /// `activeSurface()`, never dereferenced.
+    /// `overlayTextFollowsActiveSurface(overlay_mode)`, so the text refills
+    /// when the active surface changes (a tab switch or focus moving to
+    /// another split pane). Only compared with `activeSurface()`, never
+    /// dereferenced.
     overlay_text_surface: ?*const Surface = null,
     /// Active confirm overlay payload when `overlay_mode == .confirm`.
     /// Owned byte slices (`title`, `body`, `accept_label`,
@@ -18459,9 +18461,10 @@ const Host = struct {
 
     /// The tab and window title prompts are filled from the active surface
     /// and submit to whichever surface is active at Enter. Their label
-    /// already follows a tab switch ("Rename tab n/N"); refill the text with
-    /// the new tab's title too, so submit never writes one tab's title onto
-    /// another.
+    /// already follows a tab switch ("Rename tab n/N"); when the active
+    /// surface changes (a tab switch or focus moving to another split pane),
+    /// refill the text with the new surface's title too, so submit never
+    /// writes one surface's title onto another.
     fn syncOverlayTextToActiveSurface(self: *Host) !bool {
         const surface = self.activeSurface();
         if (!overlayTextNeedsRefill(self.overlay_mode, self.overlay_text_surface, surface)) return false;

@@ -389,8 +389,9 @@ pub fn overlayEmptySubmitDismisses(mode: HostOverlayMode) bool {
 
 /// Whether the overlay's text is prefilled from the active surface and
 /// written back to the active surface on submit. Those prompts must refill
-/// when the active tab changes while they are open, or submit writes one
-/// tab's title onto another. Exhaustive for the same reason as
+/// when the active surface changes (a tab switch or focus moving to another
+/// split pane) while they are open, or submit writes one surface's title
+/// onto another. Exhaustive for the same reason as
 /// `overlayEmptySubmitDismisses`.
 pub fn overlayTextFollowsActiveSurface(mode: HostOverlayMode) bool {
     return switch (mode) {
@@ -401,8 +402,9 @@ pub fn overlayTextFollowsActiveSurface(mode: HostOverlayMode) bool {
 
 /// Whether an open title prompt has to refill its text: the prompt follows
 /// the active surface, there is one, and it is not the surface the text was
-/// last filled from. A refresh on the same surface leaves what the user
-/// typed alone. Surfaces are compared by identity only.
+/// last filled from, i.e. the active surface changed (a tab switch or focus
+/// moving to another split pane). A refresh on the same surface leaves what
+/// the user typed alone. Surfaces are compared by identity only.
 pub fn overlayTextNeedsRefill(
     mode: HostOverlayMode,
     filled_from: ?*const anyopaque,
