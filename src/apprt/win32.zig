@@ -18460,11 +18460,11 @@ const Host = struct {
     }
 
     /// The tab and window title prompts are filled from the active surface
-    /// and submit to whichever surface is active at Enter. Their label
-    /// already follows a tab switch ("Rename tab n/N"); when the active
-    /// surface changes (a tab switch or focus moving to another split pane),
-    /// refill the text with the new surface's title too, so submit never
-    /// writes one surface's title onto another.
+    /// and submit to whichever surface is active at Enter. The tab prompt's
+    /// hint already follows the active tab ("Rename tab n/N"); when the
+    /// active surface changes (a tab switch or focus moving to another split
+    /// pane), refill the text with the new surface's title too, so submit
+    /// never writes one surface's title onto another.
     fn syncOverlayTextToActiveSurface(self: *Host) !bool {
         const surface = self.activeSurface();
         if (!overlayTextNeedsRefill(self.overlay_mode, self.overlay_text_surface, surface)) return false;
