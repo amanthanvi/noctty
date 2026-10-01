@@ -37218,12 +37218,22 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                     0,
                     c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                 ) != 0);
+                // Applying the frame can also move the window: Windows fits a
+                // maximized window that covers its monitor's work area to the
+                // monitor's maximized rect. The 1280x800 host covers the work
+                // area of a screen no larger than itself, a CI runner's among
+                // them. So the client is measured against the window rect as
+                // it is now: the inset computed above, on the side and on top.
+                var zoomed_rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &zoomed_rect) != 0);
                 var zoomed_origin: POINT = .{ .x = 0, .y = 0 };
                 try std.testing.expect(sys.ClientToScreen(hwnd, &zoomed_origin) != 0);
-                try std.testing.expectEqual(rect.top, zoomed_origin.y);
-                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, zoomed_origin.y));
-                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, zoomed_origin.y + host.tabBarHeight() - 1));
-                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, zoomed_origin.y + host.tabBarHeight()));
+                try std.testing.expectEqual(rect.left - window_rect.left, zoomed_origin.x - zoomed_rect.left);
+                try std.testing.expectEqual(rect.top - window_rect.top, zoomed_origin.y - zoomed_rect.top);
+                const zoomed_mid_x = @divTrunc(zoomed_rect.left + zoomed_rect.right, 2);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, zoomed_mid_x, zoomed_origin.y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, zoomed_mid_x, zoomed_origin.y + host.tabBarHeight() - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, zoomed_mid_x, zoomed_origin.y + host.tabBarHeight()));
             }
         }
     }
