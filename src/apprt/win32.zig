@@ -10710,7 +10710,9 @@ fn captionRightClickOpensWindowMenu(ht: i32, client_caption_height: ?i32) bool {
 /// caption. The menu `GetSystemMenu` returns keeps whatever state it was
 /// last given, and `TrackPopupMenu` does not refresh it: without this a
 /// maximized window offered Maximize, Move and Size and grayed Restore.
-/// Close is left as Windows keeps it.
+/// Close is left as Windows keeps it. Measured on build 26200: Move stays
+/// enabled on a minimized window, and Close is the default unless the
+/// window is minimized.
 const WindowMenuState = struct {
     restore: bool,
     move: bool,
@@ -10729,7 +10731,7 @@ fn windowMenuState(style: u32) WindowMenuState {
         .size = style & c.WS_THICKFRAME != 0 and !maximized and !minimized,
         .minimize = style & c.WS_MINIMIZEBOX != 0 and !minimized,
         .maximize = style & c.WS_MAXIMIZEBOX != 0 and !maximized,
-        .default_command = if (maximized or minimized) c.SC_RESTORE else c.SC_MAXIMIZE,
+        .default_command = if (minimized) c.SC_RESTORE else c.SC_CLOSE,
     };
 }
 
@@ -43202,7 +43204,7 @@ test "win32 windowMenuState follows the window style like a stock caption" {
         .size = true,
         .minimize = true,
         .maximize = true,
-        .default_command = c.SC_MAXIMIZE,
+        .default_command = c.SC_CLOSE,
     }, restored);
     const maximized = windowMenuState(WS_OVERLAPPEDWINDOW | c.WS_MAXIMIZE);
     try std.testing.expectEqual(WindowMenuState{
@@ -43211,8 +43213,18 @@ test "win32 windowMenuState follows the window style like a stock caption" {
         .size = false,
         .minimize = true,
         .maximize = false,
-        .default_command = c.SC_RESTORE,
+        .default_command = c.SC_CLOSE,
     }, maximized);
+    // Minimizing clears WS_MAXIMIZE. DefWindowProc still offers Move.
+    const minimized = windowMenuState(WS_OVERLAPPEDWINDOW | c.WS_MINIMIZE);
+    try std.testing.expectEqual(WindowMenuState{
+        .restore = true,
+        .move = true,
+        .size = false,
+        .minimize = false,
+        .maximize = true,
+        .default_command = c.SC_RESTORE,
+    }, minimized);
     // A style without a sizing frame or maximize box offers neither.
     const fixed = windowMenuState(c.WS_CAPTION | c.WS_SYSMENU | c.WS_MINIMIZEBOX);
     try std.testing.expect(!fixed.size);
