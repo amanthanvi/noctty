@@ -43106,7 +43106,7 @@ test "win32 search bar codicons are rejected in a substitute font" {
     try std.testing.expect(!fontHasSearchCodicons(font));
 }
 
-test "win32 search bar icon font is created at first use, not with the host" {
+test "win32 search bar icon font is created at first use and dropped on a DPI or theme change" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
