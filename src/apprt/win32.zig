@@ -24982,7 +24982,8 @@ fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) 
 const ButtonTooltipAction = enum {
     none,
     show,
-    /// Hide, and keep hidden until the pointer leaves the button.
+    /// Hide, and keep hidden until a `.hide` for the same button: the pointer
+    /// leaving it, or the button being hidden or destroyed.
     dismiss,
     hide,
 };
@@ -43022,7 +43023,7 @@ test "win32 search button tooltip follows hover, clicks, hiding and destruction"
         .{ .msg = c.WM_SHOWWINDOW, .wParam = 1, .action = .none },
         .{ .msg = c.WM_DESTROY, .wParam = 0, .action = .hide },
         // The button-up and the WM_MOUSEMOVE after it neither show nor end
-        // a click's dismissal; only leaving the button does.
+        // a click's dismissal; leaving, hiding or destroying the button does.
         .{ .msg = c.WM_LBUTTONUP, .wParam = 0, .action = .none },
         .{ .msg = c.WM_MOUSEMOVE, .wParam = 0, .action = .none },
     };
