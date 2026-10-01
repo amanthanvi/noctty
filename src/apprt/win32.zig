@@ -162,7 +162,7 @@ const ThemeSurface = enum {
 
 fn themeSurface(theme: *const ThemeColors, surface: ThemeSurface) u32 {
     return switch (surface) {
-        .tab_accent => tabAccentStrip(tabAccent(theme), theme.is_dark),
+        .tab_accent => tabAccentStrip(theme),
         .caption_cluster_bg => if (theme.is_dark)
             adjustColor(theme.chrome_bg, 8, 8, 10)
         else
@@ -22109,14 +22109,26 @@ fn tabAccentBorder(accent: u32, is_dark: bool) u32 {
 }
 
 /// The accent strip above a separate tab row, derived from the tab accent.
-fn tabAccentStrip(accent: u32, is_dark: bool) u32 {
-    return if (is_dark) adjustColor(accent, -12, -12, -12) else adjustColor(accent, 18, 18, 18);
+/// Only that layout paints it, so `readableTabAccent` does not judge a
+/// followed accent by it. Where the shift would take a followed accent below
+/// `tab_accent_min_contrast`, the strip paints the accent itself, which was
+/// made to clear it against the same `chrome_bg`.
+fn tabAccentStrip(theme: *const ThemeColors) u32 {
+    const accent = tabAccent(theme);
+    const strip = if (theme.is_dark)
+        adjustColor(accent, -12, -12, -12)
+    else
+        adjustColor(accent, 18, 18, 18);
+    if (theme.tab_accent == null) return strip;
+    const background = rgbFromColorRef(theme.chrome_bg);
+    if (rgbFromColorRef(strip).contrast(background) >= tab_accent_min_contrast) return strip;
+    return accent;
 }
 
 /// The Windows accent can be anything, including a color that disappears
 /// into the tab strip, such as a dark accent on the dark theme. Keep it as
-/// chosen when every color painted from it (the underline, `tabAccentBorder`
-/// and `tabAccentStrip`) already reaches `tab_accent_min_contrast` against
+/// chosen when what every layout paints from it (the underline and
+/// `tabAccentBorder`) already reaches `tab_accent_min_contrast` against
 /// `background`; otherwise move it toward white on a dark strip, or black on
 /// a light one, only as far as it takes.
 fn readableTabAccent(accent: u32, background: u32, is_dark: bool) u32 {
@@ -22125,11 +22137,7 @@ fn readableTabAccent(accent: u32, background: u32, is_dark: bool) u32 {
     var step: u32 = 0;
     while (step <= 20) : (step += 1) {
         const candidate = blendColorRGB(accent, toward, @as(f32, @floatFromInt(step)) / 20.0);
-        const painted = [_]u32{
-            candidate,
-            tabAccentBorder(candidate, is_dark),
-            tabAccentStrip(candidate, is_dark),
-        };
+        const painted = [_]u32{ candidate, tabAccentBorder(candidate, is_dark) };
         for (painted) |color| {
             if (rgbFromColorRef(color).contrast(surface) < tab_accent_min_contrast) break;
         } else return candidate;
@@ -36084,18 +36092,31 @@ test "win32 tab strip accent stays readable against the strip" {
     const deepened = readableTabAccent(pale, light.chrome_bg, false);
     try std.testing.expect(rgbFromColorRef(deepened).contrast(light_bg) >= tab_accent_min_contrast);
 
-    // What is painted counts, not only the accent: #808080 clears the floor
-    // on the light strip, but the strip variant, lightened by 18, does not.
-    const gray = rgb(0x80, 0x80, 0x80);
-    try std.testing.expect(rgbFromColorRef(gray).contrast(light_bg) >= tab_accent_min_contrast);
-    try std.testing.expect(rgbFromColorRef(tabAccentStrip(gray, false)).contrast(light_bg) < tab_accent_min_contrast);
-    const kept = readableTabAccent(gray, light.chrome_bg, false);
-    for ([_]u32{ kept, tabAccentBorder(kept, false), tabAccentStrip(kept, false) }) |painted| {
-        try std.testing.expect(rgbFromColorRef(painted).contrast(light_bg) >= tab_accent_min_contrast);
-    }
-    for ([_]u32{ lifted, tabAccentBorder(lifted, true), tabAccentStrip(lifted, true) }) |painted| {
+    for ([_]u32{ lifted, tabAccentBorder(lifted, true) }) |painted| {
         try std.testing.expect(rgbFromColorRef(painted).contrast(dark_bg) >= tab_accent_min_contrast);
     }
+
+    // The strip above a separate tab row paints the followed accent, shifted.
+    const followed = withSystemTabAccent(dark, true, lime);
+    try std.testing.expectEqual(adjustColor(lime, -12, -12, -12), themeSurface(&followed, .tab_accent));
+
+    // The strip is not painted with the integrated titlebar, so it does not
+    // decide the accent: #0099BC clears the floor on the light strip as the
+    // underline and border, and is kept as chosen although its strip shift,
+    // lightened by 18, does not. Where the strip is painted, it takes the
+    // accent itself.
+    const teal = rgb(0x00, 0x99, 0xBC);
+    try std.testing.expect(rgbFromColorRef(teal).contrast(light_bg) >= tab_accent_min_contrast);
+    try std.testing.expect(rgbFromColorRef(adjustColor(teal, 18, 18, 18)).contrast(light_bg) < tab_accent_min_contrast);
+    try std.testing.expectEqual(teal, readableTabAccent(teal, light.chrome_bg, false));
+    const teal_theme = withSystemTabAccent(light, true, teal);
+    const strip = themeSurface(&teal_theme, .tab_accent);
+    try std.testing.expectEqual(teal, strip);
+    try std.testing.expect(rgbFromColorRef(strip).contrast(light_bg) >= tab_accent_min_contrast);
+
+    // The built-in accents keep their strip shift.
+    try std.testing.expectEqual(adjustColor(dark.accent, -12, -12, -12), themeSurface(&dark, .tab_accent));
+    try std.testing.expectEqual(adjustColor(light.accent, 18, 18, 18), themeSurface(&light, .tab_accent));
 }
 
 test "win32 followed tab accent is re-checked against a custom titlebar band" {
@@ -36112,7 +36133,7 @@ test "win32 followed tab accent is re-checked against a custom titlebar band" {
     const band_bg = rgbFromColorRef(band.chrome_bg);
     const accent = tabAccent(&band);
     try std.testing.expect(rgbFromColorRef(lime).contrast(band_bg) < tab_accent_min_contrast);
-    for ([_]u32{ accent, tabAccentBorder(accent, band.is_dark), tabAccentStrip(accent, band.is_dark) }) |painted| {
+    for ([_]u32{ accent, tabAccentBorder(accent, band.is_dark) }) |painted| {
         try std.testing.expect(rgbFromColorRef(painted).contrast(band_bg) >= tab_accent_min_contrast);
     }
 
