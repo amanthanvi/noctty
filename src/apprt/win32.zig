@@ -20,6 +20,7 @@ const terminal = @import("../terminal/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const ptypkg = @import("../pty.zig");
 const updatepkg = @import("../update/github_releases.zig");
+const font_embedded = @import("../font/embedded.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
 const win32_theme = @import("win32_theme.zig");
@@ -104,6 +105,7 @@ const HostOverlayMode = win32_theme.HostOverlayMode;
 const darkTheme = win32_theme.darkTheme;
 const lightTheme = win32_theme.lightTheme;
 const adjustColor = win32_theme.adjustColor;
+const tabAccent = win32_theme.tabAccent;
 const buttonColorsFromTheme = win32_theme.buttonColorsFromTheme;
 const overlayAccentColor = win32_theme.overlayAccentColor;
 const overlayEditBorderColor = win32_theme.overlayEditBorderColor;
@@ -161,10 +163,7 @@ const ThemeSurface = enum {
 
 fn themeSurface(theme: *const ThemeColors, surface: ThemeSurface) u32 {
     return switch (surface) {
-        .tab_accent => if (theme.is_dark)
-            adjustColor(theme.accent, -12, -12, -12)
-        else
-            adjustColor(theme.accent, 18, 18, 18),
+        .tab_accent => tabAccentStrip(theme),
         .caption_cluster_bg => if (theme.is_dark)
             adjustColor(theme.chrome_bg, 8, 8, 10)
         else
@@ -1506,6 +1505,7 @@ const forwarded_argv_allowed_keys = [_][]const u8{
     "window-padding-color",
     "window-decoration",
     "window-theme",
+    "accent-follow-system",
     "window-colorspace",
     "window-subtitle",
     "window-titlebar-background",
@@ -10676,6 +10676,101 @@ fn titlebarFallbackIcon(kind: TitlebarGlyphKind) win32_icons.Kind {
     };
 }
 
+/// The search bar's icons are VS Code's (Codicons), drawn from the Symbols
+/// Nerd Font that noctty already embeds for the terminal (Nerd Fonts bundles
+/// Codicons). The system icon fonts have no regex, match-case or whole-word
+/// glyph, and taking all six from one set keeps them the same weight and
+/// size. `win32_icons` stays the fallback when the font is unavailable.
+const search_icon_font_face = std.unicode.utf8ToUtf16LeStringLiteral("Symbols Nerd Font");
+
+/// Codicons are drawn on a 16 px grid, the size VS Code uses them at.
+const search_icon_font_px = 16;
+
+/// GDI cannot draw from font bytes in memory until they are registered, so
+/// the embedded Symbols Nerd Font is added once as a private font: only this
+/// process can see it, and Windows removes it when the process exits.
+fn registerSearchIconFont() void {
+    const bytes = font_embedded.symbols_nerd_font;
+    var count: DWORD = 0;
+    const handle = sys.AddFontMemResourceEx(@constCast(bytes.ptr), @intCast(bytes.len), null, &count);
+    if (handle == null or count == 0) {
+        log.warn("embedded Symbols Nerd Font could not be registered for the search bar icons", .{});
+    }
+}
+var search_icon_font_registration = std.once(registerSearchIconFont);
+
+fn logSearchIconFontRejected() void {
+    log.warn("search bar icon font lacks a Codicon glyph; drawing geometric search icons", .{});
+}
+var search_icon_font_rejection_log = std.once(logSearchIconFontRejected);
+
+/// The search bar's Codicons font at `dpi`, or null when it is unavailable,
+/// in which case `win32_icons` draws the buttons.
+fn createSearchIconFont(dpi: u32) ?*anyopaque {
+    search_icon_font_registration.call();
+    const font = createIconFontForFace(
+        search_icon_font_face,
+        Host.scaledBy(search_icon_font_px, dpi),
+    ) orelse return null;
+    if (!fontHasSearchCodicons(font)) {
+        search_icon_font_rejection_log.call();
+        _ = sys.DeleteObject(font);
+        return null;
+    }
+    return font;
+}
+
+/// An icon font of `face` with a `height_px` device-pixel em.
+fn createIconFontForFace(face: [*:0]const u16, height_px: i32) ?*anyopaque {
+    var lf: LOGFONTW = .{};
+    lf.lfHeight = -height_px;
+    lf.lfWeight = c.FW_NORMAL;
+    lf.lfQuality = c.CLEARTYPE_QUALITY;
+    const name = std.mem.span(face);
+    const copy_len = @min(name.len, c.LF_FACESIZE - 1);
+    @memcpy(lf.lfFaceName[0..copy_len], name[0..copy_len]);
+    return sys.CreateFontIndirectW(&lf);
+}
+
+/// Whether `font` has a glyph for every search bar button. This, not the
+/// face name, decides whether the Codicons font is used: GDI never fails a
+/// missing face but hands back a substitute such as Arial, which has none of
+/// these private-use code points, and an older "Symbols Nerd Font" installed
+/// on the system can shadow the registered one without having them all.
+/// Any GDI failure counts as missing, so the buttons fall back to
+/// `win32_icons` rather than risk empty boxes.
+fn fontHasSearchCodicons(font: *anyopaque) bool {
+    const hdc = sys.CreateCompatibleDC(null) orelse return false;
+    defer _ = sys.DeleteDC(hdc);
+    const old_font = sys.SelectObject(hdc, font) orelse return false;
+    defer _ = sys.SelectObject(hdc, old_font);
+    for (search_bar_button_roles) |role| {
+        const glyph = searchButtonCodicon(role);
+        var index: [1]u16 = undefined;
+        if (sys.GetGlyphIndicesW(
+            hdc,
+            glyph.ptr,
+            1,
+            &index,
+            c.GGI_MARK_NONEXISTING_GLYPHS,
+        ) != 1) return false;
+        if (index[0] == 0xFFFF) return false;
+    }
+    return true;
+}
+
+/// The Codicon for each search bar button, by its Nerd Fonts code point.
+fn searchButtonCodicon(role: SearchBarButtonRole) [:0]const u16 {
+    return switch (role) {
+        .prev => std.unicode.utf8ToUtf16LeStringLiteral("\u{EAA1}"), // arrow-up
+        .next => std.unicode.utf8ToUtf16LeStringLiteral("\u{EA9A}"), // arrow-down
+        .close => std.unicode.utf8ToUtf16LeStringLiteral("\u{EA76}"), // close
+        .regex => std.unicode.utf8ToUtf16LeStringLiteral("\u{EB38}"), // regex
+        .case_sensitive => std.unicode.utf8ToUtf16LeStringLiteral("\u{EAB1}"), // case-sensitive
+        .whole_word => std.unicode.utf8ToUtf16LeStringLiteral("\u{EB7E}"), // whole-word
+    };
+}
+
 fn titlebarRoleFromCaption(button: CaptionButton) TitlebarButtonRole {
     return switch (button) {
         .none => .none,
@@ -11139,6 +11234,12 @@ const Host = struct {
     /// outside this host-local gesture state.
     drag_state: win32_tab_drag.DragState = .{},
     overlay_mode: HostOverlayMode = .none,
+    /// Surface a title prompt's text was last filled from, while
+    /// `overlayTextFollowsActiveSurface(overlay_mode)`, so the text refills
+    /// when the active surface changes (a tab switch or focus moving to
+    /// another split pane). Only compared with `activeSurface()`, never
+    /// dereferenced.
+    overlay_text_surface: ?*const Surface = null,
     /// Active confirm overlay payload when `overlay_mode == .confirm`.
     /// Owned byte slices (`title`, `body`, `accept_label`,
     /// `cancel_label`) are allocated via `app.core_app.alloc` and
@@ -11213,6 +11314,12 @@ const Host = struct {
     preview_font: ?*anyopaque = null, // HFONT, owned
     titlebar_caption_icon_font: ?*anyopaque = null, // HFONT, owned
     titlebar_action_icon_font: ?*anyopaque = null, // HFONT, owned
+    /// Codicons for the search bar buttons (`search_icon_font_face`). Null
+    /// until first use (`searchIconFont`), and when the font is unavailable.
+    search_icon_font: ?*anyopaque = null, // HFONT, owned
+    /// Whether `search_icon_font` has been created, or found unavailable,
+    /// since the last DPI or theme change.
+    search_icon_font_resolved: bool = false,
 
     // Cached chrome paint strings — rebuilt only when their per-zone
     // dirty bits are set, so WM_PAINT can skip unrelated UTF-16 churn.
@@ -11332,6 +11439,9 @@ const Host = struct {
     /// unchanged neither re-announces the name nor repaints.
     tab_tooltip_text: ?[:0]const u8 = null,
     tab_tooltip_uia_provider: ?*win32_uia.ChromeControlProvider = null,
+    /// The chrome button the same popup describes instead of a tab (the
+    /// search bar's icon buttons), and the button a click keeps it down for.
+    button_tooltip: ButtonTooltip = .{},
 
     // Command palette list UI. Backed by a custom child HWND shown
     // only while the palette is open. `palette_list_ranked` caches the
@@ -13847,6 +13957,7 @@ const Host = struct {
         if (self.preview_font) |font| _ = sys.DeleteObject(font);
         if (self.titlebar_caption_icon_font) |font| _ = sys.DeleteObject(font);
         if (self.titlebar_action_icon_font) |font| _ = sys.DeleteObject(font);
+        if (self.search_icon_font) |font| _ = sys.DeleteObject(font);
         self.clearStructuralHistory(.host_destroy);
         self.structural_undo_entries.deinit(self.app.core_app.alloc);
         self.structural_redo_entries.deinit(self.app.core_app.alloc);
@@ -14117,12 +14228,24 @@ const Host = struct {
     /// Hide the tab title tooltip if one is up.
     fn hideTabTooltip(self: *Host) void {
         self.tab_tooltip_tab_id = null;
+        self.button_tooltip.shown = null;
         if (self.tab_tooltip_text) |value| {
             self.app.core_app.alloc.free(value);
             self.tab_tooltip_text = null;
         }
         const hwnd = self.tab_tooltip_hwnd orelse return;
         _ = sys.ShowWindow(hwnd, c.SW_HIDE);
+    }
+
+    /// Name an icon-only search bar button in a tooltip under it. The icons
+    /// are small drawn glyphs, so the name is otherwise only available to
+    /// screen readers. `ButtonTooltip.apply` has already decided the tooltip
+    /// should come up for `button`.
+    fn showSearchButtonTooltip(self: *Host, button: HWND) void {
+        const role = self.searchBarButtonRole(button) orelse return;
+        const text = labels.searchBarButtonName(role);
+        const name_changed = !ownedStringEquals(self.tab_tooltip_text, text);
+        self.presentTooltip(button, sys.IsWindowVisible(button) != 0, text, name_changed, .{ .button = button });
     }
 
     /// Show the full title of the tab drawn by `button`, under that tab.
@@ -14163,7 +14286,7 @@ const Host = struct {
     /// underneath has to keep working either way. `name_changed` says whether
     /// the name the popup reports to UIA differs from what it reported before.
     fn presentTabTooltip(self: *Host, index: usize, name_changed: bool) void {
-        const host_hwnd = self.hwnd orelse return;
+        if (self.hwnd == null) return;
         const tab = &self.tabs.items[index];
         const button = tab.button_hwnd orelse return self.hideTabTooltip();
         const title = tab.cached_button_title orelse return self.hideTabTooltip();
@@ -14189,26 +14312,55 @@ const Host = struct {
         const alloc = self.app.core_app.alloc;
         const text = labels.buildTabTooltipText(alloc, title) catch return;
         defer alloc.free(text);
-        const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
-        defer alloc.free(text_w);
 
-        var button_rect: RECT = undefined;
-        if (sys.GetWindowRect(button, &button_rect) == 0) return;
-        // The tooltip describes what the pointer rests on. A relayout can move
-        // the tab out from under a pointer that has not moved, and the button's
-        // WM_MOUSELEAVE for that arrives on the tracker's own clock, so check
-        // here rather than re-present the popup under a tab nobody points at.
         // The strip's own visibility record is consulted, not the rect: a
         // button that scrolled out of `visibleTabRange` (or a strip turned
         // off by config) is hidden with `ShowWindow` alone and keeps its last
         // rect, which now describes some other tab's slot.
-        var cursor: POINT = undefined;
-        if (sys.GetCursorPos(&cursor) == 0) return self.hideTabTooltip();
         const button_visible = self.shouldShowTabBar() and
             tab.button_placement.visible_known and
             tab.button_placement.visible;
+        self.presentTooltip(button, button_visible, text, name_changed, .{ .tab = tab.id });
+    }
+
+    /// What the shared tooltip popup currently describes.
+    const TooltipOwner = union(enum) {
+        /// A tab whose compacted label hides part of its title.
+        tab: u32,
+        /// A chrome button whose icon needs its name spelled out.
+        button: HWND,
+    };
+
+    /// Show, or update in place, the tooltip popup with `text` under `anchor`.
+    ///
+    /// Shared by the tab strip and the icon-only chrome buttons, so both get
+    /// the same popup, placement and UIA provider. Every step is best-effort:
+    /// a tooltip that cannot be measured, placed or created is simply not
+    /// shown.
+    fn presentTooltip(
+        self: *Host,
+        anchor: HWND,
+        anchor_visible: bool,
+        text: []const u8,
+        name_changed: bool,
+        owner: TooltipOwner,
+    ) void {
+        const host_hwnd = self.hwnd orelse return;
+        const alloc = self.app.core_app.alloc;
+        const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
+        defer alloc.free(text_w);
+
+        var button_rect: RECT = undefined;
+        if (sys.GetWindowRect(anchor, &button_rect) == 0) return;
+        // The tooltip describes what the pointer rests on. A relayout can move
+        // the anchor out from under a pointer that has not moved, and the
+        // button's WM_MOUSELEAVE for that arrives on the tracker's own clock,
+        // so check here rather than re-present the popup under a control
+        // nobody points at.
+        var cursor: POINT = undefined;
+        if (sys.GetCursorPos(&cursor) == 0) return self.hideTabTooltip();
         if (!win32_tab_tooltip.mayPresent(
-            button_visible,
+            anchor_visible,
             .{ .x = cursor.x, .y = cursor.y },
             .{
                 .left = button_rect.left,
@@ -14292,7 +14444,16 @@ const Host = struct {
         const text_changed = !ownedStringEquals(self.tab_tooltip_text, text);
         appendOwnedString(alloc, &self.tab_tooltip_text, text) catch return;
         _ = sys.SetWindowTextW(tooltip, text_w.ptr);
-        self.tab_tooltip_tab_id = tab.id;
+        switch (owner) {
+            .tab => |id| {
+                self.tab_tooltip_tab_id = id;
+                self.button_tooltip.shown = null;
+            },
+            .button => |button| {
+                self.tab_tooltip_tab_id = null;
+                self.button_tooltip.shown = button;
+            },
+        }
         if (name_changed) {
             if (self.tab_tooltip_uia_provider) |provider| provider.raiseNameChanged();
         }
@@ -15565,6 +15726,11 @@ const Host = struct {
     /// UIA name for the tab title tooltip: the full title it exists to show.
     fn tabTooltipUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
+        if (self.button_tooltip.shown != null) {
+            // A button tooltip shows the button's whole name, unshortened.
+            const text = self.tab_tooltip_text orelse return "";
+            return std.fmt.bufPrint(buf, "{s}", .{text}) catch "";
+        }
         const shown = self.tab_tooltip_tab_id orelse return "";
         for (self.tabs.items) |*tab| {
             if (tab.id != shown) continue;
@@ -15984,6 +16150,7 @@ const Host = struct {
 
         const initial_text = initial orelse "";
         _ = try self.setOverlayEditText(initial_text);
+        self.overlay_text_surface = if (overlayTextFollowsActiveSurface(mode)) self.activeSurface() else null;
 
         // Keep the syncs: their return values still drive `refreshChrome`,
         // and the control text they write is what the confirm prompt's
@@ -16046,6 +16213,7 @@ const Host = struct {
         );
         self.revertPaletteThemePreview();
         self.overlay_mode = .none;
+        self.overlay_text_surface = null;
         self.clearOverlayCompletion();
         runUiActionOrLog("overlay banner clear failed", self.setBanner(.none, null));
         // Drop any active confirm payload. Both accept and cancel
@@ -16624,23 +16792,20 @@ const Host = struct {
     }
 
     fn createTitlebarIconFont(self: *Host, logical_px: i32) ?*anyopaque {
-        return self.createTitlebarIconFontForFace(titlebar_icon_font_fluent, logical_px) orelse
-            self.createTitlebarIconFontForFace(titlebar_icon_font_mdl2, logical_px);
+        return createIconFontForFace(titlebar_icon_font_fluent, self.scaled(logical_px)) orelse
+            createIconFontForFace(titlebar_icon_font_mdl2, self.scaled(logical_px));
     }
 
-    fn createTitlebarIconFontForFace(
-        self: *Host,
-        face: [*:0]const u16,
-        logical_px: i32,
-    ) ?*anyopaque {
-        var lf: LOGFONTW = .{};
-        lf.lfHeight = -self.scaled(logical_px);
-        lf.lfWeight = c.FW_NORMAL;
-        lf.lfQuality = c.CLEARTYPE_QUALITY;
-        const name = std.mem.span(face);
-        const copy_len = @min(name.len, c.LF_FACESIZE - 1);
-        @memcpy(lf.lfFaceName[0..copy_len], name[0..copy_len]);
-        return sys.CreateFontIndirectW(&lf);
+    /// The search bar's Codicons font, created at its first use rather than
+    /// with the host: registering the embedded font costs a few milliseconds
+    /// of cold start, and most sessions never open the search bar. A failed
+    /// creation is not retried until the next DPI or theme change.
+    fn searchIconFont(self: *Host) ?*anyopaque {
+        if (!self.search_icon_font_resolved) {
+            self.search_icon_font = createSearchIconFont(self.current_dpi);
+            self.search_icon_font_resolved = true;
+        }
+        return self.search_icon_font;
     }
 
     /// Monospace font for the confirm preview. `window-title-font-family`
@@ -16661,8 +16826,11 @@ const Host = struct {
     fn recreateTitlebarIconFonts(self: *Host) void {
         if (self.titlebar_caption_icon_font) |old| _ = sys.DeleteObject(old);
         if (self.titlebar_action_icon_font) |old| _ = sys.DeleteObject(old);
+        if (self.search_icon_font) |old| _ = sys.DeleteObject(old);
         self.titlebar_caption_icon_font = self.createTitlebarIconFont(10);
         self.titlebar_action_icon_font = self.createTitlebarIconFont(12);
+        self.search_icon_font = null;
+        self.search_icon_font_resolved = false;
     }
 
     fn recreateChromeFont(self: *Host) void {
@@ -17454,12 +17622,7 @@ const Host = struct {
                 .right = content_rect.left + icon_box_w,
                 .bottom = content_rect.bottom,
             };
-            win32_icons.drawIcon(icon, draw.hDC.?, .{
-                .left = icon_rect.left,
-                .top = icon_rect.top,
-                .right = icon_rect.right,
-                .bottom = icon_rect.bottom,
-            }, colors.fg, isHighContrastActive());
+            self.drawSearchButtonGlyph(draw.hDC, icon_rect, role, icon, colors.fg);
 
             var label_rect = content_rect;
             label_rect.left = icon_rect.right + self.scaled(5);
@@ -17473,12 +17636,7 @@ const Host = struct {
             return;
         }
 
-        win32_icons.drawIcon(icon, draw.hDC.?, .{
-            .left = content_rect.left,
-            .top = content_rect.top,
-            .right = content_rect.right,
-            .bottom = content_rect.bottom,
-        }, colors.fg, isHighContrastActive());
+        self.drawSearchButtonGlyph(draw.hDC, content_rect, role, icon, colors.fg);
 
         if (active and (role == .regex or role == .case_sensitive or role == .whole_word)) {
             fillSolidRect(draw.hDC, .{
@@ -17488,6 +17646,45 @@ const Host = struct {
                 .bottom = bg_rect.bottom - self.scaled(1),
             }, overlayAccentColor(.search, theme.is_dark));
         }
+    }
+
+    /// Draw a search button's Codicon centred in `rect`, falling back to the
+    /// geometric `fallback` icon when the font is missing or the glyph cannot
+    /// be drawn.
+    fn drawSearchButtonGlyph(
+        self: *Host,
+        hdc: HDC,
+        rect: RECT,
+        role: SearchBarButtonRole,
+        fallback: win32_icons.Kind,
+        color: u32,
+    ) void {
+        const hdc_nn: *anyopaque = hdc orelse return;
+        if (self.searchIconFont()) |font_handle| {
+            const glyph = searchButtonCodicon(role);
+            if (sys.SelectObject(hdc, font_handle)) |old_font| {
+                defer _ = sys.SelectObject(hdc, old_font);
+                _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+                _ = sys.SetTextColor(hdc, color);
+                var glyph_rect = rect;
+                // Whole-word's bracket spans its full advance, 16 px at
+                // 100%, wider than the 12 px wide padded content box;
+                // clipping to the box cut off both ends of the bracket.
+                if (sys.DrawTextW(
+                    hdc,
+                    glyph.ptr,
+                    @intCast(glyph.len),
+                    &glyph_rect,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_NOCLIP,
+                ) != 0) return;
+            }
+        }
+        win32_icons.drawIcon(fallback, hdc_nn, .{
+            .left = rect.left,
+            .top = rect.top,
+            .right = rect.right,
+            .bottom = rect.bottom,
+        }, color, isHighContrastActive());
     }
 
     fn isOverlayStyledButton(self: *const Host, child: HWND) bool {
@@ -17623,10 +17820,7 @@ const Host = struct {
                     adjustColor(theme.chrome_bg, 18, 18, 22)
                 else
                     adjustColor(theme.chrome_bg, 12, 12, 12);
-                colors.border = if (theme.is_dark)
-                    adjustColor(theme.accent, -10, -6, -2)
-                else
-                    theme.accent;
+                colors.border = tabAccentBorder(tabAccent(theme), theme.is_dark);
             } else if (hovered) {
                 colors.bg = if (theme.is_dark)
                     adjustColor(theme.chrome_bg, 10, 10, 12)
@@ -18554,12 +18748,32 @@ const Host = struct {
         return null;
     }
 
+    /// The tab and window title prompts are filled from the active surface
+    /// and submit to whichever surface is active at Enter. The tab prompt's
+    /// hint already follows the active tab ("Rename tab n/N"); when the
+    /// active surface changes (a tab switch or focus moving to another split
+    /// pane), refill the text with the new surface's title too, so submit
+    /// never writes one surface's title onto another.
+    fn syncOverlayTextToActiveSurface(self: *Host) !bool {
+        const surface = self.activeSurface();
+        if (!overlayTextNeedsRefill(self.overlay_mode, self.overlay_text_surface, surface)) return false;
+        const text = self.overlayInitialText(self.overlay_mode) orelse return false;
+        defer self.app.core_app.alloc.free(text);
+        const changed = try self.setOverlayEditText(text);
+        // Only after the text box really holds the new title: marking the
+        // surface first would make a failed refill look done, and the next
+        // refresh would never retry.
+        self.overlay_text_surface = surface;
+        return changed;
+    }
+
     fn refreshChrome(self: *Host) !void {
         var invalidate = self.chrome_repaint_dirty;
         _ = try self.syncWindowTitle();
         invalidate = (try self.syncTabButtons()) or invalidate;
         try self.syncChromeButtons();
         if (self.overlay_mode != .none) {
+            invalidate = (try self.syncOverlayTextToActiveSurface()) or invalidate;
             invalidate = (try self.syncOverlayLabel()) or invalidate;
             invalidate = (try self.syncOverlayHint()) or invalidate;
             _ = try self.syncOverlayPreview();
@@ -19832,7 +20046,7 @@ const Host = struct {
                         .top = tab_h - self.scaled(3),
                         .right = underline_right,
                         .bottom = tab_h - self.scaled(1),
-                    }, theme.accent);
+                    }, tabAccent(titlebar_theme));
                 }
             }
 
@@ -22206,13 +22420,74 @@ fn resolveSystemAccentColor() ?u32 {
 
 fn resolveTheme(config: *const configpkg.Config) ThemeColors {
     if (isHighContrastActive()) return highContrastThemeFromSysColors();
-    return switch (config.@"window-theme") {
+    const theme = switch (config.@"window-theme") {
         .dark => darkTheme(),
         .light => lightTheme(),
         .system => if (isSystemDarkMode()) darkTheme() else lightTheme(),
         .auto => if (isSystemDarkMode()) darkTheme() else lightTheme(),
         .ghostty => darkTheme(),
     };
+    const follow = config.@"accent-follow-system";
+    return withSystemTabAccent(theme, follow, if (follow) resolveSystemAccentColor() else null);
+}
+
+/// DESIGN.md's floor for essential non-text indicators against the surface
+/// they sit on.
+const tab_accent_min_contrast: f64 = 3.0;
+
+/// Point the tab strip at the Windows accent when `accent-follow-system` is
+/// on and one could be read. A system accent of 0 means there is nothing to
+/// follow (see `blendSemanticAccent`), so the theme's own accent stays.
+fn withSystemTabAccent(theme: ThemeColors, follow: bool, system_accent: ?u32) ThemeColors {
+    var result = theme;
+    if (!follow) return result;
+    const accent = system_accent orelse return result;
+    if (accent == 0) return result;
+    result.tab_accent = readableTabAccent(accent, theme.chrome_bg, theme.is_dark);
+    result.system_accent = accent;
+    return result;
+}
+
+/// The active tab's border, derived from the tab accent.
+fn tabAccentBorder(accent: u32, is_dark: bool) u32 {
+    return if (is_dark) adjustColor(accent, -10, -6, -2) else accent;
+}
+
+/// The accent strip above a separate tab row, derived from the tab accent.
+/// Only that layout paints it, so `readableTabAccent` does not judge a
+/// followed accent by it. Where the shift would take a followed accent below
+/// `tab_accent_min_contrast`, the strip paints the accent itself, which was
+/// made to clear it against the same `chrome_bg`.
+fn tabAccentStrip(theme: *const ThemeColors) u32 {
+    const accent = tabAccent(theme);
+    const strip = if (theme.is_dark)
+        adjustColor(accent, -12, -12, -12)
+    else
+        adjustColor(accent, 18, 18, 18);
+    if (theme.tab_accent == null) return strip;
+    const background = rgbFromColorRef(theme.chrome_bg);
+    if (rgbFromColorRef(strip).contrast(background) >= tab_accent_min_contrast) return strip;
+    return accent;
+}
+
+/// The Windows accent can be anything, including a color that disappears
+/// into the tab strip, such as a dark accent on the dark theme. Keep it as
+/// chosen when what every layout paints from it (the underline and
+/// `tabAccentBorder`) already reaches `tab_accent_min_contrast` against
+/// `background`; otherwise move it toward white on a dark strip, or black on
+/// a light one, only as far as it takes.
+fn readableTabAccent(accent: u32, background: u32, is_dark: bool) u32 {
+    const toward = if (is_dark) rgb(0xFF, 0xFF, 0xFF) else rgb(0x00, 0x00, 0x00);
+    const surface = rgbFromColorRef(background);
+    var step: u32 = 0;
+    while (step <= 20) : (step += 1) {
+        const candidate = blendColorRGB(accent, toward, @as(f32, @floatFromInt(step)) / 20.0);
+        const painted = [_]u32{ candidate, tabAccentBorder(candidate, is_dark) };
+        for (painted) |color| {
+            if (rgbFromColorRef(color).contrast(surface) < tab_accent_min_contrast) break;
+        } else return candidate;
+    }
+    return toward;
 }
 
 /// One notice for a setting Win32 cannot honour, shared by startup and the
@@ -22324,6 +22599,15 @@ fn clientTitlebarTheme(
         result.button_disabled_bg = derived_theme.button_disabled_bg;
         result.button_disabled_border = derived_theme.button_disabled_border;
         result.button_disabled_fg = derived_theme.button_disabled_fg;
+
+        // A followed Windows accent was made readable against the theme's
+        // strip; the band paints it over this background instead. Start
+        // again from the Windows color: `tab_accent` may already have been
+        // moved for the other polarity, such as a dark accent lifted for the
+        // dark strip that was readable on a light band as chosen.
+        if (result.system_accent) |accent| {
+            result.tab_accent = readableTabAccent(accent, result.chrome_bg, result.is_dark);
+        }
     }
     if (config.@"window-titlebar-foreground" != null) {
         const foreground = titlebarTextColor(theme, config);
@@ -24119,6 +24403,8 @@ const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
 const overlayEditFrameVisible = labels.overlayEditFrameVisible;
 const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
+const overlayTextFollowsActiveSurface = labels.overlayTextFollowsActiveSurface;
+const overlayTextNeedsRefill = labels.overlayTextNeedsRefill;
 
 const OverlayFocusSlot = labels.OverlayFocusSlot;
 
@@ -25048,6 +25334,85 @@ fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) 
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+const ButtonTooltipAction = enum {
+    none,
+    show,
+    /// Hide, and keep hidden until a `.hide` for the same button: the pointer
+    /// leaving it, or the button being hidden or destroyed.
+    dismiss,
+    hide,
+};
+
+/// What a message to a `hostButtonProc` button does to the search buttons'
+/// hover tooltip. Only a search button arms the hover that shows one, and a
+/// hide is a no-op for a button whose tooltip is not up, so the proc's other
+/// buttons need no case of their own.
+fn buttonTooltipAction(msg: UINT, wParam: WPARAM) ButtonTooltipAction {
+    return switch (msg) {
+        c.WM_MOUSEHOVER => .show,
+        // A click answers the question the tooltip was there for. Hiding it
+        // is not enough: the BUTTON class releases a left click's capture on
+        // the button-up, the system follows that with a WM_MOUSEMOVE even
+        // when the pointer has not moved, and that re-arms the hover, which
+        // would bring the tooltip back under a still pointer.
+        c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => .dismiss,
+        c.WM_MOUSELEAVE => .hide,
+        // A button hidden under a resting pointer (Escape closing the search
+        // bar, a tab switch) sends no WM_MOUSELEAVE, so its tooltip would
+        // outlive it. `ShowWindow(SW_HIDE)` does send this, whatever hid the
+        // button.
+        c.WM_SHOWWINDOW => if (wParam == 0) .hide else .none,
+        // A pane closing while its window stays open destroys its search
+        // buttons (`Surface.destroy` -> `destroySearchBarControls`) without
+        // hiding them first. `windowDestroyed` clears the hovered button
+        // afterwards, which takes the popup down too, since the popup is only
+        // up for the hovered button; this drops it with the button instead.
+        // Closing the window reaches here as well: each button's own window
+        // data still names the Host, which outlives the buttons, and the
+        // Host's WM_DESTROY has already destroyed the popup
+        // (`destroyChildControls`), so hiding finds no popup to hide.
+        c.WM_DESTROY => .hide,
+        else => .none,
+    };
+}
+
+/// Which `hostButtonProc` button the shared tooltip popup is up for, and which
+/// one a click keeps it down for. It holds no windows, so the order of hovers,
+/// clicks and leaves that decides whether a tooltip comes back can be tested
+/// without the popup or the real cursor.
+const ButtonTooltip = struct {
+    /// The button the popup describes. At most one of this and
+    /// `Host.tab_tooltip_tab_id` is set.
+    shown: ?HWND = null,
+    /// The last clicked button, whether or not its tooltip was up, until the
+    /// pointer leaves it or it is hidden or destroyed. Its tooltip stays down
+    /// meanwhile, as a stock Windows tooltip stays down after a click until
+    /// the pointer leaves the tool.
+    dismissed: ?HWND = null,
+
+    const Effect = enum { none, present, hide };
+
+    /// Record `action` on `button` and say what it does to the popup. The
+    /// caller makes `shown` follow: presenting sets it, hiding clears it.
+    fn apply(self: *ButtonTooltip, action: ButtonTooltipAction, button: HWND) Effect {
+        switch (action) {
+            .none => return .none,
+            .show => {
+                if (self.dismissed == button) return .none;
+                // The hover timer re-arms on every pointer move inside the
+                // button, so this fires repeatedly while the tooltip is up.
+                if (self.shown == button) return .none;
+                return .present;
+            },
+            .dismiss => self.dismissed = button,
+            .hide => {
+                if (self.dismissed == button) self.dismissed = null;
+            },
+        }
+        return if (self.shown == button) .hide else .none;
+    }
+};
+
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
@@ -25078,6 +25443,11 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         if (msg == c.WM_KEYDOWN) v.noteChromeKeyInput(wParam);
         if (msg == c.WM_LBUTTONDOWN or msg == c.WM_RBUTTONDOWN or msg == c.WM_MBUTTONDOWN) {
             v.noteChromePointerInput();
+        }
+        switch (v.button_tooltip.apply(buttonTooltipAction(msg, wParam), hwnd)) {
+            .none => {},
+            .present => v.showSearchButtonTooltip(hwnd),
+            .hide => v.hideTabTooltip(),
         }
         // Focus-region keys for the tab-strip action buttons and the
         // docked search controls. Overlay buttons are deliberately
@@ -25156,11 +25526,14 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.setFocusedQuickSlot(null);
             },
             c.WM_MOUSEMOVE => {
+                // The search bar's icon buttons also arm TME_HOVER, as the tab
+                // buttons do for their title tooltip, so a dwell names them.
+                const search_button = v.isSearchBarButton(hwnd);
                 var track: TRACKMOUSEEVENT = .{
                     .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                    .dwFlags = c.TME_LEAVE,
+                    .dwFlags = if (search_button) c.TME_LEAVE | c.TME_HOVER else c.TME_LEAVE,
                     .hwndTrack = hwnd,
-                    .dwHoverTime = 0,
+                    .dwHoverTime = if (search_button) c.HOVER_DEFAULT else 0,
                 };
                 _ = sys.TrackMouseEvent(&track);
                 v.setHoveredButton(hwnd);
@@ -27720,14 +28093,7 @@ pub const Surface = struct {
     }
 
     fn searchControlUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
-        return switch (@as(SearchBarButtonRole, @enumFromInt(tag))) {
-            .prev => "Previous match",
-            .next => "Next match",
-            .regex => "Regular expression",
-            .case_sensitive => "Case sensitive",
-            .whole_word => "Whole word",
-            .close => "Close search",
-        };
+        return labels.searchBarButtonName(@enumFromInt(tag));
     }
 
     fn searchToggleUiaState(ctx: *anyopaque, tag: usize) bool {
@@ -36135,6 +36501,125 @@ test "win32 titlebar band polarity follows readability, not a luminance cutoff" 
     try std.testing.expectEqual(@as(u8, 3), unpacked.b);
 }
 
+test "win32 tab strip accent follows the Windows accent only when asked" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const dark = darkTheme();
+    const light = lightTheme();
+    const lime = rgb(45, 255, 0);
+
+    // Built-in palettes carry no tab accent, so the strip reads `accent`.
+    try std.testing.expectEqual(@as(?u32, null), dark.tab_accent);
+    try std.testing.expectEqual(dark.accent, tabAccent(&dark));
+    try std.testing.expectEqual(light.accent, tabAccent(&light));
+
+    // Opted out, nothing read, or DWM reporting no accent: the theme is
+    // returned unchanged, so the strip looks exactly as it did before.
+    try std.testing.expectEqualDeep(dark, withSystemTabAccent(dark, false, lime));
+    try std.testing.expectEqualDeep(dark, withSystemTabAccent(dark, true, null));
+    try std.testing.expectEqualDeep(dark, withSystemTabAccent(dark, true, 0));
+
+    // A readable accent is used as chosen, and only the tab accent moves.
+    const followed = withSystemTabAccent(dark, true, lime);
+    try std.testing.expectEqual(lime, tabAccent(&followed));
+    try std.testing.expectEqual(dark.accent, followed.accent);
+    try std.testing.expectEqual(dark.chrome_bg, followed.chrome_bg);
+
+    // The config default follows the system.
+    const config: configpkg.Config = .{};
+    try std.testing.expect(config.@"accent-follow-system");
+}
+
+test "win32 tab strip accent stays readable against the strip" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const dark = darkTheme();
+    const light = lightTheme();
+    const dark_bg = rgbFromColorRef(dark.chrome_bg);
+    const light_bg = rgbFromColorRef(light.chrome_bg);
+
+    // Already readable: untouched.
+    const lime = rgb(45, 255, 0);
+    try std.testing.expectEqual(lime, readableTabAccent(lime, dark.chrome_bg, true));
+
+    // A navy accent vanishes into the dark strip, so it is lifted toward
+    // white until it clears the floor, and not further than one step past.
+    const navy = rgb(0, 0, 128);
+    try std.testing.expect(rgbFromColorRef(navy).contrast(dark_bg) < tab_accent_min_contrast);
+    const lifted = readableTabAccent(navy, dark.chrome_bg, true);
+    try std.testing.expect(rgbFromColorRef(lifted).contrast(dark_bg) >= tab_accent_min_contrast);
+    try std.testing.expect(rgbFromColorRef(lifted).contrast(dark_bg) < 4.5);
+
+    // A pale accent vanishes into the light strip, so it is darkened.
+    const pale = rgb(255, 240, 150);
+    try std.testing.expect(rgbFromColorRef(pale).contrast(light_bg) < tab_accent_min_contrast);
+    const deepened = readableTabAccent(pale, light.chrome_bg, false);
+    try std.testing.expect(rgbFromColorRef(deepened).contrast(light_bg) >= tab_accent_min_contrast);
+
+    for ([_]u32{ lifted, tabAccentBorder(lifted, true) }) |painted| {
+        try std.testing.expect(rgbFromColorRef(painted).contrast(dark_bg) >= tab_accent_min_contrast);
+    }
+
+    // The strip above a separate tab row paints the followed accent, shifted.
+    const followed = withSystemTabAccent(dark, true, lime);
+    try std.testing.expectEqual(adjustColor(lime, -12, -12, -12), themeSurface(&followed, .tab_accent));
+
+    // The strip is not painted with the integrated titlebar, so it does not
+    // decide the accent: #0099BC clears the floor on the light strip as the
+    // underline and border, and is kept as chosen although its strip shift,
+    // lightened by 18, does not. Where the strip is painted, it takes the
+    // accent itself.
+    const teal = rgb(0x00, 0x99, 0xBC);
+    try std.testing.expect(rgbFromColorRef(teal).contrast(light_bg) >= tab_accent_min_contrast);
+    try std.testing.expect(rgbFromColorRef(adjustColor(teal, 18, 18, 18)).contrast(light_bg) < tab_accent_min_contrast);
+    try std.testing.expectEqual(teal, readableTabAccent(teal, light.chrome_bg, false));
+    const teal_theme = withSystemTabAccent(light, true, teal);
+    const strip = themeSurface(&teal_theme, .tab_accent);
+    try std.testing.expectEqual(teal, strip);
+    try std.testing.expect(rgbFromColorRef(strip).contrast(light_bg) >= tab_accent_min_contrast);
+
+    // The built-in accents keep their strip shift.
+    try std.testing.expectEqual(adjustColor(dark.accent, -12, -12, -12), themeSurface(&dark, .tab_accent));
+    try std.testing.expectEqual(adjustColor(light.accent, 18, 18, 18), themeSurface(&light, .tab_accent));
+}
+
+test "win32 followed tab accent is re-checked against a custom titlebar band" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const lime = rgb(45, 255, 0);
+    const followed = withSystemTabAccent(darkTheme(), true, lime);
+    var config: configpkg.Config = .{};
+    config.@"window-theme" = .ghostty;
+    // A band in nearly the accent's own color: the accent would vanish there.
+    config.@"window-titlebar-background" = .{ .r = 40, .g = 240, .b = 10 };
+
+    const band = clientTitlebarTheme(&followed, &config, true, false);
+    const band_bg = rgbFromColorRef(band.chrome_bg);
+    const accent = tabAccent(&band);
+    try std.testing.expect(rgbFromColorRef(lime).contrast(band_bg) < tab_accent_min_contrast);
+    for ([_]u32{ accent, tabAccentBorder(accent, band.is_dark) }) |painted| {
+        try std.testing.expect(rgbFromColorRef(painted).contrast(band_bg) >= tab_accent_min_contrast);
+    }
+
+    // A dark accent is lifted for the dark strip, but a light band takes it
+    // as chosen: the band starts from the Windows color, not the lifted one.
+    const blue = rgb(0x00, 0x63, 0xB1);
+    const lifted = withSystemTabAccent(darkTheme(), true, blue);
+    try std.testing.expect(tabAccent(&lifted) != blue);
+    config.@"window-titlebar-background" = .{ .r = 0xF0, .g = 0xF0, .b = 0xF0 };
+    const light_band = clientTitlebarTheme(&lifted, &config, true, false);
+    try std.testing.expect(!light_band.is_dark);
+    try std.testing.expectEqual(blue, tabAccent(&light_band));
+
+    // Not following: the band keeps using the theme accent, untouched.
+    const plain = darkTheme();
+    const own = clientTitlebarTheme(&plain, &config, true, false);
+    try std.testing.expectEqual(@as(?u32, null), own.tab_accent);
+
+    // A second launch may forward the setting to the running instance.
+    try std.testing.expect(forwardedKeyAllowed("accent-follow-system"));
+}
+
 test "win32 titlebar colors honor ghostty overrides" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -42595,6 +43080,83 @@ test "win32 overlay dismissal restores focus only from owned controls" {
     try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
 }
 
+fn expectOverlayEditText(host: *Host, expected: []const u8) !void {
+    const text = try readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_edit_hwnd.?);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected, text);
+}
+
+test "win32 title prompt refills its text when the active surface changes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    surface_a.tab_title_override = "one";
+    surface_b.tab_title_override = "two";
+
+    // `showOverlay` stops short without the edit and its two buttons, so
+    // give it real ones under a hidden parent. `host.hwnd` stays null, so
+    // the tab strip and layout passes have nothing to do.
+    const parent = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(parent);
+    host.overlay_edit_hwnd = try createTestChromeChild(parent, prompt_edit_class);
+    host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    // `Host.deinit` frees these caches, and the session never runs it.
+    defer for ([_]*?[:0]const u8{
+        &host.cached_overlay_edit,
+        &host.cached_overlay_accept,
+        &host.cached_overlay_cancel,
+    }) |cached| {
+        if (cached.*) |value| app.core_app.alloc.free(value);
+        cached.* = null;
+    };
+
+    try host.showOverlay(.tab_title, "one");
+    try std.testing.expectEqual(@as(?*const Surface, &surface_a), host.overlay_text_surface);
+
+    // A refresh on the same tab keeps what the user typed.
+    _ = try host.setOverlayEditText("renamed");
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "renamed");
+
+    // Regression: the text kept tab one's title after a switch, and Enter
+    // wrote it onto tab two.
+    host.active_tab = 1;
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "two");
+    try std.testing.expectEqual(@as(?*const Surface, &surface_b), host.overlay_text_surface);
+
+    host.hideOverlay();
+    try std.testing.expectEqual(@as(?*const Surface, null), host.overlay_text_surface);
+
+    // A search query is the user's own, not the tab's: a switch keeps it.
+    try host.showOverlay(.search, "needle");
+    try std.testing.expectEqual(@as(?*const Surface, null), host.overlay_text_surface);
+    host.active_tab = 0;
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "needle");
+    host.hideOverlay();
+}
+
 test "win32 host activation keeps focus within transient UI" {
     const edit: HWND = @ptrFromInt(0x10);
     const accept: HWND = @ptrFromInt(0x20);
@@ -43152,6 +43714,82 @@ test "win32 tab button mouse-up only closes when released in close zone" {
     );
 }
 
+test "win32 search button tooltip follows hover, clicks, hiding and destruction" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const cases = [_]struct { msg: UINT, wParam: WPARAM, action: ButtonTooltipAction }{
+        .{ .msg = c.WM_MOUSEHOVER, .wParam = 0, .action = .show },
+        .{ .msg = c.WM_LBUTTONDOWN, .wParam = 0, .action = .dismiss },
+        .{ .msg = c.WM_RBUTTONDOWN, .wParam = 0, .action = .dismiss },
+        .{ .msg = c.WM_MBUTTONDOWN, .wParam = 0, .action = .dismiss },
+        .{ .msg = c.WM_MOUSELEAVE, .wParam = 0, .action = .hide },
+        .{ .msg = c.WM_SHOWWINDOW, .wParam = 0, .action = .hide },
+        .{ .msg = c.WM_SHOWWINDOW, .wParam = 1, .action = .none },
+        .{ .msg = c.WM_DESTROY, .wParam = 0, .action = .hide },
+        // The button-up and the WM_MOUSEMOVE after it neither show nor end
+        // a click's dismissal; leaving, hiding or destroying the button does.
+        .{ .msg = c.WM_LBUTTONUP, .wParam = 0, .action = .none },
+        .{ .msg = c.WM_MOUSEMOVE, .wParam = 0, .action = .none },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.action, buttonTooltipAction(case.msg, case.wParam));
+    }
+}
+
+test "win32 a clicked search button's tooltip stays down until the button is left, hidden or destroyed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const find: HWND = @ptrFromInt(0x10);
+    const next: HWND = @ptrFromInt(0x20);
+    const send = struct {
+        /// Deliver `msg` to `button` as `hostButtonProc` does, with `shown`
+        /// standing in for the popup: presenting puts it up, hiding takes it
+        /// down.
+        fn send(tooltip: *ButtonTooltip, button: HWND, msg: UINT, wParam: WPARAM) ButtonTooltip.Effect {
+            const effect = tooltip.apply(buttonTooltipAction(msg, wParam), button);
+            switch (effect) {
+                .none => {},
+                .present => tooltip.shown = button,
+                .hide => tooltip.shown = null,
+            }
+            return effect;
+        }
+    }.send;
+    const expectEqual = std.testing.expectEqual;
+    var tooltip: ButtonTooltip = .{};
+
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    // The hover re-arms on every move inside the button.
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    try expectEqual(.hide, send(&tooltip, find, c.WM_LBUTTONDOWN, 0));
+    // The button-up, the WM_MOUSEMOVE the system sends after it under a still
+    // pointer, and the hover that move re-arms leave the tooltip down.
+    try expectEqual(.none, send(&tooltip, find, c.WM_LBUTTONUP, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEMOVE, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    // The click holds down only the button it landed on.
+    try expectEqual(.present, send(&tooltip, next, c.WM_MOUSEHOVER, 0));
+    try expectEqual(.hide, send(&tooltip, next, c.WM_MOUSELEAVE, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+
+    // Leaving the button ends the dismissal.
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSELEAVE, 0));
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+
+    // So does hiding it.
+    try expectEqual(.hide, send(&tooltip, find, c.WM_RBUTTONDOWN, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_SHOWWINDOW, 0));
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+
+    // And destroying it, so a later window that reuses the handle starts
+    // with nothing held down.
+    try expectEqual(.hide, send(&tooltip, find, c.WM_MBUTTONDOWN, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_DESTROY, 0));
+    try expectEqual(@as(?HWND, null), tooltip.dismissed);
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+}
+
 test "win32 caption buttons are painted only while the window is on screen" {
     // The UIA children exist exactly when the buttons are painted. A
     // hidden window is the case that has no WM_SIZE to notice it, so the
@@ -43298,6 +43936,66 @@ test "win32 titlebar glyph mapping uses Win11 glyph codepoints" {
     try std.testing.expectEqual(@as(u16, 0xE8BB), titlebarGlyphCodepoint(.close));
     try std.testing.expectEqual(@as(u16, 0xE710), titlebarGlyphCodepoint(.new_tab));
     try std.testing.expectEqual(@as(u16, 0xE70D), titlebarGlyphCodepoint(.dropdown));
+}
+
+test "win32 search bar codicons exist in the embedded symbols font" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Each button is one UTF-16 unit, which `fontHasSearchCodicons` looks up.
+    for (search_bar_button_roles) |role| {
+        try std.testing.expectEqual(@as(usize, 1), searchButtonCodicon(role).len);
+    }
+
+    // The registered font has every button's glyph, so a Nerd Fonts update
+    // that renumbers a Codicon fails here rather than drawing an empty box.
+    for ([_]u32{ 96, 144 }) |dpi| {
+        const font = createSearchIconFont(dpi) orelse return error.FontCreateFailed;
+        _ = sys.DeleteObject(font);
+    }
+}
+
+test "win32 search bar codicons are rejected in a substitute font" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Arial is what GDI substituted for a missing icon face on Windows 10.
+    const font = createIconFontForFace(
+        std.unicode.utf8ToUtf16LeStringLiteral("Arial"),
+        search_icon_font_px,
+    ) orelse return error.FontCreateFailed;
+    defer _ = sys.DeleteObject(font);
+    try std.testing.expect(!fontHasSearchCodicons(font));
+}
+
+test "win32 search bar icon font is created at first use and dropped on a DPI or theme change" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+    });
+    defer session.deinit();
+    defer {
+        if (host.titlebar_caption_icon_font) |font| _ = sys.DeleteObject(font);
+        if (host.titlebar_action_icon_font) |font| _ = sys.DeleteObject(font);
+        if (host.search_icon_font) |font| _ = sys.DeleteObject(font);
+    }
+
+    // `createHost` runs this before the first frame.
+    host.recreateTitlebarIconFonts();
+    try std.testing.expect(host.search_icon_font == null);
+
+    const font = host.searchIconFont() orelse return error.FontCreateFailed;
+    try std.testing.expectEqual(font, host.searchIconFont().?);
+
+    // A DPI or theme change drops it, to be created again at the next use.
+    host.recreateTitlebarIconFonts();
+    try std.testing.expect(host.search_icon_font == null);
+    try std.testing.expect(!host.search_icon_font_resolved);
 }
 
 test "win32 titlebar hover fade decays linearly and snaps at zero duration" {

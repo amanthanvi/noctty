@@ -608,6 +608,10 @@ pub extern "gdi32" fn SwapBuffers(hdc: HDC) callconv(.winapi) BOOL;
 pub extern "gdi32" fn TextOutW(hdc: HDC, x: i32, y: i32, lpString: LPCWSTR, c: i32) callconv(.winapi) BOOL;
 
 pub extern "gdi32" fn CreateFontIndirectW(lplf: *const LOGFONTW) callconv(.winapi) ?*anyopaque;
+pub extern "gdi32" fn AddFontMemResourceEx(pFileView: *anyopaque, cjSize: DWORD, pvReserved: ?*anyopaque, pNumFonts: *DWORD) callconv(.winapi) ?HANDLE;
+pub extern "gdi32" fn GetGlyphIndicesW(hdc: HDC, lpstr: [*]const u16, c: i32, pgi: [*]u16, fl: DWORD) callconv(.winapi) DWORD;
+pub extern "gdi32" fn CreateCompatibleDC(hdc: HDC) callconv(.winapi) HDC;
+pub extern "gdi32" fn DeleteDC(hdc: HDC) callconv(.winapi) BOOL;
 
 pub extern "gdi32" fn SelectObject(hdc: HDC, h: HGDIOBJ) callconv(.winapi) HGDIOBJ;
 
