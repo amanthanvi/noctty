@@ -11150,6 +11150,12 @@ const Host = struct {
     /// outside this host-local gesture state.
     drag_state: win32_tab_drag.DragState = .{},
     overlay_mode: HostOverlayMode = .none,
+    /// Surface a title prompt's text was last filled from, while
+    /// `overlayTextFollowsActiveSurface(overlay_mode)`, so the text refills
+    /// when the active surface changes (a tab switch or focus moving to
+    /// another split pane). Only compared with `activeSurface()`, never
+    /// dereferenced.
+    overlay_text_surface: ?*const Surface = null,
     /// Active confirm overlay payload when `overlay_mode == .confirm`.
     /// Owned byte slices (`title`, `body`, `accept_label`,
     /// `cancel_label`) are allocated via `app.core_app.alloc` and
@@ -15995,6 +16001,7 @@ const Host = struct {
 
         const initial_text = initial orelse "";
         _ = try self.setOverlayEditText(initial_text);
+        self.overlay_text_surface = if (overlayTextFollowsActiveSurface(mode)) self.activeSurface() else null;
 
         // Keep the syncs: their return values still drive `refreshChrome`,
         // and the control text they write is what the confirm prompt's
@@ -16057,6 +16064,7 @@ const Host = struct {
         );
         self.revertPaletteThemePreview();
         self.overlay_mode = .none;
+        self.overlay_text_surface = null;
         self.clearOverlayCompletion();
         runUiActionOrLog("overlay banner clear failed", self.setBanner(.none, null));
         // Drop any active confirm payload. Both accept and cancel
@@ -18583,12 +18591,32 @@ const Host = struct {
         return null;
     }
 
+    /// The tab and window title prompts are filled from the active surface
+    /// and submit to whichever surface is active at Enter. The tab prompt's
+    /// hint already follows the active tab ("Rename tab n/N"); when the
+    /// active surface changes (a tab switch or focus moving to another split
+    /// pane), refill the text with the new surface's title too, so submit
+    /// never writes one surface's title onto another.
+    fn syncOverlayTextToActiveSurface(self: *Host) !bool {
+        const surface = self.activeSurface();
+        if (!overlayTextNeedsRefill(self.overlay_mode, self.overlay_text_surface, surface)) return false;
+        const text = self.overlayInitialText(self.overlay_mode) orelse return false;
+        defer self.app.core_app.alloc.free(text);
+        const changed = try self.setOverlayEditText(text);
+        // Only after the text box really holds the new title: marking the
+        // surface first would make a failed refill look done, and the next
+        // refresh would never retry.
+        self.overlay_text_surface = surface;
+        return changed;
+    }
+
     fn refreshChrome(self: *Host) !void {
         var invalidate = self.chrome_repaint_dirty;
         _ = try self.syncWindowTitle();
         invalidate = (try self.syncTabButtons()) or invalidate;
         try self.syncChromeButtons();
         if (self.overlay_mode != .none) {
+            invalidate = (try self.syncOverlayTextToActiveSurface()) or invalidate;
             invalidate = (try self.syncOverlayLabel()) or invalidate;
             invalidate = (try self.syncOverlayHint()) or invalidate;
             _ = try self.syncOverlayPreview();
@@ -24148,6 +24176,8 @@ const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
 const overlayEditFrameVisible = labels.overlayEditFrameVisible;
 const overlayEmptySubmitDismisses = labels.overlayEmptySubmitDismisses;
+const overlayTextFollowsActiveSurface = labels.overlayTextFollowsActiveSurface;
+const overlayTextNeedsRefill = labels.overlayTextNeedsRefill;
 
 const OverlayFocusSlot = labels.OverlayFocusSlot;
 
@@ -42489,6 +42519,83 @@ test "win32 overlay dismissal restores focus only from owned controls" {
     try std.testing.expect(shouldRefocusAfterOverlayHide(list, edit, accept, cancel, list));
     try std.testing.expect(!shouldRefocusAfterOverlayHide(external, edit, accept, cancel, list));
     try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
+}
+
+fn expectOverlayEditText(host: *Host, expected: []const u8) !void {
+    const text = try readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_edit_hwnd.?);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected, text);
+}
+
+test "win32 title prompt refills its text when the active surface changes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    surface_a.tab_title_override = "one";
+    surface_b.tab_title_override = "two";
+
+    // `showOverlay` stops short without the edit and its two buttons, so
+    // give it real ones under a hidden parent. `host.hwnd` stays null, so
+    // the tab strip and layout passes have nothing to do.
+    const parent = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(parent);
+    host.overlay_edit_hwnd = try createTestChromeChild(parent, prompt_edit_class);
+    host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    // `Host.deinit` frees these caches, and the session never runs it.
+    defer for ([_]*?[:0]const u8{
+        &host.cached_overlay_edit,
+        &host.cached_overlay_accept,
+        &host.cached_overlay_cancel,
+    }) |cached| {
+        if (cached.*) |value| app.core_app.alloc.free(value);
+        cached.* = null;
+    };
+
+    try host.showOverlay(.tab_title, "one");
+    try std.testing.expectEqual(@as(?*const Surface, &surface_a), host.overlay_text_surface);
+
+    // A refresh on the same tab keeps what the user typed.
+    _ = try host.setOverlayEditText("renamed");
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "renamed");
+
+    // Regression: the text kept tab one's title after a switch, and Enter
+    // wrote it onto tab two.
+    host.active_tab = 1;
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "two");
+    try std.testing.expectEqual(@as(?*const Surface, &surface_b), host.overlay_text_surface);
+
+    host.hideOverlay();
+    try std.testing.expectEqual(@as(?*const Surface, null), host.overlay_text_surface);
+
+    // A search query is the user's own, not the tab's: a switch keeps it.
+    try host.showOverlay(.search, "needle");
+    try std.testing.expectEqual(@as(?*const Surface, null), host.overlay_text_surface);
+    host.active_tab = 0;
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "needle");
+    host.hideOverlay();
 }
 
 test "win32 host activation keeps focus within transient UI" {
