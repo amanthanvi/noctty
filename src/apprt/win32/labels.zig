@@ -1254,8 +1254,9 @@ pub fn searchBarButtonLabel(role: SearchBarButtonRole) LPCWSTR {
 }
 
 /// What a search bar button does, in words: its UIA name, and the hover
-/// tooltip that spells out its icon. One source, so a screen reader and a
-/// sighted user are told the same thing.
+/// tooltip that spells out its icon, so those two always agree. The window
+/// text, which a wide button draws as its label and MSAA reports as its
+/// name, comes from `searchBarButtonLabel` instead.
 pub fn searchBarButtonName(role: SearchBarButtonRole) []const u8 {
     return switch (role) {
         .prev => "Previous match",
