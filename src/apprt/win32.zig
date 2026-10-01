@@ -17510,8 +17510,9 @@ const Host = struct {
                 _ = sys.SetBkMode(hdc, c.TRANSPARENT);
                 _ = sys.SetTextColor(hdc, color);
                 var glyph_rect = rect;
-                // The 16 px glyph is taller than the padded content box;
-                // clipping to it cut off the foot of whole-word's bracket.
+                // Whole-word's bracket spans its full advance, 16 px at
+                // 100%, wider than the 12 px wide padded content box;
+                // clipping to the box cut off both ends of the bracket.
                 if (sys.DrawTextW(
                     hdc,
                     glyph.ptr,
