@@ -10789,6 +10789,91 @@ fn titlebarCaptionFromHitTest(ht: i32) CaptionButton {
     };
 }
 
+/// Whether a right-click the host received as `WM_NCRBUTTONUP` opens the
+/// window menu here. Only on a caption row the host keeps in its client
+/// area (`Host.clientCaptionHeight` non-null): DefWindowProc turns the
+/// right-click into `WM_CONTEXTMENU`, whose handler looks for the caption
+/// in the stock frame's geometry instead of asking `WM_NCHITTEST`, and
+/// `WM_NCCALCSIZE` has made that row client area, so it opens nothing.
+/// Where Windows draws the caption (null) it keeps the right-click.
+fn captionRightClickOpensWindowMenu(ht: i32, client_caption_height: ?i32) bool {
+    return ht == c.HTCAPTION and client_caption_height != null;
+}
+
+/// What the host does with a right-button message on a client-area caption,
+/// or null to leave it to DefWindowProc. The press is swallowed, not only
+/// the release: measured on build 26200, DefWindowProc given
+/// `WM_NCRBUTTONDOWN` HTCAPTION on an active window runs a modal loop that
+/// ends only when it removes the `WM_RBUTTONUP` the captured release turns
+/// into, and neither `WM_NCRBUTTONUP` nor `WM_CONTEXTMENU` follows, so the
+/// release never reached the menu. A quick second press arrives as
+/// `WM_NCRBUTTONDBLCLK`, which needs no `CS_DBLCLKS`.
+const CaptionRightClick = enum { swallow, open_menu };
+
+fn captionRightClick(msg: UINT, ht: i32, client_caption_height: ?i32) ?CaptionRightClick {
+    if (!captionRightClickOpensWindowMenu(ht, client_caption_height)) return null;
+    return switch (msg) {
+        c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONDBLCLK => .swallow,
+        c.WM_NCRBUTTONUP => .open_menu,
+        else => null,
+    };
+}
+
+/// Which window-menu commands a window style allows, and the bold default,
+/// by the rules DefWindowProc applies before it opens the menu from a stock
+/// caption. The menu `GetSystemMenu` returns keeps whatever state it was
+/// last given, and `TrackPopupMenu` does not refresh it: without this a
+/// maximized window offered Maximize, Move and Size and grayed Restore.
+/// Close is left as Windows keeps it. Measured on build 26200: Move stays
+/// enabled on a minimized window, and Close is the default unless the
+/// window is minimized.
+const WindowMenuState = struct {
+    restore: bool,
+    move: bool,
+    size: bool,
+    minimize: bool,
+    maximize: bool,
+    default_command: WPARAM,
+};
+
+fn windowMenuState(style: u32) WindowMenuState {
+    const maximized = style & c.WS_MAXIMIZE != 0;
+    const minimized = style & c.WS_MINIMIZE != 0;
+    return .{
+        .restore = maximized or minimized,
+        .move = !maximized,
+        .size = style & c.WS_THICKFRAME != 0 and !maximized and !minimized,
+        .minimize = style & c.WS_MINIMIZEBOX != 0 and !minimized,
+        .maximize = style & c.WS_MAXIMIZEBOX != 0 and !maximized,
+        .default_command = if (minimized) c.SC_RESTORE else c.SC_CLOSE,
+    };
+}
+
+/// Shows the window menu at the screen point of a `WM_NCRBUTTONUP` and
+/// runs the chosen command. `TPM_RETURNCMD` and a posted `WM_SYSCOMMAND`
+/// run it after the menu loop has returned, as Windows Terminal does for
+/// its own caption.
+fn openWindowMenuAt(hwnd: HWND, lParam: LPARAM) void {
+    const bits: u32 = @truncate(@as(u64, @bitCast(lParam)));
+    const x: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits))));
+    const y: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16))));
+    const menu = sys.GetSystemMenu(hwnd, 0) orelse return;
+    const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+    const state = windowMenuState(style);
+    for ([_]struct { WPARAM, bool }{
+        .{ c.SC_RESTORE, state.restore },
+        .{ c.SC_MOVE, state.move },
+        .{ c.SC_SIZE, state.size },
+        .{ c.SC_MINIMIZE, state.minimize },
+        .{ c.SC_MAXIMIZE, state.maximize },
+    }) |item| {
+        _ = sys.EnableMenuItem(menu, @intCast(item[0]), c.MF_BYCOMMAND | if (item[1]) c.MF_ENABLED else c.MF_GRAYED);
+    }
+    _ = sys.SetMenuDefaultItem(menu, @intCast(state.default_command), 0);
+    const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON, x, y, 0, hwnd, null);
+    if (cmd > 0) _ = sys.PostMessageW(hwnd, c.WM_SYSCOMMAND, @intCast(cmd), 0);
+}
+
 fn captionButtonSysCommand(ht: i32, is_zoomed: bool) ?WPARAM {
     return switch (ht) {
         c.HTMINBUTTON => c.SC_MINIMIZE,
@@ -12527,6 +12612,13 @@ const Host = struct {
         const state: win32_nc_layout.WindowState =
             if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const ht = win32_nc_layout.hitTest(window_rect, client_screen_rect, cursor, metrics, state);
+        // With no caption row, the empty part of the tab strip stands in for
+        // the title bar: drag to move, double-click to maximize, right-click
+        // for the system menu. The tabs and the [+] / [▾] buttons are child
+        // windows and answer their own hit tests before this one runs.
+        if (ht == .client and caption_height == 0 and cy < client_screen_rect.top + self.tabBarHeight()) {
+            return c.HTCAPTION;
+        }
         return switch (ht) {
             .nowhere => c.HTNOWHERE,
             .client => c.HTCLIENT,
@@ -18257,6 +18349,17 @@ const Host = struct {
         if ((self.clientCaptionHeight() orelse return false) != 0) return false;
         const ht = self.handleNcHitTest(self.hwnd orelse return false, lParam) orelse return false;
         return ht >= c.HTLEFT and ht <= c.HTBOTTOMRIGHT;
+    }
+
+    /// `resizesFrom` for the top band and its corners only, which the
+    /// tab-strip buttons begin inside. The side strips are measured from the
+    /// window rect, scaled linearly, while the client starts at DWP's frame,
+    /// which is narrower above 96 DPI (13 vs 16 px at 192), so a side strip
+    /// overlaps a button's outer columns there; the button keeps those.
+    fn resizesFromTop(self: *Host, lParam: LPARAM) bool {
+        if ((self.clientCaptionHeight() orelse return false) != 0) return false;
+        const ht = self.handleNcHitTest(self.hwnd orelse return false, lParam) orelse return false;
+        return ht == c.HTTOP or ht == c.HTTOPLEFT or ht == c.HTTOPRIGHT;
     }
 
     fn tabBarHeight(self: *Host) i32 {
@@ -25313,6 +25416,7 @@ const ButtonTooltip = struct {
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
+        if (msg == c.WM_NCHITTEST and v.resizesFromTop(lParam)) return c.HTTRANSPARENT;
         if (msg == c.WM_GETOBJECT) {
             if (v.chromeUiaProviderForHwnd(hwnd)) |provider| {
                 if (win32_uia.returnChromeControlProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
@@ -25466,6 +25570,7 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
+        if (msg == c.WM_NCHITTEST and v.resizesFromTop(lParam)) return c.HTTRANSPARENT;
         if (v.tabIndexForButton(hwnd)) |index| {
             if (msg == c.WM_GETOBJECT) {
                 if (v.tabs.items[index].uia_provider) |provider| {
@@ -26137,6 +26242,21 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         },
                         else => v.clearCaptionPressed(),
                     }
+                }
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        // Right-click on the integrated titlebar's empty strip or on an
+        // undecorated window's tab strip: the window menu, as on a stock
+        // caption. See `captionRightClick`. No DwmDefWindowProc first:
+        // only HTCAPTION is handled here, and every other code, the
+        // caption buttons included, goes to DefWindowProc as before.
+        c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONDBLCLK, c.WM_NCRBUTTONUP => {
+            if (host) |v| {
+                const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
+                if (captionRightClick(msg, ht, v.clientCaptionHeight())) |action| {
+                    if (action == .open_menu) openWindowMenuAt(hwnd, lParam);
+                    return 0;
                 }
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -37428,6 +37548,22 @@ test "win32 new host starts with the client area its first frame change keeps" {
     var client_origin: POINT = .{ .x = 0, .y = 0 };
     try std.testing.expect(sys.ClientToScreen(hwnd, &client_origin) != 0);
     try std.testing.expectEqual(window_rect.top, client_origin.y);
+
+    // Its hit test is the one an undecorated frame leaves alone: an 8 DIP
+    // top band over a caption row as tall as the tab strip, and the caption
+    // buttons at the row's right end.
+    const mid_x = @divTrunc(window_rect.left + window_rect.right, 2);
+    const edge = host.scaled(8);
+    try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + edge - 1));
+    try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, window_rect.top + edge));
+    try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, client_origin.y + host.tabBarHeight() - 1));
+    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, client_origin.y + host.tabBarHeight()));
+    const caption_button_w = host.scaled(46);
+    try std.testing.expectEqual(@as(LRESULT, c.HTMAXBUTTON), testHitTest(
+        hwnd,
+        client_origin.x + created.right - caption_button_w - @divTrunc(caption_button_w, 2),
+        client_origin.y + @divTrunc(host.tabBarHeight(), 2),
+    ));
 }
 
 test "win32 createHost frames an undecorated host for its Windows build" {
@@ -37501,20 +37637,93 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                     continue;
                 }
                 // Windows 11 keeps the side and bottom frame, whose invisible
-                // margins resize the window, and a top band inside the client.
+                // margins resize the window, and a 4 DIP top band inside the
+                // client. The corners keep their 8 DIP square.
                 try std.testing.expectEqual(@as(?i32, 0), host.clientCaptionHeight());
                 try std.testing.expect(client.right - client.left < window_rect.right - window_rect.left);
-                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + 1));
-                try std.testing.expectEqual(@as(LRESULT, c.HTTOPLEFT), testHitTest(hwnd, window_rect.left + 1, window_rect.top + 1));
-                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, window_rect.left + 1, mid_y));
+                const dpi: i32 = @intCast(host.current_dpi);
+                const band = @divTrunc(4 * dpi + 48, 96);
+                const corner = @divTrunc(8 * dpi + 48, 96);
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + band - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOPLEFT), testHitTest(hwnd, window_rect.left + corner - 1, window_rect.top + corner - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOPRIGHT), testHitTest(hwnd, window_rect.right - corner, window_rect.top + corner - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, window_rect.left + 1, window_rect.top + corner));
+                try std.testing.expectEqual(@as(LRESULT, c.HTRIGHT), testHitTest(hwnd, window_rect.right - 2, mid_y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTBOTTOM), testHitTest(hwnd, mid_x, window_rect.bottom - 2));
                 try std.testing.expectEqual(@as(LRESULT, c.HTBOTTOMRIGHT), testHitTest(hwnd, window_rect.right - 2, window_rect.bottom - 2));
-                // No caption row: just below the top band is terminal.
-                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, client_origin.y + host.scaled(16)));
+                // No caption row: below the band, the tab strip (shown by
+                // default) stands in for the title bar; below it is terminal.
+                const strip_bottom = client_origin.y + host.tabBarHeight();
+                try std.testing.expect(client_origin.y + band < strip_bottom);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, window_rect.top + band));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, mid_x, strip_bottom - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, strip_bottom));
                 try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, mid_y));
-                // With no tab bar the terminal pane covers the top band, so it
-                // hands those points to the host; everywhere else it keeps them.
-                try std.testing.expect(host.resizesFrom(testPoint(mid_x, window_rect.top + 1)));
-                try std.testing.expect(!host.resizesFrom(testPoint(mid_x, mid_y)));
+                try std.testing.expect(!host.resizesFrom(testPoint(mid_x, window_rect.top + band)));
+
+                // The strip has no caption buttons: its right end, where the
+                // integrated titlebar puts [x], is caption up to the edge.
+                const strip_mid_y = client_origin.y + @divTrunc(host.tabBarHeight(), 2);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, window_rect.right - corner - 1, strip_mid_y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTRIGHT), testHitTest(hwnd, window_rect.right - corner, strip_mid_y));
+                // The tabs and the [+] / [▾] buttons are BUTTON children over
+                // the strip. Windows asks the topmost visible, enabled child
+                // under the point first, so the caption never reaches them,
+                // and they hand the band's rows above them back to the host.
+                // A stand-in running their window procedures: the real
+                // strip's tab container is a layered child, which a test
+                // binary without the app manifest cannot create.
+                const button = try createTestChromeChild(hwnd, prompt_button_class);
+                defer _ = sys.DestroyWindow(button);
+                try std.testing.expect(sys.SetWindowPos(
+                    button,
+                    null,
+                    0,
+                    host.scaled(3),
+                    host.scaled(host_tab_max_button_width),
+                    host.tabBarHeight() - host.scaled(6),
+                    c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+                ) != 0);
+                var button_point: POINT = .{ .x = host.scaled(10), .y = strip_mid_y - client_origin.y };
+                try std.testing.expectEqual(@as(?HWND, button), sys.ChildWindowFromPointEx(
+                    hwnd,
+                    button_point,
+                    c.CWP_SKIPINVISIBLE | c.CWP_SKIPDISABLED | c.CWP_SKIPTRANSPARENT,
+                ));
+                try std.testing.expect(sys.ClientToScreen(hwnd, &button_point) != 0);
+                try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, button_point.x, window_rect.top + band - 1));
+                // Only the top band: the left strip is measured linearly from
+                // the window rect and the client starts at DWP's frame, so
+                // above 96 DPI the strip's inner columns are the button's
+                // first, which keeps them. At 96 DPI the two are equally wide
+                // and this point lies in the frame left of the button, so it
+                // pins the procedures' answer rather than that overlap.
+                const side_x = window_rect.left + corner - 1;
+                try std.testing.expectEqual(@as(LRESULT, c.HTLEFT), testHitTest(hwnd, side_x, button_point.y));
+                for ([_]WNDPROC{ &tabButtonProc, &hostButtonProc }) |proc| {
+                    var previous: ?*const anyopaque = null;
+                    host.subclassButton(button, proc, &previous);
+                    defer _ = sys.SetWindowLongPtrW(button, c.GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(previous))));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTTRANSPARENT), testHitTest(button, button_point.x, window_rect.top + band - 1));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, window_rect.top + band));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(button, button_point.x, button_point.y));
+                    try std.testing.expect(testHitTest(button, side_x, button_point.y) != c.HTTRANSPARENT);
+                }
+
+                // With the tab bar off there is no drag handle: the terminal
+                // pane covers the band and hands only the band to the host.
+                {
+                    const show_tab_bar = app.config.@"window-show-tab-bar";
+                    app.config.@"window-show-tab-bar" = .never;
+                    defer app.config.@"window-show-tab-bar" = show_tab_bar;
+                    try std.testing.expectEqual(@as(LRESULT, c.HTTOP), testHitTest(hwnd, mid_x, window_rect.top + band - 1));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, window_rect.top + band));
+                    try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, mid_x, strip_bottom - 1));
+                    try std.testing.expect(host.resizesFrom(testPoint(mid_x, window_rect.top + band - 1)));
+                    try std.testing.expect(host.resizesFrom(testPoint(window_rect.left + corner - 1, window_rect.top + corner - 1)));
+                    try std.testing.expect(!host.resizesFrom(testPoint(mid_x, window_rect.top + band)));
+                    try std.testing.expect(!host.resizesFrom(testPoint(mid_x, mid_y)));
+                }
 
                 // Maximized, the client starts where the monitor does: the top
                 // inset equals the frame the window overhangs it by, which is
@@ -37525,6 +37734,33 @@ test "win32 createHost frames an undecorated host for its Windows build" {
                 _ = sys.SendMessageW(hwnd, c.WM_NCCALCSIZE, 0, @bitCast(@intFromPtr(&rect)));
                 try std.testing.expect(rect.left > window_rect.left);
                 try std.testing.expectEqual(rect.left - window_rect.left, rect.top - window_rect.top);
+                // Nothing resizes a maximized window, so the strip drags from
+                // its top row; the drag restores the window.
+                try std.testing.expect(sys.SetWindowPos(
+                    hwnd,
+                    null,
+                    0,
+                    0,
+                    0,
+                    0,
+                    c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
+                ) != 0);
+                // Applying the frame can also move the window: Windows fits a
+                // maximized window that covers its monitor's work area to the
+                // monitor's maximized rect. The 1280x800 host covers the work
+                // area of a screen no larger than itself, a CI runner's among
+                // them. So the client is measured against the window rect as
+                // it is now: the inset computed above, on the side and on top.
+                var zoomed_rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &zoomed_rect) != 0);
+                var zoomed_origin: POINT = .{ .x = 0, .y = 0 };
+                try std.testing.expect(sys.ClientToScreen(hwnd, &zoomed_origin) != 0);
+                try std.testing.expectEqual(rect.left - window_rect.left, zoomed_origin.x - zoomed_rect.left);
+                try std.testing.expectEqual(rect.top - window_rect.top, zoomed_origin.y - zoomed_rect.top);
+                const zoomed_mid_x = @divTrunc(zoomed_rect.left + zoomed_rect.right, 2);
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, zoomed_mid_x, zoomed_origin.y));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCAPTION), testHitTest(hwnd, zoomed_mid_x, zoomed_origin.y + host.tabBarHeight() - 1));
+                try std.testing.expectEqual(@as(LRESULT, c.HTCLIENT), testHitTest(hwnd, zoomed_mid_x, zoomed_origin.y + host.tabBarHeight()));
             }
         }
     }
@@ -43615,6 +43851,80 @@ test "win32 captionButtonSysCommand ignores non minimize/maximize hit tests" {
     try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCLIENT, false));
     try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCAPTION, false));
     try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCLOSE, false));
+}
+
+test "win32 windowMenuState follows the window style like a stock caption" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const restored = windowMenuState(WS_OVERLAPPEDWINDOW);
+    try std.testing.expectEqual(WindowMenuState{
+        .restore = false,
+        .move = true,
+        .size = true,
+        .minimize = true,
+        .maximize = true,
+        .default_command = c.SC_CLOSE,
+    }, restored);
+    const maximized = windowMenuState(WS_OVERLAPPEDWINDOW | c.WS_MAXIMIZE);
+    try std.testing.expectEqual(WindowMenuState{
+        .restore = true,
+        .move = false,
+        .size = false,
+        .minimize = true,
+        .maximize = false,
+        .default_command = c.SC_CLOSE,
+    }, maximized);
+    // Minimizing clears WS_MAXIMIZE. DefWindowProc still offers Move.
+    const minimized = windowMenuState(WS_OVERLAPPEDWINDOW | c.WS_MINIMIZE);
+    try std.testing.expectEqual(WindowMenuState{
+        .restore = true,
+        .move = true,
+        .size = false,
+        .minimize = false,
+        .maximize = true,
+        .default_command = c.SC_RESTORE,
+    }, minimized);
+    // A style without a sizing frame or maximize box offers neither.
+    const fixed = windowMenuState(c.WS_CAPTION | c.WS_SYSMENU | c.WS_MINIMIZEBOX);
+    try std.testing.expect(!fixed.size);
+    try std.testing.expect(!fixed.maximize);
+    try std.testing.expect(fixed.minimize and fixed.move and !fixed.restore);
+}
+
+test "win32 right-click opens the window menu only on a client-area caption" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Undecorated (0 px row) and integrated (its caption height) hosts.
+    try std.testing.expect(captionRightClickOpensWindowMenu(c.HTCAPTION, 0));
+    try std.testing.expect(captionRightClickOpensWindowMenu(c.HTCAPTION, host_caption_button_h));
+    // Windows owns a stock caption and its right-click.
+    try std.testing.expect(!captionRightClickOpensWindowMenu(c.HTCAPTION, null));
+    // Resize edges and the caption buttons keep DefWindowProc's handling.
+    for ([_]i32{ c.HTTOP, c.HTTOPLEFT, c.HTRIGHT, c.HTMAXBUTTON, c.HTCLOSE, c.HTSYSMENU, c.HTCLIENT }) |ht| {
+        try std.testing.expect(!captionRightClickOpensWindowMenu(ht, 0));
+        try std.testing.expect(!captionRightClickOpensWindowMenu(ht, host_caption_button_h));
+    }
+}
+
+test "win32 client-area caption swallows the right press and opens the menu on release" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // Not sent to a window: a press handed to DefWindowProc on an active
+    // window waits in a modal loop for a real release, so a regression
+    // would hang the suite instead of failing it.
+    for ([_]?i32{ 0, host_caption_button_h }) |height| {
+        try std.testing.expectEqual(@as(?CaptionRightClick, .swallow), captionRightClick(c.WM_NCRBUTTONDOWN, c.HTCAPTION, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, .swallow), captionRightClick(c.WM_NCRBUTTONDBLCLK, c.HTCAPTION, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, .open_menu), captionRightClick(c.WM_NCRBUTTONUP, c.HTCAPTION, height));
+        // Other hit-test codes and other messages keep DefWindowProc.
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(c.WM_NCRBUTTONDOWN, c.HTTOP, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(c.WM_NCRBUTTONUP, c.HTCLOSE, height));
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(c.WM_NCLBUTTONDOWN, c.HTCAPTION, height));
+    }
+    // A caption Windows draws keeps the whole right-click.
+    for ([_]UINT{ c.WM_NCRBUTTONDOWN, c.WM_NCRBUTTONDBLCLK, c.WM_NCRBUTTONUP }) |msg| {
+        try std.testing.expectEqual(@as(?CaptionRightClick, null), captionRightClick(msg, c.HTCAPTION, null));
+    }
 }
 
 test "win32 titlebar glyph mapping uses Win11 glyph codepoints" {
