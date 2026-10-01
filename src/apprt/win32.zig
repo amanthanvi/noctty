@@ -22099,6 +22099,7 @@ fn withSystemTabAccent(theme: ThemeColors, follow: bool, system_accent: ?u32) Th
     const accent = system_accent orelse return result;
     if (accent == 0) return result;
     result.tab_accent = readableTabAccent(accent, theme.chrome_bg, theme.is_dark);
+    result.system_accent = accent;
     return result;
 }
 
@@ -22247,8 +22248,11 @@ fn clientTitlebarTheme(
         result.button_disabled_fg = derived_theme.button_disabled_fg;
 
         // A followed Windows accent was made readable against the theme's
-        // strip; the band paints it over this background instead.
-        if (result.tab_accent) |accent| {
+        // strip; the band paints it over this background instead. Start
+        // again from the Windows color: `tab_accent` may already have been
+        // moved for the other polarity, such as a dark accent lifted for the
+        // dark strip that was readable on a light band as chosen.
+        if (result.system_accent) |accent| {
             result.tab_accent = readableTabAccent(accent, result.chrome_bg, result.is_dark);
         }
     }
@@ -36111,6 +36115,16 @@ test "win32 followed tab accent is re-checked against a custom titlebar band" {
     for ([_]u32{ accent, tabAccentBorder(accent, band.is_dark), tabAccentStrip(accent, band.is_dark) }) |painted| {
         try std.testing.expect(rgbFromColorRef(painted).contrast(band_bg) >= tab_accent_min_contrast);
     }
+
+    // A dark accent is lifted for the dark strip, but a light band takes it
+    // as chosen: the band starts from the Windows color, not the lifted one.
+    const blue = rgb(0x00, 0x63, 0xB1);
+    const lifted = withSystemTabAccent(darkTheme(), true, blue);
+    try std.testing.expect(tabAccent(&lifted) != blue);
+    config.@"window-titlebar-background" = .{ .r = 0xF0, .g = 0xF0, .b = 0xF0 };
+    const light_band = clientTitlebarTheme(&lifted, &config, true, false);
+    try std.testing.expect(!light_band.is_dark);
+    try std.testing.expectEqual(blue, tabAccent(&light_band));
 
     // Not following: the band keeps using the theme accent, untouched.
     const plain = darkTheme();

@@ -62,6 +62,10 @@ pub const ThemeColors = struct {
     /// `accent-follow-system` sets it from the Windows accent color. Read it
     /// through `tabAccent`.
     tab_accent: ?u32 = null,
+    /// The Windows accent `tab_accent` was derived from, as read. A surface
+    /// over another background (a custom titlebar band) derives its own
+    /// readable accent from this, not from the already adjusted `tab_accent`.
+    system_accent: ?u32 = null,
 
     // Buttons - idle
     button_bg: u32,
