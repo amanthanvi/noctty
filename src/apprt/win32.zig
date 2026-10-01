@@ -42345,6 +42345,83 @@ test "win32 overlay dismissal restores focus only from owned controls" {
     try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
 }
 
+fn expectOverlayEditText(host: *Host, expected: []const u8) !void {
+    const text = try readWindowTextUtf8Alloc(std.testing.allocator, host.overlay_edit_hwnd.?);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(expected, text);
+}
+
+test "win32 title prompt refills its text when the active surface changes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    surface_a.tab_title_override = "one";
+    surface_b.tab_title_override = "two";
+
+    // `showOverlay` stops short without the edit and its two buttons, so
+    // give it real ones under a hidden parent. `host.hwnd` stays null, so
+    // the tab strip and layout passes have nothing to do.
+    const parent = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(parent);
+    host.overlay_edit_hwnd = try createTestChromeChild(parent, prompt_edit_class);
+    host.overlay_accept_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    host.overlay_cancel_hwnd = try createTestChromeChild(parent, prompt_button_class);
+    // `Host.deinit` frees these caches, and the session never runs it.
+    defer for ([_]*?[:0]const u8{
+        &host.cached_overlay_edit,
+        &host.cached_overlay_accept,
+        &host.cached_overlay_cancel,
+    }) |cached| {
+        if (cached.*) |value| app.core_app.alloc.free(value);
+        cached.* = null;
+    };
+
+    try host.showOverlay(.tab_title, "one");
+    try std.testing.expectEqual(@as(?*const Surface, &surface_a), host.overlay_text_surface);
+
+    // A refresh on the same tab keeps what the user typed.
+    _ = try host.setOverlayEditText("renamed");
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "renamed");
+
+    // Regression: the text kept tab one's title after a switch, and Enter
+    // wrote it onto tab two.
+    host.active_tab = 1;
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "two");
+    try std.testing.expectEqual(@as(?*const Surface, &surface_b), host.overlay_text_surface);
+
+    host.hideOverlay();
+    try std.testing.expectEqual(@as(?*const Surface, null), host.overlay_text_surface);
+
+    // A search query is the user's own, not the tab's: a switch keeps it.
+    try host.showOverlay(.search, "needle");
+    try std.testing.expectEqual(@as(?*const Surface, null), host.overlay_text_surface);
+    host.active_tab = 0;
+    try host.refreshChrome();
+    try expectOverlayEditText(&host, "needle");
+    host.hideOverlay();
+}
+
 test "win32 host activation keeps focus within transient UI" {
     const edit: HWND = @ptrFromInt(0x10);
     const accept: HWND = @ptrFromInt(0x20);
