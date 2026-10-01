@@ -11355,6 +11355,9 @@ const Host = struct {
     /// unchanged neither re-announces the name nor repaints.
     tab_tooltip_text: ?[:0]const u8 = null,
     tab_tooltip_uia_provider: ?*win32_uia.ChromeControlProvider = null,
+    /// The chrome button the same popup describes instead of a tab (the
+    /// search bar's icon buttons), and the button a click keeps it down for.
+    button_tooltip: ButtonTooltip = .{},
 
     // Command palette list UI. Backed by a custom child HWND shown
     // only while the palette is open. `palette_list_ranked` caches the
@@ -14134,12 +14137,24 @@ const Host = struct {
     /// Hide the tab title tooltip if one is up.
     fn hideTabTooltip(self: *Host) void {
         self.tab_tooltip_tab_id = null;
+        self.button_tooltip.shown = null;
         if (self.tab_tooltip_text) |value| {
             self.app.core_app.alloc.free(value);
             self.tab_tooltip_text = null;
         }
         const hwnd = self.tab_tooltip_hwnd orelse return;
         _ = sys.ShowWindow(hwnd, c.SW_HIDE);
+    }
+
+    /// Name an icon-only search bar button in a tooltip under it. The icons
+    /// are small drawn glyphs, so the name is otherwise only available to
+    /// screen readers. `ButtonTooltip.apply` has already decided the tooltip
+    /// should come up for `button`.
+    fn showSearchButtonTooltip(self: *Host, button: HWND) void {
+        const role = self.searchBarButtonRole(button) orelse return;
+        const text = labels.searchBarButtonName(role);
+        const name_changed = !ownedStringEquals(self.tab_tooltip_text, text);
+        self.presentTooltip(button, sys.IsWindowVisible(button) != 0, text, name_changed, .{ .button = button });
     }
 
     /// Show the full title of the tab drawn by `button`, under that tab.
@@ -14180,7 +14195,7 @@ const Host = struct {
     /// underneath has to keep working either way. `name_changed` says whether
     /// the name the popup reports to UIA differs from what it reported before.
     fn presentTabTooltip(self: *Host, index: usize, name_changed: bool) void {
-        const host_hwnd = self.hwnd orelse return;
+        if (self.hwnd == null) return;
         const tab = &self.tabs.items[index];
         const button = tab.button_hwnd orelse return self.hideTabTooltip();
         const title = tab.cached_button_title orelse return self.hideTabTooltip();
@@ -14206,26 +14221,55 @@ const Host = struct {
         const alloc = self.app.core_app.alloc;
         const text = labels.buildTabTooltipText(alloc, title) catch return;
         defer alloc.free(text);
-        const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
-        defer alloc.free(text_w);
 
-        var button_rect: RECT = undefined;
-        if (sys.GetWindowRect(button, &button_rect) == 0) return;
-        // The tooltip describes what the pointer rests on. A relayout can move
-        // the tab out from under a pointer that has not moved, and the button's
-        // WM_MOUSELEAVE for that arrives on the tracker's own clock, so check
-        // here rather than re-present the popup under a tab nobody points at.
         // The strip's own visibility record is consulted, not the rect: a
         // button that scrolled out of `visibleTabRange` (or a strip turned
         // off by config) is hidden with `ShowWindow` alone and keeps its last
         // rect, which now describes some other tab's slot.
-        var cursor: POINT = undefined;
-        if (sys.GetCursorPos(&cursor) == 0) return self.hideTabTooltip();
         const button_visible = self.shouldShowTabBar() and
             tab.button_placement.visible_known and
             tab.button_placement.visible;
+        self.presentTooltip(button, button_visible, text, name_changed, .{ .tab = tab.id });
+    }
+
+    /// What the shared tooltip popup currently describes.
+    const TooltipOwner = union(enum) {
+        /// A tab whose compacted label hides part of its title.
+        tab: u32,
+        /// A chrome button whose icon needs its name spelled out.
+        button: HWND,
+    };
+
+    /// Show, or update in place, the tooltip popup with `text` under `anchor`.
+    ///
+    /// Shared by the tab strip and the icon-only chrome buttons, so both get
+    /// the same popup, placement and UIA provider. Every step is best-effort:
+    /// a tooltip that cannot be measured, placed or created is simply not
+    /// shown.
+    fn presentTooltip(
+        self: *Host,
+        anchor: HWND,
+        anchor_visible: bool,
+        text: []const u8,
+        name_changed: bool,
+        owner: TooltipOwner,
+    ) void {
+        const host_hwnd = self.hwnd orelse return;
+        const alloc = self.app.core_app.alloc;
+        const text_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, text) catch return;
+        defer alloc.free(text_w);
+
+        var button_rect: RECT = undefined;
+        if (sys.GetWindowRect(anchor, &button_rect) == 0) return;
+        // The tooltip describes what the pointer rests on. A relayout can move
+        // the anchor out from under a pointer that has not moved, and the
+        // button's WM_MOUSELEAVE for that arrives on the tracker's own clock,
+        // so check here rather than re-present the popup under a control
+        // nobody points at.
+        var cursor: POINT = undefined;
+        if (sys.GetCursorPos(&cursor) == 0) return self.hideTabTooltip();
         if (!win32_tab_tooltip.mayPresent(
-            button_visible,
+            anchor_visible,
             .{ .x = cursor.x, .y = cursor.y },
             .{
                 .left = button_rect.left,
@@ -14309,7 +14353,16 @@ const Host = struct {
         const text_changed = !ownedStringEquals(self.tab_tooltip_text, text);
         appendOwnedString(alloc, &self.tab_tooltip_text, text) catch return;
         _ = sys.SetWindowTextW(tooltip, text_w.ptr);
-        self.tab_tooltip_tab_id = tab.id;
+        switch (owner) {
+            .tab => |id| {
+                self.tab_tooltip_tab_id = id;
+                self.button_tooltip.shown = null;
+            },
+            .button => |button| {
+                self.tab_tooltip_tab_id = null;
+                self.button_tooltip.shown = button;
+            },
+        }
         if (name_changed) {
             if (self.tab_tooltip_uia_provider) |provider| provider.raiseNameChanged();
         }
@@ -15582,6 +15635,11 @@ const Host = struct {
     /// UIA name for the tab title tooltip: the full title it exists to show.
     fn tabTooltipUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
+        if (self.button_tooltip.shown != null) {
+            // A button tooltip shows the button's whole name, unshortened.
+            const text = self.tab_tooltip_text orelse return "";
+            return std.fmt.bufPrint(buf, "{s}", .{text}) catch "";
+        }
         const shown = self.tab_tooltip_tab_id orelse return "";
         for (self.tabs.items) |*tab| {
             if (tab.id != shown) continue;
@@ -25107,6 +25165,85 @@ fn overlayPromptTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) 
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+const ButtonTooltipAction = enum {
+    none,
+    show,
+    /// Hide, and keep hidden until a `.hide` for the same button: the pointer
+    /// leaving it, or the button being hidden or destroyed.
+    dismiss,
+    hide,
+};
+
+/// What a message to a `hostButtonProc` button does to the search buttons'
+/// hover tooltip. Only a search button arms the hover that shows one, and a
+/// hide is a no-op for a button whose tooltip is not up, so the proc's other
+/// buttons need no case of their own.
+fn buttonTooltipAction(msg: UINT, wParam: WPARAM) ButtonTooltipAction {
+    return switch (msg) {
+        c.WM_MOUSEHOVER => .show,
+        // A click answers the question the tooltip was there for. Hiding it
+        // is not enough: the BUTTON class releases a left click's capture on
+        // the button-up, the system follows that with a WM_MOUSEMOVE even
+        // when the pointer has not moved, and that re-arms the hover, which
+        // would bring the tooltip back under a still pointer.
+        c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => .dismiss,
+        c.WM_MOUSELEAVE => .hide,
+        // A button hidden under a resting pointer (Escape closing the search
+        // bar, a tab switch) sends no WM_MOUSELEAVE, so its tooltip would
+        // outlive it. `ShowWindow(SW_HIDE)` does send this, whatever hid the
+        // button.
+        c.WM_SHOWWINDOW => if (wParam == 0) .hide else .none,
+        // A pane closing while its window stays open destroys its search
+        // buttons (`Surface.destroy` -> `destroySearchBarControls`) without
+        // hiding them first. `windowDestroyed` clears the hovered button
+        // afterwards, which takes the popup down too, since the popup is only
+        // up for the hovered button; this drops it with the button instead.
+        // Closing the window reaches here as well: each button's own window
+        // data still names the Host, which outlives the buttons, and the
+        // Host's WM_DESTROY has already destroyed the popup
+        // (`destroyChildControls`), so hiding finds no popup to hide.
+        c.WM_DESTROY => .hide,
+        else => .none,
+    };
+}
+
+/// Which `hostButtonProc` button the shared tooltip popup is up for, and which
+/// one a click keeps it down for. It holds no windows, so the order of hovers,
+/// clicks and leaves that decides whether a tooltip comes back can be tested
+/// without the popup or the real cursor.
+const ButtonTooltip = struct {
+    /// The button the popup describes. At most one of this and
+    /// `Host.tab_tooltip_tab_id` is set.
+    shown: ?HWND = null,
+    /// The last clicked button, whether or not its tooltip was up, until the
+    /// pointer leaves it or it is hidden or destroyed. Its tooltip stays down
+    /// meanwhile, as a stock Windows tooltip stays down after a click until
+    /// the pointer leaves the tool.
+    dismissed: ?HWND = null,
+
+    const Effect = enum { none, present, hide };
+
+    /// Record `action` on `button` and say what it does to the popup. The
+    /// caller makes `shown` follow: presenting sets it, hiding clears it.
+    fn apply(self: *ButtonTooltip, action: ButtonTooltipAction, button: HWND) Effect {
+        switch (action) {
+            .none => return .none,
+            .show => {
+                if (self.dismissed == button) return .none;
+                // The hover timer re-arms on every pointer move inside the
+                // button, so this fires repeatedly while the tooltip is up.
+                if (self.shown == button) return .none;
+                return .present;
+            },
+            .dismiss => self.dismissed = button,
+            .hide => {
+                if (self.dismissed == button) self.dismissed = null;
+            },
+        }
+        return if (self.shown == button) .hide else .none;
+    }
+};
+
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
     if (host) |v| {
@@ -25136,6 +25273,11 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         if (msg == c.WM_KEYDOWN) v.noteChromeKeyInput(wParam);
         if (msg == c.WM_LBUTTONDOWN or msg == c.WM_RBUTTONDOWN or msg == c.WM_MBUTTONDOWN) {
             v.noteChromePointerInput();
+        }
+        switch (v.button_tooltip.apply(buttonTooltipAction(msg, wParam), hwnd)) {
+            .none => {},
+            .present => v.showSearchButtonTooltip(hwnd),
+            .hide => v.hideTabTooltip(),
         }
         // Focus-region keys for the tab-strip action buttons and the
         // docked search controls. Overlay buttons are deliberately
@@ -25214,11 +25356,14 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.setFocusedQuickSlot(null);
             },
             c.WM_MOUSEMOVE => {
+                // The search bar's icon buttons also arm TME_HOVER, as the tab
+                // buttons do for their title tooltip, so a dwell names them.
+                const search_button = v.isSearchBarButton(hwnd);
                 var track: TRACKMOUSEEVENT = .{
                     .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                    .dwFlags = c.TME_LEAVE,
+                    .dwFlags = if (search_button) c.TME_LEAVE | c.TME_HOVER else c.TME_LEAVE,
                     .hwndTrack = hwnd,
-                    .dwHoverTime = 0,
+                    .dwHoverTime = if (search_button) c.HOVER_DEFAULT else 0,
                 };
                 _ = sys.TrackMouseEvent(&track);
                 v.setHoveredButton(hwnd);
@@ -27762,14 +27907,7 @@ pub const Surface = struct {
     }
 
     fn searchControlUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
-        return switch (@as(SearchBarButtonRole, @enumFromInt(tag))) {
-            .prev => "Previous match",
-            .next => "Next match",
-            .regex => "Regular expression",
-            .case_sensitive => "Case sensitive",
-            .whole_word => "Whole word",
-            .close => "Close search",
-        };
+        return labels.searchBarButtonName(@enumFromInt(tag));
     }
 
     fn searchToggleUiaState(ctx: *anyopaque, tag: usize) bool {
@@ -43153,6 +43291,82 @@ test "win32 tab button mouse-up only closes when released in close zone" {
         TabButtonMouseUpAction.none,
         tabButtonMouseUpAction(null, false, 40, 100, 3),
     );
+}
+
+test "win32 search button tooltip follows hover, clicks, hiding and destruction" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const cases = [_]struct { msg: UINT, wParam: WPARAM, action: ButtonTooltipAction }{
+        .{ .msg = c.WM_MOUSEHOVER, .wParam = 0, .action = .show },
+        .{ .msg = c.WM_LBUTTONDOWN, .wParam = 0, .action = .dismiss },
+        .{ .msg = c.WM_RBUTTONDOWN, .wParam = 0, .action = .dismiss },
+        .{ .msg = c.WM_MBUTTONDOWN, .wParam = 0, .action = .dismiss },
+        .{ .msg = c.WM_MOUSELEAVE, .wParam = 0, .action = .hide },
+        .{ .msg = c.WM_SHOWWINDOW, .wParam = 0, .action = .hide },
+        .{ .msg = c.WM_SHOWWINDOW, .wParam = 1, .action = .none },
+        .{ .msg = c.WM_DESTROY, .wParam = 0, .action = .hide },
+        // The button-up and the WM_MOUSEMOVE after it neither show nor end
+        // a click's dismissal; leaving, hiding or destroying the button does.
+        .{ .msg = c.WM_LBUTTONUP, .wParam = 0, .action = .none },
+        .{ .msg = c.WM_MOUSEMOVE, .wParam = 0, .action = .none },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.action, buttonTooltipAction(case.msg, case.wParam));
+    }
+}
+
+test "win32 a clicked search button's tooltip stays down until the button is left, hidden or destroyed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const find: HWND = @ptrFromInt(0x10);
+    const next: HWND = @ptrFromInt(0x20);
+    const send = struct {
+        /// Deliver `msg` to `button` as `hostButtonProc` does, with `shown`
+        /// standing in for the popup: presenting puts it up, hiding takes it
+        /// down.
+        fn send(tooltip: *ButtonTooltip, button: HWND, msg: UINT, wParam: WPARAM) ButtonTooltip.Effect {
+            const effect = tooltip.apply(buttonTooltipAction(msg, wParam), button);
+            switch (effect) {
+                .none => {},
+                .present => tooltip.shown = button,
+                .hide => tooltip.shown = null,
+            }
+            return effect;
+        }
+    }.send;
+    const expectEqual = std.testing.expectEqual;
+    var tooltip: ButtonTooltip = .{};
+
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    // The hover re-arms on every move inside the button.
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    try expectEqual(.hide, send(&tooltip, find, c.WM_LBUTTONDOWN, 0));
+    // The button-up, the WM_MOUSEMOVE the system sends after it under a still
+    // pointer, and the hover that move re-arms leave the tooltip down.
+    try expectEqual(.none, send(&tooltip, find, c.WM_LBUTTONUP, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEMOVE, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    // The click holds down only the button it landed on.
+    try expectEqual(.present, send(&tooltip, next, c.WM_MOUSEHOVER, 0));
+    try expectEqual(.hide, send(&tooltip, next, c.WM_MOUSELEAVE, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+
+    // Leaving the button ends the dismissal.
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSELEAVE, 0));
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+
+    // So does hiding it.
+    try expectEqual(.hide, send(&tooltip, find, c.WM_RBUTTONDOWN, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_SHOWWINDOW, 0));
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+
+    // And destroying it, so a later window that reuses the handle starts
+    // with nothing held down.
+    try expectEqual(.hide, send(&tooltip, find, c.WM_MBUTTONDOWN, 0));
+    try expectEqual(.none, send(&tooltip, find, c.WM_DESTROY, 0));
+    try expectEqual(@as(?HWND, null), tooltip.dismissed);
+    try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
 }
 
 test "win32 caption buttons are painted only while the window is on screen" {
