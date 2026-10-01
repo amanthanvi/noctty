@@ -2146,6 +2146,20 @@ keybind: Keybinds = .{},
 /// Supported in the Windows-only fork.
 @"window-theme": WindowTheme = .auto,
 
+/// Follow the Windows accent color (Settings > Personalization > Colors) in
+/// the window chrome. When `false`, the chrome keeps the built-in accent of
+/// the resolved `window-theme`.
+///
+/// The tab strip is the first part of the chrome that follows it: the active
+/// tab's border and underline, and the accent strip above a separate tab row.
+/// The color is lightened or darkened only as far as needed to stay readable
+/// against the tab strip. Changing the Windows accent applies immediately.
+/// Windows High Contrast always uses system colors, regardless of this
+/// setting.
+///
+/// Supported in the Windows-only fork.
+@"accent-follow-system": bool = true,
+
 /// The color space to use when interpreting terminal colors. "Terminal colors"
 /// refers to colors specified in your configuration and colors produced by
 /// direct-color SGR sequences.
