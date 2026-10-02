@@ -12,6 +12,7 @@ const Screen = @import("Screen.zig");
 const modes = @import("modes.zig");
 const osc_color = @import("osc/parsers/color.zig");
 const kitty_color = @import("kitty/color.zig");
+const osc = @import("osc.zig");
 const size_report = @import("size_report.zig");
 const Terminal = @import("Terminal.zig");
 
@@ -85,6 +86,19 @@ pub const Handler = struct {
         /// is 256 bytes; longer strings will be silently ignored.
         xtversion: ?*const fn (*Handler) []const u8,
 
+        /// Called when the running program sends a program status report
+        /// (OSC 7501). Programs use these to say what they are doing, such
+        /// as working, done, or waiting on the user. The report's
+        /// text is only valid until this returns, so copy what you keep.
+        ///
+        /// A full reset (RIS) removes every record. When that happens, the
+        /// terminal calls this with a `clear` report without an id.
+        ///
+        /// Setting this also makes the terminal answer the support query,
+        /// `OSC 7501 ; ?`, through `write_pty`. While this is null, the
+        /// query gets no reply, so programs know not to send reports.
+        program_status: ?*const fn (*Handler, osc.Command.ProgramStatus.Report) void,
+
         /// No effects means that the stream effectively becomes readonly
         /// that only affects pure terminal state and ignores all side
         /// effects beyond that.
@@ -93,6 +107,7 @@ pub const Handler = struct {
             .color_scheme = null,
             .device_attributes = null,
             .enquiry = null,
+            .program_status = null,
             .size = null,
             .title_changed = null,
             .write_pty = null,
@@ -229,7 +244,10 @@ pub const Handler = struct {
             },
             .active_status_display => self.terminal.status_display = value,
             .decaln => try self.terminal.decaln(),
-            .full_reset => self.terminal.fullReset(),
+            .full_reset => {
+                self.terminal.fullReset();
+                self.programStatusReport(.{ .state = .clear });
+            },
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
             .semantic_prompt => try self.terminal.semanticPrompt(value),
@@ -253,6 +271,7 @@ pub const Handler = struct {
             .size_report => self.reportSize(value),
             .window_title => self.windowTitle(value.title),
             .xtversion => self.reportXtversion(),
+            .program_status => self.programStatus(value),
 
             // No supported DCS commands have any terminal-modifying effects,
             // but they may in the future. For now we just ignore it.
@@ -275,6 +294,30 @@ pub const Handler = struct {
     inline fn writePty(self: *Handler, data: [:0]const u8) void {
         const func = self.effects.write_pty orelse return;
         func(self, data);
+    }
+
+    fn programStatus(self: *Handler, cmd: osc.Command.ProgramStatus) void {
+        switch (cmd) {
+            .report => |report| self.programStatusReport(report),
+
+            // Only claim support when something handles the reports. The
+            // reply is always the same fixed bytes. The specification
+            // never allows sending report contents back to the program.
+            .query => |terminator| if (self.effects.program_status != null) {
+                self.writePty(switch (terminator) {
+                    .st => "\x1b]7501;?\x1b\\",
+                    .bel => "\x1b]7501;?\x07",
+                });
+            },
+        }
+    }
+
+    fn programStatusReport(
+        self: *Handler,
+        report: osc.Command.ProgramStatus.Report,
+    ) void {
+        const func = self.effects.program_status orelse return;
+        func(self, report);
     }
 
     fn bell(self: *Handler) void {
@@ -1964,6 +2007,103 @@ test "semantic prompt end_prompt_start_input_terminate_eol clears on linefeed" {
     // Linefeed should reset semantic content to output
     s.nextSlice("\n");
     try testing.expectEqual(.output, t.screens.active.cursor.semantic_content);
+}
+
+test "program_status effect callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var count: usize = 0;
+        var last_state: ?osc.Command.ProgramStatus.State = null;
+        var last_id: [64]u8 = undefined;
+        var last_id_len: ?usize = null;
+        var last_message: [64]u8 = undefined;
+        var last_message_len: ?usize = null;
+        var written: [64]u8 = undefined;
+        var written_len: usize = 0;
+
+        fn reset() void {
+            count = 0;
+            last_state = null;
+            last_id_len = null;
+            last_message_len = null;
+            written_len = 0;
+        }
+
+        fn programStatus(_: *Handler, report: osc.Command.ProgramStatus.Report) void {
+            count += 1;
+            last_state = report.state;
+            last_id_len = if (report.readOption(.id)) |v| copy(&last_id, v) else null;
+            var message: std.Io.Writer = .fixed(&last_message);
+            report.writeText(.msg, &message) catch unreachable;
+            last_message_len = message.buffered().len;
+        }
+
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            written_len += copy(written[written_len..], data);
+        }
+
+        fn copy(dst: []u8, src: []const u8) usize {
+            @memcpy(dst[0..src.len], src);
+            return src.len;
+        }
+    };
+
+    // Without a callback, reports are ignored and the query isn't
+    // answered so the program sees the protocol as unsupported.
+    {
+        S.reset();
+        var handler: Handler = .init(&t);
+        handler.effects.write_pty = &S.writePty;
+        var s: Stream = .initAlloc(testing.allocator, handler);
+        defer s.deinit();
+        s.nextSlice("\x1b]7501;?\x1b\\\x1b]7501;state=idle\x1b\\");
+        try testing.expectEqual(@as(usize, 0), S.written_len);
+    }
+
+    S.reset();
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.program_status = &S.programStatus;
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // The query is answered once with the same body and terminator.
+    s.nextSlice("\x1b]7501;?\x1b\\");
+    try testing.expectEqualStrings("\x1b]7501;?\x1b\\", S.written[0..S.written_len]);
+    S.written_len = 0;
+    s.nextSlice("\x1b]7501;?\x07");
+    try testing.expectEqualStrings("\x1b]7501;?\x07", S.written[0..S.written_len]);
+    try testing.expectEqual(@as(usize, 0), S.count);
+    S.written_len = 0;
+
+    // A report split across writes. "Syncing photos"
+    s.nextSlice("\x1b]7501;state=working:id=sync:msg=U3lu");
+    try testing.expectEqual(@as(usize, 0), S.count);
+    s.nextSlice("Y2luZyBwaG90b3M=\x1b\\");
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqual(.working, S.last_state.?);
+    try testing.expectEqualStrings("sync", S.last_id[0..S.last_id_len.?]);
+    try testing.expectEqualStrings("Syncing photos", S.last_message[0..S.last_message_len.?]);
+
+    // A body over the limit is discarded whole, even with an allocator
+    // that could hold it. The unknown key keeps every other limit out of
+    // play, so only the sequence size can discard this report.
+    s.nextSlice("\x1b]7501;state=done:pad=");
+    for (0..osc.program_status.max_sequence_bytes) |_| s.nextSlice("a");
+    s.nextSlice("\x1b\\");
+    try testing.expectEqual(@as(usize, 1), S.count);
+
+    // A full reset clears every record.
+    s.nextSlice("\x1bc");
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(.clear, S.last_state.?);
+    try testing.expect(S.last_id_len == null);
+    try testing.expectEqual(@as(?usize, 0), S.last_message_len);
+
+    // Nothing from the reports was echoed back.
+    try testing.expectEqual(@as(usize, 0), S.written_len);
 }
 
 test "bell effect callback" {

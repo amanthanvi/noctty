@@ -41,6 +41,7 @@ pub const structs: std.StaticStringMap(StructInfo) = .initComptime(.{
     .{ "GhosttyStyle", StructInfo.init(style_c.Style) },
     .{ "GhosttyStyleColor", StructInfo.init(style_c.Color) },
     .{ "GhosttyTerminalOptions", StructInfo.init(terminal.Options) },
+    .{ "GhosttyTerminalProgramStatus", StructInfo.init(terminal.ProgramStatus) },
     .{ "GhosttyTerminalScrollbar", StructInfo.init(terminal.TerminalScrollbar) },
     .{ "GhosttyTerminalScrollViewport", StructInfo.init(terminal.ScrollViewport) },
 });
