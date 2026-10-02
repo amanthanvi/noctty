@@ -395,3 +395,13 @@ test "encode" {
     try ghostty.encode(&writer);
     try std.testing.expect(writer.buffered().len > 0);
 }
+
+test "compile" {
+    // The Windows build compiles this entry with our own encoder, which
+    // rejects what it cannot encode as tic would (a duplicate, a predefined
+    // capability with the wrong type). Fail here rather than in the build.
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try @import("compiled.zig").encode(std.testing.allocator, ghostty, &out.writer);
+    try std.testing.expect(out.written().len > 0);
+}

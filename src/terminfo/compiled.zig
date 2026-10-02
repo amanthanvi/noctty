@@ -2,8 +2,13 @@
 //! See term(5): https://invisible-island.net/ncurses/man/term.5.html
 //!
 //! Windows has no `tic`, so the Windows build compiles our entry with this
-//! encoder. For the sources it accepts it writes the same bytes as ncurses 6
-//! `tic -x`, which the tests pin against entries compiled by tic.
+//! encoder. For a source written with short capability names, as ours is, it
+//! writes the same bytes as ncurses 6 `tic -x`; the tests pin that against
+//! entries compiled by tic. It does not know tic's aliases (`kbtab` for `kcbt`)
+//! or long names (`auto_right_margin`), stores them as extended capabilities,
+//! and does not check extended names against ncurses' table of known
+//! extensions. An extended number above 32767 makes it write 32-bit numbers,
+//! where tic writes 16-bit ones and truncates it.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -561,6 +566,31 @@ test "encode matches tic with 32-bit numbers" {
     defer out.deinit();
     try encode(std.testing.allocator, src, &out.writer);
     try std.testing.expectEqualSlices(u8, @embedFile("testdata/wide-term"), out.written());
+}
+
+test "encode matches tic for a canceled boolean after the last true one" {
+    // testdata/canceled-term was compiled by `tic -x` (ncurses 6.6.20251230)
+    // from:
+    //
+    //   canceled-term|Canceled Boolean,
+    //       am, km@,
+    //       colors#8,
+    //
+    // tic writes booleans only up to the last true one, so the canceled km
+    // (index 8) leaves the section 2 bytes long, after am (index 1).
+    const src: Source = .{
+        .names = &.{ "canceled-term", "Canceled Boolean" },
+        .capabilities = &.{
+            .{ .name = "am", .value = .{ .boolean = {} } },
+            .{ .name = "km", .value = .{ .canceled = {} } },
+            .{ .name = "colors", .value = .{ .numeric = 8 } },
+        },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try encode(std.testing.allocator, src, &out.writer);
+    try std.testing.expectEqualSlices(u8, @embedFile("testdata/canceled-term"), out.written());
 }
 
 test "encode rejects what tic would resolve or reject differently" {

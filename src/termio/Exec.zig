@@ -101,43 +101,79 @@ fn addGhosttyBinToPath(
     try env.put("PATH", updated_path);
 }
 
-/// Point TERMINFO at our terminfo database on Windows. Its readers there are
-/// ncurses ports on the MSYS2 and Cygwin runtimes: less (git's pager), vim,
-/// nano and tput from Git for Windows, MSYS2 or Cygwin. Their ncurses splits
-/// TERMINFO on ':', so a Windows path `C:\noctty\share\terminfo` is searched as
-/// a directory `C` relative to the current directory, where a cloned
-/// repository can supply the entry git's pager uses, and then as
-/// `\noctty\share\terminfo` on the current directory's drive, which misses
-/// from any other drive. Both runtimes read `/proc/cygdrive/c/...` as an
-/// absolute path on drive C.
+/// Export TERM, COLORTERM and TERMINFO for our terminfo database in `dir`.
 ///
-/// MSYS2 rewrites a value that looks like a POSIX path into a Windows path
-/// when it starts a native program, so Git Bash starting git.exe, which starts
-/// less, would hand less `C:/noctty/share/terminfo` again. MSYS2_ENV_CONV_EXCL
-/// exempts TERMINFO from that rewrite.
+/// On Windows the readers of our entry are ncurses ports on the MSYS2 and
+/// Cygwin runtimes: less (git's pager), vim, nano and tput from Git for
+/// Windows, MSYS2 or Cygwin. Their ncurses splits TERMINFO on ':', so a
+/// Windows path `C:\noctty\share\terminfo` is searched as a directory `C`
+/// relative to the current directory, where a cloned repository can supply
+/// the entry git's pager uses, and then as `\noctty\share\terminfo` on the
+/// current directory's drive, which misses from any other drive. TERMINFO
+/// therefore takes the form cygwinPath gives, which both runtimes read as
+/// absolute. A path without that form cannot be exported safely, so TERM
+/// falls back to xterm-256color, as it does with no resources directory, and
+/// an inherited TERMINFO is dropped.
 ///
-/// Native Windows programs that read terminfo files themselves do not
-/// understand this form. Before the database was compiled for Windows they had
-/// no entry to find here either.
-fn putWindowsTerminfo(alloc: Allocator, env: *EnvMap, dir: []const u8) !void {
-    const cygwin_dir = try cygwinPath(alloc, dir) orelse {
-        // The Windows form would have ncurses search relative directories.
-        log.warn("not setting TERMINFO, path has no MSYS2/Cygwin form path={s}", .{dir});
-        return;
-    };
-    defer alloc.free(cygwin_dir);
-    try env.put("TERMINFO", cygwin_dir);
-
-    const excl_key = "MSYS2_ENV_CONV_EXCL";
-    const excl_entry = "TERMINFO=";
-    const current = env.get(excl_key) orelse "";
-    var it = std.mem.splitScalar(u8, current, ';');
-    while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry, excl_entry)) return;
+/// No value is absolute to every reader. Native Windows programs that read
+/// terminfo files themselves (Neovim through unibilium, Helix) resolve
+/// `/proc/cygdrive/...` against the root of the current drive, so they do not
+/// find our entry and fall back to their own, but they would read one that
+/// another user of the machine planted under `<drive>:\proc`.
+///
+/// Returns the TERMINFO value exported on Windows, allocated with `alloc`,
+/// for exemptTerminfoFromMsysConversion. Returns null on other platforms.
+fn putTermEnv(
+    alloc: Allocator,
+    env: *EnvMap,
+    term: []const u8,
+    dir: []const u8,
+) !?[]const u8 {
+    try env.put("COLORTERM", "truecolor");
+    if (comptime builtin.os.tag != .windows) {
+        try env.put("TERM", term);
+        try env.put("TERMINFO", dir);
+        return null;
     }
-    const updated = try internal_os.appendEnv(alloc, current, excl_entry);
+
+    const terminfo = try cygwinPath(alloc, dir) orelse {
+        log.warn("terminfo path has no MSYS2/Cygwin form, using xterm-256color path={s}", .{dir});
+        try env.put("TERM", "xterm-256color");
+        env.remove("TERMINFO");
+        return null;
+    };
+    try env.put("TERM", term);
+    try env.put("TERMINFO", terminfo);
+    return terminfo;
+}
+
+/// MSYS2 rewrites an environment value that looks like a POSIX path into a
+/// Windows path when it starts a native program, so Git Bash starting
+/// git.exe, which starts less, would hand less `C:/noctty/share/terminfo`
+/// and the problems putTermEnv avoids. Add `TERMINFO=` to
+/// MSYS2_ENV_CONV_EXCL, whose entries are prefixes of `NAME=VALUE`, so only
+/// TERMINFO is exempt. This runs after the configured `env` overrides, so a
+/// configured MSYS2_ENV_CONV_EXCL keeps the exemption, and only while
+/// TERMINFO still holds `terminfo`, the value putTermEnv exported. A shell
+/// startup file that replaces MSYS2_ENV_CONV_EXCL still drops it.
+fn exemptTerminfoFromMsysConversion(
+    alloc: Allocator,
+    env: *EnvMap,
+    terminfo: []const u8,
+) !void {
+    const current_terminfo = env.get("TERMINFO") orelse return;
+    if (!std.mem.eql(u8, current_terminfo, terminfo)) return;
+
+    const key = "MSYS2_ENV_CONV_EXCL";
+    const entry = "TERMINFO=";
+    const current = env.get(key) orelse "";
+    var it = std.mem.splitScalar(u8, current, ';');
+    while (it.next()) |existing| {
+        if (std.mem.eql(u8, existing, entry)) return;
+    }
+    const updated = try internal_os.appendEnv(alloc, current, entry);
     defer alloc.free(updated);
-    try env.put(excl_key, updated);
+    try env.put(key, updated);
 }
 
 /// Convert an absolute Windows path into the form the MSYS2 and Cygwin
@@ -901,21 +937,15 @@ const Subprocess = struct {
         //
         // For now, we just look up a bundled dir but in the future we should
         // also load the terminfo database and look for it.
+        var windows_terminfo: ?[]const u8 = null;
         if (cfg.resources_dir) |base| {
-            try env.put("TERM", cfg.term);
-            try env.put("COLORTERM", "truecolor");
-
             // Assume that the resources directory is adjacent to the terminfo
             // database
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const dir = try std.fmt.bufPrint(&buf, "{s}/terminfo", .{
                 std.fs.path.dirname(base) orelse unreachable,
             });
-            if (comptime builtin.os.tag == .windows) {
-                try putWindowsTerminfo(alloc, &env, dir);
-            } else {
-                try env.put("TERMINFO", dir);
-            }
+            windows_terminfo = try putTermEnv(alloc, &env, cfg.term, dir);
         } else {
             if (comptime builtin.target.os.tag.isDarwin()) {
                 log.warn("ghostty terminfo not found, using xterm-256color", .{});
@@ -1079,6 +1109,9 @@ const Subprocess = struct {
                 entry.key_ptr.*,
                 entry.value_ptr.*,
             );
+        }
+        if (windows_terminfo) |terminfo| {
+            try exemptTerminfoFromMsysConversion(alloc, &env, terminfo);
         }
 
         // Build our args list
@@ -2366,47 +2399,79 @@ test "cygwinPath" {
     }
 }
 
-test "putWindowsTerminfo exports the Cygwin path and exempts it from MSYS2 conversion" {
+test "putTermEnv exports TERM and the Cygwin form of TERMINFO" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
+    const testing = std.testing;
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    const terminfo = try putTermEnv(
+        arena.allocator(),
+        &env,
+        "xterm-ghostty",
+        "C:\\Program Files\\noctty/share/terminfo",
+    );
+    try testing.expectEqualStrings("/proc/cygdrive/c/Program Files/noctty/share/terminfo", terminfo.?);
+    try testing.expectEqualStrings(terminfo.?, env.get("TERMINFO").?);
+    try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
+    try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
+}
+
+test "putTermEnv falls back to xterm-256color without a Cygwin form" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena: ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    // As a noctty started from a noctty shell inherits it.
+    try env.put("TERMINFO", "C:\\noctty\\share\\terminfo");
+    try testing.expectEqual(null, try putTermEnv(arena.allocator(), &env, "xterm-ghostty", "share/terminfo"));
+    try testing.expectEqual(null, env.get("TERMINFO"));
+    try testing.expectEqualStrings("xterm-256color", env.get("TERM").?);
+    try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
+}
+
+test "exemptTerminfoFromMsysConversion adds TERMINFO= once" {
     const testing = std.testing;
     var env: EnvMap = .init(testing.allocator);
     defer env.deinit();
 
-    try putWindowsTerminfo(testing.allocator, &env, "C:\\Program Files\\noctty/share/terminfo");
-    try testing.expectEqualStrings(
-        "/proc/cygdrive/c/Program Files/noctty/share/terminfo",
-        env.get("TERMINFO").?,
-    );
+    const terminfo = "/proc/cygdrive/c/noctty/share/terminfo";
+    try env.put("TERMINFO", terminfo);
+    try exemptTerminfoFromMsysConversion(testing.allocator, &env, terminfo);
     try testing.expectEqualStrings("TERMINFO=", env.get("MSYS2_ENV_CONV_EXCL").?);
 
-    // A noctty started from a noctty shell inherits both; nothing is repeated.
-    try putWindowsTerminfo(testing.allocator, &env, "C:\\Program Files\\noctty/share/terminfo");
+    // A noctty started from a noctty shell inherits the exemption.
+    try exemptTerminfoFromMsysConversion(testing.allocator, &env, terminfo);
     try testing.expectEqualStrings("TERMINFO=", env.get("MSYS2_ENV_CONV_EXCL").?);
 }
 
-test "putWindowsTerminfo keeps existing MSYS2 exemptions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
+test "exemptTerminfoFromMsysConversion keeps existing exemptions" {
     const testing = std.testing;
     var env: EnvMap = .init(testing.allocator);
     defer env.deinit();
 
+    // As a configured `env = MSYS2_ENV_CONV_EXCL=...` leaves it.
+    const terminfo = "/proc/cygdrive/d/noctty/share/terminfo";
+    try env.put("TERMINFO", terminfo);
     try env.put("MSYS2_ENV_CONV_EXCL", "MY_VAR;OTHER=");
-    try putWindowsTerminfo(testing.allocator, &env, "D:\\noctty\\share\\terminfo");
-    try testing.expectEqualStrings("/proc/cygdrive/d/noctty/share/terminfo", env.get("TERMINFO").?);
+    try exemptTerminfoFromMsysConversion(testing.allocator, &env, terminfo);
     try testing.expectEqualStrings("MY_VAR;OTHER=;TERMINFO=", env.get("MSYS2_ENV_CONV_EXCL").?);
 }
 
-test "putWindowsTerminfo leaves TERMINFO unset without an absolute path" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
+test "exemptTerminfoFromMsysConversion leaves a configured TERMINFO alone" {
     const testing = std.testing;
     var env: EnvMap = .init(testing.allocator);
     defer env.deinit();
 
-    try putWindowsTerminfo(testing.allocator, &env, "share/terminfo");
-    try testing.expectEqual(null, env.get("TERMINFO"));
+    try env.put("TERMINFO", "/home/me/.terminfo");
+    try exemptTerminfoFromMsysConversion(testing.allocator, &env, "/proc/cygdrive/c/noctty/share/terminfo");
     try testing.expectEqual(null, env.get("MSYS2_ENV_CONV_EXCL"));
 }
 
