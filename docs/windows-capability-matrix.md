@@ -76,7 +76,7 @@ Last reviewed: 2026-09-02.
 | Tab overview                                                                      | The bindable `toggle_tab_overview` action opens a numeric tab switcher; it has no default keybind.                                                                                                                   |
 | Drag and drop                                                                     | Each pane accepts files, plain text, URLs, and HTML. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                        |
 | Opt-in child-process limits                                                       | Retained `linux-cgroup*` keys map to Job Objects for Windows-local children only. See [child-process limits](#child-process-limits).                                                                                 |
-| `TERM` and terminfo                                                               | Children get `TERM=xterm-ghostty`, and its compiled entry is installed where Git for Windows tools such as `less`, `vim` and `tput` find it from any drive. See [terminfo](#terminfo).                               |
+| `TERM` and terminfo                                                               | Children get `TERM=xterm-ghostty`, with its compiled entry installed where Git for Windows tools such as `less`, `vim` and `tput` find it, or `xterm-256color` where it cannot be. See [terminfo](#terminfo).        |
 
 ## Notes
 
@@ -162,26 +162,32 @@ that:
   `share\terminfo`, in the hex-directory layout (`78\xterm-ghostty`) that
   ncurses uses on Windows. The Windows build compiles them itself, byte for
   byte as ncurses 6.6 `tic -x` does.
-- At startup noctty installs the same entries into `.terminfo` under the
-  `HOME` that Git for Windows gives its tools: `HOME`, else `HOMEDRIVE` +
-  `HOMEPATH` when that folder exists, else `USERPROFILE`. That is usually
-  `%USERPROFILE%\.terminfo\78\xterm-ghostty` and `67\ghostty`. Git for
-  Windows' `less`, `vim`, `nano` and `tput` search that folder from every
-  drive and through every chain of programs.
+- At startup noctty installs the same entries into `.terminfo` under the home
+  that Git for Windows gives its tools: `HOME` if set, else `HOMEDRIVE` +
+  `HOMEPATH`. That is usually `%USERPROFILE%\.terminfo\78\xterm-ghostty` and
+  `67\ghostty`. Git for Windows' `less`, `vim`, `nano` and `tput` find them
+  there whichever drive the current directory is on, whether they are started
+  from PowerShell, from git, or from Git Bash.
 - It never replaces a file it did not write. It records the SHA-256 of the
-  entry it installed in `%LOCALAPPDATA%\noctty\terminfo-install.sha256`, and
-  updates a file only while that file still holds the recorded entry. Nothing
-  is installed in portable mode, which leaves nothing on the host, or when
-  `term` names another entry.
+  entry it installed in `.terminfo\.noctty-installed`, and updates a file only
+  while that file still holds the recorded entry.
+- It installs nothing in portable mode, which leaves nothing on the host, or
+  when `term` names another entry.
+- It also installs nothing where it cannot safely know that home:
+  - a home on a network share or mapped network drive, which a disconnected
+    share would let block startup and every new tab;
+  - `HOMEDRIVE` + `HOMEPATH` that is not a folder, where git.exe falls back
+    to `USERPROFILE` but a tool started directly does not;
+  - a `HOME` that is not an absolute Windows path.
 - `TERMINFO` is not exported on Windows. Those tools' ncurses splits it on
   `:`, so a `C:\...` path is searched as a directory `C` relative to the
   current directory, where a cloned repository can supply the entry. A
   `/proc/cygdrive/...` path is read by native Windows programs such as Neovim
   and Helix as a folder at the root of the current drive, which another
   account can create.
-- `TERM` falls back to `xterm-256color` when it names noctty's entry and that
-  folder lacks it, for example in portable mode. `TERM_PROGRAM=ghostty` is set
-  either way.
+- `TERM` falls back to `xterm-256color` whenever it names noctty's entry and
+  the child's home has no such entry, for example in portable mode.
+  `TERM_PROGRAM=ghostty` is set either way.
 - Standalone MSYS2 and Cygwin keep `HOME` under their own `/home` and do not
   see the entry. Their `less` and `tput` still report `xterm-ghostty` as
   unknown unless you copy the two files into that `.terminfo` folder or set

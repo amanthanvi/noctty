@@ -126,10 +126,11 @@ fn putTermEnv(env: *EnvMap, term: []const u8, dir: []const u8) !void {
     }
 }
 
-/// Settle TERM on Windows: when `term` names our entry and the per-user
-/// terminfo directory for the child's environment lacks it (portable mode, a
-/// failed install, a configured HOME elsewhere), fall back to xterm-256color,
-/// as with no resources directory. TERM_PROGRAM still says ghostty.
+/// Settle TERM on Windows: when `term` names our entry and the child's
+/// environment gives no per-user terminfo directory with it (portable mode, a
+/// failed install, a configured HOME elsewhere, a home on the network, a home
+/// git.exe and the MSYS2 runtime disagree on), fall back to xterm-256color, as
+/// with no resources directory. TERM_PROGRAM still says ghostty.
 fn putWindowsTerm(
     alloc: Allocator,
     env: *EnvMap,
@@ -147,7 +148,7 @@ fn putWindowsTerm(
     else
         false;
     if (!installed) {
-        log.warn("no terminfo entry for TERM={s} in the per-user directory, using xterm-256color", .{term});
+        log.info("no terminfo entry for TERM={s} in the per-user directory, using xterm-256color", .{term});
         try env.put("TERM", "xterm-256color");
     }
 }

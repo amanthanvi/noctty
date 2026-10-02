@@ -3146,13 +3146,11 @@ fn installTerminfo(alloc: Allocator, term: []const u8) void {
     var env = std.process.getEnvMap(alloc) catch return;
     defer env.deinit();
     const dir = (win32_terminfo.homeTerminfoDir(alloc, &env) catch null) orelse {
-        log.info("terminfo install skipped: HOME, HOMEDRIVE+HOMEPATH and USERPROFILE give no absolute path", .{});
+        log.info("terminfo install skipped: no local home that git.exe and the MSYS2 runtime agree on", .{});
         return;
     };
     defer alloc.free(dir);
-    const state = localAppDataPathAlloc(alloc, "terminfo-install.sha256") orelse return;
-    defer alloc.free(state);
-    const result = win32_terminfo.install(alloc, terminfo.ghostty, dir, state);
+    const result = win32_terminfo.install(alloc, terminfo.ghostty, dir);
     log.info("terminfo install dir={s} result={s}", .{ dir, @tagName(result) });
 }
 
