@@ -54,7 +54,9 @@ pub fn homeTerminfoDir(
 }
 
 fn homeDir(alloc: Allocator, env: *const std.process.EnvMap) Allocator.Error!?[]u8 {
-    if (getEnv(env, "HOME")) |home| return try localAbsolute(alloc, home);
+    // git.exe keeps a HOME that is set even when it is empty, so an empty one
+    // gives none rather than the fallbacks below.
+    if (env.get("HOME")) |home| return try localAbsolute(alloc, home);
 
     const drive = getEnv(env, "HOMEDRIVE");
     const path = getEnv(env, "HOMEPATH");
@@ -105,21 +107,19 @@ fn isDirectory(path: []const u8) bool {
     return true;
 }
 
-/// Whether the database in `terminfo_dir` has a compiled entry for `term`: a
-/// file that starts with a terminfo header. An empty or foreign file there
+/// Whether the database in `terminfo_dir` has a compiled entry for `term`
+/// (see `terminfo.compiled.isEntry`). An empty, foreign or cut-off file there
 /// would leave ncurses without an entry just the same.
-pub fn hasEntry(terminfo_dir: []const u8, term: []const u8) bool {
+pub fn hasEntry(alloc: Allocator, terminfo_dir: []const u8, term: []const u8) bool {
     if (term.len == 0) return false;
     var dir = std.fs.openDirAbsolute(terminfo_dir, .{}) catch return false;
     defer dir.close();
     const hex = terminfo.compiled.hexDir(term);
     var sub_dir = dir.openDir(&hex, .{}) catch return false;
     defer sub_dir.close();
-    const file = sub_dir.openFile(term, .{}) catch return false;
-    defer file.close();
-    var header: [terminfo.compiled.header_size]u8 = undefined;
-    const len = file.readAll(&header) catch return false;
-    return terminfo.compiled.isHeader(header[0..len]);
+    const data = sub_dir.readFileAlloc(alloc, term, terminfo.compiled.max_entry_size) catch return false;
+    defer alloc.free(data);
+    return terminfo.compiled.isEntry(data);
 }
 
 pub const InstallResult = enum {
@@ -335,9 +335,9 @@ test "install writes every name and then finds them current" {
         try testing.expectEqualSlices(u8, entry, data);
     }
     try testing.expectEqual(sha256(entry), paths.recorded().?);
-    try testing.expect(hasEntry(paths.db, "xterm-test"));
-    try testing.expect(hasEntry(paths.db, "test"));
-    try testing.expect(!hasEntry(paths.db, "Test Terminal"));
+    try testing.expect(hasEntry(testing.allocator, paths.db, "xterm-test"));
+    try testing.expect(hasEntry(testing.allocator, paths.db, "test"));
+    try testing.expect(!hasEntry(testing.allocator, paths.db, "Test Terminal"));
 
     try testing.expectEqual(.current, install(testing.allocator, test_source, paths.db));
 
@@ -384,7 +384,7 @@ test "install keeps entries that were there before it ever wrote one" {
     try testing.expectEqualStrings("the user's entry", kept);
 
     // The missing one was written.
-    try testing.expect(hasEntry(paths.db, "test"));
+    try testing.expect(hasEntry(testing.allocator, paths.db, "test"));
 }
 
 test "install counts a file that already holds the entry as its own" {
@@ -439,18 +439,23 @@ test "hasEntry wants a compiled entry" {
     defer paths.deinit();
 
     try paths.put("78/xterm-test", "");
-    try testing.expect(!hasEntry(paths.db, "xterm-test"));
+    try testing.expect(!hasEntry(testing.allocator, paths.db, "xterm-test"));
     try paths.put("78/xterm-test", "not a terminfo entry at all");
-    try testing.expect(!hasEntry(paths.db, "xterm-test"));
+    try testing.expect(!hasEntry(testing.allocator, paths.db, "xterm-test"));
 
     const entry = try testEntry(test_source);
     defer testing.allocator.free(entry);
+    try paths.put("78/xterm-test", entry[0 .. entry.len - 1]);
+    try testing.expect(!hasEntry(testing.allocator, paths.db, "xterm-test"));
     try paths.put("78/xterm-test", entry);
-    try testing.expect(hasEntry(paths.db, "xterm-test"));
-    try testing.expect(!hasEntry(paths.db, "xterm-other"));
+    try testing.expect(hasEntry(testing.allocator, paths.db, "xterm-test"));
+    try testing.expect(!hasEntry(testing.allocator, paths.db, "xterm-other"));
 }
 
 test "homeTerminfoDir follows where Git's tools look" {
+    // Windows paths, and drive types only Windows can report.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
     var paths: TestPaths = try .init();
     defer paths.deinit();
     var env: std.process.EnvMap = .init(testing.allocator);
@@ -492,6 +497,12 @@ test "homeTerminfoDir follows where Git's tools look" {
     try env.put("HOME", "/c/Users/me");
     try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
     try env.put("HOME", "\\\\server\\homes\\me");
+    try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
+
+    // git.exe keeps an empty HOME rather than looking further.
+    try env.put("HOME", "");
+    try env.put("HOMEDRIVE", paths.root[0..2]);
+    try env.put("HOMEPATH", paths.root[2..]);
     try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
 }
 

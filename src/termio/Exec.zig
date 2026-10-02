@@ -144,7 +144,7 @@ fn putWindowsTerm(
     const home_terminfo = try apprt.win32_terminfo.homeTerminfoDir(alloc, env);
     defer if (home_terminfo) |path| alloc.free(path);
     const installed = if (home_terminfo) |path|
-        apprt.win32_terminfo.hasEntry(path, term)
+        apprt.win32_terminfo.hasEntry(alloc, path, term)
     else
         false;
     if (!installed) {

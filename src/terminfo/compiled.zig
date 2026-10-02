@@ -24,17 +24,39 @@ const magic_32bit: i32 = 0o1036;
 
 /// The size of the header every compiled entry starts with: six 16-bit
 /// values, the first of them the magic number.
-pub const header_size = 12;
+const header_size = 12;
 
-/// Whether `bytes` begin with a compiled entry's header.
-pub fn isHeader(bytes: []const u8) bool {
+/// Whether `bytes` hold a whole compiled entry, as far as its header tells:
+/// a known magic number, and the names, booleans, numbers, string offsets and
+/// string table the header declares all present. ncurses rejects a file that
+/// ends before them. The extended section that may follow is not checked.
+pub fn isEntry(bytes: []const u8) bool {
     if (bytes.len < header_size) return false;
     const magic = std.mem.readInt(u16, bytes[0..2], .little);
-    return magic == magic_legacy or magic == magic_32bit;
+    const number_size: usize = if (magic == magic_legacy)
+        2
+    else if (magic == magic_32bit)
+        4
+    else
+        return false;
+
+    var counts: [5]usize = undefined;
+    for (&counts, 0..) |*count, i| {
+        const offset = 2 + i * 2;
+        const value = std.mem.readInt(i16, bytes[offset..][0..2], .little);
+        if (value < 0) return false;
+        count.* = @intCast(value);
+    }
+    const names, const booleans, const numbers, const strings, const table = counts;
+
+    var size = header_size + names + booleans;
+    if (size % 2 != 0) size += 1;
+    size += numbers * number_size + strings * 2 + table;
+    return bytes.len >= size;
 }
 
 /// ncurses 6.1 and later read entries up to this size.
-const max_entry_size = 32768;
+pub const max_entry_size = 32768;
 
 /// The longest names line tic writes (MAX_NAME_SIZE), excluding its NUL.
 const max_names_size = 512;
@@ -613,6 +635,23 @@ test "encode matches tic for a canceled boolean after the last true one" {
     defer out.deinit();
     try encode(std.testing.allocator, src, &out.writer);
     try std.testing.expectEqualSlices(u8, @embedFile("testdata/canceled-term"), out.written());
+}
+
+test "isEntry" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        @embedFile("testdata/fixture-term"),
+        @embedFile("testdata/wide-term"),
+        @embedFile("testdata/canceled-term"),
+    }) |entry| {
+        try testing.expect(isEntry(entry));
+
+        // Cut inside the string table, before the extended section.
+        try testing.expect(!isEntry(entry[0..header_size]));
+        try testing.expect(!isEntry(entry[0 .. entry.len / 3]));
+    }
+    try testing.expect(!isEntry(""));
+    try testing.expect(!isEntry("not a terminfo entry at all"));
 }
 
 test "encode rejects what tic would resolve or reject differently" {
