@@ -23,50 +23,40 @@ const Allocator = std.mem.Allocator;
 const terminfo = @import("../terminfo/main.zig");
 const log = std.log.scoped(.win32_terminfo);
 
-/// The `.terminfo` directory under the HOME Git for Windows gives its tools.
-/// When HOME is unset, git.exe sets it to HOMEDRIVE + HOMEPATH if that is a
-/// directory and to USERPROFILE otherwise (compat/mingw.c). Returns null when
-/// that HOME is not an absolute Windows path: Git's tools would not find a
-/// file under it either.
-pub fn homeTerminfoDir(alloc: Allocator) Allocator.Error!?[]u8 {
-    const home = try homeDir(alloc) orelse return null;
+/// The `.terminfo` directory under the HOME Git for Windows gives its tools,
+/// for the environment `env`. When HOME is unset, git.exe sets it to
+/// HOMEDRIVE + HOMEPATH if that is a directory and to USERPROFILE otherwise
+/// (compat/mingw.c). Returns null when that HOME is not an absolute Windows
+/// path: Git's tools would not find a file under it either.
+pub fn homeTerminfoDir(
+    alloc: Allocator,
+    env: *const std.process.EnvMap,
+) Allocator.Error!?[]u8 {
+    const home = try homeDir(alloc, env) orelse return null;
     defer alloc.free(home);
     return try std.fs.path.join(alloc, &.{ home, ".terminfo" });
 }
 
-fn homeDir(alloc: Allocator) Allocator.Error!?[]u8 {
-    if (try getEnv(alloc, "HOME")) |home| {
-        if (isAbsolute(home)) return home;
-        alloc.free(home);
-        return null;
+fn homeDir(alloc: Allocator, env: *const std.process.EnvMap) Allocator.Error!?[]u8 {
+    if (getEnv(env, "HOME")) |home| {
+        return if (isAbsolute(home)) try alloc.dupe(u8, home) else null;
     }
 
-    if (try getEnv(alloc, "HOMEDRIVE")) |drive| {
-        defer alloc.free(drive);
-        if (try getEnv(alloc, "HOMEPATH")) |path| {
-            defer alloc.free(path);
+    if (getEnv(env, "HOMEDRIVE")) |drive| {
+        if (getEnv(env, "HOMEPATH")) |path| {
             const joined = try std.mem.concat(alloc, u8, &.{ drive, path });
             if (isAbsolute(joined) and isDirectory(joined)) return joined;
             alloc.free(joined);
         }
     }
 
-    const profile = try getEnv(alloc, "USERPROFILE") orelse return null;
-    if (isAbsolute(profile)) return profile;
-    alloc.free(profile);
-    return null;
+    const profile = getEnv(env, "USERPROFILE") orelse return null;
+    return if (isAbsolute(profile)) try alloc.dupe(u8, profile) else null;
 }
 
-fn getEnv(alloc: Allocator, key: []const u8) Allocator.Error!?[]u8 {
-    const value = std.process.getEnvVarOwned(alloc, key) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.EnvironmentVariableNotFound, error.InvalidWtf8 => return null,
-    };
-    if (value.len == 0) {
-        alloc.free(value);
-        return null;
-    }
-    return value;
+fn getEnv(env: *const std.process.EnvMap, key: []const u8) ?[]const u8 {
+    const value = env.get(key) orelse return null;
+    return if (value.len == 0) null else value;
 }
 
 /// A drive path (`C:\...`) or a UNC path (`\\server\share`). A rooted or
@@ -88,7 +78,9 @@ fn isDirectory(path: []const u8) bool {
     return true;
 }
 
-/// Whether the database in `terminfo_dir` has a file for `term`.
+/// Whether the database in `terminfo_dir` has a compiled entry for `term`: a
+/// file that starts with a terminfo header. An empty or foreign file there
+/// would leave ncurses without an entry just the same.
 pub fn hasEntry(terminfo_dir: []const u8, term: []const u8) bool {
     if (term.len == 0) return false;
     var dir = std.fs.openDirAbsolute(terminfo_dir, .{}) catch return false;
@@ -96,8 +88,11 @@ pub fn hasEntry(terminfo_dir: []const u8, term: []const u8) bool {
     const hex = terminfo.compiled.hexDir(term);
     var sub_dir = dir.openDir(&hex, .{}) catch return false;
     defer sub_dir.close();
-    sub_dir.access(term, .{}) catch return false;
-    return true;
+    const file = sub_dir.openFile(term, .{}) catch return false;
+    defer file.close();
+    var header: [terminfo.compiled.header_size]u8 = undefined;
+    const len = file.readAll(&header) catch return false;
+    return terminfo.compiled.isHeader(header[0..len]);
 }
 
 pub const InstallResult = enum {
@@ -371,6 +366,64 @@ test "install reports a failure instead of returning an error" {
     // A file where the database directory should be.
     try paths.tmp.dir.writeFile(.{ .sub_path = ".terminfo", .data = "" });
     try testing.expectEqual(.failed, install(testing.allocator, test_source, paths.db, paths.state));
+}
+
+test "hasEntry wants a compiled entry" {
+    var paths: TestPaths = try .init();
+    defer paths.deinit();
+
+    try paths.put("78/xterm-test", "");
+    try testing.expect(!hasEntry(paths.db, "xterm-test"));
+    try paths.put("78/xterm-test", "not a terminfo entry at all");
+    try testing.expect(!hasEntry(paths.db, "xterm-test"));
+
+    const entry = try testEntry();
+    defer testing.allocator.free(entry);
+    try paths.put("78/xterm-test", entry);
+    try testing.expect(hasEntry(paths.db, "xterm-test"));
+    try testing.expect(!hasEntry(paths.db, "xterm-other"));
+}
+
+test "homeTerminfoDir follows git.exe's HOME" {
+    var paths: TestPaths = try .init();
+    defer paths.deinit();
+    var env: std.process.EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    // Nothing usable.
+    try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
+
+    try env.put("USERPROFILE", "C:\\Users\\me");
+    {
+        const dir = (try homeTerminfoDir(testing.allocator, &env)).?;
+        defer testing.allocator.free(dir);
+        try testing.expectEqualStrings("C:\\Users\\me\\.terminfo", dir);
+    }
+
+    // HOMEDRIVE + HOMEPATH wins when it is a directory, as on a home share.
+    try env.put("HOMEDRIVE", paths.root[0..2]);
+    try env.put("HOMEPATH", paths.root[2..]);
+    {
+        const dir = (try homeTerminfoDir(testing.allocator, &env)).?;
+        defer testing.allocator.free(dir);
+        try testing.expectEqualStrings(paths.db, dir);
+    }
+    try env.put("HOMEPATH", "\\does\\not\\exist");
+    {
+        const dir = (try homeTerminfoDir(testing.allocator, &env)).?;
+        defer testing.allocator.free(dir);
+        try testing.expectEqualStrings("C:\\Users\\me\\.terminfo", dir);
+    }
+
+    // HOME wins over both, and one Git's tools cannot use gives nothing.
+    try env.put("HOME", "D:\\home");
+    {
+        const dir = (try homeTerminfoDir(testing.allocator, &env)).?;
+        defer testing.allocator.free(dir);
+        try testing.expectEqualStrings("D:\\home\\.terminfo", dir);
+    }
+    try env.put("HOME", "/c/Users/me");
+    try testing.expectEqual(null, try homeTerminfoDir(testing.allocator, &env));
 }
 
 test "isAbsolute" {

@@ -22,6 +22,17 @@ const magic_legacy: i32 = 0o432;
 /// writes it when a number does not fit in 16 bits.
 const magic_32bit: i32 = 0o1036;
 
+/// The size of the header every compiled entry starts with: six 16-bit
+/// values, the first of them the magic number.
+pub const header_size = 12;
+
+/// Whether `bytes` begin with a compiled entry's header.
+pub fn isHeader(bytes: []const u8) bool {
+    if (bytes.len < header_size) return false;
+    const magic = std.mem.readInt(u16, bytes[0..2], .little);
+    return magic == magic_legacy or magic == magic_32bit;
+}
+
 /// ncurses 6.1 and later read entries up to this size.
 const max_entry_size = 32768;
 

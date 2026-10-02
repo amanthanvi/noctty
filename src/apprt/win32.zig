@@ -3143,7 +3143,9 @@ fn installTerminfo(alloc: Allocator, term: []const u8) void {
         if (std.mem.eql(u8, name, term)) break;
     } else return;
 
-    const dir = (win32_terminfo.homeTerminfoDir(alloc) catch null) orelse {
+    var env = std.process.getEnvMap(alloc) catch return;
+    defer env.deinit();
+    const dir = (win32_terminfo.homeTerminfoDir(alloc, &env) catch null) orelse {
         log.info("terminfo install skipped: HOME, HOMEDRIVE+HOMEPATH and USERPROFILE give no absolute path", .{});
         return;
     };
