@@ -175,7 +175,9 @@ that:
   when `term` names another entry.
 - It also installs nothing where it cannot safely know that home:
   - a home on a network share or mapped network drive, which a disconnected
-    share would let block startup and every new tab;
+    share would let block startup and every new tab (a local path that links
+    to a share through a junction or symbolic link is not detected, as for
+    `ssh` config includes);
   - `HOMEDRIVE` + `HOMEPATH` that is not a folder, where git.exe falls back
     to `USERPROFILE` but a tool started directly does not;
   - a `HOME` that is not an absolute Windows path.
