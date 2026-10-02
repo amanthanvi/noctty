@@ -553,9 +553,10 @@ try {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
     }
 
-    # TERM=xterm-ghostty relies on these compiled entries. Without them less,
-    # vim and tput from Git for Windows, MSYS2 and Cygwin report an unknown
-    # terminal type.
+    # The compiled entries for TERM=xterm-ghostty that the build writes on
+    # Windows. They mark the resources directory (src/os/resourcesdir.zig)
+    # and can be copied or pointed at by hand; noctty installs the same entry
+    # into the user's own terminfo directory at startup.
     foreach ($terminfoEntry in @("share\terminfo\78\xterm-ghostty", "share\terminfo\67\ghostty")) {
         $terminfoPath = Join-Path $portableRoot $terminfoEntry
         if (-not (Test-Path -LiteralPath $terminfoPath -PathType Leaf)) {
