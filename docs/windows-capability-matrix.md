@@ -76,6 +76,7 @@ Last reviewed: 2026-09-02.
 | Tab overview                                                                      | The bindable `toggle_tab_overview` action opens a numeric tab switcher; it has no default keybind.                                                                                                                   |
 | Drag and drop                                                                     | Each pane accepts files, plain text, URLs, and HTML. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                        |
 | Opt-in child-process limits                                                       | Retained `linux-cgroup*` keys map to Job Objects for Windows-local children only. See [child-process limits](#child-process-limits).                                                                                 |
+| `TERM` and terminfo                                                               | Children get `TERM=xterm-ghostty` and a compiled entry for it. Git for Windows, MSYS2 and Cygwin tools such as `less`, `vim` and `tput` find it from any drive. See [terminfo](#terminfo).                           |
 
 ## Notes
 
@@ -154,6 +155,26 @@ that:
   command marks and exit codes. Noctty does not activate Clink. Without the
   loaded Clink script, prompt/cwd marks still work but command-finish marks and
   exit codes are unavailable.
+
+### Terminfo
+
+- The package ships compiled `xterm-ghostty` and `ghostty` entries under
+  `share\terminfo`, in the hex-directory layout (`78\xterm-ghostty`) that
+  ncurses uses on Windows. The Windows build compiles them itself, byte for
+  byte as ncurses 6.6 `tic -x` does.
+- `TERMINFO` is exported as `/proc/cygdrive/<drive>/.../share/terminfo`, a
+  path the MSYS2 and Cygwin runtimes read as absolute. Their ncurses splits
+  `TERMINFO` on `:`, so a `C:\...` value would be searched as a directory `C`
+  relative to the current directory, then on the current directory's drive.
+  `MSYS2_ENV_CONV_EXCL` gains `TERMINFO=` so that MSYS2 does not turn the
+  path back into `C:/...` when Git Bash starts a native program such as
+  `git.exe`, which then starts `less`.
+- Native Windows programs that read terminfo files themselves do not use this
+  path. Neovim has its own `ghostty` entry.
+- WSL does not forward the Windows `TERM` unless `WSLENV` lists it, so
+  distributions start with `xterm-256color`. `ssh.exe` sends `TERM` to the
+  server, so a host without the entry needs the `ssh-env` or `ssh-terminfo`
+  shell integration feature, or `term = xterm-256color`.
 
 ### Keyboard input
 

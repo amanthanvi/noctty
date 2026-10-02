@@ -56,8 +56,22 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             try steps.append(b.allocator, &source_install.step);
         }
 
-        // Windows doesn't have the binaries below.
-        if (os_tag == .windows) break :terminfo;
+        // Windows doesn't have the binaries below, so compile the database
+        // with our own encoder. ncurses ports there (MSYS2, Cygwin, and the
+        // less, vim and tput in Git for Windows) find it through the TERMINFO
+        // variable termio sets.
+        if (os_tag == .windows) {
+            const db_run = b.addRunArtifact(build_data_exe);
+            db_run.addArg("+terminfo-database");
+            const db = db_run.addOutputDirectoryArg(terminfo_share_dir);
+            const db_install = b.addInstallDirectory(.{
+                .source_dir = db,
+                .install_dir = .{ .custom = "share" },
+                .install_subdir = terminfo_share_dir,
+            });
+            try steps.append(b.allocator, &db_install.step);
+            break :terminfo;
+        }
 
         // Convert to termcap source format if thats helpful to people and
         // install it. The resulting value here is the termcap source in case

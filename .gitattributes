@@ -53,6 +53,7 @@ scripts/build-site-assets.mjs text eol=lf
 *.icns binary
 *.ttf binary
 *.otf binary
+src/terminfo/testdata/* binary
 
 #--------------------------------------------------------------------
 # Linguist

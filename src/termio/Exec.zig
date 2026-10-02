@@ -101,6 +101,100 @@ fn addGhosttyBinToPath(
     try env.put("PATH", updated_path);
 }
 
+/// Point TERMINFO at our terminfo database on Windows. Its readers there are
+/// ncurses ports on the MSYS2 and Cygwin runtimes: less (git's pager), vim,
+/// nano and tput from Git for Windows, MSYS2 or Cygwin. Their ncurses splits
+/// TERMINFO on ':', so a Windows path `C:\noctty\share\terminfo` is searched as
+/// a directory `C` relative to the current directory, where a cloned
+/// repository can supply the entry git's pager uses, and then as
+/// `\noctty\share\terminfo` on the current directory's drive, which misses
+/// from any other drive. Both runtimes read `/proc/cygdrive/c/...` as an
+/// absolute path on drive C.
+///
+/// MSYS2 rewrites a value that looks like a POSIX path into a Windows path
+/// when it starts a native program, so Git Bash starting git.exe, which starts
+/// less, would hand less `C:/noctty/share/terminfo` again. MSYS2_ENV_CONV_EXCL
+/// exempts TERMINFO from that rewrite.
+///
+/// Native Windows programs that read terminfo files themselves do not
+/// understand this form. Before the database was compiled for Windows they had
+/// no entry to find here either.
+fn putWindowsTerminfo(alloc: Allocator, env: *EnvMap, dir: []const u8) !void {
+    const cygwin_dir = try cygwinPath(alloc, dir) orelse {
+        // The Windows form would have ncurses search relative directories.
+        log.warn("not setting TERMINFO, path has no MSYS2/Cygwin form path={s}", .{dir});
+        return;
+    };
+    defer alloc.free(cygwin_dir);
+    try env.put("TERMINFO", cygwin_dir);
+
+    const excl_key = "MSYS2_ENV_CONV_EXCL";
+    const excl_entry = "TERMINFO=";
+    const current = env.get(excl_key) orelse "";
+    var it = std.mem.splitScalar(u8, current, ';');
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry, excl_entry)) return;
+    }
+    const updated = try internal_os.appendEnv(alloc, current, excl_entry);
+    defer alloc.free(updated);
+    try env.put(excl_key, updated);
+}
+
+/// Convert an absolute Windows path into the form the MSYS2 and Cygwin
+/// runtimes read as absolute: `C:\a\b` becomes `/proc/cygdrive/c/a/b` and
+/// `\\server\share\a` becomes `//server/share/a`. `/proc/cygdrive` names the
+/// drives under either runtime's mount table, where MSYS2 itself uses `/c` and
+/// Cygwin `/cygdrive/c`. Returns null for any other path, including one whose
+/// result would still contain a ':', because ncurses would split it there.
+fn cygwinPath(alloc: Allocator, path: []const u8) Allocator.Error!?[]u8 {
+    // The Win32 file and device namespace prefixes add nothing here.
+    var rest = path;
+    for ([_][]const u8{ "\\\\?\\", "\\\\.\\" }) |namespace| {
+        if (std.mem.startsWith(u8, rest, namespace)) {
+            rest = rest[namespace.len..];
+            break;
+        }
+    }
+    const namespaced = rest.len != path.len;
+
+    var drive_buf: [16]u8 = undefined;
+    const prefix: []const u8 = prefix: {
+        if (rest.len >= 3 and std.ascii.isAlphabetic(rest[0]) and
+            rest[1] == ':' and isPathSeparator(rest[2]))
+        {
+            const drive = std.fmt.bufPrint(&drive_buf, "/proc/cygdrive/{c}", .{
+                std.ascii.toLower(rest[0]),
+            }) catch unreachable;
+            rest = rest[2..];
+            break :prefix drive;
+        }
+
+        // \\?\UNC\server\share keeps the separator before the server.
+        if (namespaced and std.ascii.startsWithIgnoreCase(rest, "UNC\\")) {
+            rest = rest["UNC".len..];
+            break :prefix "/";
+        }
+
+        // \\server\share
+        if (!namespaced and rest.len > 2 and isPathSeparator(rest[0]) and
+            isPathSeparator(rest[1]) and !isPathSeparator(rest[2]))
+        {
+            break :prefix "";
+        }
+
+        return null;
+    };
+    if (std.mem.indexOfScalar(u8, rest, ':') != null) return null;
+
+    const result = try std.mem.concat(alloc, u8, &.{ prefix, rest });
+    std.mem.replaceScalar(u8, result, '\\', '/');
+    return result;
+}
+
+fn isPathSeparator(c: u8) bool {
+    return c == '\\' or c == '/';
+}
+
 /// If we build with flatpak support then we have to keep track of
 /// a potential execution on the host.
 const FlatpakHostCommand = if (!flatpak_support) struct {
@@ -817,7 +911,11 @@ const Subprocess = struct {
             const dir = try std.fmt.bufPrint(&buf, "{s}/terminfo", .{
                 std.fs.path.dirname(base) orelse unreachable,
             });
-            try env.put("TERMINFO", dir);
+            if (comptime builtin.os.tag == .windows) {
+                try putWindowsTerminfo(alloc, &env, dir);
+            } else {
+                try env.put("TERMINFO", dir);
+            }
         } else {
             if (comptime builtin.target.os.tag.isDarwin()) {
                 log.warn("ghostty terminfo not found, using xterm-256color", .{});
@@ -2232,6 +2330,84 @@ test "addGhosttyBinToPath prepends existing windows entry when not first" {
         "c:\\program files\\noctty;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Noctty;C:\\Windows\\System32",
         env.get("PATH").?,
     );
+}
+
+test "cygwinPath" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const cases = [_]struct { []const u8, ?[]const u8 }{
+        .{
+            "C:\\Users\\a\\scoop\\apps\\noctty\\current/share/terminfo",
+            "/proc/cygdrive/c/Users/a/scoop/apps/noctty/current/share/terminfo",
+        },
+        .{ "D:/Tools/noctty/share/terminfo", "/proc/cygdrive/d/Tools/noctty/share/terminfo" },
+        .{ "\\\\?\\E:\\noctty\\share\\terminfo", "/proc/cygdrive/e/noctty/share/terminfo" },
+        .{ "\\\\.\\C:\\noctty\\share\\terminfo", "/proc/cygdrive/c/noctty/share/terminfo" },
+        .{ "\\\\server\\tools\\noctty\\share\\terminfo", "//server/tools/noctty/share/terminfo" },
+        .{ "\\\\?\\UNC\\server\\tools\\share\\terminfo", "//server/tools/share/terminfo" },
+
+        // Relative, rooted on the current drive, or drive-relative.
+        .{ "share\\terminfo", null },
+        .{ "\\noctty\\share\\terminfo", null },
+        .{ "C:share\\terminfo", null },
+
+        // A colon left over would split TERMINFO again.
+        .{ "C:\\noctty\\share:x\\terminfo", null },
+    };
+    for (cases) |case| {
+        const result = try cygwinPath(alloc, case[0]);
+        defer if (result) |r| alloc.free(r);
+        if (case[1]) |expected| {
+            try testing.expectEqualStrings(expected, result orelse return error.TestUnexpectedResult);
+        } else {
+            try testing.expectEqual(null, result);
+        }
+    }
+}
+
+test "putWindowsTerminfo exports the Cygwin path and exempts it from MSYS2 conversion" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try putWindowsTerminfo(testing.allocator, &env, "C:\\Program Files\\noctty/share/terminfo");
+    try testing.expectEqualStrings(
+        "/proc/cygdrive/c/Program Files/noctty/share/terminfo",
+        env.get("TERMINFO").?,
+    );
+    try testing.expectEqualStrings("TERMINFO=", env.get("MSYS2_ENV_CONV_EXCL").?);
+
+    // A noctty started from a noctty shell inherits both; nothing is repeated.
+    try putWindowsTerminfo(testing.allocator, &env, "C:\\Program Files\\noctty/share/terminfo");
+    try testing.expectEqualStrings("TERMINFO=", env.get("MSYS2_ENV_CONV_EXCL").?);
+}
+
+test "putWindowsTerminfo keeps existing MSYS2 exemptions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try env.put("MSYS2_ENV_CONV_EXCL", "MY_VAR;OTHER=");
+    try putWindowsTerminfo(testing.allocator, &env, "D:\\noctty\\share\\terminfo");
+    try testing.expectEqualStrings("/proc/cygdrive/d/noctty/share/terminfo", env.get("TERMINFO").?);
+    try testing.expectEqualStrings("MY_VAR;OTHER=;TERMINFO=", env.get("MSYS2_ENV_CONV_EXCL").?);
+}
+
+test "putWindowsTerminfo leaves TERMINFO unset without an absolute path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try putWindowsTerminfo(testing.allocator, &env, "share/terminfo");
+    try testing.expectEqual(null, env.get("TERMINFO"));
+    try testing.expectEqual(null, env.get("MSYS2_ENV_CONV_EXCL"));
 }
 
 test "Windows PTY read batches amortize high-volume output" {

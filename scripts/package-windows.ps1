@@ -553,6 +553,16 @@ try {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
     }
 
+    # TERM=xterm-ghostty relies on these compiled entries. Without them less,
+    # vim and tput from Git for Windows, MSYS2 and Cygwin report an unknown
+    # terminal type.
+    foreach ($terminfoEntry in @("share\terminfo\78\xterm-ghostty", "share\terminfo\67\ghostty")) {
+        $terminfoPath = Join-Path $portableRoot $terminfoEntry
+        if (-not (Test-Path -LiteralPath $terminfoPath -PathType Leaf)) {
+            throw "Expected compiled terminfo entry was not staged: $terminfoPath"
+        }
+    }
+
     $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($hostArchitecture -eq $Architecture) {
         Write-Host "Packaging phase: verify custom shader capability"
