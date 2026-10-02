@@ -76,7 +76,7 @@ Last reviewed: 2026-09-02.
 | Tab overview                                                                      | The bindable `toggle_tab_overview` action opens a numeric tab switcher; it has no default keybind.                                                                                                                   |
 | Drag and drop                                                                     | Each pane accepts files, plain text, URLs, and HTML. See [clipboard and drag-drop](#clipboard-and-drag-drop).                                                                                                        |
 | Opt-in child-process limits                                                       | Retained `linux-cgroup*` keys map to Job Objects for Windows-local children only. See [child-process limits](#child-process-limits).                                                                                 |
-| `TERM` and terminfo                                                               | Children get `TERM=xterm-ghostty` and a compiled entry for it, which Git for Windows tools such as `less`, `vim` and `tput` find from any drive. See [terminfo](#terminfo).                                          |
+| `TERM` and terminfo                                                               | Children get `TERM=xterm-ghostty`, and its compiled entry is installed where Git for Windows tools such as `less`, `vim` and `tput` find it from any drive. See [terminfo](#terminfo).                               |
 
 ## Notes
 
@@ -162,21 +162,30 @@ that:
   `share\terminfo`, in the hex-directory layout (`78\xterm-ghostty`) that
   ncurses uses on Windows. The Windows build compiles them itself, byte for
   byte as ncurses 6.6 `tic -x` does.
-- `TERMINFO` is exported as `/proc/cygdrive/<drive>/.../share/terminfo`, a
-  path the MSYS2 and Cygwin runtimes read as absolute (measured with Git for
-  Windows; Cygwin documents `/proc/cygdrive` but was not tested). Their
-  ncurses splits `TERMINFO` on `:`, so a `C:\...` value would be searched as a
-  directory `C` relative to the current directory, then on the current
-  directory's drive.
-- `MSYS2_ENV_CONV_EXCL` gains `TERMINFO=` so that MSYS2 does not turn the
-  path back into `C:/...` when Git Bash starts a native program such as
-  `git.exe`, which then starts `less`. A value configured with `env =` keeps
-  it; a shell startup file that replaces the variable drops it.
-- Native Windows programs that read terminfo files themselves, such as Neovim
-  and Helix, resolve that path against the root of the current drive
-  (`C:\proc\cygdrive\...`), so they do not find the entry and use their own.
-  On a machine shared with other accounts, an account that can create
-  folders at that drive root could plant an entry there for them to read.
+- At startup noctty installs the same entries into `.terminfo` under the
+  `HOME` that Git for Windows gives its tools: `HOME`, else `HOMEDRIVE` +
+  `HOMEPATH` when that folder exists, else `USERPROFILE`. That is usually
+  `%USERPROFILE%\.terminfo\78\xterm-ghostty` and `67\ghostty`. Git for
+  Windows' `less`, `vim`, `nano` and `tput` search that folder from every
+  drive and through every chain of programs.
+- It never replaces a file it did not write. It records the SHA-256 of the
+  entry it installed in `%LOCALAPPDATA%\noctty\terminfo-install.sha256`, and
+  updates a file only while that file still holds the recorded entry. Nothing
+  is installed in portable mode, which leaves nothing on the host, or when
+  `term` names another entry.
+- `TERMINFO` is not exported on Windows. Those tools' ncurses splits it on
+  `:`, so a `C:\...` path is searched as a directory `C` relative to the
+  current directory, where a cloned repository can supply the entry. A
+  `/proc/cygdrive/...` path is read by native Windows programs such as Neovim
+  and Helix as a folder at the root of the current drive, which another
+  account can create.
+- `TERM` falls back to `xterm-256color` when it names noctty's entry and that
+  folder lacks it, for example in portable mode. `TERM_PROGRAM=ghostty` is set
+  either way.
+- Standalone MSYS2 and Cygwin keep `HOME` under their own `/home` and do not
+  see the entry. Their `less` and `tput` still report `xterm-ghostty` as
+  unknown unless you copy the two files into that `.terminfo` folder or set
+  `term = xterm-256color`.
 - WSL does not forward the Windows `TERM` unless `WSLENV` lists it, so
   distributions start with `xterm-256color`. `ssh.exe` sends `TERM` to the
   server, so a host without the entry needs the `ssh-env` or `ssh-terminfo`

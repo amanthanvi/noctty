@@ -69,29 +69,40 @@ pub fn encode(alloc: Allocator, source: Source, writer: *std.Io.Writer) Error!vo
     try writer.writeAll(out.written());
 }
 
-/// Write `source` into the terminfo database directory `dir`, as one file per
-/// terminal name. The last of several names is a description, as in
-/// terminfo(5), and gets no file. Files go in a directory named for the hex
-/// code of the name's first character (`78/xterm-ghostty`), the layout ncurses
-/// uses on case-insensitive file systems and the only one the ncurses ports
-/// on Windows (MSYS2, Cygwin) read.
+/// Write `source` into the terminfo database directory `dir`, one file per
+/// name in fileNames, each in the directory hexDir names.
 pub fn writeDatabase(alloc: Allocator, source: Source, dir: std.fs.Dir) !void {
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     try encode(alloc, source, &out.writer);
 
+    for (try fileNames(source)) |name| {
+        const hex = hexDir(name);
+        var sub_dir = try dir.makeOpenPath(&hex, .{});
+        defer sub_dir.close();
+        try sub_dir.writeFile(.{ .sub_path = name, .data = out.written() });
+    }
+}
+
+/// The names of `source` that get a file in a database. The last of several
+/// names is a description, as in terminfo(5), and gets none.
+pub fn fileNames(source: Source) Error![]const []const u8 {
     const names = if (source.names.len > 1)
         source.names[0 .. source.names.len - 1]
     else
         source.names;
-    for (names) |name| {
-        try validateFileName(name);
-        var hex_buf: [2]u8 = undefined;
-        const hex = std.fmt.bufPrint(&hex_buf, "{x:0>2}", .{name[0]}) catch unreachable;
-        var sub_dir = try dir.makeOpenPath(hex, .{});
-        defer sub_dir.close();
-        try sub_dir.writeFile(.{ .sub_path = name, .data = out.written() });
-    }
+    for (names) |name| try validateFileName(name);
+    return names;
+}
+
+/// The directory, inside a database, that holds the file for `name`: the hex
+/// code of its first character (`78` for `xterm-ghostty`). That is the layout
+/// ncurses uses on case-insensitive file systems and the only one its ports
+/// on Windows (MSYS2, Cygwin) read. `name` must not be empty.
+pub fn hexDir(name: []const u8) [2]u8 {
+    var buf: [2]u8 = undefined;
+    _ = std.fmt.bufPrint(&buf, "{x:0>2}", .{name[0]}) catch unreachable;
+    return buf;
 }
 
 fn validateFileName(name: []const u8) Error!void {

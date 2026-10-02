@@ -39,6 +39,8 @@ const win32_toast_winrt = @import("win32_toast_winrt.zig");
 const win32_taskbar_progress = @import("win32_taskbar_progress.zig");
 const win32_jump_list = @import("win32_jump_list.zig");
 const win32_powershell_install = @import("win32_powershell_install.zig");
+const win32_terminfo = @import("win32_terminfo.zig");
+const terminfo = @import("../terminfo/main.zig");
 const win32_link_preview = @import("win32_link_preview.zig");
 const win32_quick_terminal = @import("win32_quick_terminal.zig");
 const win32_surface_drop = @import("win32_surface_drop.zig");
@@ -3135,6 +3137,23 @@ fn isPortableModeActive(alloc: Allocator) bool {
     return true;
 }
 
+fn installTerminfo(alloc: Allocator, term: []const u8) void {
+    const names = terminfo.compiled.fileNames(terminfo.ghostty) catch return;
+    for (names) |name| {
+        if (std.mem.eql(u8, name, term)) break;
+    } else return;
+
+    const dir = (win32_terminfo.homeTerminfoDir(alloc) catch null) orelse {
+        log.info("terminfo install skipped: HOME, HOMEDRIVE+HOMEPATH and USERPROFILE give no absolute path", .{});
+        return;
+    };
+    defer alloc.free(dir);
+    const state = localAppDataPathAlloc(alloc, "terminfo-install.sha256") orelse return;
+    defer alloc.free(state);
+    const result = win32_terminfo.install(alloc, terminfo.ghostty, dir, state);
+    log.info("terminfo install dir={s} result={s}", .{ dir, @tagName(result) });
+}
+
 fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
     // A unit test that constructs a real `App` must never read or write the
     // developer's own profile. It used to: every full `zig build test` run
@@ -3872,6 +3891,15 @@ pub const App = struct {
             } else |err| {
                 std.log.warn("powershell integration install path resolve failed err={}", .{err});
             }
+        }
+
+        // Install our compiled terminfo entry where Git for Windows' ncurses
+        // tools find it, for TERM=xterm-ghostty (win32_terminfo.zig). Not in
+        // portable mode, which leaves nothing on the host; not when `term`
+        // names some other entry; and not in unit tests, which must not write
+        // into the developer's profile.
+        if (!builtin.is_test and !isPortableModeActive(core_app.alloc)) {
+            installTerminfo(core_app.alloc, self.config.term);
         }
 
         // Windows version probe. Win11 build 22000+ enables the

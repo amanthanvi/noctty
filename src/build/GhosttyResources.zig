@@ -57,9 +57,10 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         }
 
         // Windows doesn't have the binaries below, so compile the database
-        // with our own encoder. ncurses ports there (MSYS2, Cygwin, and the
-        // less, vim and tput in Git for Windows) find it through the TERMINFO
-        // variable termio sets.
+        // with our own encoder. At runtime noctty installs the same entry
+        // into the per-user terminfo directory (apprt/win32_terminfo.zig);
+        // the copy here marks the resources directory and can be used
+        // directly.
         if (os_tag == .windows) {
             const db_run = b.addRunArtifact(build_data_exe);
             db_run.addArg("+terminfo-database");
