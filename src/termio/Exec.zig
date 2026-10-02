@@ -19,6 +19,7 @@ const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
 const terminal = @import("../terminal/main.zig");
+const terminfo = @import("../terminfo/main.zig");
 const termio = @import("../termio.zig");
 const Command = @import("../Command.zig");
 const windows_shell = configpkg.windows_shell;
@@ -99,6 +100,71 @@ fn addGhosttyBinToPath(
     defer alloc.free(updated_path);
 
     try env.put("PATH", updated_path);
+}
+
+/// Export TERM and COLORTERM, and outside Windows TERMINFO, for our terminfo
+/// database in `dir`.
+///
+/// On Windows the readers of our entry are the ncurses tools of Git for
+/// Windows: less (git's pager), vim, nano and tput. They find it in the
+/// per-user terminfo directory where App.init installs it, and
+/// apprt/win32_terminfo.zig explains why TERMINFO cannot point at `dir`
+/// safely. An inherited TERMINFO that names `dir`, as older versions of noctty
+/// exported it, is dropped. Whether that directory has the entry depends on
+/// the child's HOME, which the configured `env` can change, so
+/// putWindowsTerm settles TERM after those overrides.
+fn putTermEnv(env: *EnvMap, term: []const u8, dir: []const u8) !void {
+    try env.put("COLORTERM", "truecolor");
+    try env.put("TERM", term);
+    if (comptime builtin.os.tag != .windows) {
+        try env.put("TERMINFO", dir);
+        return;
+    }
+
+    if (env.get("TERMINFO")) |inherited| {
+        if (samePath(inherited, dir)) env.remove("TERMINFO");
+    }
+}
+
+/// Settle TERM on Windows: when `term` names our entry and the child's
+/// environment gives no per-user terminfo directory with it (portable mode, a
+/// failed install, a configured HOME elsewhere, a home on the network, a home
+/// git.exe and the MSYS2 runtime disagree on), fall back to xterm-256color, as
+/// with no resources directory. TERM_PROGRAM still says ghostty.
+fn putWindowsTerm(
+    alloc: Allocator,
+    env: *EnvMap,
+    term: []const u8,
+) !void {
+    const ours = for (terminfo.compiled.fileNames(terminfo.ghostty) catch &.{}) |name| {
+        if (std.mem.eql(u8, name, term)) break true;
+    } else false;
+    if (!ours) return;
+
+    const home_terminfo = try apprt.win32_terminfo.homeTerminfoDir(alloc, env);
+    defer if (home_terminfo) |path| alloc.free(path);
+    const installed = if (home_terminfo) |path|
+        apprt.win32_terminfo.hasEntry(alloc, path, term)
+    else
+        false;
+    if (!installed) {
+        log.info("no terminfo entry for TERM={s} in the per-user directory, using xterm-256color", .{term});
+        try env.put("TERM", "xterm-256color");
+    }
+}
+
+/// Whether two Windows paths are the same text, ignoring case and treating
+/// `/` and `\` alike.
+fn samePath(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        const xs = x == '/' or x == '\\';
+        const ys = y == '/' or y == '\\';
+        if (xs or ys) {
+            if (xs != ys) return false;
+        } else if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    }
+    return true;
 }
 
 /// If we build with flatpak support then we have to keep track of
@@ -808,16 +874,13 @@ const Subprocess = struct {
         // For now, we just look up a bundled dir but in the future we should
         // also load the terminfo database and look for it.
         if (cfg.resources_dir) |base| {
-            try env.put("TERM", cfg.term);
-            try env.put("COLORTERM", "truecolor");
-
             // Assume that the resources directory is adjacent to the terminfo
             // database
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const dir = try std.fmt.bufPrint(&buf, "{s}/terminfo", .{
                 std.fs.path.dirname(base) orelse unreachable,
             });
-            try env.put("TERMINFO", dir);
+            try putTermEnv(&env, cfg.term, dir);
         } else {
             if (comptime builtin.target.os.tag.isDarwin()) {
                 log.warn("ghostty terminfo not found, using xterm-256color", .{});
@@ -975,12 +1038,21 @@ const Subprocess = struct {
             shell_command;
 
         // Add the environment variables that override any others.
+        var term_overridden = false;
         {
             var it = cfg.env_override.iterator();
-            while (it.next()) |entry| try env.put(
-                entry.key_ptr.*,
-                entry.value_ptr.*,
-            );
+            while (it.next()) |entry| {
+                try env.put(entry.key_ptr.*, entry.value_ptr.*);
+                if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "TERM")) term_overridden = true;
+            }
+        }
+
+        // A configured TERM is the user's; otherwise check our entry under
+        // the HOME the child actually gets.
+        if (comptime builtin.os.tag == .windows) {
+            if (cfg.resources_dir != null and !term_overridden) {
+                try putWindowsTerm(alloc, &env, cfg.term);
+            }
         }
 
         // Build our args list
@@ -2232,6 +2304,93 @@ test "addGhosttyBinToPath prepends existing windows entry when not first" {
         "c:\\program files\\noctty;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Noctty;C:\\Windows\\System32",
         env.get("PATH").?,
     );
+}
+
+test "putTermEnv on Windows exports TERM and no TERMINFO" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+    try putTermEnv(&env, "xterm-ghostty", "C:\\noctty/share/terminfo");
+    try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
+    try testing.expectEqualStrings("truecolor", env.get("COLORTERM").?);
+    try testing.expectEqual(null, env.get("TERMINFO"));
+}
+
+test "putTermEnv on Windows drops a TERMINFO an older noctty exported" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    for ([_][]const u8{
+        "C:\\noctty/share/terminfo",
+        "c:\\Noctty\\share\\terminfo",
+        "C:/noctty/share/terminfo",
+    }) |inherited| {
+        try env.put("TERMINFO", inherited);
+        try putTermEnv(&env, "xterm-256color", "C:\\noctty/share/terminfo");
+        try testing.expectEqual(null, env.get("TERMINFO"));
+    }
+
+    // One the user set is theirs.
+    try env.put("TERMINFO", "C:\\Users\\me\\terminfo");
+    try putTermEnv(&env, "xterm-256color", "C:\\noctty/share/terminfo");
+    try testing.expectEqualStrings("C:\\Users\\me\\terminfo", env.get("TERMINFO").?);
+}
+
+test "putWindowsTerm keeps TERM when the child's HOME has the entry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try terminfo.compiled.encode(testing.allocator, terminfo.ghostty, &out.writer);
+    try tmp.dir.makePath(".terminfo/78");
+    try tmp.dir.writeFile(.{ .sub_path = ".terminfo/78/xterm-ghostty", .data = out.written() });
+    const home = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(home);
+
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", home);
+    try env.put("TERM", "xterm-ghostty");
+    try putWindowsTerm(testing.allocator, &env, "xterm-ghostty");
+    try testing.expectEqualStrings("xterm-ghostty", env.get("TERM").?);
+
+    // The same HOME without the entry, as in portable mode.
+    try tmp.dir.deleteTree(".terminfo");
+    try putWindowsTerm(testing.allocator, &env, "xterm-ghostty");
+    try testing.expectEqualStrings("xterm-256color", env.get("TERM").?);
+}
+
+test "putWindowsTerm falls back without a usable HOME and leaves other TERMs alone" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try env.put("HOME", "/c/Users/me");
+    try env.put("TERM", "ghostty");
+    try putWindowsTerm(testing.allocator, &env, "ghostty");
+    try testing.expectEqualStrings("xterm-256color", env.get("TERM").?);
+
+    // A TERM that is not ours is the user's choice; we have no entry to check.
+    try env.put("TERM", "xterm-kitty");
+    try putWindowsTerm(testing.allocator, &env, "xterm-kitty");
+    try testing.expectEqualStrings("xterm-kitty", env.get("TERM").?);
+}
+
+test "samePath" {
+    const testing = std.testing;
+    try testing.expect(samePath("C:\\noctty/share/terminfo", "c:/NOCTTY\\share\\terminfo"));
+    try testing.expect(!samePath("C:\\noctty/share/terminfo", "C:\\noctty/share/terminfo2"));
+    try testing.expect(!samePath("C:\\noctty/share/terminfo", "C:\\noctty-share/terminfo"));
 }
 
 test "Windows PTY read batches amortize high-volume output" {

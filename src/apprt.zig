@@ -18,6 +18,7 @@ pub const win32 = @import("apprt/win32.zig");
 /// Pure workspace state/reducer used by the incremental Win32 shell migration.
 pub const win32_shell = @import("apprt/win32_shell.zig");
 pub const win32_job_object = @import("apprt/win32_job_object.zig");
+pub const win32_terminfo = @import("apprt/win32_terminfo.zig");
 pub const win32_session_state = @import("apprt/win32_session_state.zig");
 pub const win32_session_persistence = @import("apprt/win32_session_persistence.zig");
 pub const win32_layouts = @import("apprt/win32_layouts.zig");
@@ -68,6 +69,7 @@ test {
     _ = action;
     _ = structs;
     _ = win32_job_object;
+    _ = win32_terminfo;
     _ = win32_session_state;
     _ = win32_session_persistence;
     _ = win32_layouts;

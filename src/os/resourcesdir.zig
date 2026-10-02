@@ -59,7 +59,9 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     // This is the sentinel value we look for in the path to know
     // we've found the resources directory.
     const sentinels = switch (comptime builtin.target.os.tag) {
-        .windows => .{"terminfo/ghostty.terminfo"},
+        // The compiled entry is always installed; the source only with
+        // -Demit-terminfo, which is on by default.
+        .windows => .{ "terminfo/78/xterm-ghostty", "terminfo/ghostty.terminfo" },
         .macos => .{"terminfo/78/xterm-ghostty"},
         .freebsd => .{ "site-terminfo/g/ghostty", "site-terminfo/x/xterm-ghostty" },
         else => .{ "terminfo/g/ghostty", "terminfo/x/xterm-ghostty" },

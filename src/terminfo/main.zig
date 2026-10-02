@@ -5,6 +5,7 @@
 //! the archaic (imo) terminfo format by hand. But eventually we may want to
 //! extract this into a more full-featured library on its own.
 
+pub const compiled = @import("compiled.zig");
 pub const ghostty = @import("ghostty.zig").ghostty;
 pub const Source = @import("Source.zig");
 

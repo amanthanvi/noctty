@@ -553,6 +553,17 @@ try {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
     }
 
+    # The compiled entries for TERM=xterm-ghostty that the build writes on
+    # Windows. They mark the resources directory (src/os/resourcesdir.zig)
+    # and can be copied or pointed at by hand; noctty installs the same entry
+    # into the user's own terminfo directory at startup.
+    foreach ($terminfoEntry in @("share\terminfo\78\xterm-ghostty", "share\terminfo\67\ghostty")) {
+        $terminfoPath = Join-Path $portableRoot $terminfoEntry
+        if (-not (Test-Path -LiteralPath $terminfoPath -PathType Leaf)) {
+            throw "Expected compiled terminfo entry was not staged: $terminfoPath"
+        }
+    }
+
     $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($hostArchitecture -eq $Architecture) {
         Write-Host "Packaging phase: verify custom shader capability"
