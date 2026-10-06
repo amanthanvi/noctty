@@ -116,7 +116,8 @@ dumps, and SSH host cache go there.
   by an older version. If you have no Noctty config, the Settings window can
   save to one of these older files or to `ghostty\config.ghostty`.
 - **Session restore:** `session-state.json`, saved when Noctty closes, except
-  in safe mode or if you set `window-save-state = never`. It holds window positions and sizes,
+  in safe mode, when Noctty runs as administrator through UAC, or if you set
+  `window-save-state = never`. It holds window positions and sizes,
   tabs and splits, each pane's shell profile and last working directory as
   reported by the shell, and titles you gave tabs or panes. It holds terminal
   text only if you set `window-save-state-scrollback` above 0 (the default is
