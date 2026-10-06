@@ -4733,6 +4733,14 @@ test "update requests send exactly one User-Agent" {
     };
     var capture: Capture = .{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Capture.serve, .{&capture});
+    // If the client fails before it connects, the worker is still blocked in
+    // `accept`: connect once so it returns, then join it before the capture
+    // and the listener go away.
+    var joined = false;
+    defer if (!joined) {
+        if (std.net.tcpConnectToAddress(server.listen_address)) |stream| stream.close() else |_| {}
+        thread.join();
+    };
 
     const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/", .{server.listen_address.getPort()});
     defer alloc.free(url);
@@ -4748,6 +4756,7 @@ test "update requests send exactly one User-Agent" {
         _ = try request.receiveHead(&.{});
     }
     thread.join();
+    joined = true;
 
     const head = capture.head[0..capture.len];
     var count: usize = 0;

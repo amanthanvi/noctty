@@ -164,6 +164,17 @@ begin
   if CurUninstallStep <> usUninstall then
     Exit;
   ExePath := ExpandConstant('{app}\noctty.exe');
-  if FileExists(ExePath) and OwnsDefaultTerminalRegistration() then
-    Exec(ExePath, '+unregister-default-terminal', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not (FileExists(ExePath) and OwnsDefaultTerminalRegistration()) then
+    Exit;
+  { The uninstall goes on either way, but a registration left pointing at the
+    removed files makes every console launch fall back to conhost, so say so. }
+  if not Exec(ExePath, '+unregister-default-terminal', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+    or (ResultCode <> 0) then
+  begin
+    Log('+unregister-default-terminal did not finish: result ' + IntToStr(ResultCode));
+    SuppressibleMsgBox(
+      'noctty could not remove its default terminal registration, so Windows may keep trying to start it after it is uninstalled.' + #13#10#13#10 +
+      'To clear it, reinstall noctty, run "noctty +unregister-default-terminal", and uninstall again, or pick another default terminal in Windows Settings.',
+      mbInformation, MB_OK, IDOK);
+  end;
 end;
