@@ -117,10 +117,10 @@ dumps, and SSH host cache go there.
   includes your Windows user name. The Settings window saves your changes
   here. Noctty also reads `ghostty\config`, beside the `noctty` folder, if it
   exists and, when it finds no other config, `winghostty\config.ghostty` left
-  by an older version. Noctty does not read `ghostty\config.ghostty`. If you
-  have no Noctty config, the Settings window saves to one of the older files
-  Noctty does read, `ghostty\config` or `winghostty\config.ghostty`, rather
-  than creating a new one.
+  by an older version. Noctty does not read `ghostty\config.ghostty`. If your
+  Noctty config is missing or empty, the Settings window saves to one of the
+  older files Noctty does read, `ghostty\config` or `winghostty\config.ghostty`,
+  if one exists, rather than creating a new Noctty config.
 - **Session restore:** `session-state.json`, saved when Noctty closes, except
   in safe mode, when Noctty runs as administrator through UAC, when it was
   started to run one command (`-e` or `initial-command`), without an initial
