@@ -12747,6 +12747,35 @@ test "Terminal: resize less cols without reflow cutting wide char tail" {
     try testing.expect(t.screens.active.pages.getCell(.{ .active = .{ .x = 1 } }).?.cell.isEmpty());
 }
 
+test "Terminal: alt screen edits after narrowing cuts a wide char" {
+    const alloc = testing.allocator;
+
+    // A full-screen app's wide char straddles the column a split cuts. The
+    // alternate screen narrows without reflow, then the app erases left from
+    // the last column and inserts a blank at the start of the row.
+    for ([_]bool{ false, true }) |insert| {
+        var t = try init(alloc, .{ .cols = 3, .rows = 1 });
+        defer t.deinit(alloc);
+
+        try t.switchScreenMode(.@"1049", true);
+        try t.print('a');
+        try t.print('一');
+        try t.resize(alloc, 2, 1);
+
+        if (insert) {
+            t.setCursorPos(1, 1);
+            t.insertBlanks(1);
+        } else {
+            t.setCursorPos(1, 2);
+            t.eraseLine(.left, false);
+        }
+
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings(if (insert) " a" else "", str);
+    }
+}
+
 // https://github.com/mitchellh/ghostty/issues/723
 // This was found via fuzzing so its highly specific.
 test "Terminal: resize with left and right margin set" {
