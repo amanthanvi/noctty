@@ -161,16 +161,18 @@ Noctty from scripts and the command line, see
 
 ## Privacy and updates
 
-- **No telemetry.** Noctty goes online only to reach GitHub Releases for
-  updates.
-- **Updates** are checked when Noctty starts, at most once every 24 hours.
-  Nothing is installed until you start the update yourself. Set
+- **No telemetry.** On its own, Noctty goes online only to reach GitHub
+  Releases for updates.
+- **Updates** are checked when Noctty starts, unless a check succeeded in the
+  last 24 hours. Nothing is installed until you start the update yourself. Set
   `auto-update = off` to stop checking, or `auto-update = download` to have
   Noctty download and verify the update ahead of time.
 - **Crash dumps** stay on your PC in `%LOCALAPPDATA%\noctty\crash` and are
   never uploaded.
 
-More detail is in [docs/windows.md](docs/windows.md#updates).
+The [privacy policy](PRIVACY.md) describes what Noctty stores on your PC, the
+connections it makes, and how to remove your data. More detail on updates is
+in [docs/windows.md](docs/windows.md#updates).
 
 ## Troubleshooting
 

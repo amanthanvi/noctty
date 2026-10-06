@@ -50,13 +50,17 @@ XDG helpers still honor `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and
 `XDG_CACHE_HOME` when set on Windows; `%LOCALAPPDATA%` is the fallback in
 the normal packaged app environment.
 
-| Path                                       | Purpose                                                                                        |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `%LOCALAPPDATA%\noctty\config.ghostty`     | User config, written on first launch.                                                          |
-| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
-| `%LOCALAPPDATA%\noctty\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                              |
-| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                     |
-| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
+| Path                                       | Purpose                                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `%LOCALAPPDATA%\noctty\config.ghostty`     | User config, written on first launch.                                                                        |
+| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved on exit unless `window-save-state = never`. |
+| `%LOCALAPPDATA%\noctty\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                                            |
+| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                                   |
+| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                                   |
+
+[PRIVACY.md](../PRIVACY.md) describes the other files and registry entries
+noctty writes, including the jump list, command palette history, and update
+and startup records, and how to remove them.
 
 The portable ZIP carries the bundled resources next to the executable. Do
 not move `noctty.exe` alone out of the extracted tree; it needs the packaged
@@ -703,8 +707,8 @@ integration; noctty does not currently add jump-list layout entries.
 auto-update = check
 ```
 
-The updater checks the configured release feed at most once every 24 hours
-and never replaces binaries silently. The feed defaults to noctty's GitHub
+The updater checks the configured release feed when the app starts, unless a
+check succeeded in the last 24 hours, and never replaces binaries silently. The feed defaults to noctty's GitHub
 Releases API and can be changed with `auto-update-feed-url`; checksum,
 Authenticode, and pinned-publisher-key verification stay mandatory whatever
 the feed host. For tests and diagnostics, `NOCTTY_UPDATE_FEED_URL` overrides
@@ -713,9 +717,12 @@ precedence is explicit config, then the environment variable, then the
 compiled-in default; a blank or whitespace-only value at either level falls
 through to the next, and a value that is not a valid HTTPS URL is ignored
 with a warning. Changing the effective feed discards the previous feed's
-cached release, dismissal, and staged installer. In `check` mode it opens the
-release page when a newer stable version exists. It is the only outbound
-network call the app makes; there is no telemetry and no analytics.
+cached release, dismissal, and staged installer. When a newer stable version
+exists, `check` mode shows a notice that opens the release page when clicked.
+The updater is the only part of the app that goes online on its own; there is
+no telemetry and no analytics. [PRIVACY.md](../PRIVACY.md) covers what its
+requests send and the connections you start yourself, such as links and SSH
+entries.
 
 Upstream Ghostty is leaving GitHub, so the maintainer periodically checks
 that the `upstream` remote and the release-feed host are still live and

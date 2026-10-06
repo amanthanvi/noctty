@@ -152,8 +152,8 @@ WSL shows up in the picker but is never the default unless you set
 
 ## Updates
 
-noctty checks GitHub Releases on launch, at most once every 24 hours, and
-never installs anything until you start it. `auto-update = off` disables the
+noctty checks GitHub Releases on launch, unless a check succeeded in the
+last 24 hours, and never installs anything until you start it. `auto-update = off` disables the
 check. `auto-update = download` also downloads and verifies the installer
 ahead of time; you still choose when to install. Details are in
 [windows.md](windows.md#updates).

@@ -171,8 +171,8 @@ Win32-validated VT protocol coverage is tracked in
 ### Updater
 
 - Checks the stable release feed (GitHub Releases by default, overridable
-  with `auto-update-feed-url`) at most once every 24 hours and never replaces
-  binaries silently.
+  with `auto-update-feed-url`) on launch, unless a check succeeded in the
+  last 24 hours, and never replaces binaries silently.
 - `auto-update = download` stages only releases whose checksum metadata and
   Authenticode signatures both verify. Portable ZIPs additionally require a
   publisher-signed manifest covering every payload file; releases without it
