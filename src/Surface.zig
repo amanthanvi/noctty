@@ -2584,8 +2584,8 @@ fn resolvePathForOpening(
     return null;
 }
 
-/// Whether Windows can address `path`, which must be the output of
-/// `std.fs.path.resolve`.
+/// Whether `path` is a local path Windows can address, which must be the output
+/// of `std.fs.path.resolve`.
 ///
 /// Deliberately conservative. Anything this lets through that NT considers
 /// malformed does not merely fail: `std.posix.faccessatW` maps
@@ -2593,14 +2593,18 @@ fn resolvePathForOpening(
 /// the caller cannot recover. Shapes we cannot cheaply prove safe are
 /// rejected, which only costs the link its file-path interpretation.
 fn windowsPathIsRepresentable(path: []const u8) bool {
+    // Also not for a network share or device path. The pwd can no longer be one
+    // (`reportPwd` refuses it), but `accessAbsolute` would contact the share
+    // before the opener's own refusal runs, so keep this the one gate.
+    if (internal_os.path.isNetworkOrDevicePath(path)) return false;
+
+    // `accessAbsolute` asserts that its argument is absolute, and `resolve` does
+    // not always return one: a pwd opening with `\/` comes back as
+    // `server\share\file`.
+    if (!std.fs.path.isAbsolute(path)) return false;
+
     var rest = path;
 
-    // The extended-length prefix is legal and `std.fs.path.resolve` preserves
-    // it, so step over it before screening. Its own `?` is not a wildcard.
-    if (std.mem.startsWith(u8, rest, "\\\\?\\")) {
-        rest = rest[4..];
-        if (std.ascii.startsWithIgnoreCase(rest, "UNC\\")) rest = rest[4..];
-    }
     if (rest.len >= 2 and rest[1] == ':' and std.ascii.isAlphabetic(rest[0])) {
         rest = rest[2..];
     }
@@ -2648,7 +2652,6 @@ test "windowsPathIsRepresentable" {
 
     // Ordinary paths resolve as before.
     try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\Documents"));
-    try testing.expect(windowsPathIsRepresentable("\\\\server\\share\\file"));
     // Drive-relative input ("C:foo") resolves to a plain path.
     try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\foo"));
 
@@ -2659,17 +2662,20 @@ test "windowsPathIsRepresentable" {
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\a*b"));
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\dir*x\\leaf"));
 
-    // The extended-length prefix survives resolution and its `?` is not a
-    // wildcard, but the rest of such a path is screened as usual.
-    try testing.expect(windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\Documents"));
-    try testing.expect(windowsPathIsRepresentable("\\\\?\\UNC\\server\\share\\file"));
-    try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\https:\\example.com"));
-    try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\a*b"));
+    // Network shares and device paths are refused before anything touches them,
+    // in every spelling `resolve` can leave (it rewrites `//server/share`).
+    for ([_][]const u8{
+        "\\\\server\\share\\file",
+        "//server/share/file",
+        "\\\\?\\UNC\\server\\share\\file",
+        "\\\\?\\C:\\Users\\me\\Documents",
+        "\\\\.\\pipe\\x",
+        "\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share\\file",
+    }) |p| try testing.expect(!windowsPathIsRepresentable(p));
 
     // C0 aborts in a directory or file name, wherever it appears.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\bad\x01name\\leaf"));
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\leaf\x1f"));
-    try testing.expect(!windowsPathIsRepresentable("\\\\?\\C:\\Users\\me\\bad\x01name\\leaf"));
     // DEL is legal in a Windows name, so it must keep resolving.
     try testing.expect(windowsPathIsRepresentable("C:\\Users\\me\\leaf\x7f"));
 
@@ -2690,6 +2696,70 @@ test "windowsPathIsRepresentable" {
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn:btih:0000"));
     // A NUL would truncate the existence check to a shorter path.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\file.txt:str\x00eam"));
+}
+
+test "a relative link never resolves onto a network or device pwd" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{
+        "\\\\server\\share",
+        "//server/share",
+        "\\\\?\\UNC\\server\\share\\dir",
+        "\\\\.\\pipe",
+        "\\/server/share",
+        "/\\\\server/share",
+        // The NT namespace prefix is reachable from a reported pwd of
+        // `/??/UNC/server/share`, which `resolve` turns into `\??\UNC\...`.
+        "/??/UNC/server/share",
+        "\\??\\UNC\\server\\share",
+    }) |reported| {
+        const resolved = try std.fs.path.resolve(alloc, &.{ reported, "file.txt" });
+        defer alloc.free(resolved);
+        std.testing.expect(!windowsPathIsRepresentable(resolved)) catch |err| {
+            std.debug.print("pwd {s} resolved to {s}\n", .{ reported, resolved });
+            return err;
+        };
+    }
+
+    // A local pwd still resolves.
+    const local = try std.fs.path.resolve(alloc, &.{ "C:\\Users\\me", "file.txt" });
+    defer alloc.free(local);
+    try std.testing.expect(windowsPathIsRepresentable(local));
+}
+
+test "a relative resolution result is never handed to accessAbsolute" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // `std.fs.accessAbsolute` asserts that its argument is absolute (a panic in
+    // safe builds, undefined behaviour in ReleaseFast). `resolve` does not
+    // always return one: a pwd that opens with `\/` is parsed as a drive-less
+    // UNC fragment and comes back as `server\share\file.txt`.
+    const alloc = std.testing.allocator;
+    const relative = try std.fs.path.resolve(alloc, &.{ "\\/server/share", "file.txt" });
+    defer alloc.free(relative);
+    try std.testing.expect(!std.fs.path.isAbsolute(relative));
+    try std.testing.expect(!windowsPathIsRepresentable(relative));
+
+    for ([_][]const u8{
+        "#x",
+        "relative",
+        "",
+        "/\\\\server/share",
+        "/home/me",
+        "kitty-shell-cwd:",
+        "\\/server/share",
+        "/\\server\\share",
+    }) |reported| {
+        const resolved = try std.fs.path.resolve(alloc, &.{ reported, "file.txt" });
+        defer alloc.free(resolved);
+        std.testing.expect(
+            std.fs.path.isAbsolute(resolved) or !windowsPathIsRepresentable(resolved),
+        ) catch |err| {
+            std.debug.print("pwd {s} resolved to {s}\n", .{ reported, resolved });
+            return err;
+        };
+    }
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)

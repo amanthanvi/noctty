@@ -66,9 +66,12 @@ published release files, such as Scoop or WinGet, install the same app.
 - **Paths from programs.** A program can report its working directory. New
   tabs and splits, and your next session, start there if it is a folder on a
   drive letter, and in your home folder otherwise. A program can also ask
-  Noctty to display an image file, which Noctty opens wherever it is, and a
-  relative link you Ctrl+click is looked up in the reported directory. If
-  either path is on a network share, Windows connects to that share.
+  Noctty to display an image file, and a relative link you Ctrl+click is
+  looked up in the reported directory. Noctty refuses a working directory or
+  image file on a network share or device path (`\\server\share`,
+  `\\?\UNC\...`, `\\.\pipe\...`), so such a path never makes Windows connect
+  to a share. A share you mapped to a drive letter is an ordinary drive to
+  Windows and is treated as one.
 - **Clipboard.** Programs, including ones on a remote host you reach over
   SSH, can put text on your clipboard. They can read it only after you allow
   it. Change this with `clipboard-write` and `clipboard-read`.
