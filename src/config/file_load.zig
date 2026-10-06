@@ -24,13 +24,6 @@ pub fn legacyGhosttyDefaultXdgPath(alloc: Allocator) ![]const u8 {
     );
 }
 
-pub fn legacyGhosttyConfigDotGhosttyPath(alloc: Allocator) ![]const u8 {
-    return try xdg.config(
-        alloc,
-        .{ .subdir = "ghostty/config.ghostty" },
-    );
-}
-
 /// Pre-rename fork default path for the XDG home configuration file.
 /// The fork shipped as "winghostty" before the Noctty rename, so
 /// existing users still have their config under that directory.
@@ -42,44 +35,64 @@ pub fn legacyForkXdgPath(alloc: Allocator) ![]const u8 {
     );
 }
 
-/// Preferred default path for the XDG home configuration file.
+const FileState = enum { missing, empty, content };
+
+fn fileState(path: []const u8) FileState {
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.BadPathName => return .missing,
+        // Something is there that we cannot open; it still exists.
+        else => return .content,
+    };
+    defer file.close();
+    const stat = file.stat() catch return .content;
+    return if (stat.size == 0) .empty else .content;
+}
+
+/// The per-user config file an edit has to land in: the one
+/// `Config.loadDefaultFiles` will read back.
+///
+/// The loader reads `ghostty/config`, then `noctty/config.ghostty` over it,
+/// and falls back to the pre-rename `winghostty/config.ghostty` only when
+/// neither exists. It never reads `ghostty/config.ghostty`, so that file is
+/// not a candidate. The highest-precedence file with content wins, so an edit
+/// is not shadowed by another layer; an empty file is only chosen when
+/// nothing has content, and the noctty path is the answer when nothing exists.
+///
 /// Returned value must be freed by the caller.
 pub fn preferredXdgPath(alloc: Allocator) ![]const u8 {
-    // If the XDG path exists, use that.
     const xdg_path = try defaultXdgPath(alloc);
-    if (open(xdg_path)) |f| {
-        f.close();
-        return xdg_path;
-    } else |_| {}
-
-    // Try the pre-rename fork ("winghostty") path.
     errdefer alloc.free(xdg_path);
-    const legacy_fork_path = try legacyForkXdgPath(alloc);
-    if (open(legacy_fork_path)) |f| {
-        f.close();
-        alloc.free(xdg_path);
-        return legacy_fork_path;
-    } else |_| {}
-    alloc.free(legacy_fork_path);
+    const legacy_path = try legacyGhosttyDefaultXdgPath(alloc);
+    errdefer alloc.free(legacy_path);
 
-    // Try the legacy path
-    const legacy_config_ghostty_path = try legacyGhosttyConfigDotGhosttyPath(alloc);
-    if (open(legacy_config_ghostty_path)) |f| {
-        f.close();
-        alloc.free(xdg_path);
-        return legacy_config_ghostty_path;
-    } else |_| {}
+    const xdg_state = fileState(xdg_path);
+    const legacy_state = fileState(legacy_path);
 
-    alloc.free(legacy_config_ghostty_path);
-    const legacy_xdg_path = try legacyGhosttyDefaultXdgPath(alloc);
-    if (open(legacy_xdg_path)) |f| {
-        f.close();
+    if (xdg_state == .content) {
+        alloc.free(legacy_path);
+        return xdg_path;
+    }
+    if (legacy_state == .content) {
         alloc.free(xdg_path);
-        return legacy_xdg_path;
-    } else |_| {}
+        return legacy_path;
+    }
+    if (xdg_state == .empty) {
+        alloc.free(legacy_path);
+        return xdg_path;
+    }
+    if (legacy_state == .empty) {
+        alloc.free(xdg_path);
+        return legacy_path;
+    }
 
-    // Legacy paths and XDG path both don't exist. Return the new one.
-    alloc.free(legacy_xdg_path);
+    const fork_path = try legacyForkXdgPath(alloc);
+    if (fileState(fork_path) != .missing) {
+        alloc.free(xdg_path);
+        alloc.free(legacy_path);
+        return fork_path;
+    }
+    alloc.free(fork_path);
+    alloc.free(legacy_path);
     return xdg_path;
 }
 

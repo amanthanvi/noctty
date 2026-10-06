@@ -3871,6 +3871,169 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
     }
 }
 
+test "default config files: an edit to the edit-target takes effect on reload" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // `xdg.config` pins everything beside the executable in portable mode, so
+    // redirecting the config home below could not steer it. Skip rather than
+    // pass without checking anything.
+    if (try internal_os.xdg.portableRoot(alloc)) |root| {
+        alloc.free(root);
+        return error.SkipZigTest;
+    }
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(tmp_path);
+
+    // Point XDG_CONFIG_HOME (it wins over LOCALAPPDATA) at a scratch directory
+    // for the length of this test, then put the real value back.
+    const saved: ?[:0]u8 = saved: {
+        const value = std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => break :saved null,
+            else => return err,
+        };
+        defer alloc.free(value);
+        break :saved try alloc.dupeZ(u8, value);
+    };
+    defer if (saved) |value| alloc.free(value);
+    defer _ = if (saved) |value|
+        internal_os.setenv("XDG_CONFIG_HOME", value)
+    else
+        internal_os.unsetenv("XDG_CONFIG_HOME");
+
+    const File = struct { path: []const u8, content: []const u8 };
+    const Case = struct {
+        name: []const u8,
+        /// The per-user config files that exist at startup.
+        files: []const File,
+        /// The file an edit has to land in, relative to the config home.
+        target: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .name = "ghostty/config.ghostty is never read, so it is never the target",
+            .files = &.{
+                .{ .path = "ghostty/config", .content = "font-size = 11\n" },
+                .{ .path = "ghostty/config.ghostty", .content = "font-size = 17\n" },
+            },
+            .target = "ghostty/config",
+        },
+        .{
+            .name = "ghostty/config.ghostty alone leaves the loader's new noctty file as the target",
+            .files = &.{.{ .path = "ghostty/config.ghostty", .content = "font-size = 17\n" }},
+            .target = "noctty/config.ghostty",
+        },
+        .{
+            .name = "winghostty is only a fallback, so ghostty/config wins",
+            .files = &.{
+                .{ .path = "ghostty/config", .content = "font-size = 11\n" },
+                .{ .path = "winghostty/config.ghostty", .content = "font-size = 15\n" },
+            },
+            .target = "ghostty/config",
+        },
+        .{
+            .name = "winghostty alone is read, so it is the target",
+            .files = &.{.{ .path = "winghostty/config.ghostty", .content = "font-size = 15\n" }},
+            .target = "winghostty/config.ghostty",
+        },
+        .{
+            .name = "winghostty beside the unread ghostty/config.ghostty",
+            .files = &.{
+                .{ .path = "winghostty/config.ghostty", .content = "font-size = 15\n" },
+                .{ .path = "ghostty/config.ghostty", .content = "font-size = 17\n" },
+            },
+            .target = "winghostty/config.ghostty",
+        },
+        .{
+            .name = "noctty overrides ghostty/config",
+            .files = &.{
+                .{ .path = "ghostty/config", .content = "font-size = 11\n" },
+                .{ .path = "noctty/config.ghostty", .content = "font-size = 13\n" },
+            },
+            .target = "noctty/config.ghostty",
+        },
+        .{
+            .name = "noctty beside the unread ghostty/config.ghostty",
+            .files = &.{
+                .{ .path = "noctty/config.ghostty", .content = "font-size = 13\n" },
+                .{ .path = "ghostty/config.ghostty", .content = "font-size = 17\n" },
+            },
+            .target = "noctty/config.ghostty",
+        },
+        .{
+            .name = "an empty noctty file does not hide a non-empty ghostty/config",
+            .files = &.{
+                .{ .path = "noctty/config.ghostty", .content = "" },
+                .{ .path = "ghostty/config", .content = "font-size = 11\n" },
+            },
+            .target = "ghostty/config",
+        },
+        .{
+            .name = "no config at all",
+            .files = &.{},
+            .target = "noctty/config.ghostty",
+        },
+    };
+
+    for (cases, 0..) |case, i| {
+        errdefer std.debug.print("case failed: {s}\n", .{case.name});
+
+        const home_name = try std.fmt.allocPrint(alloc, "case{d}", .{i});
+        defer alloc.free(home_name);
+        try tmp.dir.makePath(home_name);
+        const home = try std.fs.path.join(alloc, &.{ tmp_path, home_name });
+        defer alloc.free(home);
+        const home_z = try alloc.dupeZ(u8, home);
+        defer alloc.free(home_z);
+        try testing.expectEqual(@as(c_int, 0), internal_os.setenv("XDG_CONFIG_HOME", home_z));
+
+        var home_dir = try tmp.dir.openDir(home_name, .{});
+        defer home_dir.close();
+        for (case.files) |file| {
+            if (std.fs.path.dirname(file.path)) |parent| try home_dir.makePath(parent);
+            try home_dir.writeFile(.{ .sub_path = file.path, .data = file.content });
+        }
+
+        // What a launch does first, including writing the template when
+        // nothing exists.
+        {
+            var cfg = try Config.default(alloc);
+            defer cfg.deinit();
+            try cfg.loadDefaultFiles(alloc);
+        }
+
+        // `xdg.config` joins the `noctty/config.ghostty` subdir verbatim, so
+        // compare with one separator.
+        const target_raw = try file_load.preferredDefaultFilePath(alloc);
+        defer alloc.free(target_raw);
+        const target = try alloc.dupe(u8, target_raw);
+        defer alloc.free(target);
+        const want = try std.fs.path.join(alloc, &.{ home, case.target });
+        defer alloc.free(want);
+        std.mem.replaceScalar(u8, target, '/', '\\');
+        std.mem.replaceScalar(u8, want, '/', '\\');
+        try testing.expectEqualStrings(want, target);
+
+        // What Settings does: put a value into the target...
+        {
+            const f = try std.fs.openFileAbsolute(target, .{ .mode = .read_write });
+            defer f.close();
+            try f.seekFromEnd(0);
+            try f.writeAll("font-size = 77\n");
+        }
+
+        // ...and the next launch has to see it.
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadDefaultFiles(alloc);
+        try testing.expectEqual(@as(f32, 77), cfg.@"font-size");
+    }
+}
+
 /// Load and parse the CLI args.
 pub fn loadCliArgs(self: *Config, alloc_gpa: Allocator) !void {
     switch (builtin.os.tag) {

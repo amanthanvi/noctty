@@ -26,19 +26,22 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
     var buffer: [1024]u8 = undefined;
     var stderr_writer = std.fs.File.stderr().writer(&buffer);
     const stderr = &stderr_writer.interface;
+    // The exit code carries the result. The uninstaller runs this from a
+    // process with no console, where every write fails, and a failed write
+    // must not turn a finished unregistration into an error dialog.
     const result = handoff.unregisterDefaultTerminal(alloc) catch |err| {
         if (err == error.MissingRestoreState) {
-            try stderr.writeAll(
+            stderr.writeAll(
                 "Cannot unregister noctty while it is selected: the saved previous terminal value is missing, so the registry was left unchanged.\n",
-            );
+            ) catch {};
         } else if (err == error.MissingProxyRestoreState) {
-            try stderr.writeAll(
+            stderr.writeAll(
                 "Cannot unregister noctty safely: a shared Interface value still points to noctty but its saved previous value is missing, so the registry was left unchanged.\n",
-            );
+            ) catch {};
         } else {
-            try stderr.print("Default-terminal unregistration failed: {}\n", .{err});
+            stderr.print("Default-terminal unregistration failed: {}\n", .{err}) catch {};
         }
-        try stderr.flush();
+        stderr.flush() catch {};
         return 1;
     };
 
@@ -46,14 +49,14 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
     if (result.selection_restored) {
-        try stdout.writeAll("Restored the default-terminal selection saved before noctty was registered.\n");
+        stdout.writeAll("Restored the default-terminal selection saved before noctty was registered.\n") catch {};
     } else if (result.newer_selection_preserved) {
-        try stdout.writeAll("A different default terminal is selected; preserved it and removed noctty's COM registration.\n");
+        stdout.writeAll("A different default terminal is selected; preserved it and removed noctty's COM registration.\n") catch {};
     } else if (result.class_removed) {
-        try stdout.writeAll("Removed noctty's COM registration; no terminal selection needed restoration.\n");
+        stdout.writeAll("Removed noctty's COM registration; no terminal selection needed restoration.\n") catch {};
     } else {
-        try stdout.writeAll("noctty was already unregistered; no registry values changed.\n");
+        stdout.writeAll("noctty was already unregistered; no registry values changed.\n") catch {};
     }
-    try stdout.flush();
+    stdout.flush() catch {};
     return 0;
 }

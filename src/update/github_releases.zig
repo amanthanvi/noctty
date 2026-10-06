@@ -1917,6 +1917,19 @@ fn clearOptionalOwned(alloc: Allocator, slot: *?[]u8) void {
     slot.* = null;
 }
 
+/// The one `User-Agent` every updater request carries. `std.http.Client`
+/// always writes its own `zig/<version> (std.http)` unless it is told to
+/// override it, so naming the header in `extra_headers` sent both.
+const user_agent = "noctty-updater";
+
+fn requestOptions(extra_headers: []const std.http.Header) std.http.Client.RequestOptions {
+    return .{
+        .redirect_behavior = .unhandled,
+        .headers = .{ .user_agent = .{ .override = user_agent } },
+        .extra_headers = extra_headers,
+    };
+}
+
 fn fetchHttps(
     alloc: Allocator,
     context: []const u8,
@@ -1938,10 +1951,7 @@ fn fetchHttps(
         var next_url: ?[]u8 = null;
         {
             const uri = try validateHttpsUrl(current_url);
-            var request = try client.request(.GET, uri, .{
-                .redirect_behavior = .unhandled,
-                .extra_headers = extra_headers,
-            });
+            var request = try client.request(.GET, uri, requestOptions(extra_headers));
             defer request.deinit();
 
             try request.sendBodiless();
@@ -2043,7 +2053,6 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
         url,
         &.{
             .{ .name = "accept", .value = "application/octet-stream" },
-            .{ .name = "user-agent", .value = "noctty-updater" },
         },
         &file_writer.interface,
         max_download_response_bytes,
@@ -3099,7 +3108,6 @@ fn fetchLatestStableRelease(alloc: Allocator, release_feed_url: []const u8) !Rel
         release_feed_url,
         &.{
             .{ .name = "accept", .value = "application/vnd.github+json" },
-            .{ .name = "user-agent", .value = "noctty-updater" },
             .{ .name = "x-github-api-version", .value = "2022-11-28" },
         },
         &response_buf.writer,
@@ -4693,6 +4701,73 @@ test "http status mapping distinguishes update response failures" {
         error.UnexpectedHttpStatus,
         requireOkHttpStatus("test", "https://example.invalid/client-error", .bad_request),
     );
+}
+
+test "update requests send exactly one User-Agent" {
+    const alloc = std.testing.allocator;
+
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{});
+    defer server.deinit();
+
+    const Capture = struct {
+        server: *std.net.Server,
+        head: [2048]u8 = undefined,
+        len: usize = 0,
+
+        fn serve(self: *@This()) void {
+            const conn = self.server.accept() catch return;
+            defer conn.stream.close();
+            var read_buf: [2048]u8 = undefined;
+            var write_buf: [256]u8 = undefined;
+            var stream_reader = conn.stream.reader(&read_buf);
+            var stream_writer = conn.stream.writer(&write_buf);
+            var http_server = std.http.Server.init(stream_reader.interface(), &stream_writer.interface);
+            var request = http_server.receiveHead() catch return;
+            const head = request.head_buffer;
+            const len = @min(head.len, self.head.len);
+            @memcpy(self.head[0..len], head[0..len]);
+            self.len = len;
+            request.respond("", .{ .keep_alive = false }) catch {};
+        }
+    };
+    var capture: Capture = .{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Capture.serve, .{&capture});
+    // If the client fails before it connects, the worker is still blocked in
+    // `accept`: connect once so it returns, then join it before the capture
+    // and the listener go away.
+    var joined = false;
+    defer if (!joined) {
+        if (std.net.tcpConnectToAddress(server.listen_address)) |stream| stream.close() else |_| {}
+        thread.join();
+    };
+
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/", .{server.listen_address.getPort()});
+    defer alloc.free(url);
+
+    var client: std.http.Client = .{ .allocator = alloc };
+    defer client.deinit();
+    {
+        var request = try client.request(.GET, try std.Uri.parse(url), requestOptions(&.{
+            .{ .name = "accept", .value = "application/octet-stream" },
+        }));
+        defer request.deinit();
+        try request.sendBodiless();
+        _ = try request.receiveHead(&.{});
+    }
+    thread.join();
+    joined = true;
+
+    const head = capture.head[0..capture.len];
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    while (lines.next()) |line| {
+        if (std.ascii.startsWithIgnoreCase(line, "user-agent:")) {
+            count += 1;
+            try std.testing.expectEqualStrings("user-agent: noctty-updater", line);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 test "update redirect target resolution accepts absolute HTTPS URL" {

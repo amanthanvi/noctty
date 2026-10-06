@@ -108,15 +108,6 @@ Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty\command"; ValueType: str
 [Run]
 Filename: "{app}\noctty.exe"; Description: "Launch noctty"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-; Drop the uninstalling user's default-terminal selection before the files go
-; away. Without this, HKCU keeps pointing DelegationTerminal at noctty's CLSID
-; and the shared Interface proxy mappings at the deleted DLL, so every console
-; launch fails activation and silently falls back to conhost. Runs before file
-; removal; other users' selections are theirs to unregister. The ownership
-; check preserves a newer registration made by another installed/portable copy.
-Filename: "{app}\noctty.exe"; Parameters: "+unregister-default-terminal"; Flags: runhidden skipifdoesntexist; RunOnceId: "UnregisterDefaultTerminal"; Check: OwnsDefaultTerminalRegistration
-
 [Code]
 function OwnsDefaultTerminalRegistration(): Boolean;
 var
@@ -149,4 +140,44 @@ begin
   ExePath := ExpandConstant('{app}\noctty.exe');
   StringChangeEx(ExePath, '%', '%%', True);
   Result := AddQuotes(ExePath) + ' --single-instance=false --working-directory="%V\."';
+end;
+
+{ Drop the uninstalling user's default-terminal selection before the files go
+  away. Without this, HKCU keeps pointing DelegationTerminal at noctty's CLSID
+  and the shared Interface proxy mappings at the deleted DLL, so every console
+  launch fails activation and silently falls back to conhost. Other users'
+  selections are theirs to unregister. The ownership check preserves a newer
+  registration made by another installed/portable copy.
+
+  This is deliberately code and not an [UninstallRun] entry with a Check:
+  Inno Setup evaluates an [UninstallRun] Check while INSTALLING, so on a fresh
+  install (nothing registered yet) it returned False and the entry was never
+  recorded in the uninstall log, and uninstall then left noctty registered.
+  Measured with a throwaway installer: the Check ran once, at install time,
+  and never at uninstall. CurUninstallStepChanged runs in the uninstaller,
+  before the files are removed. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ExePath: String;
+  ResultCode: Integer;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+  ExePath := ExpandConstant('{app}\noctty.exe');
+  if not (FileExists(ExePath) and OwnsDefaultTerminalRegistration()) then
+    Exit;
+  { The uninstall goes on either way, but a registration left pointing at the
+    removed files makes every console launch fall back to conhost, so say so. }
+  if not Exec(ExePath, '+unregister-default-terminal', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+    or (ResultCode <> 0) then
+  begin
+    Log('+unregister-default-terminal did not finish: result ' + IntToStr(ResultCode));
+    { Only an attended uninstall gets the box: /SILENT and /VERYSILENT without
+      /SUPPRESSMSGBOXES would otherwise wait for a click nobody can give. }
+    if not UninstallSilent then
+      MsgBox(
+        'noctty could not remove its default terminal registration, so Windows may keep trying to start it after it is uninstalled.' + #13#10#13#10 +
+        'To clear it, reinstall noctty, run "noctty +unregister-default-terminal", and uninstall again, or pick another default terminal in Windows Settings.',
+        mbInformation, MB_OK);
+  end;
 end;

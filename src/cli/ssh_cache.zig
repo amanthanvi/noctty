@@ -11,7 +11,6 @@ pub const Options = struct {
     add: ?[]const u8 = null,
     remove: ?[]const u8 = null,
     host: ?[]const u8 = null,
-    @"expire-days": ?u32 = null,
 
     pub fn deinit(self: *Options) void {
         _ = self;
@@ -30,8 +29,7 @@ pub const Options = struct {
 /// manages the cache of successful installations to avoid redundant uploads.
 ///
 /// The cache stores hostnames (or user@hostname combinations) along with timestamps.
-/// Entries older than the expiration period are automatically removed during cache
-/// operations. By default, entries never expire.
+/// Entries never expire: remove one with `--remove`, or all of them with `--clear`.
 ///
 /// Only one of `--clear`, `--add`, `--remove`, or `--host` can be specified.
 /// If multiple are specified, one of the actions will be executed but
@@ -45,7 +43,6 @@ pub const Options = struct {
 ///   noctty +ssh-cache --add=user@example.com   # Add user@host combination
 ///   noctty +ssh-cache --remove=example.com     # Remove host from cache
 ///   noctty +ssh-cache --clear                  # Clear entire cache
-///   noctty +ssh-cache --expire-days=30         # Set custom expiration period
 pub fn run(alloc_gpa: Allocator) !u8 {
     var arena = std.heap.ArenaAllocator.init(alloc_gpa);
     defer arena.deinit();
