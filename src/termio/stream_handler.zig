@@ -1242,7 +1242,7 @@ pub const StreamHandler = struct {
         const scratch = stack_alloc.get();
         const path = decodeOsc7PathForPwd(scratch, uri) catch |err| switch (err) {
             error.InvalidOsc7Path => {
-                log.warn("OSC 7 path contains unsafe Windows path bytes", .{});
+                log.warn("OSC 7 path is a network or device path or contains unsafe bytes", .{});
                 return;
             },
             else => return err,
@@ -1275,6 +1275,14 @@ pub const StreamHandler = struct {
 
         const path = try configpkg.windows_shell.osc7PathToLocal(alloc, raw_path);
         if (!configpkg.windows_shell.isSafeWindowsPath(path)) return error.InvalidOsc7Path;
+
+        // A network share or device path is not a working directory this
+        // terminal acts on: spawning already replaces it with the home folder
+        // and links to such paths are never opened. Keeping it as the pwd would
+        // let later consumers (relative link resolution, session files) touch
+        // it, so refuse it here, like the link opener does. WSL paths were
+        // normalized to `/...` above and are unaffected.
+        if (internal_os.path.isNetworkOrDevicePath(path)) return error.InvalidOsc7Path;
         return path;
     }
 
@@ -1992,12 +2000,69 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     message.deinit(alloc);
     try std.testing.expect(app_queue.pop() == null);
 
-    // A UNC cwd must drop the URI's leading slash instead of being reported as
-    // the invalid path `/\\server\share\dir`.
+    // A network or device cwd is refused whole: the previous pwd stays and
+    // the surface is not told about a change.
     stream.nextSlice("\x1b]9;9;kitty-shell-cwd://localhost/\\\\server\\share\\dir\x1b\\");
-    try std.testing.expectEqualStrings("\\\\server\\share\\dir", term.getPwd().?);
-
-    var unc_message = app_queue.pop().?;
-    unc_message.deinit(alloc);
+    stream.nextSlice("\x1b]7;file://localhost/%5C%5Cserver%5Cshare\x1b\\");
+    stream.nextSlice("\x1b]7;file://localhost//server/share\x1b\\");
+    try std.testing.expectEqualStrings("C:\\Users\\test\\project", term.getPwd().?);
     try std.testing.expect(app_queue.pop() == null);
+}
+
+test "OSC 7 pwd refuses network and device paths" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const refused = [_][]const u8{
+        "kitty-shell-cwd://localhost/\\\\server\\share",
+        "kitty-shell-cwd://localhost/\\\\server\\share\\dir",
+        "kitty-shell-cwd://localhost/\\\\?\\UNC\\server\\share\\dir",
+        "kitty-shell-cwd://localhost/\\\\?\\C:\\Users\\me",
+        "kitty-shell-cwd://localhost/\\\\.\\pipe\\x",
+        "kitty-shell-cwd://localhost/\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share",
+        "kitty-shell-cwd://localhost/\\\\server/share",
+        "kitty-shell-cwd://localhost//server/share",
+        "kitty-shell-cwd://localhost/\\/server/share",
+        "file://localhost/%5C%5Cserver%5Cshare",
+        "file://localhost/%5C%5C%3F%5CUNC%5Cserver%5Cshare",
+        "file://localhost/%5C%5C.%5Cpipe%5Cx",
+        "file://localhost//server/share",
+        "file://localhost/%2F%2Fserver/share",
+        "file://localhost/%2F/server/share",
+        "file://localhost/%5C/server/share",
+        "file://localhost/%3F%3F/UNC/server/share",
+        "file://localhost/%3F%3F/GLOBALROOT/Device/Mup/server/share",
+        "kitty-shell-cwd://localhost//??/UNC/server/share",
+    };
+    for (refused) |url| {
+        const uri = try internal_os.uri.parse(url, .{
+            .mac_address = false,
+            .raw_path = std.mem.startsWith(u8, url, "kitty-shell-cwd://"),
+        });
+        std.testing.expectError(
+            error.InvalidOsc7Path,
+            StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri),
+        ) catch |err| {
+            std.debug.print("accepted: {s}\n", .{url});
+            return err;
+        };
+    }
+
+    // Local drive and WSL paths are unaffected.
+    const accepted = [_]struct { []const u8, []const u8 }{
+        .{ "kitty-shell-cwd://localhost/C:\\Users\\me", "C:\\Users\\me" },
+        .{ "file://localhost/C:/Users/me", "C:\\Users\\me" },
+        .{ "file://localhost/home/me", "/home/me" },
+        .{ "kitty-shell-cwd://localhost/\\\\wsl.localhost\\Ubuntu\\home\\me", "/home/me" },
+    };
+    for (accepted) |case| {
+        const uri = try internal_os.uri.parse(case[0], .{
+            .mac_address = false,
+            .raw_path = std.mem.startsWith(u8, case[0], "kitty-shell-cwd://"),
+        });
+        const path = try StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri);
+        try std.testing.expectEqualStrings(case[1], path);
+    }
 }

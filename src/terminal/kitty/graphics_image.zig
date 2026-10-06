@@ -10,6 +10,8 @@ const command = @import("graphics_command.zig");
 const PageList = @import("../PageList.zig");
 const wuffs = @import("wuffs");
 
+const isNetworkOrDevicePath = @import("../../os/path.zig").isNetworkOrDevicePath;
+
 const temp_dir = struct {
     const TempDir = @import("../../os/TempDir.zig");
     const allocTmpDir = @import("../../os/file.zig").allocTmpDir;
@@ -79,6 +81,17 @@ pub const LoadingImage = struct {
                 // posix.realpath *asserts* that the path does not have
                 // internal nulls instead of erroring.
                 log.warn("failed to get absolute path: BadPathName", .{});
+                return error.InvalidData;
+            }
+        }
+
+        // On Windows `realpath` opens the path, so a network share or device
+        // path (`\\server\share`, `\\?\UNC\...`, `\\.\pipe\x`) would be
+        // contacted before any other check ran. A program inside the
+        // terminal supplies this path, so refuse those shapes up front.
+        if (comptime builtin.os.tag == .windows) {
+            if (isNetworkOrDevicePath(cmd.data)) {
+                log.warn("refusing network or device path for image file", .{});
                 return error.InvalidData;
             }
         }
@@ -724,6 +737,63 @@ test "image load: temporary file without correct path" {
 
     // Temporary file should still be there
     try tmp_dir.dir.access(path, .{});
+}
+
+test "image load: network and device path spellings are refused" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A network path cannot be used here without contacting a share. These
+    // prefixes make the SAME local file reachable (`realpath` strips them),
+    // so loading would succeed without the guard and the file would be
+    // deleted for `t=t`, while no network is involved.
+    var tmp_dir = try temp_dir.TempDir.init();
+    defer tmp_dir.deinit();
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "tty-graphics-protocol-image.data",
+        .data = data,
+    });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real = try tmp_dir.dir.realpath("tty-graphics-protocol-image.data", &buf);
+
+    for ([_][]const u8{ "\\\\?\\", "\\\\.\\", "\\??\\", "//?/" }) |prefix| {
+        for ([_]command.Transmission.Medium{ .file, .temporary_file }) |medium| {
+            var cmd: command.Command = .{
+                .control = .{ .transmit = .{
+                    .format = .rgb,
+                    .medium = medium,
+                    .compression = .none,
+                    .width = 20,
+                    .height = 15,
+                    .image_id = 31,
+                } },
+                .data = try std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, real }),
+            };
+            defer cmd.deinit(alloc);
+            try testing.expectError(error.InvalidData, LoadingImage.init(alloc, &cmd));
+            try tmp_dir.dir.access(real, .{});
+        }
+    }
+
+    // The plain path of the same file still loads.
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .file,
+            .compression = .none,
+            .width = 20,
+            .height = 15,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, real),
+    };
+    defer cmd.deinit(alloc);
+    var loading = try LoadingImage.init(alloc, &cmd);
+    defer loading.deinit(alloc);
 }
 
 test "image load: rgb, not compressed, temporary file" {

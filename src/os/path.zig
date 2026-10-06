@@ -64,6 +64,29 @@ pub fn expand(alloc: Allocator, cmd: []const u8) !?[]u8 {
     return null;
 }
 
+/// Whether `path` names a Windows network share or device namespace rather
+/// than a local drive: `\\server\share`, `//server/share`, `\\?\UNC\...`,
+/// `\\.\pipe\x` and the mixed-separator spellings, all of which start with two
+/// path separators. Windows treats `/` and `\` alike there, so `\/` and `/\`
+/// count too, and so does the NT namespace prefix `\??\`. Opening such a path reaches the network or a device, so paths
+/// that a program reports (working directory, image file) are screened with
+/// this before the filesystem is touched.
+///
+/// Pure and platform independent: a POSIX `//x` is legal, so callers that can
+/// run elsewhere must gate on Windows themselves.
+pub fn isNetworkOrDevicePath(path: []const u8) bool {
+    if (path.len >= 2 and isSeparator(path[0]) and isSeparator(path[1])) return true;
+
+    // The NT object namespace prefix `\??\` is passed to the kernel unchanged
+    // by the path conversion, so `\??\UNC\server\share` reaches the share too.
+    return path.len >= 4 and isSeparator(path[0]) and path[1] == '?' and
+        path[2] == '?' and isSeparator(path[3]);
+}
+
+fn isSeparator(c: u8) bool {
+    return c == '/' or c == '\\';
+}
+
 fn isExecutable(mode: std.fs.File.Mode) bool {
     if (builtin.os.tag == .windows) return true;
     return mode & 0o0111 != 0;
@@ -86,4 +109,43 @@ test "expand: slash" {
     const path = (try expand(testing.allocator, "foo/env")).?;
     defer testing.allocator.free(path);
     try testing.expect(path.len == 7);
+}
+
+test "isNetworkOrDevicePath" {
+    for ([_][]const u8{
+        "\\\\server\\share",
+        "\\\\server\\share\\dir\\file.png",
+        "//server/share",
+        "\\/server/share",
+        "/\\server\\share",
+        "/\\\\server/share",
+        "\\\\?\\UNC\\server\\share",
+        "\\\\?\\unc\\server\\share",
+        "\\\\?\\C:\\Users\\me",
+        "\\\\.\\pipe\\x",
+        "\\\\.\\GLOBALROOT\\Device\\Mup\\server\\share",
+        "\\\\",
+        "//",
+        "\\??\\UNC\\server\\share",
+        "\\??\\GLOBALROOT\\Device\\Mup\\server\\share",
+        "/??/UNC/server/share",
+        "\\??\\C:\\Users\\me",
+    }) |p| try testing.expect(isNetworkOrDevicePath(p));
+
+    for ([_][]const u8{
+        "",
+        "/",
+        "\\",
+        "C:\\Users\\me",
+        "C:/Users/me",
+        "c:\\",
+        "/home/me",
+        "/C:/Users/me",
+        "relative\\dir",
+        "\\single",
+        "x\\\\y",
+        "\\??",
+        "\\?\\x",
+        "/?x",
+    }) |p| try testing.expect(!isNetworkOrDevicePath(p));
 }

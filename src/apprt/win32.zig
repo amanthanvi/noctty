@@ -5397,6 +5397,14 @@ pub const App = struct {
     /// stays strict: `win32_session_state.validatePane` rejects the file.
     fn sessionSnapshotPaneText(field: []const u8, value: ?[]const u8) ?[]const u8 {
         const text = value orelse return null;
+        // A working directory on a network share or device is never written:
+        // spawn would replace it with the home folder anyway, and a file that
+        // names one invites the next reader to touch it. This also drops one
+        // restored from a session saved before such pwds were refused.
+        if (std.mem.eql(u8, field, "cwd") and internal_os.path.isNetworkOrDevicePath(text)) {
+            log.warn("win32 session save: dropping network or device cwd", .{});
+            return null;
+        }
         if (win32_session_state.isValidPaneText(text)) return text;
         log.warn("win32 session save: dropping unsafe pane field field={s} len={}", .{ field, text.len });
         return null;
@@ -9826,8 +9834,7 @@ pub const App = struct {
     }
 
     fn isWin32UncOrDevicePath(path: []const u8) bool {
-        return std.mem.startsWith(u8, path, "\\\\") or
-            std.mem.startsWith(u8, path, "//");
+        return internal_os.path.isNetworkOrDevicePath(path);
     }
 
     fn openConfig(self: *App) !void {
@@ -40341,6 +40348,53 @@ test "win32 ssh split and session state drop remote cwd" {
     );
     defer std.testing.allocator.free(layout.nodes);
     try std.testing.expect(layout.nodes[0].pane.cwd == null);
+}
+
+test "win32 session and layout snapshots drop network and device cwds" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var surface: Surface = undefined;
+    surface.launched_ssh = false;
+    surface.launch_profile_key = null;
+    surface.title_override = null;
+    surface.tab_title_override = null;
+    var tab = try Tab.init(std.testing.allocator, 1, &surface);
+    defer tab.deinit();
+
+    const dropped = [_][:0]const u8{
+        "\\\\server\\share\\dir",
+        "//server/share/dir",
+        "\\\\?\\UNC\\server\\share\\dir",
+        "\\\\.\\pipe\\x",
+        "/\\\\server/share",
+    };
+    for ([_]App.SnapshotScope{ .session, .layout }) |scope| {
+        var no_scrollback_budget: usize = 0;
+
+        surface.pwd = "C:\\Users\\me\\src";
+        const kept = try App.buildSessionLayout(
+            std.testing.allocator,
+            &tab,
+            scope,
+            0,
+            &no_scrollback_budget,
+        );
+        defer std.testing.allocator.free(kept.nodes);
+        try std.testing.expectEqualStrings("C:\\Users\\me\\src", kept.nodes[0].pane.cwd.?);
+
+        for (dropped) |pwd| {
+            surface.pwd = pwd;
+            const layout = try App.buildSessionLayout(
+                std.testing.allocator,
+                &tab,
+                scope,
+                0,
+                &no_scrollback_budget,
+            );
+            defer std.testing.allocator.free(layout.nodes);
+            try std.testing.expect(layout.nodes[0].pane.cwd == null);
+        }
+    }
 }
 
 test "win32 ssh title identity survives profile refresh" {
