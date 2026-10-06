@@ -172,9 +172,12 @@ begin
     or (ResultCode <> 0) then
   begin
     Log('+unregister-default-terminal did not finish: result ' + IntToStr(ResultCode));
-    SuppressibleMsgBox(
-      'noctty could not remove its default terminal registration, so Windows may keep trying to start it after it is uninstalled.' + #13#10#13#10 +
-      'To clear it, reinstall noctty, run "noctty +unregister-default-terminal", and uninstall again, or pick another default terminal in Windows Settings.',
-      mbInformation, MB_OK, IDOK);
+    { Only an attended uninstall gets the box: /SILENT and /VERYSILENT without
+      /SUPPRESSMSGBOXES would otherwise wait for a click nobody can give. }
+    if not UninstallSilent then
+      MsgBox(
+        'noctty could not remove its default terminal registration, so Windows may keep trying to start it after it is uninstalled.' + #13#10#13#10 +
+        'To clear it, reinstall noctty, run "noctty +unregister-default-terminal", and uninstall again, or pick another default terminal in Windows Settings.',
+        mbInformation, MB_OK);
   end;
 end;
