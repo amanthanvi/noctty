@@ -807,7 +807,7 @@ test "integration.ps1 honours the injected block scope" {
     }
     // Guard the guard: if either scan stops matching, everything above turns
     // vacuous. These are the live counts; bump them when the script grows.
-    try std.testing.expectEqual(@as(usize, 23), declarations);
+    try std.testing.expectEqual(@as(usize, 24), declarations);
     try std.testing.expectEqual(@as(usize, 11), top_level_variables);
     // Unbalanced braces here mean the tracker desynced (an unterminated
     // string, a here-string, nesting past the stack), which would silently
@@ -852,6 +852,7 @@ test "integration.ps1 honours the injected block scope" {
     // make the host fall back to its built-in prompt and its own line reader.
     for ([_][]const u8{
         "__ghostty_prompt_body",
+        "__ghostty_exit_code",
         "__ghostty_wrap_prompt",
         "__ghostty_prompt_is_ours",
         "__ghostty_same_object",
@@ -1019,14 +1020,38 @@ test "integration.ps1 writes OSC 133 B from the line reader" {
     try std.testing.expect(b_write < read);
     // A prompt our wrapper did not draw (replaced by the last command, or a
     // ReadOnly one) gets OSC 7 and a P mark with redraw=0 in place of its
-    // missing A. P, unlike A, does not fresh-line.
+    // missing A. P, unlike A, does not fresh-line. The replaced prompt also
+    // gets its missing D first, but only when the re-wrap made the prompt
+    // ours: a prompt that stays unwrapped would get one on every line, and
+    // every command would then copy the prompt's text as its output. The
+    // D's code comes from the helper the wrapped prompt uses, told that the
+    // user's prompt ran in between, and only that one prompt pays for it.
+    const wrap = std.mem.indexOfPos(u8, integration_script, readline, "        __ghostty_wrap_prompt\n").?;
+    const gate = std.mem.indexOfPos(
+        u8,
+        integration_script,
+        readline,
+        "if (__ghostty_prompt_is_ours ${function:global:prompt}) {\n" ++
+            "                    $code = __ghostty_exit_code $ok -AfterPrompt\n" ++
+            "                    __ghostty_write_osc \"${Global:__ghostty_esc}]133;D;${code};",
+    ).?;
+    try std.testing.expect(wrap < gate);
+    const d_write = std.mem.indexOfPos(
+        u8,
+        integration_script,
+        readline,
+        "__ghostty_write_osc \"${Global:__ghostty_esc}]133;D;${code};aid=${Global:__ghostty_aid}${Global:__ghostty_bel}\"",
+    ).?;
     const p_write = std.mem.indexOfPos(
         u8,
         integration_script,
         readline,
         "__ghostty_write_osc \"${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}\"",
     ).?;
+    try std.testing.expect(gate < d_write);
+    try std.testing.expect(d_write < p_write);
     try std.testing.expect(p_write < b_write);
+    try std.testing.expect(std.mem.indexOf(u8, integration_script, "        $code = __ghostty_exit_code $ok\n") != null);
     try std.testing.expect(codeContains("$Global:__ghostty_prompt_marked = $true"));
     // Only the host's own read gets those marks: not a script calling the
     // reader itself (more than one frame per prompt level on the stack),
@@ -1494,18 +1519,30 @@ test "PowerShell marks: a shell started by a repeated line gets its prompt clear
 test "PowerShell marks: a prompt the wrapper did not draw gets its marks from the line reader" {
     // `. $PROFILE` replaced the prompt, so the next prompt is drawn by the
     // user's own function: no D, no OSC 7, no A. The line reader then writes
-    // OSC 7 and `P;k=i;redraw=0` in place of the A, and B. Trimmed from the
-    // pwsh 7.6.6 recording of that exact sequence.
+    // the D, OSC 7, `P;k=i;redraw=0` in place of the A, and B. Trimmed from
+    // the pwsh 7.6.6 recording of that exact sequence, after `cmd /c exit 5`
+    // in the profile.
     const alloc = std.testing.allocator;
     const before = pwsh_prompt_marks ++ "PS> \x1b]133;B\x07. $PROFILE";
     const reload = "\r\n\x1b]133;C;aid=1;cmdline_url=.%20%24PROFILE\x07RELOADED> ";
+    const cwd_p_b = "\x1b]7;file://h/C:/\x07\x1b]133;P;k=i;redraw=0\x07\x1b]133;B\x07";
     {
         var t = try pwshReplay(alloc, 40, &.{
             before,
             "",
-            reload ++ "\x1b]7;file://h/C:/\x07\x1b]133;P;k=i;redraw=0\x07\x1b]133;B\x07",
+            reload ++ "\x1b]133;D;5;aid=1\x07" ++ cwd_p_b,
         });
         defer t.deinit(alloc);
+        // The D ends the command, so it is not left running and it can be
+        // recalled...
+        try std.testing.expect(!t.screens.active.semanticPromptCommandRunning());
+        const recalled = (try t.screens.active.lastCommandString(alloc)).?;
+        defer alloc.free(recalled);
+        try std.testing.expectEqualStrings(". $PROFILE", recalled);
+        // ...but its output cannot be copied: written after the prompt's
+        // text, the D puts the command's end on the prompt's row, past the
+        // end of its output.
+        try std.testing.expect(try t.screens.active.lastCommandOutputString(alloc) == null);
         // Input is marked, so noctty knows a line editor is reading here...
         try std.testing.expect(t.screens.active.semanticPromptInputPending());
         // ...and the prompt says it cannot redraw, so a resize keeps it.
@@ -1515,11 +1552,93 @@ test "PowerShell marks: a prompt the wrapper did not draw gets its marks from th
         defer alloc.free(screen);
         try std.testing.expect(std.mem.indexOf(u8, screen, "RELOADED>") != null);
     }
-    // Control: the same prompt without the reader's marks, as before. No
-    // input mark, so `insert_last_command` has nothing to type into.
+    // Control: the marks the reader wrote before it wrote the D. B abandons
+    // the running command, so it never completes and there is nothing to
+    // recall.
+    {
+        var t = try pwshReplay(alloc, 40, &.{ before, "", reload ++ cwd_p_b });
+        defer t.deinit(alloc);
+        try std.testing.expect(t.screens.active.semanticPromptInputPending());
+        try std.testing.expect(try t.screens.active.lastCommandString(alloc) == null);
+    }
+    // Control: no marks from the reader at all. No input mark, so
+    // `insert_last_command` has nothing to type into.
     {
         var t = try pwshReplay(alloc, 40, &.{ before, "", reload });
         defer t.deinit(alloc);
         try std.testing.expect(!t.screens.active.semanticPromptInputPending());
+    }
+    // A D with no command running changes nothing. oh-my-posh's re-init
+    // prompt writes its own D, A and B; the reader's D then follows the
+    // prompt's own and leaves the command that D completed alone.
+    {
+        var t = try pwshReplay(alloc, 40, &.{
+            before,
+            "",
+            "\r\n\x1b]133;C;aid=1;cmdline_url=.%20%24PROFILE\x07" ++
+                "\x1b]133;D;5\x07\x1b]133;A\x07OMP> \x1b]133;B\x07" ++
+                "\x1b]133;D;5;aid=1\x07" ++ cwd_p_b,
+        });
+        defer t.deinit(alloc);
+        try std.testing.expect(!t.screens.active.semanticPromptCommandRunning());
+        try std.testing.expect(t.screens.active.semanticPromptInputPending());
+        const recalled = (try t.screens.active.lastCommandString(alloc)).?;
+        defer alloc.free(recalled);
+        try std.testing.expectEqualStrings(". $PROFILE", recalled);
+    }
+    // The command typed at that prompt, once the next prompt is wrapped
+    // again, cannot be recalled, and copying its output returns the replaced
+    // prompt's text: that text was written before any mark. The D does not
+    // change this; it is the same with and without it.
+    inline for (.{ "\x1b]133;D;5;aid=1\x07", "" }) |d| {
+        var t = try pwshReplay(alloc, 40, &.{
+            before,
+            "",
+            reload ++ d ++ cwd_p_b ++ "Get-Date",
+            "",
+            "\r\n\x1b]133;C;aid=1;cmdline_url=Get-Date\x07DATE\r\n" ++
+                pwsh_prompt_marks ++ "PS> \x1b]133;B\x07",
+        });
+        defer t.deinit(alloc);
+        try std.testing.expect(try t.screens.active.lastCommandString(alloc) == null);
+        const output = (try t.screens.active.lastCommandOutputString(alloc)).?;
+        defer alloc.free(output);
+        try std.testing.expectEqualStrings("RELOADED> ", output);
+    }
+}
+
+test "PowerShell marks: a prompt that stays unwrapped gets no D from the line reader" {
+    // A ReadOnly prompt is never wrapped, so every prompt is drawn by it and
+    // gets OSC 7, P and B from the line reader, but no D. With nothing ever
+    // completing a command, there is no command to recall and no output to
+    // copy.
+    const alloc = std.testing.allocator;
+    const cwd_p_b = "\x1b]7;file://h/C:/\x07\x1b]133;P;k=i;redraw=0\x07\x1b]133;B\x07";
+    const lines = struct {
+        fn replay(a: Allocator, comptime d: []const u8) !terminal_for_tests.Terminal {
+            return pwshReplay(a, 40, &.{
+                pwsh_prompt_marks ++ "PS> \x1b]133;B\x07Set-Item",
+                "",
+                "\r\n\x1b]133;C;aid=1;cmdline_url=Set-Item\x07LOCKED> " ++ d ++ cwd_p_b ++ "cmd1",
+                "",
+                "\r\n\x1b]133;C;aid=1;cmdline_url=cmd1\x07OUT1\r\nLOCKED> " ++ d ++ cwd_p_b,
+            });
+        }
+    };
+    {
+        var t = try lines.replay(alloc, "");
+        defer t.deinit(alloc);
+        try std.testing.expect(try t.screens.active.lastCommandString(alloc) == null);
+        try std.testing.expect(try t.screens.active.lastCommandOutputString(alloc) == null);
+    }
+    // Control: a D after every such prompt. Each command then ends on the
+    // prompt's row, and copying its output returns the prompt's text, not
+    // the command's.
+    {
+        var t = try lines.replay(alloc, "\x1b]133;D;0;aid=1\x07");
+        defer t.deinit(alloc);
+        const output = (try t.screens.active.lastCommandOutputString(alloc)).?;
+        defer alloc.free(output);
+        try std.testing.expectEqualStrings("LOCKED> ", output);
     }
 }

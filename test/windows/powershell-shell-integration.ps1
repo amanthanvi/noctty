@@ -355,22 +355,22 @@ try {
     Assert-True ($read.Osc -ceq "$B${C};cmdline_url=Get-ChildItem%20%27a%3Bb%27$([char]7)") "The line reader did not write exactly B, then one C: $($read.Osc -replace [char]27, '<ESC>')"
 
     # A prompt that is not ours was drawn without D, cwd or A. The reader
-    # gives it OSC 7 and a P mark with redraw=0 before its B (P does not
-    # fresh-line, so the cursor stays where the prompt ended), and wraps it
-    # for the next prompt.
+    # wraps it for the next prompt and gives it the D for the command that
+    # just ran, OSC 7 and a P mark with redraw=0 before its B (P does not
+    # fresh-line, so the cursor stays where the prompt ended).
     function global:prompt { 'REPLACED> ' }
     [void](Invoke-TestPrompt)
     # A script that calls the reader itself gets no reader marks for an
-    # unmarked prompt: written into its running command, a B would end it
-    # and make the answer typed at the script the terminal's last command.
+    # unmarked prompt: written into its running command, a D or B would end
+    # it and make the answer typed at the script the terminal's last command.
     $direct = Invoke-TestReadLine 'answer'
-    Assert-True (-not ($direct.Osc -match '\]133;[PB]|\]7;')) "A script's own call to the reader got prompt marks: $($direct.Osc -replace [char]27, '<ESC>')"
+    Assert-True (-not ($direct.Osc -match '\]133;[DPB]|\]7;')) "A script's own call to the reader got prompt marks: $($direct.Osc -replace [char]27, '<ESC>')"
     Assert-True ($direct.Osc.Contains(']133;C;')) "A script's own call to the reader lost its C"
     # The prompt is ours again now (that read wrapped it); replace it anew.
     function global:prompt { 'REPLACED> ' }
     [void](Invoke-TestPrompt)
     $unmarked = Invoke-TestReadLine 'Get-Date' -AsHost
-    Assert-True ($unmarked.Osc -match "^$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get OSC 7, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
+    Assert-True ($unmarked.Osc -match "^$([char]27)\]133;D;0;aid=$PID$([char]7)$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get D, OSC 7, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
     Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
     [void](Invoke-TestPrompt)
     $marked = Invoke-TestReadLine 'Get-Date' -AsHost
@@ -519,7 +519,8 @@ try {
             [string]$Preamble,
             [string]$Postamble,
             [string[]]$Lines = $null,
-            [switch]$WithoutPSReadLine
+            [switch]$WithoutPSReadLine,
+            [switch]$StandInReader
         )
 
         if ($null -eq $Lines) { $Lines = $script:ChildInput }
@@ -529,7 +530,16 @@ try {
         # OSC 133 D cases below. `Ignore` rather than `SilentlyContinue` so
         # a child without PSReadLine does not start with a record of its own
         # in $Error.
-        $prefix = if ($WithoutPSReadLine) {
+        #
+        # -StandInReader also drops PSReadLine, and defines a
+        # PSConsoleHostReadLine that reads stdin in its place. The host calls
+        # that for every line, so our reader hook runs on the host's own
+        # call stack; with no such function the hook has nothing to wrap and
+        # returns before writing a mark.
+        $prefix = if ($StandInReader) {
+            'Remove-Module PSReadLine -Force -ErrorAction Ignore; ' +
+            'function global:PSConsoleHostReadLine { [Console]::In.ReadLine() }; '
+        } elseif ($WithoutPSReadLine) {
             'Remove-Module PSReadLine -Force -ErrorAction Ignore; '
         } else { '' }
         $payload = $prefix + $Preamble +
@@ -670,7 +680,7 @@ try {
     # and records nothing; measured through a live pseudo console on both
     # hosts, every sequence below holds with PSReadLine loaded. Asserting
     # the piped-stdin behaviour instead would pin an artifact of the rig.
-    foreach ($case in @(
+    $dCases = @(
         # The regression: the second failure must still report 5, not 1.
         @{ Name = 'repeated native failure'
            Pre = ''
@@ -741,11 +751,83 @@ try {
                      '("ERR" + "COUNT=") + $Error.Count')
            Expect = @(0, 5, 0, 5, 0)
            ErrorCount = 0 }
-    )) {
+    )
+
+    # ── OSC 133 D for a prompt our wrapper did not draw ──────────────────
+    #
+    # A command that replaces `function prompt` (`. $PROFILE`, a theme
+    # re-init) has its next prompt drawn by the user's function, so the
+    # wrapper that writes D never runs. The line reader wraps the new
+    # prompt, so every later line is back on the wrapper, and writes that
+    # one prompt's D, after its text. These children read through a
+    # stand-in reader: the hook needs a PSConsoleHostReadLine to call.
+    $dCases += @(
+        # The failure that did the replacing keeps its own code, and the
+        # D lands after the replaced prompt, ahead of its cwd, P and B.
+        @{ Name = 'native failure that replaced the prompt'
+           Pre = ''
+           Reader = $true
+           Lines = @("function global:prompt { 'RE' + 'PLACED> ' }; cmd /c exit 5",
+                     'cmd /c exit 5', 'Get-Date | Out-Null')
+           Expect = @(0, 5, 5, 0)
+           Pattern = "REPLACED> $([char]27)\]133;D;5;aid=\d+$([char]7)$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))" }
+        # The replacing prompt ran a native of its own, which moved
+        # $LASTEXITCODE; the failure can then only report 1.
+        @{ Name = 'native failure under a prompt that runs a native'
+           Pre = ''
+           Reader = $true
+           Lines = @("function global:prompt { `$null = cmd /c exit 0; 'NAT' + 'IVE> ' }; cmd /c exit 5",
+                     'Get-Date | Out-Null')
+           Expect = @(0, 1, 0) }
+        # A success stays 0 even though the prompt's native left 3 in
+        # $LASTEXITCODE.
+        @{ Name = 'success under a prompt whose native fails'
+           Pre = ''
+           Reader = $true
+           Lines = @("function global:prompt { `$null = cmd /c exit 3; 'NAT' + 'IVE> ' }; Get-Date | Out-Null",
+                     'Get-Date | Out-Null')
+           Expect = @(0, 0, 0) }
+        # A ReadOnly prompt cannot be wrapped, so every prompt after it is
+        # the user's. The reader gives each one OSC 7, P and B but no D, which
+        # would make every command copy the prompt's text as its output, and
+        # leaves nothing in $Error but the user's own throw.
+        @{ Name = 'ReadOnly prompt'
+           Pre = ''
+           Reader = $true
+           Lines = @("Set-Item function:prompt -Value { 'LOCKED> ' } -Options ReadOnly -Force",
+                     '$Error.Clear()', 'cmd /c exit 5', 'cmd /c exit 5',
+                     'Get-Date | Out-Null', "throw 'x'",
+                     '("ERR" + "COUNT=") + $Error.Count')
+           Expect = @(0)
+           Pattern = "LOCKED> $([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))"
+           ErrorCount = 1 }
+        # Likewise a deleted prompt, which the wrapper leaves deleted: the
+        # host draws its own default prompt on every line.
+        @{ Name = 'deleted prompt'
+           Pre = ''
+           Reader = $true
+           Lines = @('Remove-Item function:prompt; cmd /c exit 5',
+                     'cmd /c exit 5', 'Get-Date | Out-Null')
+           Expect = @(0)
+           Pattern = "$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))" }
+        # A script that calls the reader itself (here for `answer`) is not
+        # the host's read and gets no D; a D there would end the command
+        # that is still running.
+        @{ Name = "script's own reader call"
+           Pre = ''
+           Reader = $true
+           Lines = @("function global:prompt { 'RE' + 'PLACED> ' }; cmd /c exit 5",
+                     '$null = PSConsoleHostReadLine', 'answer',
+                     'Get-Date | Out-Null')
+           Expect = @(0, 5, 0, 0) }
+    )
+
+    foreach ($case in $dCases) {
         $childOut = Invoke-NocttyInjectedChild `
             -Preamble $case.Pre `
             -Lines (@($case.Lines) + @('exit')) `
-            -WithoutPSReadLine
+            -WithoutPSReadLine `
+            -StandInReader:([bool]$case.Reader)
         $shown = $childOut -replace [char]27, '<ESC>'
         $marks = @([regex]::Matches($childOut, ']133;D;(\d+);') |
             ForEach-Object { [int]$_.Groups[1].Value })
@@ -753,6 +835,9 @@ try {
         Assert-True ((($marks) -join ',') -eq (($case.Expect) -join ',')) `
             "$where OSC 133 D sequence was $($marks -join ','), expected $($case.Expect -join ','): $shown"
         Assert-True ($childOut.Contains('NOCTTYPROBE> ')) "$where Injected block replaced the user's prompt: $shown"
+        if ($case.ContainsKey('Pattern')) {
+            Assert-True ($childOut -match $case.Pattern) "$where Marks after the replaced prompt were out of order: $shown"
+        }
         if ($case.ContainsKey('ErrorCount')) {
             $counted = [regex]::Match($childOut, 'ERRCOUNT=(\d+)')
             Assert-True ($counted.Success) "$where Child never reported the error count: $shown"
