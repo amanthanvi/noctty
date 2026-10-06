@@ -29,5 +29,12 @@ test "ConPTY transport probe child dispatch only" {
         probe.runChildIfRequested();
         try probe.runParentIfRequested();
     }
+}
+
+// -Dtest-filter drops every named test whose name does not match, and with it
+// everything that test alone would have referenced. An unnamed test is exempt
+// from the filter, so this one keeps the whole test tree reachable and a
+// filtered run executes the tests that match instead of none.
+test {
     _ = entrypoint;
 }
