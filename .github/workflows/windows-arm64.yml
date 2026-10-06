@@ -60,8 +60,9 @@ jobs:
       - name: Run ARM64 Zig tests
         shell: pwsh
         # The four -Dtest-filter=<one token> commands this replaces each ran 0
-        # tests, so this job reported ARM64 coverage it never had. The full
-        # suite is the only invocation measured to run anything here.
+        # tests (src/main.zig has since been fixed so a filter runs what it
+        # matches), so this job reported ARM64 coverage it never had. A filter
+        # is still only a subset; the full suite is what this job should run.
         run: |
           zig build test -Demit-test-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline --summary all
 
