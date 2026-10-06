@@ -27987,8 +27987,11 @@ pub const Surface = struct {
     decorations_visible_overridden: bool = false,
     fullscreen: bool = false,
     topmost: bool = false,
+    /// What `leaveFullscreen` returns the window to, captured by
+    /// `enterFullscreen`: the window rect, and the placement for a window
+    /// that was maximized.
     restore_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-    restore_maximized: bool = false,
+    restore_placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT),
     default_client_size: ?apprt.SurfaceSize = null,
     cell_size_pixels: apprt.action.CellSize = .{ .width = 0, .height = 0 },
     background_opacity_default: f64 = 1.0,
@@ -31821,7 +31824,7 @@ pub const Surface = struct {
             .height = @intCast(size.height),
         };
         if (self.fullscreen or
-            self.restore_maximized or
+            (if (self.windowHwnd()) |hwnd| sys.IsZoomed(hwnd) != 0 else false) or
             !shouldResizeHostForInitialSize(self.hostSurfaceCount())) return;
         const client_size = scaleInitialClientSize(self.default_client_size.?, self.content_scale);
         try self.resizeClientArea(client_size.width, client_size.height);
@@ -31876,7 +31879,12 @@ pub const Surface = struct {
 
     fn enterFullscreen(self: *Surface) !void {
         const hwnd = self.windowHwnd() orelse return;
-        self.captureRestoreState();
+        // Captured before the style write below, which drops WS_MAXIMIZE:
+        // the monitor-sized SetWindowPos after it would otherwise land on a
+        // normal window and overwrite its normal rect.
+        self.restore_placement.length = @sizeOf(WINDOWPLACEMENT);
+        if (sys.GetWindowPlacement(hwnd, &self.restore_placement) == 0 or
+            sys.GetWindowRect(hwnd, &self.restore_rect) == 0) return lastError();
         self.fullscreen = true;
         try self.applyWindowStyle();
 
@@ -31910,6 +31918,15 @@ pub const Surface = struct {
         self.fullscreen = false;
         try self.applyWindowStyle();
 
+        // A maximized window is maximized again and given back the normal
+        // rect it had before. Moving it to its maximized rect first, while
+        // it was a normal window, made that rect its normal rect, so a
+        // later restore kept it maximized-size. Any other window returns to
+        // its exact rect: the placement of a snapped window holds its
+        // pre-snap rect.
+        if (self.restore_placement.showCmd == c.SW_MAXIMIZE) {
+            return maximizeWithPlacement(hwnd, &self.restore_placement);
+        }
         if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
@@ -31921,16 +31938,15 @@ pub const Surface = struct {
         ) == 0) {
             return lastError();
         }
-
-        if (self.restore_maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
     }
 
-    fn captureRestoreState(self: *Surface) void {
-        const hwnd = self.windowHwnd() orelse return;
-        self.restore_maximized = sys.IsZoomed(hwnd) != 0;
-        if (sys.GetWindowRect(hwnd, &self.restore_rect) == 0) {
-            self.restore_rect = .{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-        }
+    /// Maximizes `hwnd` with the normal rect of `placement`. Maximizing
+    /// first leaves SetWindowPlacement only the normal rect to write: on a
+    /// normal window it moves the window to that rect before maximizing it,
+    /// a second resize that also changes monitor if the rect is on another.
+    fn maximizeWithPlacement(hwnd: HWND, placement: *const WINDOWPLACEMENT) !void {
+        _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+        if (sys.SetWindowPlacement(hwnd, placement) == 0) return lastError();
     }
 
     fn setDecorationsVisible(self: *Surface, visible: bool) !void {
@@ -32047,7 +32063,7 @@ pub const Surface = struct {
         self.fullscreen = source.fullscreen;
         self.topmost = source.topmost;
         self.restore_rect = source.restore_rect;
-        self.restore_maximized = source.restore_maximized;
+        self.restore_placement = source.restore_placement;
         self.default_client_size = source.default_client_size;
         self.cell_size_pixels = source.cell_size_pixels;
         self.background_opacity_default = source.background_opacity_default;
@@ -32115,9 +32131,10 @@ pub const Surface = struct {
         const hwnd = self.windowHwnd() orelse return;
         const source_hwnd = source.windowHwnd() orelse return;
         var rect: RECT = undefined;
-        if (sys.GetWindowRect(source_hwnd, &rect) == 0) {
-            return lastError();
-        }
+        var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
+        placement.length = @sizeOf(WINDOWPLACEMENT);
+        if (sys.GetWindowRect(source_hwnd, &rect) == 0 or
+            sys.GetWindowPlacement(source_hwnd, &placement) == 0) return lastError();
         if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
@@ -32132,7 +32149,9 @@ pub const Surface = struct {
 
         if (!self.fullscreen) {
             if (sys.IsZoomed(source_hwnd) != 0) {
-                _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+                // The move above made the source's maximized rect this
+                // window's normal rect; it takes the source's instead.
+                try maximizeWithPlacement(hwnd, &placement);
             } else {
                 _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
             }
@@ -37318,7 +37337,9 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
     source.fullscreen = true;
     source.topmost = true;
     source.restore_rect = .{ .left = 10, .top = 20, .right = 30, .bottom = 40 };
-    source.restore_maximized = true;
+    source.restore_placement = std.mem.zeroes(WINDOWPLACEMENT);
+    source.restore_placement.showCmd = c.SW_MAXIMIZE;
+    source.restore_placement.rcNormalPosition = .{ .left = 50, .top = 60, .right = 70, .bottom = 80 };
     source.default_client_size = .{ .width = 123, .height = 456 };
     source.cell_size_pixels = .{ .width = 9, .height = 21 };
     source.background_opacity_default = 0.75;
@@ -37339,12 +37360,131 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
     try std.testing.expectEqual(source.fullscreen, dest.fullscreen);
     try std.testing.expectEqual(source.topmost, dest.topmost);
     try std.testing.expectEqualDeep(source.restore_rect, dest.restore_rect);
-    try std.testing.expectEqual(source.restore_maximized, dest.restore_maximized);
+    try std.testing.expectEqualDeep(source.restore_placement, dest.restore_placement);
     try std.testing.expectEqualDeep(source.default_client_size, dest.default_client_size);
     try std.testing.expectEqualDeep(source.cell_size_pixels, dest.cell_size_pixels);
     try std.testing.expectEqual(source.background_opacity_default, dest.background_opacity_default);
     try std.testing.expectEqual(source.background_opacity_force_opaque, dest.background_opacity_force_opaque);
     try std.testing.expect(sizeLimitEquals(source.size_limit, dest.size_limit));
+}
+
+test "win32 leaveFullscreen and new_window keep the normal rect of a maximized window" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Desktop = struct {
+        extern "user32" fn CreateDesktopW(
+            name: [*:0]const u16,
+            device: ?*anyopaque,
+            mode: ?*anyopaque,
+            flags: u32,
+            access: u32,
+            attributes: ?*anyopaque,
+        ) callconv(.winapi) ?*anyopaque;
+        extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+        extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+
+        fn run(desktop: *anyopaque, result: *anyerror!void) void {
+            body(desktop) catch |err| {
+                // The test fails at `try result` on the runner's thread;
+                // the trace shows which check failed.
+                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+                result.* = err;
+            };
+        }
+
+        fn window(app: *App, origin: i32) !Surface {
+            var surface: Surface = undefined;
+            surface.app = app;
+            surface.host = null;
+            surface.hwnd = sys.CreateWindowExW(
+                0,
+                prompt_label_class,
+                std.unicode.utf8ToUtf16LeStringLiteral(""),
+                WS_OVERLAPPEDWINDOW,
+                origin,
+                origin,
+                640,
+                480,
+                null,
+                null,
+                sys.GetModuleHandleW(null),
+                null,
+            ) orelse return lastError();
+            surface.quick_terminal = false;
+            surface.decorations_visible = true;
+            surface.fullscreen = false;
+            surface.topmost = false;
+            surface.background_opacity_default = 1.0;
+            surface.background_opacity_force_opaque = false;
+            return surface;
+        }
+
+        fn normalRect(hwnd: HWND) !RECT {
+            var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
+            placement.length = @sizeOf(WINDOWPLACEMENT);
+            if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
+            return placement.rcNormalPosition;
+        }
+
+        // Maximizing shows a window, so these live on a desktop of their
+        // own and never reach the user's.
+        fn body(desktop: *anyopaque) !void {
+            if (SetThreadDesktop(desktop) == 0) return lastError();
+            _ = sys.SetThreadDpiAwarenessContext(-4);
+            var app: App = undefined;
+            app.os_build = c.OS_BUILD_WIN11_21H2;
+            var surface = try window(&app, 100);
+            const hwnd = surface.hwnd.?;
+            defer _ = sys.DestroyWindow(hwnd);
+
+            _ = sys.ShowWindow(hwnd, c.SW_SHOW);
+            var normal_rect: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(hwnd, &normal_rect) != 0);
+            const normal = try normalRect(hwnd);
+
+            // Before the fix, the maximized rect became the normal one.
+            for ([_]bool{ false, true }) |maximized| {
+                if (maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+                try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
+                var before: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
+                try surface.enterFullscreen();
+                try surface.leaveFullscreen();
+                try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
+                var rect: RECT = undefined;
+                try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
+                try std.testing.expectEqualDeep(before, rect);
+                try std.testing.expectEqualDeep(normal, try normalRect(hwnd));
+                if (maximized) _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+                try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
+                try std.testing.expectEqualDeep(normal_rect, rect);
+            }
+
+            // new_window from a maximized window, into a window created
+            // elsewhere, so it has to take the source's normal rect.
+            var clone = try window(&app, 200);
+            defer _ = sys.DestroyWindow(clone.hwnd.?);
+            _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+            try clone.inheritWindowStateFrom(&surface);
+            try std.testing.expect(sys.IsZoomed(clone.hwnd.?) != 0);
+            try std.testing.expectEqualDeep(normal, try normalRect(clone.hwnd.?));
+        }
+    };
+
+    const desktop = Desktop.CreateDesktopW(
+        std.unicode.utf8ToUtf16LeStringLiteral("noctty-test-fullscreen"),
+        null,
+        null,
+        0,
+        0x10000000, // GENERIC_ALL
+        null,
+    ) orelse return error.SkipZigTest;
+    defer _ = Desktop.CloseDesktop(desktop);
+    // SetThreadDesktop fails on a thread that already owns a window.
+    var result: anyerror!void = {};
+    const thread = try std.Thread.spawn(.{}, Desktop.run, .{ desktop, &result });
+    thread.join();
+    try result;
 }
 
 test "win32 shouldShowSurfaceImmediately only for new hosts" {
