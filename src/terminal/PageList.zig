@@ -1306,10 +1306,10 @@ const ReflowCursor = struct {
         // Defer processing of blank rows so that blank rows
         // at the end of the page list are never written.
         if (cols_len == 0) {
-            // If this blank row was a wrap continuation somehow
-            // then we won't need to write it since it should be
-            // a part of the previously written row.
-            if (!src_row.wrap_continuation) self.new_rows += 1;
+            // Only an unwrapped row can be blank here, so its line ends
+            // with it. That holds for a blank wrap continuation too: it
+            // writes nothing, but the next row must still start a new line.
+            self.new_rows += 1;
             return;
         }
 

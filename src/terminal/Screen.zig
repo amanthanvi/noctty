@@ -7445,6 +7445,30 @@ test "Screen: resize less cols reflows cursor after empty cells" {
     try testing.expectEqual(@as(usize, 4), s.cursor.x);
 }
 
+test "Screen: resize keeps the line break after a blank wrap continuation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try Screen.init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Narrowing to the text's width moves the cursor onto a blank
+    // continuation row of its own.
+    try s.testWriteString("abcd");
+    try s.resize(.{ .cols = 4, .rows = 5 });
+    try testing.expectEqual(@as(usize, 1), s.cursor.y);
+    try testing.expectEqual(@as(usize, 0), s.cursor.x);
+
+    // Once the cursor leaves it, that row is blank but still ends the line.
+    try s.testWriteString("\nxyz");
+    try s.resize(.{ .cols = 10, .rows = 5 });
+
+    const contents = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
+    defer alloc.free(contents);
+    try testing.expectEqualStrings("abcd\nxyz", contents);
+    try testing.expectEqual(@as(usize, 1), s.cursor.y);
+    try testing.expectEqual(@as(usize, 3), s.cursor.x);
+}
+
 test "Screen: resize more cols with wide spacer head" {
     const testing = std.testing;
     const alloc = testing.allocator;
