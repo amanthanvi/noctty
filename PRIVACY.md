@@ -30,9 +30,8 @@ published release files, such as Scoop or WinGet, install the same app.
   automatic checks off. In a pre-release build it opens the releases page in
   your browser instead.
 - The request carries no account, identifier, or information about your PC
-  or how you use Noctty. It sends standard HTTP headers, including two
-  user-agent values: `noctty-updater` and the default of the Zig HTTP library
-  it uses, `zig/<version> (std.http)`. As with any web request, GitHub sees
+  or how you use Noctty. It sends standard HTTP headers, including a single
+  user-agent value, `noctty-updater`. As with any web request, GitHub sees
   your IP address.
 - With `auto-update = download`, Noctty also downloads the new release's
   checksum file and installer (for a portable copy, its ZIP and file
@@ -118,8 +117,10 @@ dumps, and SSH host cache go there.
   includes your Windows user name. The Settings window saves your changes
   here. Noctty also reads `ghostty\config`, beside the `noctty` folder, if it
   exists and, when it finds no other config, `winghostty\config.ghostty` left
-  by an older version. If you have no Noctty config, the Settings window can
-  save to one of these older files or to `ghostty\config.ghostty`.
+  by an older version. Noctty does not read `ghostty\config.ghostty`. If you
+  have no Noctty config, the Settings window saves to one of the older files
+  Noctty does read, `ghostty\config` or `winghostty\config.ghostty`, rather
+  than creating a new one.
 - **Session restore:** `session-state.json`, saved when Noctty closes, except
   in safe mode, when Noctty runs as administrator through UAC, when it was
   started to run one command (`-e` or `initial-command`), without an initial
