@@ -195,13 +195,13 @@ if ($null -eq (__ghostty_read_global '__ghostty_aid')) {
     $Global:__ghostty_aid = [string]$PID
 }
 
-# The "before the command" snapshots `__ghostty_prompt_body` compares
+# The "before the command" snapshots `__ghostty_exit_code` compares
 # against, re-taken at the end of every prompt and again when a line is
 # accepted. $LASTEXITCODE is compared so a stale native exit code from an
 # earlier pipeline can't masquerade as the current command's exit status; the
 # head of $Error is compared so a repeated native failure can be told apart
 # from a cmdlet failure that left $LASTEXITCODE untouched. See
-# `__ghostty_prompt_body` for why one signal alone is not enough. Taken only
+# `__ghostty_exit_code` for why one signal alone is not enough. Taken only
 # on the first load, so a re-source does not move the baseline of the command
 # that re-sourced us.
 if ($null -eq (Get-Variable -Name '__ghostty_prev_exitcode' -Scope Global -ErrorAction Ignore)) {
@@ -508,11 +508,14 @@ function global:__ghostty_encode_cwd_uri {
 # A prompt replaced after startup (`. $PROFILE`, an oh-my-posh or Starship
 # re-init, a venv) is wrapped again by `__ghostty_readline` before the next
 # line is read. The ONE prompt drawn before that, by the user's own function,
-# gets OSC 7, a P mark and B from `__ghostty_readline` instead, and lacks only
-# its D. Hooking
-# `prompt` through an alias instead catches that one too, since an alias
-# resolves before a function of the same name, but it was measured to cost
-# more than it saves: `Get-Command prompt` then returns the alias, whose
+# gets its marks from `__ghostty_readline` instead, the previous command's D
+# among them, all written after its text, so the terminal cannot copy that
+# command's output. (A venv's prompt calls the saved copy of our wrapper,
+# which writes them itself.)
+#
+# Hooking `prompt` through an alias instead catches that one too, since an
+# alias resolves before a function of the same name, but it was measured to
+# cost more than it saves: `Get-Command prompt` then returns the alias, whose
 # missing `.ScriptBlock` breaks a profile that chains to the prompt that way on
 # every later `. $PROFILE` (the prompt turns into `PS>` plus an error per
 # draw), and PSReadLine then sees the user's own prompt, derives a PromptText
@@ -595,6 +598,127 @@ function global:__ghostty_wrap_prompt {
     $Global:__ghostty_prompt_installed = ${function:global:prompt}
 }
 
+# ── The previous command's exit code, for OSC 133 D ──────────────────────
+# `$ok` is the $? the command left, captured by the caller before any
+# statement of its own reset it.
+#
+# PowerShell updates $LASTEXITCODE only for native executables and
+# explicit scripts. Cmdlet / function / `throw` failures leave it
+# null or stale while flipping $? to $false. Naively trusting
+# $LASTEXITCODE after a cmdlet failure therefore reports whichever
+# native exit code happened to be lying around from an earlier
+# pipeline — e.g. `cmd /c exit 5; Get-Item missing` would double-
+# emit OSC 133;D;5.
+#
+# Comparing $LASTEXITCODE against the value snapshotted before the
+# command ran separates a fresh code from a stale one — but only
+# when the code CHANGED. Two native commands failing with the same
+# code are indistinguishable from a cmdlet failing after a native
+# one on that signal alone: both leave $? false and $LASTEXITCODE
+# untouched, so `cmd /c exit 5` twice reported 5 and then 1 (#237).
+#
+# $Error breaks the tie. A cmdlet / script / `throw` / `Write-Error`
+# failure always pushes an ErrorRecord; a native command's nonzero
+# exit does not (measured on Windows PowerShell 5.1 and on pwsh 7.6,
+# whose $PSNativeCommandUseErrorActionPreference defaults to
+# $false), and the records native commands DO push are recognised
+# by __ghostty_is_native_error. So when $? is false:
+#
+#   * head of $Error is a new, non-native record → PowerShell-level
+#     failure: report $LASTEXITCODE only if it changed and is
+#     nonzero, else 1.
+#   * otherwise → native failure: report $LASTEXITCODE whenever it
+#     is nonzero, changed or not.
+#
+# And when $? is true, a new bare ParseException at the head is a
+# line that did not parse: PowerShell leaves $? true for it (measured
+# on both hosts), so it would otherwise read as a success.
+#
+# Two measured limits, both of which report a stale-but-real native
+# code where the old rule reported a synthetic 1, so the mark still
+# reads as a failure either way:
+#
+#   * A command silenced with `-ErrorAction Ignore` leaves $? false
+#     and pushes nothing, so it lands in the native arm.
+#   * PowerShell does not reset $? for an EMPTY command line, so
+#     pressing Enter after any failure re-reports the last native
+#     code (or 1). No C mark precedes that D (see
+#     `__ghostty_readline`), so the terminal attaches it to no
+#     command.
+#
+# Resetting $LASTEXITCODE here to remove the ambiguity is not an
+# option: users read it.
+#
+# `-AfterPrompt` is `__ghostty_readline` reporting for a replaced prompt the
+# wrapper did not draw (see there). The user's own prompt has run since the
+# command, and it can have changed $LASTEXITCODE (a git prompt that does not
+# restore it) or added to $Error, but not $?, which the host hands the line
+# reader as the command left it (measured on both hosts). So a success
+# reads 0 even when $LASTEXITCODE changed: that code may be the prompt's,
+# and reporting it marked a reload under a failing git prompt as a
+# failure. The cost is a line that ended in a failing native without
+# failing itself, `& { cmd /c exit 3 }` or a script whose last native
+# failed, which reads 0 here and 3 on the prompt path. A failure keeps the
+# rules above and reads the prompt's leftovers as the command's: after
+# `cmd /c exit 5`, a prompt whose native command succeeded leaves 1 and
+# one whose native failed leaves that code, and a prompt that adds to
+# $Error turns a second `cmd /c exit 5` into 1.
+#
+# Everything below reads through __ghostty_read_global so a
+# profile's Set-StrictMode cannot turn "no native command has run
+# yet" into a terminating error that costs the user their prompt.
+function global:__ghostty_exit_code {
+    param([bool]$ok, [switch]$AfterPrompt)
+    $code = 0
+    try {
+        # Read the head FIRST, before any other helper. This used to be
+        # load-bearing: __ghostty_read_global asked for -ErrorAction
+        # SilentlyContinue, which still APPENDS to $Error, and
+        # $LASTEXITCODE is legitimately unset in a session that has run
+        # no native command — so our own VariableNotFound record landed
+        # on top of the user's and every native failure read as a
+        # PowerShell one. That helper now uses -ErrorAction Ignore, but
+        # keeping this read first means no later change over there can
+        # silently do it again.
+        $error_head = __ghostty_error_head
+        $prev_error = __ghostty_read_global '__ghostty_prev_error'
+        $last_exitcode = __ghostty_read_global 'LASTEXITCODE'
+        $exit_changed = ($last_exitcode -ne (__ghostty_read_global '__ghostty_prev_exitcode'))
+        # A null head means $Error is empty, so no record survived and
+        # there is no new PowerShell-level failure to report. That is
+        # also how a user's `$Error.Clear()` between prompts lands here.
+        $new_error = ($null -ne $error_head) -and
+            (-not (__ghostty_same_object $error_head $prev_error))
+        $ps_error = $new_error -and (-not (__ghostty_is_native_error $error_head))
+        $code = if ($ok) {
+            if ($new_error -and ($error_head -is [System.Management.Automation.ParseException])) {
+                1
+            } elseif ($exit_changed -and $null -ne $last_exitcode -and -not $AfterPrompt) {
+                $last_exitcode
+            } else { 0 }
+        } elseif ($ps_error) {
+            # Cmdlet / script-block / `throw` failure. Honour a fresh
+            # native exit code from the same pipeline; otherwise
+            # synthesise 1 so OSC 133 D carries the failure signal.
+            if ($exit_changed -and $null -ne $last_exitcode -and $last_exitcode -ne 0) {
+                $last_exitcode
+            } else { 1 }
+        } else {
+            # Native failure. The code is authoritative even when it
+            # repeats the previous command's, which is the whole point
+            # of consulting $Error: `$exit_changed` is false for the
+            # second of two `cmd /c exit 5`.
+            if ($null -ne $last_exitcode -and $last_exitcode -ne 0) {
+                $last_exitcode
+            } else { 1 }
+        }
+    } catch {
+        # Report an unknown status rather than losing the prompt.
+        $code = 0
+    }
+    return $code
+}
+
 # ── The prompt ───────────────────────────────────────────────────────────
 function global:__ghostty_prompt_body {
     # `$ok` is the $? the user's command left. The generated `prompt`
@@ -624,105 +748,7 @@ function global:__ghostty_prompt_body {
 
     $Global:__ghostty_in_prompt = $true
     try {
-        # Capture previous-command status.
-        #
-        # PowerShell updates $LASTEXITCODE only for native executables and
-        # explicit scripts. Cmdlet / function / `throw` failures leave it
-        # null or stale while flipping $? to $false. Naively trusting
-        # $LASTEXITCODE after a cmdlet failure therefore reports whichever
-        # native exit code happened to be lying around from an earlier
-        # pipeline — e.g. `cmd /c exit 5; Get-Item missing` would double-
-        # emit OSC 133;D;5.
-        #
-        # Comparing $LASTEXITCODE against the value snapshotted before the
-        # command ran separates a fresh code from a stale one — but only
-        # when the code CHANGED. Two native commands failing with the same
-        # code are indistinguishable from a cmdlet failing after a native
-        # one on that signal alone: both leave $? false and $LASTEXITCODE
-        # untouched, so `cmd /c exit 5` twice reported 5 and then 1 (#237).
-        #
-        # $Error breaks the tie. A cmdlet / script / `throw` / `Write-Error`
-        # failure always pushes an ErrorRecord; a native command's nonzero
-        # exit does not (measured on Windows PowerShell 5.1 and on pwsh 7.6,
-        # whose $PSNativeCommandUseErrorActionPreference defaults to
-        # $false), and the records native commands DO push are recognised
-        # by __ghostty_is_native_error. So when $? is false:
-        #
-        #   * head of $Error is a new, non-native record → PowerShell-level
-        #     failure: report $LASTEXITCODE only if it changed and is
-        #     nonzero, else 1.
-        #   * otherwise → native failure: report $LASTEXITCODE whenever it
-        #     is nonzero, changed or not.
-        #
-        # And when $? is true, a new bare ParseException at the head is a
-        # line that did not parse: PowerShell leaves $? true for it (measured
-        # on both hosts), so it would otherwise read as a success.
-        #
-        # Two measured limits, both of which report a stale-but-real native
-        # code where the old rule reported a synthetic 1, so the mark still
-        # reads as a failure either way:
-        #
-        #   * A command silenced with `-ErrorAction Ignore` leaves $? false
-        #     and pushes nothing, so it lands in the native arm.
-        #   * PowerShell does not reset $? for an EMPTY command line, so
-        #     pressing Enter after any failure re-reports the last native
-        #     code (or 1). No C mark precedes that D (see
-        #     `__ghostty_readline`), so the terminal attaches it to no
-        #     command.
-        #
-        # Resetting $LASTEXITCODE here to remove the ambiguity is not an
-        # option: users read it.
-        #
-        # Everything below reads through __ghostty_read_global so a
-        # profile's Set-StrictMode cannot turn "no native command has run
-        # yet" into a terminating error that costs the user their prompt.
-        $code = 0
-        try {
-            # Read the head FIRST, before any other helper. This used to be
-            # load-bearing: __ghostty_read_global asked for -ErrorAction
-            # SilentlyContinue, which still APPENDS to $Error, and
-            # $LASTEXITCODE is legitimately unset in a session that has run
-            # no native command — so our own VariableNotFound record landed
-            # on top of the user's and every native failure read as a
-            # PowerShell one. That helper now uses -ErrorAction Ignore, but
-            # keeping this read first means no later change over there can
-            # silently do it again.
-            $error_head = __ghostty_error_head
-            $prev_error = __ghostty_read_global '__ghostty_prev_error'
-            $last_exitcode = __ghostty_read_global 'LASTEXITCODE'
-            $exit_changed = ($last_exitcode -ne (__ghostty_read_global '__ghostty_prev_exitcode'))
-            # A null head means $Error is empty, so no record survived and
-            # there is no new PowerShell-level failure to report. That is
-            # also how a user's `$Error.Clear()` between prompts lands here.
-            $new_error = ($null -ne $error_head) -and
-                (-not (__ghostty_same_object $error_head $prev_error))
-            $ps_error = $new_error -and (-not (__ghostty_is_native_error $error_head))
-            $code = if ($ok) {
-                if ($new_error -and ($error_head -is [System.Management.Automation.ParseException])) {
-                    1
-                } elseif ($exit_changed -and $null -ne $last_exitcode) {
-                    $last_exitcode
-                } else { 0 }
-            } elseif ($ps_error) {
-                # Cmdlet / script-block / `throw` failure. Honour a fresh
-                # native exit code from the same pipeline; otherwise
-                # synthesise 1 so OSC 133 D carries the failure signal.
-                if ($exit_changed -and $null -ne $last_exitcode -and $last_exitcode -ne 0) {
-                    $last_exitcode
-                } else { 1 }
-            } else {
-                # Native failure. The code is authoritative even when it
-                # repeats the previous command's, which is the whole point
-                # of consulting $Error: `$exit_changed` is false for the
-                # second of two `cmd /c exit 5`.
-                if ($null -ne $last_exitcode -and $last_exitcode -ne 0) {
-                    $last_exitcode
-                } else { 1 }
-            }
-        } catch {
-            # Report an unknown status rather than losing the prompt.
-            $code = 0
-        }
+        $code = __ghostty_exit_code $ok
 
         # Everything terminal-reporting lives inside try/catch, and the
         # user's own prompt is invoked OUTSIDE it. Shell integration is a
@@ -921,9 +947,22 @@ function global:__ghostty_readline {
     # whatever it returned, and PSReadLine has not started. An unmarked
     # prompt first gets OSC 7 and a P mark in place of its missing A, with
     # `redraw=0` for the same reason A carries it. P does not fresh-line the
-    # way A does, so the cursor stays put after the drawn text. Its D is
-    # lost, which costs the replacing command its command-finished
-    # notification and exit status; the next C restarts the command timer.
+    # way A does, so the cursor stays put after the drawn text.
+    #
+    # Its missing D, for the command that just ran, goes first, but only
+    # when the wrap above made the prompt ours: the one prompt drawn before
+    # a re-wrap. The code comes from `$ok` and the snapshots taken at the
+    # command's C; a wrap that made the prompt ours added nothing to $Error,
+    # since its reads ignore errors and a failed assignment leaves the
+    # prompt as it was. Written after the prompt's text, the D ends the
+    # command on the prompt's row: the terminal keeps the command's line,
+    # status and duration, but cannot copy its output. The prompt's text
+    # came before any mark and stays tagged as output, so the command typed
+    # at this prompt cannot be recalled, and copying its output returns
+    # that text, D or no D. A prompt that stays unwrapped (ReadOnly, or
+    # deleted) gets no D: every command is typed at such a prompt, and a D
+    # after it would make copying any command's output return the prompt's
+    # text, where without one it returns nothing.
     #
     # Only the host's own read of a prompt line gets marks or consumes the
     # flag. A script that calls PSConsoleHostReadLine itself is not that
@@ -932,7 +971,7 @@ function global:__ghostty_readline {
     # running command would end it early. That includes a prompt function
     # calling the reader, which runs after our wrapper has set the flag, so
     # the flag cannot vouch for the caller. And under Enter-PSSession the
-    # prompt on screen is the remote one, drawn remotely: a P and B there
+    # prompt on screen is the remote one, drawn remotely: marks there
     # would be dated with this machine's directory and turn remote prompts
     # into local ones. The check costs 10-70 microseconds a line (measured
     # on both hosts).
@@ -943,6 +982,10 @@ function global:__ghostty_readline {
         if ($from_host) {
             $Global:__ghostty_prompt_marked = $false
             if (-not $marked) {
+                if (__ghostty_prompt_is_ours ${function:global:prompt}) {
+                    $code = __ghostty_exit_code $ok -AfterPrompt
+                    __ghostty_write_osc "${Global:__ghostty_esc}]133;D;${code};aid=${Global:__ghostty_aid}${Global:__ghostty_bel}"
+                }
                 $cwd_uri = __ghostty_encode_cwd_uri
                 __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
                 __ghostty_write_osc "${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"

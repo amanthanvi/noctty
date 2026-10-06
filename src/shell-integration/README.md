@@ -182,20 +182,44 @@ called from inside a newer wrapper passes straight through without a second
 set of marks. A prompt replaced after startup (`. $PROFILE`, an oh-my-posh or
 Starship re-init, a venv) is wrapped again by the line reader before the next
 line is read. The one prompt drawn before that, by the user's own function,
-gets its marks from the line reader instead: OSC 7 and `133;P;k=i;redraw=0`
-in place of its missing A (P does not fresh-line, so the cursor stays where
-the prompt ended), then B. A `ReadOnly` prompt, which cannot be wrapped, gets
-the same on every line. Only the host's own read of a prompt line gets these
-marks: not a script that calls `PSConsoleHostReadLine` itself, whose command
-they would cut short, and not a remote prompt under `Enter-PSSession`. What that prompt still lacks is its D, which would
-have closed the command that replaced the prompt: that command's
-command-finished notification and exit status are lost (the next C restarts
-the command timer, so nothing else is thrown off). Its text also arrives
-before any prompt mark, so the terminal records it as the previous command's
-output, and copying the output of the next command returns that prompt text.
-(For a venv that one prompt is `(venv) ` followed by the saved copy of our
-wrapper, so its marks land after `(venv) ` instead of before it.) All of this
-needs PSReadLine; without it a replaced prompt stays unwrapped, as before.
+gets its marks from the line reader instead, all after its text: the D for the
+command that replaced the prompt, OSC 7, and `133;P;k=i;redraw=0` in place of
+its missing A (P does not fresh-line, so the cursor stays where the prompt
+ended), then B. A prompt that cannot be wrapped, because it is `ReadOnly` or
+was deleted, gets OSC 7, P and B on every line, but no D (see below). Only the
+host's own read of a prompt line gets these marks: not a script that calls
+`PSConsoleHostReadLine` itself, whose command they would cut short, and not a
+remote prompt under `Enter-PSSession`.
+
+That D is worked out by the wrapper's rules (below), from the `$?` the host
+hands the line reader, which is still the command's, and from the snapshots
+taken when the line was accepted. The user's prompt has run by then, though,
+and can have run native commands of its own. So a success is marked `0` even
+when `$LASTEXITCODE` changed, because that code may be the prompt's (a git
+prompt that does not restore it would otherwise turn a reload into a
+failure). A line that ended in a failing native without failing itself, such
+as `& { cmd /c exit 3 }` or a script whose last native command failed, is
+therefore marked `0` here and `3` by the wrapper. A failure reads what the
+prompt left as the command's: under a prompt that runs a native it is marked
+`1` when that native succeeded, or with the native's code when it failed, and
+under a prompt that adds a record to `$Error` a second native failure with the
+same code is marked `1`.
+
+Because the D follows the prompt's text, the terminal ends the command on the
+prompt's row: its command-finished notification, exit status and
+`insert_last_command` work, its duration also covers the time the prompt took
+to draw, and copying its output is unavailable, because the output region
+stops at the prompt's row. The prompt's text itself arrives before any prompt
+mark, so the terminal records it as output at the start of the prompt's row,
+and the command typed at that prompt cannot be recalled: `insert_last_command`
+finds nothing, and copying its output returns the prompt's text, with or
+without the D. That is why a prompt that stays unwrapped gets no D: every
+command is typed at such a prompt, and a D after it would make copying any
+command's output return the prompt's text instead of nothing, at the price of
+those commands' notifications and exit status. (For a venv that one prompt is
+`(venv) ` followed by the saved copy of our wrapper, so its marks land after
+`(venv) ` instead of before it.) All of this needs PSReadLine; without it a
+replaced prompt stays unwrapped and gets no D, as before.
 
 Hooking `prompt` through a global alias instead, which PowerShell resolves
 before a function of the same name, would catch that one prompt too. It was
@@ -260,7 +284,9 @@ hosts:
   alone, no C marks are emitted, and B rides in the prompt string as it does
   without PSReadLine.
 - A `ReadOnly` or `Constant` prompt function cannot be wrapped and is left as
-  it is. It gets OSC 7, P and B from the line reader, but no D.
+  it is. It gets OSC 7, P and B from the line reader, but no D, so no command
+  typed at it gets a command-finished notification or an exit status, and none
+  can be recalled or have its output copied.
 - The user's prompt runs inside the wrapper, so it can read the wrapper's
   local variables through PowerShell's dynamic scoping, as it could before.
 
@@ -312,8 +338,12 @@ still reads as a failure:
   bare `ParseException` at the head of `$Error` and marked `1`.
 - `$?` does not propagate out of a function, `& { }`, `. { }` or
   `Invoke-Expression`, and Windows PowerShell 5.1 leaves it true for a parse
-  error, so `function f { cmd /c exit 5 }; f` marks `0`. These take the
-  `$?`-true path, where `$Error` is not consulted at all.
+  error. These take the `$?`-true path, which reports a native code only when
+  `$LASTEXITCODE` changed: `function f { cmd /c exit 5 }; f` marks `5`, but
+  `0` right after another command that exited with 5.
+- A line that only defines a function, such as a `function prompt { ... }`
+  typed at the prompt, leaves `$?` as the line before it set it, so it is
+  marked with that line's failure again.
 
 When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
 wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
