@@ -31,10 +31,13 @@ test "ConPTY transport probe child dispatch only" {
     }
 }
 
-// -Dtest-filter drops every named test whose name does not match, and with it
-// everything that test alone would have referenced. An unnamed test is exempt
-// from the filter, so this one keeps the whole test tree reachable and a
-// filtered run executes the tests that match instead of none.
+// -Dtest-filter keeps a named test only if its fully qualified name (file
+// path, ".test.", then the test name) contains a token, and what only a
+// dropped test referenced is never analysed. An unnamed test is exempt, so
+// this one keeps the tree reachable and a filtered run executes the tests
+// that match instead of none. pty_transport_probe.zig stays reachable only
+// through the named test above, so its two probe tests run only when the
+// filter also matches that one (use ConPTY).
 test {
     _ = entrypoint;
 }

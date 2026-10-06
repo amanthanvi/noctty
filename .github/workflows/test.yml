@@ -128,11 +128,11 @@ jobs:
         # default-off config is one no user runs. It is also a superset,
         # 4495 tests against 4491, the difference being the shadertoy tests
         # that used to have a step of their own. That step ran
-        # -Dtest-filter=shadertoy, which matched nothing and executed 0 of
-        # them (measured); replacing it with a second full-suite run would
-        # have doubled this job's time to collect 4 tests. Compiling the
-        # default-off config is still covered by "Build executable" and
-        # "Verify default source-build shader mode" below.
+        # -Dtest-filter=shadertoy, which executed 0 of them (measured, before
+        # the src/main.zig filter fix); replacing it with a second full-suite
+        # run would have doubled this job's time to collect 4 tests.
+        # Compiling the default-off config is still covered by "Build
+        # executable" and "Verify default source-build shader mode" below.
         run: zig build test -Demit-test-exe=true -Dcustom-shaders=true --summary all
 
       - name: Native Win32 compositor tests

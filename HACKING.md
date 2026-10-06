@@ -29,12 +29,14 @@ The full suite is the only test run to trust on its own, and `--summary all`
 is part of it: read the `N/M tests passed` line. `Build Summary: 41/41 steps
 succeeded` counts build steps, not tests.
 
-`-Dtest-filter=<name>` runs the tests whose names contain `<name>`; it is a
-local convenience, not evidence. Repeat the flag to match several names. The
-`N/M tests passed` line counts the matching tests plus about 70 unnamed
-`test { ... }` blocks that no filter excludes, so a name that matches nothing
-still reports about 70 passes. Subtract that baseline before you trust the
-number, then run the full suite and `zig build` before you finish.
+`-Dtest-filter=<name>` runs the tests whose fully qualified name (file path,
+`.test.`, test name) contains `<name>`; it is a local convenience, not
+evidence. Repeat the flag to match several names. The `N/M tests passed` line
+counts the matching tests plus about 70 unnamed `test { ... }` blocks that no
+filter excludes, so a name that matches nothing still reports about 70
+passes. Subtract that baseline before you trust the number, and expect a
+filtered build to compile the whole tree (about a minute). Then run the full
+suite and `zig build` before you finish.
 
 A `run test ghostty-test cached` line has no count. Zig prints it when it
 reuses an earlier test run instead of running the tests again: under
