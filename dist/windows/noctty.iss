@@ -108,15 +108,6 @@ Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty\command"; ValueType: str
 [Run]
 Filename: "{app}\noctty.exe"; Description: "Launch noctty"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-; Drop the uninstalling user's default-terminal selection before the files go
-; away. Without this, HKCU keeps pointing DelegationTerminal at noctty's CLSID
-; and the shared Interface proxy mappings at the deleted DLL, so every console
-; launch fails activation and silently falls back to conhost. Runs before file
-; removal; other users' selections are theirs to unregister. The ownership
-; check preserves a newer registration made by another installed/portable copy.
-Filename: "{app}\noctty.exe"; Parameters: "+unregister-default-terminal"; Flags: runhidden skipifdoesntexist; RunOnceId: "UnregisterDefaultTerminal"; Check: OwnsDefaultTerminalRegistration
-
 [Code]
 function OwnsDefaultTerminalRegistration(): Boolean;
 var
@@ -149,4 +140,30 @@ begin
   ExePath := ExpandConstant('{app}\noctty.exe');
   StringChangeEx(ExePath, '%', '%%', True);
   Result := AddQuotes(ExePath) + ' --single-instance=false --working-directory="%V\."';
+end;
+
+{ Drop the uninstalling user's default-terminal selection before the files go
+  away. Without this, HKCU keeps pointing DelegationTerminal at noctty's CLSID
+  and the shared Interface proxy mappings at the deleted DLL, so every console
+  launch fails activation and silently falls back to conhost. Other users'
+  selections are theirs to unregister. The ownership check preserves a newer
+  registration made by another installed/portable copy.
+
+  This is deliberately code and not an [UninstallRun] entry with a Check:
+  Inno Setup evaluates an [UninstallRun] Check while INSTALLING, so on a fresh
+  install (nothing registered yet) it returned False and the entry was never
+  recorded in the uninstall log, and uninstall then left noctty registered.
+  Measured with a throwaway installer: the Check ran once, at install time,
+  and never at uninstall. CurUninstallStepChanged runs in the uninstaller,
+  before the files are removed. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ExePath: String;
+  ResultCode: Integer;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+  ExePath := ExpandConstant('{app}\noctty.exe');
+  if FileExists(ExePath) and OwnsDefaultTerminalRegistration() then
+    Exec(ExePath, '+unregister-default-terminal', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
