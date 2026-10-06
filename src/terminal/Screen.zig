@@ -1795,7 +1795,11 @@ pub inline fn resize(
         .rows = opts.rows,
         .cols = opts.cols,
         .reflow = opts.reflow,
-        .cursor = .{ .x = self.cursor.x, .y = self.cursor.y },
+        .cursor = .{
+            .x = self.cursor.x,
+            .y = self.cursor.y,
+            .pin = self.cursor.page_pin,
+        },
     });
 
     // If we have no scrollback and we shrunk our rows, we must explicitly
@@ -6626,6 +6630,105 @@ test "Screen: resize more cols with populated scrollback" {
     }
 }
 
+test "Screen: resize more cols bounded scrollback keeps viewport valid" {
+    // Regression test for issue #12298.
+    //
+    // This needs to live at the Screen layer rather than PageList because the
+    // bad state only appears once Screen forwards the active cursor into the
+    // resize path. A direct PageList resize repro does not hit the same bug.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{
+        .cols = 2,
+        .rows = 10,
+        .max_scrollback = 10_000,
+    });
+    defer s.deinit();
+
+    // Build 30 rows of scrollback on top of our 10-row viewport so we have a
+    // 40-row screen with history above the active area.
+    for (0..30) |_| _ = try s.pages.grow();
+    s.cursorReload();
+    try testing.expectEqual(@as(usize, 40), s.pages.scrollbar().total);
+
+    // Fill the entire screen with two-row wrapped runs:
+    // - even rows mark the end of a wrapped line
+    // - odd rows mark the continuation
+    //
+    // With 2 columns, each logical line occupies two rows. When we grow to 4
+    // columns with reflow enabled, those pairs unwrap back into single rows.
+    // That cuts the total row count down and is what stresses the viewport pin.
+    var it = s.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
+    while (it.next()) |chunk| {
+        const page = &chunk.node.data;
+        for (chunk.start..chunk.end) |y| {
+            const rac = page.getRowAndCell(0, y);
+            if (y % 2 == 0) {
+                rac.row.wrap = true;
+            } else {
+                rac.row.wrap_continuation = true;
+            }
+
+            for (0..s.pages.cols) |x| {
+                page.getRowAndCell(x, y).cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = 'A' },
+                };
+            }
+        }
+    }
+
+    // Pin the viewport to a history row just above the active area.
+    //
+    // Before resize:
+    // - total rows = 40
+    // - active area starts at row 30
+    // - viewport is pinned at row 28
+    //
+    // After unwrap during resize:
+    // - total rows shrinks to 20
+    // - the old row 28 remaps into what is now the active area
+    //
+    // The bug was that resize/grow would temporarily keep the viewport as a
+    // history pin even after reflow had moved it into the active area, leaving
+    // fewer than `rows` visible rows beneath the pin and tripping integrity
+    // checks.
+    s.pages.scroll(.{ .pin = s.pages.pin(.{ .screen = .{ .y = 28 } }).? });
+    try testing.expect(s.pages.viewport == .pin);
+    try testing.expect(s.pages.getBottomRight(.viewport) != null);
+
+    // Growing columns triggers reflow, which unwraps the synthetic wrapped
+    // rows above. This used to panic during the resize path.
+    try s.resize(.{ .cols = 4, .rows = s.pages.rows, .reflow = true });
+
+    // After the fix, the viewport is normalized back to the active area as
+    // soon as the pinned row lands there, so viewport queries remain valid.
+    try testing.expectEqual(@as(usize, 4), s.pages.cols);
+    try testing.expect(s.pages.scrollbar().total < 40);
+    try testing.expect(s.pages.viewport == .active);
+    try testing.expect(s.pages.getBottomRight(.viewport) != null);
+}
+
+test "Screen: resize less cols past the cursor keeps a history viewport valid" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10_000 });
+    defer s.deinit();
+
+    // A cursor past the new width with blank rows below it. Narrowing drops
+    // those rows, so the active area reaches up over the pinned history row
+    // before the rows below the cursor are grown back.
+    try s.testWriteString("1\n2\n3\n4\n5\n6\n7\n8\n9");
+    try s.scrollClear();
+    try s.testWriteString("abcdefgh");
+    s.pages.scroll(.{ .pin = s.pages.pin(.{ .screen = .{ .y = 8 } }).? });
+    try testing.expect(s.pages.viewport == .pin);
+
+    try s.resize(.{ .cols = 5, .rows = 5 });
+    try testing.expect(s.pages.getBottomRight(.viewport) != null);
+}
+
 test "Screen: resize more cols with reflow" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -7324,6 +7427,65 @@ test "Screen: resize less cols to eliminate wide char with row space" {
         defer alloc.free(contents);
         try testing.expectEqualStrings("", contents);
     }
+}
+
+test "Screen: resize less cols reflows cursor after wrapped text" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try Screen.init(alloc, .{ .cols = 50, .rows = 7, .max_scrollback = 0 });
+    defer s.deinit();
+
+    for (0..30) |_| try s.testWriteString("a");
+
+    try testing.expectEqual(@as(usize, 0), s.cursor.y);
+    try testing.expectEqual(@as(usize, 30), s.cursor.x);
+
+    try s.resize(.{ .cols = 25, .rows = 7 });
+
+    try testing.expectEqual(@as(usize, 1), s.cursor.y);
+    try testing.expectEqual(@as(usize, 5), s.cursor.x);
+}
+
+test "Screen: resize less cols reflows cursor after empty cells" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try Screen.init(alloc, .{ .cols = 10, .rows = 3, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.testWriteString("abc");
+    s.cursorRight(6);
+
+    try testing.expectEqual(@as(usize, 0), s.cursor.y);
+    try testing.expectEqual(@as(usize, 9), s.cursor.x);
+
+    try s.resize(.{ .cols = 5, .rows = 3 });
+
+    try testing.expectEqual(@as(usize, 1), s.cursor.y);
+    try testing.expectEqual(@as(usize, 4), s.cursor.x);
+}
+
+test "Screen: resize keeps the line break after a blank wrap continuation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try Screen.init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Narrowing to the text's width moves the cursor onto a blank
+    // continuation row of its own.
+    try s.testWriteString("abcd");
+    try s.resize(.{ .cols = 4, .rows = 5 });
+    try testing.expectEqual(@as(usize, 1), s.cursor.y);
+    try testing.expectEqual(@as(usize, 0), s.cursor.x);
+
+    // Once the cursor leaves it, that row is blank but still ends the line.
+    try s.testWriteString("\nxyz");
+    try s.resize(.{ .cols = 10, .rows = 5 });
+
+    const contents = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
+    defer alloc.free(contents);
+    try testing.expectEqualStrings("abcd\nxyz", contents);
+    try testing.expectEqual(@as(usize, 1), s.cursor.y);
+    try testing.expectEqual(@as(usize, 3), s.cursor.x);
 }
 
 test "Screen: resize more cols with wide spacer head" {

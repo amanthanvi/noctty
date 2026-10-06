@@ -803,6 +803,30 @@ test "resize invalid value" {
     try testing.expectEqual(Result.invalid_value, resize(t, 80, 0, 9, 18));
 }
 
+test "resize shrinks both axes with cursor at bottom" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback = 0,
+        },
+    ));
+    defer free(t);
+
+    // CSI 24;1H -> park the cursor on the bottom row (1-based).
+    const move = "\x1b[24;1H";
+    vt_write(t, move, move.len);
+
+    // Shrink both axes; pre-resize cursor.y sits past the new bottom row.
+    // Previously this underflowed in PageList.resizeCols.
+    try testing.expectEqual(Result.success, resize(t, 79, 23, 8, 16));
+    try testing.expectEqual(79, t.?.terminal.cols);
+    try testing.expectEqual(23, t.?.terminal.rows);
+}
+
 test "mode_get and mode_set" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
