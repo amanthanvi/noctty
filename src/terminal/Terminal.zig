@@ -12734,6 +12734,48 @@ test "Terminal: resize less cols with wide char then print" {
     try t.print('😀'); // 0x1F600
 }
 
+test "Terminal: resize less cols without reflow cutting wide char tail" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 3, .rows = 1 });
+    defer t.deinit(alloc);
+
+    try t.print('a');
+    try t.print('一');
+    t.modes.set(.wraparound, false);
+    try t.resize(alloc, 2, 1);
+
+    try testing.expect(t.screens.active.pages.getCell(.{ .active = .{ .x = 1 } }).?.cell.isEmpty());
+}
+
+test "Terminal: alt screen edits after narrowing cuts a wide char" {
+    const alloc = testing.allocator;
+
+    // A full-screen app's wide char straddles the column a split cuts. The
+    // alternate screen narrows without reflow, then the app erases left from
+    // the last column and inserts a blank at the start of the row.
+    for ([_]bool{ false, true }) |insert| {
+        var t = try init(alloc, .{ .cols = 3, .rows = 1 });
+        defer t.deinit(alloc);
+
+        try t.switchScreenMode(.@"1049", true);
+        try t.print('a');
+        try t.print('一');
+        try t.resize(alloc, 2, 1);
+
+        if (insert) {
+            t.setCursorPos(1, 1);
+            t.insertBlanks(1);
+        } else {
+            t.setCursorPos(1, 2);
+            t.eraseLine(.left, false);
+        }
+
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings(if (insert) " a" else "", str);
+    }
+}
+
 // https://github.com/mitchellh/ghostty/issues/723
 // This was found via fuzzing so its highly specific.
 test "Terminal: resize with left and right margin set" {
@@ -12913,6 +12955,93 @@ test "Terminal: resize with reflow and saved cursor pending wrap" {
         const str = try t.plainString(testing.allocator);
         defer testing.allocator.free(str);
         try testing.expectEqualStrings("1A2BX", str);
+    }
+}
+
+test "Terminal: resize pending wrap before reflow padding" {
+    const alloc = testing.allocator;
+    for ([_]bool{ false, true }) |restore| {
+        var t = try init(alloc, .{ .cols = 4, .rows = 5 });
+        defer t.deinit(alloc);
+
+        // Rewrite the D so pending wrap is set just before the wide char.
+        try t.printString("ABCD界E");
+        t.setCursorPos(1, 4);
+        try t.print('Z');
+        if (restore) t.saveCursor();
+
+        // Widening pads column 4 and moves the wide char down a row. The
+        // next print still belongs on the wide char, as at 4 columns.
+        try t.resize(alloc, 5, 5);
+        if (restore) t.restoreCursor();
+        try testing.expect(t.screens.active.cursor.pending_wrap);
+        try testing.expectEqual(@as(size.CellCountInt, 4), t.screens.active.cursor.x);
+
+        try t.print('X');
+        const pad = t.screens.active.pages.getCell(.{ .active = .{ .x = 4, .y = 0 } }).?.cell;
+        try testing.expect(pad.codepoint() != 'X');
+        const next = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?.cell;
+        try testing.expectEqual(@as(u21, 'X'), next.codepoint());
+    }
+}
+
+test "Terminal: saved cursor survives repeated widening" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 4, .rows = 5 });
+    defer t.deinit(alloc);
+
+    try t.printString("abc\nAAA|");
+    t.saveCursor();
+    try t.resize(alloc, 5, 5);
+    try t.resize(alloc, 6, 5);
+    t.restoreCursor();
+    try t.print('X');
+
+    const str = try t.plainString(alloc);
+    defer alloc.free(str);
+    try testing.expectEqualStrings("abc\nAAA|X", str);
+}
+
+test "Terminal: resize pending wrap live and saved cursors" {
+    const alloc = testing.allocator;
+    const cases = [_]struct {
+        text: []const u8,
+        cols: size.CellCountInt,
+        pending_wrap: bool,
+        expected: []const u8,
+    }{
+        // Widening leaves room after the formerly full line.
+        .{ .text = "ABCD", .cols = 6, .pending_wrap = false, .expected = "ABCDX" },
+        // Narrowing can move the last character into the middle of a row.
+        .{ .text = "ABCD", .cols = 3, .pending_wrap = false, .expected = "ABC\nDX" },
+        // Keep pending wrap when the last character still fills a row.
+        .{ .text = "ABCD", .cols = 2, .pending_wrap = true, .expected = "AB\nCD\nX" },
+        // A height-only resize also preserves pending wrap.
+        .{ .text = "ABCD", .cols = 4, .pending_wrap = true, .expected = "ABCD\nX" },
+        // Reflow can merge previously wrapped rows.
+        .{ .text = "ABCDEFGH", .cols = 6, .pending_wrap = false, .expected = "ABCDEF\nGHX" },
+        // A wide character at the old right edge must not be overwritten.
+        .{ .text = "AB界", .cols = 6, .pending_wrap = false, .expected = "AB界X" },
+        // A cursor without pending wrap must not advance an extra cell.
+        .{ .text = "ABC", .cols = 6, .pending_wrap = false, .expected = "ABCX" },
+    };
+
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |restore| {
+            var t = try init(alloc, .{ .cols = 4, .rows = 5 });
+            defer t.deinit(alloc);
+            try t.printString(case.text);
+            if (restore) t.saveCursor();
+
+            try t.resize(alloc, case.cols, 6);
+            if (restore) t.restoreCursor();
+            try testing.expectEqual(case.pending_wrap, t.screens.active.cursor.pending_wrap);
+
+            try t.print('X');
+            const str = try t.plainString(alloc);
+            defer alloc.free(str);
+            try testing.expectEqualStrings(case.expected, str);
+        }
     }
 }
 
