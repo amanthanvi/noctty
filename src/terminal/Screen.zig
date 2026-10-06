@@ -3084,6 +3084,9 @@ pub fn selectLine(self: *const Screen, opts: SelectLine) ?Selection {
         const whitespace = opts.whitespace orelse break :start start_pin;
         var it = start_pin.cellIterator(.right_down, end_pin);
         while (it.next()) |p| {
+            // CellIterator only limits the row, so bound the column too.
+            if (end_pin.before(p)) return null;
+
             const cell = p.rowAndCell().cell;
             if (!cell.hasText()) continue;
 
@@ -9669,6 +9672,30 @@ test "Screen: selectLine semantic prompt boundary" {
             .x = 0,
             .y = 2,
         } }, s.pages.pointFromPin(.active, sel.end()).?);
+    }
+}
+
+test "Screen: selectLine whitespace between prompt boundaries" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 1, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Typed blanks between two prompt cells form their own zone. (Cells
+    // that were never written take the nearest text's state (PKG-52,
+    // 2026-10-15 in terminal-core.md), so they would join the prompt
+    // instead.)
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("x");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.testWriteString("  ");
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("m");
+
+    for (1..3) |x| {
+        const pin = s.pages.pin(.{ .active = .{ .x = @intCast(x) } }).?;
+        try testing.expect(s.selectLine(.{ .pin = pin }) == null);
     }
 }
 
