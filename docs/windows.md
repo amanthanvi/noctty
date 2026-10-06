@@ -50,13 +50,13 @@ XDG helpers still honor `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and
 `XDG_CACHE_HOME` when set on Windows; `%LOCALAPPDATA%` is the fallback in
 the normal packaged app environment.
 
-| Path                                       | Purpose                                                                                                                                                       |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `%LOCALAPPDATA%\noctty\config.ghostty`     | User config, written on first launch.                                                                                                                         |
-| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved on exit except in safe mode, when elevated through UAC, or with `window-save-state = never`. |
-| `%LOCALAPPDATA%\noctty\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                                                                                             |
-| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                                                                                    |
-| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                                                                                    |
+| Path                                       | Purpose                                                                                                                                                                                                                                                           |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `%LOCALAPPDATA%\noctty\config.ghostty`     | User config, written on first launch.                                                                                                                                                                                                                             |
+| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved on exit except in safe mode, when elevated through UAC, when started with `-e` / `initial-command`, `initial-window = false` or the startup profile picker, or with `window-save-state = never`. |
+| `%LOCALAPPDATA%\noctty\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                                                                                                                                                                                                 |
+| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                                                                                                                                                                                        |
+| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                                                                                                                                                                                        |
 
 [PRIVACY.md](../PRIVACY.md) describes the other files and registry entries
 noctty writes, including the jump list, command palette history, and update

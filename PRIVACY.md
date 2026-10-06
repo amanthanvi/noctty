@@ -63,10 +63,12 @@ published release files, such as Scoop or WinGet, install the same app.
 - **Programs you run.** Shells, `ssh`, `git`, WSL, and other programs in
   Noctty make their own connections. Noctty does not see, filter, or record
   their network traffic.
-- **Paths from programs.** A program can report its working directory, which
-  new tabs and splits, and your next session, start in. It can also ask
-  Noctty to display an image file. If such a path is on a network share,
-  Windows connects to that share.
+- **Paths from programs.** A program can report its working directory. New
+  tabs and splits, and your next session, start there if it is a folder on a
+  drive letter, and in your home folder otherwise. A program can also ask
+  Noctty to display an image file, which Noctty opens wherever it is, and a
+  relative link you Ctrl+click is looked up in the reported directory. If
+  either path is on a network share, Windows connects to that share.
 - **Clipboard.** Programs, including ones on a remote host you reach over
   SSH, can put text on your clipboard. They can read it only after you allow
   it. Change this with `clipboard-write` and `clipboard-read`.
@@ -116,8 +118,10 @@ dumps, and SSH host cache go there.
   by an older version. If you have no Noctty config, the Settings window can
   save to one of these older files or to `ghostty\config.ghostty`.
 - **Session restore:** `session-state.json`, saved when Noctty closes, except
-  in safe mode, when Noctty runs as administrator through UAC, or if you set
-  `window-save-state = never`. It holds window positions and sizes,
+  in safe mode, when Noctty runs as administrator through UAC, when it was
+  started to run one command (`-e` or `initial-command`), without an initial
+  window (`initial-window = false`), or from its startup profile picker, or
+  if you set `window-save-state = never`. It holds window positions and sizes,
   tabs and splits, each pane's shell profile and last working directory as
   reported by the shell, and titles you gave tabs or panes. It holds terminal
   text only if you set `window-save-state-scrollback` above 0 (the default is
