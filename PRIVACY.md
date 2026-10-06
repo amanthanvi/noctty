@@ -107,13 +107,13 @@ they live next to `noctty.exe` instead. If you set `XDG_CONFIG_HOME`, your
 config goes there; if you set `XDG_STATE_HOME`, the update files, crash
 dumps, and SSH host cache go there.
 
-- **Config:** `config.ghostty`. Noctty creates a template on first launch,
-  with a comment giving the file's own path, which usually includes your
-  Windows user name. The Settings window saves your changes here. Noctty
-  also reads `%LOCALAPPDATA%\ghostty\config` if it exists and, when it finds
-  no other config, one left by an older version at
-  `%LOCALAPPDATA%\winghostty\config.ghostty`. When you have no Noctty config,
-  the Settings window saves to the older file it found.
+- **Config:** `config.ghostty`. If Noctty finds no config at all, it creates
+  a template here, with a comment giving the file's own path, which usually
+  includes your Windows user name. The Settings window saves your changes
+  here. Noctty also reads `ghostty\config`, beside the `noctty` folder, if it
+  exists and, when it finds no other config, `winghostty\config.ghostty` left
+  by an older version. If you have no Noctty config, the Settings window can
+  save to one of these older files or to `ghostty\config.ghostty`.
 - **Session restore:** `session-state.json`, saved when Noctty closes unless
   you set `window-save-state = never`. It holds window positions and sizes,
   tabs and splits, each pane's shell profile and last working directory as
@@ -206,8 +206,8 @@ installer created. It does not remove your data. To remove everything:
      `noctty +unregister-shell-menu`, and `noctty +ssh-cache --clear`.
 2. Close Noctty and delete `%LOCALAPPDATA%\noctty` (in portable mode, the files
    next to `noctty.exe`), and the `noctty` folders in `XDG_CONFIG_HOME` and
-   `XDG_STATE_HOME` if you set them. Delete `%LOCALAPPDATA%\ghostty` and
-   `%LOCALAPPDATA%\winghostty` too if Noctty is the only program that used
+   `XDG_STATE_HOME` if you set them. Delete the `ghostty` and `winghostty`
+   folders in the same places too if Noctty is the only program that used
    them.
 3. Delete the registry key
    `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty`.

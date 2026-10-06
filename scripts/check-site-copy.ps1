@@ -68,6 +68,8 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/discussions"; Reason = "Footer should link to project Discussions." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-noctty.html"; Reason = "The landing page should expose the identity and trust page." }
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The landing page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "https://github.com/amanthanvi/noctty/blob/main/PRIVACY.md"; Reason = "The trust page footer should link the privacy policy that the WinGet manifest's PrivacyUrl names." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
     @{ Path = $verifyDoc; Pattern = "Assert-ReleaseSignature"; Reason = "The manual legacy-release path should validate the embedded Authenticode signature and signer pin with the repository helper." }
