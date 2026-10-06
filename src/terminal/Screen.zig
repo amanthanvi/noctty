@@ -6710,6 +6710,25 @@ test "Screen: resize more cols bounded scrollback keeps viewport valid" {
     try testing.expect(s.pages.getBottomRight(.viewport) != null);
 }
 
+test "Screen: resize less cols past the cursor keeps a history viewport valid" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10_000 });
+    defer s.deinit();
+
+    // A cursor past the new width with blank rows below it. Narrowing drops
+    // those rows, so the active area reaches up over the pinned history row
+    // before the rows below the cursor are grown back.
+    try s.testWriteString("1\n2\n3\n4\n5\n6\n7\n8\n9");
+    try s.scrollClear();
+    try s.testWriteString("abcdefgh");
+    s.pages.scroll(.{ .pin = s.pages.pin(.{ .screen = .{ .y = 8 } }).? });
+    try testing.expect(s.pages.viewport == .pin);
+
+    try s.resize(.{ .cols = 5, .rows = 5 });
+    try testing.expect(s.pages.getBottomRight(.viewport) != null);
+}
+
 test "Screen: resize more cols with reflow" {
     const testing = std.testing;
     const alloc = testing.allocator;
