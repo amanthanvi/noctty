@@ -161,8 +161,8 @@ Noctty from scripts and the command line, see
 
 ## Privacy and updates
 
-- **No telemetry.** On its own, Noctty goes online only to reach GitHub
-  Releases for updates.
+- **No telemetry.** On its own, Noctty goes online only to check for updates,
+  from GitHub Releases unless you set another update feed.
 - **Updates** are checked when Noctty starts, unless a check succeeded in the
   last 24 hours. Nothing is installed until you start the update yourself. Set
   `auto-update = off` to stop checking, or `auto-update = download` to have
