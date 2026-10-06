@@ -764,6 +764,9 @@ pub fn cursorReload(self: *Screen) void {
     ) orelse reset: {
         const pin = self.pages.pin(.{ .active = .{} }).?;
         self.cursor.page_pin.* = pin;
+
+        // A pending wrap belonged to the position the cursor just lost.
+        self.cursor.pending_wrap = false;
         break :reset self.pages.pointFromPin(.active, pin).?;
     };
 
@@ -1819,6 +1822,13 @@ pub inline fn resize(
     if (self.cursor.pending_wrap and self.cursor.x != opts.cols - 1) {
         self.cursor.pending_wrap = false;
         self.cursorRight(1);
+
+        // Reflow pads the end of a row when it moves a wide char down to the
+        // next one. The next print belongs on that wide char, as it did
+        // before the resize, so wrap from the padding rather than fill it.
+        if (self.cursor.page_cell.wide == .spacer_head) {
+            self.cursor.pending_wrap = true;
+        }
     }
 
     // If we reflowed a saved cursor, update it.
@@ -1834,8 +1844,12 @@ pub inline fn resize(
             // the line, we unset the pending wrap and move the cursor to
             // reflect the correct next position.
             if (sc.pending_wrap and sc.x != opts.cols - 1) {
-                sc.pending_wrap = false;
+                var next = p.*;
+                next.x += 1;
                 sc.x += 1;
+
+                // Wrap from reflow padding, as the live cursor does above.
+                sc.pending_wrap = next.rowAndCell().cell.wide == .spacer_head;
             }
         } else {
             // I think this can happen if the screen is resized to be
@@ -7505,6 +7519,24 @@ test "Screen: resize keeps the line break after a blank wrap continuation" {
     try testing.expectEqualStrings("abcd\nxyz", contents);
     try testing.expectEqual(@as(usize, 1), s.cursor.y);
     try testing.expectEqual(@as(usize, 3), s.cursor.x);
+}
+
+test "Screen: resize resets a pending-wrap cursor pushed into scrollback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s = try init(alloc, .{ .cols = 4, .rows = 5, .max_scrollback = 10 });
+    defer s.deinit();
+
+    // Every row has text, so shrinking rows pushes the top rows, and the
+    // cursor with them, into scrollback.
+    try s.testWriteString("ABCD\n1\n2\n3\n4");
+    s.cursorAbsolute(3, 0);
+    s.cursor.pending_wrap = true;
+
+    try s.resize(.{ .cols = 4, .rows = 2 });
+    try testing.expectEqual(@as(usize, 0), s.cursor.x);
+    try testing.expectEqual(@as(usize, 0), s.cursor.y);
+    try testing.expect(!s.cursor.pending_wrap);
 }
 
 test "Screen: resize more cols with wide spacer head" {

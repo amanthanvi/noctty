@@ -12958,6 +12958,33 @@ test "Terminal: resize with reflow and saved cursor pending wrap" {
     }
 }
 
+test "Terminal: resize pending wrap before reflow padding" {
+    const alloc = testing.allocator;
+    for ([_]bool{ false, true }) |restore| {
+        var t = try init(alloc, .{ .cols = 4, .rows = 5 });
+        defer t.deinit(alloc);
+
+        // Rewrite the D so pending wrap is set just before the wide char.
+        try t.printString("ABCD界E");
+        t.setCursorPos(1, 4);
+        try t.print('Z');
+        if (restore) t.saveCursor();
+
+        // Widening pads column 4 and moves the wide char down a row. The
+        // next print still belongs on the wide char, as at 4 columns.
+        try t.resize(alloc, 5, 5);
+        if (restore) t.restoreCursor();
+        try testing.expect(t.screens.active.cursor.pending_wrap);
+        try testing.expectEqual(@as(size.CellCountInt, 4), t.screens.active.cursor.x);
+
+        try t.print('X');
+        const pad = t.screens.active.pages.getCell(.{ .active = .{ .x = 4, .y = 0 } }).?.cell;
+        try testing.expect(pad.codepoint() != 'X');
+        const next = t.screens.active.pages.getCell(.{ .active = .{ .x = 0, .y = 1 } }).?.cell;
+        try testing.expectEqual(@as(u21, 'X'), next.codepoint());
+    }
+}
+
 test "Terminal: saved cursor survives repeated widening" {
     const alloc = testing.allocator;
     var t = try init(alloc, .{ .cols = 4, .rows = 5 });
