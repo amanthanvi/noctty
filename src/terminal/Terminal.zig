@@ -1173,7 +1173,10 @@ pub fn semanticPrompt(
         .fresh_line_new_prompt => {
             // Before the abort below, which clears the input mark this
             // reads. See the `redraw` handling further down.
-            const new_prompt = self.screens.active.semanticPromptMarkStart();
+            const redraw = cmd.readOption(.redraw);
+            const new_prompt = self.screens.active.semanticPromptMarkStart(
+                (redraw orelse .true) == .false,
+            );
             self.screens.active.semanticPromptAbortCommand();
 
             // "First do a fresh-line."
@@ -1215,12 +1218,12 @@ pub fn semanticPrompt(
             // where it does not: the line was submitted before the outer
             // prompt opened, so nothing closes that prompt. A shell with C
             // marks closes it with the C; for cmd, which has none,
-            // `markPromptStart` treats a mark after such a prompt's B as new.
-            // A line PSReadLine keeps out of history (a repeat of the last
-            // one) gets no C from an integration that marks C from its
-            // AddToHistoryHandler, so a shell started from it keeps the outer
-            // setting until its next prompt.
-            if (cmd.readOption(.redraw)) |v| {
+            // `markPromptStart` treats a mark after such a prompt's B as new,
+            // and only for a prompt that says `redraw=0`, the one setting a
+            // nested shell needs reset. Without PSReadLine, noctty's
+            // PowerShell integration writes no C either, and the same
+            // inference serves its `redraw=0` prompts.
+            if (redraw) |v| {
                 self.flags.shell_redraws_prompt = v;
             } else if (new_prompt) {
                 self.flags.shell_redraws_prompt = .true;
@@ -1285,8 +1288,10 @@ pub fn semanticPrompt(
             // `redraw` option applies either way, as on an A: noctty's
             // PowerShell integration uses one to mark a prompt it could not
             // wrap in time, where an A's fresh-line would break the line.
-            const new_prompt = kind == .initial and self.screens.active.semanticPromptMarkStart();
-            if (cmd.readOption(.redraw)) |v| {
+            const redraw = cmd.readOption(.redraw);
+            const new_prompt = kind == .initial and
+                self.screens.active.semanticPromptMarkStart((redraw orelse .true) == .false);
+            if (redraw) |v| {
                 self.flags.shell_redraws_prompt = v;
             } else if (new_prompt) {
                 self.flags.shell_redraws_prompt = .true;
