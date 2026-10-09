@@ -43,8 +43,8 @@ $script:SHADER_PACING_WM_CHAR = [uint32] 0x0102
 # bound proves saver pacing is in effect: unpaced, the animation presents at
 # 60 fps or more, and main passes this harness for the wrong reason.
 $script:SHADER_PACING_ANIMATION_WINDOW_MS = 1000
-$script:SHADER_PACING_MIN_ANIMATION_SWAPS = 10
-$script:SHADER_PACING_MAX_ANIMATION_SWAPS = 40
+$script:SHADER_PACING_MIN_ANIMATION_FPS = 10
+$script:SHADER_PACING_MAX_ANIMATION_FPS = 40
 
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be greater than 0.' }
 
@@ -166,7 +166,8 @@ $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 Assert-InteractiveWin11ExeExists -ExePath $exePath
 $commandPath = Join-Path (Split-Path -Parent $exePath) 'noctty.com'
 $versionText = & $commandPath +version | Out-String
-if ($LASTEXITCODE -ne 0 -or $versionText -notmatch 'custom shaders: enabled') {
+if ($LASTEXITCODE -ne 0) { throw "noctty +version failed with exit code $LASTEXITCODE" }
+if ($versionText -notmatch 'custom shaders: enabled') {
     throw 'The current executable does not include custom shader support. Re-run with -Rebuild.'
 }
 
@@ -237,11 +238,15 @@ try {
             }
             $sent = [DateTime]::UtcNow
             $limit = $sent.AddMilliseconds($script:SHADER_PACING_PRESENT_LIMIT_MS)
-            do {
+            if ($limit -gt $deadline) { $limit = $deadline }
+            # Every request is bounded by the step's limit, so a snapshot that
+            # only arrives later cannot count as presented in time.
+            while ([uint64] $typed.last_swap_process_output_bytes -le $baseline) {
                 Start-Sleep -Milliseconds $script:SHADER_PACING_POLL_MS
-                $typed = Request-ShaderPacingTrace -Hwnd $surface.Hwnd -Path $tracePath -AfterSequence $sequence -Deadline $deadline
+                if ([DateTime]::UtcNow -ge $limit) { break }
+                $typed = Request-ShaderPacingTrace -Hwnd $surface.Hwnd -Path $tracePath -AfterSequence $sequence -Deadline $limit
                 $sequence = [uint64] $typed.snapshot_sequence
-            } while ([uint64] $typed.last_swap_process_output_bytes -le $baseline -and [DateTime]::UtcNow -lt $limit)
+            }
             if ([uint64] $typed.last_swap_process_output_bytes -le $baseline) {
                 throw ("round ${round}: typed input did not reach a presented frame within $($script:SHADER_PACING_PRESENT_LIMIT_MS) ms: " +
                     "presented_output_bytes stayed at $baseline while swaps went $($before.swap_buffers_count) -> " +
@@ -254,12 +259,17 @@ try {
 
     Start-Sleep -Milliseconds $script:SHADER_PACING_ANIMATION_WINDOW_MS
     $after = Request-ShaderPacingTrace -Hwnd $surface.Hwnd -Path $tracePath -AfterSequence $sequence -Deadline $deadline
-    $animationSwaps = [uint64] $after.swap_buffers_count - [uint64] $typed.swap_buffers_count
-    if ($animationSwaps -lt $script:SHADER_PACING_MIN_ANIMATION_SWAPS) {
-        throw "the shader animation stopped presenting: $animationSwaps swaps in $($script:SHADER_PACING_ANIMATION_WINDOW_MS) ms"
+    # A rate over the app's own clock (`runtime_ms`), so a stalled runner
+    # cannot stretch the window and inflate the count.
+    $animationMs = [double] $after.runtime_ms - [double] $typed.runtime_ms
+    if ($animationMs -le 0) { throw "render-trace runtime did not advance ($($typed.runtime_ms) -> $($after.runtime_ms))" }
+    $animationSwapsPerSecond = [Math]::Round(
+        ([double] $after.swap_buffers_count - [double] $typed.swap_buffers_count) * 1000 / $animationMs, 1)
+    if ($animationSwapsPerSecond -lt $script:SHADER_PACING_MIN_ANIMATION_FPS) {
+        throw "the shader animation stopped presenting: $animationSwapsPerSecond swaps/s over $animationMs ms"
     }
-    if ($animationSwaps -gt $script:SHADER_PACING_MAX_ANIMATION_SWAPS) {
-        throw "saver pacing is not in effect: $animationSwaps swaps in $($script:SHADER_PACING_ANIMATION_WINDOW_MS) ms"
+    if ($animationSwapsPerSecond -gt $script:SHADER_PACING_MAX_ANIMATION_FPS) {
+        throw "saver pacing is not in effect: $animationSwapsPerSecond swaps/s over $animationMs ms"
     }
 
     Close-StatefulHost $hostHwnd $run $deadline
@@ -278,5 +288,5 @@ Write-Host ("interactive-win11 shader-pacing validation: PASS " +
     $typed.last_swap_process_output_bytes,
     $before.renderer_update_frame_count,
     $typed.renderer_update_frame_count,
-    $animationSwaps,
+    $animationSwapsPerSecond,
     ($presentedMs -join '/'))
