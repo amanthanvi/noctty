@@ -145,10 +145,14 @@ if ($quick) {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-shader-pacing.ps1 -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
   ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-shader-pacing.ps1 -ResetState
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
