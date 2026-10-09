@@ -271,6 +271,24 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-shaders.ps1 -Rebuild -ResetState
 ```
 
+## interactive-win11-shader-pacing.ps1
+
+Regression harness for #297. It runs an animated custom shader with
+`power-saver-rendering = on` (the pacing Battery Saver or Energy Saver turns on),
+types into the terminal with key messages sent to the surface over three rounds,
+and fails unless each step's output reaches a presented frame within two
+seconds, per the render trace's `last_swap_process_output_bytes`, and the
+animation keeps presenting at the paced rate. The bug it guards against is
+timing-dependent, so one run on a regressed build can still pass.
+It needs an executable built with custom shaders, for example the one
+`interactive-win11-shaders.ps1 -Rebuild` leaves behind.
+
+Run with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-shader-pacing.ps1 -ResetState
+```
+
 ## interactive-win11-resize.ps1
 
 Interactive Win11 validation for resize repaint coverage. It launches

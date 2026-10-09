@@ -108,6 +108,11 @@ render_followup_pending: bool = false,
 /// Absolute Win32 tick when the active render follow-up should fire.
 render_timer_due_ms: u64 = 0,
 last_present_request_ms: u64 = 0,
+/// Set when pacing deferred a frame update (`renderOnce` found the present
+/// slot taken) and cleared when one runs. The animation draw timer checks it:
+/// a draw-only tick that takes the slot would otherwise present stale frame
+/// data and push the deferred update out again, every interval (#297).
+frame_update_deferred: bool = false,
 
 /// The timer used for draw calls. Draw calls don't update from the
 /// terminal state so they're much cheaper. They're used for animation
@@ -823,7 +828,10 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
     // existing follow-up timer so background output cannot burn CPU at the
     // uncapped wakeup rate.
     const interval_ms = self.minimumPresentIntervalMs() orelse return false;
-    if (self.presentWaitMs(interval_ms) > 0) return true;
+    if (self.presentWaitMs(interval_ms) > 0) {
+        self.frame_update_deferred = true;
+        return true;
+    }
 
     var repaint_reserved = false;
     if (must_draw_from_app_thread and self.flags.visible and !self.renderer.hasVsync()) {
@@ -839,6 +847,7 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
 
     // updateFrame returns the cursor mode from the same locked terminal
     // snapshot used to rebuild this frame.
+    self.frame_update_deferred = false;
     const frame_update: ?rendererpkg.Renderer.FrameUpdate = self.renderer.updateFrame(
         self.state,
         self.flags.cursor_blink_visible,
@@ -936,11 +945,20 @@ fn drawCallback(
     };
     t.draw_timer_due_ms = 0;
 
-    // Draw
-    t.drawFrame(false);
+    // Draw. When pacing has deferred a frame update, this tick carries it
+    // instead: both paths share one present slot per interval, and a
+    // draw-only tick would keep the slot while presenting stale frame data.
+    if (t.frame_update_deferred) {
+        if (t.renderOnce(false)) t.scheduleRenderFollowup();
+    } else {
+        t.drawFrame(false);
+    }
 
-    // Only continue if we're still active
-    if (t.draw_active) {
+    // Only continue if we're still active. `renderOnce` drains the mailbox,
+    // and a focus, visibility or config message there runs `syncDrawTimer`,
+    // which may already have re-armed this (dead) completion. Running it a
+    // second time would corrupt libxev's timer queue.
+    if (t.draw_active and t.draw_c.state() == .dead) {
         if (t.nextPresentTimerDelayMs()) |delay_ms| {
             t.draw_h.run(&t.loop, &t.draw_c, delay_ms, Thread, t, drawCallback);
             if (apprt.runtime == apprt.win32) {
