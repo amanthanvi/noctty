@@ -2473,6 +2473,58 @@ pub fn appendGrapheme(
     };
 }
 
+/// Set the graphemes of the given cell within the current cursor row.
+/// The cell must have a codepoint and no graphemes yet.
+pub fn setGraphemes(
+    self: *Screen,
+    cell: *Cell,
+    cps: []const u21,
+) PageList.IncreaseCapacityError!void {
+    defer self.cursor.page_pin.node.data.assertIntegrity();
+    self.cursor.page_pin.node.data.setGraphemes(
+        self.cursor.page_row,
+        cell,
+        cps,
+    ) catch |err| switch (err) {
+        error.GraphemeMapOutOfMemory,
+        error.GraphemeAllocOutOfMemory,
+        => {
+            // See appendGrapheme for the capacity increase and cell reload.
+            const cell_idx: usize = cell_idx: {
+                const cells: [*]Cell = @ptrCast(self.cursor.page_cell);
+                const zero: [*]Cell = cells - self.cursor.x;
+                const target: [*]Cell = @ptrCast(cell);
+                const cell_idx = (@intFromPtr(target) - @intFromPtr(zero)) / @sizeOf(Cell);
+                break :cell_idx cell_idx;
+            };
+
+            _ = try self.increaseCapacity(
+                self.cursor.page_pin.node,
+                .grapheme_bytes,
+            );
+
+            const reloaded_cell: *Cell = switch (std.math.order(cell_idx, self.cursor.x)) {
+                .eq => self.cursor.page_cell,
+                .lt => self.cursorCellLeft(@intCast(self.cursor.x - cell_idx)),
+                .gt => self.cursorCellRight(@intCast(cell_idx - self.cursor.x)),
+            };
+
+            self.cursor.page_pin.node.data.setGraphemes(
+                self.cursor.page_row,
+                reloaded_cell,
+                cps,
+            ) catch |err2| {
+                comptime assert(@TypeOf(err2) == Page.GraphemeError);
+                // This should never happen because we just increased capacity.
+                // Log loudly but still return an error so we don't just
+                // crash.
+                log.err("grapheme set failed after capacity increase err={}", .{err2});
+                return error.OutOfMemory;
+            };
+        },
+    };
+}
+
 /// Start the hyperlink state. Future cells will be marked as hyperlinks with
 /// this state. Note that various terminal operations may clear the hyperlink
 /// state, such as switching screens (alt screen).

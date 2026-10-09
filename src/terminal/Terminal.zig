@@ -494,12 +494,10 @@ pub fn print(self: *Terminal, c: u21) !void {
                         self.writeCell(0, if (row_wrap) .spacer_head else .narrow);
                         try self.printWrap();
                         self.writeCell(prev_cp, .wide);
-
-                        // Each append may replace the page, so reload the cursor cell.
-                        for (prev_grapheme) |cp| {
-                            try self.screens.active.appendGrapheme(
+                        if (prev_grapheme.len > 0) {
+                            try self.screens.active.setGraphemes(
                                 self.screens.active.cursor.page_cell,
-                                cp,
+                                prev_grapheme,
                             );
                         }
 
@@ -4941,6 +4939,49 @@ test "Terminal: grapheme transfer when widening scrolls a single row" {
             }
         }
     }
+}
+
+test "Terminal: grapheme transfer when widening wraps to a page without grapheme capacity" {
+    const rows = pagepkg.std_capacity.rows;
+    const cols = pagepkg.std_capacity.cols;
+    var t = try init(testing.allocator, .{ .rows = rows, .cols = cols });
+    defer t.deinit(testing.allocator);
+
+    t.modes.set(.grapheme_cluster, true);
+
+    // Fill the first page so the bottom row of the screen is on a second
+    // page, then compact that page so it has no grapheme capacity. Only an
+    // oversized page compacts, so grow it first.
+    t.cursorDown(rows - 1);
+    for (rows..t.screens.active.pages.pages.first.?.data.capacity.rows + 1) |_| {
+        try t.index();
+    }
+    const pages = &t.screens.active.pages;
+    try testing.expect(pages.pages.first != pages.pages.last);
+    _ = try t.screens.active.increaseCapacity(pages.pages.last.?, .grapheme_bytes);
+    try testing.expect(try pages.compact(pages.pages.last.?) != null);
+    try testing.expectEqual(0, pages.pages.last.?.data.capacity.grapheme_bytes);
+
+    // The cursor is on the compacted page, and compacting freed the page
+    // its cached row and cell pointed into.
+    t.screens.active.cursorReload();
+
+    t.setCursorPos(rows - 1, cols);
+    try t.print(0x2764); // Heart
+    try t.print(0x200D); // ZWJ
+    try t.print(0x1F44D); // Thumbs up
+
+    // The re-attach had to grow the page's grapheme capacity.
+    try testing.expect(pages.pages.last.?.data.capacity.grapheme_bytes > 0);
+    const base = pages.getCell(.{ .active = .{ .x = 0, .y = rows - 1 } }).?;
+    try testing.expectEqual(pages.pages.last.?, base.node);
+    try testing.expectEqual(Cell.Wide.wide, base.cell.wide);
+    try testing.expectEqual(@as(u21, 0x2764), base.cell.codepoint());
+    try testing.expectEqualSlices(
+        u21,
+        &.{ 0x200D, 0x1F44D },
+        base.node.data.lookupGrapheme(base.cell).?,
+    );
 }
 
 test "Terminal: VS16 to make wide character with pending wrap" {
