@@ -85,6 +85,7 @@ pub fn setup(
         break :shell force_shell orelse detected orelse return null;
     };
 
+    var shell_fallback = false;
     // Only these integrations rebuild argv. Cmd/zsh/Elvish keep the string
     // intact, so their expansion and quoting remain cmd's responsibility.
     if (builtin.os.tag == .windows and
@@ -106,19 +107,20 @@ pub fn setup(
                 while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeZ(u8, arg));
                 command = .{ .direct = try argv.toOwnedSlice(alloc_arena) };
             } else if (command == .shell) {
-                // Keep the original cmd launch when the child search cannot
-                // produce a native executable (including batch wrappers).
-                return null;
+                // Preserve main's integrated launch form when lookup cannot
+                // resolve a native file: PowerShell was direct, Bash/Nu cmd.
+                shell_fallback = shell != .powershell;
             }
         }
     }
 
     const new_command: config.Command = switch (shell) {
-        .bash => try setupBash(
+        .bash => try setupBashWithLaunchForm(
             alloc_arena,
             command,
             resource_dir,
             env,
+            shell_fallback,
         ),
 
         .nushell => try setupNushell(
@@ -161,8 +163,24 @@ pub fn setup(
 
     return .{
         .shell = shell,
-        .command = new_command,
+        .command = if (shell_fallback and shell == .nushell)
+            (try windowsIntegratedShellCommand(alloc_arena, new_command.direct)) orelse return null
+        else
+            new_command,
     };
+}
+
+fn windowsIntegratedShellCommand(alloc: Allocator, argv: []const [:0]const u8) !?config.Command {
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    for (argv, 0..) |arg, i| {
+        if (i != 0) try buf.writer.writeByte(' ');
+        try config.Command.writeDirectArg(&buf.writer, arg);
+    }
+    // Cmd still parses the serialized tail. Never turn quoted literal data
+    // or an injected resource path into expansion or an exposed operator.
+    if (windowsCommandNeedsShell(buf.written())) return null;
+    return .{ .shell = try buf.toOwnedSliceSentinel(0) };
 }
 
 fn windowsCommandNeedsShell(value: []const u8) bool {
@@ -465,18 +483,54 @@ test "PKG08 round2 bare powershell uses child PATH" {
     try std.testing.expectEqualStrings(expected, result.command.direct[0]);
 }
 
-test "PKG08 round2 unresolved shell stays on the cmd launch path" {
+test "PKG08 round3 unresolved shells retain their integrated launch forms" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    inline for (.{ Shell.bash, Shell.nushell, Shell.powershell }) |shell| {
+        var env = EnvMap.init(alloc);
+        try env.put("PATH", "relative;\\\\server\\share;\\??\\UNC\\server\\share");
+        var res: TmpResourcesDir = try .init(alloc, shell);
+        defer res.deinit();
+        const value: [:0]const u8 = switch (shell) {
+            .bash => "bash -i",
+            .nushell => "nu",
+            .powershell => "pwsh -NoLogo",
+            else => unreachable,
+        };
+        const result = try setup(alloc, res.path, .{ .shell = value }, &env, null, false);
+        try std.testing.expect(result != null);
+        try std.testing.expectEqual(shell, result.?.shell);
+        if (shell == .powershell) {
+            try std.testing.expect(result.?.command == .direct);
+            try std.testing.expectEqualStrings("pwsh", result.?.command.direct[0]);
+            try std.testing.expectEqualStrings("-Command", result.?.command.direct[result.?.command.direct.len - 2]);
+        } else {
+            try std.testing.expect(result.?.command == .shell);
+            try std.testing.expect(std.mem.startsWith(u8, result.?.command.shell, if (shell == .bash) "bash --posix -i" else "nu --execute "));
+            if (shell == .bash) try std.testing.expect(env.get("GHOSTTY_BASH_INJECT") != null);
+        }
+    }
+}
+
+test "PKG08 round3 rejected bash fallback preserves environment" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var env = EnvMap.init(alloc);
-    try env.put("PATH", "relative;\\\\server\\share;\\??\\UNC\\server\\share");
+    try env.put("PATH", "relative");
+    try env.put("ENV", "user-env.sh");
     const before = env.count();
-    for ([_][:0]const u8{ "bash -i", "pwsh -NoLogo", "nu" }) |value| {
-        try std.testing.expect(try setup(alloc, "C:\\unused", .{ .shell = value }, &env, null, false) == null);
-        try std.testing.expectEqual(before, env.count());
-    }
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    try std.testing.expect(try setup(alloc, res.path, .{
+        .shell = "bash -i -- \"file&name.sh\"",
+    }, &env, null, false) == null);
+    try std.testing.expectEqualStrings("user-env.sh", env.get("ENV").?);
+    try std.testing.expect(env.get("HISTFILE") == null);
+    try std.testing.expectEqual(before, env.count());
 }
 
 test "PKG08 round2 cmd syntax screen respects double quotes" {
@@ -1743,6 +1797,16 @@ fn setupBash(
     resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
+    return setupBashWithLaunchForm(alloc, command, resource_dir, env, false);
+}
+
+fn setupBashWithLaunchForm(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+    shell_fallback: bool,
+) !?config.Command {
     var cmd = IntegrationCommandBuilder.init(alloc);
     defer cmd.deinit();
 
@@ -1802,6 +1866,14 @@ fn setupBash(
         }
     }
 
+    // Validate cmd fallback before changing ENV or history settings. A
+    // rejected rebuild must leave the original command's environment intact.
+    const integrated_command = try cmd.finish();
+    const launch_command = if (shell_fallback)
+        (try windowsIntegratedShellCommand(alloc, integrated_command.direct)) orelse return null
+    else
+        integrated_command;
+
     // Preserve an existing ENV value. We're about to overwrite it.
     if (env.get("ENV")) |v| {
         try env.put("GHOSTTY_BASH_ENV", v);
@@ -1845,7 +1917,7 @@ fn setupBash(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return try cmd.finish();
+    return launch_command;
 }
 
 test "PKG08 bash direct argv preserves Program Files and quoted arguments" {

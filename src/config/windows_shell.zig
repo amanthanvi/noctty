@@ -245,13 +245,12 @@ pub fn executableCommand(alloc: Allocator, command: Command) !Command {
     const ext = std.fs.path.extension(path);
     if (!std.ascii.eqlIgnoreCase(ext, ".exe") and
         !std.ascii.eqlIgnoreCase(ext, ".com")) return command;
-    // Screen these before statFile opens anything. A command value must not
+    // Screen these before querying attributes. A command value must not
     // introduce a network timeout on the terminal's startup path.
     if (internal_os.path.isNetworkOrDevicePath(path)) return command;
     if (internal_os.windows.driveTypeForLetter(path[0]) == internal_os.windows.DRIVE_REMOTE)
         return command;
-    const stat = std.fs.cwd().statFile(path) catch return command;
-    if (stat.kind != .file) return command;
+    if (!windowsNonDirectoryPathExists(path)) return command;
     const argv = try alloc.alloc([:0]const u8, 1);
     errdefer alloc.free(argv);
     argv[0] = try alloc.dupeZ(u8, path);
@@ -291,8 +290,7 @@ pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.
                 if (!valid) continue;
             }
             const candidate = std.fmt.bufPrint(&buf, "{s}\\{s}{s}", .{ dir, exe, ext }) catch continue;
-            const stat = std.fs.cwd().statFile(candidate) catch continue;
-            if (stat.kind != .file) continue;
+            if (!windowsNonDirectoryPathExists(candidate)) continue;
             const found_ext = if (extension.len > 0) extension else ext;
             if (!std.ascii.eqlIgnoreCase(found_ext, ".exe") and
                 !std.ascii.eqlIgnoreCase(found_ext, ".com")) return null;
@@ -300,6 +298,16 @@ pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.
         }
     }
     return null;
+}
+
+/// App Execution Aliases are reparse points whose target cannot be opened
+/// or stat'ed as an ordinary file. Query the path itself, accepting aliases.
+/// Callers must screen network/device paths and remote drives first.
+fn windowsNonDirectoryPathExists(path: []const u8) bool {
+    const path_w = windows.sliceToPrefixedFileW(null, path) catch return false;
+    const attributes = windows.kernel32.GetFileAttributesW(path_w.span().ptr);
+    return attributes != windows.INVALID_FILE_ATTRIBUTES and
+        attributes & windows.FILE_ATTRIBUTE_DIRECTORY == 0;
 }
 
 test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
@@ -326,8 +334,43 @@ test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
     try env.put("PATHEXT", ".cmd;.exe");
     try std.testing.expect(try lookupChildExecutable(alloc, "nu", &env) == null);
     try std.testing.expect(try lookupChildExecutable(alloc, "missing", &env) == null);
+    try tmp.dir.makeDir("directory.exe");
+    try std.testing.expect(try lookupChildExecutable(alloc, "directory.exe", &env) == null);
     for ([_][]const u8{ "C:nu", ".\\nu", "\\nu", "\\\\server\\nu" }) |value|
         try std.testing.expect(try lookupChildExecutable(alloc, value, &env) == null);
+}
+
+test "PKG08 round3 child lookup accepts a real App Execution Alias" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var host_env = try std.process.getEnvMap(alloc);
+    const local_app_data = host_env.get("LOCALAPPDATA") orelse return error.SkipZigTest;
+    const dir = try std.fs.path.join(alloc, &.{ local_app_data, "Microsoft", "WindowsApps" });
+    if (internal_os.path.isNetworkOrDevicePath(dir) or
+        dir.len < 3 or dir[1] != ':' or
+        internal_os.windows.driveTypeForLetter(dir[0]) == internal_os.windows.DRIVE_REMOTE)
+        return error.SkipZigTest;
+    var env = std.process.EnvMap.init(alloc);
+    try env.put("PATH", dir);
+    try env.put("PATHEXT", ".EXE");
+    // These aliases are installed by Store PowerShell or the Windows Python
+    // launcher. Do not launch them: an unconfigured alias can open the Store.
+    for ([_][]const u8{ "pwsh.exe", "python.exe", "python3.exe" }) |name| {
+        const path = try std.fs.path.join(alloc, &.{ dir, name });
+        const attributes = windows.GetFileAttributes(path) catch continue;
+        if (attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
+            attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+        const result = try lookupChildExecutable(alloc, name, &env);
+        try std.testing.expect(result != null);
+        try std.testing.expectEqualStrings(path, result.?);
+        const normalized = try executableCommand(alloc, .{ .shell = try alloc.dupeZ(u8, path) });
+        try std.testing.expect(normalized == .direct);
+        try std.testing.expectEqualStrings(path, normalized.direct[0]);
+        return;
+    }
+    return error.SkipZigTest;
 }
 
 test "PKG08 whole executable path with spaces launches directly" {
