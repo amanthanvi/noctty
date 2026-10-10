@@ -181,6 +181,30 @@ launching a session would fail. To make it the default:
 command = wsl.exe
 ```
 
+A session that `wsl.exe` starts sees the same terminal as one that `cmd.exe`
+does. `wsl.exe` passes a Linux process only the Windows variables that
+`WSLENV` lists, so noctty adds `COLORTERM`, `TERM_PROGRAM` and
+`TERM_PROGRAM_VERSION` to the `WSLENV` of a WSL launch, each with the `/u`
+flag so that a Windows program started from inside WSL does not get the Linux
+values back. It adds `TERM` too when the distribution has a terminfo entry for
+noctty's `term`, which noctty asks the distribution itself with `infocmp`; the
+answer is remembered until noctty exits, so install the entry first, then
+start noctty again. To give a distribution the entry, compile
+`share/terminfo/ghostty.terminfo` from the noctty folder with `tic -x` inside
+it. Without the entry `TERM` stays `xterm-256color`, the value `wsl.exe` sets,
+and the other three are still forwarded. The first WSL tab of a stopped
+distribution waits for it to start, up to 15 seconds, before its shell
+appears; if it has not answered by then, that run keeps `xterm-256color`.
+Entries already in `WSLENV`, their flags and their order are kept, and a
+`WSLENV` set with `env` in the configuration is the one extended. A `TERM` set
+with `env` is forwarded as it is. A WSL shell started from inside cmd or
+PowerShell is not changed: only a launch of `wsl.exe` by noctty is.
+
+`ssh.exe` is different. It sends the PTY's `TERM` by itself, and the other
+variables travel only through the opt-in `ssh-env` shell integration feature
+(`SendEnv`, which the server must accept), with `ssh-terminfo` choosing the
+`TERM` for hosts that have the entry.
+
 ## SSH hosts
 
 noctty reads `%USERPROFILE%\.ssh\config` read-only whenever Windows
