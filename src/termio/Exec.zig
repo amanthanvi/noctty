@@ -327,6 +327,7 @@ pub fn threadEnter(
         .read_thread = read_thread,
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
+        .stopping = &io.stopping,
         .termios_timer = termios_timer,
         .write_pool = .init(alloc),
     } };
@@ -376,9 +377,10 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     if (exec.exited) self.subprocess.externalExit();
     self.subprocess.stop();
 
-    // Quit our read thread after exiting the subprocess so that
-    // we don't get stuck waiting for data to stop flowing if it is
-    // a particularly noisy process.
+    // Stop our read thread. `Surface.deinit` has normally set the flag
+    // already, before it stopped this thread; an IO thread that ends on its
+    // own has not.
+    exec.stopping.store(true, .release);
     _ = posix.write(exec.read_thread_pipe, "x") catch |err| switch (err) {
         // BrokenPipe means that our read thread is closed already,
         // which is completely fine since that is what we were trying
@@ -392,13 +394,7 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     };
 
     if (comptime builtin.os.tag == .windows) {
-        // Interrupt the blocking read so the thread can see the quit message
-        if (windows.kernel32.CancelIoEx(exec.read_thread_fd, null) == 0) {
-            switch (windows.kernel32.GetLastError()) {
-                .NOT_FOUND => {},
-                else => |err| log.warn("error interrupting read thread err={}", .{err}),
-            }
-        }
+        ReadThread.cancelReadUntilExit(exec.read_thread_fd, exec.read_thread);
     }
 
     exec.read_thread.join();
@@ -463,13 +459,14 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     );
 
     // We always notify the surface immediately that the child has
-    // exited and some metadata about the exit.
+    // exited and some metadata about the exit, unless the surface is
+    // closing: its app thread is then waiting for this thread.
     _ = td.surface_mailbox.push(.{
         .child_exited = .{
             .exit_code = exit_code,
             .runtime_ms = runtime_ms orelse 0,
         },
-    }, .{ .forever = {} });
+    }, .{ .forever_unless = execdata.stopping });
 }
 
 fn processExit(
@@ -732,6 +729,7 @@ pub const ThreadData = struct {
     read_thread: std.Thread,
     read_thread_pipe: posix.fd_t,
     read_thread_fd: posix.fd_t,
+    stopping: *std.atomic.Value(bool),
 
     /// The timer to detect termios state changes.
     termios_timer: xev.Timer,
@@ -1378,7 +1376,10 @@ const Subprocess = struct {
     pub fn externalExit(self: *Subprocess) void {
         if (comptime builtin.os.tag == .windows) if (self.adopted_client_process != null) return;
         switch (self.process orelse return) {
-            .fork_exec => |*cmd| cmd.closeWindowsJobObject(),
+            .fork_exec => |*cmd| {
+                cmd.closeWindowsJobObject();
+                cmd.closeWindowsProcess();
+            },
             .flatpak => {},
         }
         self.process = null;
@@ -1386,7 +1387,8 @@ const Subprocess = struct {
 
     /// Stop the subprocess. This is safe to call anytime. This will wait
     /// for the subprocess to register that it has been signalled, but not
-    /// for it to terminate, so it will not block.
+    /// for it to terminate, so it will not block; on Windows it waits up to
+    /// `kill_wait_ms` for the terminated child to exit.
     /// This does not close the pty.
     pub fn stop(self: *Subprocess) void {
         if (comptime builtin.os.tag == .windows) if (self.adopted_client_process != null) {
@@ -1403,6 +1405,7 @@ const Subprocess = struct {
                 // DO NOT call cmd.wait
                 killCommand(cmd) catch |err|
                     log.err("error sending SIGHUP to command, may hang: {}", .{err});
+                cmd.closeWindowsProcess();
             },
 
             .flatpak => |*cmd| if (comptime flatpak_support) {
@@ -1439,9 +1442,9 @@ const Subprocess = struct {
         }
     }
 
-    /// Kill the underlying subprocess. This sends a SIGHUP to the child
-    /// process. This also waits for the command to exit and will return the
-    /// exit code.
+    /// Kill the underlying subprocess: SIGHUP to its process group, or on
+    /// Windows TerminateProcess on the child. This also waits for the command
+    /// to exit, on Windows for at most `kill_wait_ms`.
     fn killCommand(command: *Command) !void {
         defer command.closeWindowsJobObject();
         if (command.pid) |pid| {
@@ -1451,7 +1454,15 @@ const Subprocess = struct {
                         return windows.unexpectedError(windows.kernel32.GetLastError());
                     }
 
-                    _ = try command.wait(false);
+                    // Termination completes asynchronously. Wait for it, but
+                    // not forever: a close blocks the app thread until this
+                    // returns, and a process stuck in its kernel teardown
+                    // would hold it for good.
+                    switch (windows.kernel32.WaitForSingleObject(pid, kill_wait_ms)) {
+                        std.os.windows.WAIT_OBJECT_0 => {},
+                        std.os.windows.WAIT_TIMEOUT => log.warn("child process still exiting after {d} ms", .{kill_wait_ms}),
+                        else => return windows.unexpectedError(windows.kernel32.GetLastError()),
+                    }
                 },
 
                 else => try killPid(pid),
@@ -1531,6 +1542,9 @@ const Subprocess = struct {
             return pgid;
         }
     }
+
+    /// How long `killCommand` waits for a terminated Windows child to exit.
+    const kill_wait_ms = 2000;
 
     /// Kill the underlying process started via Flatpak host command.
     /// This sends a signal via the Flatpak API.
@@ -1673,7 +1687,8 @@ pub const ReadThread = struct {
         adopted_client_process: ?windows.HANDLE,
         process_start: std.time.Instant,
     ) void {
-        // Always close our end of the pipe when we exit.
+        // Always close our end of the pipe when we exit. This reader stops
+        // on `io.stopping` instead; only the POSIX reader polls the pipe.
         defer posix.close(quit);
 
         // Setup our crash metadata
@@ -1684,59 +1699,97 @@ pub const ReadThread = struct {
         defer crash.sentry.thread_state = null;
 
         var buf: [WINDOWS_READ_BUF_SIZE]u8 = undefined;
-        const trace_enabled = io.outputTraceEnabled();
+        const trace = io.outputTraceEnabled();
+        const output: WindowsOutput = .{ .io = io, .trace = trace };
+        switch (readUntilStopped(fd, &buf, &io.stopping, trace, output)) {
+            .stopped => log.info("read thread got quit signal", .{}),
+
+            // Output EOF is authoritative for adopted sessions:
+            // descendants may keep running after the root client.
+            .eof => if (adopted_client_process) |process| {
+                notifyAdoptedExit(io, process, process_start);
+            },
+        }
+    }
+
+    /// Hands the Windows reader's output to termio.
+    const WindowsOutput = struct {
+        io: *termio.Termio,
+        trace: bool,
+
+        fn output(self: WindowsOutput, data: []const u8, read_ns: u64) void {
+            self.io.noteWindowsPtyRead(data.len, WINDOWS_READ_BUF_SIZE, read_ns);
+            const process_started = traceInstant(self.trace);
+            @call(.always_inline, termio.Termio.processOutput, .{ self.io, data });
+            self.io.noteWindowsProcessOutput(traceElapsedNs(process_started));
+        }
+    };
+
+    const ReadEnd = enum { stopped, eof };
+
+    /// Read `fd` and hand each chunk to `sink.output(chunk, read_ns)` until
+    /// `stop` is set or the output ends.
+    ///
+    /// The read is a synchronous ReadFile that only output, EOF or a cancel
+    /// ends. On a pseudo console noctty created, EOF does not come while we
+    /// wait: this process holds the pipe's write end until the pty closes,
+    /// after the reader is joined. A cancel reaches only a read that is
+    /// already pending, so `stop` is checked before every read. A reader
+    /// that was between reads when `cancelReadUntilExit` started then exits
+    /// at the next check, and so does one that output keeps busy.
+    fn readUntilStopped(
+        fd: windows.HANDLE,
+        buf: []u8,
+        stop: *const std.atomic.Value(bool),
+        trace: bool,
+        sink: anytype,
+    ) ReadEnd {
+        while (!stop.load(.acquire)) {
+            var n: windows.DWORD = 0;
+            const read_started = traceInstant(trace);
+            if (windows.kernel32.ReadFile(fd, buf.ptr, @intCast(buf.len), &n, null) == 0) {
+                switch (windows.kernel32.GetLastError()) {
+                    // `cancelReadUntilExit`; `stop` decides.
+                    .OPERATION_ABORTED => continue,
+                    .BROKEN_PIPE => return .eof,
+                    else => |err| {
+                        log.err("io reader error err={}", .{err});
+                        unreachable;
+                    },
+                }
+            }
+            if (n == 0) return .eof;
+            sink.output(buf[0..n], traceElapsedNs(read_started));
+        }
+        return .stopped;
+    }
+
+    /// Cancel the Windows reader's read until its thread has exited. The
+    /// reader's stop flag must already be set.
+    ///
+    /// One cancel is not enough: it finds nothing to cancel when the reader
+    /// has just checked the flag but is not yet blocked in ReadFile, the
+    /// read that follows then never ends, and the join hangs the IO thread
+    /// and the UI thread joining it. Windows Terminal retries for the same
+    /// reason (microsoft/terminal#14544).
+    fn cancelReadUntilExit(fd: windows.HANDLE, reader: std.Thread) void {
+        var warned = false;
         while (true) {
-            while (true) {
-                var n: windows.DWORD = 0;
-                const read_started = traceInstant(trace_enabled);
-                if (windows.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == 0) {
-                    const err = windows.kernel32.GetLastError();
-                    switch (err) {
-                        // Check for a quit signal
-                        .OPERATION_ABORTED => break,
-
-                        // Output EOF is authoritative for adopted sessions:
-                        // descendants may keep running after the root client.
-                        .BROKEN_PIPE => {
-                            if (adopted_client_process) |process| {
-                                notifyAdoptedExit(io, process, process_start);
-                            }
-                            return;
-                        },
-
-                        else => {
-                            log.err("io reader error err={}", .{err});
-                            unreachable;
-                        },
-                    }
-                }
-
-                if (n == 0) {
-                    if (adopted_client_process) |process| {
-                        notifyAdoptedExit(io, process, process_start);
-                    }
-                    return;
-                }
-
-                io.noteWindowsPtyRead(n, buf.len, traceElapsedNs(read_started));
-                const process_started = traceInstant(trace_enabled);
-                @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
-                io.noteWindowsProcessOutput(traceElapsedNs(process_started));
-            }
-
-            var quit_bytes: windows.DWORD = 0;
-            if (windows.exp.kernel32.PeekNamedPipe(quit, null, 0, null, &quit_bytes, null) == 0) {
-                const err = windows.kernel32.GetLastError();
-                log.err("quit pipe reader error err={}", .{err});
-                unreachable;
-            }
-
-            if (quit_bytes > 0) {
-                log.info("read thread got quit signal", .{});
-                return;
+            if (windows.kernel32.CancelIoEx(fd, null) == 0) switch (windows.kernel32.GetLastError()) {
+                .NOT_FOUND => {},
+                else => |err| if (!warned) {
+                    warned = true;
+                    log.warn("error interrupting read thread err={}", .{err});
+                },
+            };
+            switch (windows.kernel32.WaitForSingleObject(reader.getHandle(), cancel_retry_ms)) {
+                std.os.windows.WAIT_TIMEOUT => {},
+                else => return,
             }
         }
     }
+
+    const cancel_retry_ms = 10;
 
     fn notifyAdoptedExit(
         io: *termio.Termio,
@@ -1763,9 +1816,215 @@ pub const ReadThread = struct {
                 .exit_code = exit_code,
                 .runtime_ms = runtime_ms,
             },
-        }, .{ .forever = {} });
+        }, .{ .forever_unless = &io.stopping });
     }
 };
+
+/// An anonymous pipe whose write end stays open, as a pseudo console's output
+/// pipe does until the pty closes: a read on it ends only on output, a cancel,
+/// or the write end closing.
+const TestPipe = struct {
+    read: windows.HANDLE,
+    write: ?windows.HANDLE,
+
+    fn init() !TestPipe {
+        var read: windows.HANDLE = undefined;
+        var write: windows.HANDLE = undefined;
+        if (windows.exp.kernel32.CreatePipe(&read, &write, null, 0) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        return .{ .read = read, .write = write };
+    }
+
+    fn put(self: *TestPipe, data: []const u8) !void {
+        var written: windows.DWORD = 0;
+        if (windows.kernel32.WriteFile(self.write.?, data.ptr, @intCast(data.len), &written, null) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+    }
+
+    /// End any read in progress with EOF. Unblocks a test whose reader the
+    /// code under test failed to stop.
+    fn closeWrite(self: *TestPipe) void {
+        if (self.write) |handle| _ = windows.CloseHandle(handle);
+        self.write = null;
+    }
+
+    fn deinit(self: *TestPipe) void {
+        self.closeWrite();
+        _ = windows.CloseHandle(self.read);
+    }
+};
+
+/// Runs `cancelReadUntilExit` and reports when it returned.
+const TestStopper = struct {
+    done: std.Thread.ResetEvent = .{},
+
+    fn run(self: *TestStopper, fd: windows.HANDLE, reader: std.Thread) void {
+        ReadThread.cancelReadUntilExit(fd, reader);
+        self.done.set();
+    }
+};
+
+test "Windows pty reader busy with output when stopped exits at its next read" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var pipe = try TestPipe.init();
+    defer pipe.deinit();
+
+    // Holds the reader in its first chunk, outside ReadFile, where the cancel
+    // that used to be the only stop signal finds nothing to cancel.
+    const Sink = struct {
+        entered: std.Thread.ResetEvent = .{},
+        release: std.Thread.ResetEvent = .{},
+        chunks: std.atomic.Value(u32) = .init(0),
+
+        fn output(self: *@This(), _: []const u8, _: u64) void {
+            if (self.chunks.fetchAdd(1, .acq_rel) == 0) {
+                self.entered.set();
+                self.release.wait();
+            }
+        }
+
+        fn read(
+            fd: windows.HANDLE,
+            stop: *const std.atomic.Value(bool),
+            sink: *@This(),
+            end: *ReadThread.ReadEnd,
+        ) void {
+            var buf: [16]u8 = undefined;
+            end.* = ReadThread.readUntilStopped(fd, &buf, stop, false, sink);
+        }
+    };
+
+    var stop: std.atomic.Value(bool) = .init(false);
+    var sink: Sink = .{};
+    var end: ReadThread.ReadEnd = .eof;
+    try pipe.put("first");
+    const reader = try std.Thread.spawn(.{}, Sink.read, .{ pipe.read, &stop, &sink, &end });
+    sink.entered.timedWait(5 * std.time.ns_per_s) catch {
+        pipe.closeWrite();
+        sink.release.set();
+        reader.join();
+        return error.ReaderNeverRead;
+    };
+
+    // Stop while the reader is busy and more output is already waiting, as
+    // from a descendant of the killed shell that keeps writing.
+    try pipe.put("second");
+    stop.store(true, .release);
+    var stopper: TestStopper = .{};
+    const stopping = try std.Thread.spawn(.{}, TestStopper.run, .{ &stopper, pipe.read, reader });
+    std.Thread.sleep(100 * std.time.ns_per_ms);
+    sink.release.set();
+
+    stopper.done.timedWait(5 * std.time.ns_per_s) catch {
+        pipe.closeWrite();
+        stopping.join();
+        reader.join();
+        return error.ReaderNotStopped;
+    };
+    stopping.join();
+    reader.join();
+    try std.testing.expectEqual(ReadThread.ReadEnd.stopped, end);
+    try std.testing.expectEqual(@as(u32, 1), sink.chunks.load(.acquire));
+}
+
+test "Windows pty reader cancel is retried for a read that starts after the first cancel" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var pipe = try TestPipe.init();
+    defer pipe.deinit();
+
+    // A reader that checked its stop flag just before it was set: it reaches
+    // ReadFile only after the first cancel found no read to cancel. One
+    // cancel left this read, and the joins behind it, blocked for good.
+    const LateReader = struct {
+        go: std.Thread.ResetEvent = .{},
+        err: std.os.windows.Win32Error = .SUCCESS,
+
+        fn run(self: *@This(), fd: windows.HANDLE) void {
+            self.go.wait();
+            var buf: [16]u8 = undefined;
+            var n: windows.DWORD = 0;
+            if (windows.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == 0) {
+                self.err = windows.kernel32.GetLastError();
+            }
+        }
+    };
+
+    var late: LateReader = .{};
+    const reader = try std.Thread.spawn(.{}, LateReader.run, .{ &late, pipe.read });
+    var stopper: TestStopper = .{};
+    const stopping = try std.Thread.spawn(.{}, TestStopper.run, .{ &stopper, pipe.read, reader });
+    std.Thread.sleep(100 * std.time.ns_per_ms);
+    late.go.set();
+
+    stopper.done.timedWait(5 * std.time.ns_per_s) catch {
+        pipe.closeWrite();
+        stopping.join();
+        reader.join();
+        return error.ReaderNotStopped;
+    };
+    stopping.join();
+    reader.join();
+    try std.testing.expectEqual(std.os.windows.Win32Error.OPERATION_ABORTED, late.err);
+}
+
+test "child exit report gives up on a full app mailbox once the surface is closing" {
+    const alloc = std.testing.allocator;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(alloc);
+    defer app_queue.destroy(alloc);
+    while (app_queue.push(.{ .quit = {} }, .{ .instant = {} }) != 0) {}
+
+    // The app thread set this before joining the IO thread, so it drains
+    // nothing until that thread exits.
+    var stopping: std.atomic.Value(bool) = .init(true);
+    var td: termio.Termio.ThreadData = .{
+        .alloc = alloc,
+        .loop = undefined,
+        .renderer_state = undefined,
+        .surface_mailbox = .{
+            .surface = undefined,
+            .app = .{ .rt_app = &rt_app, .mailbox = app_queue },
+        },
+        .backend = .{ .exec = .{
+            .start = try std.time.Instant.now(),
+            .write_stream = undefined,
+            .process = null,
+            .read_thread = undefined,
+            .read_thread_pipe = undefined,
+            .read_thread_fd = undefined,
+            .stopping = &stopping,
+            .termios_timer = undefined,
+            .write_pool = undefined,
+        } },
+        .mailbox = undefined,
+    };
+
+    const Exit = struct {
+        done: std.Thread.ResetEvent = .{},
+
+        fn run(self: *@This(), data: *termio.Termio.ThreadData) void {
+            processExitCommon(data, 0);
+            self.done.set();
+        }
+    };
+    var exit: Exit = .{};
+    const thread = try std.Thread.spawn(.{}, Exit.run, .{ &exit, &td });
+    exit.done.timedWait(5 * std.time.ns_per_s) catch {
+        // Make room so the waiting report can finish, then fail.
+        _ = app_queue.pop();
+        thread.join();
+        return error.ChildExitReportWaitedOnClosingSurface;
+    };
+    thread.join();
+    try std.testing.expect(td.backend.exec.exited);
+}
 
 test "handoff adopted execution reuses pipes without spawn job or terminate" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -2465,6 +2724,7 @@ test "Windows pty writes stay whole and in order when large writes overlap" {
             .read_thread = undefined,
             .read_thread_pipe = undefined,
             .read_thread_fd = undefined,
+            .stopping = undefined,
             .termios_timer = undefined,
             .write_pool = .init(alloc),
         } },

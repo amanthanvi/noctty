@@ -46,10 +46,16 @@ pub const Mailbox = union(enum) {
     /// send would block, we'll unlock this mutex, resend the message, and
     /// lock it again. This handles an edge case where queues are full.
     /// This may not apply to all writer types.
+    ///
+    /// If `stop` is given, a send that has to wait for room drops the
+    /// message once `stop` is set. The pty reader passes its stop flag:
+    /// this mailbox's consumer, the IO thread, waits for the reader to exit
+    /// while it tears the terminal down.
     pub fn send(
         self: *Mailbox,
         msg: Message,
         mutex: ?*std.Thread.Mutex,
+        stop: ?*const std.atomic.Value(bool),
     ) void {
         switch (self.*) {
             .spsc => |*mb| send: {
@@ -63,6 +69,7 @@ pub const Mailbox = union(enum) {
                 // lock so we need to unlock.
                 mb.wakeup.notify() catch |err| {
                     log.warn("failed to wake up writer, data will be dropped err={}", .{err});
+                    msg.deinit();
                     return;
                 };
 
@@ -77,7 +84,11 @@ pub const Mailbox = union(enum) {
                 // here.
                 if (mutex) |m| m.unlock();
                 defer if (mutex) |m| m.lock();
-                _ = mb.queue.push(msg, .{ .forever = {} });
+                const timeout: Queue.Timeout = if (stop) |flag|
+                    .{ .forever_unless = flag }
+                else
+                    .{ .forever = {} };
+                if (mb.queue.push(msg, timeout) == 0) msg.deinit();
             },
         }
     }
