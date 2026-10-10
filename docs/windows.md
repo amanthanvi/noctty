@@ -209,6 +209,12 @@ it keeps the fallback. For shell-form commands, automatic `TERM` is limited
 to a single `wsl.exe` command without variable expansion, redirection or
 command operators. Complex shell commands and a bare `wsl` without `.exe`
 still receive the identity variables, but keep WSL's default terminal type.
+Shell-form launches also keep the fallback when a CMD AutoRun hook is present
+or cannot be checked: the hook may change the environment before WSL starts,
+and noctty preserves its normal execution rather than running it twice.
+The probe uses the exact executable without `PATHEXT` script fallback and
+honors CMD's `NoDefaultCurrentDirectoryInExePath` choice. Per-tab surface IDs
+do not split the cache unless the user lists them in `WSLENV`.
 
 `ssh.exe` is different. It sends the PTY's `TERM` by itself, and the other
 variables travel only through the opt-in `ssh-env` shell integration feature

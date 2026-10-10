@@ -1160,6 +1160,7 @@ const Subprocess = struct {
             try wsl_env.forwardIdentity(&env, term_overridden);
             if (term_overridden or std.mem.eql(u8, cfg.term, "xterm-256color")) break :wsl null;
             if (exec_command.windows_cmd_shell and !wsl_env.canProbeShell(exec_command.args[2])) break :wsl null;
+            if (exec_command.windows_cmd_shell and !wsl_env.cmdAutoRunAbsent()) break :wsl null;
             break :wsl .{ .argv = argv, .term = try alloc.dupe(u8, cfg.term), .cwd = cwd };
         } else null;
 
@@ -2762,9 +2763,13 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
             "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u",
             subprocess.env.?.get("WSLENV").?,
         );
-        const probe = subprocess.wsl_probe.?;
-        try testing.expectEqual(@as(usize, 3), probe.argv.len);
-        try testing.expectEqualStrings("Ubuntu", probe.argv[2]);
+        if (wsl_env.cmdAutoRunAbsent()) {
+            const probe = subprocess.wsl_probe.?;
+            try testing.expectEqual(@as(usize, 3), probe.argv.len);
+            try testing.expectEqualStrings("Ubuntu", probe.argv[2]);
+        } else {
+            try testing.expectEqual(null, subprocess.wsl_probe);
+        }
     }
 
     // Another program is not a WSL launch.
@@ -2785,7 +2790,7 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
 
     // One distribution's answer must not become TERM for another command
     // in the same cmd.exe environment. Identity names can still be listed.
-    for ([_][]const u8{
+    for ([_][:0]const u8{
         "wsl.exe -d Ubuntu -e true & wsl.exe -d kali-linux",
         "wsl.exe -d %DISTRO%",
     }) |line| {

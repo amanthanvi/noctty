@@ -22,6 +22,7 @@ const windows = std.os.windows;
 const windows_shell = @import("../config.zig").windows_shell;
 const os_path = @import("../os/path.zig");
 const os_windows = @import("../os/windows.zig");
+const Command = @import("../Command.zig");
 
 const log = std.log.scoped(.wsl_env);
 
@@ -75,6 +76,36 @@ pub fn canProbeShell(line: []const u8) bool {
         }
     }
     return !quoted;
+}
+
+/// cmd.exe /C runs user/machine AutoRun hooks before the WSL command. We
+/// cannot verify their resulting environment without running them again.
+/// Check for absence only, without reading or logging any hook contents.
+pub fn cmdAutoRunAbsent() bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    return cmdAutoRunAbsentWithQuery(struct {
+        fn query(root: windows.HKEY, view: windows.DWORD) windows.LSTATUS {
+            var bytes: windows.DWORD = 0;
+            return windows.advapi32.RegGetValueW(
+                root,
+                std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Command Processor"),
+                std.unicode.utf8ToUtf16LeStringLiteral("AutoRun"),
+                windows.advapi32.RRF.RT_ANY | windows.advapi32.RRF.NOEXPAND | view,
+                null,
+                null,
+                &bytes,
+            );
+        }
+    }.query);
+}
+
+fn cmdAutoRunAbsentWithQuery(query: anytype) bool {
+    for ([_]windows.HKEY{ windows.HKEY_CURRENT_USER, windows.HKEY_LOCAL_MACHINE }) |root| {
+        for ([_]windows.DWORD{ windows.advapi32.RRF.SUBKEY_WOW6432KEY, windows.advapi32.RRF.SUBKEY_WOW6464KEY }) |view| {
+            if (query(root, view) != @intFromEnum(windows.Win32Error.FILE_NOT_FOUND)) return false;
+        }
+    }
+    return true;
 }
 
 /// Split a command line at whitespace. A double-quoted stretch is part of a
@@ -220,8 +251,12 @@ fn localExecutable(alloc: Allocator, env: *const EnvMap, exe: []const u8, cwd: [
         alloc.free(path);
         return null;
     }
-    const here = try std.fs.path.join(alloc, &.{ cwd, exe });
-    if (std.fs.accessAbsolute(here, .{})) |_| return here else |_| alloc.free(here);
+    // CMD omits cwd from its executable search when this opt-out is present,
+    // even when its value is empty. Never probe an executable it would skip.
+    if (env.get("NoDefaultCurrentDirectoryInExePath") == null) {
+        const here = try std.fs.path.join(alloc, &.{ cwd, exe });
+        if (std.fs.accessAbsolute(here, .{})) |_| return here else |_| alloc.free(here);
+    }
     var paths = std.mem.splitScalar(u8, env.get("PATH") orelse "", ';');
     while (paths.next()) |entry| {
         const dir = std.mem.trim(u8, entry, "\"");
@@ -233,14 +268,22 @@ fn localExecutable(alloc: Allocator, env: *const EnvMap, exe: []const u8, cwd: [
     return null;
 }
 
-/// Fingerprint the complete launch environment in key order. WSLENV can
+/// Fingerprint the launch environment in key order. WSLENV can
 /// forward HOME, PATH, or any other lookup input, not just TERMINFO. Values
 /// never leave this hash; the cache and logs contain no environment data.
+/// The per-surface ID is omitted unless explicitly forwarded into WSL.
 fn probeKey(alloc: Allocator, env: *const EnvMap, argv: []const []const u8, cwd: []const u8) !u64 {
     var keys: std.ArrayList([]const u8) = .empty;
     defer keys.deinit(alloc);
     var it = env.iterator();
-    while (it.next()) |entry| try keys.append(alloc, entry.key_ptr.*);
+    while (it.next()) |entry| {
+        // Surface IDs differ in every tab but cannot affect WSL's lookup
+        // unless the user explicitly forwards them. Keep shared questions
+        // shared, including negative answers for a hung WSL service.
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "GHOSTTY_SURFACE_ID") and
+            !listed(env.get("WSLENV") orelse "", "GHOSTTY_SURFACE_ID")) continue;
+        try keys.append(alloc, entry.key_ptr.*);
+    }
     std.mem.sort([]const u8, keys.items, {}, struct {
         fn lessThan(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
@@ -338,27 +381,55 @@ fn distroHasTerminfo(
 
 /// Run the probe. Null when it did not start, so a later tab may try again.
 fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd: []const u8) ?bool {
-    var child = std.process.Child.init(probe, alloc);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.create_no_window = true;
-    child.env_map = env;
-    child.cwd = cwd;
-    child.spawn() catch |err| {
+    if (comptime builtin.os.tag != .windows) return false;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const args = temp.alloc([:0]const u8, probe.len) catch return null;
+    for (probe, args) |arg, *dest| dest.* = temp.dupeZ(u8, arg) catch return null;
+    var sa: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .bInheritHandle = windows.TRUE,
+        .lpSecurityDescriptor = null,
+    };
+    const nul = windows.OpenFile(&.{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
+        .access_mask = windows.GENERIC_READ | windows.GENERIC_WRITE | windows.SYNCHRONIZE,
+        .share_access = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+        .creation = windows.OPEN_EXISTING,
+        .sa = &sa,
+    }) catch return null;
+    defer std.posix.close(nul);
+    // Command uses an exact lpApplicationName for the absolute path. Unlike
+    // std.Child, it never tries wsl.exe.cmd through the parent's PATHEXT.
+    var child: Command = .{
+        .path = args[0],
+        .args = args,
+        .env = env,
+        .cwd = cwd,
+        .stdin = .{ .handle = nul },
+        .stdout = .{ .handle = nul },
+        .stderr = .{ .handle = nul },
+        .windows_create_no_window = true,
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+    child.start(temp) catch |err| {
         log.warn("terminfo probe did not start err={}", .{err});
         return null;
     };
 
-    windows.WaitForSingleObjectEx(child.id, probe_timeout_ms, false) catch |err| {
+    defer std.posix.close(child.pid.?);
+    windows.WaitForSingleObjectEx(child.pid.?, probe_timeout_ms, false) catch |err| {
         log.warn("terminfo probe did not finish err={}", .{err});
-        _ = child.kill() catch {};
+        _ = windows.kernel32.TerminateProcess(child.pid.?, 1);
+        windows.WaitForSingleObjectEx(child.pid.?, 5000, false) catch {};
         return false;
     };
-    return switch (child.wait() catch return false) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    const result = child.wait(true) catch return false;
+    return result.Exited == 0;
 }
 
 /// List the identity variables of `env` for a WSL launch, and `TERM` too when
@@ -557,6 +628,31 @@ test "automatic TERM is limited to one reproducible shell command" {
     }) |line| try std.testing.expect(!canProbeShell(line));
 }
 
+test "CMD AutoRun must be absent in both hives and registry views" {
+    const Queries = struct {
+        var calls: usize = 0;
+        var bad_call: ?usize = null;
+        var status: windows.LSTATUS = 0;
+        fn query(_: windows.HKEY, _: windows.DWORD) windows.LSTATUS {
+            defer calls += 1;
+            if (bad_call == calls) return status;
+            return @intFromEnum(windows.Win32Error.FILE_NOT_FOUND);
+        }
+    };
+    Queries.calls = 0;
+    Queries.bad_call = null;
+    try std.testing.expect(cmdAutoRunAbsentWithQuery(Queries.query));
+    try std.testing.expectEqual(@as(usize, 4), Queries.calls);
+    for (0..4) |bad| {
+        for ([_]windows.LSTATUS{ 0, @intFromEnum(windows.Win32Error.ACCESS_DENIED) }) |status| {
+            Queries.calls = 0;
+            Queries.bad_call = bad;
+            Queries.status = status;
+            try std.testing.expect(!cmdAutoRunAbsentWithQuery(Queries.query));
+        }
+    }
+}
+
 test "probeArgv refuses an infocmp option as the terminal name" {
     try std.testing.expectEqual(null, try probeArgv(std.testing.allocator, &.{"wsl.exe"}, "-V"));
     try std.testing.expectEqual(null, try probeArgv(std.testing.allocator, &.{"wsl.exe"}, ""));
@@ -580,6 +676,14 @@ test "probeKey distinguishes forwarded HOME and cwd independent of map order" {
     try b.put("HOME", "/tmp/without-entry");
     try std.testing.expect(key != try probeKey(alloc, &b, argv, "C:\\one"));
     try std.testing.expect(key != try probeKey(alloc, &a, argv, "C:\\two"));
+    try a.put("GHOSTTY_SURFACE_ID", "1");
+    try std.testing.expectEqual(key, try probeKey(alloc, &a, argv, "C:\\one"));
+    try a.put("GHOSTTY_SURFACE_ID", "2");
+    try std.testing.expectEqual(key, try probeKey(alloc, &a, argv, "C:\\one"));
+    try a.put("WSLENV", "HOME/u:TERMINFO/u:GHOSTTY_SURFACE_ID/u");
+    const forwarded = try probeKey(alloc, &a, argv, "C:\\one");
+    try a.put("GHOSTTY_SURFACE_ID", "3");
+    try std.testing.expect(forwarded != try probeKey(alloc, &a, argv, "C:\\one"));
 }
 
 test "localExecutable refuses remote device and ambiguous search paths" {
@@ -599,4 +703,30 @@ test "localExecutable refuses remote device and ambiguous search paths" {
     try env.put("PATH", "\\\\unavailable\\share;C:\\Windows\\System32");
     try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
     try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl", cwd));
+
+    // An empty opt-out is still set. Even with a cwd executable planted,
+    // the probe follows CMD to PATH (unsafe here, so it gives up).
+    var planted = try td.dir.createFile("wsl.exe", .{});
+    planted.close();
+    try env.put("NoDefaultCurrentDirectoryInExePath", "");
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
+}
+
+test "runProbe does not execute a PATHEXT sibling of a missing exe" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const exe = try std.fs.path.join(alloc, &.{ cwd, "wsl.exe" });
+    defer alloc.free(exe);
+    var script = try td.dir.createFile("wsl.exe.cmd", .{});
+    try script.writeAll("@echo off\r\necho executed>probe-executed.txt\r\nexit /b 0\r\n");
+    script.close();
+    var env = try std.process.getEnvMap(alloc);
+    defer env.deinit();
+    try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+    try std.testing.expectEqual(null, runProbe(alloc, &env, &.{ exe, "--exec", "infocmp", "xterm-ghostty" }, cwd));
+    try std.testing.expectError(error.FileNotFound, td.dir.access("probe-executed.txt", .{}));
 }
