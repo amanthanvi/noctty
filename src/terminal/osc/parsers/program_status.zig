@@ -312,7 +312,12 @@ fn validate(data: []const u8) error{
 
     // Every value is checked against its limit, even one a later pair
     // replaces, because any limit violation discards the whole report.
-    var ids: kitty_metadata.ValueIterator("id", value_bytes) = .init(data);
+    //
+    // Ids are read whatever bytes they hold. Skipping an id with a byte
+    // outside the value alphabet as a malformed pair would turn the report
+    // into one about the root record, and `state=clear:id=build!x` into a
+    // clear of every record.
+    var ids: kitty_metadata.ValueIterator("id", null) = .init(data);
     while (ids.next()) |v| try validateId(v);
     inline for (.{
         .{ "app", max_app_bytes },
@@ -323,11 +328,15 @@ fn validate(data: []const u8) error{
         while (it.next()) |v| if (v.len > limit[1]) return error.TooLong;
     }
 
+    // Every title and msg has to decode to safe text within its limit,
+    // not just the last one, which is the one that counts.
     var buf: [max_msg_bytes]u8 = undefined;
-    if (lastValue("title", data)) |v| {
+    var titles: kitty_metadata.ValueIterator("title", value_bytes) = .init(data);
+    while (titles.next()) |v| {
         if ((try decodeText(v, &buf)).len > max_title_bytes) return error.TooLong;
     }
-    if (lastValue("msg", data)) |v| _ = try decodeText(v, &buf);
+    var msgs: kitty_metadata.ValueIterator("msg", value_bytes) = .init(data);
+    while (msgs.next()) |v| _ = try decodeText(v, &buf);
 
     // An unknown state discards the report rather than guessing, so a
     // state added in a later revision never turns into something else.
@@ -612,6 +621,11 @@ test "OSC 7501: ids" {
         max_segment ++ "a",
         "a/b/c/d/e/f/g/h/i",
         ("a" ** 31 ++ "/") ** 4 ++ "a",
+        // Bytes outside the value alphabet. Skipping these as malformed
+        // pairs would clear every record instead of none.
+        "build!x",
+        "my task",
+        "caf\xc3\xa9",
     };
     for (invalid) |id| {
         p.reset();
@@ -638,6 +652,10 @@ test "OSC 7501: text must decode to safe UTF-8" {
         "7501;state=done:msg=wps=",
         // Invalid UTF-8.
         "7501;state=done:msg=/w==",
+        // A bad msg or title that a later pair replaces still discards
+        // the report: "a\nb", then "ok".
+        "7501;state=done:msg=YQpi:msg=b2s",
+        "7501;state=done:title=YQpi:title=b2s",
     };
     for (invalid) |input| {
         p.reset();
