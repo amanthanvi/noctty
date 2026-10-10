@@ -36,16 +36,15 @@ Local 2026-10-10 measurements on the NVIDIA RTX 5070 Ti:
 - Hardware: zero differences out of 1,533,852 pixels.
 - WARP: 8,592 differing pixels, maximum delta four, 89 pixels over two levels.
 - Hardware/WARP reconstruction, resize return and DPI scale return: exact.
-- The original HWND-swapchain hidden run was occluded. Composition Present
-  receipts in later runs can succeed, but still establish no scanout, GPU-completion latency,
-  physical TDR, monitor hotplug, or RDP claim follows from these captures.
+- The composition swapchain run was also occluded. These captures establish no
+  scanout, GPU-completion latency, physical TDR, monitor hotplug, or RDP behavior.
 
 One-binary coexistence was retained after comparing ReleaseFast production
-builds with custom shaders enabled: OpenGL-only was 31,064,064 bytes and the
-combined binary 31,176,704 bytes, an increase of 112,640 bytes (0.36%).
-Dependency-cached build wall times were 176.69 and 172.15 seconds respectively
-at BelowNormal priority. These single runs share a busy host and do not prove
-a compilation speedup; no material wall-time penalty was observed.
+builds after the main rebase, with custom shaders enabled: OpenGL-only was
+31,155,712 bytes and the combined binary 31,276,544 bytes, an increase of
+120,832 bytes (118 KiB, 0.39%). Dependency-cached build wall times were 166.99
+and 212.36 seconds respectively at BelowNormal priority. These single runs
+share a busy host and do not isolate the backend's compilation cost.
 
 ## Review follow-up checks
 
@@ -64,6 +63,22 @@ UI resize/snapshot response times. Run `../interactive-win11-shader-pacing.ps1
 -Binary <exe> -OutputDirectory <directory>` on the same verified hidden driver
 for each binary. The supplied binary is copied beside a portable marker before
 launch; these measurements describe CPU/UI behavior, not visible scanout latency.
+
+After the review fixes and main rebase, three shader-pacing runs per production
+binary each presented all six input/output steps (100 ms polling): default
+106-125 ms, OpenGL-only 118-128 ms. Animation remained at 20.7 swaps/s for default
+and 20.7-21.7 for OpenGL-only. Each run presented 370 new PTY bytes. This checks
+progress under saver pacing; it does not measure keyboard-to-scanout latency.
+
+Streaming during 80 alternating live resizes per binary also kept advancing:
+
+| Production build | UI resize/snapshot p50 / p95 / max (ms) | Frame updates | Presented PTY bytes |
+| --- | --- | --- | --- |
+| Default | 13.11 / 18.65 / 20.42 | 142 | 170,023 |
+| `-Dd3d11=false` | 12.39 / 22.54 / 25.98 | 145 | 169,960 |
+
+These are one sequential comparison on a shared host, including snapshot work;
+they show continued progress and bounded UI response, without a speedup claim.
 
 The maintainer runs `Invoke-VisibleD3D11Check.ps1 -Binary <production exe>` on
 their own desktop for palette, paste preview/Allow/Cancel, scrollbar, quick-select,
