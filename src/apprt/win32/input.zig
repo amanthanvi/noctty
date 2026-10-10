@@ -86,6 +86,16 @@ pub const TypedChars = struct {
     fn translated(self: *const TypedChars) bool {
         return self.len > 0 or self.dead;
     }
+
+    /// The text a pending dead key left in front of this key's own control
+    /// character: after `'` on US-International, Enter queues `'` then CR
+    /// and Backspace queues `'` then BS (measured).
+    fn accentBeforeControl(self: *const TypedChars) []const u16 {
+        for (self.slice(), 0..) |unit, i| {
+            if (isControlCodepoint(unit)) return self.units[0..i];
+        }
+        return &.{};
+    }
 };
 
 /// Remove the `WM_CHAR` and `WM_DEADCHAR` messages `TranslateMessage` queued
@@ -149,6 +159,10 @@ pub const DeferredCharState = struct {
     /// key press: `SendInput` delivers an astral character as two VK_PACKET
     /// keys.
     high_surrogate: ?u16 = null,
+    /// The key whose press only latched a dead key. That press sent nothing,
+    /// so its release is not sent either: a Kitty `report_events` client
+    /// would see a release for a key it never saw pressed.
+    dead_key_vk: ?UINT = null,
 
     pub fn expect(self: *DeferredCharState, units: usize) void {
         self.pending_units = units;
@@ -1206,10 +1220,11 @@ fn keyMessage(
 /// Deliver a `WM_(SYS)KEYDOWN` / `WM_(SYS)KEYUP` to the core.
 ///
 /// `typed` holds the characters `TranslateMessage` queued for this key
-/// (`takeTypedChars`; empty for a release). Text that defers to a character
-/// commit is committed from it right after the key event, unless the core
-/// handled the key itself; a key the core encodes from its own identity
-/// (Enter, Backspace, Tab, Esc, Ctrl and Alt chords) drops them.
+/// (`takeTypedChars`; empty for a release). Plain text that defers to a
+/// character commit is committed from it right after the key event unless
+/// the core handled the key; a key the core encodes from its own identity
+/// (Enter, Backspace, Tab, Esc, Ctrl and Alt chords) does not type them,
+/// apart from an accent a pending dead key left in front of it.
 ///
 /// `target` supplies `keyCallback(input.KeyEvent) !CoreSurface.InputEffect`
 /// and `noteInput([]const u8) void`. A key typed into a pane whose child has
@@ -1230,11 +1245,25 @@ pub fn dispatchKeyMessage(
     var message = keyMessage(msg, wParam, lParam, defer_plain_text, typed) orelse return;
     message.bindText();
     const event = message.event;
+    const vk: UINT = @intCast(wParam & 0xFFFF);
+
+    if (event.action == .release) {
+        if (chars.dead_key_vk == vk) {
+            chars.dead_key_vk = null;
+            return;
+        }
+    } else if (message.deferred_utf16_units == 0 and event.utf8.len == 0) {
+        // The core encodes this key itself. An accent that a dead key could
+        // not combine with it comes first, as in any other Windows program
+        // (so Backspace cancels the accent rather than deleting a character).
+        const accent = typed.accentBeforeControl();
+        if (accent.len > 0 and commitUnits(target, chars, accent, ime_composing, lParam) == .closed) return;
+    }
 
     const effect = target.keyCallback(event) catch |err| {
         log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
             err,
-            @as(UINT, @intCast(wParam & 0xFFFF)),
+            vk,
             event.action,
             event.key,
             event.mods,
@@ -1245,19 +1274,41 @@ pub fn dispatchKeyMessage(
     if (event.utf8.len != 0) target.noteInput(event.utf8);
     if (event.action == .release) return;
 
+    if (typed.dead and typed.len == 0) {
+        chars.dead_key_vk = vk;
+    } else if (chars.dead_key_vk == vk) {
+        chars.dead_key_vk = null;
+    }
+
+    // What this key types after its event: nothing when the core handled it.
     const units = if (shouldAuthorizeDeferredCharMessage(effect)) message.deferred_utf16_units else 0;
     if (!typed.translated()) {
-        // TranslateMessage never saw this key, so its characters, if any,
-        // follow as WM_CHAR.
+        // TranslateMessage never saw this key (a key message sent straight to
+        // the window), so its characters, if any, follow as WM_CHAR.
         chars.expect(units);
-        return;
+    } else if (units == 0) {
+        chars.expect(0);
+    } else {
+        _ = commitUnits(target, chars, typed.slice(), ime_composing, lParam);
     }
-    chars.expect(if (units == 0) 0 else typed.len);
-    if (units == 0) return;
-    for (typed.slice()) |unit| {
+}
+
+/// Commit typed UTF-16 units, pairing surrogates through `chars`. Returns
+/// `.closed` as soon as a commit closes the surface; nothing may be touched
+/// after that.
+fn commitUnits(
+    target: anytype,
+    chars: *DeferredCharState,
+    units: []const u16,
+    ime_composing: bool,
+    lParam: LPARAM,
+) CoreSurface.InputEffect {
+    chars.expect(units.len);
+    for (units) |unit| {
         const codepoint = chars.consumeCodeUnit(unit, ime_composing) orelse continue;
-        if (commitChar(target, codepoint, lParam) == .closed) return;
+        if (commitChar(target, codepoint, lParam) == .closed) return .closed;
     }
+    return .ignored;
 }
 
 /// Deliver a `WM_CHAR`, `WM_DEADCHAR` or `WM_SYSDEADCHAR` that is still in the
@@ -2317,10 +2368,12 @@ fn testingDeliverKeyMessage(
 const TestingKey = struct {
     vk: UINT,
     ctrl: bool = false,
+    /// Press and release, or only one half, to hold a key across others.
+    stroke: enum { tap, down, up } = .tap,
 };
 
-/// Press and release each key in turn, with the thread's key state set the
-/// way the keyboard driver would set it.
+/// Type each key in turn, with the thread's key state set the way the
+/// keyboard driver would set it.
 fn testingTypeKeys(
     terminal: *TestingTerminal,
     hwnd: sys.HWND,
@@ -2328,23 +2381,28 @@ fn testingTypeKeys(
     defer_plain_text: bool,
 ) void {
     var chars: DeferredCharState = .{};
+    var held: [256]u8 = [_]u8{0} ** 256;
     for (keys) |key| {
-        var state: [256]u8 = [_]u8{0} ** 256;
+        var state = held;
         if (key.ctrl) {
             state[c.VK_CONTROL] = 0x80;
             state[c.VK_LCONTROL] = 0x80;
         }
         const scan: usize = sys.MapVirtualKeyW(key.vk, c.MAPVK_VK_TO_VSC);
         const down: usize = 1 | (scan << 16);
-
-        state[key.vk] = 0x80;
-        _ = sys.SetKeyboardState(&state);
-        testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYDOWN, key.vk, @bitCast(down), defer_plain_text);
-
-        state[key.vk] = 0;
-        _ = sys.SetKeyboardState(&state);
-        const up = down | (1 << 30) | (1 << 31);
-        testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYUP, key.vk, @bitCast(up), defer_plain_text);
+        if (key.stroke != .up) {
+            state[key.vk] = 0x80;
+            if (key.stroke == .down) held[key.vk] = 0x80;
+            _ = sys.SetKeyboardState(&state);
+            testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYDOWN, key.vk, @bitCast(down), defer_plain_text);
+        }
+        if (key.stroke != .down) {
+            state[key.vk] = 0;
+            held[key.vk] = 0;
+            _ = sys.SetKeyboardState(&state);
+            const up = down | (1 << 30) | (1 << 31);
+            testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYUP, key.vk, @bitCast(up), defer_plain_text);
+        }
     }
     _ = sys.SetKeyboardState(&([_]u8{0} ** 256));
 }
@@ -2355,7 +2413,8 @@ fn testingTypeKeys(
 // layouts, a ToUnicode probe taken at that point sees the accent pressed twice
 // (two units) rather than a dead key, and the key after it sees its own base
 // letter rather than the composed one. Driven through the real layouts and the
-// real TranslateMessage, every key has to reach the shell exactly once.
+// real TranslateMessage, every key has to reach the shell exactly once, and an
+// accent that cannot combine comes out before the key that cancelled it.
 test "win32 dead keys on real layouts deliver every key exactly once" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const hwnd = testingKeyWindow() orelse return error.SkipZigTest;
@@ -2379,35 +2438,43 @@ test "win32 dead keys on real layouts deliver every key exactly once" {
         .{ .klid = "00000407", .dead = .{ .vk = c.VK_OEM_6 }, .accent = "\u{B4}", .composed_e = "\u{E9}" },
         .{ .klid = "0000040C", .dead = .{ .vk = c.VK_OEM_6 }, .accent = "^", .composed_e = "\u{EA}" },
     };
+    var ran: usize = 0;
     inline for (layouts) |layout| {
-        const active = TestingLayout.activate(layout.klid) orelse return error.SkipZigTest;
-        defer active.deinit();
+        if (TestingLayout.activate(layout.klid)) |active| {
+            defer active.deinit();
+            ran += 1;
 
-        const cases = [_]struct { keys: []const TestingKey, expect: []const u8 }{
-            .{ .keys = &.{ layout.dead, e, enter }, .expect = layout.composed_e ++ "\r" },
-            .{ .keys = &.{ layout.dead, e, backspace }, .expect = layout.composed_e ++ "\x7f" },
-            .{ .keys = &.{ layout.dead, e, ctrl_c }, .expect = layout.composed_e ++ "\x03" },
-            .{ .keys = &.{ layout.dead, space, tab }, .expect = layout.accent ++ "\t" },
-            .{ .keys = &.{ layout.dead, x, enter }, .expect = layout.accent ++ "x\r" },
-        };
-        for (cases) |case| {
-            var terminal: TestingTerminal = .{ .opts = .{ .alt_esc_prefix = true } };
-            testingTypeKeys(&terminal, hwnd, case.keys, true);
-            std.testing.expectEqualStrings(case.expect, terminal.output()) catch |err| {
-                std.debug.print("win32 dead key case failed: layout {s} expect {any}\n", .{
-                    layout.klid,
-                    case.expect,
-                });
-                return err;
+            const cases = [_]struct { keys: []const TestingKey, expect: []const u8 }{
+                .{ .keys = &.{ layout.dead, e, enter }, .expect = layout.composed_e ++ "\r" },
+                .{ .keys = &.{ layout.dead, e, backspace }, .expect = layout.composed_e ++ "\x7f" },
+                .{ .keys = &.{ layout.dead, e, ctrl_c }, .expect = layout.composed_e ++ "\x03" },
+                .{ .keys = &.{ layout.dead, space, tab }, .expect = layout.accent ++ "\t" },
+                .{ .keys = &.{ layout.dead, x, enter }, .expect = layout.accent ++ "x\r" },
+                .{ .keys = &.{ layout.dead, enter }, .expect = layout.accent ++ "\r" },
+                .{ .keys = &.{ layout.dead, backspace }, .expect = layout.accent ++ "\x7f" },
             };
+            for (cases) |case| {
+                var terminal: TestingTerminal = .{ .opts = .{ .alt_esc_prefix = true } };
+                testingTypeKeys(&terminal, hwnd, case.keys, true);
+                std.testing.expectEqualStrings(case.expect, terminal.output()) catch |err| {
+                    std.debug.print("win32 dead key case failed: layout {s} expect {any}\n", .{
+                        layout.klid,
+                        case.expect,
+                    });
+                    return err;
+                };
+            }
         }
     }
+    if (ran == 0) return error.SkipZigTest;
 }
 
 // Under Kitty `report_all` the text rides on the physical key event, so the
 // event for the key after a dead key has to carry what the layout composed:
 // `é` on the `e` key, or the accent and the letter together when they do not
-// combine. The dead key itself sends nothing; it only latched an accent.
+// combine. The dead key sends nothing, not even its release, because its
+// press only latched an accent; that holds when the next key is pressed
+// before the dead key is released, too.
 test "win32 kitty report_all dead keys carry the composed text on the next key" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const hwnd = testingKeyWindow() orelse return error.SkipZigTest;
@@ -2418,13 +2485,20 @@ test "win32 kitty report_all dead keys carry the composed text on the next key" 
 
     const flags: @import("../../terminal/kitty/key.zig").Flags = .{
         .disambiguate = true,
+        .report_events = true,
         .report_all = true,
         .report_associated = true,
     };
     const quote: TestingKey = .{ .vk = c.VK_OEM_7 };
+    const e: TestingKey = .{ .vk = c.VK_A + 4 };
     const cases = [_]struct { keys: []const TestingKey, expect: []const u8 }{
-        .{ .keys = &.{ quote, .{ .vk = c.VK_A + 4 } }, .expect = "\x1b[101;;233u" },
-        .{ .keys = &.{ quote, .{ .vk = c.VK_A + 23 } }, .expect = "\x1b[120;;39:120u" },
+        .{ .keys = &.{ quote, e }, .expect = "\x1b[101;;233u\x1b[101;1:3u" },
+        .{ .keys = &.{ quote, .{ .vk = c.VK_A + 23 } }, .expect = "\x1b[120;;39:120u\x1b[120;1:3u" },
+        .{
+            .keys = &.{ .{ .vk = c.VK_OEM_7, .stroke = .down }, .{ .vk = c.VK_A + 4, .stroke = .down }, .{ .vk = c.VK_OEM_7, .stroke = .up }, .{ .vk = c.VK_A + 4, .stroke = .up } },
+            .expect = "\x1b[101;;233u\x1b[101;1:3u",
+        },
+        .{ .keys = &.{ quote, .{ .vk = c.VK_RETURN } }, .expect = "\x1b[39;;39u\x1b[13u\x1b[13;1:3u" },
     };
     for (cases) |case| {
         var terminal: TestingTerminal = .{ .opts = .{ .kitty_flags = flags } };
