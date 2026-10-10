@@ -215,8 +215,9 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     try std.testing.expect(std.mem.endsWith(u8, entry.name, ".dmp"));
     try std.testing.expect((try it.next()) == null);
 
-    // MINIDUMP_HEADER starts with "MDMP"; the exception stream (type 6) is
-    // present only when dbghelp could read the exception pointers.
+    // MINIDUMP_HEADER starts with "MDMP". The exception stream (type 6)
+    // must carry this thread and the record above, which proves dbghelp
+    // read our exception pointers rather than something else.
     var file = try tmp.dir.openFile(entry.name, .{});
     defer file.close();
     var header: [32]u8 = undefined;
@@ -224,11 +225,18 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     try std.testing.expectEqualStrings("MDMP", header[0..4]);
     const stream_count = std.mem.readInt(u32, header[8..12], .little);
     const directory_rva = std.mem.readInt(u32, header[12..16], .little);
-    var found_exception = false;
-    for (0..stream_count) |i| {
+    const stream_rva = for (0..stream_count) |i| {
         var dir_entry: [12]u8 = undefined;
         try std.testing.expectEqual(dir_entry.len, try file.preadAll(&dir_entry, directory_rva + i * dir_entry.len));
-        if (std.mem.readInt(u32, dir_entry[0..4], .little) == 6) found_exception = true;
-    }
-    try std.testing.expect(found_exception);
+        if (std.mem.readInt(u32, dir_entry[0..4], .little) == 6) break std.mem.readInt(u32, dir_entry[8..12], .little);
+    } else return error.TestExpectedExceptionStream;
+
+    // MINIDUMP_EXCEPTION_STREAM: ThreadId, padding, then MINIDUMP_EXCEPTION
+    // (code, flags, record, address, parameter count, padding, parameters).
+    var stream: [56]u8 = undefined;
+    try std.testing.expectEqual(stream.len, try file.preadAll(&stream, stream_rva));
+    try std.testing.expectEqual(windows.GetCurrentThreadId(), std.mem.readInt(u32, stream[0..4], .little));
+    try std.testing.expectEqual(record.ExceptionCode, std.mem.readInt(u32, stream[8..12], .little));
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, stream[32..36], .little));
+    try std.testing.expectEqual(@as(u64, 0x10), std.mem.readInt(u64, stream[48..56], .little));
 }
