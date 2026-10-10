@@ -434,10 +434,14 @@ pub fn parseIntoField(
 
                 f32,
                 f64,
-                => |Float| std.fmt.parseFloat(
-                    Float,
-                    value orelse return error.ValueRequired,
-                ) catch return error.InvalidValue,
+                => |Float| float: {
+                    const parsed = std.fmt.parseFloat(
+                        Float,
+                        value orelse return error.ValueRequired,
+                    ) catch return error.InvalidValue;
+                    if (!std.math.isFinite(parsed)) return error.InvalidValue;
+                    break :float parsed;
+                },
 
                 else => switch (fieldInfo) {
                     .@"enum" => std.meta.stringToEnum(
