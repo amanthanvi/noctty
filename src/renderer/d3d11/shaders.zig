@@ -14,6 +14,7 @@ comptime {
     std.debug.assert(@offsetOf(Uniforms, "grid_padding") == 96);
     std.debug.assert(@offsetOf(Uniforms, "padding_extend") == 112);
     std.debug.assert(@offsetOf(Uniforms, "cursor_pos") == 120);
+    std.debug.assert(@offsetOf(Uniforms, "cursor_color") == 124);
     std.debug.assert(@offsetOf(Uniforms, "bg_color") == 128);
     std.debug.assert(@offsetOf(Uniforms, "bools") == 132);
     std.debug.assert(@sizeOf(CellText) == 32);
@@ -41,3 +42,15 @@ pub const Shaders = struct {
         self.defunct = true;
     }
 };
+
+test "embedded D3D11 bytecode source hash is current" {
+    // Metadata freshness check, not a rendering oracle. Behavioral parity is
+    // measured by the GPU harness independently of these source bytes.
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(@embedFile("terminal.hlsl"), &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const header = @embedFile("terminal_bytecode.h");
+    const marker = "terminal.hlsl SHA256: ";
+    const offset = (std.mem.indexOf(u8, header, marker) orelse return error.MissingShaderSourceHash) + marker.len;
+    try std.testing.expectEqualStrings(&hex, header[offset..][0..hex.len]);
+}

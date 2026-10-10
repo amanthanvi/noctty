@@ -363,6 +363,7 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
             try surface.makeGLContextCurrent();
             log.debug("OpenGL.surfaceInit win32 current", .{});
             try prepareContext(&apprt.win32.getProcAddress);
+            surface.renderer_gl_prepared = true;
             apprt.win32.clearOpenGLStartupFailure();
             log.debug("OpenGL.surfaceInit win32 prepared", .{});
         },

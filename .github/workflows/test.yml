@@ -156,6 +156,9 @@ jobs:
             throw "Default source build did not report disabled custom shaders."
           }
 
+      - name: Build without D3D11 beta
+        run: zig build -Demit-exe=true -Dd3d11=false --prefix opengl-only --summary all
+
       - name: Build D3D11 lifecycle smoke tools
         shell: pwsh
         timeout-minutes: 20

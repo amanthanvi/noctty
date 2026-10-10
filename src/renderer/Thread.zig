@@ -910,7 +910,7 @@ fn wakeupCallback(
     // A UI-thread backend atomically requests presentation retries. Reconcile
     // after every wake rather than relying on room in the bounded mailbox.
     if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
-        t.syncDrawTimer();
+        if (t.renderer.takePresentationPendingChanged()) t.syncDrawTimer();
     }
 
     return .rearm;

@@ -29,7 +29,9 @@ renderer = d3d11
 
 D3D11 first tries hardware, then Microsoft's WARP software renderer if a
 capable hardware device cannot be created. An unavailable D3D11 runtime or
-failed software initialization falls back to OpenGL and logs the reason.
+failed software initialization falls back to OpenGL. Selection and fallback
+reasons appear in the host banner; the inspector shows the active backend and
+`+version` reports whether the build includes the beta.
 `renderer = d3d11-warp` selects WARP explicitly for driver diagnostics;
 `renderer = opengl` restores the default for newly created surfaces. Changing
 the backend preference does not interrupt an existing terminal session.
@@ -40,10 +42,14 @@ startup; enabling them on reload or receiving terminal image content switches
 that surface to OpenGL while preserving its terminal and search state. The
 surface stays on OpenGL for its lifetime after fallback. GLSL support still
 depends on a build with custom shader support, as it does for the default
-renderer. OpenGL fallback needs a working OpenGL 4.3 driver.
+renderer. OpenGL fallback needs a working OpenGL 4.3 driver. If it cannot start,
+a healthy D3D11 surface continues drawing text, ignores unsupported images and
+effects, and shows a notice. A later config reload can retry the feature.
+Unavailable devices retry fallback at five-second intervals instead of spinning.
 
 Device removal/reset triggers resource reconstruction and re-uploads retained
-atlas/buffer data. Recovery allows one hardware retry, then WARP; failed WARP
+atlas/buffer data. Recovery permits one hardware retry per sixty-second window,
+then WARP; a later loss after that window can re-probe hardware. Failed WARP
 reconstruction falls back to OpenGL. Hardware resource or presentation errors
 also get a bounded WARP attempt. Presentation follows the existing Win32 UI
 thread paint and power-saver policy. Occluded frames keep their render target
@@ -53,8 +59,11 @@ tabs and minimized windows suspend the renderer's draw timer.
 Known limits: WARP can consume substantially more CPU under heavy output.
 Its blend quantization can differ from hardware/OpenGL at glyph edges by up
 to four channel levels in the default corrected-linear mode. D3D11 does not
-add DirectComposition, per-pixel translucency, or custom HLSL effects. Existing
-whole-window opacity remains the Win32 host's policy. GPU loss injection in
+add per-pixel translucency or custom HLSL effects. Its flip swap chain is
+composed through DirectComposition beneath the terminal HWND's children, with
+the existing host/sibling clipping. Framebuffer alpha remains ignored; the host
+still owns whole-window opacity. Overlay ordering, opacity, and visible OpenGL
+handoff require the maintainer desktop check below. GPU loss injection in
 the automated harness tests the recovery path, rather than a physical GPU
 reset. Hidden-desktop readback proves rendered pixels, and does not prove DWM
 composition, scanout, unoccluded frame latency, monitor hotplug, or RDP behavior.
@@ -65,7 +74,21 @@ fault-injection controls are absent from normal builds. Run
 `test/windows/renderer/Invoke-RendererParity.ps1` against the resulting
 executable; it copies a portable run, redirects app data, and uses a hidden
 desktop. On ARM64/hosts without a suitable OpenGL driver, `-WarpOnly` runs the
-software-rendering lifecycle smoke without claiming cross-backend parity.
+software-rendering lifecycle smoke, including failed GL image/effect fallback,
+without claiming cross-backend parity.
+
+For a visible check on your own desktop, build a normal ReleaseFast binary and run:
+
+```powershell
+pwsh -NoProfile -File test/windows/renderer/Invoke-VisibleD3D11Check.ps1 -Binary .\zig-out\bin\noctty.exe
+```
+
+The script stages a separate portable copy, redirects app data, records pass/fail
+for the palette, paste confirmation, scrollbar, quick-select, opacity 0.8, and a
+Kitty-triggered OpenGL handoff. Screenshots are optional and capture displayed
+pixels. `-PrepareOnly` validates staging without launching a window. It changes
+only the staged config and never sets the clipboard or takes foreground.
+An automated readback alone is not a passing visible-desktop check.
 
 ## Install modes
 

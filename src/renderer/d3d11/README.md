@@ -2,7 +2,9 @@
 
 This opt-in Win32 backend uses the shared `GenericRenderer` preparation,
 shaping, atlases, dirty ranges, uniforms, and cursor state. OpenGL remains the
-default. Each pane owns a D3D11 device and flip-sequential HWND swapchain.
+default. Each pane owns a D3D11 device and flip-sequential composition swapchain.
+A DirectComposition visual targets the terminal HWND below its children. The
+SDK C++ companion owns that graph, with System32-only lazy runtime loading.
 The terminal renders into an offscreen target before copying to DXGI.
 
 The SDK C bridge owns COM declarations and references. Its fixed shaders are
@@ -18,8 +20,9 @@ directly. HRESULT failures from resource allocation, resize, Present, and
 staging Map are classified with `GetDeviceRemovedReason`. Frame boundaries
 also check this reason because D3D11 context drawing/upload calls return void.
 Device loss retains CPU buffer contents and complete atlas images. Recovery
-recreates shaders, buffers, atlases, and target objects. One hardware retry is
-allowed across the backend lifetime; subsequent loss uses WARP. A failed
+recreates shaders, buffers, atlases, targets, and the composition graph. Hardware
+retries are limited to one per sixty-second window; repeated loss uses WARP,
+and a later loss after cooldown can re-probe hardware. Explicit WARP stays WARP. A failed
 recovery candidate is fully released before trying WARP. Failure there marks
 the backend unavailable for the runtime's OpenGL fallback.
 
@@ -37,7 +40,8 @@ and visibility policy remain in control; an idle occluded surface uses the exist
 renderer draw timer for 250 ms presentation retries.
 Stats distinguish encoded frames, S_OK presents, occlusion responses, tests,
 recovery generations, HRESULT/removal reason, and adapter identity. Test builds
-also collect CPU encode and Present-call timing; those values are not GPU time
+also report draw calls, uploaded bytes, CPU encode and Present-call timing,
+swapchain dimensions, ResizeBuffers calls, and composition commits. Those values are not GPU time
 or visible scanout evidence. Encode timing runs from `beginFrame` to the
 completed draw encoding, before resize/copy/presentation work. Present timing
 covers normal Present submissions and excludes Present(TEST) probes.
@@ -47,8 +51,8 @@ Test hooks require `-Drenderer-test-tools=true` (C macro
 C hooks and reject them at the Zig boundary. Callers must hold the renderer
 draw mutex:
 
-- `captureBmp(path)` reads the last completed offscreen target into a staging
-  texture and writes a top-down 32-bit BMP. `capture(hdc)` also draws a DIB;
+- `capture(hdc)` reads the last completed offscreen target into a staging
+  texture and draws a DIB;
   its optional `NOCTTY_RENDERER_CAPTURE_PATH` writes the same pixels when a
   cross-process HDC cannot be used. This bypasses DWM composition.
 - `requestDeviceLoss()` injects `DXGI_ERROR_DEVICE_REMOVED` into the production
@@ -74,5 +78,24 @@ resize, and DPI-derived physical target sizes. Configured custom shaders and
 background images are prechecked by the runtime; live Kitty image use causes
 runtime fallback. The backend's corresponding texture/pipeline APIs also
 reject unsupported use. Feature level 11.0 is required. There is no
-DirectComposition path, GPU timer query, or claim of visible-presentation
+per-pixel translucency, GPU timer query, or claim of visible-presentation
 performance from hidden-desktop measurements.
+
+Default OpenGL forwards through a stable atomic pointer with no dispatcher mutex;
+its generic renderer owns exactly its original locks. GL functions are loaded at
+the original pre-font stage. Presentation timer reconciliation occurs only when
+the D3D pending state changes.
+
+Before fallback, detach the composition root, commit the detachment, release
+the graph/backbuffer/swapchain, and
+flush deferred destruction. Keep the D3D device and terminal resources until GL
+construction succeeds. On failure, D3D recreates presentation and continues text;
+shader/image capabilities prevent unsupported GPU work. Detachment is asynchronous;
+old pixels may briefly remain while DWM applies the commit. No compositor completion
+wait runs on the UI thread, and a successful Commit is not scanout evidence.
+
+The CPU mirrors are intentionally retained in this beta to reconstruct resources
+before generic GPU preparation. A 2048-square gray/color atlas pair adds roughly
+20 MiB per pane; replacing mirrors with forced shared-atlas resync is deferred.
+The backend adds compatibility for software/GL-unavailable sessions; no visible
+latency or throughput advantage over OpenGL is claimed.

@@ -88,6 +88,7 @@ pub fn run(alloc: Allocator) !u8 {
     try stdout.print("  - app runtime   : {}\n", .{build_config.app_runtime});
     try stdout.print("  - font engine   : {}\n", .{build_config.font_backend});
     try stdout.print("  - renderer      : {}\n", .{renderer.Renderer});
+    try stdout.print("  - D3D11 beta    : {s} (default: OpenGL)\n", .{if (build_config.d3d11) "available" else "omitted"});
     try stdout.print("{s}{t}\n", .{ event_backend_label, xev.backend });
     try stdout.print("{s}{s}\n", .{
         custom_shaders_label,

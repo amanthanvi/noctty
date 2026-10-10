@@ -723,7 +723,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             errdefer api.deinit();
 
             const has_custom_shaders = build_config.custom_shaders and
-                options.config.custom_shaders.value.items.len > 0;
+                options.config.custom_shaders.value.items.len > 0 and
+                supportsCustomShaders();
 
             // Prepare our swap chain
             var swap_chain = try SwapChain.init(
@@ -905,13 +906,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.shaders.deinit(self.alloc);
         }
 
+        fn supportsImages() bool {
+            return !@hasDecl(GraphicsAPI, "supports_images") or GraphicsAPI.supports_images;
+        }
+
+        fn supportsCustomShaders() bool {
+            return !@hasDecl(GraphicsAPI, "supports_custom_shaders") or GraphicsAPI.supports_custom_shaders;
+        }
+
         fn initShaders(self: *Self) !void {
             var arena = ArenaAllocator.init(self.alloc);
             defer arena.deinit();
             const arena_alloc = arena.allocator();
 
             // Load our custom shaders
-            const custom_shaders: []const [:0]const u8 = shadertoy.loadFromFiles(
+            const custom_shaders: []const [:0]const u8 = if (!supportsCustomShaders()) &.{} else shadertoy.loadFromFiles(
                 arena_alloc,
                 self.config.custom_shaders,
                 GraphicsAPI.custom_shader_target,
@@ -1377,6 +1386,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const overlay_features: []const Overlay.Feature = overlay: {
                     const insp = state.inspector orelse break :overlay &.{};
                     const renderer_info = insp.rendererInfo();
+                    renderer_info.backend = if (@hasDecl(GraphicsAPI, "backendLabel")) self.api.backendLabel() else "OpenGL";
                     break :overlay renderer_info.overlayFeatures(
                         arena_alloc,
                     ) catch &.{};
@@ -1609,6 +1619,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // path, so re-presenting an unchanged frame only adds another
                 // SwapBuffers call into the driver with no visible benefit.
                 if (apprt.runtime == apprt.win32) {
+                    if (comptime @hasDecl(GraphicsAPI, "requires_retained_present")) {
+                        try self.api.presentLastTarget();
+                    }
                     return;
                 }
                 try self.api.presentLastTarget();
@@ -1686,7 +1699,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             // Upload images to the GPU as necessary.
-            _ = self.images.upload(self.alloc, &self.api);
+            if (comptime supportsImages()) _ = self.images.upload(self.alloc, &self.api);
 
             // Upload the background image to the GPU as necessary.
             try self.uploadBackgroundImage();
@@ -1977,6 +1990,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Caller must hold the draw mutex.
         fn prepBackgroundImage(self: *Self) !void {
+            if (comptime !supportsImages()) return;
             // Then we try to load the background image if we have a path.
             if (self.config.bg_image) |p| load_background: {
                 const path = switch (p) {
@@ -2188,7 +2202,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Move CPU frame preparation to another graphics API. GPU resources
         /// are freshly initialized; font, terminal and search state survive.
         pub fn transferCpuState(self: *Self, target: anytype) void {
-            inline for (.{ "grid_metrics", "size", "focused", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "overlay" }) |field| {
+            const transferred = .{ "grid_metrics", "size", "focused", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "overlay" };
+            // These fields own API-specific resources, shared ownership, or
+            // fresh-renderer synchronization state. A backport must classify
+            // every new field explicitly instead of silently dropping state.
+            const recreated = .{ "alloc", "draw_mutex", "config", "surface_mailbox", "custom_shader_focused_changed", "cells_rebuilt", "font_grid", "images", "bg_image", "bg_image_changed", "bg_image_buffer", "bg_image_buffer_modified", "api", "display_link", "health", "swap_chain", "target_config_modified", "reinitialize_shaders", "has_custom_shaders", "shaders" };
+            comptime {
+                @setEvalBranchQuota(100_000);
+                for (std.meta.fields(Self)) |field| {
+                    var covered = false;
+                    for (transferred ++ recreated) |name| {
+                        if (std.mem.eql(u8, name, field.name)) covered = true;
+                    }
+                    if (!covered) @compileError("classify new renderer field for backend transfer: " ++ field.name);
+                }
+            }
+            inline for (transferred) |field| {
                 std.mem.swap(@TypeOf(@field(self, field)), &@field(self, field), &@field(target, field));
             }
             target.cells_rebuilt = true;

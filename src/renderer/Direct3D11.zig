@@ -25,6 +25,9 @@ pub const shaders = @import("d3d11/shaders.zig");
 pub const custom_shader_target: rendererpkg.shadertoy.Target = .glsl;
 pub const custom_shader_y_is_down = true;
 pub const swap_chain_count = 1;
+pub const requires_retained_present = true;
+pub const supports_images = false;
+pub const supports_custom_shaders = false;
 
 device: *api.Device,
 rt_surface: *apprt.Surface,
@@ -32,8 +35,6 @@ blending: Config.AlphaBlending,
 vsync_enabled: bool,
 
 pub fn init(_: std.mem.Allocator, opts: rendererpkg.Options) !Direct3D11 {
-    if (opts.config.custom_shaders.value.items.len != 0) return error.Direct3D11CustomShadersUnsupported;
-    if (opts.config.bg_image != null) return error.Direct3D11ImagesUnsupported;
     const hwnd = opts.rt_surface.hwnd orelse return error.Direct3D11MissingWindow;
     const device = api.noctty_d3d11_create(@ptrCast(hwnd), @intFromBool(opts.config.renderer_backend == .@"d3d11-warp")) orelse return error.Direct3D11Unavailable;
     var receipt: api.Stats = undefined;
@@ -126,11 +127,6 @@ pub fn capture(self: *Direct3D11, hdc: *anyopaque) !void {
     try api.check(api.noctty_d3d11_capture(self.device, hdc));
 }
 
-pub fn captureBmp(self: *Direct3D11, path: [:0]const u16) !void {
-    if (!build_config.renderer_test_tools) return error.RendererTestToolsDisabled;
-    try api.check(api.noctty_d3d11_capture_bmp(self.device, path.ptr));
-}
-
 /// Inject a device-removed HRESULT through the production recovery classifier.
 /// This tests resource restoration without resetting the system's graphics driver.
 pub fn requestDeviceLoss(self: *Direct3D11) !void {
@@ -202,4 +198,14 @@ pub fn isOccluded(self: *const Direct3D11) bool {
 }
 pub fn recoveryPending(self: *const Direct3D11) bool {
     return api.noctty_d3d11_recovery_pending(self.device) != 0;
+}
+
+/// Detach the presentation surface before WGL touches the same HWND. GPU
+/// resources and the device remain usable if OpenGL construction fails.
+pub fn suspendPresentation(self: *Direct3D11) !void {
+    try api.check(api.noctty_d3d11_suspend_presentation(self.device));
+}
+
+pub fn backendLabel(self: *const Direct3D11) [:0]const u8 {
+    return if (self.stats().warp != 0) "D3D11 WARP (software)" else "D3D11 hardware";
 }

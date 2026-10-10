@@ -36,7 +36,8 @@ Local 2026-10-10 measurements on the NVIDIA RTX 5070 Ti:
 - Hardware: zero differences out of 1,533,852 pixels.
 - WARP: 8,592 differing pixels, maximum delta four, 89 pixels over two levels.
 - Hardware/WARP reconstruction, resize return and DPI scale return: exact.
-- Hidden DXGI presents are occluded. No scanout, GPU-completion latency,
+- The original HWND-swapchain hidden run was occluded. Composition Present
+  receipts in later runs can succeed, but still establish no scanout, GPU-completion latency,
   physical TDR, monitor hotplug, or RDP claim follows from these captures.
 
 One-binary coexistence was retained after comparing ReleaseFast production
@@ -45,3 +46,28 @@ combined binary 31,176,704 bytes, an increase of 112,640 bytes (0.36%).
 Dependency-cached build wall times were 176.69 and 172.15 seconds respectively
 at BelowNormal priority. These single runs share a busy host and do not prove
 a compilation speedup; no material wall-time penalty was observed.
+
+## Review follow-up checks
+
+`-WarpOnly` also forces GL initialization failure while Kitty content arrives and
+while a reload enables a shader/background image. Text frames must keep advancing.
+Resize now checks actual swapchain dimensions and a new ResizeBuffers receipt,
+in addition to offscreen readback. Host notices are suppressed only in this
+test-tools parity run to keep reference geometry identical; production and the
+visible check retain them.
+
+Build two production binaries with custom shaders, one default and one with
+`-Dd3d11=false`. Run `Invoke-OpenGLScheduling.ps1 -DefaultBinary <exe>
+-OpenGLOnlyBinary <exe> -OutputDirectory <new directory>` for an isolated hidden
+streaming/live-resize comparison. It records output progress, frame updates, and
+UI resize/snapshot response times. Run `../interactive-win11-shader-pacing.ps1
+-Binary <exe> -OutputDirectory <directory>` on the same verified hidden driver
+for each binary. The supplied binary is copied beside a portable marker before
+launch; these measurements describe CPU/UI behavior, not visible scanout latency.
+
+The maintainer runs `Invoke-VisibleD3D11Check.ps1 -Binary <production exe>` on
+their own desktop for palette, paste preview/Allow/Cancel, scrollbar, quick-select,
+opacity, and Kitty-to-GL presentation. It records individual pass/fail/skip ratings
+and offers an optional cropped screen capture per step. `-PrepareOnly` performs
+staging without launching; agents must use that switch. A skipped visible step
+stays incomplete, and readback is never substituted for displayed content.

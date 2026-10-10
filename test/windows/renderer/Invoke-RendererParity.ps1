@@ -75,7 +75,7 @@ if (!$Driver) {
 if ([RendererNative]::DesktopName() -ne $DesktopName -or !$DesktopName.StartsWith('renderer-test-')) { throw 'Driver is not on its verified hidden desktop.' }
 [void][RendererNative]::SetThreadDpiAwarenessContext([IntPtr]-4)
 $result = [ordered]@{ status = 'error'; hiddenDesktop = $DesktopName; profileBefore = $before; binarySHA256 = (Get-FileHash -LiteralPath $Binary).Hash; runs = @(); comparisons = @() }
-function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironment = @{}, [string[]]$ExtraConfig = @(), [switch]$Lifecycle, [switch]$MultiPane, [switch]$Streaming, [int]$FailureAction = 0) {
+function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironment = @{}, [string[]]$ExtraConfig = @(), [switch]$Lifecycle, [switch]$MultiPane, [switch]$Streaming, [int]$FailureAction = 0, [switch]$ReloadUnsupported) {
     [void](Assert-Profile $before)
     $run = Join-Path $OutputDirectory $Label
     $bin = Join-Path $run 'bin'
@@ -93,7 +93,7 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
     if ($Streaming) { $config[-1] += ' -Stream' }
     $config += $ExtraConfig
     Set-Content -LiteralPath (Join-Path $bin 'config.ghostty') -Value ($config -join "`n") -Encoding utf8
-    $environment = @{ LOCALAPPDATA = (Join-Path $run 'LocalAppData'); APPDATA = (Join-Path $run 'AppData'); NOCTTY_RENDERER_CAPTURE_PATH = (Join-Path $run 'frame.bmp'); NOCTTY_RENDERER_STATUS_PATH = (Join-Path $run 'renderer.json'); NOCTTY_RENDERER_READY_PATH = (Join-Path $run 'ready.txt') }
+    $environment = @{ LOCALAPPDATA = (Join-Path $run 'LocalAppData'); APPDATA = (Join-Path $run 'AppData'); NOCTTY_RENDERER_CAPTURE_PATH = (Join-Path $run 'frame.bmp'); NOCTTY_RENDERER_STATUS_PATH = (Join-Path $run 'renderer.json'); NOCTTY_RENDERER_READY_PATH = (Join-Path $run 'ready.txt'); NOCTTY_RENDERER_HIDE_NOTICES = '1' }
     foreach ($key in $ExtraEnvironment.Keys) { $environment[$key] = $ExtraEnvironment[$key] }
     [void](New-Item -ItemType Directory -Path $environment.LOCALAPPDATA, $environment.APPDATA)
     if (!(Test-Path -LiteralPath (Join-Path $bin 'noctty.portable'))) { throw 'Portable marker missing; app launch blocked.' }
@@ -162,6 +162,9 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             Start-Sleep -Milliseconds 250
             $case.resized = & $capture 'resized'
             if ($case.resized.pixels.width -eq $case.initial.pixels.width -or $case.resized.pixels.height -eq $case.initial.pixels.height) { throw 'Resize did not change physical render-target dimensions.' }
+            if ($case.resized.status.resize_buffers -le $case.recreated.status.resize_buffers -or
+                $case.resized.status.swapchain_width -ne $case.resized.pixels.width -or
+                $case.resized.status.swapchain_height -ne $case.resized.pixels.height) { throw 'Resize did not reach DXGI ResizeBuffers with the target dimensions.' }
             [void][RendererNative]::Resize($hostWindow, $rect.r - $rect.l, $rect.b - $rect.t)
             Start-Sleep -Milliseconds 250
             $case.restored = & $capture 'restored'
@@ -197,6 +200,23 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $case.scaleRestored = & $capture 'scale-restored'
             $case.scaleDiff = [RendererNative]::Diff($case.initial.path, $case.scaleRestored.path, (Join-Path $run 'scale-diff.png')) | ConvertFrom-Json
             if ($case.scaleDiff.different -ne 0) { throw 'DPI scale round trip changed pixels.' }
+        }
+        if ($ReloadUnsupported) {
+            $reloadShader = Join-Path $run 'reload.glsl'
+            Set-Content -LiteralPath $reloadShader -Value 'void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p / iResolution.xy); }'
+            $reloadImage = Join-Path $run 'reload.png'
+            $image = [Drawing.Bitmap]::new(2, 2)
+            try { $image.SetPixel(0, 0, [Drawing.Color]::Red); $image.Save($reloadImage, [Drawing.Imaging.ImageFormat]::Png) } finally { $image.Dispose() }
+            Add-Content -LiteralPath (Join-Path $bin 'config.ghostty') -Value @(('custom-shader=' + $reloadShader), 'custom-shader-animation=false', ('background-image=' + $reloadImage))
+            if (![RendererNative]::Action($surfaceWindow, 7)) { throw 'Config reload action rejected.' }
+            Start-Sleep -Milliseconds 800
+            $case.reloaded = & $capture 'unsupported-reload'
+            if ($case.reloaded.status.backend -ne 'd3d11' -or !$case.reloaded.status.fallback_blocked) { throw 'Failed GL reload fallback did not retain D3D11.' }
+            # A retained healthy device must produce more frames, not just retain
+            # old readback pixels after the fallback attempt.
+            Start-Sleep -Milliseconds 600
+            $case.afterReload = & $capture 'after-unsupported-reload'
+            if ($case.afterReload.status.frames -le $case.reloaded.status.frames) { throw 'D3D11 stopped rendering after rejected GL fallback.' }
         }
         if ($MultiPane) {
             if (![RendererNative]::Action($surfaceWindow, 2)) { throw 'Split action rejected.' }
@@ -257,6 +277,12 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
     }
 }
 try {
+    # These cases need no GL driver and run on x64 and native ARM64 CI too.
+    $blockedKitty = Invoke-Case 'kitty-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1';NOCTTY_RENDERER_TEST_KITTY='1'} @('power-saver-rendering=on') -Streaming
+    $result.runs += $blockedKitty
+    if ($blockedKitty.initial.status.backend -ne 'd3d11' -or !$blockedKitty.initial.status.fallback_blocked) { throw 'Failed GL image fallback did not retain healthy D3D11.' }
+    $blockedReload = Invoke-Case 'reload-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1'} @('power-saver-rendering=on') -Streaming -ReloadUnsupported
+    $result.runs += $blockedReload
     if ($WarpOnly) {
         $warp = Invoke-Case 'warp' 'd3d11-warp' -Lifecycle
         $result.runs += $warp

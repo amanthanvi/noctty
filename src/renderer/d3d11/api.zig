@@ -14,6 +14,10 @@ pub const Stats = extern struct {
     occluded_presents: u64,
     present_tests: u64,
     generation: u64,
+    resize_buffers: u64,
+    composition_commits: u64,
+    swapchain_width: u32,
+    swapchain_height: u32,
     warp: u32,
     feature_level: u32,
     recovery_pending: u32,
@@ -43,7 +47,7 @@ pub extern fn noctty_d3d11_request_device_loss(d: *Device) i32;
 pub extern fn noctty_d3d11_set_test_failures(d: *Device, hardware: u32, device: u32) i32;
 pub extern fn noctty_d3d11_fail_next_present(d: *Device) i32;
 pub extern fn noctty_d3d11_capture(d: *Device, hdc: *anyopaque) i32;
-pub extern fn noctty_d3d11_capture_bmp(d: *Device, path: [*:0]const u16) i32;
+pub extern fn noctty_d3d11_suspend_presentation(d: *Device) i32;
 pub extern fn noctty_d3d11_buffer_create(d: *Device, size: usize, uniform: u32) ?*Buffer;
 pub extern fn noctty_d3d11_buffer_destroy(b: *Buffer) void;
 pub extern fn noctty_d3d11_buffer_reserve(b: *Buffer, size: usize) i32;

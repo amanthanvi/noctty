@@ -45,7 +45,6 @@ public static class RendererNative {
  public static IntPtr[] Surfaces(IntPtr host,bool visibleOnly) { var found=new List<IntPtr>();EnumChildWindows(host,(h,l)=>{if(ClassOf(h)=="noctty.win32" && (!visibleOnly || IsWindowVisible(h))) found.Add(h);return true;},IntPtr.Zero);return found.ToArray(); }
  public static bool Action(IntPtr surf,int action) { IntPtr result;return SendMessageTimeoutW(surf,0x8056,(IntPtr)action,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Scale(IntPtr surf,int dpi) { IntPtr result;return SendMessageTimeoutW(surf,0x8057,(IntPtr)dpi,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
- public static void Snapshot(IntPtr surf) { IntPtr result; SendMessageTimeoutW(surf,0x8008,IntPtr.Zero,IntPtr.Zero,2,5000,out result); }
  public static bool LoseDevice(IntPtr surf) { IntPtr result;return SendMessageTimeoutW(surf,0x8050,IntPtr.Zero,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Replay(IntPtr surf) { IntPtr result;return SendMessageTimeoutW(surf,0x8051,IntPtr.Zero,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Resize(IntPtr host,int w,int h) { return SetWindowPos(host,IntPtr.Zero,0,0,w,h,0x16); }

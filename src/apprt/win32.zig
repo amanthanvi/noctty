@@ -28515,6 +28515,7 @@ pub const Surface = struct {
     inspector_visible: bool = false,
     paint_pending: bool = false,
     live_resize_repaint_deferred: bool = false,
+    renderer_gl_prepared: bool = false,
     renderer_repaint_requested: std.atomic.Value(bool) = .init(false),
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
     /// One-shot post-show frame handshake for #224. Only ever touched from
@@ -29980,7 +29981,7 @@ pub const Surface = struct {
         if (self.draw_in_progress) return;
         self.draw_in_progress = true;
         defer self.draw_in_progress = false;
-        if (!build_config.d3d11) try self.makeGLContextCurrent();
+        if (self.hglrc != null) try self.makeGLContextCurrent();
         try self.core_surface.draw();
     }
 
@@ -30020,6 +30021,12 @@ pub const Surface = struct {
             } else null,
             cursor_blinking,
         );
+    }
+
+    /// UI-thread-only notice using the same banner as other host diagnostics.
+    pub fn showRendererNotice(self: *Surface, message: []const u8) !void {
+        const host = self.host orelse return error.NoHost;
+        try host.setBanner(.info, message);
     }
 
     /// Lazily prepare WGL for an opted-in surface that needs OpenGL fallback.

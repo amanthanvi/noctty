@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include "bridge.h"
+#include "composition.h"
 #include "terminal_bytecode.h"
 #ifndef NOCTTY_RENDERER_TEST_TOOLS
 #define NOCTTY_RENDERER_TEST_TOOLS 0
@@ -51,6 +52,8 @@ struct NocttyD3D {
     ID3D11Device *device;
     ID3D11DeviceContext *context;
     IDXGISwapChain1 *swapchain;
+    NocttyComposition *composition;
+    uint32_t composition_committed;
     ID3D11Texture2D *backbuffer;
     ID3D11VertexShader *bg_vs, *text_vs;
     ID3D11PixelShader *ps[3];
@@ -60,7 +63,8 @@ struct NocttyD3D {
     NocttyD3DTexture *textures;
     NocttyD3DTarget *targets;
     NocttyD3DTarget *last_rendered;
-    uint32_t width, height, force_warp, hardware_retried, occluded;
+    uint32_t width, height, force_warp, occluded;
+    uint64_t hardware_retry_after_ms;
     uint64_t next_present_test_ms;
 #if NOCTTY_RENDERER_TEST_TOOLS
     uint32_t fail_hardware, fail_device, fail_resource;
@@ -83,6 +87,14 @@ static uint64_t env_number(const char *name) {
 }
 #endif
 
+static INIT_ONCE d3d_library_once = INIT_ONCE_STATIC_INIT;
+static HMODULE d3d_library;
+static BOOL CALLBACK load_d3d_library(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once; (void)parameter; (void)context;
+    d3d_library = LoadLibraryExW(L"d3d11.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return d3d_library != NULL;
+}
+
 static int device_lost(HRESULT hr) {
     return hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
         hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
@@ -98,10 +110,13 @@ static HRESULT record_result(NocttyD3D *d, HRESULT hr) {
         d->stats.recovery_pending = 1;
         d->last_rendered = NULL;
         for (NocttyD3DTarget *t = d->targets; t; t = t->next) t->rendered = 0;
+    } else if (hr == E_INVALIDARG || hr == DXGI_ERROR_INVALID_CALL) {
+        // Bridge contract errors are not device loss or a WARP retry trigger.
+        fprintf(stderr, "d3d11 contract failure hr=0x%08lx\n", (unsigned long)hr);
     } else if (!d->stats.warp && !d->force_warp) {
         /* A hardware allocation/Present failure can still succeed on WARP.
          * It gets one bounded software reconstruction before OpenGL. */
-        d->force_warp = 1;
+        d->hardware_retry_after_ms = GetTickCount64() + 60000;
         d->stats.recovery_pending = 1;
         d->last_rendered = NULL;
         for (NocttyD3DTarget *t = d->targets; t; t = t->next) t->rendered = 0;
@@ -114,7 +129,9 @@ static HRESULT device_status(NocttyD3D *d) {
     if (d->stats.unavailable) return FAILED(d->stats.last_error) ? d->stats.last_error : E_FAIL;
     if (d->stats.recovery_pending) return DXGI_ERROR_DEVICE_REMOVED;
     if (!d->device) return record_result(d, E_FAIL);
-    return record_result(d, ID3D11Device_GetDeviceRemovedReason(d->device));
+    HRESULT hr = ID3D11Device_GetDeviceRemovedReason(d->device);
+    if (SUCCEEDED(hr) && d->composition) hr = noctty_composition_check_state(d->composition);
+    return record_result(d, hr);
 }
 static HRESULT buffer_gpu(NocttyD3DBuffer *b) {
     if (!b->owner->device) return E_FAIL;
@@ -202,6 +219,9 @@ static void release_device(NocttyD3D *d) {
     for (NocttyD3DTexture *t = d->textures; t; t = t->next) { RELEASE(t->srv); RELEASE(t->gpu); }
     for (NocttyD3DTarget *t = d->targets; t; t = t->next) { RELEASE(t->rtv); RELEASE(t->gpu); t->rendered = 0; }
     d->last_rendered = NULL;
+    noctty_composition_destroy(d->composition);
+    d->composition = NULL;
+    d->composition_committed = 0;
     RELEASE(d->backbuffer);
     RELEASE(d->swapchain);
     RELEASE(d->bg_vs); RELEASE(d->text_vs);
@@ -223,6 +243,11 @@ static HRESULT create_device(NocttyD3D *d, uint32_t warp) {
         &d->device, &obtained, &d->context);
     if (FAILED(hr)) return hr;
     d->stats.warp = warp; d->stats.feature_level = obtained;
+    IDXGIDevice1 *latency_device = NULL;
+    hr = ID3D11Device_QueryInterface(d->device, &IID_IDXGIDevice1, (void **)&latency_device);
+    if (SUCCEEDED(hr)) hr = IDXGIDevice1_SetMaximumFrameLatency(latency_device, 1);
+    RELEASE(latency_device);
+    if (FAILED(hr)) return hr;
     {
         IDXGIDevice *dxgi_device = NULL;
         IDXGIAdapter *adapter = NULL;
@@ -286,6 +311,7 @@ static HRESULT resize_swapchain(NocttyD3D *d, uint32_t width, uint32_t height) {
     if (d->swapchain) {
         hr = IDXGISwapChain1_ResizeBuffers(d->swapchain, 2, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
         if (FAILED(hr)) return hr;
+        ++d->stats.resize_buffers;
     } else {
         IDXGIDevice *dxgi_device = NULL;
         IDXGIAdapter *adapter = NULL;
@@ -304,15 +330,19 @@ static HRESULT resize_swapchain(NocttyD3D *d, uint32_t width, uint32_t height) {
             desc.Scaling = DXGI_SCALING_STRETCH;
             desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
             desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-            hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)d->device,
-                d->hwnd, &desc, NULL, NULL, &d->swapchain);
-            if (SUCCEEDED(hr)) hr = IDXGIFactory2_MakeWindowAssociation(factory, d->hwnd, DXGI_MWA_NO_ALT_ENTER);
+            hr = IDXGIFactory2_CreateSwapChainForComposition(factory, (IUnknown *)d->device,
+                &desc, NULL, &d->swapchain);
+            if (SUCCEEDED(hr)) hr = noctty_composition_create(dxgi_device, d->hwnd,
+                d->swapchain, &d->composition);
         }
         RELEASE(factory); RELEASE(adapter); RELEASE(dxgi_device);
         if (FAILED(hr)) return hr;
     }
     hr = IDXGISwapChain1_GetBuffer(d->swapchain, 0, &IID_ID3D11Texture2D, (void **)&d->backbuffer);
-    if (SUCCEEDED(hr)) { d->width = width; d->height = height; }
+    if (SUCCEEDED(hr)) {
+        d->width = width; d->height = height;
+        d->stats.swapchain_width = width; d->stats.swapchain_height = height;
+    }
     return hr;
 }
 
@@ -351,10 +381,11 @@ NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp) {
 #if NOCTTY_RENDERER_TEST_TOOLS
     if (env_number("NOCTTY_RENDERER_FAIL_LIBRARY")) { free(d); return NULL; }
 #endif
-    d->library = LoadLibraryExW(L"d3d11.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!InitOnceExecuteOnce(&d3d_library_once, load_d3d_library, NULL, NULL)) { free(d); return NULL; }
+    d->library = d3d_library;
     if (!d->library) { free(d); return NULL; }
     d->create_device_proc = (PFN_D3D11_CREATE_DEVICE)(void *)GetProcAddress(d->library, "D3D11CreateDevice");
-    if (!d->create_device_proc) { FreeLibrary(d->library); free(d); return NULL; }
+    if (!d->create_device_proc) { free(d); return NULL; }
     d->force_warp = force_warp != 0;
     d->stats.last_present_status = S_FALSE;
 #if NOCTTY_RENDERER_TEST_TOOLS
@@ -363,7 +394,7 @@ NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp) {
     d->fail_resource = env_number("NOCTTY_RENDERER_FAIL_RESOURCE") != 0;
     QueryPerformanceFrequency(&d->frequency);
 #endif
-    HRESULT hr = create_candidates(d, !d->force_warp);
+    HRESULT hr = create_device(d, d->force_warp);
     if (FAILED(hr)) {
         fprintf(stderr, "d3d11 initialization_failed hr=0x%08lx\n", (unsigned long)hr);
         noctty_d3d11_destroy(d);
@@ -379,15 +410,16 @@ void noctty_d3d11_destroy(NocttyD3D *d) {
     while (d->buffers) noctty_d3d11_buffer_destroy(d->buffers);
     while (d->textures) noctty_d3d11_texture_destroy(d->textures);
     while (d->targets) noctty_d3d11_target_destroy(d->targets);
-    if (d->library) FreeLibrary(d->library);
+    // The process pins the runtime; drivers may finish worker teardown later.
     free(d);
 }
 int32_t noctty_d3d11_recover(NocttyD3D *d) {
     if (d->stats.unavailable) return device_status(d);
     (void)device_status(d);
     if (!d->stats.recovery_pending) return device_status(d);
-    uint32_t hardware = !d->force_warp && !d->stats.warp && !d->hardware_retried;
-    if (hardware) d->hardware_retried = 1;
+    uint64_t now = GetTickCount64();
+    uint32_t hardware = !d->force_warp && now >= d->hardware_retry_after_ms;
+    if (hardware) d->hardware_retry_after_ms = now + 60000;
     release_device(d);
     HRESULT hr = create_candidates(d, hardware);
     if (FAILED(hr)) {
@@ -440,6 +472,10 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
     RECT client;
     if (!GetClientRect(d->hwnd, &client)) return record_result(d, HRESULT_FROM_WIN32(GetLastError()));
     if (client.right <= client.left || client.bottom <= client.top) return S_FALSE;
+    // Resize is a lifecycle operation even while occluded. Keep the back
+    // buffer synchronized with the retained target before any Present(TEST).
+    hr = resize_swapchain(d, target->width, target->height);
+    if (FAILED(hr)) return record_result(d, hr);
     if (d->occluded) {
         uint64_t now = GetTickCount64();
         if (now < d->next_present_test_ms) return DXGI_STATUS_OCCLUDED;
@@ -451,8 +487,6 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
         if (FAILED(hr)) return record_result(d, hr);
         d->occluded = 0;
     }
-    hr = resize_swapchain(d, target->width, target->height);
-    if (FAILED(hr)) return record_result(d, hr);
     ID3D11DeviceContext_OMSetRenderTargets(d->context, 0, NULL, NULL);
     ID3D11DeviceContext_CopyResource(d->context, (ID3D11Resource *)d->backbuffer, (ID3D11Resource *)target->gpu);
 #if NOCTTY_RENDERER_TEST_TOOLS
@@ -471,6 +505,14 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
         d->next_present_test_ms = GetTickCount64() + 250;
         ++d->stats.occluded_presents;
     } else if (hr == S_OK) {
+        // Attach only initialized pixels. A failed DComp commit is a failed
+        // submission, so it cannot signal the app's first-frame handshake.
+        if (!d->composition_committed) {
+            hr = noctty_composition_commit(d->composition);
+            if (FAILED(hr)) return record_result(d, hr);
+            d->composition_committed = 1;
+            ++d->stats.composition_commits;
+        }
         ++d->stats.presents;
     }
     return hr;
@@ -480,8 +522,7 @@ int32_t noctty_d3d11_present(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vsy
 }
 void noctty_d3d11_stats(NocttyD3D *d, NocttyD3DStats *stats) { *stats = d->stats; }
 uint32_t noctty_d3d11_needs_redraw(NocttyD3D *d) {
-    return d->stats.recovery_pending || !d->last_rendered ||
-        (d->occluded && GetTickCount64() >= d->next_present_test_ms);
+    return d->stats.recovery_pending || !d->last_rendered;
 }
 uint32_t noctty_d3d11_occluded(NocttyD3D *d) { return d->occluded; }
 uint32_t noctty_d3d11_recovery_pending(NocttyD3D *d) { return d->stats.recovery_pending; }
@@ -586,19 +627,6 @@ static HRESULT save_bmp(const uint16_t *path, const unsigned char *pixels, uint3
     return hr;
 }
 #endif
-int32_t noctty_d3d11_capture_bmp(NocttyD3D *d, const uint16_t *path) {
-#if NOCTTY_RENDERER_TEST_TOOLS
-    unsigned char *pixels = NULL;
-    uint32_t width, height;
-    HRESULT hr = readback(d, &pixels, &width, &height);
-    if (SUCCEEDED(hr)) hr = save_bmp(path, pixels, width, height);
-    free(pixels);
-    return hr;
-#else
-    (void)d; (void)path;
-    return E_NOTIMPL;
-#endif
-}
 int32_t noctty_d3d11_capture(NocttyD3D *d, void *hdc) {
 #if NOCTTY_RENDERER_TEST_TOOLS
     unsigned char *bgra = NULL;
@@ -781,4 +809,25 @@ int32_t noctty_d3d11_draw(NocttyD3DTarget *target, uint32_t pipeline, NocttyD3DB
     ID3D11DeviceContext_DrawInstanced(d->context, vertices, instances, 0, 0);
     ++d->stats.draw_calls;
     return device_status(d);
+}
+
+int32_t noctty_d3d11_suspend_presentation(NocttyD3D *d) {
+    // Strict healthy handoff: detach must complete before WGL can present.
+    // Invalid composition graphs have no usable content to keep attached.
+    if (d->composition) {
+        HRESULT hr = noctty_composition_check_state(d->composition);
+        if (SUCCEEDED(hr)) {
+            hr = noctty_composition_detach(d->composition);
+            if (FAILED(hr)) return hr;
+        }
+        noctty_composition_destroy(d->composition);
+        d->composition = NULL;
+    }
+    d->composition_committed = 0;
+    if (d->context) ID3D11DeviceContext_OMSetRenderTargets(d->context, 0, NULL, NULL);
+    RELEASE(d->backbuffer);
+    RELEASE(d->swapchain);
+    if (d->context) ID3D11DeviceContext_Flush(d->context);
+    d->width = d->height = d->occluded = 0;
+    return S_OK;
 }

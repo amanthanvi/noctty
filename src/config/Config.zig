@@ -10,11 +10,7 @@
 
 const Config = @This();
 
-/// Windows rendering backend. OpenGL remains the default. D3D11 is beta and
-/// falls back to OpenGL for custom shaders, images, or an unavailable device.
-/// `d3d11-warp` explicitly selects software rendering for driver diagnostics.
-/// Changes apply to newly created surfaces; existing surfaces may fall back
-/// to OpenGL when a config reload enables an unsupported feature.
+/// Windows renderer preference. See the `renderer` setting below.
 pub const RendererBackend = enum { opengl, d3d11, @"d3d11-warp" };
 
 const std = @import("std");
@@ -189,6 +185,9 @@ language: ?[:0]const u8 = null,
 /// `d3d11-warp` explicitly uses software rendering for driver diagnostics.
 /// Custom shaders and images use OpenGL. Backend choice applies to new
 /// surfaces; unsupported features enabled by reload also trigger fallback.
+/// If OpenGL cannot initialize, a healthy D3D11 pane keeps rendering text and
+/// ignores unsupported images/effects with a visible notice.
+/// Available since 1.3.132.
 renderer: RendererBackend = .opengl,
 
 /// The font families to use.

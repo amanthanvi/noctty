@@ -373,6 +373,10 @@ pub fn add(
             else
                 &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=0" },
         });
+        step.addCSourceFile(.{
+            .file = b.path("src/renderer/d3d11/composition.cpp"),
+            .flags = &.{ "-std=c++11", "-fno-exceptions", "-fno-rtti" },
+        });
     }
 
     // libcpp is required for various dependencies. On MSVC, we must

@@ -2,7 +2,9 @@
 param(
     [switch] $Rebuild,
     [switch] $ResetState,
-    [int] $TimeoutSeconds = 30
+    [int] $TimeoutSeconds = 30,
+    [string] $Binary = '',
+    [string] $OutputDirectory = ''
 )
 
 # Regression harness for #297: with an animated custom shader and power-saver
@@ -55,6 +57,8 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
 if ($Rebuild) { $forwardedArgs += '-Rebuild' }
 if ($ResetState) { $forwardedArgs += '-ResetState' }
+if ($Binary) { $forwardedArgs += @('-Binary', $Binary) }
+if ($OutputDirectory) { $forwardedArgs += @('-OutputDirectory', $OutputDirectory) }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
@@ -70,6 +74,8 @@ if ($Rebuild) {
     finally { Pop-Location }
 }
 
+$realStartupPath = Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json'
+$profileBefore = if (Test-Path -LiteralPath $realStartupPath) { @{hash=(Get-FileHash -LiteralPath $realStartupPath).Hash;mtime=(Get-Item -LiteralPath $realStartupPath).LastWriteTimeUtc} } else { $null }
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'shader-pacing' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
@@ -163,6 +169,19 @@ function Request-ShaderPacingTrace {
 }
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
+if ($Binary) {
+    if ($Rebuild) { throw 'Use either Binary or Rebuild, not both.' }
+    $Binary = [IO.Path]::GetFullPath($Binary)
+    $portableBin = Join-Path $layout.Temp ('portable-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $portableBin)
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $portableBin 'noctty.exe')
+    Copy-Item -LiteralPath (Join-Path (Split-Path $Binary) 'noctty.com') -Destination $portableBin
+    Set-Content -LiteralPath (Join-Path $portableBin 'noctty.portable') -Value 'isolated shader pacing comparison'
+    if ((Get-FileHash -LiteralPath $Binary).Hash -ne (Get-FileHash -LiteralPath (Join-Path $portableBin 'noctty.exe')).Hash) { throw 'Copied shader binary differs.' }
+    $share = Join-Path (Split-Path (Split-Path $Binary)) 'share'
+    if (Test-Path -LiteralPath $share) { Copy-Item -LiteralPath $share -Destination $portableBin -Recurse }
+    $exePath = Join-Path $portableBin 'noctty.exe'
+}
 Assert-InteractiveWin11ExeExists -ExePath $exePath
 $commandPath = Join-Path (Split-Path -Parent $exePath) 'noctty.com'
 $versionText = & $commandPath +version | Out-String
@@ -278,6 +297,7 @@ finally {
     if ($null -ne $run -and -not $run.Process.HasExited) {
         Stop-InteractiveWin11Process -Process $run.Process -Contained
     }
+    if ($profileBefore -and ((Get-FileHash -LiteralPath $realStartupPath).Hash -ne $profileBefore.hash -or (Get-Item -LiteralPath $realStartupPath).LastWriteTimeUtc -ne $profileBefore.mtime)) { throw 'Real startup-attempts.json changed.' }
     Remove-Item Env:\NOCTTY_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
 }
@@ -290,3 +310,8 @@ Write-Host ("interactive-win11 shader-pacing validation: PASS " +
     $typed.renderer_update_frame_count,
     $animationSwapsPerSecond,
     ($presentedMs -join '/'))
+
+if ($OutputDirectory) {
+    [void](New-Item -ItemType Directory -Path $OutputDirectory -Force)
+    @{status='pass';binarySHA256=(Get-FileHash -LiteralPath $exePath).Hash;presentedWithinMs=$presentedMs;animationSwapsPerSecond=$animationSwapsPerSecond;frameUpdates=([uint64]$typed.renderer_update_frame_count-[uint64]$before.renderer_update_frame_count);outputBytes=([uint64]$typed.last_swap_process_output_bytes-[uint64]$before.last_swap_process_output_bytes)} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'shader-pacing.json')
+}

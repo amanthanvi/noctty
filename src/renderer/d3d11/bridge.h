@@ -12,6 +12,8 @@ typedef struct NocttyD3DStats {
     uint64_t frames, presents, recoveries, draw_calls, upload_bytes;
     uint64_t encode_ns, present_ns;
     uint64_t occluded_presents, present_tests, generation;
+    uint64_t resize_buffers, composition_commits;
+    uint32_t swapchain_width, swapchain_height;
     uint32_t warp, feature_level, recovery_pending, unavailable;
     int32_t last_error, removed_reason, last_present_status;
     uint32_t vendor_id, device_id, adapter_luid_low;
@@ -37,7 +39,7 @@ int32_t noctty_d3d11_request_device_loss(NocttyD3D *d);
 int32_t noctty_d3d11_set_test_failures(NocttyD3D *d, uint32_t hardware, uint32_t device);
 int32_t noctty_d3d11_fail_next_present(NocttyD3D *d);
 int32_t noctty_d3d11_capture(NocttyD3D *d, void *hdc);
-int32_t noctty_d3d11_capture_bmp(NocttyD3D *d, const uint16_t *path);
+int32_t noctty_d3d11_suspend_presentation(NocttyD3D *d);
 
 NocttyD3DBuffer *noctty_d3d11_buffer_create(NocttyD3D *d, size_t size, uint32_t uniform);
 void noctty_d3d11_buffer_destroy(NocttyD3DBuffer *b);

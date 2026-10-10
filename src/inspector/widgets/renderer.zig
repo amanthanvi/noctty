@@ -8,6 +8,7 @@ const log = std.log.scoped(.inspector_renderer);
 
 /// Renderer information inspector widget.
 pub const Info = struct {
+    backend: [:0]const u8 = "OpenGL",
     features: std.AutoArrayHashMapUnmanaged(
         std.meta.Tag(renderer.Overlay.Feature),
         renderer.Overlay.Feature,
@@ -47,6 +48,8 @@ pub const Info = struct {
         open: bool,
     ) void {
         if (!open) return;
+
+        cimgui.c.ImGui_Text("Active renderer: %s", self.backend.ptr);
 
         cimgui.c.ImGui_SetNextItemOpen(true, cimgui.c.ImGuiCond_Once);
         if (!cimgui.c.ImGui_CollapsingHeader("Overlays", cimgui.c.ImGuiTreeNodeFlags_None)) return;
