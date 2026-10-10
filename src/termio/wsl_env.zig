@@ -138,7 +138,9 @@ fn selectorArgs(alloc: Allocator, argv: []const [:0]const u8) Allocator.Error!?[
         }
         for (selecting) |option| {
             if (!std.mem.eql(u8, arg, option)) continue;
-            if (i + 1 >= argv.len) {
+            // A value cmd.exe expands (`%DISTRO%`, `^`) is not what the launch
+            // gets, and the probe has no shell to expand it.
+            if (i + 1 >= argv.len or std.mem.indexOfAny(u8, argv[i + 1], "%^") != null) {
                 out.deinit(alloc);
                 return null;
             }
@@ -173,21 +175,31 @@ fn probeArgv(alloc: Allocator, argv: []const [:0]const u8, term: []const u8) All
     return try out.toOwnedSlice(alloc);
 }
 
-/// What distributions have answered, by a hash of the probe command line.
-/// Asking costs a `wsl.exe` start, 200 ms or more, and a restored window
-/// opens several tabs at once, so ask once; a probe that times out is a "no"
-/// too, so a hung WSL service stalls one tab and not each in turn. An install
-/// made while noctty runs is therefore seen by the next noctty, not the next
-/// tab.
-var probe_cache: std.AutoHashMapUnmanaged(u64, bool) = .empty;
+/// What distributions have answered, by a hash of the probe command line and
+/// of the variables that steer where the probe looks for terminfo. Asking
+/// costs a `wsl.exe` start, 200 ms or more, and a restored window opens
+/// several tabs at once, so ask once; a probe that times out is a "no" too, so
+/// a hung WSL service stalls one tab and not each in turn. An install made
+/// while noctty runs is therefore seen by the next noctty, not the next tab.
+/// The lock covers the table only: a tab waits for a probe of its own question
+/// and for nothing else.
+const Answer = enum { pending, yes, no };
+var probe_cache: std.AutoHashMapUnmanaged(u64, Answer) = .empty;
 var probe_mutex: std.Thread.Mutex = .{};
+var probe_done: std.Thread.Condition = .{};
 
 /// Whether the distribution that `argv` (a `wsl.exe` launch) starts has a
 /// terminfo entry for `term`, asked of the distribution itself with
 /// `infocmp`, so that its own search path and the launch user's `~/.terminfo`
-/// count. Any failure, including a missing `infocmp` and a timeout, answers
-/// no.
-fn distroHasTerminfo(alloc: Allocator, argv: []const [:0]const u8, term: []const u8) bool {
+/// count. The probe runs in the launch's environment `env`, which decides what
+/// `WSLENV` carries into the distribution (`TERMINFO`, say). Any failure,
+/// including a missing `infocmp` and a timeout, answers no.
+fn distroHasTerminfo(
+    alloc: Allocator,
+    env: *const EnvMap,
+    argv: []const [:0]const u8,
+    term: []const u8,
+) bool {
     if (comptime builtin.os.tag != .windows) return false;
     if (argv.len == 0) return false;
 
@@ -199,24 +211,55 @@ fn distroHasTerminfo(alloc: Allocator, argv: []const [:0]const u8, term: []const
         hasher.update(arg);
         hasher.update(&.{0});
     }
+    for ([_][]const u8{ "WSLENV", "TERMINFO", "TERMINFO_DIRS" }) |name| {
+        hasher.update(env.get(name) orelse "");
+        hasher.update(&.{0});
+    }
     const key = hasher.final();
 
     probe_mutex.lock();
-    defer probe_mutex.unlock();
-    if (probe_cache.get(key)) |answer| return answer;
+    while (true) {
+        const known = probe_cache.get(key) orelse break;
+        switch (known) {
+            .yes => {
+                probe_mutex.unlock();
+                return true;
+            },
+            .no => {
+                probe_mutex.unlock();
+                return false;
+            },
+            // Another tab is asking the same question.
+            .pending => probe_done.wait(&probe_mutex),
+        }
+    }
+    probe_cache.put(std.heap.page_allocator, key, .pending) catch {
+        probe_mutex.unlock();
+        return false;
+    };
+    probe_mutex.unlock();
 
-    const answer = runProbe(alloc, probe) orelse return false;
-    probe_cache.put(std.heap.page_allocator, key, answer) catch {};
-    return answer;
+    const answer = runProbe(alloc, env, probe);
+
+    probe_mutex.lock();
+    defer probe_mutex.unlock();
+    if (answer) |yes| {
+        probe_cache.putAssumeCapacity(key, if (yes) .yes else .no);
+    } else {
+        _ = probe_cache.remove(key);
+    }
+    probe_done.broadcast();
+    return answer orelse false;
 }
 
 /// Run the probe. Null when it did not start, so a later tab may try again.
-fn runProbe(alloc: Allocator, probe: []const []const u8) ?bool {
+fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8) ?bool {
     var child = std.process.Child.init(probe, alloc);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
+    child.env_map = env;
     child.spawn() catch |err| {
         log.warn("terminfo probe did not start err={}", .{err});
         return null;
@@ -246,7 +289,7 @@ pub fn forwardIdentity(env: *EnvMap, include_term: bool) !void {
 /// on the Windows home having the entry and says nothing about the
 /// distribution.
 pub fn forwardProbedTerm(alloc: Allocator, env: *EnvMap, probe: Probe) !void {
-    if (!distroHasTerminfo(alloc, probe.argv, probe.term)) {
+    if (!distroHasTerminfo(alloc, env, probe.argv, probe.term)) {
         log.info("WSL distribution has no terminfo entry for TERM={s}, leaving TERM to wsl.exe", .{probe.term});
         return;
     }
@@ -373,6 +416,7 @@ test "probeArgv keeps the distribution and user selection" {
         .{ .argv = &.{ "wsl.exe", "--shutdown" }, .expected = null },
         .{ .argv = &.{ "wsl.exe", "-d", "Ubuntu", "--update" }, .expected = null },
         .{ .argv = &.{ "wsl.exe", "-d" }, .expected = null },
+        .{ .argv = &.{ "wsl.exe", "-d", "%DISTRO%" }, .expected = null },
     };
     for (cases) |case| {
         const got = (try probeArgv(alloc, case.argv, "xterm-ghostty")) orelse {
