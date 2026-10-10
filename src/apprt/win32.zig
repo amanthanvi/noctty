@@ -3723,6 +3723,9 @@ pub const App = struct {
     // Live-resize state is tracked PER HOST (`Host.is_live_resize`),
     // not per App. Dragging window A must NOT freeze renderer
     // invalidations for unrelated background windows B/C.
+    /// Whether the current core-app tick already spent its one synchronous
+    /// renderer paint. See `rendererTickRepaintMode`.
+    renderer_sync_paint_spent: bool = false,
     /// Cached CF_HTML clipboard format ID — lazy-registered on
     /// first HTML copy. Process-local so one cache per App is
     /// enough; re-registering on every copy is documented as
@@ -4839,8 +4842,16 @@ pub const App = struct {
     }
 
     fn tickCoreApp(self: *App) !void {
+        self.renderer_sync_paint_spent = false;
         try self.core_app.tick(self);
         self.resolveRecoveryStartup();
+    }
+
+    fn rendererRepaintModeThisTick(self: *App, host: ?*const Host) SurfaceRepaintRequestMode {
+        return rendererTickRepaintMode(
+            rendererRepaintRequestMode(host, sys.GetTickCount64()),
+            &self.renderer_sync_paint_spent,
+        );
     }
 
     /// Record this launch as resolved in the startup ledger.
@@ -6949,14 +6960,14 @@ pub const App = struct {
                 return switch (target) {
                     .app => blk: {
                         for (self.windows.items) |surface| {
-                            try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                            try surface.requestRepaintWithMode(self.rendererRepaintModeThisTick(surface.host));
                             surface.drainTerminalAccessibilityOutput();
                             if (surface.terminal_accessibility) |session| session.rendererUpdated();
                         }
                         break :blk true;
                     },
                     .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
-                        try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                        try surface.requestRepaintWithMode(self.rendererRepaintModeThisTick(surface.host));
                         surface.drainTerminalAccessibilityOutput();
                         if (surface.terminal_accessibility) |session| session.rendererUpdated();
                         break :blk true;
@@ -11787,6 +11798,11 @@ const Host = struct {
     scrollbar_timer_active: bool = false,
     resize_settle_timer_active: bool = false,
     resize_settle_repaint_ticks: u8 = 0,
+    /// `GetTickCount64` past which resize-settle paint mode is over even while
+    /// its timer is still armed. WM_TIMER is the lowest-priority message, so a
+    /// busy pump can hold off the timer's last tick indefinitely, and settle
+    /// mode used to last exactly that long.
+    resize_settle_until_ms: u64 = 0,
     structural_history_disposing: bool = false,
     destroy_after_structural_dispose: bool = false,
     structural_undo_entries: win32_structural_history.List(StructuralUndoEntry) = .empty,
@@ -12772,6 +12788,7 @@ const Host = struct {
 
     fn startResizeSettleRepaints(self: *Host) void {
         self.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
+        self.resize_settle_until_ms = sys.GetTickCount64() +| resize_settle_deadline_ms;
         self.ensureResizeSettleTimer();
     }
 
@@ -22545,22 +22562,54 @@ const RendererHealthSurfaceAction = enum {
     recover_with_followup_repaint,
 };
 
-fn surfaceRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
+/// Settle mode normally ends with its timer's last tick. Its 12 ticks of 16 ms
+/// can take about twice that, because at the default 15.6 ms clock resolution
+/// a 16 ms timer fires about every 31 ms, so the deadline only cuts settle
+/// short when a busy pump starves WM_TIMER.
+const resize_settle_deadline_ms: u64 = 2 * @as(u64, c.RESIZE_SETTLE_REPAINT_TICKS) * c.RESIZE_SETTLE_TIMER_INTERVAL_MS;
+
+fn resizeSettleActive(h: *const Host, now_ms: u64) bool {
+    return h.resize_settle_timer_active and now_ms < h.resize_settle_until_ms;
+}
+
+fn surfaceRepaintRequestMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
     const h = host orelse return .queue;
     if (h.is_live_resize.load(.acquire)) return .defer_until_flush;
-    if (h.resize_settle_timer_active) return .update_now;
+    if (resizeSettleActive(h, now_ms)) return .update_now;
     return .queue;
 }
 
-fn rendererRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
-    return surfaceRepaintRequestMode(host);
+fn rendererRepaintRequestMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
+    return surfaceRepaintRequestMode(host, now_ms);
 }
 
-fn surfaceSizeChangeRepaintMode(host: ?*const Host) SurfaceRepaintRequestMode {
-    const h = host orelse return surfaceRepaintRequestMode(null);
+/// Renderer frames reach the UI thread as `redraw_surface` mailbox messages,
+/// and `App.drainMailbox` pops until the mailbox is empty. An `update_now`
+/// paint blocks in SwapBuffers until vblank and only then releases the
+/// surface's repaint reservation, so when a present takes longer than the
+/// renderer's frame interval (a 60 Hz display against the 8 ms animation
+/// timer, or heavy output) the next frame is usually queued before the drain
+/// looks again. With every frame painted synchronously, drains ran back to
+/// back, and each frame also posted a WAKE, which outranks input and WM_TIMER:
+/// the backlog grew faster than the pump retired it, and typing waited for
+/// seconds (#297). One synchronous paint per core-app tick keeps settle mode's
+/// prompt present; later frames in the same tick queue an invalidate, whose
+/// WM_PAINT ranks below input.
+fn rendererTickRepaintMode(
+    mode: SurfaceRepaintRequestMode,
+    sync_paint_spent: *bool,
+) SurfaceRepaintRequestMode {
+    if (mode != .update_now) return mode;
+    if (sync_paint_spent.*) return .queue;
+    sync_paint_spent.* = true;
+    return mode;
+}
+
+fn surfaceSizeChangeRepaintMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
+    const h = host orelse return surfaceRepaintRequestMode(null, now_ms);
     if (h.is_live_resize.load(.acquire)) return .update_now;
-    if (h.resize_settle_timer_active) return .update_now;
-    return surfaceRepaintRequestMode(h);
+    if (resizeSettleActive(h, now_ms)) return .update_now;
+    return surfaceRepaintRequestMode(h, now_ms);
 }
 
 fn surfaceSizeChangePrimesRenderer(repaint_mode: SurfaceRepaintRequestMode) bool {
@@ -29778,7 +29827,7 @@ pub const Surface = struct {
             .recover_with_followup_repaint => {
                 _ = self.beginRendererRepaintRequest();
                 self.renderer_repaint_retry_pending.store(true, .release);
-                self.requestRepaintWithMode(rendererRepaintRequestMode(self.host)) catch |err| {
+                self.requestRepaintWithMode(self.app.rendererRepaintModeThisTick(self.host)) catch |err| {
                     log.warn("win32 renderer health repaint request failed err={}", .{err});
                     return false;
                 };
@@ -29916,7 +29965,7 @@ pub const Surface = struct {
         // enters a drag. Surfaces outside a Host (quick-terminal
         // pre-host-attach, pre-init paint) fall through without
         // gating.
-        const repaint_mode = surfaceRepaintRequestMode(self.host);
+        const repaint_mode = surfaceRepaintRequestMode(self.host, sys.GetTickCount64());
         try self.requestRepaintWithMode(repaint_mode);
     }
 
@@ -32773,7 +32822,7 @@ pub const Surface = struct {
         // guaranteeing a follow-up paint for the newly exposed pixels. Request
         // one from the child itself after `WM_SIZE`, when the default
         // framebuffer and client rect have both advanced to the new size.
-        const repaint_mode = surfaceSizeChangeRepaintMode(self.host);
+        const repaint_mode = surfaceSizeChangeRepaintMode(self.host, sys.GetTickCount64());
         if (surfaceSizeChangePrimesRenderer(repaint_mode)) _ = self.beginRendererRepaintRequest();
         self.requestRepaintWithMode(repaint_mode) catch |err| {
             log.err("win32 size-change repaint request failed err={}", .{err});
@@ -43490,35 +43539,97 @@ test "win32 installer apply args double embedded quotes" {
 test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(null));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(null, 1000));
 
     var host: Host = undefined;
     host.is_live_resize = .init(false);
     host.resize_settle_timer_active = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 0;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(&host, 1000));
 
     host.resize_settle_timer_active = true;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceRepaintRequestMode(&host, 1000));
 
     host.is_live_resize = .init(true);
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, surfaceRepaintRequestMode(&host));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, surfaceRepaintRequestMode(&host, 1000));
 }
 
-test "win32 rendererRepaintRequestMode prefers synchronous paints outside live resize" {
+test "win32 rendererRepaintRequestMode paints synchronously only during resize settle" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(null));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(null, 1000));
 
     var host: Host = undefined;
     host.is_live_resize = .init(false);
     host.resize_settle_timer_active = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 0;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 1000));
 
     host.resize_settle_timer_active = true;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host, 1000));
 
     host.is_live_resize = .init(true);
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererRepaintRequestMode(&host));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererRepaintRequestMode(&host, 1000));
+}
+
+test "win32 resize settle paint mode ends with its timer or at its deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var host: Host = undefined;
+    host.hwnd = null;
+    host.is_live_resize = .init(false);
+    host.resize_settle_timer_active = false;
+    const start_ms = sys.GetTickCount64();
+    host.startResizeSettleRepaints();
+    try std.testing.expect(host.resize_settle_until_ms >= start_ms + resize_settle_deadline_ms);
+    try std.testing.expect(host.resize_settle_until_ms <= sys.GetTickCount64() + resize_settle_deadline_ms);
+
+    // The timer's last tick ends settle mode before the deadline.
+    host.resize_settle_timer_active = false;
+    host.resize_settle_until_ms = 5000;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 4999));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceSizeChangeRepaintMode(&host, 4999));
+
+    // A busy pump delays WM_TIMER, so the timer can still be armed, with
+    // repaint ticks left, after the deadline has passed.
+    host.resize_settle_timer_active = true;
+    host.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
+    host.resize_settle_until_ms = 5000;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host, 4999));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 5000));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceSizeChangeRepaintMode(&host, 4999));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceSizeChangeRepaintMode(&host, 5000));
+}
+
+test "win32 a core-app tick spends at most one synchronous renderer paint" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var spent = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.queue, &spent));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererTickRepaintMode(.defer_until_flush, &spent));
+    try std.testing.expect(!spent);
+
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererTickRepaintMode(.update_now, &spent));
+    try std.testing.expect(spent);
+    // Every later settle-mode frame in the same tick queues, so the pump can
+    // reach input before it paints again.
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.update_now, &spent));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.update_now, &spent));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererTickRepaintMode(.defer_until_flush, &spent));
+
+    // The App's per-tick budget, as `tickCoreApp` resets it for each tick.
+    var host: Host = undefined;
+    host.is_live_resize = .init(false);
+    host.resize_settle_timer_active = true;
+    host.resize_settle_until_ms = std.math.maxInt(u64);
+    var app: App = undefined;
+    app.renderer_sync_paint_spent = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, app.rendererRepaintModeThisTick(&host));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, app.rendererRepaintModeThisTick(&host));
+    app.renderer_sync_paint_spent = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, app.rendererRepaintModeThisTick(&host));
 }
 
 test "win32 renderer health policy recovers unhealthy frames and clears healthy state" {
@@ -43745,28 +43856,30 @@ test "win32 surface size-change repaint stays synchronous during live resize" {
 
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.queue,
-        surfaceSizeChangeRepaintMode(null),
+        surfaceSizeChangeRepaintMode(null, 1000),
     );
 
     var host: Host = undefined;
     host.is_live_resize = .init(false);
     host.resize_settle_timer_active = false;
+    host.resize_settle_until_ms = 0;
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.queue,
-        surfaceSizeChangeRepaintMode(&host),
+        surfaceSizeChangeRepaintMode(&host, 1000),
     );
 
     host.resize_settle_timer_active = true;
+    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.update_now,
-        surfaceSizeChangeRepaintMode(&host),
+        surfaceSizeChangeRepaintMode(&host, 1000),
     );
 
     host.resize_settle_timer_active = false;
     host.is_live_resize = .init(true);
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.update_now,
-        surfaceSizeChangeRepaintMode(&host),
+        surfaceSizeChangeRepaintMode(&host, 1000),
     );
 
     try std.testing.expect(!surfaceSizeChangePrimesRenderer(.queue));
