@@ -970,11 +970,15 @@ const Subprocess = struct {
 
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
-            const default_shell_command: configpkg.Command =
+            const configured_shell_command: configpkg.Command =
                 cfg.command orelse switch (builtin.os.tag) {
                     .windows => try windows_shell.previewCommand(alloc),
                     else => .{ .shell = "sh" },
                 };
+            const default_shell_command = if (builtin.os.tag == .windows)
+                try windows_shell.executableCommand(alloc, configured_shell_command)
+            else
+                configured_shell_command;
 
             // Always set up shell features (GHOSTTY_SHELL_FEATURES). These are
             // used by both automatic and manual shell integrations.

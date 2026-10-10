@@ -4,7 +4,13 @@
 
   # Clean up XDG_DATA_DIRS by removing GHOSTTY_SHELL_INTEGRATION_XDG_DIR
   if (and (has-env GHOSTTY_SHELL_INTEGRATION_XDG_DIR) (has-env XDG_DATA_DIRS)) {
-    set-env XDG_DATA_DIRS (str:replace $E:GHOSTTY_SHELL_INTEGRATION_XDG_DIR":" "" $E:XDG_DATA_DIRS)
+    var separator = ':'
+    if $platform:is-windows { set separator = ';' }
+    if (eq $E:XDG_DATA_DIRS $E:GHOSTTY_SHELL_INTEGRATION_XDG_DIR) {
+      unset-env XDG_DATA_DIRS
+    } else {
+      set-env XDG_DATA_DIRS (str:replace $E:GHOSTTY_SHELL_INTEGRATION_XDG_DIR$separator "" $E:XDG_DATA_DIRS)
+    }
     unset-env GHOSTTY_SHELL_INTEGRATION_XDG_DIR
   }
 

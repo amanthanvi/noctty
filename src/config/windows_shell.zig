@@ -229,6 +229,63 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
     };
 }
 
+/// Config string quoting is removed before Command parsing. Recover a whole
+/// executable path before splitting it, while preserving actual cmd strings.
+/// The result may borrow command; new argv storage belongs to the arena.
+pub fn executableCommand(alloc: Allocator, command: Command) !Command {
+    if (builtin.os.tag != .windows or command == .direct) return command;
+    var path = std.mem.trim(u8, command.shell, " \t");
+    if (path.len >= 2 and path[0] == '"' and path[path.len - 1] == '"')
+        path = path[1 .. path.len - 1];
+    // A relative executable is resolved against the pane's cwd by cmd, not
+    // the app's cwd used by this probe and lpApplicationName. Keep that
+    // existing contract, including drive-relative and root-relative values.
+    if (path.len < 3 or !std.ascii.isAlphabetic(path[0]) or path[1] != ':' or
+        (path[2] != '\\' and path[2] != '/')) return command;
+    const ext = std.fs.path.extension(path);
+    if (!std.ascii.eqlIgnoreCase(ext, ".exe") and
+        !std.ascii.eqlIgnoreCase(ext, ".com")) return command;
+    // Screen these before statFile opens anything. A command value must not
+    // introduce a network timeout on the terminal's startup path.
+    if (internal_os.path.isNetworkOrDevicePath(path)) return command;
+    if (internal_os.windows.driveTypeForLetter(path[0]) == internal_os.windows.DRIVE_REMOTE)
+        return command;
+    const stat = std.fs.cwd().statFile(path) catch return command;
+    if (stat.kind != .file) return command;
+    const argv = try alloc.alloc([:0]const u8, 1);
+    errdefer alloc.free(argv);
+    argv[0] = try alloc.dupeZ(u8, path);
+    return .{ .direct = argv };
+}
+
+test "PKG08 whole executable path with spaces launches directly" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("PowerShell 7");
+    const exe = try tmp.dir.createFile("PowerShell 7/pwsh.exe", .{});
+    exe.close();
+    const path = try tmp.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
+    const input: Command = .{ .shell = try alloc.dupeZ(u8, path) };
+    const result = try prepareCommandWithLookup(std.testing.allocator, input, null, false, false, lookupExecutable);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result == .direct);
+    try std.testing.expectEqual(@as(usize, 1), result.direct.len);
+    try std.testing.expectEqualStrings(path, result.direct[0]);
+    const current = try std.process.getCwdAlloc(alloc);
+    const relative = try std.fs.path.relative(alloc, current, path);
+    const relative_input: Command = .{ .shell = try alloc.dupeZ(u8, relative) };
+    const preserved = try executableCommand(alloc, relative_input);
+    try std.testing.expect(preserved == .shell);
+    try std.testing.expectEqualStrings(relative, preserved.shell);
+    for ([_][:0]const u8{ "C:pwsh.exe", "\\pwsh.exe", "\\\\server\\share\\pwsh.exe" }) |value| {
+        try std.testing.expect((try executableCommand(alloc, .{ .shell = value })) == .shell);
+    }
+}
+
 /// Prepare a command for Windows spawning. This applies the guarded UTF-8
 /// preamble to payload-free cmd launches and translates WSL working
 /// directories into `wsl.exe --cd ...` without paying a shell trampoline cost.
@@ -376,12 +433,14 @@ fn currentWindowsDirectory(alloc: Allocator) !?[]const u8 {
 
 fn prepareCommandWithLookup(
     alloc: Allocator,
-    command: Command,
+    command_: Command,
     cwd: ?[]const u8,
     working_directory_home: bool,
     utf8_console: bool,
     lookup: anytype,
 ) !Command {
+    const command = try executableCommand(alloc, command_);
+    defer if (command_ == .shell and command == .direct) command.deinit(alloc);
     if (utf8_console) {
         if (try prepareCmdUtf8(alloc, command)) |prepared| return prepared;
     }
