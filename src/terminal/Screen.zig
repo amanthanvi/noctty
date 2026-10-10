@@ -1391,6 +1391,42 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
 pub inline fn scrollClear(self: *Screen) !void {
     defer self.assertIntegrity();
 
+    // The cursor style and hyperlink IDs belong to the cursor's page. The
+    // growth below pushes the cursor row into scrollback, where the
+    // scrollback limit can prune that very page, and PageList then moves
+    // the cursor pin to the new first page: the IDs are gone with the old
+    // page and the new one never held them. Release both first and add
+    // them back on the cursor's final page, as resize does, keeping the
+    // hyperlink's own ID.
+    const cursor_style = self.cursor.style;
+    self.cursor.style = .{};
+    self.manualStyleUpdate() catch unreachable;
+    const cursor_hyperlink = self.cursor.hyperlink;
+    if (cursor_hyperlink != null) {
+        const page = &self.cursor.page_pin.node.data;
+        page.hyperlink_set.release(page.memory, self.cursor.hyperlink_id);
+        self.cursor.hyperlink_id = 0;
+        self.cursor.hyperlink = null;
+    }
+    defer {
+        self.cursor.style = cursor_style;
+        self.manualStyleUpdate() catch |err| {
+            log.err("failed to restore style on scroll clear err={}", .{err});
+            self.cursor.style = .{};
+            self.cursor.style_id = style.default_id;
+        };
+        if (cursor_hyperlink) |link| {
+            self.startHyperlinkLink(link.*) catch |err| {
+                log.err("failed to restore hyperlink on scroll clear err={}", .{err});
+            };
+            link.deinit(self.alloc);
+            self.alloc.destroy(link);
+        }
+    }
+
+    // A grow that fails partway can still have moved the cursor pin.
+    errdefer self.cursorReload();
+
     try self.pages.scrollClear();
     self.cursorReload();
 
@@ -2368,6 +2404,15 @@ pub fn startHyperlink(
         .implicit => self.cursor.hyperlink_implicit_id -= 1,
     };
 
+    try self.startHyperlinkLink(link);
+}
+
+/// Start the hyperlink state for an existing hyperlink, keeping its ID
+/// (explicit or implicit), and grow the page as needed to fit it.
+fn startHyperlinkLink(
+    self: *Screen,
+    link: hyperlink.Hyperlink,
+) PageList.IncreaseCapacityError!void {
     // Loop until we have enough page memory to add the hyperlink
     while (true) {
         if (self.startHyperlinkOnce(link)) {
@@ -3924,6 +3969,107 @@ test "Screen scrollClear across pages migrates cursor style and hyperlink" {
     ));
 
     // Printing attaches the migrated style and hyperlink to a cell.
+    try s.testWriteString("B");
+}
+
+// scrollClear pushes the cursor row into scrollback. With a small
+// scrollback limit, the same growth can then prune and reuse the page the
+// cursor is on, taking the cursor's style and hyperlink entries with it,
+// and PageList moves the tracked cursor pin to the new first page. There
+// is no old page left to release the IDs from, and the new page never
+// held them.
+test "Screen scrollClear that prunes the cursor page keeps cursor style and hyperlink live" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Wide rows make each page hold barely more than one screen, and the
+    // minimum scrollback allows only one page besides the active area.
+    var s = try init(alloc, .{ .cols = 2000, .rows = 20, .max_scrollback = 1 });
+    defer s.deinit();
+    const page_rows = s.pages.pages.first.?.data.capacity.rows;
+    try testing.expect(page_rows > 20 and page_rows < 40);
+
+    // Write a row of text on every line until the second page holds half
+    // the active area, so the active top-left is on the first page.
+    for (0..page_rows + 9) |_| try s.testWriteString("x\n");
+    try s.testWriteString("x");
+    try testing.expectEqual(@as(usize, 2), s.pages.totalPages());
+
+    s.cursorAbsolute(0, 0);
+    const old_first = s.pages.pages.first.?;
+    try testing.expect(s.cursor.page_pin.node == old_first);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", null);
+    const implicit_id = s.cursor.hyperlink.?.id.implicit;
+
+    try s.scrollClear();
+
+    // The growth pruned the page the cursor was on, and the new active
+    // top-left is on the page the cursor pin was moved to.
+    try testing.expect(s.pages.pages.first.? != old_first);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expect(page.styles.refCount(page.memory, s.cursor.style_id) > 0);
+    try testing.expect(page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ) > 0);
+
+    // The link keeps its implicit ID, so it stays one link across the clear.
+    try testing.expectEqual(implicit_id, s.cursor.hyperlink.?.id.implicit);
+
+    // Printing attaches the style and hyperlink to a cell.
+    try s.testWriteString("B");
+}
+
+// The other shape of the prune above: an under-filled page between the
+// pruned page and the active area means the new active top-left is not
+// on the page the cursor pin was moved to.
+test "Screen scrollClear that prunes the cursor page before a partial page" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 2000, .rows = 20, .max_scrollback = 1 });
+    defer s.deinit();
+    const page_rows = s.pages.pages.first.?.data.capacity.rows;
+    try testing.expect(page_rows > 20 and page_rows < 40);
+    for (0..page_rows + 9) |_| try s.testWriteString("x\n");
+    try s.testWriteString("x");
+
+    // Split the second page so a three-row page sits in the middle.
+    try s.pages.split(.{ .node = s.pages.pages.last.?, .y = 3 });
+    s.cursorReload();
+    const middle = s.pages.pages.first.?.next.?;
+
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", "explicit-id");
+
+    try s.scrollClear();
+
+    // The cursor's page was pruned, the pin was moved to the middle page,
+    // and the cursor ended up on a later page.
+    try testing.expect(s.pages.pages.first.? == middle);
+    try testing.expect(s.cursor.page_pin.node != middle);
+
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expect(page.styles.refCount(page.memory, s.cursor.style_id) > 0);
+    try testing.expect(page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ) > 0);
+    try testing.expectEqualStrings(
+        "explicit-id",
+        s.cursor.hyperlink.?.id.explicit,
+    );
+
+    // Printing attaches the style and hyperlink to a cell.
     try s.testWriteString("B");
 }
 
