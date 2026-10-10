@@ -155,7 +155,10 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $case.recreationDiff = [RendererNative]::Diff($case.initial.path, $case.recreated.path, (Join-Path $run 'recreation-diff.png')) | ConvertFrom-Json
             if ($case.recreationDiff.different -ne 0) { throw 'Device recreation changed pixels.' }
             $rect = New-Object RendererNative+RECT; [void][RendererNative]::GetWindowRect($hostWindow, [ref]$rect)
-            [void][RendererNative]::Resize($hostWindow, $rect.r - $rect.l + 100, $rect.b - $rect.t + 60)
+            # Shrink rather than grow: Windows clamps a window that would exceed
+            # the desktop, and CI runners' displays can be smaller than the
+            # fixture window, so a growing resize left the width unchanged there.
+            [void][RendererNative]::Resize($hostWindow, $rect.r - $rect.l - 100, $rect.b - $rect.t - 60)
             Start-Sleep -Milliseconds 250
             $case.resized = & $capture 'resized'
             if ($case.resized.pixels.width -eq $case.initial.pixels.width -or $case.resized.pixels.height -eq $case.initial.pixels.height) { throw 'Resize did not change physical render-target dimensions.' }
