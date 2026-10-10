@@ -13,9 +13,59 @@ protocol coverage validated on the Win32 runtime, see
   `kernel32` import, so an earlier build refuses to start the process rather
   than degrading.
 - Native Win32 application runtime.
-- OpenGL 4.3 or newer through WGL.
+- OpenGL 4.3 or newer through WGL for the default renderer; the opt-in D3D11
+  beta needs feature level 11.0 and can use WARP software rendering.
 - `libghostty-vt` stays portable as a library. This repository does not
   ship macOS, Linux, GTK, Wayland, or X11 app runtimes.
+
+## D3D11 renderer beta
+
+OpenGL remains the default. A normal Windows build includes both renderers.
+To opt in, add this to your config and open a new window, tab, or split:
+
+```ini
+renderer = d3d11
+```
+
+D3D11 first tries hardware, then Microsoft's WARP software renderer if a
+capable hardware device cannot be created. An unavailable D3D11 runtime or
+failed software initialization falls back to OpenGL and logs the reason.
+`renderer = d3d11-warp` selects WARP explicitly for driver diagnostics;
+`renderer = opengl` restores the default for newly created surfaces. Changing
+the backend preference does not interrupt an existing terminal session.
+
+Custom shaders, background images, Kitty graphics, and generated image
+overlays use OpenGL in this beta. Configured shaders/images select OpenGL at
+startup; enabling them on reload or receiving terminal image content switches
+that surface to OpenGL while preserving its terminal and search state. The
+surface stays on OpenGL for its lifetime after fallback. GLSL support still
+depends on a build with custom shader support, as it does for the default
+renderer. OpenGL fallback needs a working OpenGL 4.3 driver.
+
+Device removal/reset triggers resource reconstruction and re-uploads retained
+atlas/buffer data. Recovery allows one hardware retry, then WARP; failed WARP
+reconstruction falls back to OpenGL. Hardware resource or presentation errors
+also get a bounded WARP attempt. Presentation follows the existing Win32 UI
+thread paint and power-saver policy. Occluded frames keep their render target
+and probe presentation at most four times per second while visible; hidden
+tabs and minimized windows suspend the renderer's draw timer.
+
+Known limits: WARP can consume substantially more CPU under heavy output.
+Its blend quantization can differ from hardware/OpenGL at glyph edges by up
+to four channel levels in the default corrected-linear mode. D3D11 does not
+add DirectComposition, per-pixel translucency, or custom HLSL effects. Existing
+whole-window opacity remains the Win32 host's policy. GPU loss injection in
+the automated harness tests the recovery path, rather than a physical GPU
+reset. Hidden-desktop readback proves rendered pixels, and does not prove DWM
+composition, scanout, unoccluded frame latency, monitor hotplug, or RDP behavior.
+
+Developers can build with `-Dd3d11=false` to omit the beta backend. GPU parity
+and recovery tests require `-Drenderer-test-tools=true`; those readback and
+fault-injection controls are absent from normal builds. Run
+`test/windows/renderer/Invoke-RendererParity.ps1` against the resulting
+executable; it copies a portable run, redirects app data, and uses a hidden
+desktop. On ARM64/hosts without a suitable OpenGL driver, `-WarpOnly` runs the
+software-rendering lifecycle smoke without claiming cross-backend parity.
 
 ## Install modes
 

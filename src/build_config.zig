@@ -45,6 +45,8 @@ pub const font_backend: FontBackend = config.font_backend;
 pub const renderer: RendererBackend = config.renderer;
 pub const i18n: bool = config.i18n;
 pub const custom_shaders: bool = config.custom_shaders;
+pub const d3d11: bool = config.d3d11;
+pub const renderer_test_tools: bool = config.renderer_test_tools;
 
 /// Stable application identifier used by the Windows-only fork for
 /// instance naming and shared resource identity. It remains hardcoded

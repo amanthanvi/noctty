@@ -156,6 +156,26 @@ jobs:
             throw "Default source build did not report disabled custom shaders."
           }
 
+      - name: Build D3D11 lifecycle smoke tools
+        shell: pwsh
+        timeout-minutes: 20
+        run: zig build -Doptimize=ReleaseFast -Dcustom-shaders=true -Dd3d11=true -Drenderer-test-tools=true --prefix renderer-smoke --summary all
+
+      - name: Hidden-desktop x64 WARP lifecycle smoke
+        shell: pwsh
+        timeout-minutes: 10
+        # Hosted runners need not have an OpenGL 4.3 driver. Local hardware
+        # parity uses the same harness without -WarpOnly.
+        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/noctty.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
+
+      - name: Upload x64 renderer evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: renderer-x64-${{ github.run_id }}
+          path: renderer-smoke/evidence
+          if-no-files-found: ignore
+
       - name: Build ARM64 executable
         env:
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache

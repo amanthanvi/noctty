@@ -362,6 +362,19 @@ pub fn add(
     step.addIncludePath(b.path("src/stb"));
     step.addCSourceFiles(.{ .files = &.{"src/stb/stb.c"} });
 
+    if (self.config.renderer_test_tools and target.result.os.tag == .windows) {
+        step.addCSourceFile(.{ .file = b.path("src/renderer/readback.c"), .flags = &.{} });
+    }
+    if (self.config.d3d11) {
+        step.addCSourceFile(.{
+            .file = b.path("src/renderer/d3d11/bridge.c"),
+            .flags = if (self.config.renderer_test_tools)
+                &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=1" }
+            else
+                &.{ "-std=c11", "-DCOBJMACROS", "-DNOCTTY_RENDERER_TEST_TOOLS=0" },
+        });
+    }
+
     // libcpp is required for various dependencies. On MSVC, we must
     // not use linkLibCpp because Zig unconditionally passes -nostdinc++
     // and then adds its bundled libc++/libc++abi include paths, which

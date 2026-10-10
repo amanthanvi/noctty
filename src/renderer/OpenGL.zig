@@ -126,7 +126,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
         .rt_surface = opts.rt_surface,
         .vsync_enabled = opts.config.vsync,
         .default_framebuffer = default_framebuffer.framebuffer,
-        .default_framebuffer_srgb = default_framebuffer.srgb,
+        .default_framebuffer_srgb = default_framebuffer.srgb and !build_config.renderer_test_tools,
     };
 }
 
@@ -598,6 +598,33 @@ pub fn present(self: *OpenGL, target: Target) !void {
 pub fn presentLastTarget(self: *OpenGL) !void {
     if (self.last_target) |target| try self.present(target);
 }
+
+/// Test-only PrintWindow transport, compiled with -Drenderer-test-tools=true.
+pub fn capture(self: *OpenGL, hdc: *anyopaque) !void {
+    if (!build_config.renderer_test_tools) return error.TestToolsDisabled;
+    const target = self.last_target orelse return error.NoCapturedFrame;
+    const pixels = try self.alloc.alloc(u8, target.width * target.height * 4);
+    defer self.alloc.free(pixels);
+    var previous_framebuffer: gl.c.GLint = 0;
+    var previous_buffer: gl.c.GLint = 0;
+    gl.glad.context.GetIntegerv.?(gl.c.GL_READ_FRAMEBUFFER_BINDING, &previous_framebuffer);
+    gl.glad.context.GetIntegerv.?(gl.c.GL_READ_BUFFER, &previous_buffer);
+    defer {
+        gl.glad.context.BindFramebuffer.?(gl.c.GL_READ_FRAMEBUFFER, @intCast(previous_framebuffer));
+        gl.glad.context.ReadBuffer.?(@intCast(previous_buffer));
+    }
+    gl.glad.context.BindFramebuffer.?(gl.c.GL_READ_FRAMEBUFFER, target.framebuffer.id);
+    gl.glad.context.ReadBuffer.?(if (target.storage == .offscreen) gl.c.GL_COLOR_ATTACHMENT0 else gl.c.GL_FRONT);
+    gl.glad.context.ReadPixels.?(0, 0, @intCast(target.width), @intCast(target.height), gl.c.GL_RGBA, gl.c.GL_UNSIGNED_BYTE, pixels.ptr);
+    try gl.errors.getError();
+    log.info("renderer readback storage={s} framebuffer={d} first_pixel={d},{d},{d},{d}", .{
+        @tagName(target.storage), target.framebuffer.id, pixels[0], pixels[1], pixels[2], pixels[3],
+    });
+    if (noctty_renderer_blit(hdc, pixels.ptr, @intCast(target.width), @intCast(target.height), 1) == 0)
+        return error.CaptureBlitFailed;
+}
+
+extern fn noctty_renderer_blit(*anyopaque, [*]u8, u32, u32, c_int) c_int;
 
 /// Returns the options to use when constructing buffers.
 pub inline fn bufferOptions(self: OpenGL) bufferpkg.Options {

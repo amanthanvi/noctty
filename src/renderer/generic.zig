@@ -19,8 +19,7 @@ const constraintWidth = cellpkg.constraintWidth;
 const isCovering = cellpkg.isCovering;
 const rowNeverExtendBg = @import("row.zig").neverExtendBg;
 const Overlay = @import("Overlay.zig");
-const imagepkg = @import("image.zig");
-const ImageState = imagepkg.State;
+
 const shadertoy = if (build_config.custom_shaders)
     @import("shadertoy.zig")
 else
@@ -121,15 +120,145 @@ test "renderer target recreation tracks custom shader presence" {
 ///
 /// [ Texture ] - An abstraction over a GPU texture.
 ///
+pub const CommonDerivedConfig = struct {
+    const DerivedConfig = @This();
+    renderer_backend: configpkg.Config.RendererBackend = .opengl,
+    arena: ArenaAllocator,
+
+    font_thicken: bool,
+    font_thicken_strength: u8,
+    font_features: std.ArrayListUnmanaged([:0]const u8),
+    font_styles: font.CodepointResolver.StyleStatus,
+    font_shaping_break: configpkg.FontShapingBreak,
+    cursor_color: ?configpkg.Config.TerminalColor,
+    cursor_opacity: f64,
+    cursor_text: ?configpkg.Config.TerminalColor,
+    background: terminal.color.RGB,
+    background_opacity: f64,
+    background_opacity_cells: bool,
+    foreground: terminal.color.RGB,
+    selection_background: ?configpkg.Config.TerminalColor,
+    selection_foreground: ?configpkg.Config.TerminalColor,
+    search_background: configpkg.Config.TerminalColor,
+    search_foreground: configpkg.Config.TerminalColor,
+    search_selected_background: configpkg.Config.TerminalColor,
+    search_selected_foreground: configpkg.Config.TerminalColor,
+    bold_color: ?terminal.Style.BoldColor,
+    faint_opacity: u8,
+    min_contrast: f32,
+    padding_color: configpkg.WindowPaddingColor,
+    custom_shaders: configpkg.RepeatablePath,
+    bg_image: ?configpkg.Path,
+    bg_image_opacity: f32,
+    bg_image_position: configpkg.BackgroundImagePosition,
+    bg_image_fit: configpkg.BackgroundImageFit,
+    bg_image_repeat: bool,
+    links: link.Set,
+    vsync: bool,
+    colorspace: configpkg.Config.WindowColorspace,
+    blending: configpkg.Config.AlphaBlending,
+    background_blur: configpkg.Config.BackgroundBlur,
+    scroll_to_bottom_on_output: bool,
+
+    pub fn init(
+        alloc_gpa: Allocator,
+        config: *const configpkg.Config,
+    ) !DerivedConfig {
+        var arena = ArenaAllocator.init(alloc_gpa);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+
+        // Copy our shaders
+        const custom_shaders = try config.@"custom-shader".clone(alloc);
+
+        // Copy our background image
+        const bg_image =
+            if (config.@"background-image") |bg|
+                try bg.clone(alloc)
+            else
+                null;
+
+        // Copy our font features
+        const font_features = try config.@"font-feature".clone(alloc);
+
+        // Get our font styles
+        var font_styles = font.CodepointResolver.StyleStatus.initFill(true);
+        font_styles.set(.bold, config.@"font-style-bold" != .false);
+        font_styles.set(.italic, config.@"font-style-italic" != .false);
+        font_styles.set(.bold_italic, config.@"font-style-bold-italic" != .false);
+
+        // Our link configs
+        const links = try link.Set.fromConfigWithUrl(
+            alloc,
+            config.link.links.items,
+            config.@"link-url",
+        );
+
+        return .{
+            .renderer_backend = config.renderer,
+            .background_opacity = @max(0, @min(1, config.@"background-opacity")),
+            .background_opacity_cells = config.@"background-opacity-cells",
+            .font_thicken = config.@"font-thicken",
+            .font_thicken_strength = config.@"font-thicken-strength",
+            .font_features = font_features.list,
+            .font_styles = font_styles,
+            .font_shaping_break = config.@"font-shaping-break",
+
+            .cursor_color = config.@"cursor-color",
+            .cursor_text = config.@"cursor-text",
+            .cursor_opacity = @max(0, @min(1, config.@"cursor-opacity")),
+
+            .background = config.background.toTerminalRGB(),
+            .foreground = config.foreground.toTerminalRGB(),
+            .bold_color = if (config.@"bold-color") |b| b.toTerminal() else null,
+            .faint_opacity = @intFromFloat(@ceil(config.@"faint-opacity" * 255)),
+
+            .min_contrast = @floatCast(config.@"minimum-contrast"),
+            .padding_color = config.@"window-padding-color",
+
+            .selection_background = config.@"selection-background",
+            .selection_foreground = config.@"selection-foreground",
+            .search_background = config.@"search-background",
+            .search_foreground = config.@"search-foreground",
+            .search_selected_background = config.@"search-selected-background",
+            .search_selected_foreground = config.@"search-selected-foreground",
+
+            .custom_shaders = custom_shaders,
+            .bg_image = bg_image,
+            .bg_image_opacity = config.@"background-image-opacity",
+            .bg_image_position = config.@"background-image-position",
+            .bg_image_fit = config.@"background-image-fit",
+            .bg_image_repeat = config.@"background-image-repeat",
+            .links = links,
+            .vsync = config.@"window-vsync",
+            .colorspace = config.@"window-colorspace",
+            .blending = config.@"alpha-blending",
+            .background_blur = config.@"background-blur",
+            .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
+            .arena = arena,
+        };
+    }
+
+    pub fn deinit(self: *DerivedConfig) void {
+        const alloc = self.arena.allocator();
+        self.links.deinit(alloc);
+        self.arena.deinit();
+    }
+};
+
+pub const CommonFrameUpdate = struct {
+    cursor_blinking: bool,
+    output_progress: ?renderer.State.OutputProgress = null,
+};
+
 pub fn Renderer(comptime GraphicsAPI: type) type {
+    const imagepkg = @import("image.zig").ForAPI(GraphicsAPI);
+    const ImageState = imagepkg.State;
     return struct {
         const Self = @This();
 
         pub const API = GraphicsAPI;
-        pub const FrameUpdate = struct {
-            cursor_blinking: bool,
-            output_progress: ?renderer.State.OutputProgress = null,
-        };
+        pub const FrameUpdate = CommonFrameUpdate;
 
         const Target = GraphicsAPI.Target;
         const Buffer = GraphicsAPI.Buffer;
@@ -584,128 +713,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The configuration for this renderer that is derived from the main
         /// configuration. This must be exported so that we don't need to
         /// pass around Config pointers which makes memory management a pain.
-        pub const DerivedConfig = struct {
-            arena: ArenaAllocator,
-
-            font_thicken: bool,
-            font_thicken_strength: u8,
-            font_features: std.ArrayListUnmanaged([:0]const u8),
-            font_styles: font.CodepointResolver.StyleStatus,
-            font_shaping_break: configpkg.FontShapingBreak,
-            cursor_color: ?configpkg.Config.TerminalColor,
-            cursor_opacity: f64,
-            cursor_text: ?configpkg.Config.TerminalColor,
-            background: terminal.color.RGB,
-            background_opacity: f64,
-            background_opacity_cells: bool,
-            foreground: terminal.color.RGB,
-            selection_background: ?configpkg.Config.TerminalColor,
-            selection_foreground: ?configpkg.Config.TerminalColor,
-            search_background: configpkg.Config.TerminalColor,
-            search_foreground: configpkg.Config.TerminalColor,
-            search_selected_background: configpkg.Config.TerminalColor,
-            search_selected_foreground: configpkg.Config.TerminalColor,
-            bold_color: ?terminal.Style.BoldColor,
-            faint_opacity: u8,
-            min_contrast: f32,
-            padding_color: configpkg.WindowPaddingColor,
-            custom_shaders: configpkg.RepeatablePath,
-            bg_image: ?configpkg.Path,
-            bg_image_opacity: f32,
-            bg_image_position: configpkg.BackgroundImagePosition,
-            bg_image_fit: configpkg.BackgroundImageFit,
-            bg_image_repeat: bool,
-            links: link.Set,
-            vsync: bool,
-            colorspace: configpkg.Config.WindowColorspace,
-            blending: configpkg.Config.AlphaBlending,
-            background_blur: configpkg.Config.BackgroundBlur,
-            scroll_to_bottom_on_output: bool,
-
-            pub fn init(
-                alloc_gpa: Allocator,
-                config: *const configpkg.Config,
-            ) !DerivedConfig {
-                var arena = ArenaAllocator.init(alloc_gpa);
-                errdefer arena.deinit();
-                const alloc = arena.allocator();
-
-                // Copy our shaders
-                const custom_shaders = try config.@"custom-shader".clone(alloc);
-
-                // Copy our background image
-                const bg_image =
-                    if (config.@"background-image") |bg|
-                        try bg.clone(alloc)
-                    else
-                        null;
-
-                // Copy our font features
-                const font_features = try config.@"font-feature".clone(alloc);
-
-                // Get our font styles
-                var font_styles = font.CodepointResolver.StyleStatus.initFill(true);
-                font_styles.set(.bold, config.@"font-style-bold" != .false);
-                font_styles.set(.italic, config.@"font-style-italic" != .false);
-                font_styles.set(.bold_italic, config.@"font-style-bold-italic" != .false);
-
-                // Our link configs
-                const links = try link.Set.fromConfigWithUrl(
-                    alloc,
-                    config.link.links.items,
-                    config.@"link-url",
-                );
-
-                return .{
-                    .background_opacity = @max(0, @min(1, config.@"background-opacity")),
-                    .background_opacity_cells = config.@"background-opacity-cells",
-                    .font_thicken = config.@"font-thicken",
-                    .font_thicken_strength = config.@"font-thicken-strength",
-                    .font_features = font_features.list,
-                    .font_styles = font_styles,
-                    .font_shaping_break = config.@"font-shaping-break",
-
-                    .cursor_color = config.@"cursor-color",
-                    .cursor_text = config.@"cursor-text",
-                    .cursor_opacity = @max(0, @min(1, config.@"cursor-opacity")),
-
-                    .background = config.background.toTerminalRGB(),
-                    .foreground = config.foreground.toTerminalRGB(),
-                    .bold_color = if (config.@"bold-color") |b| b.toTerminal() else null,
-                    .faint_opacity = @intFromFloat(@ceil(config.@"faint-opacity" * 255)),
-
-                    .min_contrast = @floatCast(config.@"minimum-contrast"),
-                    .padding_color = config.@"window-padding-color",
-
-                    .selection_background = config.@"selection-background",
-                    .selection_foreground = config.@"selection-foreground",
-                    .search_background = config.@"search-background",
-                    .search_foreground = config.@"search-foreground",
-                    .search_selected_background = config.@"search-selected-background",
-                    .search_selected_foreground = config.@"search-selected-foreground",
-
-                    .custom_shaders = custom_shaders,
-                    .bg_image = bg_image,
-                    .bg_image_opacity = config.@"background-image-opacity",
-                    .bg_image_position = config.@"background-image-position",
-                    .bg_image_fit = config.@"background-image-fit",
-                    .bg_image_repeat = config.@"background-image-repeat",
-                    .links = links,
-                    .vsync = config.@"window-vsync",
-                    .colorspace = config.@"window-colorspace",
-                    .blending = config.@"alpha-blending",
-                    .background_blur = config.@"background-blur",
-                    .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
-                    .arena = arena,
-                };
-            }
-
-            pub fn deinit(self: *DerivedConfig) void {
-                const alloc = self.arena.allocator();
-                self.links.deinit(alloc);
-                self.arena.deinit();
-            }
-        };
+        pub const DerivedConfig = CommonDerivedConfig;
 
         pub fn init(alloc: Allocator, options: renderer.Options) !Self {
             // Initialize our graphics API wrapper, this will prepare the
@@ -853,6 +861,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.deinitInternal(true);
+        }
+
+        /// Used after a backend replacement adopts the same config arena.
+        pub fn deinitAfterBackendSwitch(self: *Self) void {
+            self.deinitInternal(false);
+        }
+
+        fn deinitInternal(self: *Self, free_config: bool) void {
             if (self.overlay) |*overlay| overlay.deinit(self.alloc);
             self.terminal_state.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
@@ -871,7 +888,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
 
-            self.config.deinit();
+            if (free_config) self.config.deinit();
 
             self.images.deinit(self.alloc);
 
@@ -1577,6 +1594,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Conditions under which we need to draw the frame, otherwise we
             // don't need to since the previous frame should be identical.
             const needs_redraw =
+                (if (@hasDecl(GraphicsAPI, "needsRedraw")) self.api.needsRedraw() else false) or
                 size_changed or
                 self.cells_rebuilt or
                 self.hasAnimations() or
@@ -2147,6 +2165,33 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             })) {
                 self.target_config_modified +%= 1;
             }
+        }
+
+        pub fn setSearchMatches(self: *Self, value: ?renderer.Message.SearchMatches) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+            if (self.search_matches) |*m| m.deinit();
+            self.search_matches = value;
+            self.search_matches_dirty = true;
+        }
+
+        pub fn setSearchSelectedMatch(self: *Self, value: ?renderer.Message.SearchMatch) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+            if (self.search_selected_match) |*m| m.arena.deinit();
+            self.search_selected_match = value;
+            self.search_matches_dirty = true;
+        }
+
+        /// Move CPU frame preparation to another graphics API. GPU resources
+        /// are freshly initialized; font, terminal and search state survive.
+        pub fn transferCpuState(self: *Self, target: anytype) void {
+            inline for (.{ "grid_metrics", "size", "focused", "scrollbar", "scrollbar_dirty", "last_bottom_node", "last_bottom_y", "search_matches", "search_selected_match", "search_matches_dirty", "cells", "bg_cells_dirty", "fg_cells_dirty_from", "fg_cell_count", "uniforms", "custom_shader_uniforms", "first_frame_time", "last_frame_time", "font_shaper", "font_shaper_cache", "terminal_state", "terminal_state_frame_count", "overlay" }) |field| {
+                std.mem.swap(@TypeOf(@field(self, field)), &@field(self, field), &@field(target, field));
+            }
+            target.cells_rebuilt = true;
+            target.bg_cells_dirty = .full;
+            target.fg_cells_dirty_from = 0;
         }
 
         /// Resize the screen.

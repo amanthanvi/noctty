@@ -18,6 +18,9 @@ wasm_target: WasmTarget,
 /// Comptime interfaces
 app_runtime: ApprtRuntime = .win32,
 renderer: RendererBackend = .opengl,
+/// Include the beta runtime D3D11 backend alongside OpenGL.
+d3d11: bool = false,
+renderer_test_tools: bool = false,
 font_backend: FontBackend = .freetype,
 
 /// Feature flags
@@ -126,6 +129,12 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         "renderer",
         "The app runtime to use. Not all values supported on all platforms.",
     ) orelse RendererBackend.default(target.result, wasm_target);
+
+    config.d3d11 = b.option(bool, "d3d11", "Include beta D3D11 alongside OpenGL (Win32 default).") orelse
+        (config.app_runtime == .win32 and config.renderer == .opengl);
+    if (config.d3d11 and (config.app_runtime != .win32 or config.renderer != .opengl))
+        return error.Direct3D11RequiresWin32OpenGL;
+    config.renderer_test_tools = b.option(bool, "renderer-test-tools", "Enable isolated GPU readback and fault injection tests.") orelse false;
 
     //---------------------------------------------------------------
     // Feature Flags
@@ -368,6 +377,8 @@ pub fn addOptions(self: *const Config, step: *std.Build.Step.Options) !void {
     step.addOption(bool, "simd", self.simd);
     step.addOption(bool, "i18n", self.i18n);
     step.addOption(bool, "custom_shaders", self.custom_shaders);
+    step.addOption(bool, "d3d11", self.d3d11);
+    step.addOption(bool, "renderer_test_tools", self.renderer_test_tools);
     step.addOption(ApprtRuntime, "app_runtime", self.app_runtime);
     step.addOption(FontBackend, "font_backend", self.font_backend);
     step.addOption(RendererBackend, "renderer", self.renderer);
@@ -451,6 +462,8 @@ pub fn fromOptions() Config {
         .wasm_shared = options.wasm_shared,
         .i18n = options.i18n,
         .custom_shaders = options.custom_shaders,
+        .d3d11 = options.d3d11,
+        .renderer_test_tools = options.renderer_test_tools,
     };
 }
 
