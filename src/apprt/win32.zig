@@ -32839,6 +32839,19 @@ pub const Surface = struct {
     /// Hidden tabs, zoomed panes and undo-retained surfaces catch up when
     /// shown, independently of layouts already completed by other panes.
     fn syncContentScaleToHostDpi(self: *Surface) void {
+        self.syncContentScaleToHostDpiWith(
+            &self.core_surface,
+            CoreSurface.contentScaleCallback,
+        ) catch |err| {
+            log.err("win32 content scale callback failed err={}", .{err});
+        };
+    }
+
+    fn syncContentScaleToHostDpiWith(
+        self: *Surface,
+        callback_ctx: anytype,
+        comptime callback: anytype,
+    ) !void {
         const host = self.host orelse return;
         if (!self.window_visible or !host.surfaces_visible) return;
         const scale: f32 = @as(f32, @floatFromInt(host.current_dpi)) / 96.0;
@@ -32847,12 +32860,10 @@ pub const Surface = struct {
 
         const previous = self.content_scale;
         self.content_scale = next;
+        // Keep this surface eligible for retry on its next layout.
+        errdefer self.content_scale = previous;
         if (self.core_initialized) {
-            self.core_surface.contentScaleCallback(next) catch |err| {
-                // Keep this surface eligible for retry on its next layout.
-                self.content_scale = previous;
-                log.err("win32 content scale callback failed err={}", .{err});
-            };
+            try callback(callback_ctx, next);
         }
     }
 
@@ -42819,6 +42830,55 @@ test "win32 startupProfilePickerEnabled parses launcher env values" {
     try std.testing.expect(!startupProfilePickerEnabled("0"));
     try std.testing.expect(!startupProfilePickerEnabled("false"));
     try std.testing.expect(!startupProfilePickerEnabled("no"));
+}
+
+test "win32 DPI dispatches each surface callback and retries failures" {
+    const Spy = struct {
+        surface: *Surface,
+        calls: usize = 0,
+        fail: bool = false,
+        scale: apprt.ContentScale = .{ .x = 0, .y = 0 },
+
+        fn update(self: *@This(), scale: apprt.ContentScale) !void {
+            self.calls += 1;
+            self.scale = scale;
+            try std.testing.expectEqual(scale, self.surface.content_scale);
+            if (self.fail) return error.TestDpiUpdateFailed;
+        }
+    };
+    var app: App = undefined;
+    var host: Host = .{ .app = &app, .id = 1, .current_dpi = 144 };
+    var surface: Surface = .{ .app = &app, .host = &host, .core_initialized = true };
+    var spy: Spy = .{ .surface = &surface };
+
+    try surface.syncContentScaleToHostDpiWith(&spy, Spy.update);
+    try std.testing.expectEqual(@as(usize, 0), spy.calls);
+    surface.window_visible = true;
+    host.surfaces_visible = false;
+    try surface.syncContentScaleToHostDpiWith(&spy, Spy.update);
+    try std.testing.expectEqual(@as(usize, 0), spy.calls);
+    host.surfaces_visible = true;
+    try surface.syncContentScaleToHostDpiWith(&spy, Spy.update);
+    try std.testing.expectEqual(@as(usize, 1), spy.calls);
+    try std.testing.expectEqual(apprt.ContentScale{ .x = 1.5, .y = 1.5 }, spy.scale);
+    try surface.syncContentScaleToHostDpiWith(&spy, Spy.update);
+    try std.testing.expectEqual(@as(usize, 1), spy.calls);
+
+    var split: Surface = .{ .app = &app, .host = &host, .core_initialized = true, .window_visible = true };
+    var split_spy: Spy = .{ .surface = &split };
+    try split.syncContentScaleToHostDpiWith(&split_spy, Spy.update);
+    try std.testing.expectEqual(@as(usize, 1), split_spy.calls);
+    try std.testing.expectEqual(surface.content_scale, split.content_scale);
+
+    host.current_dpi = 96;
+    spy.fail = true;
+    try std.testing.expectError(error.TestDpiUpdateFailed, surface.syncContentScaleToHostDpiWith(&spy, Spy.update));
+    try std.testing.expectEqual(@as(f32, 1.5), surface.content_scale.x);
+    try std.testing.expectEqual(@as(usize, 2), spy.calls);
+    spy.fail = false;
+    try surface.syncContentScaleToHostDpiWith(&spy, Spy.update);
+    try std.testing.expectEqual(@as(usize, 3), spy.calls);
+    try std.testing.expectEqual(apprt.ContentScale{ .x = 1, .y = 1 }, surface.content_scale);
 }
 
 test "win32 DPI follows each surface when inactive tabs and splits become visible" {
