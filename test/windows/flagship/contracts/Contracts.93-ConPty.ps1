@@ -54,6 +54,39 @@ Assert-WorkflowContractAbsent `
     -Path $diagnosticBundle `
     -Pattern 'const ConPty = struct|fn conPtyManifest' `
     -Description 'diagnostic bundles do not duplicate the ConPTY info shape'
+
+# Source builds stage the same pinned pair (zig build -> src/build/ConptyRedist.zig
+# -> scripts/stage-conpty-redist.ps1 -> Install-ConPtyRedist).
+$conptyBuildStep = Join-Path $repoRoot 'src\build\ConptyRedist.zig'
+$conptyStageScript = Join-Path $repoRoot 'scripts\stage-conpty-redist.ps1'
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'build.zig') `
+    -Pattern '(?ms)if \(config\.target\.result\.os\.tag == \.windows\) \{[^}]*?ConptyRedist\.install\(b, config\.target\);' `
+    -Description 'every Windows source build installs the pinned bundled ConPTY beside the exe'
+Assert-WorkflowContract `
+    -Path $conptyBuildStep `
+    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?if \(installedMatches\(arena, bin, &staged, self\.arch\)\) return;.*?b\.pathFromRoot\(stage_script\).*?0 => \{\s*if \(installedMatches\(arena, bin, &staged, self\.arch\)\) return;\s*return step\.fail\(.*?exit_not_downloaded => break :reason.*?return step\.fail\(.*?bin\.deleteFile\(file\.name\)' `
+    -Description 'source builds restage only through the release helper, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
+Assert-WorkflowContract `
+    -Path $conptyStageScript `
+    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
+    -Description 'source-build staging runs the release helper against the shared pin and reports only a failed download as exit 3'
+Assert-WorkflowContractAbsent `
+    -Path $conptyStageScript `
+    -Pattern 'Invoke-SignFile|signtool|Set-AuthenticodeSignature' `
+    -Description 'source-build staging never signs the Microsoft binaries'
+Assert-WorkflowContract `
+    -Path $testWorkflow `
+    -Pattern '(?ms)- name: Build executable.*?- name: Verify source build stages the pinned ConPTY\s+shell: pwsh\s+run: \./test/windows/source-build-conpty\.ps1 -Architecture x64\s.*?- name: Build ARM64 executable.*?- name: Verify ARM64 source build stages the pinned ConPTY\s+shell: pwsh\s+run: \./test/windows/source-build-conpty\.ps1 -Architecture arm64\s' `
+    -Description 'CI checks that x64 and ARM64 source builds stage the pinned ConPTY pair'
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'test\windows\source-build-conpty.ps1') `
+    -Pattern '(?ms)Assert-ConPtySha256 -Path \$path -Expected \$file\.Sha256.*?Assert-PeMachine -PathToCheck \$path -ExpectedArchitecture \$Architecture.*?ConPTY\\s\*: bundled \\\(' `
+    -Description 'the source-build ConPTY check uses the release hash and PE checks and requires noctty to select the pair'
+Assert-WorkflowContract `
+    -Path $conptyRuntime `
+    -Pattern '(?ms)fn signalFallbackBanner\(\) void \{\s*if \(comptime builtin\.is_test\) return;' `
+    -Description 'a ConPTY fallback warns in every build mode, not only ReleaseFast'
 Assert-WorkflowContract `
     -Path $releaseDefenderScanner `
     -Pattern '(?ms)\$portablePayloads = @\(Get-WindowsSignedRuntimePayloads\) \+ @\(\s*''noctty/conpty\.dll'',\s*''noctty/OpenConsole\.exe''\s*\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\)' `

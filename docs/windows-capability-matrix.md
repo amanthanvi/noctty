@@ -83,9 +83,14 @@ Last reviewed: 2026-09-02.
 
 ### ConPTY transport
 
-Packaged builds prefer the side-by-side ConPTY redistributable and fall back to
-the in-box conhost with a warning. `+version` and the diagnostic-bundle manifest
-report the active source. On this machine the bundled source delivered measured
+Packaged builds and source builds (`zig build`) carry the side-by-side ConPTY
+redistributable and fall back to the in-box conhost only when it is missing or
+fails, with a banner that names the reason. `+version` and the
+diagnostic-bundle manifest report the active source and the reason. The in-box
+source answers DA, DSR and DECRQM itself and returns no colour or XTGETTCAP
+replies; see the
+[query differential](windows-vt-conformance.md#measured-query-ownership-differential).
+On this machine the bundled source delivered measured
 Kitty APC and Sixel DCS payloads byte-for-byte; the in-box source dropped both.
 Because the in-box source re-renders rather than forwards, it can also reshape
 repaints. For the `herdr` scenario measured on this conhost vintage it rewrote

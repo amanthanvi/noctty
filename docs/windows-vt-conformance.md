@@ -210,6 +210,36 @@ Measurement host: Windows `10.0.26200.0`; in-box `System32\conhost.exe`
 FileVersion `10.0.26100.1`; bundled `conpty.dll` ProductVersion
 `1.24.260710001`.
 
+### Measured query ownership differential
+
+A program's terminal queries have a different responder on each source. A
+synthetic probe in cmd, PowerShell and WSL sent each query, waited 550 ms, and
+recorded every reply. Through the bundled pair noctty answered; the in-box
+conhost answered several itself and returned nothing for others. Replies were
+identical across the three shells, and no query was answered twice. The
+values describe the probe's 100x30 grid and configured colours.
+
+| Query                                                     | Bundled: replied by noctty   | In-box                                                        |
+| --------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------- |
+| DA1 `CSI c`                                               | `CSI ?62;22;52c`             | conhost: `CSI ?61;6;7;21;22;23;24;28;32;42c`                  |
+| DA2 `CSI >c`                                              | `CSI >1;10;0c`               | conhost: `CSI >0;10;1c`                                       |
+| DA3 `CSI =c`                                              | none                         | conhost: `DCS !\|00000000 ST`                                 |
+| DECRQM 2026, before and after `CSI ?2026h`                | `2`, then `1`                | `0`, then `0`: synchronized output looks unsupported          |
+| DECRQM 1004 / 9001                                        | `1` / `0`                    | `2` / `2`                                                     |
+| XTGETTCAP `TN`, `Co`, `RGB`                               | three replies                | none                                                          |
+| OSC 4 / 10 / 11 / 12 colour queries                       | noctty's palette and colours | none                                                          |
+| Private CPR `CSI ?6n`                                     | none                         | conhost: `CSI ?1;15;1R`                                       |
+| XTVERSION, DECRQSS, `CSI ?u`, `CSI 14/16/18t`, DSR 5, CPR | answered                     | same bytes; conhost answers DSR, CPR, DECRQSS and size itself |
+
+So on the in-box path a program detects conhost's capabilities rather than
+noctty's, finds no synchronized output, and waits out its own timeout for
+colour and terminfo replies. The bundled stream also carried the probe's
+output byte-for-byte, while the in-box stream re-rendered it.
+
+Measurement host: Windows `10.0.26300`; in-box `System32\conhost.exe`
+FileVersion `10.0.26100.1`; bundled `conpty.dll` FileVersion
+`1.24.2607.10001`.
+
 ### Measured master-to-child key encoding differential
 
 The input direction has its own opt-in probe in `src/pty_transport_probe.zig`

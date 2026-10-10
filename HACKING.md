@@ -25,6 +25,14 @@ Use the standard Zig workflow from the repository root:
 Bare `zig build test` errors in this fork; pass `-Demit-test-exe=true` or
 `-Dtest-filter=<name>` (enforced in `build.zig`).
 
+`zig build` also stages Microsoft's pinned ConPTY pair, `conpty.dll` and
+`OpenConsole.exe`, beside the exe, so a source build takes the terminal path a
+release takes. The first build downloads the package (about 1.7 MB) with
+Windows PowerShell into the Zig global cache; later builds only re-hash the
+installed pair. Without network access the build prints a warning and the
+exe falls back to Windows' in-box conhost, which re-renders output and drops
+colour-query replies; `noctty +version` and an in-app banner name the reason.
+
 The full suite is the only test run to trust on its own, and `--summary all`
 is part of it: read the `N/M tests passed` line. `Build Summary: 41/41 steps
 succeeded` counts build steps, not tests.

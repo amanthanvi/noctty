@@ -204,9 +204,10 @@ cd noctty
 zig build -Demit-exe=true
 ```
 
-The app is built to `zig-out\bin\noctty.exe`. Building has no Windows version
+The app is built to `zig-out\bin\noctty.exe`, beside Microsoft's pinned ConPTY
+pair, which the first build downloads. Building has no Windows version
 requirement of its own, but running the result needs Windows 10 1809 or later.
-[HACKING.md](HACKING.md) covers the dev shell and tests, and
+[HACKING.md](HACKING.md) covers the dev shell, offline builds and tests, and
 [PACKAGING.md](PACKAGING.md) covers building the installer and portable ZIP.
 
 ## Relationship to Ghostty

@@ -167,6 +167,8 @@ pub fn build(b: *std.Build) !void {
             const TerminalHandoffProxy = @import("src/build/TerminalHandoffProxy.zig");
             const handoff_proxy = try TerminalHandoffProxy.init(b, &config);
             handoff_proxy.install();
+            const ConptyRedist = @import("src/build/ConptyRedist.zig");
+            ConptyRedist.install(b, config.target);
         }
     }
 

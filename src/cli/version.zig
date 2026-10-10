@@ -18,6 +18,15 @@ fn customShadersStatus(comptime enabled: bool) []const u8 {
     return if (enabled) "enabled" else "disabled";
 }
 
+/// The ConPTY line: the bundled DLL's path, or why the in-box conhost is in
+/// use, since that path answers terminal queries differently.
+fn writeConPty(writer: *std.Io.Writer, info: pty.ConPtyInfo) !void {
+    try writer.print("{s}{t}", .{ conpty_label, info.source });
+    if (info.dll_path) |path| try writer.print(" ({s})", .{path});
+    if (info.fallback) |reason| try writer.print(" ({s})", .{pty.describeConPtyFallback(reason)});
+    try writer.writeByte('\n');
+}
+
 /// Architecture line for the bug-report template.
 ///
 /// The build architecture alone hides the case that matters on Windows on
@@ -80,11 +89,7 @@ pub fn run(alloc: Allocator) !u8 {
         architecture_label,
         architectureText(&architecture_buf, os_windows.detectProcessArchitecture()),
     });
-    if (pty.conPtyInfo()) |info| {
-        try stdout.print("{s}{t}", .{ conpty_label, info.source });
-        if (info.dll_path) |path| try stdout.print(" ({s})", .{path});
-        try stdout.writeByte('\n');
-    }
+    if (pty.conPtyInfo()) |info| try writeConPty(stdout, info);
     try stdout.print("  - app runtime   : {}\n", .{build_config.app_runtime});
     try stdout.print("  - font engine   : {}\n", .{build_config.font_backend});
     try stdout.print("  - renderer      : {}\n", .{renderer.Renderer});
@@ -108,6 +113,18 @@ test "version output labels are Windows-facing" {
     try std.testing.expect(std.mem.indexOf(u8, conpty_label, "ConPTY") != null);
     try std.testing.expect(std.mem.indexOf(u8, architecture_label, "architecture") != null);
     try std.testing.expectEqual(platform_label.len, architecture_label.len);
+}
+
+test "version ConPTY line names the bundled DLL or the fallback reason" {
+    var buf: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try writeConPty(&writer, .{ .source = .bundled, .dll_path = "C:\\noctty\\conpty.dll" });
+    try writeConPty(&writer, .{ .source = .inbox, .dll_path = null, .fallback = error.NotFound });
+    try std.testing.expectEqualStrings(
+        conpty_label ++ "bundled (C:\\noctty\\conpty.dll)\n" ++
+            conpty_label ++ "inbox (conpty.dll is not next to noctty.exe)\n",
+        writer.buffered(),
+    );
 }
 
 test "version custom shader status selection" {
