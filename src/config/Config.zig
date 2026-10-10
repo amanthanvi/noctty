@@ -3821,8 +3821,11 @@ fn writeConfigTemplate(path: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir_path| {
         try std.fs.cwd().makePath(dir_path);
     }
-    const file = try std.fs.createFileAbsolute(path, .{});
+    // Recheck on the opened file so a config created since the template
+    // decision is preserved. Never truncate an existing file with content.
+    const file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
     defer file.close();
+    if ((try file.stat()).size != 0) return;
     var buf: [4096]u8 = undefined;
     var file_writer = file.writer(&buf);
     const writer = &file_writer.interface;
@@ -3830,6 +3833,37 @@ fn writeConfigTemplate(path: []const u8) !void {
         @embedFile("./config-template"),
         .{ .path = path },
     );
+    try writer.flush();
+}
+
+test "writeConfigTemplate writes the template with its path" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const path = try std.fs.path.join(alloc, &.{ root, "config.ghostty" });
+    defer alloc.free(path);
+
+    try writeConfigTemplate(path);
+    const content = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 8192);
+    defer alloc.free(content);
+    try std.testing.expect(content.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, content, path) != null);
+
+    const user_content = "# keep this config\nfont-size = 13\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = user_content });
+    try writeConfigTemplate(path);
+    const preserved = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 8192);
+    defer alloc.free(preserved);
+    try std.testing.expectEqualStrings(user_content, preserved);
+}
+
+fn defaultConfigIsEmpty(path: []const u8) bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    defer file.close();
+    const stat = file.stat() catch return false;
+    return stat.kind == .file and stat.size == 0;
 }
 
 /// Load configurations from the default configuration files. The default
@@ -3867,8 +3901,11 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
             }
         }
 
-        break :xdg_loaded xdg_action != .not_found or
-            legacy_xdg_action != .not_found;
+        // Older builds left the default template at exactly zero bytes.
+        // Treat only that file as absent for the template decision; optional
+        // file loading and legacy config precedence keep their semantics.
+        break :xdg_loaded legacy_xdg_action != .not_found or
+            (xdg_action != .not_found and !defaultConfigIsEmpty(xdg_path));
     };
 
     if (!xdg_loaded) {
@@ -3984,6 +4021,16 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             .files = &.{},
             .target = "noctty/config.ghostty",
         },
+        .{
+            .name = "a zero-byte default config gets the template",
+            .files = &.{.{ .path = "noctty/config.ghostty", .content = "" }},
+            .target = "noctty/config.ghostty",
+        },
+        .{
+            .name = "a comment-only default config is preserved",
+            .files = &.{.{ .path = "noctty/config.ghostty", .content = "# user's config\n" }},
+            .target = "noctty/config.ghostty",
+        },
     };
 
     for (cases, 0..) |case, i| {
@@ -4011,6 +4058,19 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             var cfg = try Config.default(alloc);
             defer cfg.deinit();
             try cfg.loadDefaultFiles(alloc);
+        }
+
+        // Migration may fill an empty default file, but never replace content
+        // or a legacy file, including when a legacy config is the edit target.
+        for (case.files) |file| {
+            const content = try home_dir.readFileAlloc(alloc, file.path, 8192);
+            defer alloc.free(content);
+            if (file.content.len == 0 and std.mem.eql(u8, case.target, file.path)) {
+                try testing.expect(content.len > 0);
+                try testing.expect(std.mem.indexOf(u8, content, "# This is the configuration file for noctty.") != null);
+            } else {
+                try testing.expectEqualStrings(file.content, content);
+            }
         }
 
         // `xdg.config` joins the `noctty/config.ghostty` subdir verbatim, so

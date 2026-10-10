@@ -19,10 +19,9 @@
 # in the generated config docs and CLI help shipped with this repository.
 #
 # noctty can reload the configuration while running by using the menu
-# options or the bound key (default: Command + Shift + comma on macOS and
-# Control + Shift + comma on other platforms). Not all config options can be
-# reloaded while running; some only apply to new windows and others may require
-# a full restart to take effect.
+# options or the bound key (default: Control + Shift + comma). Not all config
+# options can be reloaded while running; some only apply to new windows and
+# others may require a full restart to take effect.
 
 # Config syntax crash course
 # ==========================
