@@ -394,7 +394,10 @@ terminfo capability, so a program can check before it reports.
   panes: a ring for working (a bright arc for the progress, when reported), a
   filled amber dot for blocked, a green check for done, and a red cross for
   failed. Each state has its own shape, so high contrast, which draws every
-  badge in the text color, still tells them apart.
+  badge in the text color, still tells them apart. A step that finishes or
+  fails inside work that is still going, such as one region of a deploy
+  whose parent record is still working, doesn't show or notify; the work
+  reports when it ends.
 - **When it clears.** Working and blocked last until the program reports
   something else, or until it ends: a new shell prompt (OSC 133 A, which
   noctty's shell integration emits) or the shell exiting. Done and failed
@@ -407,19 +410,24 @@ terminfo capability, so a program can check before it reports.
   taskbar until a full reset, as the protocol asks. `progress-style = false`
   turns this off too.
 - **Notifications.** When a tab you are not looking at becomes blocked,
-  done or failed, noctty shows a toast that names the program and the tab;
-  clicking it focuses that pane. It follows `desktop-notifications`, and it
-  is rate-limited: at most one per pane every 5 seconds and three across
-  noctty every 10 seconds.
+  done or failed, noctty shows a toast that names the program, the tab and,
+  with more than one window open, the window; clicking it focuses that pane.
+  It follows `desktop-notifications`, and it is rate-limited: at most one
+  per pane every 5 seconds and three across noctty every 10 seconds. One the
+  limit holds back arrives as soon as the limit allows, with what the pane
+  shows then, if it still needs you and you haven't looked.
 - **Go to the tab that needs you.** The `goto_attention` action, also in the
-  command palette as "Go to Tab Needing Attention", focuses the next blocked
-  tab, then failed, then done, across windows; repeating it visits each in
-  turn. It has no default key binding; bind it with, for example,
+  command palette as "Go to Tab Needing Attention", focuses the most urgent
+  other tab: blocked, then failed, then done, and among equals the next one
+  after the current tab, across windows. Done and failed clear once you
+  look, so repeating it works through them. It has no default key binding;
+  bind it with, for example,
   `keybind = ctrl+shift+g=goto_attention`. `noctty +perform-action
   goto_attention` runs it from scripts.
 - **Screen readers.** Each tab's UI Automation `ItemStatus` reads the status,
-  such as "claude needs permission: Allow edit to main.rs?", and changes
-  raise a property-change event.
+  such as "claude needs permission: Allow edit to main.rs?". A new state,
+  request or result raises a property-change event; progress updates
+  don't.
 
 Program text shown outside the terminal (in toasts and UI Automation) has
 bidirectional overrides and invisible formatting characters removed and is

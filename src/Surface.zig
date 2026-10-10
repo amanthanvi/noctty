@@ -1688,7 +1688,6 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     self.close();
 }
 
-/// Called when the child process exited abnormally.
 /// Hand a program status event (OSC 7501) to the apprt, which keeps the
 /// records.
 fn programStatus(self: *Surface, event: apprt.action.ProgramStatus) void {
@@ -1701,6 +1700,7 @@ fn programStatus(self: *Surface, event: apprt.action.ProgramStatus) void {
     };
 }
 
+/// Called when the child process exited abnormally.
 fn childExitedAbnormally(
     self: *Surface,
     info: apprt.surface.Message.ChildExited,

@@ -355,9 +355,13 @@ const releases_url = updatepkg.releases_url;
 const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
 /// The program status badge a tab draws before its label, and the room it
-/// takes from the label with the gap after it, in DIPs.
+/// takes from the label with the gap after it, in DIPs and in label cells
+/// (about 7 DIPs each in the chrome font).
 const tab_status_badge_size: i32 = 10;
 const tab_status_badge_slot: i32 = tab_status_badge_size + 5;
+const tab_status_badge_cells: usize = 2;
+/// The fewest cells `hostTabLabelMaxWidth` gives a label.
+const tab_label_min_cells: usize = 6;
 
 // Context menu constants
 
@@ -3652,6 +3656,9 @@ pub const App = struct {
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
+    /// Thread timer that delivers program status notifications the rate
+    /// limit held back. Only runs while one is waiting.
+    program_status_notify_timer_id: ?UINT_PTR = null,
     recovery_retry_timer_id: ?UINT_PTR = null,
     /// Monotonic `GetTickCount64` deadline before which no tick may spend a
     /// ready-marker attempt. Cleared by the retry timer, which is the tick
@@ -4053,6 +4060,7 @@ pub const App = struct {
             self.stopQuitTimer();
             self.stopTerminalHandoffIdleTimer();
             self.stopRecoveryRetryTimer();
+            self.stopProgramStatusNotifyTimer();
             drainDeferredUiaDisconnects(ui_thread_id);
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             self.running = false;
@@ -4340,6 +4348,12 @@ pub const App = struct {
                         continue;
                     }
                 }
+                if (self.program_status_notify_timer_id) |timer_id| {
+                    if (@intFromPtr(msg.hwnd) == 0 and msg.wParam == timer_id) {
+                        self.flushProgramStatusNotifications();
+                        continue;
+                    }
+                }
             }
 
             if (msg.message == c.WM_HOTKEY) {
@@ -4384,6 +4398,7 @@ pub const App = struct {
         self.stopQuitTimer();
         self.stopTerminalHandoffIdleTimer();
         self.stopRecoveryRetryTimer();
+        self.stopProgramStatusNotifyTimer();
         self.update_check_running.store(false, .release);
         if (self.update_notice) |*notice| {
             notice.deinit(self.core_app.alloc);
@@ -9020,7 +9035,7 @@ pub const App = struct {
                         tab.focused = it.next().?.handle;
                         // The closed split may have been what the tab's
                         // status badge was showing.
-                        host.refreshTabStatus(i);
+                        host.refreshTabStatus(i, false);
                     }
                     break;
                 }
@@ -10285,6 +10300,7 @@ pub const App = struct {
         event: apprt.action.ProgramStatus,
     ) !void {
         const alloc = self.core_app.alloc;
+        const taskbar_before = surface.effectiveTaskbarProgress();
         const news = switch (event) {
             .report => |report| try surface.program_status.apply(alloc, report),
             .program_ended => news: {
@@ -10293,62 +10309,83 @@ pub const App = struct {
             },
             .reset => news: {
                 surface.program_status.reset(alloc);
+                // A full reset clears OSC 9;4 progress too. Termio's clear
+                // follows, but the taskbar must not show the stale 9;4 for
+                // the moment in between.
+                surface.taskbar_progress = null;
                 break :news null;
             },
         };
         const found = self.findTabForSurface(surface) orelse return;
-        if (tabSeenByUser(found.host, found.index)) {
-            // The user is looking at this tab, so a program that finished or
-            // failed has been seen the moment it says so.
-            _ = surface.program_status.acknowledge(alloc);
-        } else if (news) |record| {
-            self.notifyProgramStatus(surface, found.host, found.index, record) catch |err| {
-                log.warn("program status notification failed err={}", .{err});
-            };
-        }
-        found.host.refreshTabStatus(found.index);
-        if (self.activeSurfaceForHost(found.host.id) == surface) {
+        const seen = tabSeenByUser(found.host, found.index);
+        // The user is looking at this tab, so a program that finished or
+        // failed has been seen the moment it says so.
+        if (seen) _ = surface.program_status.acknowledge();
+        found.host.refreshTabStatus(found.index, news != null);
+        if (self.activeSurfaceForHost(found.host.id) == surface and
+            !std.meta.eql(taskbar_before, surface.effectiveTaskbarProgress()))
+        {
             self.syncTaskbarProgressForHost(found.host.id);
         }
+        // Last: showing a toast is a cross-process COM call that can pump
+        // messages, and nothing here may touch the surface after it.
+        if (!seen) if (news) |record| self.notifyProgramStatus(surface, found.host, found.index, record);
     }
 
-    /// The user is looking at `surface`'s tab: stop showing what its
-    /// programs finished or failed.
-    fn acknowledgeProgramStatus(self: *App, surface: *Surface) void {
-        const found = self.findTabForSurface(surface) orelse return;
-        if (!tabSeenByUser(found.host, found.index)) return;
+    /// The user is looking at tab `index` of `host`: stop showing what its
+    /// programs finished or failed, and let its next news notify at once.
+    fn acknowledgeTab(self: *App, host: *Host, index: usize) void {
+        if (index >= host.tabs.items.len or !tabSeenByUser(host, index)) return;
         var changed = false;
-        var it = found.tab.tree.iterator();
+        var it = host.tabs.items[index].tree.iterator();
         while (it.next()) |entry| {
-            if (entry.view.program_status.acknowledge(self.core_app.alloc)) changed = true;
+            entry.view.program_status_notified_ms = null;
+            entry.view.program_status_notify_pending = false;
+            if (entry.view.program_status.acknowledge()) changed = true;
         }
         if (!changed) return;
-        found.host.refreshTabStatus(found.index);
-        self.syncTaskbarProgressForHost(found.host.id);
+        host.refreshTabStatus(index, false);
+        self.syncTaskbarProgressForHost(host.id);
     }
 
     /// Tell the user that a program in a tab they are not looking at is
     /// blocked on them, finished, or failed. Follows `desktop-notifications`
-    /// like OSC 9 and 777 do, and `win32_program_status.NotifyLimiter`.
+    /// like OSC 9 and 777 do. A notification the rate limit holds back is
+    /// not lost: `flushProgramStatusNotifications` delivers what the pane
+    /// then shows once the limit allows.
     fn notifyProgramStatus(
         self: *App,
         surface: *Surface,
         host: *Host,
         index: usize,
         record: *const win32_program_status.Record,
-    ) !void {
+    ) void {
         if (!surface.core().config.desktop_notifications) {
             log.debug("program status notification skipped: desktop-notifications is off", .{});
             return;
         }
         if (!self.program_status_notify.allow(&surface.program_status_notified_ms, sys.GetTickCount64())) {
-            log.debug("program status notification rate limited", .{});
+            log.debug("program status notification deferred by the rate limit", .{});
+            surface.program_status_notify_pending = true;
+            self.startProgramStatusNotifyTimer();
             return;
         }
+        surface.program_status_notify_pending = false;
+        self.showProgramStatusToast(surface, host, index, record) catch |err| {
+            log.warn("program status notification failed err={}", .{err});
+        };
+    }
 
+    fn showProgramStatusToast(
+        self: *App,
+        surface: *Surface,
+        host: *Host,
+        index: usize,
+        record: *const win32_program_status.Record,
+    ) !void {
         // The tab title is what the user knows the tab by. It names the
-        // program when the record has no title or app, and the body says
-        // which tab this is, so a program can't pass for another terminal.
+        // program when the record has no title or app. The body says which
+        // tab and window this is, so a program can't pass for another one.
         const tab = &host.tabs.items[index];
         const tab_surface = tab.focusedSurface() orelse surface;
         const tab_title = tab_surface.effectiveTitle() orelse "noctty";
@@ -10361,9 +10398,15 @@ pub const App = struct {
         var body: std.Io.Writer = .fixed(&body_buf);
         if (record.msg) |msg| {
             try win32_program_status.writeSanitized(&body, msg, win32_program_status.max_shown_text_bytes);
-            try body.writeByte('\n');
+            try body.writeAll(" \u{2014} ");
         }
-        try body.print("Tab {d}: ", .{index + 1});
+        try body.print("Tab {d}", .{index + 1});
+        if (self.hosts.items.len > 1) {
+            if (std.mem.indexOfScalar(*Host, self.hosts.items, host)) |window| {
+                try body.print(" of window {d}", .{window + 1});
+            }
+        }
+        try body.writeAll(": ");
         try win32_program_status.writeSanitized(&body, tab_title, 64);
 
         log.debug("program status notification tab={d} title={s}", .{ index + 1, title.buffered() });
@@ -10377,9 +10420,64 @@ pub const App = struct {
         );
     }
 
+    /// Deliver program status notifications the rate limit held back: for
+    /// each pane still waiting, what it shows now, if that still needs the
+    /// user and its tab is still out of sight. Runs on a one-second thread
+    /// timer that only exists while something waits.
+    fn flushProgramStatusNotifications(self: *App) void {
+        var waiting = false;
+        for (self.windows.items) |surface| {
+            if (!surface.program_status_notify_pending) continue;
+            const found = self.findTabForSurface(surface) orelse {
+                surface.program_status_notify_pending = false;
+                continue;
+            };
+            const record = surface.program_status.headline() orelse {
+                surface.program_status_notify_pending = false;
+                continue;
+            };
+            if (tabSeenByUser(found.host, found.index) or
+                !win32_program_status.Indicator.of(record).needsUser())
+            {
+                surface.program_status_notify_pending = false;
+                continue;
+            }
+            if (!self.program_status_notify.allow(&surface.program_status_notified_ms, sys.GetTickCount64())) {
+                waiting = true;
+                continue;
+            }
+            surface.program_status_notify_pending = false;
+            self.showProgramStatusToast(surface, found.host, found.index, record) catch |err| {
+                log.warn("deferred program status notification failed err={}", .{err});
+            };
+            // The toast may have pumped messages that closed windows, so
+            // the list is not walked any further this tick.
+            waiting = true;
+            break;
+        }
+        if (!waiting) self.stopProgramStatusNotifyTimer();
+    }
+
+    fn startProgramStatusNotifyTimer(self: *App) void {
+        if (self.program_status_notify_timer_id != null) return;
+        const timer_id = sys.SetTimer(null, 0, 1000, null);
+        if (timer_id == 0) {
+            log.warn("failed to start program status notification timer err={}", .{windows.kernel32.GetLastError()});
+            return;
+        }
+        self.program_status_notify_timer_id = timer_id;
+    }
+
+    fn stopProgramStatusNotifyTimer(self: *App) void {
+        if (self.program_status_notify_timer_id) |timer_id| {
+            _ = sys.KillTimer(null, timer_id);
+            self.program_status_notify_timer_id = null;
+        }
+    }
+
     /// Focus the next tab whose programs need the user; see
     /// `win32_program_status.nextNeedingUser` for the order. Tabs are taken
-    /// window by window, so repeating it visits each one in turn.
+    /// window by window.
     fn gotoAttention(self: *App, target: apprt.Target) !bool {
         const alloc = self.core_app.alloc;
         const current = if (self.findSurfaceForTarget(target)) |surface|
@@ -12130,7 +12228,7 @@ const Host = struct {
         value.index = insert_index;
         self.active_tab = insert_index;
         // Its programs may have ended while the tab waited in undo history.
-        self.refreshTabStatus(insert_index);
+        self.refreshTabStatus(insert_index, false);
         return self.activeSurface() != null;
     }
 
@@ -14966,25 +15064,27 @@ const Host = struct {
         return false;
     }
 
-    /// Recompute what tab `index` shows for its programs' status (OSC 7501).
-    /// A change repaints the tab, and a change of state, not just of
-    /// progress, is announced to assistive technology.
-    fn refreshTabStatus(self: *Host, index: usize) void {
+    /// Recompute what tab `index` shows for its programs' status (OSC 7501)
+    /// and repaint it when that changed. Assistive technology hears about a
+    /// change of state, and with `news` about a new request or result in
+    /// the same state, but not about progress.
+    fn refreshTabStatus(self: *Host, index: usize, news: bool) void {
         if (index >= self.tabs.items.len) return;
         const tab = &self.tabs.items[index];
         const previous = tab.status_indicator;
         const next: win32_program_status.Indicator = .of(if (tabStatusHeadline(tab)) |status| status.record else null);
-        if (previous.eql(next)) return;
-        tab.status_indicator = next;
-        if ((previous == .none) != (next == .none)) {
-            // The badge takes room from the label, so the label is rebuilt
-            // against a different budget.
-            if (chromeSyncOrLog("tab status label sync failed", self.syncTabButtons())) {
-                self.invalidateTopChromeText();
+        if (!previous.eql(next)) {
+            tab.status_indicator = next;
+            if ((previous == .none) != (next == .none)) {
+                // The badge takes room from the label, so the label is
+                // rebuilt against a different budget.
+                if (chromeSyncOrLog("tab status label sync failed", self.syncTabButtons())) {
+                    self.invalidateTopChromeText();
+                }
             }
+            if (tab.button_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
         }
-        if (tab.button_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
-        if (!previous.sameKind(next) and self.shouldShowTabBar()) {
+        if ((news or !previous.sameKind(next)) and self.shouldShowTabBar()) {
             if (tab.uia_provider) |provider| provider.raiseItemStatusChanged();
         }
     }
@@ -18299,7 +18399,8 @@ const Host = struct {
         const top = @divTrunc(text_rect.top + text_rect.bottom - size, 2);
         // High contrast draws every badge in the text color; the shapes
         // still tell the states apart.
-        const color = if (isHighContrastActive())
+        const high_contrast = isHighContrastActive();
+        const color = if (high_contrast)
             fg
         else
             win32_program_status.badgeColor(status, theme.is_dark, tabAccent(theme), theme.error_fg);
@@ -18310,6 +18411,7 @@ const Host = struct {
             color,
             bg,
             @max(2, self.scaled(2)),
+            high_contrast,
         );
         text_rect.left = left + slot;
         text_rect.right = left + group;
@@ -19415,11 +19517,13 @@ const Host = struct {
             const active = i == self.active_tab;
             const pane_count = tab.leafCount();
             const show_pane_count = shouldShowPaneCount(button_width, pane_count);
-            // A program status badge takes its slot out of the label's room.
+            // A program status badge takes its slot out of the label's room,
+            // charged in cells after `hostTabLabelMaxWidth` has capped the
+            // budget the way the layout caps the button.
             const tab_label_max_width = if (tab.status_indicator == .none)
                 label_max_width
             else
-                hostTabLabelMaxWidth(button_width - self.scaled(tab_status_badge_slot));
+                @max(tab_label_min_cells, label_max_width -| tab_status_badge_cells);
             const title_unchanged = if (title) |value|
                 ownedStringEquals(tab.cached_button_title, value)
             else
@@ -26443,6 +26547,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             // cloaked host renders nothing, so a stale `surfaces_visible`
             // would otherwise mean a permanently frozen window.
             if (host) |v| v.refreshSurfaceVisibility();
+            if ((wParam & 0xFFFF) != c.WA_INACTIVE) {
+                // The user brought this window forward: its active tab is
+                // seen even if focus lands on the chrome, not a terminal.
+                if (host) |v| v.app.acknowledgeTab(v, v.active_tab);
+            }
             if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {
                     // The tab tooltip is a top-level popup, so losing the
@@ -28342,6 +28451,9 @@ pub const Surface = struct {
     /// When this surface last raised a program status notification, in
     /// `GetTickCount64` milliseconds.
     program_status_notified_ms: ?u64 = null,
+    /// A notification the rate limit held back is waiting; see
+    /// `App.flushProgramStatusNotifications`.
+    program_status_notify_pending: bool = false,
     inspector_visible: bool = false,
     paint_pending: bool = false,
     live_resize_repaint_deferred: bool = false,
@@ -32692,7 +32804,9 @@ pub const Surface = struct {
         }
         // A terminal gains focus when the user activates its window or
         // switches to its tab, which is the user looking at it.
-        if (focused) self.app.acknowledgeProgramStatus(self);
+        if (focused) {
+            if (self.app.findTabForSurface(self)) |found| self.app.acknowledgeTab(found.host, found.index);
+        }
     }
 
     fn handleKeyMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {

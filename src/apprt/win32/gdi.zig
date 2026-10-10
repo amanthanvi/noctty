@@ -91,7 +91,8 @@ const NULL_PEN: i32 = 8;
 const PS_SOLID: i32 = 0;
 
 /// Draw `badge` inside the square `rect` in `color`, with lines `stroke`
-/// pixels wide. A progress ring's track is `color` faded into `bg`.
+/// pixels wide. A progress ring's track is `color` faded into `bg`, or in
+/// high contrast, which allows only system colors, a hairline in `color`.
 pub fn drawStatusBadge(
     hdc: HDC,
     rect: RECT,
@@ -99,6 +100,7 @@ pub fn drawStatusBadge(
     color: u32,
     bg: u32,
     stroke: i32,
+    high_contrast: bool,
 ) void {
     const size = rect.right - rect.left;
     if (size < 4 or rect.bottom - rect.top != size) return;
@@ -131,7 +133,10 @@ pub fn drawStatusBadge(
                 return;
             };
             if (percent < 100) {
-                const track = sys.CreatePen(PS_SOLID, stroke, blendColorRGB(bg, color, 0.35)) orelse return;
+                const track = if (high_contrast)
+                    sys.CreatePen(PS_SOLID, 1, color) orelse return
+                else
+                    sys.CreatePen(PS_SOLID, stroke, blendColorRGB(bg, color, 0.35)) orelse return;
                 defer _ = sys.DeleteObject(track);
                 _ = sys.SelectObject(hdc, track);
                 _ = sys.Ellipse(hdc, ring.left, ring.top, ring.right, ring.bottom);

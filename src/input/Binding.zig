@@ -634,10 +634,11 @@ pub const Action = union(enum) {
     /// Focus on either the previous window or the next one ('previous', 'next')
     goto_window: GotoWindow,
 
-    /// Focus the next tab or split whose program needs you, as the program
+    /// Focus another tab or split whose program needs you, as the program
     /// reported through the program status protocol (OSC 7501): one that
     /// is blocked on your input first, then one that failed, then one that
-    /// finished. Repeating it moves on to the next one, across windows.
+    /// finished, and among equals the next one after the current tab,
+    /// across windows.
     ///
     /// This is only implemented on Windows.
     goto_attention,

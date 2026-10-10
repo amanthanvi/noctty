@@ -152,8 +152,9 @@ pub const Records = struct {
 
     /// Apply a validated report. Returns the record when the report brought
     /// something new for the user: it put the record into blocked, done or
-    /// error, and the record was not already saying the same thing. The
-    /// pointer is valid until the records next change.
+    /// error, the record was not already saying the same thing, and it is
+    /// not a step of work that is still going (see `stepOfRunningWork`).
+    /// The pointer is valid until the records next change.
     pub fn apply(
         self: *Records,
         alloc: Allocator,
@@ -169,17 +170,39 @@ pub const Records = struct {
         var record = try Record.init(alloc, report, self.seq);
         if (self.find(record.id)) |i| {
             const slot = &self.list.items[i];
-            const news = record.needsUser() and !sameNews(slot, &record);
+            const repeated = sameNews(slot, &record);
             slot.deinit(alloc);
             slot.* = record;
-            return if (news) slot else null;
+            return if (!repeated and self.isNews(slot)) slot else null;
         }
 
         errdefer record.deinit(alloc);
         if (self.list.items.len >= max_records) self.evictOldest(alloc);
         try self.list.append(alloc, record);
         const slot = &self.list.items[self.list.items.len - 1];
-        return if (slot.needsUser()) slot else null;
+        return if (self.isNews(slot)) slot else null;
+    }
+
+    fn isNews(self: *const Records, record: *const Record) bool {
+        return record.needsUser() and !self.stepOfRunningWork(record);
+    }
+
+    /// Whether `record` is done or failed beneath a record that is still
+    /// working or blocked, such as one region of a deploy that is still
+    /// going. Such a step neither leads what the terminal shows nor is news:
+    /// the work it belongs to reports when it ends.
+    fn stepOfRunningWork(self: *const Records, record: *const Record) bool {
+        if (record.state != .done and record.state != .@"error") return false;
+        var id = record.id;
+        while (id.len > 0) {
+            id = parentId(id);
+            const i = self.find(id) orelse continue;
+            switch (self.list.items[i].state) {
+                .working, .blocked => return true,
+                .idle, .done, .@"error", .clear => {},
+            }
+        }
+        return false;
     }
 
     /// A new shell prompt started, or the program running in the terminal
@@ -197,13 +220,18 @@ pub const Records = struct {
         }.f);
     }
 
-    /// The user has seen this terminal: stop showing done and error.
-    pub fn acknowledge(self: *Records, alloc: Allocator) bool {
-        return self.removeWhere(alloc, struct {
-            fn f(record: *const Record) bool {
-                return record.state == .done or record.state == .@"error";
-            }
-        }.f);
+    /// The user has seen this terminal: stop showing done and error. The
+    /// records turn idle rather than go, so their `app` still names the
+    /// records beneath them; a new done or error from the program is news
+    /// again, and idle records end with the program.
+    pub fn acknowledge(self: *Records) bool {
+        var changed = false;
+        for (self.list.items) |*record| {
+            if (record.state != .done and record.state != .@"error") continue;
+            record.state = .idle;
+            changed = true;
+        }
+        return changed;
     }
 
     /// A full reset (RIS) removes every record and lets OSC 9;4 drive the
@@ -221,17 +249,18 @@ pub const Records = struct {
 
     /// The record that decides what this terminal shows: the most urgent
     /// state, then the root record, then the most recently updated one.
-    /// Idle records never lead, because idle shows nothing.
+    /// Idle records never lead, because idle shows nothing, and neither do
+    /// steps of work that is still going.
     pub fn headline(self: *const Records) ?*const Record {
         var best: ?*const Record = null;
         for (self.list.items) |*record| {
-            if (record.state == .idle) continue;
+            if (record.state == .idle or self.stepOfRunningWork(record)) continue;
             const current = best orelse {
                 best = record;
                 continue;
             };
-            const rank = stateRank(record.state);
-            const best_rank = stateRank(current.state);
+            const rank = Indicator.of(record).rank();
+            const best_rank = Indicator.of(current).rank();
             if (rank != best_rank) {
                 if (rank > best_rank) best = record;
                 continue;
@@ -252,7 +281,7 @@ pub const Records = struct {
         if (record.app) |value| return value;
         var id = record.id;
         while (id.len > 0) {
-            id = if (std.mem.lastIndexOfScalar(u8, id, '/')) |slash| id[0..slash] else "";
+            id = parentId(id);
             const i = self.find(id) orelse continue;
             if (self.list.items[i].app) |value| return value;
         }
@@ -315,14 +344,10 @@ fn optionalEql(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, x, y);
 }
 
-fn stateRank(state: State) u8 {
-    return switch (state) {
-        .idle, .clear => 0,
-        .working => 1,
-        .done => 2,
-        .@"error" => 3,
-        .blocked => 4,
-    };
+/// The id of `id`'s parent; the root record, "", is every record's
+/// ancestor.
+fn parentId(id: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, id, '/')) |slash| id[0..slash] else "";
 }
 
 /// What a tab shows for its terminals. Blocked outranks error, which
@@ -393,16 +418,16 @@ fn colorref(r: u8, g: u8, b: u8) u32 {
 }
 
 /// Where "go to the tab that needs attention" goes: the most urgent of
-/// `indicators` (blocked, then failed, then done), and among equally
-/// urgent ones the first after `current` in order, wrapping around, so the
-/// current one comes last and repeating the action visits each in turn.
-/// Null when nothing needs the user.
+/// `indicators` other than `current` (blocked, then failed, then done), and
+/// among equally urgent ones the first after `current` in order, wrapping
+/// around. Leaving the current tab out lets repeating the action move on
+/// from a tab that still needs the user. Null when no other tab needs them.
 pub fn nextNeedingUser(indicators: []const Indicator, current: ?usize) ?usize {
     const begin = if (current) |i| i + 1 else 0;
     var best: ?usize = null;
     for (0..indicators.len) |step| {
         const i = (begin + step) % indicators.len;
-        if (!indicators[i].needsUser()) continue;
+        if (current == i or !indicators[i].needsUser()) continue;
         if (best) |b| if (indicators[i].rank() <= indicators[b].rank()) continue;
         best = i;
     }
@@ -485,8 +510,9 @@ pub fn writeSanitized(
 }
 
 /// Bidi controls and characters that draw nothing: Unicode's format
-/// characters (general category Cf), plus the combining grapheme joiner
-/// and the Hangul fillers that render as blank.
+/// characters (general category Cf), the combining grapheme joiner, the
+/// variation selectors, the Mongolian free variation selectors, the Khmer
+/// inherent vowels, and the Hangul fillers that render as blank.
 fn isHidden(cp: u21) bool {
     return switch (cp) {
         0x00AD,
@@ -499,12 +525,15 @@ fn isHidden(cp: u21) bool {
         0x08E2,
         0x115F,
         0x1160,
-        0x180E,
+        0x17B4,
+        0x17B5,
+        0x180B...0x180F,
         0x200B...0x200F,
         0x202A...0x202E,
         0x2060...0x2064,
         0x2066...0x206F,
         0x3164,
+        0xFE00...0xFE0F,
         0xFEFF,
         0xFFA0,
         0xFFF9...0xFFFB,
@@ -515,6 +544,7 @@ fn isHidden(cp: u21) bool {
         0x1D173...0x1D17A,
         0xE0001,
         0xE0020...0xE007F,
+        0xE0100...0xE01EF,
         => true,
         else => false,
     };
@@ -676,8 +706,48 @@ test "a new prompt or exit drops working, blocked and idle but keeps done and er
     try testing.expect(testFind(&records, "e") != null);
     try testing.expect(!records.programEnded(testing.allocator));
 
-    try testing.expect(records.acknowledge(testing.allocator));
+    // Seen, they go idle and show nothing; the next prompt ends them.
+    try testing.expect(records.acknowledge());
+    try testing.expect(!records.acknowledge());
+    try testing.expect(records.indicator().eql(.none));
+    try testing.expect(records.programEnded(testing.allocator));
     try testing.expectEqual(@as(usize, 0), records.list.items.len);
+}
+
+test "an acknowledged record still names the records beneath it" {
+    var records: Records = .{};
+    defer records.deinit(testing.allocator);
+
+    _ = try testApply(&records, "state=done:app=claude");
+    _ = try testApply(&records, "state=blocked:id=tool");
+    try testing.expect(records.acknowledge());
+    try testing.expectEqualStrings("claude", records.app(testFind(&records, "tool").?).?);
+    // The same done again, after the user saw the first, is news.
+    try testing.expect(try testApply(&records, "state=done:app=claude"));
+}
+
+test "a step that ends inside running work is neither news nor shown" {
+    var records: Records = .{};
+    defer records.deinit(testing.allocator);
+
+    _ = try testApply(&records, "state=working:id=deploy");
+    try testing.expect(!try testApply(&records, "state=done:id=deploy/us-east"));
+    try testing.expect(!try testApply(&records, "state=error:id=deploy/eu"));
+    try testing.expect(records.indicator().eql(.{ .working = null }));
+
+    // A blocked step needs the user whatever its parent is doing.
+    try testing.expect(try testApply(&records, "state=blocked:id=deploy/ap"));
+    _ = try testApply(&records, "state=clear:id=deploy/ap");
+
+    // Once the work ends, its steps show; the job's own end is the news.
+    try testing.expect(try testApply(&records, "state=done:id=deploy"));
+    try testing.expect(records.indicator().eql(.failed));
+
+    // A working root holds back steps at any depth.
+    records.reset(testing.allocator);
+    _ = try testApply(&records, "state=working");
+    try testing.expect(!try testApply(&records, "state=done:id=a/b/c"));
+    try testing.expect(records.indicator().eql(.{ .working = null }));
 }
 
 test "reset clears every record and re-enables OSC 9;4" {
@@ -736,6 +806,8 @@ test "the headline is the most urgent record, then root, then most recent" {
     _ = try testApply(&records, "state=working:id=b:progress=90");
     // Root wins among working records.
     try testing.expect(records.indicator().eql(.{ .working = 50 }));
+    // Done and failed outrank working when they aren't steps of it.
+    _ = try testApply(&records, "state=idle");
     _ = try testApply(&records, "state=done:id=c");
     try testing.expect(records.indicator().eql(.done));
     _ = try testApply(&records, "state=error:id=d");
@@ -774,13 +846,17 @@ test "the next tab needing attention is the most urgent, then the next in order"
     // Without a current tab, from the start.
     try testing.expectEqual(@as(?usize, 2), nextNeedingUser(&tabs, null));
 
-    // The current tab comes last.
+    // The current tab is never the target, so the only blocked tab hands
+    // over to the next most urgent one, and a lone one goes nowhere.
+    const one_blocked = [_]Indicator{ .done, .{ .blocked = null }, .failed };
+    try testing.expectEqual(@as(?usize, 2), nextNeedingUser(&one_blocked, 1));
     const one = [_]Indicator{ .none, .{ .blocked = null } };
-    try testing.expectEqual(@as(?usize, 1), nextNeedingUser(&one, 1));
+    try testing.expectEqual(@as(?usize, null), nextNeedingUser(&one, 1));
 
     // Failed before done; working and idle never.
     const rest = [_]Indicator{ .done, .{ .working = null }, .failed, .done };
-    try testing.expectEqual(@as(?usize, 2), nextNeedingUser(&rest, 2));
+    try testing.expectEqual(@as(?usize, 3), nextNeedingUser(&rest, 2));
+    try testing.expectEqual(@as(?usize, 2), nextNeedingUser(&rest, 0));
     const quiet = [_]Indicator{ .none, .{ .working = 10 } };
     try testing.expectEqual(@as(?usize, null), nextNeedingUser(&quiet, 0));
     try testing.expectEqual(@as(?usize, null), nextNeedingUser(&.{}, null));
@@ -813,6 +889,10 @@ test "sanitized text drops bidi controls and invisible characters" {
     var w: std.Io.Writer = .fixed(&buf);
     try writeSanitized(&w, "ok\u{202E}gpj.exe\u{2066}\u{200B}\u{FEFF}\u{00AD}!\u{2028}x\u{E0041}", 100);
     try testing.expectEqualStrings("okgpj.exe! x", w.buffered());
+
+    w = .fixed(&buf);
+    try writeSanitized(&w, "a\u{FE0F}\u{17B4}\u{180B}\u{E0100}b", 100);
+    try testing.expectEqualStrings("ab", w.buffered());
 
     w = .fixed(&buf);
     try writeSanitized(&w, "安全な文", 7);
