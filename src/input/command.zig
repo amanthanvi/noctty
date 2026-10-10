@@ -562,6 +562,12 @@ fn actionCommands(action: Action.Key) []const Command {
             },
         },
 
+        .goto_attention => comptime &.{.{
+            .action = .goto_attention,
+            .title = "Go to Tab Needing Attention",
+            .description = "Focus the next tab whose program is blocked on you, failed, or finished.",
+        }},
+
         .cycle_focus_region => comptime &.{
             .{
                 .action = .{ .cycle_focus_region = .next },

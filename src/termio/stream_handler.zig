@@ -86,6 +86,12 @@ pub const StreamHandler = struct {
     /// This is set for the duration of a parse batch when we see 2026h.
     saw_synchronized_output_start: bool = false,
 
+    /// Set by the first program status report (OSC 7501) after a full
+    /// reset. While set, OSC 9;4 progress is no longer forwarded: the
+    /// specification asks terminals to stop mapping it once a program
+    /// reports status, because a mapped 9;4 would erase the real report.
+    program_status_reported: bool = false,
+
     /// Semantic output committed during the current PTY read batch.
     semantic_output: SemanticOutputCapture = .{},
 
@@ -362,6 +368,7 @@ pub const StreamHandler = struct {
             .report_pwd => try self.reportPwd(value.url),
             .show_desktop_notification => try self.showDesktopNotification(value.title, value.body),
             .progress_report => self.progressReport(value),
+            .program_status => self.programStatus(value),
             .start_hyperlink => try self.startHyperlink(value.uri, value.id),
             .clipboard_contents => try self.clipboardContents(value.kind, value.data),
             .semantic_prompt => try self.semanticPrompt(value),
@@ -395,7 +402,6 @@ pub const StreamHandler = struct {
             // Unimplemented
             .title_push,
             .title_pop,
-            .program_status,
             => {},
         }
     }
@@ -1012,6 +1018,13 @@ pub const StreamHandler = struct {
         // Reset resets our palette so we report it for mode 2031.
         self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
 
+        // A full reset removes every program status record and lets OSC 9;4
+        // drive the progress bar again, so this comes before the clear below.
+        if (self.program_status_reported) {
+            self.program_status_reported = false;
+            self.surfaceMessageWriter(.{ .program_status = .reset });
+        }
+
         // Clear the progress bar
         self.progressReport(.{ .state = .remove });
     }
@@ -1151,12 +1164,18 @@ pub const StreamHandler = struct {
                 self.surfaceMessageWriter(.{ .stop_command = code });
             },
 
+            // A new shell prompt means the program that reported status is
+            // gone. There are no records to end before the first report.
+            .fresh_line_new_prompt,
+            .new_command,
+            => if (self.program_status_reported) {
+                self.surfaceMessageWriter(.{ .program_status = .prompt });
+            },
+
             // Handled by Terminal, no special handling by us
             .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .fresh_line_new_prompt,
-            .new_command,
             .prompt_start,
             => {},
         }
@@ -1632,7 +1651,40 @@ pub const StreamHandler = struct {
 
     /// Display a GUI progress report.
     fn progressReport(self: *StreamHandler, report: terminal.osc.Command.ProgressReport) void {
+        if (self.program_status_reported) return;
         self.surfaceMessageWriter(.{ .progress_report = report });
+    }
+
+    fn programStatus(
+        self: *StreamHandler,
+        cmd: terminal.osc.Command.ProgramStatus,
+    ) void {
+        switch (cmd) {
+            // The reply is always the same fixed bytes, ended the way the
+            // query was. The specification never allows sending anything a
+            // program reported back to it.
+            .query => |terminator| self.messageWriter(.{
+                .write_stable = switch (terminator) {
+                    .st => "\x1b]7501;?\x1b\\",
+                    .bel => "\x1b]7501;?\x07",
+                },
+            }),
+
+            .report => |report| {
+                const data = apprt.surface.Message.WriteReq.init(
+                    self.alloc,
+                    report.data,
+                ) catch |err| {
+                    log.warn("dropping program status report err={}", .{err});
+                    return;
+                };
+                self.program_status_reported = true;
+                self.surfaceMessageWriter(.{ .program_status = .{ .report = .{
+                    .state = report.state,
+                    .data = data,
+                } } });
+            },
+        }
     }
 };
 
@@ -2066,4 +2118,132 @@ test "OSC 7 pwd refuses network and device paths" {
         const path = try StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri);
         try std.testing.expectEqualStrings(case[1], path);
     }
+}
+
+fn popProgramStatusTestWrite(mailbox: *termio.Mailbox) ?[]const u8 {
+    while (true) {
+        const message = switch (mailbox.*) {
+            .spsc => |*value| value.queue.pop() orelse return null,
+        };
+        switch (message) {
+            .write_stable => |value| return value,
+            // A full reset reports the palette for mode 2031.
+            .color_scheme_report => continue,
+            else => return "unexpected termio message",
+        }
+    }
+}
+
+/// The next surface message, skipping the mouse shape a full reset sends.
+fn popProgramStatusTestSurfaceMessage(
+    queue: anytype,
+) ?apprt.surface.Message {
+    while (queue.pop()) |message| {
+        const payload = message.surface_message.message;
+        if (payload == .set_mouse_shape) continue;
+        return payload;
+    }
+    return null;
+}
+
+test "OSC 7501 answers the query once and forwards reports, prompts and resets" {
+    const alloc = std.testing.allocator;
+    var term = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+    defer term.deinit(alloc);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer termio_mailbox.deinit(alloc);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(alloc);
+    defer app_queue.destroy(alloc);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(alloc, .{
+        .alloc = alloc,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    // The query gets exactly one fixed reply, ended the way it was, and
+    // the surface hears nothing.
+    stream.nextSlice("\x1b]7501;?\x1b\\");
+    try std.testing.expectEqualStrings("\x1b]7501;?\x1b\\", popProgramStatusTestWrite(&termio_mailbox).?);
+    try std.testing.expect(popProgramStatusTestWrite(&termio_mailbox) == null);
+    stream.nextSlice("\x1b]7501;?\x07");
+    try std.testing.expectEqualStrings("\x1b]7501;?\x07", popProgramStatusTestWrite(&termio_mailbox).?);
+    try std.testing.expect(popProgramStatusTestWrite(&termio_mailbox) == null);
+    try std.testing.expect(popProgramStatusTestSurfaceMessage(app_queue) == null);
+
+    // Before any report, OSC 9;4 reaches the surface and a prompt has no
+    // records to end.
+    stream.nextSlice("\x1b]9;4;1;20\x1b\\");
+    {
+        const message = popProgramStatusTestSurfaceMessage(app_queue).?;
+        try std.testing.expectEqual(@as(?u8, 20), message.progress_report.progress);
+    }
+    stream.nextSlice("\x1b]133;A\x07");
+    try std.testing.expect(popProgramStatusTestSurfaceMessage(app_queue) == null);
+
+    // A report reaches the surface with its body. One longer than a small
+    // message is allocated and freed with the message.
+    const long_msg = "QUFB" ** 80;
+    stream.nextSlice("\x1b]7501;state=working:progress=40:msg=" ++ long_msg ++ "\x1b\\");
+    {
+        var message = popProgramStatusTestSurfaceMessage(app_queue).?;
+        defer message.deinit();
+        const report = message.program_status.report;
+        try std.testing.expectEqual(.working, report.state);
+        try std.testing.expectEqualStrings("state=working:progress=40:msg=" ++ long_msg, report.data.slice());
+    }
+
+    // A report that breaks the specification never leaves the IO thread.
+    stream.nextSlice("\x1b]7501;state=sleeping\x1b\\");
+    stream.nextSlice("\x1b]7501;state=done:msg=YQpi\x1b\\");
+    try std.testing.expect(popProgramStatusTestSurfaceMessage(app_queue) == null);
+
+    // From the first report on, OSC 9;4 is no longer mapped.
+    stream.nextSlice("\x1b]9;4;1;50\x1b\\");
+    try std.testing.expect(popProgramStatusTestSurfaceMessage(app_queue) == null);
+
+    // A new prompt, OSC 133 A or N, ends the program's records.
+    stream.nextSlice("\x1b]133;A\x07\x1b]133;N\x07");
+    try std.testing.expectEqual(.prompt, popProgramStatusTestSurfaceMessage(app_queue).?.program_status);
+    try std.testing.expectEqual(.prompt, popProgramStatusTestSurfaceMessage(app_queue).?.program_status);
+    try std.testing.expect(popProgramStatusTestSurfaceMessage(app_queue) == null);
+
+    // A full reset clears the records before the progress bar, and OSC
+    // 9;4 drives the progress bar again.
+    stream.nextSlice("\x1bc");
+    try std.testing.expectEqual(.reset, popProgramStatusTestSurfaceMessage(app_queue).?.program_status);
+    try std.testing.expectEqual(.remove, popProgramStatusTestSurfaceMessage(app_queue).?.progress_report.state);
+    try std.testing.expect(popProgramStatusTestSurfaceMessage(app_queue) == null);
+    stream.nextSlice("\x1b]9;4;1;60\x1b\\");
+    try std.testing.expectEqual(@as(?u8, 60), popProgramStatusTestSurfaceMessage(app_queue).?.progress_report.progress);
+
+    // Nothing a program reported was written back to it.
+    try std.testing.expect(popProgramStatusTestWrite(&termio_mailbox) == null);
 }

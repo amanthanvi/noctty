@@ -3276,11 +3276,18 @@ keybind: Keybinds = .{},
 
 /// If `true` (default), applications running in the terminal can show desktop
 /// notifications using certain escape sequences such as OSC 9 or OSC 777.
+///
+/// This also covers the notification noctty shows when a program in a tab
+/// you are not looking at reports through the program status protocol
+/// (OSC 7501) that it is blocked on you, done, or failed.
 @"desktop-notifications": bool = true,
 
 /// If `true` (default), applications running in the terminal can show
 /// graphical progress bars using the ConEmu OSC 9;4 escape sequence.
 /// If `false`, progress bar sequences are silently ignored.
+///
+/// On Windows this also controls the taskbar progress that a program's
+/// status (OSC 7501) drives. Tab status badges are not affected.
 @"progress-style": bool = true,
 
 /// Modifies the color used for bold text in the terminal.

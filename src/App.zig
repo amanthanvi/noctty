@@ -241,6 +241,7 @@ test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(isSafeAutomationAction(.{ .launch_layout = "demo" }));
     try std.testing.expect(isSafeAutomationAction(.toggle_fullscreen));
     try std.testing.expect(isSafeAutomationAction(.quit));
+    try std.testing.expect(isSafeAutomationAction(.goto_attention));
     try std.testing.expect(!isSafeAutomationAction(.unbind));
     try std.testing.expect(!isSafeAutomationAction(.{ .text = "hello" }));
     try std.testing.expect(!isSafeAutomationAction(.{ .csi = "0m" }));
@@ -854,6 +855,7 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .new_split,
         .goto_split,
         .goto_window,
+        .goto_attention,
         .toggle_split_zoom,
         .toggle_readonly,
         .resize_split,

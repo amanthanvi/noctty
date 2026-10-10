@@ -363,6 +363,14 @@ pub const Action = union(Key) {
     /// target supplies the invoking surface context when available.
     new_window_elevated: NewWindowElevated,
 
+    /// A program status event (OSC 7501) for the target surface. The
+    /// terminal core only validates reports; the apprt keeps the records.
+    program_status: ProgramStatus,
+
+    /// Focus the next tab or split whose program needs the user, as its
+    /// program reported through OSC 7501.
+    goto_attention,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +444,8 @@ pub const Action = union(Key) {
         toggle_quick_select,
         cycle_focus_region,
         new_window_elevated,
+        program_status,
+        goto_attention,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -596,6 +606,28 @@ pub const NewWindow = struct {
         _ = self;
         return .{};
     }
+};
+
+/// A program status event (OSC 7501). The apprt keeps one record per id
+/// and applies the specification's record and lifetime rules.
+pub const ProgramStatus = union(enum) {
+    /// A report the parser validated. It is only valid during the call.
+    report: terminal.osc.Command.ProgramStatus.Report,
+
+    /// The program that set the records is gone: a new shell prompt
+    /// started (OSC 133 A or N) or the child process exited. Working,
+    /// blocked and idle records end; done and error stay until the user
+    /// has seen them.
+    program_ended,
+
+    /// A full reset (RIS) removes every record and lets OSC 9;4 drive the
+    /// progress bar again.
+    reset,
+
+    /// Not part of the C API.
+    pub const C = void;
+
+    pub fn cval(_: ProgramStatus) void {}
 };
 
 pub const NewWindowElevated = struct {

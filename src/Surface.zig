@@ -1441,6 +1441,18 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .program_status => |event| switch (event) {
+            .report => |report| {
+                defer report.data.deinit();
+                self.programStatus(.{ .report = .{
+                    .state = report.state,
+                    .data = report.data.slice(),
+                } });
+            },
+            .prompt => self.programStatus(.program_ended),
+            .reset => self.programStatus(.reset),
+        },
+
         .progress_report => |v| {
             self.last_progress_report = v;
             if (!self.config.progress_style) return;
@@ -1592,6 +1604,10 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     // Mark our flag that we exited immediately
     self.child_exited = true;
 
+    // Program status records that describe running work end with the
+    // process, whatever happens to the surface next.
+    self.programStatus(.program_ended);
+
     // If our runtime was below some threshold then we assume that this
     // was an abnormal exit and we show an error message.
     if (info.runtime_ms <= self.config.abnormal_command_exit_runtime_ms) runtime: {
@@ -1673,6 +1689,18 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 }
 
 /// Called when the child process exited abnormally.
+/// Hand a program status event (OSC 7501) to the apprt, which keeps the
+/// records.
+fn programStatus(self: *Surface, event: apprt.action.ProgramStatus) void {
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .program_status,
+        event,
+    ) catch |err| {
+        log.warn("apprt failed to apply program status err={}", .{err});
+    };
+}
+
 fn childExitedAbnormally(
     self: *Surface,
     info: apprt.surface.Message.ChildExited,
@@ -6780,6 +6808,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .previous => .previous,
                 .next => .next,
             },
+        ),
+
+        .goto_attention => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .goto_attention,
+            {},
         ),
 
         .cycle_focus_region => |direction| return try self.rt_app.performAction(

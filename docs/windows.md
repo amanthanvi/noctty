@@ -370,7 +370,8 @@ in-app banners when Windows notification policy, Focus Assist, app identity,
 or runtime availability prevents a toast. `desktop-notifications` gates every
 toast, including command-finish toasts, which additionally need
 `notify-on-command-finish` and a `notify-on-command-finish-action` that
-includes `notify`. Only command-finish toasts focus the originating pane when
+includes `notify`, and [program status](#program-status-osc-7501) toasts.
+Command-finish and program status toasts focus the originating pane when
 clicked; OSC 9 and OSC 777 toasts are display-only.
 
 Terminal progress reports map to Windows taskbar progress for the active
@@ -378,6 +379,56 @@ surface in each host window when `progress-style` is enabled; with
 `progress-style = false` the sequences are silently ignored. Terminal apps
 can also set in-terminal progress state through Ghostty's shared VT/OSC
 support.
+
+### Program status (OSC 7501)
+
+Programs that speak the
+[program status protocol](https://www.superlogical.com/rex/docs/build/program-status),
+such as coding agents, build tools and deploy scripts, tell noctty whether
+they are idle, working (with optional progress), done, blocked on you (for a
+permission, an answer, or a sign-in), or failed. noctty answers the
+protocol's support query (`OSC 7501 ; ?`) and advertises it with the `Pst`
+terminfo capability, so a program can check before it reports.
+
+- **Tab badge.** A tab shows the most urgent status of the programs in its
+  panes: a ring for working (a bright arc for the progress, when reported), a
+  filled amber dot for blocked, a green check for done, and a red cross for
+  failed. Each state has its own shape, so high contrast, which draws every
+  badge in the text color, still tells them apart.
+- **When it clears.** Working and blocked last until the program reports
+  something else, or until it ends: a new shell prompt (OSC 133 A, which
+  noctty's shell integration emits) or the shell exiting. Done and failed
+  stay until you look at the tab, meaning the tab is active and its window is
+  in the foreground. A full reset (`ESC c`) clears everything.
+- **Taskbar.** The active pane's root status drives the taskbar button like
+  OSC 9;4 does: working is normal or indeterminate progress, blocked is the
+  paused (yellow) bar and failed the error (red) bar. Once a program has
+  reported status, OSC 9;4 from the same terminal no longer changes the
+  taskbar until a full reset, as the protocol asks. `progress-style = false`
+  turns this off too.
+- **Notifications.** When a tab you are not looking at becomes blocked,
+  done or failed, noctty shows a toast that names the program and the tab;
+  clicking it focuses that pane. It follows `desktop-notifications`, and it
+  is rate-limited: at most one per pane every 5 seconds and three across
+  noctty every 10 seconds.
+- **Go to the tab that needs you.** The `goto_attention` action, also in the
+  command palette as "Go to Tab Needing Attention", focuses the next blocked
+  tab, then failed, then done, across windows; repeating it visits each in
+  turn. It has no default key binding; bind it with, for example,
+  `keybind = ctrl+shift+g=goto_attention`. `noctty +perform-action
+  goto_attention` runs it from scripts.
+- **Screen readers.** Each tab's UI Automation `ItemStatus` reads the status,
+  such as "claude needs permission: Allow edit to main.rs?", and changes
+  raise a property-change event.
+
+Program text shown outside the terminal (in toasts and UI Automation) has
+bidirectional overrides and invisible formatting characters removed and is
+cut to 240 bytes. noctty never sends anything a program reported back to a
+program.
+
+With Windows' built-in console host, replies to OSC queries, including this
+one, don't reach Windows console programs; the ConPTY that noctty ships
+delivers them. Programs may also report without asking first.
 
 ## Power and battery
 
