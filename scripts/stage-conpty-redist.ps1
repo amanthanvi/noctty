@@ -23,11 +23,31 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "conpty-redist.ps1")
 
-$staged = Install-ConPtyRedist `
-    -PinPath (Join-Path $PSScriptRoot "..\dist\windows\conpty-redist.json") `
-    -Architecture $Architecture `
-    -Destination $Destination `
-    -CacheRoot $CacheRoot
+# Builds in several worktrees share the Zig global cache, and two first-time
+# downloads would race to move the package into it.
+$mutex = [System.Threading.Mutex]::new($false, "Local\noctty-stage-conpty-redist")
+try {
+    try {
+        [void]$mutex.WaitOne()
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # A build was killed mid-stage; the mutex is ours and the helper
+        # re-verifies everything it finds.
+    }
+    try {
+        $staged = Install-ConPtyRedist `
+            -PinPath (Join-Path $PSScriptRoot "..\dist\windows\conpty-redist.json") `
+            -Architecture $Architecture `
+            -Destination $Destination `
+            -CacheRoot $CacheRoot
+    }
+    finally {
+        $mutex.ReleaseMutex()
+    }
+}
+finally {
+    $mutex.Dispose()
+}
 if (-not $staged) {
     exit 3
 }

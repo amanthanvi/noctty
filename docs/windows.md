@@ -1116,7 +1116,11 @@ the same selection and reason (`"fallback": "NotFound"`). Set
 `NOCTTY_CONPTY=inbox` before launch to force the in-box conhost for diagnosis.
 
 When noctty falls back on its own it shows a banner naming the reason, in
-every build. The shell still works, but the in-box conhost is a different
+every build. One fallback happens only inside a running window: if the
+bundled pair loads but fails to create a pseudo console, that window moves to
+the in-box conhost and its banner says so, while `+version` and the bundle,
+which run as separate processes, still report `bundled`. The shell still
+works, but the in-box conhost is a different
 terminal path. On the Windows builds measured it re-renders output instead of
 forwarding it, answers DA, DSR and DECRQM itself (reporting synchronized
 output, mode 2026, as unsupported), never returns the OSC 4/10/11/12 colour

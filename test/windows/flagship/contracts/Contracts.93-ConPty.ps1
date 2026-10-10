@@ -61,16 +61,20 @@ $conptyBuildStep = Join-Path $repoRoot 'src\build\ConptyRedist.zig'
 $conptyStageScript = Join-Path $repoRoot 'scripts\stage-conpty-redist.ps1'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'build.zig') `
-    -Pattern '(?ms)if \(config\.target\.result\.os\.tag == \.windows\) \{[^}]*?ConptyRedist\.install\(b, config\.target\);' `
+    -Pattern '(?ms)if \(config\.target\.result\.os\.tag == \.windows\) \{[^}]*?if \(config\.bundled_conpty\) \{[^}]*?ConptyRedist\.install\(b, config\.target\);' `
     -Description 'every Windows source build installs the pinned bundled ConPTY beside the exe'
 Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'src\build\Config.zig') `
+    -Pattern '(?ms)config\.bundled_conpty = b\.option\(\s*bool,\s*"bundled-conpty",.*?\) orelse true;' `
+    -Description 'source builds stage the bundled ConPTY unless the builder opts out'
+Assert-WorkflowContract `
     -Path $conptyBuildStep `
-    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?if \(installedMatches\(arena, bin, &staged, self\.arch\)\) return;.*?b\.pathFromRoot\(stage_script\).*?0 => \{\s*if \(installedMatches\(arena, bin, &staged, self\.arch\)\) return;\s*return step\.fail\(.*?exit_not_downloaded => break :reason.*?return step\.fail\(.*?bin\.deleteFile\(file\.name\)' `
-    -Description 'source builds restage only through the release helper, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
+    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?if \(installedMatches\(arena, bin, &staged\)\) return;.*?env\.remove\("PSModulePath"\);.*?\.env_map = &env,.*?b\.pathFromRoot\(stage_script\).*?0 => \{\s*if \(installedMatches\(arena, bin, &staged\)\) return;\s*return step\.fail\(.*?exit_not_downloaded => \{.*?break :reason "the download failed";.*?return step\.fail\(.*?bin\.deleteFile\(file\.name\)' `
+    -Description 'source builds restage only through the release helper with a clean PSModulePath, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
 Assert-WorkflowContract `
     -Path $conptyStageScript `
-    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
-    -Description 'source-build staging runs the release helper against the shared pin and reports only a failed download as exit 3'
+    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Mutex\]::new\(\$false, "Local\\noctty-stage-conpty-redist"\).*?WaitOne\(\).*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?ReleaseMutex\(\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
+    -Description 'source-build staging serializes on a named mutex, runs the release helper against the shared pin, and reports only a failed download as exit 3'
 Assert-WorkflowContractAbsent `
     -Path $conptyStageScript `
     -Pattern 'Invoke-SignFile|signtool|Set-AuthenticodeSignature' `
@@ -85,7 +89,7 @@ Assert-WorkflowContract `
     -Description 'the source-build ConPTY check uses the release hash and PE checks and requires noctty to select the pair'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
-    -Pattern '(?ms)fn signalFallbackBanner\(\) void \{\s*if \(comptime builtin\.is_test\) return;' `
+    -Pattern '(?ms)fn signalFallbackBanner\(\) void \{\s*fallback_banner_pending\.store\(true, \.release\);\s*\}' `
     -Description 'a ConPTY fallback warns in every build mode, not only ReleaseFast'
 Assert-WorkflowContract `
     -Path $releaseDefenderScanner `

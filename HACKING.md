@@ -29,9 +29,12 @@ Bare `zig build test` errors in this fork; pass `-Demit-test-exe=true` or
 `OpenConsole.exe`, beside the exe, so a source build takes the terminal path a
 release takes. The first build downloads the package (about 1.7 MB) with
 Windows PowerShell into the Zig global cache; later builds only re-hash the
-installed pair. Without network access the build prints a warning and the
-exe falls back to Windows' in-box conhost, which re-renders output and drops
-colour-query replies; `noctty +version` and an in-app banner name the reason.
+installed pair. If the download cannot happen (no network, `zig build
+--system`), the build prints a warning and the exe falls back to Windows'
+in-box conhost, which re-renders output and drops colour-query replies;
+`noctty +version` and an in-app banner name the reason. A package that does
+not match the pin fails the build. Pass `-Dbundled-conpty=false` to skip the
+download, for example where policy blocks PowerShell scripts.
 
 The full suite is the only test run to trust on its own, and `--summary all`
 is part of it: read the `N/M tests passed` line. `Build Summary: 41/41 steps

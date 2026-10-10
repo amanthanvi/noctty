@@ -600,7 +600,11 @@ const WindowsConPty = struct {
             null,
             flags,
         ) orelse return switch (windows.kernel32.GetLastError()) {
-            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => error.NotFound,
+            // MOD_NOT_FOUND also means a DLL that conpty.dll needs is missing.
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => if (std.fs.accessAbsolute(path, .{}))
+                error.LoadFailed
+            else |_|
+                error.NotFound,
             else => error.LoadFailed,
         };
         errdefer _ = windows.kernel32.FreeLibrary(module);
@@ -665,9 +669,8 @@ const WindowsConPty = struct {
     }
 
     /// Source builds stage the bundled pair too (src/build/ConptyRedist.zig),
-    /// so every build mode warns. The test binary runs without the pair.
+    /// so every build mode warns.
     fn signalFallbackBanner() void {
-        if (comptime builtin.is_test) return;
         fallback_banner_pending.store(true, .release);
     }
 
@@ -1160,6 +1163,8 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
     // in-box selection says why and a bundled one does not.
     const auto = conPtyInfo().?;
     try testing.expectEqual(auto.source == .inbox, auto.fallback != null);
+    // An automatic fallback is never silent.
+    try testing.expectEqual(auto.source == .inbox, hasPendingConPtyFallbackBanner());
     {
         var auto_pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
         defer auto_pty.deinit();

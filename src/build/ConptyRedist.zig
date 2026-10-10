@@ -9,12 +9,14 @@
 //! bytes a release ships and take the terminal path a release takes.
 //!
 //! Every build re-hashes the installed pair against the pin, which takes a
-//! few milliseconds, and runs PowerShell only when the pair is missing or
-//! stale. The helper keeps the verified package in the Zig global cache. A
-//! package or file that does not match the pin fails the build. Only a failed
-//! download (offline, or `zig build --system`) is tolerated: the step warns,
-//! removes any installed pair the pin does not vouch for, and the build
-//! continues on the in-box conhost.
+//! few milliseconds, and runs Windows PowerShell only when the pair is missing
+//! or stale. (The build runner has TLS compiled out and `zig fetch` rejects a
+//! `.nupkg`, so the download needs a child process.) The helper keeps the
+//! verified package in the Zig global cache. A package or file that does not
+//! match the pin fails the build. A download that cannot happen (no network,
+//! `zig build --system`, no PowerShell) is tolerated: the step warns, removes
+//! any installed pair the pin does not vouch for, and the build continues on
+//! the in-box conhost. `-Dbundled-conpty=false` skips this step.
 const ConptyRedist = @This();
 
 const std = @import("std");
@@ -35,17 +37,7 @@ const max_file_bytes = 16 * 1024 * 1024;
 step: Step,
 arch: Arch,
 
-const Arch = enum {
-    x64,
-    arm64,
-
-    fn machine(self: Arch) u16 {
-        return switch (self) {
-            .x64 => 0x8664,
-            .arm64 => 0xaa64,
-        };
-    }
-};
+const Arch = enum { x64, arm64 };
 
 /// The parts of the pin document this step checks the installed pair
 /// against. Install-ConPtyRedist validates the rest before staging.
@@ -79,7 +71,6 @@ pub fn install(b: *std.Build, target: std.Build.ResolvedTarget) void {
 }
 
 fn make(step: *Step, options: Step.MakeOptions) !void {
-    _ = options;
     const b = step.owner;
     const self: *ConptyRedist = @fieldParentPtr("step", step);
     const arena = b.allocator;
@@ -103,17 +94,32 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
         return step.fail("unable to open '{s}': {s}", .{ bin_path, @errorName(err) });
     defer bin.close();
 
-    if (installedMatches(arena, bin, &staged, self.arch)) return;
+    if (installedMatches(arena, bin, &staged)) return;
 
     // The helper's own account of a failed download, shown after the warning.
     var detail: []const u8 = "";
     const reason: []const u8 = reason: {
         if (b.graph.system_package_mode) break :reason "downloads are disabled by --system";
+
+        // A PowerShell 7 parent puts its own modules first in PSModulePath,
+        // and Windows PowerShell then loads them instead of its own, losing
+        // Get-FileHash. Each PowerShell rebuilds the variable when unset.
+        var env = std.process.getEnvMap(arena) catch |err|
+            return step.fail("unable to read the environment: {s}", .{@errorName(err)});
+        env.remove("PSModulePath");
+        const powershell = if (builtin.os.tag == .windows)
+            b.fmt("{s}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", .{
+                env.get("SystemRoot") orelse "C:\\Windows",
+            })
+        else
+            "pwsh";
         const cache_root = b.graph.global_cache_root.join(arena, &.{"noctty-conpty"}) catch @panic("OOM");
         const result = std.process.Child.run(.{
             .allocator = arena,
+            .env_map = &env,
+            .progress_node = options.progress_node,
             .argv = &.{
-                if (builtin.os.tag == .windows) "powershell.exe" else "pwsh",
+                powershell,
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",
@@ -128,11 +134,14 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
                 "-CacheRoot",
                 cache_root,
             },
-        }) catch |err| break :reason b.fmt("PowerShell could not be started: {s}", .{@errorName(err)});
+        }) catch |err| switch (err) {
+            error.FileNotFound => break :reason b.fmt("{s} is not installed", .{powershell}),
+            else => return step.fail("unable to run {s}: {s}", .{ stage_script, @errorName(err) }),
+        };
         switch (result.term) {
             .Exited => |code| switch (code) {
                 0 => {
-                    if (installedMatches(arena, bin, &staged, self.arch)) return;
+                    if (installedMatches(arena, bin, &staged)) return;
                     return step.fail("{s} reported success, but the pair in '{s}' does not match {s}", .{
                         stage_script, bin_path, pin_path,
                     });
@@ -164,8 +173,8 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
         \\warning: the bundled ConPTY was not staged because {s}.
         \\noctty in '{s}' will fall back to Windows' in-box conhost, which re-renders
         \\output, drops OSC 4/10/11/12 and XTGETTCAP replies, and may strip Kitty
-        \\graphics and Sixel. Build again with network access to stage conpty.dll and
-        \\OpenConsole.exe from {s}.
+        \\graphics and Sixel. Once that is fixed, build again to stage conpty.dll and
+        \\OpenConsole.exe from {s}, or pass -Dbundled-conpty=false to stop trying.
         \\{s}
     , .{ reason, bin_path, pin.nupkg.url, detail });
 }
@@ -175,23 +184,15 @@ const Staged = struct {
     sha256: []const u8,
 };
 
-/// Whether every staged file is installed with its pinned SHA-256 and the
-/// target's PE machine, the checks Install-ConPtyRedist applies.
-fn installedMatches(arena: std.mem.Allocator, bin: std.fs.Dir, staged: []const Staged, arch: Arch) bool {
+/// Whether every staged file is installed with its pinned SHA-256. The pins
+/// are per architecture, so a match also fixes the PE machine, which
+/// Install-ConPtyRedist checked when it staged the file.
+fn installedMatches(arena: std.mem.Allocator, bin: std.fs.Dir, staged: []const Staged) bool {
     for (staged) |file| {
         const bytes = bin.readFileAlloc(arena, file.name, max_file_bytes) catch return false;
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(bytes, &digest, .{});
         if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), file.sha256)) return false;
-        if (peMachine(bytes) != arch.machine()) return false;
     }
     return true;
-}
-
-fn peMachine(bytes: []const u8) ?u16 {
-    if (bytes.len < 0x40 or !std.mem.eql(u8, bytes[0..2], "MZ")) return null;
-    const pe = std.mem.readInt(u32, bytes[0x3c..0x40], .little);
-    if (pe > bytes.len or bytes.len - pe < 6) return null;
-    if (!std.mem.eql(u8, bytes[pe..][0..4], "PE\x00\x00")) return null;
-    return std.mem.readInt(u16, bytes[pe + 4 ..][0..2], .little);
 }
