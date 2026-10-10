@@ -14995,8 +14995,6 @@ const Host = struct {
         removed.button_label_cache_valid = false;
         const target_index = self.findTabIndexById(target_tab_id) orelse unreachable;
         self.active_tab = target_index;
-        // The moved panes bring their programs' status with them.
-        self.refreshTabStatus(target_index);
         _ = self.appendStructuralUndoAssumeCapacity(.{
             .kind = .tab_subtree_transfer,
             .timestamp_ms = sys.GetTickCount64(),
@@ -15029,6 +15027,9 @@ const Host = struct {
         if (committed_entry.payload.tab_subtree_transfer.source_tab) |*source_tab| {
             source_tab.clearRedoHistory();
         }
+        // The moved panes bring their programs' status with them. Only now:
+        // a failed commit above restores the target's own panes.
+        self.refreshTabStatus(self.active_tab);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.tabs.items[self.active_tab].clearRedoHistory();
         while (self.structural_undo_entries.items.len > win32_undo.max_entries) {
@@ -23720,8 +23721,8 @@ fn tabStatusHeadline(tab: *const Tab) ?TabProgramStatus {
 /// What a screen reader is told about a tab's status, as a hash that
 /// progress alone doesn't change; never 0, which stands for no status.
 fn tabStatusKey(status: TabProgramStatus) u64 {
-    var hasher = std.hash.Wyhash.init(@intFromPtr(status.surface));
-    win32_program_status.hashAnnounced(&hasher, status.record);
+    var hasher = std.hash.Wyhash.init(0);
+    win32_program_status.hashAnnounced(&hasher, &status.surface.program_status, status.record);
     return hasher.final() | 1;
 }
 

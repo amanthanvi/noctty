@@ -541,13 +541,18 @@ fn isHidden(cp: u21) bool {
     };
 }
 
-/// Feed `hasher` what a screen reader is told about `record`: which record
-/// it is, its state and kind, and for blocked, done and error its message.
-/// Progress and a working record's message change too often to announce.
-pub fn hashAnnounced(hasher: *std.hash.Wyhash, record: *const Record) void {
-    hasher.update(record.id);
+/// Feed `hasher` what a screen reader is told about `record`: who it
+/// speaks for, its state and kind, and for blocked, done and error its
+/// message. Progress and a working record's message change too often to
+/// announce, and which record leads doesn't matter while it says the same.
+pub fn hashAnnounced(
+    hasher: *std.hash.Wyhash,
+    records: *const Records,
+    record: *const Record,
+) void {
+    hasher.update(subject(records, record) orelse "");
     const kind: u8 = if (record.kind) |value| @as(u8, @intCast(@intFromEnum(value))) + 1 else 0;
-    hasher.update(&.{ @as(u8, @intCast(@intFromEnum(record.state))), kind });
+    hasher.update(&.{ 0, @as(u8, @intCast(@intFromEnum(record.state))), kind });
     if (record.needsUser()) if (record.msg) |msg| hasher.update(msg);
 }
 
@@ -866,7 +871,7 @@ test "screen readers hear about a new request, not about progress" {
     const announced = struct {
         fn key(r: *const Records) u64 {
             var hasher = std.hash.Wyhash.init(0);
-            hashAnnounced(&hasher, r.root().?);
+            hashAnnounced(&hasher, r, r.headline().?);
             return hasher.final();
         }
     }.key;
@@ -887,6 +892,20 @@ test "screen readers hear about a new request, not about progress" {
     try testing.expect(second != first);
     _ = try testApply(&records, "state=blocked:kind=permission:msg=Qg");
     try testing.expect(announced(&records) != second);
+
+    // A new name is news; "Plan".
+    const unnamed = announced(&records);
+    _ = try testApply(&records, "state=blocked:kind=permission:msg=Qg:title=UGxhbg");
+    try testing.expect(announced(&records) != unnamed);
+
+    // Two working steps trading the lead with progress say the same thing.
+    records.reset(testing.allocator);
+    _ = try testApply(&records, "state=working:id=a:app=cargo:progress=1");
+    const one = announced(&records);
+    _ = try testApply(&records, "state=working:id=b:app=cargo:progress=2");
+    try testing.expectEqual(one, announced(&records));
+    _ = try testApply(&records, "state=working:id=a:app=cargo:progress=3");
+    try testing.expectEqual(one, announced(&records));
 }
 
 test "taskbar progress for the root record" {
