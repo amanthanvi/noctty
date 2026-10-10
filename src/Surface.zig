@@ -3093,13 +3093,10 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
 pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
     log.debug("set font size size={}", .{size.points});
 
-    // Update our font size so future changes work
-    self.font_size = size;
-
     // We need to build up a new font stack for this font size.
     const font_grid_key, const font_grid = try self.app.font_grid_set.ref(
         &self.config.font,
-        self.font_size,
+        size,
     );
     errdefer self.app.font_grid_set.deref(font_grid_key);
 
@@ -3108,6 +3105,10 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
         .width = font_grid.metrics.cell_width,
         .height = font_grid.metrics.cell_height,
     });
+
+    // Only record the new DPI once the fallible font update succeeds.
+    // Otherwise contentScaleCallback would skip a retry after a failure.
+    self.font_size = size;
 
     // Notify our render thread of the new font stack. The renderer
     // MUST accept the new font grid and deref the old.
@@ -8195,6 +8196,33 @@ test "Surface: rectangle selection logic" {
         9, 2, // expected end
         true, //rectangle selection
     );
+}
+
+test "Surface: font size preserves DPI after failed grid allocation" {
+    const alloc = std.testing.allocator;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    var font_config = try font.SharedGridSet.DerivedConfig.init(alloc, &config);
+    defer font_config.deinit();
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var app: App = undefined;
+    app.font_grid_set = try font.SharedGridSet.init(alloc);
+    defer app.font_grid_set.deinit();
+    app.font_grid_set.alloc = failing.allocator();
+    var surface: Surface = undefined;
+    surface.app = &app;
+    surface.config.font = font_config;
+    const original: font.face.DesiredSize = .{ .points = 12, .xdpi = 96, .ydpi = 96 };
+    surface.font_size = original;
+    const next: font.face.DesiredSize = .{ .points = 12, .xdpi = 144, .ydpi = 144 };
+
+    // Keeping the installed DPI lets contentScaleCallback try again rather
+    // than returning early as though the new grid had already been installed.
+    try std.testing.expectError(error.OutOfMemory, surface.setFontSize(next));
+    try std.testing.expectEqual(original, surface.font_size);
+    try std.testing.expectError(error.OutOfMemory, surface.setFontSize(next));
+    try std.testing.expectEqual(original, surface.font_size);
+    try std.testing.expectEqual(@as(usize, 0), app.font_grid_set.map.count());
 }
 
 test "Surface: lock keys alone do not count as a mouse mods change" {

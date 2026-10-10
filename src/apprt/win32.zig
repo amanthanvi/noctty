@@ -11338,7 +11338,6 @@ const Host = struct {
     edit_brush: HBRUSH = null,
     status_brush: HBRUSH = null,
     current_dpi: u32 = 96,
-    pending_dpi_update: bool = false,
     /// The last client rect with an area, which layout keeps using while the
     /// window is minimized. See `chrome_layout.hostLayoutClientRect`.
     last_layout_client_rect: ?RECT = null,
@@ -19840,15 +19839,7 @@ const Host = struct {
                     if (runtime_sync.core_size_sync) {
                         entry.view.syncCoreSizeFromClientRect();
                     }
-                    // Update content_scale if DPI changed since surface was last visible
-                    if (self.pending_dpi_update and entry.view.core_initialized) {
-                        const scale_val: f32 = @as(f32, @floatFromInt(self.current_dpi)) / 96.0;
-                        const new_scale: apprt.ContentScale = .{ .x = scale_val, .y = scale_val };
-                        if (entry.view.content_scale.x != new_scale.x or entry.view.content_scale.y != new_scale.y) {
-                            entry.view.content_scale = new_scale;
-                            entry.view.core_surface.contentScaleCallback(new_scale) catch {};
-                        }
-                    }
+                    entry.view.syncContentScaleToHostDpi();
                 } else {
                     content_layout_changed = entry.view.hideSearchBarControls() or content_layout_changed;
                     if (visibility_changed) {
@@ -19896,18 +19887,9 @@ const Host = struct {
                         entry.view.syncCoreSizeFromClientRect();
                     }
                 }
-                // Update content_scale if DPI changed since surface was last visible
-                if (self.pending_dpi_update and entry.view.core_initialized) {
-                    const scale_val: f32 = @as(f32, @floatFromInt(self.current_dpi)) / 96.0;
-                    const new_scale: apprt.ContentScale = .{ .x = scale_val, .y = scale_val };
-                    if (entry.view.content_scale.x != new_scale.x or entry.view.content_scale.y != new_scale.y) {
-                        entry.view.content_scale = new_scale;
-                        entry.view.core_surface.contentScaleCallback(new_scale) catch {};
-                    }
-                }
+                entry.view.syncContentScaleToHostDpi();
             }
         }
-        self.pending_dpi_update = false;
 
         if (chrome_layout_changed or content_layout_changed) {
             // Batch-invalidate after actual positioning/visibility changes.
@@ -26359,19 +26341,6 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                 _ = sys.SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
 
-                // Update content_scale on active tab surfaces
-                const scale_val: f32 = @as(f32, @floatFromInt(v.current_dpi)) / 96.0;
-                const new_scale: apprt.ContentScale = .{ .x = scale_val, .y = scale_val };
-                if (v.activeTab()) |tab| {
-                    var it = tab.tree.iterator();
-                    while (it.next()) |entry| {
-                        entry.view.content_scale = new_scale;
-                        if (entry.view.core_initialized) {
-                            entry.view.core_surface.contentScaleCallback(new_scale) catch {};
-                        }
-                    }
-                }
-                v.pending_dpi_update = true;
                 v.recreateChromeFont();
 
                 // Relayout and repaint
@@ -32856,6 +32825,7 @@ pub const Surface = struct {
         }
 
         const hwnd = self.hwnd orelse return;
+        if (visible) self.syncContentScaleToHostDpi();
         const child_visibility_changed = applyChildVisibility(hwnd, &self.placement, visible);
         if (visibility_changed or child_visibility_changed) {
             self.refreshScrollbarWindow() catch |err| {
@@ -32866,7 +32836,31 @@ pub const Surface = struct {
         self.syncOcclusion();
     }
 
+    /// Hidden tabs, zoomed panes and undo-retained surfaces catch up when
+    /// shown, independently of layouts already completed by other panes.
+    fn syncContentScaleToHostDpi(self: *Surface) void {
+        const host = self.host orelse return;
+        if (!self.window_visible or !host.surfaces_visible) return;
+        const scale: f32 = @as(f32, @floatFromInt(host.current_dpi)) / 96.0;
+        const next: apprt.ContentScale = .{ .x = scale, .y = scale };
+        if (self.content_scale.x == next.x and self.content_scale.y == next.y) return;
+
+        const previous = self.content_scale;
+        self.content_scale = next;
+        if (self.core_initialized) {
+            self.core_surface.contentScaleCallback(next) catch |err| {
+                // Keep this surface eligible for retry on its next layout.
+                self.content_scale = previous;
+                log.err("win32 content scale callback failed err={}", .{err});
+            };
+        }
+    }
+
     fn syncOcclusion(self: *Surface) void {
+        // Restoring a minimized or hidden host can make a pane visible
+        // without changing the child's visibility or placement. Reconcile
+        // its scale before waking the renderer, even in that path.
+        if (self.hwnd != null) self.syncContentScaleToHostDpi();
         if (!self.core_initialized) return;
         const visible = self.window_visible and
             (if (self.host) |host| host.surfaces_visible else true);
@@ -42825,6 +42819,68 @@ test "win32 startupProfilePickerEnabled parses launcher env values" {
     try std.testing.expect(!startupProfilePickerEnabled("0"));
     try std.testing.expect(!startupProfilePickerEnabled("false"));
     try std.testing.expect(!startupProfilePickerEnabled("no"));
+}
+
+test "win32 DPI follows each surface when inactive tabs and splits become visible" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    var app: App = undefined;
+    var host: Host = .{ .app = &app, .id = 1, .current_dpi = 144 };
+    var active: Surface = .{ .app = &app, .host = &host, .scrollbar_config = .never, .content_scale = .{ .x = 1.5, .y = 1.5 } };
+    var inactive: Surface = active;
+    var split: Surface = active;
+    // Native children of an unshown host; no WGL context or desktop show.
+    active.hwnd = try createTestChromeChild(hwnd, prompt_label_class);
+    inactive.hwnd = try createTestChromeChild(hwnd, prompt_label_class);
+    split.hwnd = try createTestChromeChild(hwnd, prompt_label_class);
+
+    host.current_dpi = 96;
+    active.setVisible(true);
+    try std.testing.expectEqual(@as(f32, 1), active.content_scale.x);
+    // Hidden panes keep their fonts until shown; the first pane must not
+    // consume an update that the other panes still need.
+    try std.testing.expectEqual(@as(f32, 1.5), inactive.content_scale.x);
+    inactive.setVisible(true);
+    split.setVisible(true);
+    try std.testing.expectEqual(active.content_scale, inactive.content_scale);
+    try std.testing.expectEqual(active.content_scale, split.content_scale);
+
+    // A zoom-hidden or undo-detached pane skips multiple monitor crossings
+    // and catches up to the latest DPI, with no pending host flag.
+    split.setVisible(false);
+    host.current_dpi = 144;
+    active.setVisible(true);
+    host.current_dpi = 192;
+    split.setVisible(true);
+    try std.testing.expectEqual(@as(f32, 2), split.content_scale.x);
+    try std.testing.expectEqual(@as(f32, 2), split.content_scale.y);
+}
+
+test "win32 DPI catches up on minimized restore and quick terminal show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    var app: App = undefined;
+    var host: Host = .{ .app = &app, .id = 1, .current_dpi = 96, .surfaces_visible = false };
+    var surface: Surface = .{ .app = &app, .host = &host, .window_visible = true, .scrollbar_config = .never };
+    surface.hwnd = try createTestChromeChild(hwnd, prompt_label_class);
+    host.current_dpi = 144;
+    surface.setVisible(true);
+    try std.testing.expectEqual(@as(f32, 1), surface.content_scale.x);
+    host.surfaces_visible = true;
+    surface.syncOcclusion();
+    try std.testing.expectEqual(@as(f32, 1.5), surface.content_scale.x);
+
+    surface.quick_terminal = true;
+    surface.setVisible(false);
+    host.surfaces_visible = false;
+    host.current_dpi = 96;
+    host.surfaces_visible = true;
+    surface.setVisible(true);
+    try std.testing.expectEqual(@as(f32, 1), surface.content_scale.x);
+    surface.setVisible(true);
+    try std.testing.expectEqual(@as(f32, 1), surface.content_scale.x);
 }
 
 test "win32 surfaceLayoutRuntimeSync only trips on visibility or pane rect changes" {
