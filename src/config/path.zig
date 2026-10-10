@@ -29,7 +29,20 @@ pub const Path = union(enum) {
     }
 
     pub fn equal(self: Path, other: Path) bool {
-        return std.meta.eql(self, other);
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+        return switch (self) {
+            inline else => |value, tag| std.mem.eql(u8, value, @field(other, @tagName(tag))),
+        };
+    }
+
+    test "settings path clones compare by content and requirement" {
+        var arena = ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const path: Path = .{ .required = "a.conf" };
+        const copy = try path.clone(arena.allocator());
+        try std.testing.expect(path.equal(copy));
+        try std.testing.expect(!path.equal(.{ .optional = "a.conf" }));
+        try std.testing.expect(!path.equal(.{ .required = "b.conf" }));
     }
 
     /// ghostty_config_path_s

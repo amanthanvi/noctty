@@ -3077,29 +3077,12 @@ fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
 
 const SettingsConfigKey = @import("../config/key.zig").Key;
 const SettingsEditedKeySet = std.StaticBitSet(std.enums.values(SettingsConfigKey).len);
-const settings_explicit_optional_edit_keys = .{
-    SettingsConfigKey.theme,
-    SettingsConfigKey.command,
-    SettingsConfigKey.@"auto-update",
-    SettingsConfigKey.@"auto-update-channel",
-};
-
 fn settingsUserEditedKeys(
     original: *const configpkg.Config,
     pending: *const configpkg.Config,
 ) SettingsEditedKeySet {
     var edited: SettingsEditedKeySet = .initEmpty();
-    inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-        if (field.name[0] == '_') continue;
-        switch (@typeInfo(field.type)) {
-            .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                const key = @field(SettingsConfigKey, field.name);
-                if (original.changed(pending, key)) edited.set(@intFromEnum(key));
-            },
-            else => {},
-        }
-    }
-    inline for (settings_explicit_optional_edit_keys) |key| {
+    inline for (win32_settings.editable_keys) |key| {
         if (original.changed(pending, key)) edited.set(@intFromEnum(key));
     }
     return edited;
@@ -3110,6 +3093,7 @@ fn settingsEditedValueMasked(
     reloaded: *const configpkg.Config,
     comptime key: SettingsConfigKey,
 ) bool {
+    if (key == .command and pending.command == null and reloaded._command_defaulted) return false;
     if (key == SettingsConfigKey.@"auto-update-channel") {
         const expected = pending.@"auto-update-channel" orelse build_config.release_channel;
         const actual = reloaded.@"auto-update-channel" orelse build_config.release_channel;
@@ -10097,25 +10081,7 @@ pub const App = struct {
         // settings-window caller surfaces this differently from a
         // generic write failure.
         var any_masked = false;
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (field.name[0] == '_') continue;
-            switch (@typeInfo(field.type)) {
-                .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                    const key = @field(SettingsConfigKey, field.name);
-                    if (user_edited.isSet(@intFromEnum(key))) {
-                        if (pending.changed(&reloaded, key)) {
-                            std.log.warn(
-                                "settings save: field '{s}' was saved but is masked by a later config-file layer; the effective value after reload differs",
-                                .{field.name},
-                            );
-                            any_masked = true;
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-        inline for (settings_explicit_optional_edit_keys) |key| {
+        inline for (win32_settings.editable_keys) |key| {
             if (user_edited.isSet(@intFromEnum(key)) and settingsEditedValueMasked(pending, &reloaded, key)) {
                 std.log.warn(
                     "settings save: field '{s}' was saved but is masked by a later config-file layer",
@@ -24104,6 +24070,10 @@ fn forwardedActivationExtraArgCount(arguments: ?[]const [:0]const u8) usize {
 fn cliConfigFileOverride(alloc: std.mem.Allocator) !?[]u8 {
     const argv = std.process.argsAlloc(alloc) catch return null;
     defer std.process.argsFree(alloc, argv);
+    return cliConfigFileOverrideArgs(alloc, argv);
+}
+
+fn cliConfigFileOverrideArgs(alloc: std.mem.Allocator, argv: []const []const u8) !?[]u8 {
     const key = "--config-file";
     // Pick the LAST `--config-file` occurrence, not the first:
     // `Config.loadRecursiveFiles` applies files in argv order and
@@ -24114,6 +24084,8 @@ fn cliConfigFileOverride(alloc: std.mem.Allocator) !?[]u8 {
     var i: usize = 1; // skip argv[0]
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        // Config.parseManuallyHook consumes everything after -e as child argv.
+        if (std.mem.eql(u8, arg, "-e")) break;
         if (std.mem.eql(u8, arg, key)) {
             if (i + 1 < argv.len) {
                 last_path = argv[i + 1];
@@ -24155,126 +24127,261 @@ fn leadingIndentLen(line: []const u8) usize {
     return i;
 }
 
-/// Patch GUI-edited config keys while preserving unchanged source text.
-///
-/// A line matches `<name>` when its trimmed-left form starts with
-/// `<name>` followed by optional whitespace and `=`. Comment lines are
-/// ignored. Duplicate key lines preserve load semantics by rewriting
-/// only the last occurrence; missing edited keys are appended.
+/// Return an assignment's key without treating literal value text as comments.
+fn settingsAssignmentKey(line: []const u8) ?SettingsConfigKey {
+    const stripped = std.mem.trimLeft(u8, line, " \t");
+    if (stripped.len == 0 or stripped[0] == '#' or stripped[0] == ';') return null;
+    const eq = std.mem.indexOfScalar(u8, stripped, '=') orelse return null;
+    return std.meta.stringToEnum(SettingsConfigKey, std.mem.trimRight(u8, stripped[0..eq], " \t"));
+}
+
+fn appendSettingsPayload(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), payload: []const u8, ending: []const u8) !void {
+    var start: usize = 0;
+    for (payload, 0..) |byte, i| {
+        if (byte != '\n') continue;
+        try out.appendSlice(alloc, payload[start..i]);
+        try out.appendSlice(alloc, ending);
+        start = i + 1;
+    }
+    try out.appendSlice(alloc, payload[start..]);
+}
+
+/// Patch only edited assignments. Scalars keep last-wins semantics; repeatable
+/// strings replace the full list at its last assignment and reset lower layers.
 fn patchOrAppendEdits(
     alloc: std.mem.Allocator,
     raw: []const u8,
     pending: *const configpkg.Config,
-    user_edited: std.StaticBitSet(std.enums.values(@import("../config/key.zig").Key).len),
+    user_edited: SettingsEditedKeySet,
     out: *std.ArrayListUnmanaged(u8),
 ) !void {
-    // Three `inline for`s over every Config field run here. Adding
-    // `auto-update-feed-url` pushes that past the default 1000-branch quota,
-    // which surfaces as a compile error in this file rather than at the new
-    // option. State the budget so the next option added does not do it again.
     @setEvalBranchQuota(10_000);
-    const ConfigKey = @import("../config/key.zig").Key;
     const ConfigFormatter = @import("../config/formatter.zig");
-
-    // Pass 1: scan lines to find the LAST occurrence of each
-    // user-edited key. Replacing only the LAST occurrence matches
-    // `Config.loadRecursiveFiles`'s "last value wins" semantic — a
-    // user who has two `font-size = 12` lines (e.g. one in a theme
-    // section, one in an override block) keeps the earlier line
-    // untouched and only sees the later one updated. Replacing
-    // every occurrence would collapse intentional overrides.
-    //
-    // Line indices are 0-based; we store them in an array keyed on
-    // `Config.Key`'s enum int. -1 / max-usize means "no match seen".
-    const keys_total = comptime std.enums.values(ConfigKey).len;
-    var last_line: [keys_total]usize = [_]usize{std.math.maxInt(usize)} ** keys_total;
-
-    // Split into line slices once so we can index by line number
-    // during the emit pass.
+    const keys_total = comptime std.enums.values(SettingsConfigKey).len;
+    var last_line: [keys_total]usize = @splat(std.math.maxInt(usize));
     var lines: std.ArrayListUnmanaged([]const u8) = .{};
     defer lines.deinit(alloc);
-    {
-        var it = std.mem.splitScalar(u8, raw, '\n');
-        while (it.next()) |line| try lines.append(alloc, line);
-    }
-
-    for (lines.items, 0..) |line, line_idx| {
-        const stripped = std.mem.trimLeft(u8, line, " \t");
-        if (stripped.len == 0 or stripped[0] == '#' or stripped[0] == ';') continue;
-        const eq_idx = std.mem.indexOfScalar(u8, stripped, '=') orelse continue;
-        const key_slice = std.mem.trimRight(u8, stripped[0..eq_idx], " \t");
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (field.name[0] != '_' and std.mem.eql(u8, field.name, key_slice)) {
-                const key = @field(ConfigKey, field.name);
-                if (user_edited.isSet(@intFromEnum(key))) {
-                    last_line[@intFromEnum(key)] = line_idx;
-                }
-            }
+    var crlf_count: usize = 0;
+    var lf_count: usize = 0;
+    var it = std.mem.splitScalar(u8, raw, '\n');
+    while (it.next()) |line| {
+        try lines.append(alloc, line);
+        if (it.index != null) {
+            if (std.mem.endsWith(u8, line, "\r")) crlf_count += 1 else lf_count += 1;
         }
     }
+    const dominant_ending: []const u8 = if (crlf_count > lf_count) "\r\n" else "\n";
 
-    // Track which keys we've emitted so the append pass can pick up
-    // the leftovers.
-    var written: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
+    for (lines.items, 0..) |line, index| {
+        const key = settingsAssignmentKey(line) orelse continue;
+        if (user_edited.isSet(@intFromEnum(key))) last_line[@intFromEnum(key)] = index;
+    }
 
-    // Pass 2: emit. Every line is written verbatim EXCEPT the
-    // recorded last-occurrence lines for user-edited keys, which
-    // get the fresh serialised value.
-    for (lines.items, 0..) |line, line_idx| {
-        if (line_idx > 0) try out.append(alloc, '\n');
-
-        var replaced = false;
+    var written: SettingsEditedKeySet = .initEmpty();
+    for (lines.items, 0..) |line, index| {
+        var handled = false;
+        const line_key = settingsAssignmentKey(line);
         inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (!replaced and field.name[0] != '_') {
-                const key = @field(ConfigKey, field.name);
-                if (user_edited.isSet(@intFromEnum(key)) and
-                    last_line[@intFromEnum(key)] == line_idx)
-                {
+            if (field.name[0] == '_') continue;
+            const key = @field(SettingsConfigKey, field.name);
+            if (line_key == key and user_edited.isSet(@intFromEnum(key))) {
+                const repeatable = field.type == configpkg.Config.RepeatableString;
+                if (last_line[@intFromEnum(key)] == index) {
                     var scratch: std.Io.Writer.Allocating = .init(alloc);
                     defer scratch.deinit();
-                    ConfigFormatter.formatEntry(
-                        field.type,
-                        field.name,
-                        @field(pending, field.name),
-                        &scratch.writer,
-                    ) catch return error.OutOfMemory;
-                    var payload = scratch.written();
-                    if (payload.len > 0 and payload[payload.len - 1] == '\n') {
-                        payload = payload[0 .. payload.len - 1];
-                    }
-                    // Preserve indentation from the original assignment. The
-                    // config grammar has no inline comments: `#` or `;` after
-                    // `=` is value data and must not survive replacement.
-                    const indent_end = leadingIndentLen(line);
-                    const leading = line[0..indent_end];
-                    try out.appendSlice(alloc, leading);
-                    try out.appendSlice(alloc, payload);
+                    // An empty list's formatter already emits its reset.
+                    if (repeatable and @field(pending, field.name).list.items.len != 0)
+                        try scratch.writer.print("{s} = \n", .{field.name});
+                    try ConfigFormatter.formatEntry(field.type, field.name, @field(pending, field.name), &scratch.writer);
+                    const payload = std.mem.trimEnd(u8, scratch.written(), "\n");
+                    const has_cr = std.mem.endsWith(u8, line, "\r");
+                    const ending: []const u8 = if (has_cr) "\r\n" else if (index + 1 < lines.items.len) "\n" else dominant_ending;
+                    try out.appendSlice(alloc, line[0..leadingIndentLen(line)]);
+                    try appendSettingsPayload(alloc, out, payload, ending);
+                    if (has_cr) try out.append(alloc, '\r');
+                    if (index + 1 < lines.items.len) try out.append(alloc, '\n');
                     written.set(@intFromEnum(key));
-                    replaced = true;
+                    handled = true;
+                } else if (repeatable) {
+                    // Remove the whole old assignment, including its newline.
+                    handled = true;
                 }
             }
         }
-        if (!replaced) try out.appendSlice(alloc, line);
+        if (!handled) {
+            try out.appendSlice(alloc, line);
+            if (index + 1 < lines.items.len) try out.append(alloc, '\n');
+        }
     }
 
-    // Pass 3: append user-edited keys that didn't appear in the
-    // source at all (first-save / new-key cases).
     inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
         if (field.name[0] == '_') continue;
-        const key = @field(ConfigKey, field.name);
+        const key = @field(SettingsConfigKey, field.name);
         if (user_edited.isSet(@intFromEnum(key)) and !written.isSet(@intFromEnum(key))) {
-            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
-                try out.append(alloc, '\n');
-            }
+            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n')
+                try out.appendSlice(alloc, dominant_ending);
             var scratch: std.Io.Writer.Allocating = .init(alloc);
             defer scratch.deinit();
-            ConfigFormatter.formatEntry(
-                field.type,
-                field.name,
-                @field(pending, field.name),
-                &scratch.writer,
-            ) catch return error.OutOfMemory;
-            try out.appendSlice(alloc, scratch.written());
+            if (field.type == configpkg.Config.RepeatableString and @field(pending, field.name).list.items.len != 0)
+                try scratch.writer.print("{s} = \n", .{field.name});
+            try ConfigFormatter.formatEntry(field.type, field.name, @field(pending, field.name), &scratch.writer);
+            try appendSettingsPayload(alloc, out, scratch.written(), dominant_ending);
+        }
+    }
+}
+
+test "win32 settings automatic command is not masked by default resolution" {
+    var pending = try configpkg.Config.default(std.testing.allocator);
+    defer pending.deinit();
+    var reloaded = try configpkg.Config.default(std.testing.allocator);
+    defer reloaded.deinit();
+    try reloaded.resolveWindowsDefaultCommand();
+    try std.testing.expect(reloaded.command != null);
+    try std.testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .command));
+    try settingsTestLoadText(&reloaded, "command = direct:cmd.exe\n");
+    try std.testing.expect(settingsEditedValueMasked(&pending, &reloaded, .command));
+}
+
+test "win32 settings save target stops at the child command boundary" {
+    const alloc = std.testing.allocator;
+    const target = (try cliConfigFileOverrideArgs(alloc, &.{ "noctty", "--config-file=first.conf", "--config-file", "last.conf", "-e", "tool", "--config-file=tool.conf" })).?;
+    defer alloc.free(target);
+    const expected = try absolutizePath(alloc, "last.conf");
+    defer alloc.free(expected);
+    try std.testing.expectEqualStrings(expected, target);
+    try std.testing.expectEqual(@as(?[]u8, null), try cliConfigFileOverrideArgs(alloc, &.{ "noctty", "-e", "tool", "--config-file=tool.conf" }));
+}
+
+fn settingsTestLoadText(config: *configpkg.Config, text: []const u8) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+    defer std.testing.allocator.free(path);
+    try config.loadFile(std.testing.allocator, path);
+    try std.testing.expect(config._diagnostics.empty());
+}
+
+test "win32 settings patch replaces the whole font list and resets lower layers" {
+    const alloc = std.testing.allocator;
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "C");
+    var edited: SettingsEditedKeySet = .initEmpty();
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(alloc);
+    try patchOrAppendEdits(alloc, "# keep\nfont-family = A\ncopy-on-select = false\n  font-family = B\n", &pending, edited, &out);
+    try std.testing.expectEqualStrings("# keep\ncopy-on-select = false\n  font-family = \nfont-family = C\n", out.items);
+    var loaded = try configpkg.Config.default(alloc);
+    defer loaded.deinit();
+    try loaded.@"font-family".parseCLI(loaded._arena.?.allocator(), "lower layer");
+    try settingsTestLoadText(&loaded, out.items);
+    try std.testing.expect(!pending.changed(&loaded, .@"font-family"));
+    pending.@"font-family" = .{};
+    out.clearRetainingCapacity();
+    try patchOrAppendEdits(alloc, "font-family = A\nfont-family = B\n", &pending, edited, &out);
+    try std.testing.expectEqualStrings("font-family = \n", out.items);
+}
+
+test "win32 settings patch preserves CRLF including multiline and appended edits" {
+    const alloc = std.testing.allocator;
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    pending.@"font-size" = 13.25;
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "A");
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "B");
+    var edited: SettingsEditedKeySet = .initEmpty();
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-size"));
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(alloc);
+    try patchOrAppendEdits(alloc, "# keep\r\nfont-size = 12\r\ncopy-on-select = false", &pending, edited, &out);
+    try std.testing.expectEqualStrings("# keep\r\nfont-size = 13.25\r\ncopy-on-select = false\r\nfont-family = \r\nfont-family = A\r\nfont-family = B\r\n", out.items);
+}
+
+test "win32 settings clone does not edit include or shader paths" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = "config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = false\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+    try tmp.dir.writeFile(.{ .sub_path = "extra.conf", .data = "config-file = nested.conf\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "nested.conf", .data = "cursor-style = block\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    try original.loadFile(alloc, path);
+    try original.loadRecursiveFiles(alloc);
+    try std.testing.expect(original._diagnostics.empty());
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    try std.testing.expectEqual(@as(usize, 0), settingsUserEditedKeys(&original, &pending).count());
+    pending.@"copy-on-select" = .true;
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try std.testing.expectEqual(@as(usize, 1), edited.count());
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(alloc);
+    try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
+    try std.testing.expectEqualStrings("config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = true\n", out.items);
+}
+
+test "win32 settings every editable key round trips through a file" {
+    const alloc = std.testing.allocator;
+    const ConfigFormatter = @import("../config/formatter.zig");
+    var defaults = try configpkg.Config.default(alloc);
+    defer defaults.deinit();
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    try settingsTestLoadText(&pending,
+        \\scrollback-limit = 123456
+        \\font-size = 13.25
+        \\background-opacity = 0.875
+        \\window-padding-x = 5,7
+        \\window-padding-y = 9,11
+        \\clipboard-trim-trailing-spaces = false
+        \\desktop-notifications = false
+        \\app-notifications = no-clipboard-copy,no-config-reload
+        \\confirm-close-surface = always
+        \\copy-on-select = clipboard
+        \\clipboard-read = deny
+        \\clipboard-write = deny
+        \\link-url = true
+        \\link-previews = false
+        \\window-theme = dark
+        \\shell-integration = none
+        \\cursor-style = bar
+        \\background-blur = true
+        \\window-padding-balance = true
+        \\auto-update = off
+        \\auto-update-channel = tip
+        \\font-family = Font #; 🚀
+        \\font-family = Second Font
+        \\theme = light:Light,dark:Dark
+        \\command = direct:pwsh.exe -NoLogo -Command "echo #; literal"
+    );
+    inline for (win32_settings.editable_keys) |key| {
+        var edited: SettingsEditedKeySet = .initEmpty();
+        edited.set(@intFromEnum(key));
+        var old: std.Io.Writer.Allocating = .init(alloc);
+        defer old.deinit();
+        const value = @field(defaults, @tagName(key));
+        try ConfigFormatter.formatEntry(@TypeOf(value), @tagName(key), value, &old.writer);
+        const duplicates = try std.fmt.allocPrint(alloc, "# preserve this comment\n{s}# between duplicates\r\n{s}", .{ old.written(), old.written() });
+        defer alloc.free(duplicates);
+        for ([_][]const u8{ "# preserve this comment\n", old.written(), duplicates }) |raw| {
+            var out: std.ArrayListUnmanaged(u8) = .{};
+            defer out.deinit(alloc);
+            try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
+            var loaded = try configpkg.Config.default(alloc);
+            defer loaded.deinit();
+            try settingsTestLoadText(&loaded, out.items);
+            try std.testing.expect(!settingsEditedValueMasked(&pending, &loaded, key));
+            if (raw.ptr == duplicates.ptr) {
+                try std.testing.expect(std.mem.startsWith(u8, out.items, "# preserve this comment\n"));
+                try std.testing.expect(std.mem.indexOf(u8, out.items, "# between duplicates\r\n") != null);
+            }
         }
     }
 }

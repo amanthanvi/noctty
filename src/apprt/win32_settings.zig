@@ -378,6 +378,19 @@ const OwnedSettingField = enum {
 
 const owned_setting_field_count = std.enums.values(OwnedSettingField).len;
 
+/// The complete persistence allowlist. Effective config contains derived fields
+/// and expanded include/shader paths which the native form does not edit.
+pub const editable_keys = .{
+    Config.Key.@"scrollback-limit",       Config.Key.@"font-size",         Config.Key.@"background-opacity",
+    Config.Key.@"window-padding-x",       Config.Key.@"window-padding-y",  Config.Key.@"clipboard-trim-trailing-spaces",
+    Config.Key.@"desktop-notifications",  Config.Key.@"app-notifications", Config.Key.@"confirm-close-surface",
+    Config.Key.@"copy-on-select",         Config.Key.@"clipboard-read",    Config.Key.@"clipboard-write",
+    Config.Key.@"link-url",               Config.Key.@"link-previews",     Config.Key.@"window-theme",
+    Config.Key.@"shell-integration",      Config.Key.@"cursor-style",      Config.Key.@"background-blur",
+    Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
+    Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
+};
+
 /// Scalar EDIT controls whose raw text can temporarily be invalid and
 /// therefore cannot yet be represented by the typed settings transaction.
 const RawScalarField = enum {
@@ -1613,6 +1626,7 @@ pub const SettingsWindow = struct {
         };
         var replacement_owned = true;
         defer if (replacement_owned) replacement.deinit();
+        if (replacement._command_defaulted) replacement.command = null;
         var changes: [setting_field_count]SettingsTransaction.FieldValue = undefined;
         for (std.enums.values(SettingField), 0..) |field, i| {
             changes[i] = .{ .field = field, .value = settingValue(&replacement, field) };
@@ -2454,7 +2468,7 @@ pub const SettingsWindow = struct {
     }
 
     fn syncFontFamilyFromEdit(self: *SettingsWindow) void {
-        if (self.suppress_edit_events) return;
+        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.font_family)]) return;
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.edit_font_family orelse return;
@@ -2496,7 +2510,7 @@ pub const SettingsWindow = struct {
             return self.setRawScalarValidationError(.font_size, edit, "Font size must be a number from 6 through 72.");
         // Range-clamp: Ghostty Config default is 12 pt; our range is
         // the same the GUI spinner catalogue will offer (6..72).
-        if (parsed < 6.0 or parsed > 72.0) return self.setRawScalarValidationError(.font_size, edit, "Font size must be from 6 through 72 points.");
+        if (!std.math.isFinite(parsed) or parsed < 6.0 or parsed > 72.0) return self.setRawScalarValidationError(.font_size, edit, "Font size must be from 6 through 72 points.");
         self.finishRawScalarEdit(.font_size);
         p.*.@"font-size" = parsed;
         self.trackEdit(.font_size, true);
@@ -2507,7 +2521,7 @@ pub const SettingsWindow = struct {
         const edit = self.edit_font_size orelse return;
         const p = self.pending orelse return;
         var buf: [32]u8 = undefined;
-        const text = std.fmt.bufPrintZ(&buf, "{d:.1}", .{p.@"font-size"}) catch return;
+        const text = std.fmt.bufPrintZ(&buf, "{d}", .{p.@"font-size"}) catch return;
         var buf_w: [32]u16 = undefined;
         const w = utf8ToW(&buf_w, text);
         self.suppress_edit_events = true;
@@ -2516,7 +2530,7 @@ pub const SettingsWindow = struct {
     }
 
     fn syncThemeFromEdit(self: *SettingsWindow) void {
-        if (self.suppress_edit_events) return;
+        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.theme)]) return;
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.edit_theme orelse return;
@@ -2543,11 +2557,7 @@ pub const SettingsWindow = struct {
         var buf: [edit_text_max_utf8]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         if (p.theme) |theme| {
-            if (std.mem.eql(u8, theme.light, theme.dark)) {
-                writer.writeAll(theme.light) catch {};
-            } else {
-                writer.print("light:{s},dark:{s}", .{ theme.light, theme.dark }) catch {};
-            }
+            theme.formatValue(&writer) catch {};
         }
         setEditText(edit, writer.buffered(), &self.suppress_edit_events);
     }
@@ -2567,7 +2577,7 @@ pub const SettingsWindow = struct {
         if (trimmed.len == 0) return self.setRawScalarValidationError(.background_opacity, edit, "Background opacity is required.");
         const parsed = std.fmt.parseFloat(f64, trimmed) catch
             return self.setRawScalarValidationError(.background_opacity, edit, "Background opacity must be a number from 0 through 1.");
-        if (parsed < 0.0 or parsed > 1.0) return self.setRawScalarValidationError(.background_opacity, edit, "Background opacity must be from 0 through 1.");
+        if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return self.setRawScalarValidationError(.background_opacity, edit, "Background opacity must be from 0 through 1.");
         self.finishRawScalarEdit(.background_opacity);
         p.*.@"background-opacity" = parsed;
         self.trackEdit(.background_opacity, true);
@@ -2578,7 +2588,7 @@ pub const SettingsWindow = struct {
         const edit = self.edit_bg_opacity orelse return;
         const p = self.pending orelse return;
         var buf: [32]u8 = undefined;
-        const text = std.fmt.bufPrintZ(&buf, "{d:.2}", .{p.@"background-opacity"}) catch return;
+        const text = std.fmt.bufPrintZ(&buf, "{d}", .{p.@"background-opacity"}) catch return;
         var buf_w: [32]u16 = undefined;
         const w = utf8ToW(&buf_w, text);
         self.suppress_edit_events = true;
@@ -2587,13 +2597,14 @@ pub const SettingsWindow = struct {
     }
 
     fn syncCommandFromEdit(self: *SettingsWindow) void {
-        if (self.suppress_edit_events) return;
+        if (self.suppress_edit_events or !self.owned_text_changed[@intFromEnum(OwnedSettingField.command)]) return;
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.edit_command orelse return;
         var text_buf: [edit_text_max_utf8]u8 = undefined;
         const text = readEditUtf8(edit, &text_buf) orelse return;
         const trimmed = std.mem.trim(u8, text, " \t");
+        p.*._command_defaulted = false;
         if (trimmed.len == 0) {
             p.*.command = null;
             self.clearValidationError(edit);
@@ -2640,6 +2651,8 @@ pub const SettingsWindow = struct {
                 .x => "Window padding X must be one number or a comma-separated pair.",
                 .y => "Window padding Y must be one number or a comma-separated pair.",
             });
+        if (parsed.top_left > 200 or parsed.bottom_right > 200)
+            return self.setRawScalarValidationError(raw_field, edit, "Window padding must be from 0 through 200 logical pixels.");
         self.finishRawScalarEdit(raw_field);
         switch (axis) {
             .x => {
@@ -3117,14 +3130,11 @@ pub const SettingsWindow = struct {
     }
 
     fn save(self: *SettingsWindow) void {
-        self.syncScrollbackFromEdit();
-        self.syncFontFamilyFromEdit();
-        self.syncFontSizeFromEdit();
-        self.syncThemeFromEdit();
-        self.syncBgOpacityFromEdit();
-        self.syncCommandFromEdit();
-        self.syncPaddingFromEdit(.x);
-        self.syncPaddingFromEdit(.y);
+        // Scalar EN_CHANGE already validates and stages every typed value.
+        // Only owned text waiting for EN_KILLFOCUS needs a save-time parse.
+        for (std.enums.values(OwnedSettingField)) |field| {
+            if (self.owned_text_changed[@intFromEnum(field)]) self.syncOwnedControl(field);
+        }
         if (self.validation_control) |control| {
             _ = sys.SetFocus(control);
             self.ensureControlVisible(control);
@@ -3417,6 +3427,11 @@ pub const SettingsWindow = struct {
         errdefer current_snapshot.deinit();
         var pending = try current.clone(self.handle.alloc);
         errdefer pending.deinit();
+        if (current._command_defaulted) {
+            original.command = null;
+            current_snapshot.command = null;
+            pending.command = null;
+        }
 
         self.clearPending();
         self.original = original;
@@ -4512,6 +4527,79 @@ test "settings reopen cancels posted close without restoring discarded draft" {
         PendingCloseReopenAction.cancel_discard_close,
         pendingCloseReopenAction(true, false),
     );
+}
+
+test "settings save preserves untouched scalar precision and legacy ranges" {
+    const Capture = struct {
+        saved: bool = false,
+        font_size: f32 = 0,
+        opacity: f64 = 0,
+        fn save(ctx: *anyopaque, pending: *const Config, _: *const Config) SaveError!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.saved = true;
+            self.font_size = pending.@"font-size";
+            self.opacity = pending.@"background-opacity";
+            // Preserve the draft so this test need not fake a config reload.
+            return error.SerializeFailed;
+        }
+    };
+    const font_edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(font_edit);
+    const opacity_edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(opacity_edit);
+    for ([_]f32{ 13.25, 80, 5.5 }) |font_size| {
+        var original = try Config.default(std.testing.allocator);
+        defer original.deinit();
+        original.@"font-size" = font_size;
+        original.@"background-opacity" = 0.875;
+        var pending = try original.clone(std.testing.allocator);
+        defer pending.deinit();
+        pending.@"copy-on-select" = .true;
+        var capture: Capture = .{};
+        var settings: SettingsWindow = .{
+            .handle = .{ .ctx = &capture, .alloc = std.testing.allocator, .hinstance = undefined, .chromeBg = undefined, .textPrimary = undefined, .openInEditor = undefined, .currentConfig = undefined, .saveAndReload = Capture.save, .notifySuccess = undefined, .onClosed = undefined },
+            .original = original,
+            .pending = pending,
+            .edit_font_size = font_edit,
+            .edit_bg_opacity = opacity_edit,
+        };
+        settings.displayFontSizeInEdit();
+        settings.displayBgOpacityInEdit();
+        settings.save();
+        try std.testing.expect(capture.saved);
+        try std.testing.expectEqual(font_size, capture.font_size);
+        try std.testing.expectEqual(@as(f64, 0.875), capture.opacity);
+    }
+}
+
+test "settings untouched owned controls survive focus loss without reparsing" {
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    var pending = try Config.default(std.testing.allocator);
+    defer pending.deinit();
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "Alpha, Beta");
+    var settings: SettingsWindow = .{ .handle = undefined, .pending = pending, .edit_font_family = edit };
+    settings.displayFontFamilyInEdit();
+    settings.syncFontFamilyFromEdit(); // The EN_KILLFOCUS production path.
+    try std.testing.expectEqual(@as(usize, 1), settings.pending.?.@"font-family".list.items.len);
+    try std.testing.expectEqualStrings("Alpha, Beta", settings.pending.?.@"font-family".list.items[0]);
+    try std.testing.expect(!settings.owned_dirty[@intFromEnum(OwnedSettingField.font_family)]);
+}
+
+test "settings numeric edits reject nonfinite floats and excessive padding" {
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral("nan"), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    var pending = try Config.default(std.testing.allocator);
+    defer pending.deinit();
+    var settings: SettingsWindow = .{ .handle = undefined, .pending = pending, .edit_font_size = edit, .edit_bg_opacity = edit, .edit_pad_x = edit };
+    settings.syncFontSizeFromEdit();
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.font_size)] != null);
+    try std.testing.expectEqual(@as(f32, 12), settings.pending.?.@"font-size");
+    settings.syncBgOpacityFromEdit();
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.background_opacity)] != null);
+    _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("4294967295"));
+    settings.syncPaddingFromEdit(.x);
+    try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
 }
 
 test "settings save command rechecks dispatch state" {
@@ -6261,11 +6349,7 @@ fn writeOwnedSettingValue(writer: *std.Io.Writer, config: *const Config, field: 
             }
         },
         .theme => if (config.theme) |theme| {
-            if (std.mem.eql(u8, theme.light, theme.dark)) {
-                try writer.writeAll(theme.light);
-            } else {
-                try writer.print("light:{s},dark:{s}", .{ theme.light, theme.dark });
-            }
+            try theme.formatValue(writer);
         } else try writer.writeAll("<default>"),
         .command => if (config.command) |command| {
             try writeCommandForEdit(writer, command);
