@@ -240,6 +240,9 @@ threadlocal var prepared_dispatch: ?gl.glad.Context = null;
 
 /// Prepares the provided GL context, loading it with glad.
 fn prepareContext(getProcAddress: anytype) !void {
+    // A loader can fail before initializing its handle or any function slots.
+    // Stage a zeroed candidate; cleanup and rollback are valid even then.
+    gl.glad.context = std.mem.zeroes(gl.glad.Context);
     errdefer {
         if (prepared_dispatch) |previous| {
             gl.glad.context = previous;
@@ -307,6 +310,10 @@ test "failed context preparation preserves the previous GL dispatch" {
     };
     try std.testing.expectError(error.GLInitFailed, prepareContext(&Loader.missing));
     try std.testing.expectEqual(@as(c_int, 1), gl.glad.context.VERSION_4_3);
+    prepared_dispatch = null;
+    gl.glad.context = undefined;
+    try std.testing.expectError(error.GLInitFailed, prepareContext(&Loader.missing));
+    try std.testing.expect(prepared_dispatch == null);
 }
 
 fn recordWin32OpenGLStartupError(step: apprt.win32.OpenGLStartupStep, err: anyerror) void {
