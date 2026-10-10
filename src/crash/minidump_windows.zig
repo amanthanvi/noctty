@@ -19,11 +19,21 @@ const MiniDumpType =
     MiniDumpWithHandleData |
     MiniDumpWithUnloadedModules;
 
+// minidumpapiset.h declares this struct inside `#include <pshpack4.h>`, so on
+// 64-bit Windows the pointer sits at offset 4 and the struct is 16 bytes, not
+// the naturally aligned 24. With natural alignment dbghelp assembles the
+// pointer from the padding and half the real pointer, and fails every dump
+// with ERROR_NOACCESS.
 const MINIDUMP_EXCEPTION_INFORMATION = extern struct {
     ThreadId: windows.DWORD,
-    ExceptionPointers: *windows.EXCEPTION_POINTERS,
+    ExceptionPointers: *windows.EXCEPTION_POINTERS align(4),
     ClientPointers: windows.BOOL,
 };
+
+comptime {
+    std.debug.assert(@offsetOf(MINIDUMP_EXCEPTION_INFORMATION, "ExceptionPointers") == 4);
+    std.debug.assert(@sizeOf(MINIDUMP_EXCEPTION_INFORMATION) == 8 + @sizeOf(usize));
+}
 
 const ExceptionFilter = ?*const fn (*windows.EXCEPTION_POINTERS) callconv(.winapi) c_long;
 
@@ -46,6 +56,9 @@ var previous_filter: ExceptionFilter = null;
 var writing = std.atomic.Value(bool).init(false);
 var crash_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 var crash_dir: []const u8 = "";
+// Static rather than on the stack: the filter runs on the faulting thread,
+// which may be a driver thread with a small stack. `writing` serializes use.
+var dump_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
 pub fn init(alloc: std.mem.Allocator) !void {
     // Preserve the original exception filter across repeated crash init calls.
@@ -95,11 +108,13 @@ fn callPreviousFilter(info: *windows.EXCEPTION_POINTERS) c_long {
 
 fn writeMinidump(info: *windows.EXCEPTION_POINTERS) !void {
     if (crash_dir.len == 0) return error.NotInitialized;
+    try writeMinidumpIn(crash_dir, info);
+}
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+fn writeMinidumpIn(base_dir: []const u8, info: *windows.EXCEPTION_POINTERS) !void {
     const path = try formatDumpPath(
-        &path_buf,
-        crash_dir,
+        &dump_path_buf,
+        base_dir,
         windows.GetCurrentProcessId(),
         std.time.milliTimestamp(),
     );
@@ -159,4 +174,69 @@ test "formatDumpPath keeps existing separator" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try formatDumpPath(&buf, "C:\\crash\\", 7, 9);
     try std.testing.expectEqualStrings("C:\\crash\\noctty-7-9.dmp", path);
+}
+
+test "writeMinidumpIn writes a dump that carries the exception" {
+    // Same layout as windows.EXCEPTION_RECORD, with a nullable chain pointer.
+    const Record = extern struct {
+        ExceptionCode: u32,
+        ExceptionFlags: u32,
+        ExceptionRecord: ?*anyopaque,
+        ExceptionAddress: ?*anyopaque,
+        NumberParameters: u32,
+        ExceptionInformation: [15]usize,
+    };
+    comptime std.debug.assert(@sizeOf(Record) == @sizeOf(windows.EXCEPTION_RECORD));
+
+    var record: Record = .{
+        .ExceptionCode = windows.EXCEPTION_ACCESS_VIOLATION,
+        .ExceptionFlags = 0,
+        .ExceptionRecord = null,
+        .ExceptionAddress = @ptrFromInt(@returnAddress()),
+        .NumberParameters = 2,
+        .ExceptionInformation = [_]usize{ 0, 0x10 } ++ [_]usize{0} ** 13,
+    };
+    var context: windows.CONTEXT = undefined;
+    windows.ntdll.RtlCaptureContext(&context);
+    var pointers: windows.EXCEPTION_POINTERS = .{
+        .ExceptionRecord = @ptrCast(&record),
+        .ContextRecord = &context,
+    };
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath(".", &dir_buf);
+
+    try writeMinidumpIn(dir_path, &pointers);
+
+    var it = tmp.dir.iterate();
+    const entry = (try it.next()) orelse return error.TestExpectedDump;
+    try std.testing.expect(std.mem.endsWith(u8, entry.name, ".dmp"));
+    try std.testing.expect((try it.next()) == null);
+
+    // MINIDUMP_HEADER starts with "MDMP". The exception stream (type 6)
+    // must carry this thread and the record above, which proves dbghelp
+    // read our exception pointers rather than something else.
+    var file = try tmp.dir.openFile(entry.name, .{});
+    defer file.close();
+    var header: [32]u8 = undefined;
+    try std.testing.expectEqual(header.len, try file.preadAll(&header, 0));
+    try std.testing.expectEqualStrings("MDMP", header[0..4]);
+    const stream_count = std.mem.readInt(u32, header[8..12], .little);
+    const directory_rva = std.mem.readInt(u32, header[12..16], .little);
+    const stream_rva = for (0..stream_count) |i| {
+        var dir_entry: [12]u8 = undefined;
+        try std.testing.expectEqual(dir_entry.len, try file.preadAll(&dir_entry, directory_rva + i * dir_entry.len));
+        if (std.mem.readInt(u32, dir_entry[0..4], .little) == 6) break std.mem.readInt(u32, dir_entry[8..12], .little);
+    } else return error.TestExpectedExceptionStream;
+
+    // MINIDUMP_EXCEPTION_STREAM: ThreadId, padding, then MINIDUMP_EXCEPTION
+    // (code, flags, record, address, parameter count, padding, parameters).
+    var stream: [56]u8 = undefined;
+    try std.testing.expectEqual(stream.len, try file.preadAll(&stream, stream_rva));
+    try std.testing.expectEqual(windows.GetCurrentThreadId(), std.mem.readInt(u32, stream[0..4], .little));
+    try std.testing.expectEqual(record.ExceptionCode, std.mem.readInt(u32, stream[8..12], .little));
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, stream[32..36], .little));
+    try std.testing.expectEqual(@as(u64, 0x10), std.mem.readInt(u64, stream[48..56], .little));
 }
