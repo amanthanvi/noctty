@@ -67,7 +67,7 @@ struct NocttyD3D {
     uint64_t hardware_retry_after_ms;
     uint64_t next_present_test_ms;
 #if NOCTTY_RENDERER_TEST_TOOLS
-    uint32_t fail_hardware, fail_device, fail_resource;
+    uint32_t fail_hardware, fail_device, fail_resource, test_present_status;
     HRESULT next_present_failure;
 #endif
     LARGE_INTEGER frequency, frame_start;
@@ -236,6 +236,7 @@ static void release_device(NocttyD3D *d) {
 static HRESULT create_device(NocttyD3D *d, uint32_t warp) {
     D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0, obtained;
 #if NOCTTY_RENDERER_TEST_TOOLS
+    if (!warp) ++d->stats.hardware_attempts;
     if (d->fail_device || (!warp && d->fail_hardware)) return E_FAIL;
 #endif
     HRESULT hr = d->create_device_proc(NULL, warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE,
@@ -346,8 +347,8 @@ static HRESULT resize_swapchain(NocttyD3D *d, uint32_t width, uint32_t height) {
     return hr;
 }
 
-/* Each candidate owns every resource or none. One hardware retry is allowed
- * across this backend's lifetime; WARP remains selected after escalation. */
+/* Each candidate owns every resource or none. Hardware recovery has a bounded
+ * retry window; an explicit software preference never probes hardware. */
 static HRESULT create_candidates(NocttyD3D *d, uint32_t try_hardware) {
     HRESULT hr = E_FAIL;
     if (try_hardware) {
@@ -392,6 +393,7 @@ NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp) {
     d->fail_hardware = env_number("NOCTTY_RENDERER_FAIL_HARDWARE") != 0;
     d->fail_device = env_number("NOCTTY_RENDERER_FAIL_DEVICE") != 0;
     d->fail_resource = env_number("NOCTTY_RENDERER_FAIL_RESOURCE") != 0;
+    d->test_present_status = env_number("NOCTTY_RENDERER_TEST_PRESENT_STATUS") != 0;
     QueryPerformanceFrequency(&d->frequency);
 #endif
     HRESULT hr = create_device(d, d->force_warp);
@@ -402,6 +404,14 @@ NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp) {
     }
     d->stats.generation = 1;
     return d;
+}
+void noctty_d3d11_set_recovery_preference(NocttyD3D *d, uint32_t force_warp) {
+    if (d->force_warp && !force_warp && d->stats.warp) {
+        /* Startup just failed its hardware candidate. Do not immediately probe
+         * again on loss; later recovery may retry after the normal window. */
+        d->hardware_retry_after_ms = GetTickCount64() + 60000;
+    }
+    d->force_warp = force_warp != 0;
 }
 void noctty_d3d11_destroy(NocttyD3D *d) {
     if (!d) return;
@@ -494,6 +504,12 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
     QueryPerformanceCounter(&before);
 #endif
     hr = IDXGISwapChain1_Present(d->swapchain, vsync ? 1 : 0, 0);
+#if NOCTTY_RENDERER_TEST_TOOLS
+    /* Exercise post-Present success classification on hidden desktops too.
+     * This test-only substitution preserves real failures, but may replace
+     * occlusion; it proves classification, not visible presentation. */
+    if (SUCCEEDED(hr) && d->test_present_status) hr = DXGI_STATUS_MODE_CHANGED;
+#endif
     d->stats.last_present_status = hr;
 #if NOCTTY_RENDERER_TEST_TOOLS
     QueryPerformanceCounter(&after);
@@ -504,7 +520,7 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
         d->occluded = 1;
         d->next_present_test_ms = GetTickCount64() + 250;
         ++d->stats.occluded_presents;
-    } else if (hr == S_OK) {
+    } else {
         // Attach only initialized pixels. A failed DComp commit is a failed
         // submission, so it cannot signal the app's first-frame handshake.
         if (!d->composition_committed) {
@@ -514,6 +530,7 @@ static HRESULT present_target(NocttyD3D *d, NocttyD3DTarget *target, uint32_t vs
             ++d->stats.composition_commits;
         }
         ++d->stats.presents;
+        hr = S_OK;
     }
     return hr;
 }
@@ -546,6 +563,12 @@ int32_t noctty_d3d11_set_test_failures(NocttyD3D *d, uint32_t hardware, uint32_t
 #if NOCTTY_RENDERER_TEST_TOOLS
     d->fail_hardware = hardware != 0;
     d->fail_device = device != 0;
+    /* Clearing injected failures also expires the retry window, so canaries
+     * can exercise a later recovery without waiting a minute. Test builds only. */
+    if (!hardware && !device) {
+        d->fail_resource = 0;
+        d->hardware_retry_after_ms = 0;
+    }
     return S_OK;
 #else
     (void)d; (void)hardware; (void)device;
@@ -703,7 +726,7 @@ int32_t noctty_d3d11_buffer_write(NocttyD3DBuffer *b, size_t offset, const void 
         ID3D11DeviceContext_UpdateSubresource(b->owner->context, (ID3D11Resource *)b->gpu, 0, NULL, b->cpu, 0, 0);
     } else {
         D3D11_BOX box = { (UINT)offset, 0, 0, (UINT)(offset + size), 1, 1 };
-        ID3D11DeviceContext_UpdateSubresource(b->owner->context, (ID3D11Resource *)b->gpu, 0, &box, data, 0, 0);
+        ID3D11DeviceContext_UpdateSubresource(b->owner->context, (ID3D11Resource *)b->gpu, 0, &box, b->cpu + offset, 0, 0);
     }
     b->owner->stats.upload_bytes += size;
     return S_OK;

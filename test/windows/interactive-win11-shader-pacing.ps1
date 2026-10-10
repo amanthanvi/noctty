@@ -297,7 +297,8 @@ finally {
     if ($null -ne $run -and -not $run.Process.HasExited) {
         Stop-InteractiveWin11Process -Process $run.Process -Contained
     }
-    if ($profileBefore -and ((Get-FileHash -LiteralPath $realStartupPath).Hash -ne $profileBefore.hash -or (Get-Item -LiteralPath $realStartupPath).LastWriteTimeUtc -ne $profileBefore.mtime)) { throw 'Real startup-attempts.json changed.' }
+    $profileExistsAfter = Test-Path -LiteralPath $realStartupPath
+    if (($null -ne $profileBefore) -ne $profileExistsAfter -or ($profileBefore -and ((Get-FileHash -LiteralPath $realStartupPath).Hash -ne $profileBefore.hash -or (Get-Item -LiteralPath $realStartupPath).LastWriteTimeUtc -ne $profileBefore.mtime))) { throw 'Real startup-attempts.json changed.' }
     Remove-Item Env:\NOCTTY_RENDER_TRACE_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:\NOCTTY_RENDER_TRACE_LIVE -ErrorAction SilentlyContinue
 }

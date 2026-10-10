@@ -641,6 +641,7 @@ pub fn presentLastTarget(self: *OpenGL) !void {
 pub fn capture(self: *OpenGL, hdc: *anyopaque) !void {
     if (!build_config.renderer_test_tools) return error.TestToolsDisabled;
     const target = self.last_target orelse return error.NoCapturedFrame;
+    if (target.storage != .offscreen) return error.CaptureDefaultFramebufferUnsupported;
     const pixels = try self.alloc.alloc(u8, target.width * target.height * 4);
     defer self.alloc.free(pixels);
     var previous_framebuffer: gl.c.GLint = 0;
@@ -652,7 +653,7 @@ pub fn capture(self: *OpenGL, hdc: *anyopaque) !void {
         gl.glad.context.ReadBuffer.?(@intCast(previous_buffer));
     }
     gl.glad.context.BindFramebuffer.?(gl.c.GL_READ_FRAMEBUFFER, target.framebuffer.id);
-    gl.glad.context.ReadBuffer.?(if (target.storage == .offscreen) gl.c.GL_COLOR_ATTACHMENT0 else gl.c.GL_FRONT);
+    gl.glad.context.ReadBuffer.?(gl.c.GL_COLOR_ATTACHMENT0);
     gl.glad.context.ReadPixels.?(0, 0, @intCast(target.width), @intCast(target.height), gl.c.GL_RGBA, gl.c.GL_UNSIGNED_BYTE, pixels.ptr);
     try gl.errors.getError();
     log.info("renderer readback storage={s} framebuffer={d} first_pixel={d},{d},{d},{d}", .{

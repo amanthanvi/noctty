@@ -102,6 +102,26 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 self.overlay_placements.deinit(alloc);
             }
 
+            /// Release deleted images without uploading live pending images.
+            /// The caller holds the draw lock and owns the graphics context if
+            /// any ready textures can be present.
+            pub fn cleanup(self: *State, alloc: Allocator) void {
+                var it = self.images.iterator();
+                while (it.next()) |kv| {
+                    if (!kv.value_ptr.image.isUnloading()) continue;
+                    kv.value_ptr.image.deinit(alloc);
+                    self.images.removeByPtr(kv.key_ptr);
+                }
+            }
+
+            pub fn hasLiveImages(self: *const State) bool {
+                var it = self.images.valueIterator();
+                while (it.next()) |value| {
+                    if (!value.image.isUnloading()) return true;
+                }
+                return false;
+            }
+
             /// Upload any images to the GPU that need to be uploaded,
             /// and remove any images that are no longer needed on the GPU.
             ///
@@ -154,6 +174,7 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 pass: *GraphicsAPI.RenderPass,
                 placement_type: DrawPlacements,
             ) !void {
+                if (comptime @hasDecl(GraphicsAPI, "supports_images") and !GraphicsAPI.supports_images) return;
                 const placements: []const Placement = switch (placement_type) {
                     .kitty_below_bg => self.kitty_placements.items[0..self.kitty_bg_end],
                     .kitty_below_text => self.kitty_placements.items[self.kitty_bg_end..self.kitty_text_end],
@@ -961,4 +982,48 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
             }
         };
     };
+}
+
+test "image cleanup preserves live pending data without a graphics device" {
+    const TestAPI = struct {
+        pub const Texture = struct {
+            released: *usize,
+            pub fn deinit(self: @This()) void {
+                self.released.* += 1;
+            }
+        };
+    };
+    const Images = ForAPI(TestAPI);
+    const alloc = std.testing.allocator;
+    var state: Images.State = .empty;
+    defer state.deinit(alloc);
+    const time = try std.time.Instant.now();
+    var pixel = [_]u8{ 255, 0, 0, 255 };
+    const pending: Images.Image.Pending = .{ .width = 1, .height = 1, .pixel_format = .rgba, .data = &pixel };
+    try state.prepImage(alloc, .{ .kitty = 1 }, time, pending);
+    const live = state.images.get(.{ .kitty = 1 }).?.image.pending.data;
+    for (2..66) |id| {
+        const key: Images.Id = .{ .kitty = @intCast(id) };
+        try state.prepImage(alloc, key, time, pending);
+        state.images.getPtr(key).?.image.markForUnload();
+        state.cleanup(alloc);
+        try std.testing.expectEqual(@as(u32, 1), state.images.count());
+        try std.testing.expect(state.hasLiveImages());
+        try std.testing.expectEqual(live, state.images.get(.{ .kitty = 1 }).?.image.pending.data);
+    }
+    var released: usize = 0;
+    try state.images.put(alloc, .{ .kitty = 66 }, .{
+        .image = .{ .unload_replace = .{
+            .texture = .{ .released = &released },
+            .pending = .{ .width = 1, .height = 1, .pixel_format = .rgba, .data = (try alloc.dupe(u8, &pixel)).ptr },
+        } },
+        .transmit_time = time,
+    });
+    state.cleanup(alloc);
+    state.cleanup(alloc);
+    try std.testing.expectEqual(@as(usize, 1), released);
+    state.images.getPtr(.{ .kitty = 1 }).?.image.markForUnload();
+    try std.testing.expect(!state.hasLiveImages());
+    state.cleanup(alloc);
+    try std.testing.expectEqual(@as(u32, 0), state.images.count());
 }

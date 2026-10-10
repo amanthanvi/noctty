@@ -75,7 +75,7 @@ if (!$Driver) {
 if ([RendererNative]::DesktopName() -ne $DesktopName -or !$DesktopName.StartsWith('renderer-test-')) { throw 'Driver is not on its verified hidden desktop.' }
 [void][RendererNative]::SetThreadDpiAwarenessContext([IntPtr]-4)
 $result = [ordered]@{ status = 'error'; hiddenDesktop = $DesktopName; profileBefore = $before; binarySHA256 = (Get-FileHash -LiteralPath $Binary).Hash; runs = @(); comparisons = @() }
-function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironment = @{}, [string[]]$ExtraConfig = @(), [switch]$Lifecycle, [switch]$MultiPane, [switch]$Streaming, [int]$FailureAction = 0, [switch]$ReloadUnsupported) {
+function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironment = @{}, [string[]]$ExtraConfig = @(), [switch]$Lifecycle, [switch]$MultiPane, [switch]$Streaming, [int]$FailureAction = 0, [switch]$ReloadUnsupported, [switch]$ReloadImages, [switch]$RetryHardware) {
     [void](Assert-Profile $before)
     $run = Join-Path $OutputDirectory $Label
     $bin = Join-Path $run 'bin'
@@ -132,6 +132,19 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             return @{ path = $image; status = $status; pixels = $pixels }
         }
         $case.initial = & $capture 'initial'
+        if ($RetryHardware) {
+            if ($case.initial.status.backend -ne 'd3d11' -or !$case.initial.status.warp) { throw 'Hardware startup failure did not select WARP.' }
+            if (![RendererNative]::LoseDevice($surfaceWindow)) { throw 'Device loss inside retry window rejected.' }
+            Start-Sleep -Milliseconds 200
+            $case.withinRetryWindow = & $capture 'within-retry-window'
+            if ($case.withinRetryWindow.status.hardware_attempts -ne $case.initial.status.hardware_attempts) { throw 'Startup WARP retried hardware before its retry window.' }
+            # Clear injected failures and expire only this test device's budget.
+            if (![RendererNative]::RetryHardware($surfaceWindow)) { throw 'Hardware retry action rejected.' }
+            Start-Sleep -Milliseconds 200
+            $case.hardwareRetried = & $capture 'hardware-retried'
+            if ($case.hardwareRetried.status.hardware_attempts -le $case.withinRetryWindow.status.hardware_attempts) { throw 'Startup WARP lost the hardware recovery preference.' }
+            if ($RequireHardware -and $case.hardwareRetried.status.warp) { throw 'Available hardware was not selected after the retry window.' }
+        }
         if ($Streaming) {
             Start-Sleep -Milliseconds 2200
             $case.streamStart = & $capture 'stream-start'
@@ -139,6 +152,27 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $case.streamEnd = & $capture 'stream-end'
             $case.streamDiff = [RendererNative]::Diff($case.streamStart.path, $case.streamEnd.path, (Join-Path $run 'stream-diff.png')) | ConvertFrom-Json
             if ($case.streamEnd.status.frames - $case.streamStart.status.frames -lt 2 -or $case.streamDiff.different -lt 10) { throw 'Streaming output did not advance paced renderer frames and pixels.' }
+        }
+        if ($ReloadImages) {
+            if ($case.streamEnd.status.image_count -gt 2) { throw 'Deleted Kitty image copies accumulate in the renderer.' }
+            if (![RendererNative]::Action($surfaceWindow, 7)) { throw 'Kitty-only config reload action rejected.' }
+            Start-Sleep -Milliseconds 600
+            $case.imagesRetried = & $capture 'kitty-only-reload'
+            if ($case.imagesRetried.status.fallback_attempts -le $case.streamEnd.status.fallback_attempts) { throw 'Reload did not retry the retained Kitty images.' }
+            if ($case.imagesRetried.status.backend -ne 'd3d11' -or !$case.imagesRetried.status.fallback_blocked) { throw 'Rejected Kitty-only reload stopped using healthy D3D11.' }
+            if ($case.imagesRetried.status.image_count -gt 2) { throw 'Deleted Kitty images accumulate after reload.' }
+            $reply = [IntPtr]::Zero
+            if ([RendererNative]::SendMessageTimeoutW($surfaceWindow, 0x8053, [IntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref]$reply) -eq [IntPtr]::Zero -or $reply -eq [IntPtr]::Zero) { throw 'Unavailable-device image cleanup injection rejected.' }
+            $case.unavailableImages = @()
+            foreach ($sample in 1..2) {
+                Start-Sleep -Milliseconds 600
+                Remove-Item -LiteralPath $environment.NOCTTY_RENDERER_STATUS_PATH -ErrorAction SilentlyContinue
+                if ([RendererNative]::Capture($surfaceWindow, (Join-Path $run ('unavailable-' + $sample + '.png')))) { throw 'An unavailable device unexpectedly supplied GPU readback.' }
+                $status = Get-Content -LiteralPath $environment.NOCTTY_RENDERER_STATUS_PATH -Raw | ConvertFrom-Json
+                if (!$status.unavailable -or $status.image_count -gt 2) { throw 'Unavailable-device image cleanup retained deleted copies.' }
+                $case.unavailableImages += $status
+            }
+            if ($case.unavailableImages[1].max_image_id -le $case.unavailableImages[0].max_image_id) { throw 'Kitty churn did not advance while the device was unavailable.' }
         }
         if ($FailureAction) {
             $reply = [IntPtr]::Zero
@@ -152,6 +186,7 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             Start-Sleep -Milliseconds 200
             $case.recreated = & $capture 'recreated'
             if ($case.recreated.status.recoveries -lt 1 -or $case.recreated.status.generation -le $case.initial.status.generation) { throw 'Device generation did not advance.' }
+            if ($Backend -eq 'd3d11-warp' -and $case.recreated.status.hardware_attempts -ne 0) { throw 'Explicit WARP attempted hardware recovery.' }
             $case.recreationDiff = [RendererNative]::Diff($case.initial.path, $case.recreated.path, (Join-Path $run 'recreation-diff.png')) | ConvertFrom-Json
             if ($case.recreationDiff.different -ne 0) { throw 'Device recreation changed pixels.' }
             $rect = New-Object RendererNative+RECT; [void][RendererNative]::GetWindowRect($hostWindow, [ref]$rect)
@@ -278,11 +313,12 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
 }
 try {
     # These cases need no GL driver and run on x64 and native ARM64 CI too.
-    $blockedKitty = Invoke-Case 'kitty-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1';NOCTTY_RENDERER_TEST_KITTY='1'} @('power-saver-rendering=on') -Streaming
+    $blockedKitty = Invoke-Case 'kitty-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1';NOCTTY_RENDERER_TEST_KITTY='1';NOCTTY_RENDERER_TEST_IMAGE_CHURN='1'} @('power-saver-rendering=on') -Streaming -ReloadImages
     $result.runs += $blockedKitty
     if ($blockedKitty.initial.status.backend -ne 'd3d11' -or !$blockedKitty.initial.status.fallback_blocked) { throw 'Failed GL image fallback did not retain healthy D3D11.' }
     $blockedReload = Invoke-Case 'reload-without-gl' 'd3d11-warp' @{NOCTTY_RENDERER_FAIL_OPENGL='1'} @('power-saver-rendering=on') -Streaming -ReloadUnsupported
     $result.runs += $blockedReload
+    $noHardware = Invoke-Case 'no-hardware' 'd3d11' @{ NOCTTY_RENDERER_FAIL_HARDWARE = '1' } -RetryHardware; $result.runs += $noHardware
     if ($WarpOnly) {
         $warp = Invoke-Case 'warp' 'd3d11-warp' -Lifecycle
         $result.runs += $warp
@@ -291,7 +327,8 @@ try {
         return
     }
     $gl = Invoke-Case 'opengl' 'opengl'; $result.runs += $gl
-    $hardware = Invoke-Case 'hardware' 'd3d11' -Lifecycle; $result.runs += $hardware
+    $hardware = Invoke-Case 'hardware' 'd3d11' @{ NOCTTY_RENDERER_TEST_PRESENT_STATUS = '1' } -Lifecycle; $result.runs += $hardware
+    if ($hardware.initial.status.last_present_status -ne 0x087A0007 -or $hardware.initial.status.composition_commits -lt 1 -or $hardware.initial.status.presents -lt 1) { throw 'Successful nonzero Present status did not commit and complete startup.' }
     if ($RequireHardware -and $hardware.initial.status.warp) { throw 'Hardware required, but adapter selection used WARP.' }
     $warp = Invoke-Case 'warp' 'd3d11-warp' -Lifecycle; $result.runs += $warp
     if (!$warp.initial.status.warp) { throw 'Forced WARP selected hardware.' }
@@ -301,13 +338,11 @@ try {
         if (!$candidate.initial.status.warp -and $diff.different -ne 0) { throw 'Hardware differs from OpenGL.' }
         if ($candidate.initial.status.warp -and ($diff.maxChannelDelta -gt 4 -or $diff.different -gt $diff.pixels * 0.01 -or $diff.over2 -gt $diff.pixels * 0.001)) { throw 'WARP exceeds documented edge quantization tolerance.' }
     }
-    $noHardware = Invoke-Case 'no-hardware' 'd3d11' @{ NOCTTY_RENDERER_FAIL_HARDWARE = '1' }; $result.runs += $noHardware
-    if ($noHardware.initial.status.backend -ne 'd3d11' -or !$noHardware.initial.status.warp) { throw 'Hardware failure did not select WARP.' }
     $noDevice = Invoke-Case 'no-device' 'd3d11' @{ NOCTTY_RENDERER_FAIL_DEVICE = '1' }; $result.runs += $noDevice
     if ($noDevice.initial.status.backend -ne 'opengl') { throw 'Unavailable D3D11 did not select OpenGL.' }
     $noLibrary = Invoke-Case 'no-library' 'd3d11' @{ NOCTTY_RENDERER_FAIL_LIBRARY = '1' }; $result.runs += $noLibrary
     if ($noLibrary.initial.status.backend -ne 'opengl') { throw 'Unavailable D3D11 runtime did not select OpenGL.' }
-    $resource = Invoke-Case 'resource-failure' 'd3d11' @{ NOCTTY_RENDERER_FAIL_RESOURCE = '1' }; $result.runs += $resource
+    $resource = Invoke-Case 'resource-failure' 'd3d11' @{ NOCTTY_RENDERER_FAIL_RESOURCE = '1' } -RetryHardware; $result.runs += $resource
     if ($resource.initial.status.backend -ne 'd3d11' -or !$resource.initial.status.warp) { throw 'Hardware startup resource failure did not select WARP.' }
     $present = Invoke-Case 'present-failure' 'd3d11' -FailureAction 0x8054; $result.runs += $present
     if ($present.afterFailure.status.backend -ne 'd3d11' -or !$present.afterFailure.status.warp) { throw 'Ordinary hardware presentation failure did not select WARP.' }

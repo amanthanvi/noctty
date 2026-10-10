@@ -28,6 +28,7 @@ opengl: std.atomic.Value(?*GL) = .init(null),
 fallback_blocked: bool = false,
 draw_failures: u8 = 0,
 fallback_retry_ms: i64 = 0,
+fallback_attempts: u32 = 0,
 last_warp: bool = false,
 notice: [256]u8 = undefined,
 notice_len: usize = 0,
@@ -89,6 +90,7 @@ pub fn init(alloc: std.mem.Allocator, options: renderer.Options) !Windows {
         if (D3D.init(alloc, candidate_options)) |initialized| {
             value.* = initialized;
             value.config.renderer_backend = config.renderer_backend;
+            value.api.setRecoveryPreference(config.renderer_backend);
             result.active = .{ .d3d11 = value };
             result.last_warp = value.api.stats().warp != 0;
             if (feature != null) {
@@ -164,6 +166,7 @@ fn tryFallback(self: *Windows) bool {
     const old = self.active.d3d11;
     const now = std.time.milliTimestamp();
     if (now < self.fallback_retry_ms) return false;
+    if (comptime build_config.renderer_test_tools) self.fallback_attempts +|= 1;
     self.fallBack() catch |err| {
         // Healthy D3D11 keeps rendering text. A config reload explicitly retries
         // a previously rejected feature; retained images alone cannot spin.
@@ -244,7 +247,7 @@ pub fn updateFrame(self: *Windows, state: *renderer.State, cursor_blink_visible:
         .d3d11 => |v| {
             const result = try v.updateFrame(state, cursor_blink_visible);
             // Images include Kitty graphics and the generated hint overlay.
-            if (v.images.images.count() != 0 and !self.fallback_blocked) {
+            if (v.images.hasLiveImages() and !self.fallback_blocked) {
                 if (!self.pending_fallback) log.warn("D3D11 does not support terminal images; using OpenGL", .{});
                 self.pending_fallback = true;
             }
@@ -258,7 +261,7 @@ pub fn changeConfig(self: *Windows, config: *DerivedConfig) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
     if (self.active == .d3d11) {
-        if (selection.unsupported(config.custom_shaders.value.items.len != 0, config.bg_image != null, false)) |feature| {
+        if (selection.unsupported(config.custom_shaders.value.items.len != 0, config.bg_image != null, self.active.d3d11.images.hasLiveImages())) |feature| {
             log.warn("D3D11 does not support {s}; trying OpenGL on next draw", .{@tagName(feature)});
             self.pending_fallback = true;
             self.fallback_blocked = false;
@@ -284,14 +287,6 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
     if (!build_config.renderer_test_tools) return error.TestToolsDisabled;
     self.mutex.lock();
     defer self.mutex.unlock();
-    switch (self.active) {
-        inline else => |v| {
-            v.draw_mutex.lock();
-            defer v.draw_mutex.unlock();
-            if (self.active == .opengl) try self.rt_surface.makeGLContextCurrent();
-            try v.api.capture(hdc);
-        },
-    }
     const status_path = try std.process.getEnvVarOwned(self.alloc, "NOCTTY_RENDERER_STATUS_PATH");
     defer self.alloc.free(status_path);
     const file = try std.fs.cwd().createFile(status_path, .{});
@@ -300,6 +295,11 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
         .opengl => try std.json.Stringify.valueAlloc(self.alloc, .{ .backend = "opengl" }, .{}),
         .d3d11 => |v| report: {
             const receipt = v.api.stats();
+            var max_image_id: u32 = 0;
+            var image_it = v.images.images.keyIterator();
+            while (image_it.next()) |key| {
+                if (key.* == .kitty) max_image_id = @max(max_image_id, key.kitty);
+            }
             break :report try std.json.Stringify.valueAlloc(self.alloc, .{
                 .backend = "d3d11",
                 .warp = receipt.warp != 0,
@@ -313,6 +313,10 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
                 .last_error = receipt.last_error,
                 .removed_reason = receipt.removed_reason,
                 .fallback_blocked = self.fallback_blocked,
+                .fallback_attempts = self.fallback_attempts,
+                .image_count = v.images.images.count(),
+                .max_image_id = max_image_id,
+                .hardware_attempts = receipt.hardware_attempts,
                 .draw_failures = self.draw_failures,
                 .swapchain_width = receipt.swapchain_width,
                 .swapchain_height = receipt.swapchain_height,
@@ -330,6 +334,16 @@ pub fn capture(self: *Windows, hdc: *anyopaque) !void {
     };
     defer self.alloc.free(json);
     try file.writeAll(json);
+    // Status remains observable when the device cannot provide GPU pixels.
+    // The harness still requires successful capture for pixel assertions.
+    switch (self.active) {
+        inline else => |v| {
+            v.draw_mutex.lock();
+            defer v.draw_mutex.unlock();
+            if (self.active == .opengl) try self.rt_surface.makeGLContextCurrent();
+            try v.api.capture(hdc);
+        },
+    }
 }
 
 pub fn requestDeviceLoss(self: *Windows) bool {

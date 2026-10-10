@@ -14,6 +14,7 @@ pub const Stats = extern struct {
     occluded_presents: u64,
     present_tests: u64,
     generation: u64,
+    hardware_attempts: u64,
     resize_buffers: u64,
     composition_commits: u64,
     swapchain_width: u32,
@@ -32,6 +33,7 @@ pub const Stats = extern struct {
     adapter_name: [512]u8,
 };
 pub extern fn noctty_d3d11_create(hwnd: *anyopaque, force_warp: u32) ?*Device;
+pub extern fn noctty_d3d11_set_recovery_preference(d: *Device, force_warp: u32) void;
 pub extern fn noctty_d3d11_destroy(d: *Device) void;
 pub extern fn noctty_d3d11_begin(d: *Device) i32;
 pub extern fn noctty_d3d11_recover(d: *Device) i32;

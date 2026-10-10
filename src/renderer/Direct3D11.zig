@@ -56,6 +56,11 @@ pub fn deinit(self: *Direct3D11) void {
     self.* = undefined;
 }
 
+/// Startup's adapter candidate is independent of the user's recovery policy.
+pub fn setRecoveryPreference(self: *Direct3D11, requested: Config.RendererBackend) void {
+    api.noctty_d3d11_set_recovery_preference(self.device, @intFromBool(requested == .@"d3d11-warp"));
+}
+
 pub fn surfaceInit(_: *apprt.Surface) !void {}
 pub fn finalizeSurfaceInit(_: *const Direct3D11, _: *apprt.Surface) !void {}
 pub fn threadEnter(_: *const Direct3D11, _: *apprt.Surface) !void {}

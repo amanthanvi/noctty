@@ -1535,6 +1535,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     log.warn("error updating overlay images err={}", .{err});
                 };
 
+                // Prune CPU copies even when both graphics backends are
+                // unavailable and drawFrame cannot run. Unsupported-image
+                // backends never own uploaded image textures here.
+                if (comptime !supportsImages()) self.images.cleanup(self.alloc);
+
                 // Update custom shader uniforms that depend on terminal state.
                 self.updateCustomShaderUniformsFromState();
             }
@@ -1619,7 +1624,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // path, so re-presenting an unchanged frame only adds another
                 // SwapBuffers call into the driver with no visible benefit.
                 if (apprt.runtime == apprt.win32) {
-                    if (comptime @hasDecl(GraphicsAPI, "requires_retained_present")) {
+                    if (comptime @hasDecl(GraphicsAPI, "requires_retained_present") and GraphicsAPI.requires_retained_present) {
                         try self.api.presentLastTarget();
                     }
                     return;

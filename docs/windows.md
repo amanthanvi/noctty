@@ -59,7 +59,7 @@ tabs and minimized windows suspend the renderer's draw timer.
 Known limits: WARP can consume substantially more CPU under heavy output.
 Its blend quantization can differ from hardware/OpenGL at glyph edges by up
 to four channel levels in the default corrected-linear mode. D3D11 does not
-add per-pixel translucency or custom HLSL effects. Its flip swap chain is
+add per-pixel translucency or custom HLSL effects. Its flip-model swap chain is
 composed through DirectComposition beneath the terminal HWND's children, with
 the existing host/sibling clipping. Framebuffer alpha remains ignored; the host
 still owns whole-window opacity. Overlay ordering, opacity, and visible OpenGL
@@ -1189,14 +1189,18 @@ in-box conhost strips Kitty-graphics APC and Sixel DCS payloads. See the
 
 ### GPU floor and OpenGL driver issues
 
-noctty needs OpenGL 4.3 or newer through WGL and has no software, DirectX,
-or ANGLE fallback renderer, so it cannot start when the active OpenGL
-implementation is below that floor. That is common in RDP sessions that fall
+The default OpenGL backend needs OpenGL 4.3 or newer through WGL and does not
+automatically switch to another renderer when the active implementation is
+below that floor. The opt-in D3D11 beta can draw supported text with feature
+level 11.0 hardware or WARP, without OpenGL. Full rendering of unsupported
+images and effects requires a working OpenGL fallback; otherwise healthy D3D11
+continues drawing text with those features degraded. The OpenGL floor is a
+common issue in RDP sessions that fall
 back to software GL (often `GDI Generic` at OpenGL 1.1), VMs without 3D
 acceleration or a guest GPU driver, and older integrated GPUs whose driver
 stops before 4.3.
 
-Below the floor, noctty stops before showing its window and the startup
+With the OpenGL backend below the floor, noctty stops before showing its window and the startup
 dialog lists the required and detected OpenGL versions plus the renderer and
 vendor strings the driver reports. The dialog also prints an `Architecture:`
 line naming the process and native machine, so a bug report separates a
@@ -1223,7 +1227,7 @@ dependencies. This shows up most often on AMD+NVIDIA hybrid-GPU laptops
 while WGL loads the AMD OpenGL ICD from DriverStore; use the driver order in
 step 3 before retrying.
 
-#### Windows on ARM needs the Compatibility Pack
+#### OpenGL on Windows on ARM needs the Compatibility Pack
 
 Qualcomm Snapdragon PCs ship no desktop OpenGL driver. No Qualcomm
 implementation has ever appeared in the Khronos OpenGL conformant-products
@@ -1252,8 +1256,9 @@ GL_RENDERER : D3D12 (Qualcomm(R) Adreno(TM) X1-85 GPU)
 The Mesa version is whatever the installed pack ships; only the `D3D12 (...)`
 renderer prefix and a version at or above 4.3 matter.
 
-This is required today: noctty still renders through OpenGL 4.3 over WGL and
-has no DirectX, ANGLE, or software fallback renderer of its own. On ARM64
+The Compatibility Pack is required for noctty's default OpenGL 4.3 backend.
+The opt-in D3D11 beta provides a separate hardware/WARP text-rendering path.
+On ARM64
 that OpenGL comes from a Microsoft mapping layer rather than a GPU vendor's
 driver, but noctty neither knows nor cares which supplied it.
 

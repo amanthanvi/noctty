@@ -22,8 +22,9 @@ int32_t noctty_composition_commit(NocttyComposition *composition);
 /* CheckDeviceState(FALSE) is reported as DXGI_ERROR_DEVICE_REMOVED. */
 int32_t noctty_composition_check_state(NocttyComposition *composition);
 
-/* Healthy renderer handoff: detach root/content, Commit, then wait for that
- * commit to be processed. A failed detach keeps the object owned by the caller
+/* Healthy renderer handoff: detach root/content and submit an asynchronous
+ * Commit without waiting for DWM. Old pixels may briefly remain until applied.
+ * A failed detach keeps the object owned by the caller
  * and attempts to restore a healthy tree. Do not construct a replacement
  * renderer unless this succeeds. Destroy before creating another target for
  * the same HWND; the detached wrapper still owns its target and swapchain. */

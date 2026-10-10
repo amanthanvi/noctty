@@ -46,6 +46,7 @@ public static class RendererNative {
  public static bool Action(IntPtr surf,int action) { IntPtr result;return SendMessageTimeoutW(surf,0x8056,(IntPtr)action,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Scale(IntPtr surf,int dpi) { IntPtr result;return SendMessageTimeoutW(surf,0x8057,(IntPtr)dpi,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool LoseDevice(IntPtr surf) { IntPtr result;return SendMessageTimeoutW(surf,0x8050,IntPtr.Zero,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
+ public static bool RetryHardware(IntPtr surf) { IntPtr result;return SendMessageTimeoutW(surf,0x8058,IntPtr.Zero,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Replay(IntPtr surf) { IntPtr result;return SendMessageTimeoutW(surf,0x8051,IntPtr.Zero,IntPtr.Zero,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
  public static bool Resize(IntPtr host,int w,int h) { return SetWindowPos(host,IntPtr.Zero,0,0,w,h,0x16); }
  public static void Readback(string bmp,string png) {using(var image=new Bitmap(bmp)){image.Save(png,ImageFormat.Png);} }

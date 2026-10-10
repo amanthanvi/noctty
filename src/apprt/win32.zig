@@ -28059,11 +28059,11 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        0x8050, 0x8051, 0x8052, 0x8053, 0x8054 => { // Test-only renderer lifecycle actions.
+        0x8050, 0x8051, 0x8052, 0x8053, 0x8054, 0x8058 => { // Test-only renderer lifecycle actions.
             if (build_config.renderer_test_tools and build_config.d3d11) {
                 if (surface) |v| {
                     if (!v.core_initialized) return 0;
-                    if (msg == 0x8052 or msg == 0x8053) {
+                    if (msg == 0x8052 or msg == 0x8053 or msg == 0x8058) {
                         if (!v.core_surface.renderer.setTestFailures(msg == 0x8052, msg == 0x8053)) return 0;
                     }
                     if (msg == 0x8054) {

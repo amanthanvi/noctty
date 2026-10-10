@@ -21,9 +21,9 @@ try {
     [void]$output.AppendLine('#ifndef NOCTTY_D3D11_TERMINAL_BYTECODE_H')
     [void]$output.AppendLine('#define NOCTTY_D3D11_TERMINAL_BYTECODE_H')
     foreach ($entry in $entries) {
-        $profile = if ($entry.EndsWith('_vs')) { 'vs_5_0' } else { 'ps_5_0' }
+        $shaderProfile = if ($entry.EndsWith('_vs')) { 'vs_5_0' } else { 'ps_5_0' }
         $compiled = Join-Path $temporary ($entry + '.dxbc')
-        & $Fxc /nologo /T $profile /E $entry /O3 /Ges /Qstrip_reflect /Qstrip_debug /Fo $compiled $source
+        & $Fxc /nologo /T $shaderProfile /E $entry /O3 /Ges /Qstrip_reflect /Qstrip_debug /Fo $compiled $source
         if ($LASTEXITCODE -ne 0) { throw ('Shader compilation failed: ' + $entry) }
         $bytes = [System.IO.File]::ReadAllBytes($compiled)
         [void]$output.AppendLine('static const unsigned char noctty_' + $entry + '[] = {')

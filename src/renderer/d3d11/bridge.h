@@ -12,6 +12,7 @@ typedef struct NocttyD3DStats {
     uint64_t frames, presents, recoveries, draw_calls, upload_bytes;
     uint64_t encode_ns, present_ns;
     uint64_t occluded_presents, present_tests, generation;
+    uint64_t hardware_attempts;
     uint64_t resize_buffers, composition_commits;
     uint32_t swapchain_width, swapchain_height;
     uint32_t warp, feature_level, recovery_pending, unavailable;
@@ -21,8 +22,10 @@ typedef struct NocttyD3DStats {
     char adapter_name[512];
 } NocttyD3DStats;
 
-/* force_warp is a configuration selection, never an environment override. */
+/* force_warp selects the startup candidate. Restore the user's policy after
+ * whole-renderer initialization succeeds, before publishing the renderer. */
 NocttyD3D *noctty_d3d11_create(void *hwnd, uint32_t force_warp);
+void noctty_d3d11_set_recovery_preference(NocttyD3D *d, uint32_t force_warp);
 void noctty_d3d11_destroy(NocttyD3D *d);
 int32_t noctty_d3d11_begin(NocttyD3D *d);
 int32_t noctty_d3d11_recover(NocttyD3D *d);
