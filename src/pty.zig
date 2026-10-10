@@ -1315,7 +1315,7 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
     }
 }
 
-test "Windows ConPTY fallback names a missing bundled pair" {
+test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
@@ -1330,6 +1330,10 @@ test "Windows ConPTY fallback names a missing bundled pair" {
         "Using Windows' in-box console host because conpty.dll is not next to noctty.exe: colour queries, synchronized output, Kitty graphics and Sixel may not work.",
         conPtyFallbackBanner(error.NotFound),
     );
+
+    // A conpty.dll that is there but does not load is not "missing".
+    try tmp.dir.writeFile(.{ .sub_path = "conpty.dll", .data = "stale" });
+    try testing.expectError(error.LoadFailed, WindowsConPty.loadBundledFrom(dir));
 }
 
 test "Windows ConPTY live bundled count follows real pseudo console open and close" {

@@ -69,11 +69,11 @@ Assert-WorkflowContract `
     -Description 'source builds stage the bundled ConPTY unless the builder opts out'
 Assert-WorkflowContract `
     -Path $conptyBuildStep `
-    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?if \(installedMatches\(arena, bin, &staged\)\) return;.*?env\.remove\("PSModulePath"\);.*?\.env_map = &env,.*?b\.pathFromRoot\(stage_script\).*?0 => \{\s*if \(installedMatches\(arena, bin, &staged\)\) return;\s*return step\.fail\(.*?exit_not_downloaded => \{.*?break :reason "the download failed";.*?return step\.fail\(.*?bin\.deleteFile\(file\.name\)' `
+    -Pattern '(?ms)const stage_script = "scripts/stage-conpty-redist\.ps1";.*?if \(installedMatches\(arena, bin, &staged\)\) return;.*?env\.remove\("PSModulePath"\);.*?\.env_map = &env,.*?b\.pathFromRoot\(stage_script\).*?0 => \{\s*if \(installedMatches\(arena, bin, &staged\)\) return;\s*return step\.fail\(.*?exit_not_downloaded => \{.*?break :reason "the package could not be fetched";.*?return step\.fail\(.*?bin\.deleteFile\(file\.name\)' `
     -Description 'source builds restage only through the release helper with a clean PSModulePath, re-verify its result, tolerate only a failed download, and remove an unpinned pair before falling back'
 Assert-WorkflowContract `
     -Path $conptyStageScript `
-    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Mutex\]::new\(\$false, "Local\\noctty-stage-conpty-redist"\).*?WaitOne\(\).*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?ReleaseMutex\(\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
+    -Pattern '(?ms)\$ErrorActionPreference = "Stop".*?\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?Mutex\]::new\(\$false, "Local\\noctty-stage-conpty-redist"\).*?WaitOne\(\[TimeSpan\]::FromMinutes\(2\)\).*?if \(-not \$owned\) \{.*?exit 3\s*\}.*?Install-ConPtyRedist\s*`\s*-PinPath \(Join-Path \$PSScriptRoot "\.\.\\dist\\windows\\conpty-redist\.json"\).*?ReleaseMutex\(\).*?if \(-not \$staged\) \{\s*exit 3\s*\}' `
     -Description 'source-build staging serializes on a named mutex, runs the release helper against the shared pin, and reports only a failed download as exit 3'
 Assert-WorkflowContractAbsent `
     -Path $conptyStageScript `

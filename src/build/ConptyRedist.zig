@@ -31,6 +31,9 @@ const stage_script = "scripts/stage-conpty-redist.ps1";
 /// The exit code the stage script uses for "could not download".
 const exit_not_downloaded = 3;
 
+/// For environments that cannot run the helper or reach the package at all.
+const opt_out = "pass -Dbundled-conpty=false to build without the bundled ConPTY";
+
 /// Both files are about 1 MB; anything far larger is not the pinned payload.
 const max_file_bytes = 16 * 1024 * 1024;
 
@@ -71,6 +74,7 @@ pub fn install(b: *std.Build, target: std.Build.ResolvedTarget) void {
 }
 
 fn make(step: *Step, options: Step.MakeOptions) !void {
+    _ = options;
     const b = step.owner;
     const self: *ConptyRedist = @fieldParentPtr("step", step);
     const arena = b.allocator;
@@ -117,7 +121,6 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
         const result = std.process.Child.run(.{
             .allocator = arena,
             .env_map = &env,
-            .progress_node = options.progress_node,
             .argv = &.{
                 powershell,
                 "-NoLogo",
@@ -136,7 +139,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
             },
         }) catch |err| switch (err) {
             error.FileNotFound => break :reason b.fmt("{s} is not installed", .{powershell}),
-            else => return step.fail("unable to run {s}: {s}", .{ stage_script, @errorName(err) }),
+            else => return step.fail("unable to run {s}: {s}; " ++ opt_out, .{ stage_script, @errorName(err) }),
         };
         switch (result.term) {
             .Exited => |code| switch (code) {
@@ -148,13 +151,13 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
                 },
                 exit_not_downloaded => {
                     detail = b.fmt("{s}{s}", .{ result.stdout, result.stderr });
-                    break :reason "the download failed";
+                    break :reason "the package could not be fetched";
                 },
                 else => {},
             },
             else => {},
         }
-        return step.fail("{s} failed ({any}):\n{s}{s}", .{
+        return step.fail("{s} failed ({any}); " ++ opt_out ++ ":\n{s}{s}", .{
             stage_script, result.term, result.stdout, result.stderr,
         });
     };
