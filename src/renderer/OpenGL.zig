@@ -234,15 +234,25 @@ fn glDebugMessageCallback(
     });
 }
 
+// GLAD is shared by every context on this thread. Keep the last successfully
+// prepared table so a failed new context cannot poison existing OpenGL panes.
+threadlocal var prepared_dispatch: ?gl.glad.Context = null;
+
 /// Prepares the provided GL context, loading it with glad.
 fn prepareContext(getProcAddress: anytype) !void {
+    errdefer {
+        if (prepared_dispatch) |previous| {
+            gl.glad.context = previous;
+        } else {
+            gl.glad.unload();
+        }
+    }
     const version = gl.glad.load(getProcAddress) catch |err| {
         recordWin32OpenGLStartupError(.load_functions, err);
         return err;
     };
     const major = gl.glad.versionMajor(@intCast(version));
     const minor = gl.glad.versionMinor(@intCast(version));
-    errdefer gl.glad.unload();
     log.debug("loaded OpenGL {}.{}", .{ major, minor });
 
     // Need to check version before trying to enable it
@@ -277,6 +287,26 @@ fn prepareContext(getProcAddress: anytype) !void {
         recordWin32OpenGLStartupError(.framebuffer_srgb, err);
         return err;
     };
+    prepared_dispatch = gl.glad.context;
+}
+
+test "failed context preparation preserves the previous GL dispatch" {
+    const previous = prepared_dispatch;
+    defer {
+        prepared_dispatch = previous;
+        if (previous) |dispatch| gl.glad.context = dispatch;
+    }
+    var dispatch = std.mem.zeroes(gl.glad.Context);
+    dispatch.VERSION_4_3 = 1;
+    prepared_dispatch = dispatch;
+    gl.glad.context = dispatch;
+    const Loader = struct {
+        fn missing(_: [*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+            return null;
+        }
+    };
+    try std.testing.expectError(error.GLInitFailed, prepareContext(&Loader.missing));
+    try std.testing.expectEqual(@as(c_int, 1), gl.glad.context.VERSION_4_3);
 }
 
 fn recordWin32OpenGLStartupError(step: apprt.win32.OpenGLStartupStep, err: anyerror) void {

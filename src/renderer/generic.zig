@@ -1748,8 +1748,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (modified <= frame.grayscale_modified) break :texture;
                 self.font_grid.lock.lockShared();
                 defer self.font_grid.lock.unlockShared();
-                frame.grayscale_modified = self.font_grid.atlas_grayscale.modified.load(.monotonic);
+                const uploaded = self.font_grid.atlas_grayscale.modified.load(.monotonic);
                 try self.syncAtlasTexture(&self.font_grid.atlas_grayscale, &frame.grayscale);
+                frame.grayscale_modified = uploaded;
                 if (apprt.runtime == apprt.win32) log.debug("drawFrame grayscale atlas synced", .{});
             }
             texture: {
@@ -1757,8 +1758,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (modified <= frame.color_modified) break :texture;
                 self.font_grid.lock.lockShared();
                 defer self.font_grid.lock.unlockShared();
-                frame.color_modified = self.font_grid.atlas_color.modified.load(.monotonic);
+                const uploaded = self.font_grid.atlas_color.modified.load(.monotonic);
                 try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
+                frame.color_modified = uploaded;
                 if (apprt.runtime == apprt.win32) log.debug("drawFrame color atlas synced", .{});
             }
 
@@ -3686,11 +3688,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             texture: *Texture,
         ) !void {
             if (atlas.size > texture.width) {
-                // Free our old texture
+                // Failed growth must leave the old texture alive for retry.
+                const replacement = try self.api.initAtlasTexture(atlas);
                 texture.*.deinit();
-
-                // Reallocate
-                texture.* = try self.api.initAtlasTexture(atlas);
+                texture.* = replacement;
             }
 
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
