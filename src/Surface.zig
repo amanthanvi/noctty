@@ -3561,6 +3561,13 @@ pub fn keyCallback(
         // an encoded value, we close the surface. We want to eventually
         // move this behavior to the apprt probably.
         if (self.child_exited) {
+            // Closing can free this surface before `close` returns (the
+            // Win32 runtime destroys the window synchronously), so release
+            // what this call still owns first, and disarm the inspector
+            // record deferred above, which would read the freed surface.
+            write_req.deinit();
+            if (insp_ev) |ev| ev.deinit(self.alloc);
+            insp_ev = null;
             self.close();
             return .closed;
         }
