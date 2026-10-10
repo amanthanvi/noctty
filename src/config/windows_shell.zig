@@ -258,6 +258,78 @@ pub fn executableCommand(alloc: Allocator, command: Command) !Command {
     return .{ .direct = argv };
 }
 
+/// Resolve a bare integration executable using the child's search environment.
+/// Never consult the app's PATH or cwd, and never probe a network PATH entry.
+/// A batch/script match keeps the caller on its original shell launch path.
+pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.process.EnvMap) !?[:0]const u8 {
+    if (builtin.os.tag != .windows or exe.len == 0 or
+        std.mem.indexOfAny(u8, exe, "\\/:") != null) return null;
+    const path = env.get("PATH") orelse return null;
+    const extension = std.fs.path.extension(exe);
+    var dirs = std.mem.splitScalar(u8, path, ';');
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    while (dirs.next()) |raw_dir| {
+        var dir = std.mem.trim(u8, raw_dir, " \t");
+        if (dir.len >= 2 and dir[0] == '"' and dir[dir.len - 1] == '"')
+            dir = dir[1 .. dir.len - 1];
+        if (internal_os.path.isNetworkOrDevicePath(dir) or dir.len < 3 or
+            !std.ascii.isAlphabetic(dir[0]) or dir[1] != ':' or
+            (dir[2] != '\\' and dir[2] != '/')) continue;
+        if (internal_os.windows.driveTypeForLetter(dir[0]) == internal_os.windows.DRIVE_REMOTE)
+            continue;
+        var extensions = std.mem.splitScalar(u8, if (extension.len > 0) "" else env.get("PATHEXT") orelse ".COM;.EXE;.BAT;.CMD", ';');
+        while (extensions.next()) |raw_ext| {
+            const ext = std.mem.trim(u8, raw_ext, " \t");
+            if (extension.len == 0) {
+                if (ext.len < 2 or ext[0] != '.') continue;
+                // PATHEXT supplies suffixes, not paths or cmd syntax.
+                var valid = true;
+                for (ext[1..]) |c| if (!std.ascii.isAlphanumeric(c)) {
+                    valid = false;
+                    break;
+                };
+                if (!valid) continue;
+            }
+            const candidate = std.fmt.bufPrint(&buf, "{s}\\{s}{s}", .{ dir, exe, ext }) catch continue;
+            const stat = std.fs.cwd().statFile(candidate) catch continue;
+            if (stat.kind != .file) continue;
+            const found_ext = if (extension.len > 0) extension else ext;
+            if (!std.ascii.eqlIgnoreCase(found_ext, ".exe") and
+                !std.ascii.eqlIgnoreCase(found_ext, ".com")) return null;
+            return try alloc.dupeZ(u8, candidate);
+        }
+    }
+    return null;
+}
+
+test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "nu.exe", .data = "exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "nu.com", .data = "com" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    var env = std.process.EnvMap.init(alloc);
+    try env.put("PATH", try std.fmt.allocPrint(alloc, "relative;;\\\\server\\share;\\??\\UNC\\server\\share;\"{s}\"", .{dir}));
+    try env.put("PATHEXT", ".com;.exe");
+    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.com"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    try env.put("PATHEXT", ".exe;.com");
+    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    // An explicit extension is looked up exactly, regardless of PATHEXT.
+    try env.put("PATHEXT", ".com");
+    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu.exe", &env)).?);
+    // Preserve a cmd/batch wrapper that wins PATHEXT instead of skipping it.
+    try tmp.dir.writeFile(.{ .sub_path = "nu.cmd", .data = "wrapper" });
+    try env.put("PATHEXT", ".cmd;.exe");
+    try std.testing.expect(try lookupChildExecutable(alloc, "nu", &env) == null);
+    try std.testing.expect(try lookupChildExecutable(alloc, "missing", &env) == null);
+    for ([_][]const u8{ "C:nu", ".\\nu", "\\nu", "\\\\server\\nu" }) |value|
+        try std.testing.expect(try lookupChildExecutable(alloc, value, &env) == null);
+}
+
 test "PKG08 whole executable path with spaces launches directly" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

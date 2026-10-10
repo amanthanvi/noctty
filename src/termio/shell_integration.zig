@@ -61,7 +61,7 @@ pub fn setup(
     force_shell: ?Shell,
     utf8_console: bool,
 ) !?ShellIntegration {
-    const command = if (builtin.os.tag == .windows)
+    var command = if (builtin.os.tag == .windows)
         try windows_shell.executableCommand(alloc_arena, command_)
     else
         command_;
@@ -85,21 +85,32 @@ pub fn setup(
         break :shell force_shell orelse detected orelse return null;
     };
 
-    // A real cmd string keeps cmd expansion. Parsing it and rebuilding argv
-    // would consume quoting and reinterpret operators as shell arguments.
-    if (builtin.os.tag == .windows and command == .shell and
-        std.mem.indexOfAny(u8, command.shell, "&|<>^%!()@\r\n") != null) return null;
-    if (builtin.os.tag == .windows and command == .shell and
-        (shell == .bash or shell == .nushell))
+    // Only these integrations rebuild argv. Cmd/zsh/Elvish keep the string
+    // intact, so their expansion and quoting remain cmd's responsibility.
+    if (builtin.os.tag == .windows and
+        (shell == .bash or shell == .nushell or shell == .powershell))
     {
+        if (command == .shell and windowsCommandNeedsShell(command.shell)) return null;
         var iter = try command.argIterator(alloc_arena);
         defer iter.deinit();
         const exe = iter.next() orelse return null;
         // Explicit relative paths in a cmd string are relative to the pane's
         // cwd. CreateProcess's application name uses the app's cwd instead.
-        if (std.mem.indexOfAny(u8, exe, "\\/:") != null and
+        if (command == .shell and std.mem.indexOfAny(u8, exe, "\\/:") != null and
             !(exe.len >= 3 and std.ascii.isAlphabetic(exe[0]) and exe[1] == ':' and
                 (exe[2] == '\\' or exe[2] == '/'))) return null;
+        if (std.mem.indexOfAny(u8, exe, "\\/:") == null) {
+            if (try windows_shell.lookupChildExecutable(alloc_arena, exe, env)) |path| {
+                var argv: std.ArrayList([:0]const u8) = .empty;
+                try argv.append(alloc_arena, path);
+                while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeZ(u8, arg));
+                command = .{ .direct = try argv.toOwnedSlice(alloc_arena) };
+            } else if (command == .shell) {
+                // Keep the original cmd launch when the child search cannot
+                // produce a native executable (including batch wrappers).
+                return null;
+            }
+        }
     }
 
     const new_command: config.Command = switch (shell) {
@@ -154,6 +165,19 @@ pub fn setup(
     };
 }
 
+fn windowsCommandNeedsShell(value: []const u8) bool {
+    var quoted = false;
+    for (value) |c| {
+        if (c == '"') quoted = !quoted;
+        // Cmd expands these inside quotes too. A caret outside quotes can
+        // escape a quote or operator, which an argv tokenizer cannot retain.
+        // A newline terminates cmd's command line even inside quotes.
+        if (c == '%' or c == '!' or c == '\r' or c == '\n' or
+            (!quoted and std.mem.indexOfScalar(u8, "&|<>^()@", c) != null)) return true;
+    }
+    return quoted;
+}
+
 test "force shell" {
     const testing = std.testing;
 
@@ -173,7 +197,7 @@ test "force shell" {
         const command: config.Command = switch (shell) {
             .powershell => .{ .direct = &.{"pwsh.exe"} },
             .cmd => .{ .direct = &.{"cmd.exe"} },
-            else => .{ .shell = "sh" },
+            else => if (builtin.os.tag == .windows) .{ .direct = &.{"sh"} } else .{ .shell = "sh" },
         };
 
         const result = try setup(
@@ -360,6 +384,112 @@ test "PKG08 quoted bash invocation keeps argv while cmd strings keep expansion" 
     }
 }
 
+test "PKG08 round2 quoted x86 bash path integrates" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = try setup(alloc, res.path, .{
+        .shell = "\"C:\\Program Files (x86)\\Git\\bin\\bash.exe\" --login -i",
+    }, &env, null, false);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("C:\\Program Files (x86)\\Git\\bin\\bash.exe", result.?.command.direct[0]);
+}
+
+test "PKG08 round2 quoted x86 powershell path integrates" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = try setup(alloc, res.path, .{
+        .shell = "\"C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe\" -NoLogo",
+    }, &env, null, false);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe", result.?.command.direct[0]);
+}
+
+test "PKG08 round2 cmd expansion keeps prompt integration" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    const value = "cmd.exe /k %X%\\a.cmd";
+    const result = try setup(alloc, "C:\\unused", .{ .shell = value }, &env, null, false);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings(value, result.?.command.shell);
+    try std.testing.expect(std.mem.indexOf(u8, env.get("PROMPT").?, "133;A") != null);
+    var bash_env = EnvMap.init(alloc);
+    try std.testing.expect(try setup(alloc, "C:\\unused", .{
+        .shell = "bash -i & echo x",
+    }, &bash_env, null, false) == null);
+    try std.testing.expectEqual(@as(u32, 0), bash_env.count());
+}
+
+test "PKG08 round2 bare bash uses child PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "bash.exe", .data = "child" });
+    const expected = try res.tmp_dir.dir.realpathAlloc(alloc, "bash.exe");
+    var env = EnvMap.init(alloc);
+    try env.put("PATH", try res.tmp_dir.dir.realpathAlloc(alloc, "."));
+    try env.put("PATHEXT", ".exe;.com");
+    const result = (try setup(alloc, res.path, .{ .shell = "bash -i" }, &env, null, false)).?;
+    try std.testing.expectEqualStrings(expected, result.command.direct[0]);
+    try std.testing.expectEqualStrings("--posix", result.command.direct[1]);
+}
+
+test "PKG08 round2 bare powershell uses child PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "child" });
+    const expected = try res.tmp_dir.dir.realpathAlloc(alloc, "pwsh.exe");
+    var env = EnvMap.init(alloc);
+    try env.put("Path", try res.tmp_dir.dir.realpathAlloc(alloc, "."));
+    try env.put("Pathext", ".exe;.com");
+    const result = (try setup(alloc, res.path, .{ .shell = "pwsh -NoLogo" }, &env, null, false)).?;
+    try std.testing.expectEqualStrings(expected, result.command.direct[0]);
+}
+
+test "PKG08 round2 unresolved shell stays on the cmd launch path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    try env.put("PATH", "relative;\\\\server\\share;\\??\\UNC\\server\\share");
+    const before = env.count();
+    for ([_][:0]const u8{ "bash -i", "pwsh -NoLogo", "nu" }) |value| {
+        try std.testing.expect(try setup(alloc, "C:\\unused", .{ .shell = value }, &env, null, false) == null);
+        try std.testing.expectEqual(before, env.count());
+    }
+}
+
+test "PKG08 round2 cmd syntax screen respects double quotes" {
+    for ([_][]const u8{
+        "bash \"a&b|c<d>e^f(g)@h\"", "\"C:\\Program Files (x86)\\bash.exe\" -i",
+    }) |value| try std.testing.expect(!windowsCommandNeedsShell(value));
+    for ([_][]const u8{
+        "bash -i & echo x",     "bash \"%X%\"",    "bash \"!X!\"",        "bash ^\"x\"",
+        "bash (x)",             "bash @x",         "bash \"unterminated", "bash\r\necho x",
+        "bash \"a\\\"& echo x", "bash \"a\r\nb\"",
+    }) |value| try std.testing.expect(windowsCommandNeedsShell(value));
+}
+
 test detectShell {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -449,6 +579,10 @@ test "setup powershell: interactive shell command auto injects" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try env.put("PATH", res.path);
+    try env.put("PATHEXT", ".exe");
+    const exe_path = try res.tmp_dir.dir.realpathAlloc(alloc, "powershell.exe");
 
     const command: config.Command = .{ .shell = "powershell.exe -NoProfile" };
     const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
@@ -465,7 +599,7 @@ test "setup powershell: interactive shell command auto injects" {
     try testing.expectEqual(.powershell, result.shell);
     try testing.expect(result.command == .direct);
     try testing.expectEqual(@as(usize, 5), result.command.direct.len);
-    try testing.expectEqualStrings("powershell.exe", result.command.direct[0]);
+    try testing.expectEqualStrings(exe_path, result.command.direct[0]);
     try testing.expectEqualStrings("-NoProfile", result.command.direct[1]);
     try testing.expectEqualStrings("-NoExit", result.command.direct[2]);
     try testing.expectEqualStrings("-Command", result.command.direct[3]);
@@ -550,6 +684,8 @@ test "setup powershell: explicit short command launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "" });
+    try env.put("PATH", res.path);
 
     const result = try setup(
         alloc,
@@ -577,6 +713,8 @@ test "setup powershell: explicit command prefix launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try env.put("PATH", res.path);
 
     const result = try setup(
         alloc,
@@ -604,6 +742,9 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "" });
+    try env.put("PATH", res.path);
+    const exe_path = try res.tmp_dir.dir.realpathAlloc(alloc, "pwsh.exe");
 
     const command: config.Command = .{ .shell = "pwsh.exe /NoProfile" };
     const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
@@ -620,7 +761,7 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
     try testing.expectEqual(.powershell, result.shell);
     try testing.expect(result.command == .direct);
     try testing.expectEqual(@as(usize, 5), result.command.direct.len);
-    try testing.expectEqualStrings("pwsh.exe", result.command.direct[0]);
+    try testing.expectEqualStrings(exe_path, result.command.direct[0]);
     try testing.expectEqualStrings("/NoProfile", result.command.direct[1]);
     try testing.expectEqualStrings("-NoExit", result.command.direct[2]);
     try testing.expectEqualStrings("-Command", result.command.direct[3]);
@@ -641,6 +782,8 @@ test "setup powershell: slash version launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try env.put("PATH", res.path);
 
     const result = try setup(
         alloc,
