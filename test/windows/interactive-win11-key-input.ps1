@@ -422,8 +422,9 @@ switch ($Key) {
         $unicodeInputUnits = [uint16[]] @(0xD83D, 0xDE42)
     }
     'unicode-burst' {
-        # Native coverage proves exact sequential delivery. The Zig
-        # 256-authorization test owns deferred backlog capacity proof.
+        # Native coverage proves exact sequential delivery. Each VK_PACKET
+        # press takes its own character from the queue, so no backlog of
+        # pending characters builds up behind the burst.
         $burstText = 'abcdefghijklmnopqrstuvwxyz012345' * 8
         if ($burstText.Length -ne 256) {
             throw "Unicode burst fixture must contain exactly 256 UTF-16 units; got $($burstText.Length)"

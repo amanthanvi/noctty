@@ -49,10 +49,74 @@ pub const RegisteredGlobalHotkey = struct {
     binding: *const input.Binding.Set.Value,
 };
 
-/// `ToUnicode` is given a four-unit buffer, so the most text one key can
-/// produce is four BMP characters (12 bytes of UTF-8) or two supplementary
-/// ones (8 bytes). 16 bytes covers either.
-const text_capacity = 16;
+/// The most UTF-16 units kept from the character messages of one key press. A
+/// keyboard layout ligature is at most four characters, and a dead key that
+/// cannot combine with the key after it adds its accent in front.
+const max_typed_units = 8;
+
+/// UTF-8 room for the text of one key press. No UTF-16 unit needs more than
+/// three bytes (a surrogate pair is two units for four), and the four-unit
+/// `ToUnicode` probe needs less than the typed units do.
+const text_capacity = max_typed_units * 3;
+
+/// The character messages `TranslateMessage` queued for one key press.
+///
+/// The pump translates every key message before dispatching it, so when a
+/// `WM_KEYDOWN` reaches the surface the characters it produced are already
+/// in the queue, and nothing from a later key can be there yet: posted
+/// messages are retrieved before the next input message. Taking them from
+/// the queue is the only reliable way to learn what the key typed. A
+/// `ToUnicode` probe at this point sees the layout after translation, so a
+/// dead key reads as its accent typed twice and the key after it reads as
+/// its bare letter (measured on US-International, German and French).
+pub const TypedChars = struct {
+    units: [max_typed_units]u16 = undefined,
+    len: usize = 0,
+    /// Translation posted `WM_DEADCHAR`: the key latched a dead key, and the
+    /// character it composes arrives with the next key.
+    dead: bool = false,
+
+    pub fn slice(self: *const TypedChars) []const u16 {
+        return self.units[0..self.len];
+    }
+
+    /// Whether translation queued anything at all. Nothing means a key that
+    /// types nothing, or a key message that never went through
+    /// `TranslateMessage`, such as one sent straight to the window.
+    fn translated(self: *const TypedChars) bool {
+        return self.len > 0 or self.dead;
+    }
+};
+
+/// Remove the `WM_CHAR` and `WM_DEADCHAR` messages `TranslateMessage` queued
+/// for the key message being dispatched to `hwnd`. `WM_SYSCHAR` stays queued:
+/// the window procedure swallows it except for Alt+Space, which has to reach
+/// `DefWindowProc` to open the window menu.
+///
+/// `PeekMessageW` runs cross-thread sent messages while it looks (measured,
+/// `PM_QS_POSTMESSAGE` does not prevent it), so call this before resolving
+/// anything such a message could free.
+pub fn takeTypedChars(hwnd: sys.HWND) TypedChars {
+    var typed: TypedChars = .{};
+    var msg: sys.MSG = undefined;
+    while (sys.PeekMessageW(&msg, hwnd, c.WM_CHAR, c.WM_DEADCHAR, c.PM_REMOVE) != 0) {
+        switch (msg.message) {
+            c.WM_CHAR => if (typed.len < typed.units.len) {
+                typed.units[typed.len] = @truncate(msg.wParam);
+                typed.len += 1;
+            },
+            c.WM_DEADCHAR => typed.dead = true,
+            c.WM_QUIT => {
+                // A filtered PeekMessage still returns WM_QUIT, and removes
+                // it (measured). Put it back for the pump.
+                sys.PostQuitMessage(@bitCast(@as(u32, @truncate(msg.wParam))));
+                break;
+            },
+            else => {},
+        }
+    }
+    return typed;
+}
 
 const KeyText = struct {
     /// UTF-8 for every code unit the layout produced for this key, not just
@@ -68,21 +132,31 @@ const KeyText = struct {
     dead_key: bool = false,
 };
 
+/// Which character units reach the core as text.
+///
+/// The pump's own key presses take their characters straight from the queue
+/// (`takeTypedChars`), so a `WM_CHAR` that still arrives belongs either to a
+/// key message that never went through `TranslateMessage` -- one sent
+/// straight to the window, which is how the interactive harnesses type -- or
+/// to nothing typed on this surface (IME text, injected characters), which
+/// is refused. Each key press states how many units may follow it, replacing
+/// whatever an earlier key left: an allowance that accumulated across keys is
+/// how a dead key used to leave a unit behind that let the next Enter,
+/// Backspace or Ctrl chord through a second time.
 pub const DeferredCharState = struct {
     pending_units: usize = 0,
+    /// The high half of a surrogate pair whose low half comes with the next
+    /// key press: `SendInput` delivers an astral character as two VK_PACKET
+    /// keys.
     high_surrogate: ?u16 = null,
 
-    pub fn authorize(self: *DeferredCharState, expected_units: usize) void {
-        self.pending_units = self.pending_units +| expected_units;
+    pub fn expect(self: *DeferredCharState, units: usize) void {
+        self.pending_units = units;
+        if (units == 0) self.high_surrogate = null;
     }
 
     pub fn clear(self: *DeferredCharState) void {
         self.* = .{};
-    }
-
-    pub fn consumeDeadChar(self: *DeferredCharState) void {
-        if (self.pending_units > 0) self.pending_units -= 1;
-        self.high_surrogate = null;
     }
 
     pub fn consumeCodeUnit(
@@ -466,6 +540,7 @@ pub fn quickSelectAsciiFromKey(wParam: WPARAM, lParam: LPARAM) ?u8 {
         lParam,
         translation_mods,
         keyboard_state,
+        null,
     );
     if (translated.len != 1) return null;
     const char = translated.utf8[0];
@@ -702,11 +777,11 @@ fn utf16CodeUnitCount(codepoint: u21) usize {
     return if (codepoint <= std.math.maxInt(u16)) 1 else 2;
 }
 
-/// Whether plain typed text should be committed by the following `WM_CHAR`
-/// instead of travelling on the physical key event.
+/// Whether plain typed text should be committed as characters after the
+/// physical key event instead of travelling on it.
 ///
 /// `allow_defer` is false while a Kitty `report_all` client is active. The
-/// synthetic `WM_CHAR` commit event carries no physical key and no modifiers,
+/// character commit event carries no physical key and no modifiers,
 /// so deferring would split one keystroke into a press with identity but no
 /// text and a commit with text but no identity, and the release would never
 /// pair with either. AltGr needs no exception here: the synthetic Ctrl+Alt pair
@@ -738,9 +813,9 @@ fn shouldDeferTextToCharMessage(
     return !isControlCodepoint(translated.unshifted_codepoint);
 }
 
-/// Plain text is committed by `WM_CHAR` unless a Kitty `report_all` client is
-/// active. IME composition keeps deferring either way: its commit is text
-/// without a physical key by design.
+/// Plain text is committed as characters after the key event unless a Kitty
+/// `report_all` client is active. IME composition keeps deferring either way:
+/// its commit is text without a physical key by design.
 pub fn deferPlainTextToCharMessage(kitty_report_all: bool, ime_composing: bool) bool {
     return !kitty_report_all or ime_composing;
 }
@@ -789,9 +864,8 @@ fn applyTranslatedKeyText(
     result.event.utf8 = "";
     result.event.consumed_mods = translated.consumed_mods;
     if (defer_text) {
-        // Keep the physical-key event visible to bindings/modifier state
-        // but defer text emission to WM_CHAR so plain typing doesn't rely
-        // on ToUnicode/GetKeyboardState timing.
+        // Keep the physical-key event visible to bindings and modifier
+        // state, and commit the text after it unless a binding consumed it.
         result.text_len = 0;
         result.event.consumed_mods = .{};
     }
@@ -957,11 +1031,14 @@ fn unshiftedCodepoint(
     ) orelse unshiftedCodepointForVirtualKey(vk);
 }
 
+/// `typed` is what `TranslateMessage` queued for this key, or null where no
+/// queue was consulted (the host's binding probes, quick select).
 fn translateKeyText(
     vk: UINT,
     lParam: LPARAM,
     mods: input.Mods,
     keyboard_state: ?*const [256]u8,
+    typed: ?*const TypedChars,
 ) KeyText {
     const state = keyboard_state orelse {
         const unshifted = unshiftedCodepointForVirtualKey(vk);
@@ -976,16 +1053,6 @@ fn translateKeyText(
     var result: KeyText = .{
         .unshifted_codepoint = unshiftedCodepoint(vk, scan_code, state),
     };
-
-    var utf16: [4]u16 = [_]u16{0} ** 4;
-    const count = translateKeyTextToUnicode(vk, scan_code, state, &utf16);
-    if (count < 0) {
-        // Dead key. The composed text arrives later as WM_CHAR.
-        result.deferred_utf16_units = 1;
-        result.dead_key = true;
-        return result;
-    }
-    if (count > 0) result.deferred_utf16_units = @intCast(count);
 
     // Text for the event. Windows folds Ctrl into the layout translation
     // (ctrl+a becomes U+0001, ctrl+backspace becomes U+007F) or refuses to
@@ -1007,18 +1074,42 @@ fn translateKeyText(
         return result;
     }
 
+    // Every other key types what TranslateMessage made of it: the composed
+    // character after a dead key, nothing for the dead key itself.
+    if (typed) |chars| if (chars.translated()) {
+        if (chars.len == 0) {
+            result.dead_key = true;
+            return result;
+        }
+        result.deferred_utf16_units = chars.len;
+        return withPrintableText(result, chars.slice(), mods);
+    };
+
+    // A key message TranslateMessage never saw. The layout has not latched
+    // anything for it, so the probe reads the key as pressed.
+    var utf16: [4]u16 = [_]u16{0} ** 4;
+    const count = translateKeyTextToUnicode(vk, scan_code, state, &utf16);
+    if (count < 0) {
+        result.dead_key = true;
+        return result;
+    }
+    result.deferred_utf16_units = @intCast(count);
+    return withPrintableText(
+        result,
+        utf16[0..@min(@as(usize, @intCast(count)), utf16.len)],
+        mods,
+    );
+}
+
+fn withPrintableText(translated: KeyText, units: []const u16, mods: input.Mods) KeyText {
+    var result = translated;
     // Keep every unit the layout produced. A dead key that cannot combine with
     // this key yields the accent and the key together (`´x`); when the text
-    // rides on the physical event instead of `WM_CHAR`, dropping the second
-    // character would lose the key that was actually pressed.
-    result.len = printableText(
-        utf16[0..@min(@as(usize, @intCast(count)), utf16.len)],
-        &result.utf8,
-    );
+    // rides on the physical event, dropping the second character would lose
+    // the key that was actually pressed.
+    result.len = printableText(units, &result.utf8);
     // Shift is only consumed when the layout used it to produce the text.
-    // In a Ctrl chord shift is part of the chord, so it stays live.
     if (result.len > 0) result.consumed_mods = .{ .shift = mods.shift };
-
     return result;
 }
 
@@ -1042,11 +1133,25 @@ fn packetKeyMessage(action: input.Action) Win32KeyMessage {
 /// The returned value owns its text; call `bindText` on the copy that will
 /// outlive every read of `event.utf8`. `defer_plain_text` comes from
 /// `deferPlainTextToCharMessage`.
+///
+/// This reads the key's text from a `ToUnicode` probe, which is right for
+/// identifying a key but not for what it typed once translation has run; the
+/// surface's own dispatch goes through `dispatchKeyMessage` instead.
 pub fn keyEventFromWin32Message(
     msg: UINT,
     wParam: WPARAM,
     lParam: LPARAM,
     defer_plain_text: bool,
+) ?Win32KeyMessage {
+    return keyMessage(msg, wParam, lParam, defer_plain_text, null);
+}
+
+fn keyMessage(
+    msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+    defer_plain_text: bool,
+    typed: ?*const TypedChars,
 ) ?Win32KeyMessage {
     const action: input.Action = switch (msg) {
         c.WM_KEYUP, c.WM_SYSKEYUP => .release,
@@ -1056,8 +1161,8 @@ pub fn keyEventFromWin32Message(
 
     const vk: UINT = @intCast(wParam & 0xFFFF);
     // KEYEVENTF_UNICODE arrives as VK_PACKET followed by one WM_CHAR UTF-16
-    // code unit. Authorize that unit explicitly without consulting live
-    // keyboard modifiers or ToUnicode; both belong to physical-key handling.
+    // code unit. Commit that unit without consulting live keyboard modifiers
+    // or ToUnicode; both belong to physical-key handling.
     if (vk == c.VK_PACKET) return packetKeyMessage(action);
 
     const key = keyFromVirtualKey(vk, lParam);
@@ -1087,7 +1192,7 @@ pub fn keyEventFromWin32Message(
     };
 
     if (action != .release) {
-        const translated = translateKeyText(vk, lParam, mods, keyboard_state);
+        const translated = translateKeyText(vk, lParam, mods, keyboard_state, typed);
         applyTranslatedKeyText(
             &result,
             translated,
@@ -1100,6 +1205,12 @@ pub fn keyEventFromWin32Message(
 
 /// Deliver a `WM_(SYS)KEYDOWN` / `WM_(SYS)KEYUP` to the core.
 ///
+/// `typed` holds the characters `TranslateMessage` queued for this key
+/// (`takeTypedChars`; empty for a release). Text that defers to a character
+/// commit is committed from it right after the key event, unless the core
+/// handled the key itself; a key the core encodes from its own identity
+/// (Enter, Backspace, Tab, Esc, Ctrl and Alt chords) drops them.
+///
 /// `target` supplies `keyCallback(input.KeyEvent) !CoreSurface.InputEffect`
 /// and `noteInput([]const u8) void`. A key typed into a pane whose child has
 /// exited closes the pane inside `keyCallback` and frees the surface that owns
@@ -1111,10 +1222,12 @@ pub fn dispatchKeyMessage(
     wParam: WPARAM,
     lParam: LPARAM,
     defer_plain_text: bool,
+    ime_composing: bool,
+    typed: *const TypedChars,
 ) void {
     // `message` lives for the rest of this function, which covers every read
     // of `event.utf8` below including the accessibility notification.
-    var message = keyEventFromWin32Message(msg, wParam, lParam, defer_plain_text) orelse return;
+    var message = keyMessage(msg, wParam, lParam, defer_plain_text, typed) orelse return;
     message.bindText();
     const event = message.event;
 
@@ -1129,14 +1242,27 @@ pub fn dispatchKeyMessage(
         return;
     };
     if (effect == .closed) return;
-    if (shouldAuthorizeDeferredCharMessage(effect)) {
-        chars.authorize(message.deferred_utf16_units);
-    }
     if (event.utf8.len != 0) target.noteInput(event.utf8);
+    if (event.action == .release) return;
+
+    const units = if (shouldAuthorizeDeferredCharMessage(effect)) message.deferred_utf16_units else 0;
+    if (!typed.translated()) {
+        // TranslateMessage never saw this key, so its characters, if any,
+        // follow as WM_CHAR.
+        chars.expect(units);
+        return;
+    }
+    chars.expect(if (units == 0) 0 else typed.len);
+    if (units == 0) return;
+    for (typed.slice()) |unit| {
+        const codepoint = chars.consumeCodeUnit(unit, ime_composing) orelse continue;
+        if (commitChar(target, codepoint, lParam) == .closed) return;
+    }
 }
 
-/// Deliver a `WM_CHAR`, `WM_DEADCHAR` or `WM_SYSDEADCHAR` to the core. Only
-/// characters a key message authorized get through; see `DeferredCharState`.
+/// Deliver a `WM_CHAR`, `WM_DEADCHAR` or `WM_SYSDEADCHAR` that is still in the
+/// queue when the pump dispatches it. Only units the last key press left room
+/// for get through; see `DeferredCharState`.
 pub fn dispatchCharMessage(
     target: anytype,
     chars: *DeferredCharState,
@@ -1145,20 +1271,71 @@ pub fn dispatchCharMessage(
     lParam: LPARAM,
     ime_composing: bool,
 ) void {
-    if (msg != c.WM_CHAR) {
-        chars.consumeDeadChar();
-        return;
-    }
+    // A dead key types nothing; the character it composes comes with the
+    // next key.
+    if (msg != c.WM_CHAR) return;
     const codepoint = chars.consumeCodeUnit(
         @intCast(wParam & 0xFFFF),
         ime_composing,
     ) orelse return;
+    _ = commitChar(target, codepoint, lParam);
+}
 
+/// UTF-8 for an IME string, in the caller's buffer when it is certain to fit.
+pub const ImeText = struct {
+    bytes: []const u8,
+    owned: bool,
+
+    pub fn deinit(self: ImeText, alloc: std.mem.Allocator) void {
+        if (self.owned) alloc.free(self.bytes);
+    }
+};
+
+/// Convert IME text, which can be any length, to UTF-8.
+/// `std.unicode.utf16LeToUtf8` asserts that its destination is big enough
+/// rather than reporting it, so a composition longer than a fixed buffer ran
+/// past it: a panic in safe builds and a stack overrun in ReleaseFast. No
+/// UTF-16 unit needs more than three UTF-8 bytes (a surrogate pair is two
+/// units for four), so `stack` is used only when three bytes per unit fit.
+pub fn imeTextUtf8(
+    alloc: std.mem.Allocator,
+    units: []const u16,
+    stack: []u8,
+) !ImeText {
+    if (units.len <= stack.len / 3) {
+        const len = try std.unicode.utf16LeToUtf8(stack, units);
+        return .{ .bytes = stack[0..len], .owned = false };
+    }
+    return .{ .bytes = try std.unicode.utf16LeToUtf8Alloc(alloc, units), .owned = true };
+}
+
+/// Commit an IME result string as a key event with no physical key, after
+/// clearing the preedit. `target` supplies `preeditCallback(?[]const u8)`
+/// besides `keyCallback` and `noteInput`. Returns the core's effect: on
+/// `.closed` the surface behind `target` is already gone.
+pub fn commitImeText(target: anytype, utf8: []const u8) CoreSurface.InputEffect {
+    target.preeditCallback(null);
+    const effect = target.keyCallback(.{
+        .action = .press,
+        .key = .unidentified,
+        .mods = .{},
+        .utf8 = utf8,
+    }) catch |err| {
+        log.err("win32 IME commit failed err={}", .{err});
+        return .ignored;
+    };
+    if (effect != .closed) target.noteInput(utf8);
+    return effect;
+}
+
+/// Commit one typed character as a key event with no physical key.
+fn commitChar(target: anytype, codepoint: u21, lParam: LPARAM) CoreSurface.InputEffect {
     var utf8_buf: [8]u8 = undefined;
-    const event = charCommitEvent(codepoint, lParam, &utf8_buf) orelse return;
+    const event = charCommitEvent(codepoint, lParam, &utf8_buf) orelse return .ignored;
     target.noteInput(event.utf8);
-    _ = target.keyCallback(event) catch |err| {
+    return target.keyCallback(event) catch |err| {
         log.err("win32 char commit failed err={} codepoint={}", .{ err, codepoint });
+        return .ignored;
     };
 }
 
@@ -1210,7 +1387,7 @@ fn testingKeyboardState(mods: input.Mods) [256]u8 {
 fn testingKeyEvent(vk: UINT, raw_mods: input.Mods, text: *KeyText) input.KeyEvent {
     const state = testingKeyboardState(raw_mods);
     const mods = withoutSyntheticAltGr(raw_mods);
-    text.* = translateKeyText(vk, testingScanCode(vk), mods, &state);
+    text.* = translateKeyText(vk, testingScanCode(vk), mods, &state, null);
     return .{
         .action = .press,
         .key = keyFromVirtualKey(vk, 0),
@@ -1365,23 +1542,23 @@ test "win32 control chords carry the unmodified layout text" {
     const state = testingKeyboardState(ctrl);
 
     // Ctrl+comma does not translate at all under Windows...
-    const comma = translateKeyText(c.VK_OEM_COMMA, testingScanCode(c.VK_OEM_COMMA), ctrl, &state);
+    const comma = translateKeyText(c.VK_OEM_COMMA, testingScanCode(c.VK_OEM_COMMA), ctrl, &state, null);
     try std.testing.expectEqualStrings(",", comma.utf8[0..comma.len]);
     try std.testing.expectEqual(@as(u21, ','), comma.unshifted_codepoint);
 
     // ...and ctrl+m translates to a control character. Both must still reach
     // the core as the plain layout text.
-    const m = translateKeyText(c.VK_A + 12, testingScanCode(c.VK_A + 12), ctrl, &state);
+    const m = translateKeyText(c.VK_A + 12, testingScanCode(c.VK_A + 12), ctrl, &state, null);
     try std.testing.expectEqualStrings("m", m.utf8[0..m.len]);
     try std.testing.expectEqual(@as(u21, 'm'), m.unshifted_codepoint);
 
     // Keys whose unmodified translation is itself a control character stay
     // text-free so the PC-style function key tables still win.
-    const backspace = translateKeyText(c.VK_BACK, testingScanCode(c.VK_BACK), ctrl, &state);
+    const backspace = translateKeyText(c.VK_BACK, testingScanCode(c.VK_BACK), ctrl, &state, null);
     try std.testing.expectEqual(@as(usize, 0), backspace.len);
-    const enter = translateKeyText(c.VK_RETURN, testingScanCode(c.VK_RETURN), ctrl, &state);
+    const enter = translateKeyText(c.VK_RETURN, testingScanCode(c.VK_RETURN), ctrl, &state, null);
     try std.testing.expectEqual(@as(usize, 0), enter.len);
-    const tab = translateKeyText(c.VK_TAB, testingScanCode(c.VK_TAB), ctrl, &state);
+    const tab = translateKeyText(c.VK_TAB, testingScanCode(c.VK_TAB), ctrl, &state, null);
     try std.testing.expectEqual(@as(usize, 0), tab.len);
 }
 
@@ -1572,24 +1749,27 @@ test "win32 kitty-report-all skips WM_CHAR deferral" {
 // A dead key produces no text yet, so its press must stay `composing` even
 // when plain text is no longer deferred: otherwise the encoder emits a bare
 // `CSI <unshifted> u` for the accent before the composed character arrives.
+// Nothing is left to commit for it either. The real-layout tests below drive
+// the same path through TranslateMessage.
 test "win32 kitty-report-all dead key remains composing" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const state = testingKeyboardState(.{});
+    const typed: TypedChars = .{ .dead = true };
+    const translated = translateKeyText(c.VK_OEM_7, testingScanCode(c.VK_OEM_7), .{}, &state, &typed);
+    try std.testing.expect(translated.dead_key);
 
     var message: Win32KeyMessage = .{ .event = .{
         .action = .press,
         .key = .quote,
         .unshifted_codepoint = '\'',
     } };
-    applyTranslatedKeyText(
-        &message,
-        .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1, .dead_key = true },
-        false,
-    );
+    applyTranslatedKeyText(&message, translated, false);
     message.bindText();
 
     try std.testing.expect(message.event.composing);
     try std.testing.expectEqualStrings("", message.event.utf8);
-    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
+    try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
 }
 
 // Under kitty `report_all` the translated text is no longer suppressed, so it
@@ -1832,24 +2012,16 @@ test "win32 authorized char commit preserves packet control characters" {
     }
 }
 
-test "win32 deferred char authorization preserves pending units across non-text events" {
+test "win32 deferred char key press replaces what an earlier key left" {
     var state: DeferredCharState = .{};
-    state.authorize(1);
-    // Release and unrelated non-text key messages authorize zero units.
-    state.authorize(0);
-    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    state.expect(2);
     try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-}
-
-test "win32 deferred char dead key and composition consume exact units" {
-    var state: DeferredCharState = .{};
-    state.authorize(1);
-    state.consumeDeadChar();
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-
-    state.authorize(1);
-    try std.testing.expectEqual(@as(?u21, 0x00E9), state.consumeCodeUnit(0x00E9, false));
+    // The next press states its own allowance. The unit the earlier key did
+    // not use must not let this key's control character through.
+    state.expect(0);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('\r', false));
+    state.expect(1);
+    try std.testing.expectEqual(@as(?u21, 'b'), state.consumeCodeUnit('b', false));
     try std.testing.expectEqual(@as(usize, 0), state.pending_units);
 }
 
@@ -1857,7 +2029,7 @@ test "win32 deferred char authorization blocks unsolicited and IME text" {
     var state: DeferredCharState = .{};
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
 
-    state.authorize(1);
+    state.expect(1);
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', true));
     try std.testing.expectEqual(@as(usize, 0), state.pending_units);
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
@@ -1865,49 +2037,163 @@ test "win32 deferred char authorization blocks unsolicited and IME text" {
 
 test "win32 deferred char two surrogate keydowns consume two code units" {
     var state: DeferredCharState = .{};
-    state.authorize(1);
-    state.authorize(1);
+    state.expect(1);
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
-    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+    // The second VK_PACKET press keeps the high half the first one left.
+    state.expect(1);
     try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
     try std.testing.expectEqual(@as(usize, 0), state.pending_units);
 }
 
 test "win32 deferred char supplementary expectation authorizes both units" {
     var state: DeferredCharState = .{};
-    state.authorize(2);
+    state.expect(2);
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
     try std.testing.expectEqual(@as(usize, 1), state.pending_units);
     try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
     try std.testing.expectEqual(@as(usize, 0), state.pending_units);
 }
 
-test "win32 deferred char commits 256 delayed BMP authorizations" {
+test "win32 deferred char key press with nothing to type drops a half pair" {
     var state: DeferredCharState = .{};
-    for (0..256) |_| state.authorize(1);
-    try std.testing.expectEqual(@as(usize, 256), state.pending_units);
-
-    for (0..256) |_| {
-        try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
-    }
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+    state.expect(1);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    state.expect(0);
+    try std.testing.expectEqual(@as(?u16, null), state.high_surrogate);
+    state.expect(1);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xDE42, false));
 }
 
 test "win32 deferred char malformed surrogate clears authorization state" {
     var state: DeferredCharState = .{};
-    state.authorize(3);
+    state.expect(3);
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
     try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
     try std.testing.expectEqual(@as(usize, 0), state.pending_units);
     try std.testing.expectEqual(@as(?u16, null), state.high_surrogate);
 }
 
-test "win32 deferred char authorization saturates only at usize maximum" {
-    var state: DeferredCharState = .{
-        .pending_units = std.math.maxInt(usize) - 1,
+/// Counts what reaches the core and answers with a scripted effect per call.
+const TestingEffects = struct {
+    effects: []const CoreSurface.InputEffect,
+    calls: usize = 0,
+    notes: usize = 0,
+    last_utf8: [8]u8 = undefined,
+    last_len: usize = 0,
+
+    fn keyCallback(self: *TestingEffects, event: input.KeyEvent) !CoreSurface.InputEffect {
+        defer self.calls += 1;
+        self.last_len = @min(event.utf8.len, self.last_utf8.len);
+        @memcpy(self.last_utf8[0..self.last_len], event.utf8[0..self.last_len]);
+        return if (self.calls < self.effects.len) self.effects[self.calls] else .ignored;
+    }
+
+    fn noteInput(self: *TestingEffects, _: []const u8) void {
+        self.notes += 1;
+    }
+};
+
+test "win32 VK_PACKET surrogate halves on two key presses commit one character" {
+    var terminal: TestingTerminal = .{ .opts = .{} };
+    var chars: DeferredCharState = .{};
+    const halves = [_]u16{ 0xD83D, 0xDE42 };
+    for (halves) |half| {
+        var typed: TypedChars = .{ .len = 1 };
+        typed.units[0] = half;
+        dispatchKeyMessage(&terminal, &chars, c.WM_KEYDOWN, c.VK_PACKET, 0, true, false, &typed);
+        dispatchKeyMessage(&terminal, &chars, c.WM_KEYUP, c.VK_PACKET, 0, true, false, &TypedChars{});
+    }
+    try std.testing.expectEqualStrings("\u{1F642}", terminal.output());
+}
+
+// A key typed into a pane whose child has exited closes the pane from inside
+// keyCallback, which frees the surface that owns the dispatch state. Nothing
+// may be committed or noted after that.
+test "win32 key dispatch stops at the effect that closed the surface" {
+    var typed: TypedChars = .{ .len = 2 };
+    typed.units[0] = 0x00B4;
+    typed.units[1] = 'x';
+
+    // The key event itself closes the pane: no character follows it.
+    var closed_by_key: TestingEffects = .{ .effects = &.{.closed} };
+    var chars: DeferredCharState = .{};
+    dispatchKeyMessage(&closed_by_key, &chars, c.WM_KEYDOWN, c.VK_PACKET, 0, true, false, &typed);
+    try std.testing.expectEqual(@as(usize, 1), closed_by_key.calls);
+    try std.testing.expectEqual(@as(usize, 0), closed_by_key.notes);
+
+    // The first committed character closes it: the second is never sent.
+    var closed_by_char: TestingEffects = .{ .effects = &.{ .ignored, .closed } };
+    chars = .{};
+    dispatchKeyMessage(&closed_by_char, &chars, c.WM_KEYDOWN, c.VK_PACKET, 0, true, false, &typed);
+    try std.testing.expectEqual(@as(usize, 2), closed_by_char.calls);
+    try std.testing.expectEqual(@as(usize, 1), closed_by_char.notes);
+    try std.testing.expectEqualStrings("\u{B4}", closed_by_char.last_utf8[0..closed_by_char.last_len]);
+}
+
+// A Japanese or Chinese composition, a reconversion or dictation can hand
+// over far more than 170 CJK characters at once. Every length has to convert
+// exactly, on the stack while it surely fits and on the heap beyond.
+test "win32 IME text of any length converts to UTF-8" {
+    const alloc = std.testing.allocator;
+    var stack: [512]u8 = undefined;
+
+    const cases = [_]struct { unit: []const u16, count: usize, owned: bool }{
+        .{ .unit = &.{0x65E5}, .count = 170, .owned = false },
+        .{ .unit = &.{0x65E5}, .count = 171, .owned = true },
+        .{ .unit = &.{0x65E5}, .count = 200, .owned = true },
+        .{ .unit = &.{'a'}, .count = 600, .owned = true },
+        .{ .unit = &.{ 0xD83D, 0xDE42 }, .count = 129, .owned = true },
     };
-    state.authorize(2);
-    try std.testing.expectEqual(std.math.maxInt(usize), state.pending_units);
+    for (cases) |case| {
+        const units = try alloc.alloc(u16, case.unit.len * case.count);
+        defer alloc.free(units);
+        for (0..case.count) |i| @memcpy(units[i * case.unit.len ..][0..case.unit.len], case.unit);
+
+        const expected = try std.unicode.utf16LeToUtf8Alloc(alloc, units);
+        defer alloc.free(expected);
+
+        const text = try imeTextUtf8(alloc, units, &stack);
+        defer text.deinit(alloc);
+        try std.testing.expectEqual(case.owned, text.owned);
+        try std.testing.expectEqualStrings(expected, text.bytes);
+    }
+
+    // An unpaired surrogate is still refused rather than half-converted.
+    try std.testing.expectError(
+        error.DanglingSurrogateHalf,
+        imeTextUtf8(alloc, &.{0xD83D}, &stack),
+    );
+}
+
+test "win32 IME commit reports the effect that closed the surface" {
+    const Target = struct {
+        effect: CoreSurface.InputEffect,
+        preedit_cleared: bool = false,
+        notes: usize = 0,
+
+        fn preeditCallback(self: *@This(), preedit: ?[]const u8) void {
+            if (preedit == null) self.preedit_cleared = true;
+        }
+
+        fn keyCallback(self: *@This(), event: input.KeyEvent) !CoreSurface.InputEffect {
+            try std.testing.expectEqualStrings("\u{65E5}", event.utf8);
+            return self.effect;
+        }
+
+        fn noteInput(self: *@This(), _: []const u8) void {
+            self.notes += 1;
+        }
+    };
+
+    var open: Target = .{ .effect = .consumed };
+    try std.testing.expectEqual(CoreSurface.InputEffect.consumed, commitImeText(&open, "\u{65E5}"));
+    try std.testing.expect(open.preedit_cleared);
+    try std.testing.expectEqual(@as(usize, 1), open.notes);
+
+    var closed: Target = .{ .effect = .closed };
+    try std.testing.expectEqual(CoreSurface.InputEffect.closed, commitImeText(&closed, "\u{65E5}"));
+    try std.testing.expectEqual(@as(usize, 0), closed.notes);
 }
 
 /// A keyboard layout made active for the test thread only. `KLF_NOTELLSHELL`
@@ -1994,8 +2280,8 @@ const TestingTerminal = struct {
 };
 
 /// One key message the way the app handles it: the pump translates it, the
-/// surface's window procedure dispatches it, and then the pump dispatches the
-/// character messages translation queued.
+/// surface's window procedure takes the characters translation queued and
+/// dispatches the key, and the pump then dispatches whatever is still queued.
 fn testingDeliverKeyMessage(
     terminal: *TestingTerminal,
     chars: *DeferredCharState,
@@ -2015,7 +2301,8 @@ fn testingDeliverKeyMessage(
         .lPrivate = 0,
     };
     _ = sys.TranslateMessage(&key_message);
-    dispatchKeyMessage(terminal, chars, msg, vk, lParam, defer_plain_text);
+    const typed: TypedChars = if (msg == c.WM_KEYDOWN) takeTypedChars(hwnd) else .{};
+    dispatchKeyMessage(terminal, chars, msg, vk, lParam, defer_plain_text, false, &typed);
 
     var queued: sys.MSG = undefined;
     while (sys.PeekMessageW(&queued, hwnd, c.WM_CHAR, c.WM_DEADCHAR, c.PM_REMOVE) != 0) {

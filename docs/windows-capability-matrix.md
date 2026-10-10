@@ -209,13 +209,19 @@ that:
 
 The Win32 path supplies press, repeat, and release events to the shared Kitty
 encoder, with Caps Lock, Num Lock, and left/right modifier state on every
-physical event. While a client has Kitty `report_all` enabled, ordinary keys
-carry their text on the physical event instead of the `WM_CHAR` commit, so
-press and release keep one identity; AltGr chords ride the same path with the
-synthetic Ctrl+Alt collapsed, a dead key stays composing until its composed
-character arrives, and a dead key that cannot combine delivers both
-characters. IME commits remain text without a physical key. These paths have
-unit coverage but have not been exercised on a real non-US keyboard.
+physical event. A key's text is what `TranslateMessage` typed for it, taken
+from the message queue when the key arrives, so a dead key composes with the
+next key (`'` then `e` types `é` on US-International) and the keys after it
+are sent once each. While a client has Kitty `report_all` enabled, ordinary
+keys carry that text on the physical event instead of a separate character
+commit, so press and release keep one identity: the `e` after a dead key
+reports `é`, AltGr chords ride the same path with the synthetic Ctrl+Alt
+collapsed, the dead key's press sends nothing (its release is still
+reported), and a dead key that cannot combine delivers both characters on the
+next key. IME commits remain text
+without a physical key. Unit tests drive the US-International, German and
+French layouts through the real `TranslateMessage`; a physical non-US
+keyboard has not been used.
 
 Kitty and modifyOtherKeys encodings survive the pseudo console byte for byte
 on the two sources measured here — the in-box conhost of Windows
