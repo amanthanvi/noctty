@@ -261,12 +261,14 @@ test "writeMinidumpIn writes a dump that carries the exception" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const sub_path = "用户-Ü/" ++ "long-directory-component/" ** 8;
+    // Twelve components are 300 characters on their own, so the path passes
+    // MAX_PATH however short the checkout is. The limit counts UTF-16 units.
+    const sub_path = "用户-Ü/" ++ "long-directory-component/" ** 12;
     try tmp.dir.makePath(sub_path);
     var dump_dir = try tmp.dir.openDir(sub_path, .{ .iterate = true });
     defer dump_dir.close();
     const dir_path = try dump_dir.realpath(".", &dir_buf);
-    try std.testing.expect(dir_path.len > 260);
+    try std.testing.expect(try std.unicode.calcWtf16LeLen(dir_path) > windows.MAX_PATH);
     const dir_w = try dumpDirectoryW(dir_path);
 
     try writeMinidumpIn(dir_path, dir_w.span(), &pointers);
