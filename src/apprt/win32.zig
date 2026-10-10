@@ -27878,11 +27878,7 @@ fn scrollbarProxyPointFromSurfaceCursor(
     );
 }
 
-const shouldAuthorizeDeferredCharMessage = win32_input.shouldAuthorizeDeferredCharMessage;
-
 const DeferredCharState = win32_input.DeferredCharState;
-
-const charCommitEvent = win32_input.charCommitEvent;
 
 const keyEventFromWin32Message = win32_input.keyEventFromWin32Message;
 
@@ -28045,10 +28041,8 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return sys.DefWindowProcW(hwnd, msg, wParam, masked_lParam);
         },
 
-        c.WM_CHAR => {
-            if (surface) |v| {
-                v.handleCharMessage(wParam, lParam);
-            }
+        c.WM_CHAR, c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {
+            if (surface) |v| v.handleCharMessage(msg, wParam, lParam);
             return 0;
         },
 
@@ -28071,11 +28065,6 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 if (!v.hasWindowMenu()) return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-        },
-
-        c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {
-            if (surface) |v| v.deferred_char.consumeDeadChar();
-            return 0;
         },
 
         c.WM_MOUSEMOVE => {
@@ -32976,53 +32965,40 @@ pub const Surface = struct {
             defer self.core_surface.renderer_state.mutex.unlock();
             break :kitty_report_all self.core_surface.renderer_state.terminal.screens.active.kitty_keyboard.current().report_all;
         };
-        var message = keyEventFromWin32Message(
+        win32_input.dispatchKeyMessage(
+            KeyTarget{ .surface = self },
+            &self.deferred_char,
             msg,
             wParam,
             lParam,
             win32_input.deferPlainTextToCharMessage(kitty_report_all, self.ime_composing),
-        ) orelse return;
-        // `message` lives for the rest of this function, which covers every
-        // read of `event.utf8` below including the post-`keyCallback`
-        // accessibility notification.
-        message.bindText();
-        const event = message.event;
-
-        const effect = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
-                err,
-                @as(UINT, @intCast(wParam & 0xFFFF)),
-                event.action,
-                event.key,
-                event.mods,
-            });
-            return;
-        };
-        if (effect == .closed) return;
-        if (shouldAuthorizeDeferredCharMessage(effect)) {
-            self.deferred_char.authorize(message.deferred_utf16_units);
-        }
-        if (event.utf8.len != 0) {
-            if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
-        }
+        );
     }
 
-    fn handleCharMessage(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
+    fn handleCharMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
-
-        const code_unit: u16 = @intCast(wParam & 0xFFFF);
-        const codepoint = self.deferred_char.consumeCodeUnit(
-            code_unit,
+        win32_input.dispatchCharMessage(
+            KeyTarget{ .surface = self },
+            &self.deferred_char,
+            msg,
+            wParam,
+            lParam,
             self.ime_composing,
-        ) orelse return;
-
-        var utf8_buf: [8]u8 = undefined;
-        const event = charCommitEvent(codepoint, lParam, &utf8_buf) orelse return;
-        if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
-        _ = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 char commit failed err={} codepoint={}", .{ err, codepoint });
-        };
+        );
     }
+
+    /// What the keyboard dispatch in `win32_input` needs from the surface.
+    const KeyTarget = struct {
+        surface: *Surface,
+
+        pub fn keyCallback(self: KeyTarget, event: input.KeyEvent) !CoreSurface.InputEffect {
+            return self.surface.core_surface.keyCallback(event);
+        }
+
+        pub fn noteInput(self: KeyTarget, utf8: []const u8) void {
+            if (self.surface.terminal_accessibility) |session| session.noteInput(utf8);
+        }
+    };
 
     fn positionImeWindow(self: *Surface) void {
         if (!self.core_initialized) return;

@@ -8,6 +8,8 @@ const input = @import("../../input.zig");
 const sys = @import("sys.zig");
 const c = @import("consts.zig");
 
+const log = std.log.scoped(.win32);
+
 const windows = std.os.windows;
 const UINT = sys.UINT;
 const WPARAM = sys.WPARAM;
@@ -1096,6 +1098,70 @@ pub fn keyEventFromWin32Message(
     return result;
 }
 
+/// Deliver a `WM_(SYS)KEYDOWN` / `WM_(SYS)KEYUP` to the core.
+///
+/// `target` supplies `keyCallback(input.KeyEvent) !CoreSurface.InputEffect`
+/// and `noteInput([]const u8) void`. A key typed into a pane whose child has
+/// exited closes the pane inside `keyCallback` and frees the surface that owns
+/// `chars`, so nothing is touched once it returns `.closed`.
+pub fn dispatchKeyMessage(
+    target: anytype,
+    chars: *DeferredCharState,
+    msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+    defer_plain_text: bool,
+) void {
+    // `message` lives for the rest of this function, which covers every read
+    // of `event.utf8` below including the accessibility notification.
+    var message = keyEventFromWin32Message(msg, wParam, lParam, defer_plain_text) orelse return;
+    message.bindText();
+    const event = message.event;
+
+    const effect = target.keyCallback(event) catch |err| {
+        log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
+            err,
+            @as(UINT, @intCast(wParam & 0xFFFF)),
+            event.action,
+            event.key,
+            event.mods,
+        });
+        return;
+    };
+    if (effect == .closed) return;
+    if (shouldAuthorizeDeferredCharMessage(effect)) {
+        chars.authorize(message.deferred_utf16_units);
+    }
+    if (event.utf8.len != 0) target.noteInput(event.utf8);
+}
+
+/// Deliver a `WM_CHAR`, `WM_DEADCHAR` or `WM_SYSDEADCHAR` to the core. Only
+/// characters a key message authorized get through; see `DeferredCharState`.
+pub fn dispatchCharMessage(
+    target: anytype,
+    chars: *DeferredCharState,
+    msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+    ime_composing: bool,
+) void {
+    if (msg != c.WM_CHAR) {
+        chars.consumeDeadChar();
+        return;
+    }
+    const codepoint = chars.consumeCodeUnit(
+        @intCast(wParam & 0xFFFF),
+        ime_composing,
+    ) orelse return;
+
+    var utf8_buf: [8]u8 = undefined;
+    const event = charCommitEvent(codepoint, lParam, &utf8_buf) orelse return;
+    target.noteInput(event.utf8);
+    _ = target.keyCallback(event) catch |err| {
+        log.err("win32 char commit failed err={} codepoint={}", .{ err, codepoint });
+    };
+}
+
 test "win32 keyFromVirtualKey maps core keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -1842,6 +1908,242 @@ test "win32 deferred char authorization saturates only at usize maximum" {
     };
     state.authorize(2);
     try std.testing.expectEqual(std.math.maxInt(usize), state.pending_units);
+}
+
+/// A keyboard layout made active for the test thread only. `KLF_NOTELLSHELL`
+/// keeps it out of the shell's input switcher, a layout the session did not
+/// already have is unloaded again, and the thread's previous layout and key
+/// state are restored.
+const TestingLayout = struct {
+    hkl: usize,
+    previous: usize,
+    loaded_here: bool,
+    key_state: [256]u8,
+
+    fn activate(comptime klid: []const u8) ?TestingLayout {
+        var before: [64]usize = undefined;
+        const count = sys.GetKeyboardLayoutList(before.len, &before);
+        const hkl = sys.LoadKeyboardLayoutW(
+            std.unicode.utf8ToUtf16LeStringLiteral(klid),
+            c.KLF_NOTELLSHELL,
+        );
+        if (hkl == 0) return null;
+        const loaded_here = for (before[0..@intCast(@max(count, 0))]) |existing| {
+            if (existing == hkl) break false;
+        } else true;
+
+        var layout: TestingLayout = .{
+            .hkl = hkl,
+            .previous = sys.GetKeyboardLayout(0),
+            .loaded_here = loaded_here,
+            .key_state = undefined,
+        };
+        if (sys.GetKeyboardState(&layout.key_state) == 0) layout.key_state = [_]u8{0} ** 256;
+        if (sys.ActivateKeyboardLayout(hkl, 0) == 0 or sys.GetKeyboardLayout(0) != hkl) {
+            layout.deinit();
+            return null;
+        }
+        return layout;
+    }
+
+    fn deinit(self: *const TestingLayout) void {
+        _ = sys.SetKeyboardState(&self.key_state);
+        _ = sys.ActivateKeyboardLayout(self.previous, 0);
+        if (self.loaded_here) _ = sys.UnloadKeyboardLayout(self.hkl);
+    }
+};
+
+/// A hidden window for `TranslateMessage` to post character messages to.
+fn testingKeyWindow() ?sys.HWND {
+    return sys.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        c.WS_POPUP,
+        0,
+        0,
+        1,
+        1,
+        null,
+        null,
+        sys.GetModuleHandleW(null),
+        null,
+    );
+}
+
+/// The core's side of a key dispatch: encode the event the way
+/// `Surface.keyCallback` does and keep the bytes it would write to the pty.
+const TestingTerminal = struct {
+    opts: input.key_encode.Options,
+    bytes: [256]u8 = undefined,
+    len: usize = 0,
+
+    fn keyCallback(self: *TestingTerminal, event: input.KeyEvent) !CoreSurface.InputEffect {
+        var writer: std.Io.Writer = .fixed(self.bytes[self.len..]);
+        try input.key_encode.encode(&writer, event, self.opts);
+        const written = writer.buffered().len;
+        self.len += written;
+        return if (written == 0) .ignored else .consumed;
+    }
+
+    fn noteInput(_: *TestingTerminal, _: []const u8) void {}
+
+    fn output(self: *const TestingTerminal) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// One key message the way the app handles it: the pump translates it, the
+/// surface's window procedure dispatches it, and then the pump dispatches the
+/// character messages translation queued.
+fn testingDeliverKeyMessage(
+    terminal: *TestingTerminal,
+    chars: *DeferredCharState,
+    hwnd: sys.HWND,
+    msg: UINT,
+    vk: UINT,
+    lParam: LPARAM,
+    defer_plain_text: bool,
+) void {
+    const key_message: sys.MSG = .{
+        .hwnd = hwnd,
+        .message = msg,
+        .wParam = vk,
+        .lParam = lParam,
+        .time = 0,
+        .pt = .{ .x = 0, .y = 0 },
+        .lPrivate = 0,
+    };
+    _ = sys.TranslateMessage(&key_message);
+    dispatchKeyMessage(terminal, chars, msg, vk, lParam, defer_plain_text);
+
+    var queued: sys.MSG = undefined;
+    while (sys.PeekMessageW(&queued, hwnd, c.WM_CHAR, c.WM_DEADCHAR, c.PM_REMOVE) != 0) {
+        if (queued.message == c.WM_QUIT) {
+            sys.PostQuitMessage(@intCast(queued.wParam));
+            break;
+        }
+        dispatchCharMessage(terminal, chars, queued.message, queued.wParam, queued.lParam, false);
+    }
+}
+
+const TestingKey = struct {
+    vk: UINT,
+    ctrl: bool = false,
+};
+
+/// Press and release each key in turn, with the thread's key state set the
+/// way the keyboard driver would set it.
+fn testingTypeKeys(
+    terminal: *TestingTerminal,
+    hwnd: sys.HWND,
+    keys: []const TestingKey,
+    defer_plain_text: bool,
+) void {
+    var chars: DeferredCharState = .{};
+    for (keys) |key| {
+        var state: [256]u8 = [_]u8{0} ** 256;
+        if (key.ctrl) {
+            state[c.VK_CONTROL] = 0x80;
+            state[c.VK_LCONTROL] = 0x80;
+        }
+        const scan: usize = sys.MapVirtualKeyW(key.vk, c.MAPVK_VK_TO_VSC);
+        const down: usize = 1 | (scan << 16);
+
+        state[key.vk] = 0x80;
+        _ = sys.SetKeyboardState(&state);
+        testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYDOWN, key.vk, @bitCast(down), defer_plain_text);
+
+        state[key.vk] = 0;
+        _ = sys.SetKeyboardState(&state);
+        const up = down | (1 << 30) | (1 << 31);
+        testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYUP, key.vk, @bitCast(up), defer_plain_text);
+    }
+    _ = sys.SetKeyboardState(&([_]u8{0} ** 256));
+}
+
+// The pump runs TranslateMessage before the key message is dispatched, so a
+// dead key is already latched when the surface sees its WM_KEYDOWN, and the
+// key's character messages are already queued. Measured on these three
+// layouts, a ToUnicode probe taken at that point sees the accent pressed twice
+// (two units) rather than a dead key, and the key after it sees its own base
+// letter rather than the composed one. Driven through the real layouts and the
+// real TranslateMessage, every key has to reach the shell exactly once.
+test "win32 dead keys on real layouts deliver every key exactly once" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const hwnd = testingKeyWindow() orelse return error.SkipZigTest;
+    defer _ = sys.DestroyWindow(hwnd);
+
+    const e: TestingKey = .{ .vk = c.VK_A + 4 };
+    const x: TestingKey = .{ .vk = c.VK_A + 23 };
+    const space: TestingKey = .{ .vk = c.VK_SPACE };
+    const enter: TestingKey = .{ .vk = c.VK_RETURN };
+    const backspace: TestingKey = .{ .vk = c.VK_BACK };
+    const tab: TestingKey = .{ .vk = c.VK_TAB };
+    const ctrl_c: TestingKey = .{ .vk = c.VK_A + 2, .ctrl = true };
+
+    const layouts = [_]struct {
+        klid: []const u8,
+        dead: TestingKey,
+        accent: []const u8,
+        composed_e: []const u8,
+    }{
+        .{ .klid = "00020409", .dead = .{ .vk = c.VK_OEM_7 }, .accent = "'", .composed_e = "\u{E9}" },
+        .{ .klid = "00000407", .dead = .{ .vk = c.VK_OEM_6 }, .accent = "\u{B4}", .composed_e = "\u{E9}" },
+        .{ .klid = "0000040C", .dead = .{ .vk = c.VK_OEM_6 }, .accent = "^", .composed_e = "\u{EA}" },
+    };
+    inline for (layouts) |layout| {
+        const active = TestingLayout.activate(layout.klid) orelse return error.SkipZigTest;
+        defer active.deinit();
+
+        const cases = [_]struct { keys: []const TestingKey, expect: []const u8 }{
+            .{ .keys = &.{ layout.dead, e, enter }, .expect = layout.composed_e ++ "\r" },
+            .{ .keys = &.{ layout.dead, e, backspace }, .expect = layout.composed_e ++ "\x7f" },
+            .{ .keys = &.{ layout.dead, e, ctrl_c }, .expect = layout.composed_e ++ "\x03" },
+            .{ .keys = &.{ layout.dead, space, tab }, .expect = layout.accent ++ "\t" },
+            .{ .keys = &.{ layout.dead, x, enter }, .expect = layout.accent ++ "x\r" },
+        };
+        for (cases) |case| {
+            var terminal: TestingTerminal = .{ .opts = .{ .alt_esc_prefix = true } };
+            testingTypeKeys(&terminal, hwnd, case.keys, true);
+            std.testing.expectEqualStrings(case.expect, terminal.output()) catch |err| {
+                std.debug.print("win32 dead key case failed: layout {s} expect {any}\n", .{
+                    layout.klid,
+                    case.expect,
+                });
+                return err;
+            };
+        }
+    }
+}
+
+// Under Kitty `report_all` the text rides on the physical key event, so the
+// event for the key after a dead key has to carry what the layout composed:
+// `é` on the `e` key, or the accent and the letter together when they do not
+// combine. The dead key itself sends nothing; it only latched an accent.
+test "win32 kitty report_all dead keys carry the composed text on the next key" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const hwnd = testingKeyWindow() orelse return error.SkipZigTest;
+    defer _ = sys.DestroyWindow(hwnd);
+
+    const active = TestingLayout.activate("00020409") orelse return error.SkipZigTest;
+    defer active.deinit();
+
+    const flags: @import("../../terminal/kitty/key.zig").Flags = .{
+        .disambiguate = true,
+        .report_all = true,
+        .report_associated = true,
+    };
+    const quote: TestingKey = .{ .vk = c.VK_OEM_7 };
+    const cases = [_]struct { keys: []const TestingKey, expect: []const u8 }{
+        .{ .keys = &.{ quote, .{ .vk = c.VK_A + 4 } }, .expect = "\x1b[101;;233u" },
+        .{ .keys = &.{ quote, .{ .vk = c.VK_A + 23 } }, .expect = "\x1b[120;;39:120u" },
+    };
+    for (cases) |case| {
+        var terminal: TestingTerminal = .{ .opts = .{ .kitty_flags = flags } };
+        testingTypeKeys(&terminal, hwnd, case.keys, false);
+        try std.testing.expectEqualStrings(case.expect, terminal.output());
+    }
 }
 
 test "win32 hotkeySpecForTrigger maps physical key triggers" {
