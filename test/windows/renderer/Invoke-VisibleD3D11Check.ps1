@@ -12,6 +12,9 @@ $repoRoot = Split-Path (Split-Path (Split-Path $PSScriptRoot))
 . (Join-Path $repoRoot 'scripts/common.ps1')
 . (Join-Path $repoRoot 'scripts/windows-architecture.ps1')
 . (Join-Path $repoRoot 'scripts/conpty-redist.ps1')
+function Assert-PeMachine([string]$PathToCheck, [string]$ExpectedArchitecture) {
+    if ([RendererNative]::PeMachine($PathToCheck) -ne (Get-WindowsPackageArchitecture -Architecture $ExpectedArchitecture).PeMachine) { throw 'Pinned ConPTY PE machine does not match the test architecture.' }
+}
 $Binary = [IO.Path]::GetFullPath($Binary)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a fresh output directory; existing evidence is preserved.' }
