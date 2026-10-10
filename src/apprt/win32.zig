@@ -9035,7 +9035,7 @@ pub const App = struct {
                         tab.focused = it.next().?.handle;
                         // The closed split may have been what the tab's
                         // status badge was showing.
-                        host.refreshTabStatus(i, false);
+                        host.refreshTabStatus(i);
                     }
                     break;
                 }
@@ -10321,7 +10321,7 @@ pub const App = struct {
         // The user is looking at this tab, so a program that finished or
         // failed has been seen the moment it says so.
         if (seen) _ = surface.program_status.acknowledge();
-        found.host.refreshTabStatus(found.index, news != null);
+        found.host.refreshTabStatus(found.index);
         if (self.activeSurfaceForHost(found.host.id) == surface and
             !std.meta.eql(taskbar_before, surface.effectiveTaskbarProgress()))
         {
@@ -10344,7 +10344,7 @@ pub const App = struct {
             if (entry.view.program_status.acknowledge()) changed = true;
         }
         if (!changed) return;
-        host.refreshTabStatus(index, false);
+        host.refreshTabStatus(index);
         self.syncTaskbarProgressForHost(host.id);
     }
 
@@ -10428,6 +10428,11 @@ pub const App = struct {
         var waiting = false;
         for (self.windows.items) |surface| {
             if (!surface.program_status_notify_pending) continue;
+            // Notifications may have been turned off while it waited.
+            if (!surface.core().config.desktop_notifications) {
+                surface.program_status_notify_pending = false;
+                continue;
+            }
             const found = self.findTabForSurface(surface) orelse {
                 surface.program_status_notify_pending = false;
                 continue;
@@ -11417,6 +11422,8 @@ const Tab = struct {
     /// kept so a change repaints the button and reaches assistive
     /// technology once. Owned by `Host.refreshTabStatus`.
     status_indicator: win32_program_status.Indicator = .none,
+    /// What `ItemStatus` last announced, as `tabStatusKey`; 0 for nothing.
+    status_key: u64 = 0,
 
     fn init(alloc: Allocator, id: u32, surface: *Surface) !Tab {
         return .{
@@ -12228,7 +12235,7 @@ const Host = struct {
         value.index = insert_index;
         self.active_tab = insert_index;
         // Its programs may have ended while the tab waited in undo history.
-        self.refreshTabStatus(insert_index, false);
+        self.refreshTabStatus(insert_index);
         return self.activeSurface() != null;
     }
 
@@ -12504,6 +12511,8 @@ const Host = struct {
     }
 
     fn applyLatestStructuralUndo(self: *Host) !?[]const u8 {
+        // Replays move panes between tabs; their status badges follow.
+        defer self.refreshAllTabStatus();
         const entry = (try self.popStructuralUndo()) orelse return null;
         errdefer self.restoreLastStructuralUndoPop();
 
@@ -12548,6 +12557,8 @@ const Host = struct {
     }
 
     fn applyLatestStructuralRedo(self: *Host) !?[]const u8 {
+        // Replays move panes between tabs; their status badges follow.
+        defer self.refreshAllTabStatus();
         const entry = (try self.popStructuralRedo()) orelse return null;
         errdefer self.restoreLastStructuralRedoPop();
 
@@ -14984,6 +14995,8 @@ const Host = struct {
         removed.button_label_cache_valid = false;
         const target_index = self.findTabIndexById(target_tab_id) orelse unreachable;
         self.active_tab = target_index;
+        // The moved panes bring their programs' status with them.
+        self.refreshTabStatus(target_index);
         _ = self.appendStructuralUndoAssumeCapacity(.{
             .kind = .tab_subtree_transfer,
             .timestamp_ms = sys.GetTickCount64(),
@@ -15065,14 +15078,15 @@ const Host = struct {
     }
 
     /// Recompute what tab `index` shows for its programs' status (OSC 7501)
-    /// and repaint it when that changed. Assistive technology hears about a
-    /// change of state, and with `news` about a new request or result in
-    /// the same state, but not about progress.
-    fn refreshTabStatus(self: *Host, index: usize, news: bool) void {
+    /// and repaint it when that changed. Assistive technology hears when
+    /// what `ItemStatus` says changes other than by progress: a new state,
+    /// a new request or result, or another record taking the lead.
+    fn refreshTabStatus(self: *Host, index: usize) void {
         if (index >= self.tabs.items.len) return;
         const tab = &self.tabs.items[index];
         const previous = tab.status_indicator;
-        const next: win32_program_status.Indicator = .of(if (tabStatusHeadline(tab)) |status| status.record else null);
+        const status = tabStatusHeadline(tab);
+        const next: win32_program_status.Indicator = .of(if (status) |value| value.record else null);
         if (!previous.eql(next)) {
             tab.status_indicator = next;
             if ((previous == .none) != (next == .none)) {
@@ -15084,9 +15098,17 @@ const Host = struct {
             }
             if (tab.button_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
         }
-        if ((news or !previous.sameKind(next)) and self.shouldShowTabBar()) {
-            if (tab.uia_provider) |provider| provider.raiseItemStatusChanged();
+        const key = if (status) |value| tabStatusKey(value) else 0;
+        if (key != tab.status_key) {
+            tab.status_key = key;
+            if (self.shouldShowTabBar()) {
+                if (tab.uia_provider) |provider| provider.raiseItemStatusChanged();
+            }
         }
+    }
+
+    fn refreshAllTabStatus(self: *Host) void {
+        for (0..self.tabs.items.len) |index| self.refreshTabStatus(index);
     }
 
     fn notifyActiveTabUiaSelectionChanged(self: *Host, previous_tab_id: ?u32) void {
@@ -23693,6 +23715,14 @@ fn tabStatusHeadline(tab: *const Tab) ?TabProgramStatus {
         best = .{ .surface = entry.view, .record = record };
     }
     return best;
+}
+
+/// What a screen reader is told about a tab's status, as a hash that
+/// progress alone doesn't change; never 0, which stands for no status.
+fn tabStatusKey(status: TabProgramStatus) u64 {
+    var hasher = std.hash.Wyhash.init(@intFromPtr(status.surface));
+    win32_program_status.hashAnnounced(&hasher, status.record);
+    return hasher.final() | 1;
 }
 
 /// Accept callback for the `confirm-close-surface` overlay. Fires

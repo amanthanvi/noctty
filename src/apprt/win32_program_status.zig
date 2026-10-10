@@ -384,15 +384,6 @@ pub const Indicator = union(enum) {
         return std.meta.eql(a, b);
     }
 
-    /// Whether `a` and `b` read the same aside from progress, which is
-    /// what decides if assistive technology hears about a change.
-    pub fn sameKind(a: Indicator, b: Indicator) bool {
-        return switch (a) {
-            .working => b == .working,
-            else => a.eql(b),
-        };
-    }
-
     /// Blocked, failed and done tabs are the ones that need the user.
     pub fn needsUser(self: Indicator) bool {
         return self.rank() >= Indicator.rank(.done);
@@ -548,6 +539,16 @@ fn isHidden(cp: u21) bool {
         => true,
         else => false,
     };
+}
+
+/// Feed `hasher` what a screen reader is told about `record`: which record
+/// it is, its state and kind, and for blocked, done and error its message.
+/// Progress and a working record's message change too often to announce.
+pub fn hashAnnounced(hasher: *std.hash.Wyhash, record: *const Record) void {
+    hasher.update(record.id);
+    const kind: u8 = if (record.kind) |value| @as(u8, @intCast(@intFromEnum(value))) + 1 else 0;
+    hasher.update(&.{ @as(u8, @intCast(@intFromEnum(record.state))), kind });
+    if (record.needsUser()) if (record.msg) |msg| hasher.update(msg);
 }
 
 /// Who a record speaks for: its title, else its (inherited) app.
@@ -821,9 +822,6 @@ test "the headline is the most urgent record, then root, then most recent" {
 }
 
 test "indicator ranks and kinds" {
-    try testing.expect(Indicator.sameKind(.{ .working = 1 }, .{ .working = 2 }));
-    try testing.expect(!Indicator.sameKind(.{ .working = 1 }, .done));
-    try testing.expect(!Indicator.sameKind(.{ .blocked = .auth }, .{ .blocked = null }));
     try testing.expect(!Indicator.needsUser(.{ .working = null }));
     try testing.expect(Indicator.needsUser(.done));
     try testing.expect(Indicator.needsUser(.failed));
@@ -860,6 +858,35 @@ test "the next tab needing attention is the most urgent, then the next in order"
     const quiet = [_]Indicator{ .none, .{ .working = 10 } };
     try testing.expectEqual(@as(?usize, null), nextNeedingUser(&quiet, 0));
     try testing.expectEqual(@as(?usize, null), nextNeedingUser(&.{}, null));
+}
+
+test "screen readers hear about a new request, not about progress" {
+    var records: Records = .{};
+    defer records.deinit(testing.allocator);
+    const announced = struct {
+        fn key(r: *const Records) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            hashAnnounced(&hasher, r.root().?);
+            return hasher.final();
+        }
+    }.key;
+
+    // "A" and "B"
+    _ = try testApply(&records, "state=working:progress=10:msg=QQ");
+    const working = announced(&records);
+    _ = try testApply(&records, "state=working:progress=20:msg=Qg");
+    try testing.expectEqual(working, announced(&records));
+
+    _ = try testApply(&records, "state=blocked:kind=question:msg=QQ");
+    const first = announced(&records);
+    try testing.expect(first != working);
+    _ = try testApply(&records, "state=blocked:kind=question:msg=QQ:progress=50");
+    try testing.expectEqual(first, announced(&records));
+    _ = try testApply(&records, "state=blocked:kind=question:msg=Qg");
+    const second = announced(&records);
+    try testing.expect(second != first);
+    _ = try testApply(&records, "state=blocked:kind=permission:msg=Qg");
+    try testing.expect(announced(&records) != second);
 }
 
 test "taskbar progress for the root record" {

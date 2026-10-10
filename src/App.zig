@@ -730,6 +730,16 @@ pub fn performAllAction(
         return;
     }
 
+    // `goto_attention` moves on from the current tab, so fanned out to every
+    // surface it would jump once per pane and could end where it started.
+    // A global binding runs it once, from the last focused surface.
+    if (action == .goto_attention) {
+        const surface = self.focusedSurface() orelse
+            if (self.surfaces.items.len > 0) self.surfaces.items[0].core() else return;
+        _ = try surface.performBindingAction(action);
+        return;
+    }
+
     switch (action.scope()) {
         // App-scoped actions are handled by the app so that they aren't
         // repeated for each surface (since each surface forwards
