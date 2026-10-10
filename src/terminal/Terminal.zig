@@ -4433,6 +4433,86 @@ test "Terminal: grapheme transfer when widening wraps to the next line" {
     }
 }
 
+// The cross-page variant of the transfer above: the wrapped row is on the
+// next page, whose grapheme storage is full, so appending the first moved
+// codepoint grows that page. The second append must then read its
+// destination from the cursor again rather than through the pointer it
+// had into the replaced page.
+test "Terminal: grapheme transfer across pages when the append grows the page" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .rows = 5, .cols = 40 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    const screen = t.screens.active;
+
+    // Scroll until the first page is full, then two rows more, so the
+    // active area is the first page's last three rows and two rows of a
+    // second page.
+    const first_page_rows = screen.pages.pages.first.?.data.capacity.rows;
+    screen.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_rows - 1) |_| try screen.testWriteString("\n");
+    screen.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try screen.testWriteString("\n\n");
+    try testing.expectEqual(@as(usize, 2), screen.pages.totalPages());
+
+    // Fill the second page's grapheme storage from its second row, leaving
+    // its first row (where the wrap lands) empty.
+    {
+        const page = &screen.pages.pages.last.?.data;
+        const row = page.getRow(1);
+        var full = false;
+        for (page.getCells(row)) |*cell| {
+            cell.* = .{ .content_tag = .codepoint, .content = .{ .codepoint = 'z' } };
+            page.appendGrapheme(row, cell, 0x0301) catch {
+                full = true;
+                break;
+            };
+        }
+        try testing.expect(full);
+    }
+
+    // On the first page's last row, at the right edge: a narrow emoji with
+    // two combining marks, then VS16 to widen it, which wraps it onto the
+    // second page.
+    t.setCursorPos(3, 40);
+    try testing.expect(screen.cursor.page_pin.node == screen.pages.pages.first.?);
+    const second_page = screen.pages.pages.last.?;
+    try t.print(0x263A);
+    try t.print(0x0301);
+    try t.print(0x0301);
+    try t.print(0xFE0F);
+
+    // The transfer grew (replaced) the second page.
+    try testing.expect(screen.pages.pages.last.? != second_page);
+
+    {
+        // The old cell is a spacer head with no graphemes left.
+        const list_cell = screen.pages.getCell(.{ .active = .{
+            .x = 39,
+            .y = 2,
+        } }).?;
+        try testing.expectEqual(Cell.Wide.spacer_head, list_cell.cell.wide);
+        try testing.expect(!list_cell.cell.hasGrapheme());
+        try testing.expect(list_cell.row.wrap);
+    }
+    {
+        // Every grapheme codepoint moved with the base codepoint.
+        const list_cell = screen.pages.getCell(.{ .active = .{
+            .x = 0,
+            .y = 3,
+        } }).?;
+        try testing.expect(list_cell.node == screen.pages.pages.last.?);
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u21, 0x263A), cell.content.codepoint);
+        try testing.expectEqual(Cell.Wide.wide, cell.wide);
+        try testing.expectEqualSlices(
+            u21,
+            &.{ 0x0301, 0x0301, 0xFE0F },
+            list_cell.node.data.lookupGrapheme(cell).?,
+        );
+    }
+}
+
 test "Terminal: VS16 to make wide character with pending wrap" {
     var t = try init(testing.allocator, .{ .rows = 5, .cols = 3 });
     defer t.deinit(testing.allocator);
