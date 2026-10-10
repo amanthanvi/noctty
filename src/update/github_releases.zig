@@ -554,7 +554,9 @@ pub fn saveState(path: []const u8, state: *const State) !void {
         try writer.flush();
         try file.sync();
     }
-    try std.fs.renameAbsolute(temp_path, path);
+    // Dir.rename selects Windows' POSIX rename semantics at our 1809 floor.
+    // std.fs.renameAbsolute always uses MoveFileExW, even at that floor.
+    try std.fs.cwd().rename(temp_path, path);
 }
 
 pub fn recordDismissal(alloc: Allocator, path: []const u8, version_text: []const u8) !void {
@@ -800,11 +802,7 @@ fn stageWindowsInstallWithDownloader(
         .portable => try std.fs.path.join(alloc, &.{ payload_path.?, "noctty.exe" }),
     };
     defer alloc.free(version_check_path);
-    const installer_version = try readWindowsFileVersion(alloc, version_check_path);
-    const claimed_version = try parseVersionText(release.version_text);
-    if (!installerVersionAtLeastClaim(installer_version, claimed_version)) {
-        return error.InstallerVersionOlderThanRelease;
-    }
+    try verifyStagedBinaryVersion(alloc, version_check_path, release.version_text);
 
     const sha256_hex = try alloc.dupe(u8, &std.fmt.bytesToHex(actual_digest, .lower));
     errdefer alloc.free(sha256_hex);
@@ -2702,6 +2700,32 @@ fn installerVersionAtLeastClaim(
     return true;
 }
 
+fn verifyStagedBinaryVersion(alloc: Allocator, path: []const u8, version_text: []const u8) !void {
+    const actual = try readWindowsFileVersion(alloc, path);
+    if (!installerVersionAtLeastClaim(actual, try parseVersionText(version_text))) {
+        return error.InstallerVersionOlderThanRelease;
+    }
+}
+
+test "portable staging downgrade guard reads the built exe version" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const path = @import("windows_version_fixture").exe_path;
+    const expected = @import("build_options").app_version;
+    const actual = try readWindowsFileVersion(alloc, path);
+    try std.testing.expectEqual(expected.major, actual.major);
+    try std.testing.expectEqual(expected.minor, actual.minor);
+    try std.testing.expectEqual(expected.patch, actual.patch);
+    try std.testing.expectEqual(@as(u16, 0), actual.build);
+
+    const claim = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ expected.major, expected.minor, expected.patch });
+    defer alloc.free(claim);
+    try verifyStagedBinaryVersion(alloc, path, claim);
+    const newer = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ expected.major, expected.minor, expected.patch + 1 });
+    defer alloc.free(newer);
+    try std.testing.expectError(error.InstallerVersionOlderThanRelease, verifyStagedBinaryVersion(alloc, path, newer));
+}
+
 fn readWindowsFileVersion(alloc: Allocator, path: []const u8) !WindowsFileVersion {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
@@ -3493,6 +3517,41 @@ test "changed release feed bypasses throttle" {
     alloc.free(state.release_url.?);
     state.release_url = null;
     try std.testing.expect(shouldCheckNetwork(&state, "https://updates.example/feed-a", now));
+}
+
+// The strict rename (below Windows 1809) refuses to replace an open file
+// whatever its share mode; the POSIX-semantics rename replaces one whose
+// opener shares delete, as std's own opens do.
+test "update state replaces a destination held open with delete sharing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(path);
+    try saveState(path, &.{ .last_checked_at = 1 });
+
+    const windows = std.os.windows;
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
+    defer alloc.free(path_w);
+    const handle = windows.kernel32.CreateFileW(
+        path_w.ptr,
+        windows.GENERIC_READ,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(handle != windows.INVALID_HANDLE_VALUE);
+    defer windows.CloseHandle(handle);
+
+    try saveState(path, &.{ .last_checked_at = 2 });
+    var state = try loadState(alloc, path);
+    defer state.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 2), state.last_checked_at);
 }
 
 test "state persists staged windows install metadata with escaped path" {

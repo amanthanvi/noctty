@@ -68,12 +68,17 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         // objects (including compiler_rt) are compatible with the MSVC
         // linker. Zig defaults to the GNU ABI which produces objects
         // with invalid COMDAT sections that MSVC rejects (LNK1143).
-        // Only override when no explicit ABI was requested.
-        if (result.result.os.tag == .windows and
-            result.query.abi == null)
-        {
+        // Only override when no explicit ABI was requested. Every Windows
+        // target also guarantees our documented 1809 floor, so std rename
+        // can use POSIX semantics instead of rejecting held-open files.
+        if (result.result.os.tag == .windows) {
             var query = result.query;
-            query.abi = .msvc;
+            if (query.abi == null) query.abi = .msvc;
+            if (query.os_version_min == null or
+                @intFromEnum(query.os_version_min.?.windows) < @intFromEnum(std.Target.Os.WindowsVersion.win10_rs5))
+            {
+                query.os_version_min = .{ .windows = .win10_rs5 };
+            }
             result = b.resolveTargetQuery(query);
         }
 
