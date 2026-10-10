@@ -1159,7 +1159,8 @@ const Subprocess = struct {
             ) orelse break :wsl null;
             try wsl_env.forwardIdentity(&env, term_overridden);
             if (term_overridden or std.mem.eql(u8, cfg.term, "xterm-256color")) break :wsl null;
-            break :wsl .{ .argv = argv, .term = try alloc.dupe(u8, cfg.term) };
+            if (exec_command.windows_cmd_shell and !wsl_env.canProbeShell(exec_command.args[2])) break :wsl null;
+            break :wsl .{ .argv = argv, .term = try alloc.dupe(u8, cfg.term), .cwd = cwd };
         } else null;
 
         return .{
@@ -2780,6 +2781,28 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
         defer subprocess.deinit();
         try testing.expectEqual(null, subprocess.env.?.get("WSLENV"));
         try testing.expectEqual(null, subprocess.wsl_probe);
+    }
+
+    // One distribution's answer must not become TERM for another command
+    // in the same cmd.exe environment. Identity names can still be listed.
+    for ([_][]const u8{
+        "wsl.exe -d Ubuntu -e true & wsl.exe -d kali-linux",
+        "wsl.exe -d %DISTRO%",
+    }) |line| {
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = .{ .shell = line },
+            .env = EnvMap.init(testing.allocator),
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqual(null, subprocess.wsl_probe);
+        try testing.expectEqualStrings(
+            "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u",
+            subprocess.env.?.get("WSLENV").?,
+        );
     }
 }
 

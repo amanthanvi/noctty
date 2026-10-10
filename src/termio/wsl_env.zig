@@ -20,6 +20,8 @@ const Allocator = std.mem.Allocator;
 const EnvMap = std.process.EnvMap;
 const windows = std.os.windows;
 const windows_shell = @import("../config.zig").windows_shell;
+const os_path = @import("../os/path.zig");
+const os_windows = @import("../os/windows.zig");
 
 const log = std.log.scoped(.wsl_env);
 
@@ -38,6 +40,8 @@ pub const Probe = struct {
     argv: []const [:0]const u8,
     /// The terminal's own `TERM`, listed if the distribution has an entry.
     term: []const u8,
+    /// The sanitized native working directory used by the launch.
+    cwd: ?[]const u8 = null,
 };
 
 /// The command line of a WSL launch, or null for any other command. The
@@ -55,6 +59,22 @@ pub fn launchArgv(
     const words = try splitWords(alloc, args[2]);
     if (!windows_shell.isWslArgv(words)) return null;
     return words;
+}
+
+/// An automatic TERM belongs to one verified WSL child, not an entire cmd
+/// pipeline. Shell expansion also prevents reproducing its selector/cwd.
+pub fn canProbeShell(line: []const u8) bool {
+    var quoted = false;
+    for (line) |c| {
+        switch (c) {
+            '"' => quoted = !quoted,
+            '%', '^', '!' => return false,
+            '&', '|', '<', '>', '(', ')' => if (!quoted) return false,
+            '\r', '\n' => return false,
+            else => {},
+        }
+    }
+    return !quoted;
 }
 
 /// Split a command line at whitespace. A double-quoted stretch is part of a
@@ -118,9 +138,9 @@ pub fn forward(env: *EnvMap, names: []const []const u8) !void {
 /// plain session launch (`--shutdown`, `--update`, `--list`, ...), so there is
 /// nothing to ask.
 fn selectorArgs(alloc: Allocator, argv: []const [:0]const u8) Allocator.Error!?[]const []const u8 {
-    const selecting = [_][]const u8{ "-d", "--distribution", "--distribution-id", "-u", "--user" };
+    const selecting = [_][]const u8{ "-d", "--distribution", "--distribution-id", "-u", "--user", "--cd" };
     // Options that take a value the probe has no use for.
-    const skipping = [_][]const u8{ "--cd", "--shell-type" };
+    const skipping = [_][]const u8{"--shell-type"};
     var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(alloc);
 
@@ -163,7 +183,8 @@ fn selectorArgs(alloc: Allocator, argv: []const [:0]const u8) Allocator.Error!?[
 /// entry: `argv[0]` (the `wsl.exe` that launches the session), the options
 /// picking the distribution and user, then `--exec infocmp <term>`. Null when
 /// `argv` is not a session launch. Free the slice (not its items) with `alloc`.
-fn probeArgv(alloc: Allocator, argv: []const [:0]const u8, term: []const u8) Allocator.Error!?[]const []const u8 {
+fn probeArgv(alloc: Allocator, argv: []const [:0]const u8, term: []const u8) Allocator.Error!?[][]const u8 {
+    if (argv.len == 0 or term.len == 0 or term[0] == '-') return null;
     const selector = (try selectorArgs(alloc, argv)) orelse return null;
     defer alloc.free(selector);
 
@@ -173,6 +194,72 @@ fn probeArgv(alloc: Allocator, argv: []const [:0]const u8, term: []const u8) All
     try out.appendSlice(alloc, selector);
     try out.appendSlice(alloc, &.{ "--exec", "infocmp", term });
     return try out.toOwnedSlice(alloc);
+}
+
+/// A local drive path only. Screen it before any file operation, including
+/// executable lookup; GetDriveType reads the local drive table.
+fn isLocalAbsolute(path: []const u8) bool {
+    if (os_path.isNetworkOrDevicePath(path) or path.len < 3 or
+        !std.ascii.isAlphabetic(path[0]) or path[1] != ':' or
+        (path[2] != '/' and path[2] != '\\')) return false;
+    return switch (os_windows.driveTypeForLetter(path[0])) {
+        os_windows.DRIVE_FIXED, os_windows.DRIVE_REMOVABLE, os_windows.DRIVE_RAMDISK => true,
+        else => false,
+    };
+}
+
+/// Resolve the shell's explicit .exe using its launch cwd and PATH. Stop at
+/// an unsafe search directory rather than touch it or verify a later binary
+/// that the shell might never reach. Direct WSL argv are normally absolute.
+fn localExecutable(alloc: Allocator, env: *const EnvMap, exe: []const u8, cwd: []const u8) !?[]u8 {
+    if (os_path.isNetworkOrDevicePath(exe) or !isLocalAbsolute(cwd)) return null;
+    if (!std.ascii.endsWithIgnoreCase(exe, ".exe")) return null;
+    if (std.fs.path.isAbsolute(exe) or std.mem.indexOfAny(u8, exe, "/\\") != null) {
+        const path = try std.fs.path.resolve(alloc, &.{ cwd, exe });
+        if (isLocalAbsolute(path)) return path;
+        alloc.free(path);
+        return null;
+    }
+    const here = try std.fs.path.join(alloc, &.{ cwd, exe });
+    if (std.fs.accessAbsolute(here, .{})) |_| return here else |_| alloc.free(here);
+    var paths = std.mem.splitScalar(u8, env.get("PATH") orelse "", ';');
+    while (paths.next()) |entry| {
+        const dir = std.mem.trim(u8, entry, "\"");
+        if (dir.len == 0) continue;
+        if (!isLocalAbsolute(dir)) return null;
+        const path = try std.fs.path.join(alloc, &.{ dir, exe });
+        if (std.fs.accessAbsolute(path, .{})) |_| return path else |_| alloc.free(path);
+    }
+    return null;
+}
+
+/// Fingerprint the complete launch environment in key order. WSLENV can
+/// forward HOME, PATH, or any other lookup input, not just TERMINFO. Values
+/// never leave this hash; the cache and logs contain no environment data.
+fn probeKey(alloc: Allocator, env: *const EnvMap, argv: []const []const u8, cwd: []const u8) !u64 {
+    var keys: std.ArrayList([]const u8) = .empty;
+    defer keys.deinit(alloc);
+    var it = env.iterator();
+    while (it.next()) |entry| try keys.append(alloc, entry.key_ptr.*);
+    std.mem.sort([]const u8, keys.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    var hasher = std.hash.Wyhash.init(0);
+    for (argv) |arg| {
+        hasher.update(arg);
+        hasher.update(&.{0});
+    }
+    hasher.update(cwd);
+    hasher.update(&.{0});
+    for (keys.items) |key| {
+        hasher.update(key);
+        hasher.update(&.{0});
+        hasher.update(env.get(key).?);
+        hasher.update(&.{0});
+    }
+    return hasher.final();
 }
 
 /// What distributions have answered, by a hash of the probe command line and
@@ -199,23 +286,20 @@ fn distroHasTerminfo(
     env: *const EnvMap,
     argv: []const [:0]const u8,
     term: []const u8,
+    launch_cwd: ?[]const u8,
 ) bool {
     if (comptime builtin.os.tag != .windows) return false;
     if (argv.len == 0) return false;
 
     const probe = (probeArgv(alloc, argv, term) catch return false) orelse return false;
     defer alloc.free(probe);
-
-    var hasher = std.hash.Wyhash.init(0);
-    for (probe) |arg| {
-        hasher.update(arg);
-        hasher.update(&.{0});
-    }
-    for ([_][]const u8{ "WSLENV", "TERMINFO", "TERMINFO_DIRS" }) |name| {
-        hasher.update(env.get(name) orelse "");
-        hasher.update(&.{0});
-    }
-    const key = hasher.final();
+    const inherited_cwd = if (launch_cwd == null) std.process.getCwdAlloc(alloc) catch return false else null;
+    defer if (inherited_cwd) |cwd| alloc.free(cwd);
+    const cwd = launch_cwd orelse inherited_cwd.?;
+    const exe = (localExecutable(alloc, env, probe[0], cwd) catch return false) orelse return false;
+    defer alloc.free(exe);
+    probe[0] = exe;
+    const key = probeKey(alloc, env, probe, cwd) catch return false;
 
     probe_mutex.lock();
     while (true) {
@@ -239,7 +323,7 @@ fn distroHasTerminfo(
     };
     probe_mutex.unlock();
 
-    const answer = runProbe(alloc, env, probe);
+    const answer = runProbe(alloc, env, probe, cwd);
 
     probe_mutex.lock();
     defer probe_mutex.unlock();
@@ -253,13 +337,14 @@ fn distroHasTerminfo(
 }
 
 /// Run the probe. Null when it did not start, so a later tab may try again.
-fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8) ?bool {
+fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd: []const u8) ?bool {
     var child = std.process.Child.init(probe, alloc);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
     child.env_map = env;
+    child.cwd = cwd;
     child.spawn() catch |err| {
         log.warn("terminfo probe did not start err={}", .{err});
         return null;
@@ -289,7 +374,7 @@ pub fn forwardIdentity(env: *EnvMap, include_term: bool) !void {
 /// on the Windows home having the entry and says nothing about the
 /// distribution.
 pub fn forwardProbedTerm(alloc: Allocator, env: *EnvMap, probe: Probe) !void {
-    if (!distroHasTerminfo(alloc, env, probe.argv, probe.term)) {
+    if (!distroHasTerminfo(alloc, env, probe.argv, probe.term, probe.cwd)) {
         log.info("WSL distribution has no terminfo entry for TERM={s}, leaving TERM to wsl.exe", .{probe.term});
         return;
     }
@@ -389,11 +474,10 @@ test "probeArgv keeps the distribution and user selection" {
             .argv = &.{"wsl.exe"},
             .expected = &.{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" },
         },
-        // The options noctty puts in front: `--cd` and its value are not the
-        // probe's.
+        // The probe needs the same cwd for relative terminfo databases.
         .{
             .argv = &.{ "C:\\Windows\\System32\\wsl.exe", "--cd", "~", "-d", "Ubuntu" },
-            .expected = &.{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu", "--exec", "infocmp", "xterm-ghostty" },
+            .expected = &.{ "C:\\Windows\\System32\\wsl.exe", "--cd", "~", "-d", "Ubuntu", "--exec", "infocmp", "xterm-ghostty" },
         },
         .{
             .argv = &.{ "wsl.exe", "--user", "root", "--distribution", "Debian", "--system", "--shell-type", "login" },
@@ -456,4 +540,63 @@ test "launchArgv finds a WSL launch in either command form" {
     try std.testing.expectEqual(null, try launchArgv(alloc, &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "echo wsl.exe" }, true));
     try std.testing.expectEqual(null, try launchArgv(alloc, &.{ "pwsh.exe", "-NoLogo" }, false));
     try std.testing.expectEqual(null, try launchArgv(alloc, &.{}, false));
+}
+
+test "automatic TERM is limited to one reproducible shell command" {
+    try std.testing.expect(canProbeShell("wsl.exe -d Ubuntu --exec bash"));
+    try std.testing.expect(canProbeShell("\"C:\\Program Files\\WSL\\wsl.exe\" --exec echo \"a & b\""));
+    for ([_][]const u8{
+        "wsl.exe -d Ubuntu -e true & wsl.exe -d kali-linux",
+        "wsl.exe | other.exe",
+        "wsl.exe > output.txt",
+        "wsl.exe -d %DISTRO%",
+        "wsl.exe -d !DISTRO!",
+        "wsl.exe -d My^ Distro",
+        "wsl.exe \"unfinished",
+        "wsl.exe\nother.exe",
+    }) |line| try std.testing.expect(!canProbeShell(line));
+}
+
+test "probeArgv refuses an infocmp option as the terminal name" {
+    try std.testing.expectEqual(null, try probeArgv(std.testing.allocator, &.{"wsl.exe"}, "-V"));
+    try std.testing.expectEqual(null, try probeArgv(std.testing.allocator, &.{"wsl.exe"}, ""));
+}
+
+test "probeKey distinguishes forwarded HOME and cwd independent of map order" {
+    const alloc = std.testing.allocator;
+    var a = EnvMap.init(alloc);
+    defer a.deinit();
+    var b = EnvMap.init(alloc);
+    defer b.deinit();
+    try a.put("WSLENV", "HOME/u:TERMINFO/u");
+    try a.put("HOME", "/tmp/with-entry");
+    try a.put("TERMINFO", "terminfo");
+    try b.put("TERMINFO", "terminfo");
+    try b.put("HOME", "/tmp/with-entry");
+    try b.put("WSLENV", "HOME/u:TERMINFO/u");
+    const argv = &[_][]const u8{ "C:\\Windows\\System32\\wsl.exe", "--exec", "infocmp", "xterm-ghostty" };
+    const key = try probeKey(alloc, &a, argv, "C:\\one");
+    try std.testing.expectEqual(key, try probeKey(alloc, &b, argv, "C:\\one"));
+    try b.put("HOME", "/tmp/without-entry");
+    try std.testing.expect(key != try probeKey(alloc, &b, argv, "C:\\one"));
+    try std.testing.expect(key != try probeKey(alloc, &a, argv, "C:\\two"));
+}
+
+test "localExecutable refuses remote device and ambiguous search paths" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    // No filesystem operation may follow these path shapes. The fake share
+    // does not need to exist and must never be contacted by this test.
+    for ([_][]const u8{ "\\\\unavailable\\share\\wsl.exe", "\\/unavailable/share/wsl.exe", "\\??\\UNC\\unavailable\\share\\wsl.exe" }) |exe| {
+        try std.testing.expectEqual(null, try localExecutable(alloc, &env, exe, cwd));
+    }
+    try env.put("PATH", "\\\\unavailable\\share;C:\\Windows\\System32");
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl", cwd));
 }

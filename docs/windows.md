@@ -200,6 +200,16 @@ Entries already in `WSLENV`, their flags and their order are kept, and a
 with `env` is forwarded as it is. A WSL shell started from inside cmd or
 PowerShell is not changed: only a launch of `wsl.exe` by noctty is.
 
+An existing `/w` entry stays Windows-only; noctty does not override that
+choice. Automatic `TERM` probing uses the launch environment and working
+directory, including `--cd`, and caches answers separately for different
+environments or directories. The optional probe resolves only a local `.exe`;
+if resolution would need a network/device path or a mapped network drive,
+it keeps the fallback. For shell-form commands, automatic `TERM` is limited
+to a single `wsl.exe` command without variable expansion, redirection or
+command operators. Complex shell commands and a bare `wsl` without `.exe`
+still receive the identity variables, but keep WSL's default terminal type.
+
 `ssh.exe` is different. It sends the PTY's `TERM` by itself, and the other
 variables travel only through the opt-in `ssh-env` shell integration feature
 (`SendEnv`, which the server must accept), with `ssh-terminfo` choosing the
