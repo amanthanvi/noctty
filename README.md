@@ -46,6 +46,10 @@ written for this fork.
 - **Session restore:** windows, tabs, splits, and working directories come
   back the next time you launch. Running programs are not restored.
 - **Command palette:** find and run actions from the keyboard.
+- **Know which tab needs you:** tools and coding agents that report their
+  status ([OSC 7501](docs/windows.md#program-status-osc-7501)) mark their tab
+  as working, blocked on you, done, or failed, and a notification tells you
+  when a background tab needs you.
 - **Ghostty config and themes:** most Ghostty options and themes work as they
   are.
 - **Private by default:** no telemetry, and crash dumps never leave your PC.

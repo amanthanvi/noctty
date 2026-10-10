@@ -121,6 +121,11 @@ pub const ghostty: Source = .{
         // Synchronized output
         .{ .name = "Sync", .value = .{ .string = "\\E[?2026%?%p1%{1}%-%tl%eh%;" } },
 
+        // Program status protocol (OSC 7501). This only advertises
+        // support; a program confirms it with the `OSC 7501 ; ?` query.
+        // https://www.superlogical.com/rex/docs/build/program-status
+        .{ .name = "Pst", .value = .{ .string = "\\E]7501;%p1%s\\E\\\\" } },
+
         // Bracketed paste mode
         .{ .name = "BD", .value = .{ .string = "\\E[?2004l" } },
         .{ .name = "BE", .value = .{ .string = "\\E[?2004h" } },
@@ -394,6 +399,34 @@ test "encode" {
     var writer: std.Io.Writer = .fixed(&buf);
     try ghostty.encode(&writer);
     try std.testing.expect(writer.buffered().len > 0);
+}
+
+test "program status capability" {
+    // The specification's extended capability, in the source...
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    try ghostty.encode(&source.writer);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        source.written(),
+        "\tPst=\\E]7501;%p1%s\\E\\\\,\n",
+    ) != null);
+
+    // ...in the compiled entry the Windows build installs for ncurses,
+    // as its name and the escape it expands to...
+    var compiled: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer compiled.deinit();
+    try @import("compiled.zig").encode(std.testing.allocator, ghostty, &compiled.writer);
+    try std.testing.expect(std.mem.indexOf(u8, compiled.written(), "Pst\x00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled.written(), "\x1b]7501;%p1%s\x1b\\\x00") != null);
+
+    // ...and answering XTGETTCAP in source form, as parameterized
+    // capabilities do. "Pst" and "\E]7501;%p1%s\E\\", hex-encoded.
+    const map = comptime ghostty.xtgettcapMap();
+    try std.testing.expectEqualStrings(
+        "\x1bP1+r507374=5C455D373530313B25703125735C455C5C\x1b\\",
+        map.get("507374").?,
+    );
 }
 
 test "compile" {

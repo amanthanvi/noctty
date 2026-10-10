@@ -241,6 +241,7 @@ test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(isSafeAutomationAction(.{ .launch_layout = "demo" }));
     try std.testing.expect(isSafeAutomationAction(.toggle_fullscreen));
     try std.testing.expect(isSafeAutomationAction(.quit));
+    try std.testing.expect(isSafeAutomationAction(.goto_attention));
     try std.testing.expect(!isSafeAutomationAction(.unbind));
     try std.testing.expect(!isSafeAutomationAction(.{ .text = "hello" }));
     try std.testing.expect(!isSafeAutomationAction(.{ .csi = "0m" }));
@@ -729,6 +730,16 @@ pub fn performAllAction(
         return;
     }
 
+    // `goto_attention` moves on from the current tab, so fanned out to every
+    // surface it would jump once per pane and could end where it started.
+    // A global binding runs it once, from the last focused surface.
+    if (action == .goto_attention) {
+        const surface = self.focusedSurface() orelse
+            if (self.surfaces.items.len > 0) self.surfaces.items[0].core() else return;
+        _ = try surface.performBindingAction(action);
+        return;
+    }
+
     switch (action.scope()) {
         // App-scoped actions are handled by the app so that they aren't
         // repeated for each surface (since each surface forwards
@@ -854,6 +865,7 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .new_split,
         .goto_split,
         .goto_window,
+        .goto_attention,
         .toggle_split_zoom,
         .toggle_readonly,
         .resize_split,

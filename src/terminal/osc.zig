@@ -21,6 +21,7 @@ const progress_report = @import("../progress_report.zig");
 
 pub const color = parsers.color;
 pub const semantic_prompt = parsers.semantic_prompt;
+pub const program_status = parsers.program_status;
 
 const log = std.log.scoped(.osc);
 
@@ -162,9 +163,16 @@ pub const Command = union(Key) {
     /// https://uapi-group.org/specifications/specs/osc_context/
     context_signal: parsers.context_signal.Command,
 
+    /// Program status protocol (OSC 7501). A program reports what it is
+    /// doing, such as working or waiting on the user, or asks whether the
+    /// terminal supports the protocol. See `ProgramStatus`.
+    program_status: ProgramStatus,
+
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
     pub const KittyClipboardProtocol = parsers.kitty_clipboard_protocol.OSC;
+
+    pub const ProgramStatus = parsers.program_status.Command;
 
     pub const Key = LibEnum(
         lib.target,
@@ -195,6 +203,7 @@ pub const Command = union(Key) {
             "kitty_text_sizing",
             "kitty_clipboard_protocol",
             "context_signal",
+            "program_status",
         },
     );
 
@@ -273,6 +282,9 @@ pub const Parser = struct {
         @"52",
         @"55",
         @"66",
+        @"75",
+        @"750",
+        @"7501",
         @"77",
         @"104",
         @"110",
@@ -351,6 +363,7 @@ pub const Parser = struct {
             .kitty_text_sizing,
             .kitty_clipboard_protocol,
             .context_signal,
+            .program_status,
             => {},
         }
 
@@ -377,6 +390,11 @@ pub const Parser = struct {
     const Capture = struct {
         writer: *std.Io.Writer,
         backing: Backing,
+
+        /// The most bytes to capture. One more byte makes the sequence
+        /// invalid. A fixed buffer is limited by its length anyway, so this
+        /// matters for allocating captures of OSCs with a size limit.
+        max_bytes: usize = std.math.maxInt(usize),
 
         const Backing = union(enum) {
             fixed: std.Io.Writer,
@@ -461,6 +479,12 @@ pub const Parser = struct {
         }
     }
 
+    /// Consume a slice of bytes, advancing the parser state. This is
+    /// equivalent to calling `next` for each byte in order.
+    pub fn nextSlice(self: *Parser, input: []const u8) void {
+        for (input) |c| self.next(c);
+    }
+
     /// Consume the next character c and advance the parser state.
     pub fn next(self: *Parser, c: u8) void {
         // If the state becomes invalid for any reason, just discard
@@ -470,6 +494,10 @@ pub const Parser = struct {
         // If a writer has been initialized, we just accumulate the rest of the
         // OSC sequence in the writer's buffer and skip the state machine.
         if (self.capture) |*cap| {
+            if (cap.trailing().len >= cap.max_bytes) {
+                self.state = .invalid;
+                return;
+            }
             cap.writer.writeByte(c) catch |err| switch (err) {
                 // We have overflowed our buffer or had some other error, set the
                 // state to invalid so that we discard any further input.
@@ -620,7 +648,26 @@ pub const Parser = struct {
 
             .@"7" => switch (c) {
                 ';' => self.captureTrailing(.fixed),
+                '5' => self.state = .@"75",
                 '7' => self.state = .@"77",
+                else => self.state = .invalid,
+            },
+
+            .@"75" => switch (c) {
+                '0' => self.state = .@"750",
+                else => self.state = .invalid,
+            },
+
+            .@"750" => switch (c) {
+                '1' => self.state = .@"7501",
+                else => self.state = .invalid,
+            },
+
+            .@"7501" => switch (c) {
+                ';' => {
+                    self.captureTrailing(.allocating);
+                    self.capture.?.max_bytes = parsers.program_status.max_body_bytes;
+                },
                 else => self.state = .invalid,
             },
 
@@ -733,6 +780,12 @@ pub const Parser = struct {
             .@"6" => null,
 
             .@"66" => parsers.kitty_text_sizing.parse(self, terminator_ch),
+
+            .@"75",
+            .@"750",
+            => null,
+
+            .@"7501" => parsers.program_status.parse(self, terminator_ch),
 
             .@"77" => null,
 

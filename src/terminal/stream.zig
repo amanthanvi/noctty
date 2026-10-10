@@ -125,6 +125,7 @@ pub const Action = union(Key) {
     kitty_color_report: kitty.color.OSC,
     color_operation: ColorOperation,
     semantic_prompt: SemanticPrompt,
+    program_status: ProgramStatus,
 
     pub const Key = lib.Enum(
         lib.target,
@@ -222,6 +223,7 @@ pub const Action = union(Key) {
             "kitty_color_report",
             "color_operation",
             "semantic_prompt",
+            "program_status",
         },
     );
 
@@ -400,6 +402,8 @@ pub const Action = union(Key) {
     };
 
     pub const SemanticPrompt = osc.Command.SemanticPrompt;
+
+    pub const ProgramStatus = osc.Command.ProgramStatus;
 };
 
 /// Returns a type that can process a stream of tty control characters.
@@ -2045,6 +2049,10 @@ pub fn Stream(comptime H: type) type {
 
                 .conemu_progress_report => |v| {
                     self.handler.vt(.progress_report, v);
+                },
+
+                .program_status => |v| {
+                    self.handler.vt(.program_status, v);
                 },
 
                 .conemu_sleep,

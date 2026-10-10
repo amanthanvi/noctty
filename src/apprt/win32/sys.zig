@@ -729,6 +729,18 @@ pub extern "gdi32" fn LineTo(hdc: HDC, x: i32, y: i32) callconv(.winapi) i32;
 
 pub extern "gdi32" fn Ellipse(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) i32;
 
+pub extern "gdi32" fn Arc(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    xr1: i32,
+    yr1: i32,
+    xr2: i32,
+    yr2: i32,
+) callconv(.winapi) i32;
+
 pub extern "gdi32" fn Rectangle(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) i32;
 
 pub extern "gdi32" fn Polygon(hdc: HDC, points: [*]const POINT, count: i32) callconv(.winapi) i32;

@@ -634,6 +634,15 @@ pub const Action = union(enum) {
     /// Focus on either the previous window or the next one ('previous', 'next')
     goto_window: GotoWindow,
 
+    /// Focus another tab or split whose program needs you, as the program
+    /// reported through the program status protocol (OSC 7501): one that
+    /// is blocked on your input first, then one that failed, then one that
+    /// finished, and among equals the next one after the current tab,
+    /// across windows.
+    ///
+    /// This is only implemented on Windows.
+    goto_attention,
+
     /// Move keyboard focus between the focus regions of the window: the
     /// terminal pane, the tab strip, the docked search controls, and the
     /// host banner. Regions that are not on screen are skipped.
@@ -1446,6 +1455,7 @@ pub const Action = union(enum) {
             .new_split,
             .goto_split,
             .goto_window,
+            .goto_attention,
             .cycle_focus_region,
             .toggle_split_zoom,
             .toggle_readonly,

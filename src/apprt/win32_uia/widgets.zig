@@ -2038,6 +2038,9 @@ pub const ChromeControlState = struct {
     role: Role,
     tag: usize = 0,
     name: *const fn (*anyopaque, usize, []u8) []const u8,
+    /// The element's status, such as what a tab's program is waiting for.
+    /// Reported as `ItemStatus`; empty when there is none.
+    item_status: ?*const fn (*anyopaque, usize, []u8) []const u8 = null,
     selected: ?*const fn (*anyopaque, usize) bool = null,
     selected_provider: ?*const fn (*anyopaque) ?*ChromeControlProvider = null,
     selection_container: ?*const fn (*anyopaque) ?*ChromeControlProvider = null,
@@ -2176,6 +2179,11 @@ pub const ChromeControlProvider = struct {
     pub fn raiseNameChanged(self: *ChromeControlProvider) void {
         if (!self.available()) return;
         events.raiseNameChanged(&self.base);
+    }
+
+    pub fn raiseItemStatusChanged(self: *ChromeControlProvider) void {
+        if (!self.available() or self.state.item_status == null) return;
+        events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ItemStatusPropertyId);
     }
 
     pub fn raiseSelected(self: *ChromeControlProvider, old: bool, new: bool) void {
@@ -2352,6 +2360,12 @@ pub const ChromeControlProvider = struct {
                 var buf: [512]u8 = undefined;
                 const name = self.state.name(self.state.ctx, self.state.tag, &buf);
                 const value = allocBstrFromUtf8(self.alloc, name) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(value);
+            },
+            constants.UIA_ItemStatusPropertyId => if (self.state.item_status) |item_status| {
+                var buf: [512]u8 = undefined;
+                const status = item_status(self.state.ctx, self.state.tag, &buf);
+                const value = allocBstrFromUtf8(self.alloc, status) orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(value);
             },
             constants.UIA_FrameworkIdPropertyId => {

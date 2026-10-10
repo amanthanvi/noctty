@@ -348,6 +348,9 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// A program status report (OSC 7501) or an event that ends records.
+    program_status: ProgramStatus,
+
     /// A command has started in the shell, start a timer.
     start_command,
 
@@ -384,9 +387,30 @@ pub const Message = union(enum) {
             .search_viewport_matches => |*v| v.deinit(),
             .search_selected_match => |*v| v.deinit(),
             .search_match_rows => |v| v.deinit(),
+            .program_status => |v| switch (v) {
+                .report => |report| report.data.deinit(),
+                .prompt, .reset => {},
+            },
             else => {},
         }
     }
+
+    /// See `apprt.action.ProgramStatus` for what each event means.
+    pub const ProgramStatus = union(enum) {
+        /// A report the parser validated. `data` holds the report body,
+        /// everything after `7501;`, which a
+        /// `terminal.osc.Command.ProgramStatus.Report` reads.
+        report: struct {
+            state: terminal.osc.Command.ProgramStatus.State,
+            data: WriteReq,
+        },
+
+        /// A new shell prompt started (OSC 133 A or N).
+        prompt,
+
+        /// A full reset (RIS).
+        reset,
+    };
 
     pub const ReportTitleStyle = enum {
         csi_21_t,
