@@ -1241,6 +1241,40 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
     host_env.remove("GHOSTTY_SHELL_FEATURES");
 
     for ([_][]const u8{ "powershell.exe", "pwsh.exe" }) |host| {
+        // Cold Windows PowerShell startup on hosted ARM64 can exceed 30s.
+        // Warm each host once and allow the same generous bound for every
+        // policy case. This is a liveness guard, not a performance assertion.
+        const host_deadline_ms = 90_000;
+        var warmup = std.process.Child.init(&.{ host, "-NoProfile", "-NonInteractive", "-Command", "exit 0" }, alloc);
+        warmup.env_map = &host_env;
+        warmup.create_no_window = true;
+        warmup.stdin_behavior = .Ignore;
+        warmup.stdout_behavior = .Ignore;
+        warmup.stderr_behavior = .Ignore;
+        warmup.spawn() catch |err| switch (err) {
+            // Only an absent optional host is omitted. Startup failures and
+            // timeouts must fail rather than turn missing coverage into a pass.
+            error.FileNotFound => if (std.mem.eql(u8, host, "pwsh.exe")) {
+                std.debug.print("PowerShell bootstrap fixture: optional host={s} absent during warm-up; omitting its policy cases\n", .{host});
+                continue;
+            } else return err,
+            else => return err,
+        };
+        var warmup_running = true;
+        errdefer if (warmup_running) {
+            _ = warmup.kill() catch {};
+        };
+        var warmup_deadline: TestProcessDeadline = .{ .handle = warmup.id, .milliseconds = host_deadline_ms };
+        const warmup_watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&warmup_deadline});
+        warmup_watcher.join();
+        const warmup_term = try warmup.wait();
+        warmup_running = false;
+        if (warmup_deadline.timed_out or !std.meta.eql(warmup_term, std.process.Child.Term{ .Exited = 0 })) {
+            std.debug.print("PowerShell bootstrap fixture: host={s} warmup_timed_out={} warmup_term={any}\n", .{ host, warmup_deadline.timed_out, warmup_term });
+        }
+        try std.testing.expect(!warmup_deadline.timed_out);
+        try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, warmup_term);
+
         for ([_][]const u8{ "Restricted", "RemoteSigned", "AllSigned" }) |policy| {
             const argv = [_][]const u8{ host, "-NoProfile", "-ExecutionPolicy", policy };
             const injected = (try buildInjectedArgv(alloc, &argv, path, false)).?;
@@ -1275,16 +1309,12 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             child.stdin_behavior = .Ignore;
             child.stdout_behavior = .Pipe;
             child.stderr_behavior = .Pipe;
-            child.spawn() catch |err| switch (err) {
-                // A Windows installation need not include optional pwsh.
-                error.FileNotFound => if (std.mem.eql(u8, host, "pwsh.exe")) continue else return err,
-                else => return err,
-            };
+            try child.spawn();
             var running = true;
             errdefer if (running) {
                 _ = child.kill() catch {};
             };
-            var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = 30_000 };
+            var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = host_deadline_ms };
             const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
             var watcher_joined = false;
             defer if (!watcher_joined) watcher.join();
