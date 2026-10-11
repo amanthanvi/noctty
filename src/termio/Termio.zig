@@ -334,6 +334,15 @@ mailbox: termio.Mailbox,
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
 
+/// Set when the IO thread is being stopped: by `Surface.deinit` before it
+/// joins the IO thread, and by the backend's `threadExit`, which also covers
+/// an IO thread that ends on its own. The pty reader then exits before its
+/// next read, and neither it nor the IO thread waits any longer for room in
+/// the termio or surface mailbox; what would wait is dropped. The threads
+/// that drain those mailboxes, the IO thread and the app thread, are the
+/// ones waiting for them to exit.
+stopping: std.atomic.Value(bool) = .init(false),
+
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
 last_cursor_reset: ?std.time.Instant = null,
@@ -568,6 +577,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     const handler: StreamHandler = .{
         .alloc = alloc,
         .termio_mailbox = &self.mailbox,
+        .stopping = &self.stopping,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
         .renderer_wakeup = opts.renderer_wakeup,
@@ -693,7 +703,7 @@ pub fn queueMessage(
     self.mailbox.send(msg, switch (mutex) {
         .locked => self.renderer_state.mutex,
         .unlocked => null,
-    });
+    }, null);
     self.mailbox.notify();
 }
 

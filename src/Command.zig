@@ -497,6 +497,16 @@ pub fn closeWindowsJobObject(self: *Command) void {
     }
 }
 
+/// Close the process handle that `start` keeps in `pid` on Windows, once
+/// nothing will wait on or terminate the process through it again.
+pub fn closeWindowsProcess(self: *Command) void {
+    if (comptime builtin.os.tag != .windows) return;
+    if (self.pid) |handle| {
+        _ = windows.CloseHandle(handle);
+        self.pid = null;
+    }
+}
+
 fn safeWindowsCurrentDirectory(
     arena: Allocator,
     path: []const u8,

@@ -1003,6 +1003,11 @@ pub fn init(
 }
 
 pub fn deinit(self: *Surface) void {
+    // This thread drains the surface mailbox and is about to wait for the IO
+    // thread, so the IO thread and its pty reader must not wait on it. The
+    // surface has already left the app, so what they would send is moot.
+    self.io.stopping.store(true, .release);
+
     // Stop search thread
     if (self.search) |*s| s.deinit();
 

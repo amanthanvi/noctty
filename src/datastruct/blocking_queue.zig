@@ -51,9 +51,17 @@ pub fn BlockingQueue(
             /// Run forever or until interrupted
             forever: void,
 
+            /// Like `forever`, but fail once the flag is set: for a producer
+            /// that is stopped while the queue's consumer may be waiting for
+            /// it to exit. Nothing signals the queue when the flag changes,
+            /// so a waiting push rechecks it every `forever_unless_poll_ns`.
+            forever_unless: *const std.atomic.Value(bool),
+
             /// Nanoseconds
             ns: u64,
         };
+
+        const forever_unless_poll_ns = 10 * std.time.ns_per_ms;
 
         /// Our data. The values are undefined until they are written.
         data: [bounds]T = undefined,
@@ -126,6 +134,17 @@ pub fn BlockingQueue(
                         while (self.full()) self.cond_not_full.wait(&self.mutex);
                     },
 
+                    .forever_unless => |flag| {
+                        self.not_full_waiters += 1;
+                        defer self.not_full_waiters -= 1;
+                        while (self.full() and !flag.load(.acquire)) {
+                            self.cond_not_full.timedWait(
+                                &self.mutex,
+                                forever_unless_poll_ns,
+                            ) catch {};
+                        }
+                    },
+
                     .ns => |ns| {
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
@@ -133,8 +152,9 @@ pub fn BlockingQueue(
                     },
                 }
 
-                // A timed wait can expire, or be interrupted, with the
-                // queue still full. `.forever` cannot reach here full.
+                // A timed wait can expire, or be interrupted, and
+                // `.forever_unless` can give up, with the queue still full.
+                // `.forever` cannot reach here full.
                 if (self.full()) return 0;
             }
 
@@ -314,4 +334,78 @@ test "forever push waits again when a wake leaves the queue full" {
     // The push waited rather than reporting failure, and the value landed.
     try testing.expect(pusher.result != 0);
     try testing.expectEqual(@as(u64, 99), q.pop().?);
+}
+
+test "forever_unless push waits for room and gives up once its flag is set" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+    try testing.expectEqual(@as(Q.Size, 1), q.push(1, .{ .instant = {} }));
+
+    // Every wait is bounded, so a broken push fails the test instead of
+    // hanging the suite.
+    const Pusher = struct {
+        q: *Q,
+        stop: *const std.atomic.Value(bool),
+        value: u64,
+        result: Q.Size = 0,
+        done: std.Thread.ResetEvent = .{},
+
+        fn run(self: *@This()) void {
+            self.result = self.q.push(self.value, .{ .forever_unless = self.stop });
+            self.done.set();
+        }
+
+        /// Whether the push parked on the full queue.
+        fn parked(self: *@This()) bool {
+            var timer = std.time.Timer.start() catch return false;
+            while (timer.read() < 5 * std.time.ns_per_s and !self.done.isSet()) {
+                self.q.mutex.lock();
+                const waiting = self.q.not_full_waiters;
+                self.q.mutex.unlock();
+                if (waiting == 1) return true;
+                std.Thread.yield() catch {};
+            }
+            return false;
+        }
+
+        /// Join the pusher, making room for a push that did not return.
+        fn finish(self: *@This(), thread: std.Thread) !void {
+            self.done.timedWait(5 * std.time.ns_per_s) catch {
+                _ = self.q.pop();
+                thread.join();
+                return error.PushDidNotReturn;
+            };
+            thread.join();
+        }
+    };
+
+    // While the flag is clear the push waits like `forever` and lands once
+    // there is room.
+    var stop: std.atomic.Value(bool) = .init(false);
+    var waits: Pusher = .{ .q = q, .stop = &stop, .value = 2 };
+    const waiting = try std.Thread.spawn(.{}, Pusher.run, .{&waits});
+    const waited = waits.parked();
+    try testing.expectEqual(@as(u64, 1), q.pop().?);
+    try waits.finish(waiting);
+    try testing.expect(waited);
+    try testing.expectEqual(@as(Q.Size, 1), waits.result);
+
+    // Setting the flag releases a push that is waiting on the full queue.
+    var gives_up: Pusher = .{ .q = q, .stop = &stop, .value = 3 };
+    const released = try std.Thread.spawn(.{}, Pusher.run, .{&gives_up});
+    const waited_again = gives_up.parked();
+    stop.store(true, .release);
+    try gives_up.finish(released);
+    try testing.expect(waited_again);
+    try testing.expectEqual(@as(Q.Size, 0), gives_up.result);
+
+    // Once the flag is set a push to a full queue fails without waiting,
+    // and the queue keeps what it held.
+    try testing.expectEqual(@as(Q.Size, 0), q.push(4, .{ .forever_unless = &stop }));
+    try testing.expectEqual(@as(u64, 2), q.pop().?);
+    try testing.expect(q.pop() == null);
 }

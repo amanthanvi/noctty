@@ -16,6 +16,9 @@ const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
 
+/// The stop flag of a handler that no reader owns.
+const never_stopped: std.atomic.Value(bool) = .init(false);
+
 /// This is used as the handler for the terminal.Stream type. This is
 /// stateful and is expected to live for the entire lifetime of the terminal.
 /// It is NOT VALID to stop a stream handler, create a new one, and use that
@@ -27,6 +30,10 @@ pub const StreamHandler = struct {
 
     /// Mailbox for data to the termio thread.
     termio_mailbox: *termio.Mailbox,
+
+    /// `Termio.stopping`. Once it is set, messages for the termio and
+    /// surface mailboxes are dropped, including one waiting for room.
+    stopping: *const std.atomic.Value(bool) = &never_stopped,
 
     /// Mailbox for the surface.
     surface_mailbox: apprt.surface.Mailbox,
@@ -141,17 +148,25 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         msg: apprt.surface.Message,
     ) void {
-        // See messageWriter which has similar logic and explains why
-        // we may have to do this.
-        if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
+        // A stopping reader sends nothing more: a closing surface has already
+        // left the app, which drops its messages, and the app thread, which
+        // drains this queue, may be joining this reader's IO thread.
+        if (!self.stopping.load(.acquire)) {
+            // See messageWriter which has similar logic and explains why
+            // we may have to do this.
+            if (self.surface_mailbox.push(msg, .{ .instant = {} }) > 0) return;
             self.renderer_state.mutex.unlock();
             defer self.renderer_state.mutex.lock();
-            _ = self.surface_mailbox.push(msg, .{ .forever = {} });
+            if (self.surface_mailbox.push(msg, .{ .forever_unless = self.stopping }) > 0) return;
         }
+        var dropped = msg;
+        dropped.deinit();
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
-        self.termio_mailbox.send(msg, self.renderer_state.mutex);
+        // A stopping IO thread handles no more, and may be joining this reader.
+        if (self.stopping.load(.acquire)) return msg.deinit();
+        self.termio_mailbox.send(msg, self.renderer_state.mutex, self.stopping);
         self.termio_messaged = true;
     }
 
@@ -1963,6 +1978,120 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
     stream.handler.osc_color_report_format = .@"8-bit";
     stream.nextSlice("\x1b]11;?\x1b\\");
     try expectIssue149Write(&termio_mailbox, "\x1b]11;rgb:ab/cd/ef\x1b\\");
+}
+
+test "a stopped reader gives up waiting on a full mailbox and sends nothing after" {
+    var term = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(std.testing.allocator);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+    defer termio_mailbox.deinit(std.testing.allocator);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
+    defer app_queue.destroy(std.testing.allocator);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    // Set when the IO thread tears the terminal down. By then nothing drains
+    // either mailbox: the IO thread is joining the reader, and the app thread
+    // is joining the IO thread.
+    var stop: std.atomic.Value(bool) = .init(false);
+    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+        .alloc = std.testing.allocator,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .stopping = &stop,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        // Longer than a small write, so the reply owns its bytes.
+        .enquiry_response = "x" ** 60,
+        .osc_color_report_format = .@"16-bit",
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    while (app_queue.push(.{ .quit = {} }, .{ .instant = {} }) != 0) {}
+    const termio_queue = termio_mailbox.spsc.queue;
+    while (termio_queue.push(.{ .linefeed_mode = false }, .{ .instant = {} }) != 0) {}
+
+    // An OSC 52 write longer than a small surface message, so it owns its
+    // bytes too; the testing allocator reports a dropped message not freed.
+    const clipboard = "\x1b]52;c;" ++ "QUJD" ** 75 ++ "\x07";
+
+    // Feeds output with the renderer mutex held, as the reader does.
+    const Feed = struct {
+        stream: *StreamHandler.Stream,
+        mutex: *std.Thread.Mutex,
+        input: []const u8,
+        done: std.Thread.ResetEvent = .{},
+
+        fn run(self: *@This()) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.stream.nextSlice(self.input);
+            self.done.set();
+        }
+
+        /// Feed on another thread until it waits on the full `queue`, stop
+        /// the reader, and expect the feed to give up and return.
+        fn stoppedWhileWaiting(self: *@This(), queue: anytype, flag: *std.atomic.Value(bool)) !void {
+            flag.store(false, .release);
+            const thread = try std.Thread.spawn(.{}, run, .{self});
+            var timer = try std.time.Timer.start();
+            const waited = while (timer.read() < 5 * std.time.ns_per_s and !self.done.isSet()) {
+                queue.mutex.lock();
+                const waiting = queue.not_full_waiters;
+                queue.mutex.unlock();
+                if (waiting == 1) break true;
+                std.Thread.yield() catch {};
+            } else false;
+            flag.store(true, .release);
+            self.done.timedWait(5 * std.time.ns_per_s) catch {
+                // Make room so the waiting feed can finish, then fail.
+                _ = queue.pop();
+                thread.join();
+                return error.StoppedReaderKeptWaiting;
+            };
+            thread.join();
+            if (!waited) return error.ReaderDidNotWait;
+        }
+    };
+
+    var to_surface: Feed = .{ .stream = &stream, .mutex = &renderer_mutex, .input = clipboard };
+    try to_surface.stoppedWhileWaiting(app_queue, &stop);
+    var to_termio: Feed = .{ .stream = &stream, .mutex = &renderer_mutex, .input = "\x05" };
+    try to_termio.stoppedWhileWaiting(termio_queue, &stop);
+
+    // Once stopped, a title, a status report, a clipboard write and an
+    // answerback are all dropped at once, and both queues keep what they held.
+    var after: Feed = .{
+        .stream = &stream,
+        .mutex = &renderer_mutex,
+        .input = "\x1b]2;closing\x07\x1b[5n" ++ clipboard ++ "\x05",
+    };
+    after.run();
+    try std.testing.expectEqual(@as(AppMailbox.Queue.Size, 64), app_queue.len);
+    try std.testing.expectEqual(@as(@TypeOf(termio_queue.len), 64), termio_queue.len);
 }
 
 test "decodeOsc7PathForPwd handles Windows file URI with a single fallback allocator" {
