@@ -4004,6 +4004,7 @@ pub const App = struct {
             .alloc = core_app.alloc,
             .hinstance = self.hinstance,
             .ownerWindow = &settingsOwnerWindowThunk,
+            .appIcon = &settingsAppIconThunk,
             .chromeBg = &settingsChromeBgThunk,
             .textPrimary = &settingsTextPrimaryThunk,
             .themeColors = &settingsThemeColorsThunk,
@@ -4426,6 +4427,12 @@ pub const App = struct {
                 // the settings window learns about keyboard navigation from
                 // the pump, not from its controls.
                 self.settings_window.noteInputMessage(msg.hwnd, msg.message, msg.wParam);
+                // Ctrl+S is not a dialog-manager key; take it before the
+                // manager sees it. Tab and the arrows still go to the manager.
+                if (self.settings_window.handleAccelerator(msg.hwnd, msg.message, msg.wParam, msg.lParam)) {
+                    try self.tickCoreApp();
+                    continue;
+                }
                 if (sys.IsDialogMessageW(settings_hwnd, &msg) != 0) {
                     try self.tickCoreApp();
                     continue;
@@ -23801,6 +23808,11 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
 /// Thunks adapting `*App` into the `AppHandle` callback shape used by
 /// `win32_settings.SettingsWindow`. Kept inline so a theme swap is
 /// picked up on the next paint without cache invalidation.
+fn settingsAppIconThunk(ctx: *anyopaque, small: bool) HICON {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    return loadAppIcon(app.hinstance, small);
+}
+
 fn settingsOwnerWindowThunk(ctx: *anyopaque) ?HWND {
     const app: *App = @ptrCast(@alignCast(ctx));
     const focused = app.focusedSurfaceForUndoRedo();
@@ -34735,6 +34747,7 @@ const TestSession = struct {
                 .alloc = self.allocator,
                 .hinstance = sys.GetModuleHandleW(null),
                 .ownerWindow = &settingsOwnerWindowThunk,
+                .appIcon = &settingsAppIconThunk,
                 .chromeBg = &settingsChromeBgThunk,
                 .textPrimary = &settingsTextPrimaryThunk,
                 .themeColors = &settingsThemeColorsThunk,
