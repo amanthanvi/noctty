@@ -246,6 +246,24 @@ pub fn build(b: *std.Build) !void {
         if (config.emit_test_exe) b.installArtifact(test_exe);
         _ = try deps.add(test_exe);
 
+        // An empty exe carrying the app's PE resource, built with the same
+        // flags as noctty.exe, so the updater's downgrade guard is tested
+        // against a real version block without compiling the whole app.
+        if (config.target.result.os.tag == .windows) {
+            const fixture_exe = b.addExecutable(.{
+                .name = "version-fixture",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/build/version_fixture_main.zig"),
+                    .target = config.target,
+                    .optimize = .Debug,
+                }),
+            });
+            try GhosttyExe.addWindowsResource(b, &config, fixture_exe);
+            const fixture = b.addOptions();
+            fixture.addOptionPath("exe_path", fixture_exe.getEmittedBin());
+            test_exe.root_module.addOptions("windows_version_fixture", fixture);
+        }
+
         // Normal test running
         const test_run = b.addRunArtifact(test_exe);
         test_step.dependOn(&test_run.step);

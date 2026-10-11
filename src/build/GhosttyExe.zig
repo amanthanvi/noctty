@@ -50,10 +50,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     switch (cfg.target.result.os.tag) {
         .windows => {
             exe.subsystem = .Windows;
-            exe.addWin32ResourceFile(.{
-                .file = b.path("dist/windows/noctty.rc"),
-                .flags = &.{try win32IconResourceStamp(b)},
-            });
+            try addWindowsResource(b, cfg, exe);
 
             const command = b.addExecutable(.{
                 .name = "noctty-command",
@@ -92,6 +89,32 @@ pub fn install(self: *const Ghostty) void {
     b.getInstallStep().dependOn(&self.install_step.step);
     if (self.command_install_step) |step| b.getInstallStep().dependOn(&step.step);
     if (self.icon_install_step) |step| b.getInstallStep().dependOn(&step.step);
+}
+
+/// Attach `noctty.rc` (icon, manifest, version) to a Windows executable. The
+/// defines are part of Zig's resource cache key, so a version change rebuilds
+/// the resource. The updater's test fixture uses this too, so it exercises the
+/// same flags as the shipped exe.
+pub fn addWindowsResource(
+    b: *std.Build,
+    cfg: *const Config,
+    compile: *std.Build.Step.Compile,
+) !void {
+    // VS_FIXEDFILEINFO stores four 16-bit components. Never silently
+    // truncate a SemVer component that the downgrade guard compares.
+    if (cfg.version.major > std.math.maxInt(u16) or
+        cfg.version.minor > std.math.maxInt(u16) or
+        cfg.version.patch > std.math.maxInt(u16)) return error.WindowsVersionComponentOutOfRange;
+    compile.addWin32ResourceFile(.{
+        .file = b.path("dist/windows/noctty.rc"),
+        .flags = &.{
+            try win32IconResourceStamp(b),
+            b.fmt("/DNOCTTY_VERSION_MAJOR={d}", .{cfg.version.major}),
+            b.fmt("/DNOCTTY_VERSION_MINOR={d}", .{cfg.version.minor}),
+            b.fmt("/DNOCTTY_VERSION_PATCH={d}", .{cfg.version.patch}),
+            b.fmt("/DNOCTTY_VERSION_STRING=\"{f}\"", .{cfg.version}),
+        },
+    });
 }
 
 fn win32IconResourceStamp(b: *std.Build) ![]const u8 {

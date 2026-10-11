@@ -27878,11 +27878,7 @@ fn scrollbarProxyPointFromSurfaceCursor(
     );
 }
 
-const shouldAuthorizeDeferredCharMessage = win32_input.shouldAuthorizeDeferredCharMessage;
-
 const DeferredCharState = win32_input.DeferredCharState;
-
-const charCommitEvent = win32_input.charCommitEvent;
 
 const keyEventFromWin32Message = win32_input.keyEventFromWin32Message;
 
@@ -27981,7 +27977,14 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         },
 
         c.WM_KEYDOWN, c.WM_SYSKEYDOWN, c.WM_KEYUP, c.WM_SYSKEYUP => {
-            if (surface) |v| {
+            // The pump has already run TranslateMessage, so the characters
+            // this key typed are queued. Take them before the surface is
+            // resolved: PeekMessage runs cross-thread sent messages.
+            const typed: win32_input.TypedChars = if (msg == c.WM_KEYDOWN or msg == c.WM_SYSKEYDOWN)
+                win32_input.takeTypedChars(hwnd)
+            else
+                .{};
+            if (getSurface(hwnd)) |v| {
                 // VK_APPS (Menu key) -> show context menu when not mouse reporting
                 const vk: UINT = @intCast(wParam & 0xFFFF);
                 if (vk == c.VK_APPS and (msg == c.WM_KEYDOWN or msg == c.WM_SYSKEYDOWN)) {
@@ -28001,7 +28004,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                         return 0;
                     }
                 }
-                v.handleKeyMessage(msg, wParam, lParam);
+                v.handleKeyMessage(msg, wParam, lParam, &typed);
                 return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -28019,10 +28022,13 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         c.WM_IME_COMPOSITION => {
             if (surface) |v| {
                 v.deferred_char.clear();
-                if ((@as(u32, @intCast(lParam)) & c.GCS_RESULTSTR) != 0) {
-                    v.handleImeResult();
+                const parts: u32 = @intCast(lParam);
+                if ((parts & c.GCS_RESULTSTR) != 0) {
+                    // Committing into a pane whose child has exited closes
+                    // the pane, which frees the surface before this returns.
+                    if (v.handleImeResult() == .closed) return 0;
                 }
-                if ((@as(u32, @intCast(lParam)) & c.GCS_COMPSTR) != 0) {
+                if ((parts & c.GCS_COMPSTR) != 0) {
                     v.handleImeComposition();
                 }
                 return 0;
@@ -28045,10 +28051,8 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return sys.DefWindowProcW(hwnd, msg, wParam, masked_lParam);
         },
 
-        c.WM_CHAR => {
-            if (surface) |v| {
-                v.handleCharMessage(wParam, lParam);
-            }
+        c.WM_CHAR, c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {
+            if (surface) |v| v.handleCharMessage(msg, wParam, lParam);
             return 0;
         },
 
@@ -28059,11 +28063,10 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             // the character carries nothing the terminal still needs, and
             // handed to DefWindowProc it becomes SC_KEYMENU: a window with
             // no menu bar answers that with a menu loop that matches nothing
-            // and the shell's default beep (#250). Swallowed outright rather
-            // than routed through the deferred-commit gate -- a unit that
-            // gate still holds by now was leaked by an earlier key, and
-            // committing it here would type a bare character after the
-            // chord. Alt+Space alone still opens the window menu, which
+            // and the shell's default beep (#250). Swallowed outright, and
+            // left out of `takeTypedChars`: committing it would type the
+            // chord's character a second time after the chord. Alt+Space
+            // alone still opens the window menu, which
             // Windows reserves for moving and resizing from the keyboard,
             // and only on a window that has one.
             if (surface) |v| {
@@ -28071,11 +28074,6 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 if (!v.hasWindowMenu()) return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-        },
-
-        c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {
-            if (surface) |v| v.deferred_char.consumeDeadChar();
-            return 0;
         },
 
         c.WM_MOUSEMOVE => {
@@ -33040,7 +33038,13 @@ pub const Surface = struct {
         }
     }
 
-    fn handleKeyMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
+    fn handleKeyMessage(
+        self: *Surface,
+        msg: UINT,
+        wParam: WPARAM,
+        lParam: LPARAM,
+        typed: *const win32_input.TypedChars,
+    ) void {
         if (!self.core_initialized) return;
 
         // Under Kitty `report_all` the text must ride on the physical key
@@ -33051,53 +33055,47 @@ pub const Surface = struct {
             defer self.core_surface.renderer_state.mutex.unlock();
             break :kitty_report_all self.core_surface.renderer_state.terminal.screens.active.kitty_keyboard.current().report_all;
         };
-        var message = keyEventFromWin32Message(
+        win32_input.dispatchKeyMessage(
+            KeyTarget{ .surface = self },
+            &self.deferred_char,
             msg,
             wParam,
             lParam,
             win32_input.deferPlainTextToCharMessage(kitty_report_all, self.ime_composing),
-        ) orelse return;
-        // `message` lives for the rest of this function, which covers every
-        // read of `event.utf8` below including the post-`keyCallback`
-        // accessibility notification.
-        message.bindText();
-        const event = message.event;
-
-        const effect = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
-                err,
-                @as(UINT, @intCast(wParam & 0xFFFF)),
-                event.action,
-                event.key,
-                event.mods,
-            });
-            return;
-        };
-        if (effect == .closed) return;
-        if (shouldAuthorizeDeferredCharMessage(effect)) {
-            self.deferred_char.authorize(message.deferred_utf16_units);
-        }
-        if (event.utf8.len != 0) {
-            if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
-        }
-    }
-
-    fn handleCharMessage(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
-        if (!self.core_initialized) return;
-
-        const code_unit: u16 = @intCast(wParam & 0xFFFF);
-        const codepoint = self.deferred_char.consumeCodeUnit(
-            code_unit,
             self.ime_composing,
-        ) orelse return;
-
-        var utf8_buf: [8]u8 = undefined;
-        const event = charCommitEvent(codepoint, lParam, &utf8_buf) orelse return;
-        if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
-        _ = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 char commit failed err={} codepoint={}", .{ err, codepoint });
-        };
+            typed,
+        );
     }
+
+    fn handleCharMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
+        if (!self.core_initialized) return;
+        win32_input.dispatchCharMessage(
+            KeyTarget{ .surface = self },
+            &self.deferred_char,
+            msg,
+            wParam,
+            lParam,
+            self.ime_composing,
+        );
+    }
+
+    /// What the keyboard and IME dispatch in `win32_input` needs from the
+    /// surface.
+    const KeyTarget = struct {
+        surface: *Surface,
+
+        pub fn keyCallback(self: KeyTarget, event: input.KeyEvent) !CoreSurface.InputEffect {
+            return self.surface.core_surface.keyCallback(event);
+        }
+
+        pub fn noteInput(self: KeyTarget, utf8: []const u8) void {
+            if (self.surface.terminal_accessibility) |session| session.noteInput(utf8);
+        }
+
+        pub fn preeditCallback(self: KeyTarget, preedit: ?[]const u8) void {
+            self.surface.core_surface.preeditCallback(preedit) catch {};
+        }
+    };
 
     fn positionImeWindow(self: *Surface) void {
         if (!self.core_initialized) return;
@@ -33115,94 +33113,64 @@ pub const Surface = struct {
         }
     }
 
-    fn handleImeResult(self: *Surface) void {
-        if (!self.core_initialized) return;
-        const surface_hwnd = self.hwnd orelse return;
-        const himc = sys.ImmGetContext(surface_hwnd) orelse return;
+    /// Read one IME string (`GCS_RESULTSTR` or `GCS_COMPSTR`) as UTF-8, or
+    /// null when there is none or it cannot be read. The input context is
+    /// released before this returns, so nothing after it holds the window.
+    fn readImeString(
+        self: *Surface,
+        alloc: std.mem.Allocator,
+        which: u32,
+        utf8_stack: []u8,
+    ) ?win32_input.ImeText {
+        const surface_hwnd = self.hwnd orelse return null;
+        const himc = sys.ImmGetContext(surface_hwnd) orelse return null;
         defer _ = sys.ImmReleaseContext(surface_hwnd, himc);
 
-        // Get the byte length of the result string
-        const byte_len = sys.ImmGetCompositionStringW(himc, c.GCS_RESULTSTR, null, 0);
-        if (byte_len <= 0) return;
+        const byte_len = sys.ImmGetCompositionStringW(himc, which, null, 0);
+        if (byte_len <= 0) return null;
         const len: u32 = @intCast(byte_len);
         const wchar_count = len / 2;
 
-        // Read the UTF-16 result into a stack buffer (most IME commits are short)
+        // Most IME strings are short; longer ones go to the heap.
         var stack_buf: [128]u16 = undefined;
         const buf: []u16 = if (wchar_count <= stack_buf.len)
             stack_buf[0..wchar_count]
-        else blk: {
-            const allocated = self.app.core_app.alloc.alloc(u16, wchar_count) catch return;
-            break :blk allocated;
-        };
-        defer if (wchar_count > stack_buf.len) self.app.core_app.alloc.free(buf);
+        else
+            alloc.alloc(u16, wchar_count) catch return null;
+        defer if (wchar_count > stack_buf.len) alloc.free(buf);
 
-        const read = sys.ImmGetCompositionStringW(himc, c.GCS_RESULTSTR, buf.ptr, len);
-        if (read <= 0) return;
-        const actual_wchars: usize = @intCast(read);
-        const result_slice = buf[0 .. actual_wchars / 2];
+        const read = sys.ImmGetCompositionStringW(himc, which, buf.ptr, len);
+        if (read <= 0) return null;
+        const actual_bytes: usize = @intCast(read);
+        return win32_input.imeTextUtf8(alloc, buf[0 .. actual_bytes / 2], utf8_stack) catch null;
+    }
 
-        // Convert UTF-16 to UTF-8
-        var utf8_buf: [512]u8 = undefined;
-        const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, result_slice) catch return;
-        if (utf8_len == 0) return;
-
-        // Clear preedit display, then commit text via a synthetic key event
-        self.core_surface.preeditCallback(null) catch {};
-
-        var event: input.KeyEvent = .{
-            .action = .press,
-            .key = .unidentified,
-            .mods = .{},
-        };
-        event.utf8 = utf8_buf[0..utf8_len];
-        _ = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 IME commit failed err={}", .{err});
-            return;
-        };
-        if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
+    /// Commit the IME's result string. Returns the core's effect: committing
+    /// into a pane whose child has exited closes the pane, and the close
+    /// frees this surface before the commit returns.
+    fn handleImeResult(self: *Surface) CoreSurface.InputEffect {
+        if (!self.core_initialized) return .ignored;
+        // Taken before the commit, which can free `self`.
+        const alloc = self.app.core_app.alloc;
+        var utf8_stack: [512]u8 = undefined;
+        const text = self.readImeString(alloc, c.GCS_RESULTSTR, &utf8_stack) orelse return .ignored;
+        defer text.deinit(alloc);
+        if (text.bytes.len == 0) return .ignored;
+        return win32_input.commitImeText(KeyTarget{ .surface = self }, text.bytes);
     }
 
     fn handleImeComposition(self: *Surface) void {
         if (!self.core_initialized) return;
-        const surface_hwnd = self.hwnd orelse return;
-        const himc = sys.ImmGetContext(surface_hwnd) orelse return;
-        defer _ = sys.ImmReleaseContext(surface_hwnd, himc);
-
-        // Get the byte length of the composition string
-        const byte_len = sys.ImmGetCompositionStringW(himc, c.GCS_COMPSTR, null, 0);
-        if (byte_len <= 0) {
-            self.core_surface.preeditCallback(null) catch {};
-            return;
-        }
-        const len: u32 = @intCast(byte_len);
-        const wchar_count = len / 2;
-
-        var stack_buf: [128]u16 = undefined;
-        const buf: []u16 = if (wchar_count <= stack_buf.len)
-            stack_buf[0..wchar_count]
-        else blk: {
-            const allocated = self.app.core_app.alloc.alloc(u16, wchar_count) catch return;
-            break :blk allocated;
-        };
-        defer if (wchar_count > stack_buf.len) self.app.core_app.alloc.free(buf);
-
-        const read = sys.ImmGetCompositionStringW(himc, c.GCS_COMPSTR, buf.ptr, len);
-        if (read <= 0) {
-            self.core_surface.preeditCallback(null) catch {};
-            return;
-        }
-        const actual_wchars: usize = @intCast(read);
-        const comp_slice = buf[0 .. actual_wchars / 2];
-
-        var utf8_buf: [512]u8 = undefined;
-        const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, comp_slice) catch {
+        const alloc = self.app.core_app.alloc;
+        var utf8_stack: [512]u8 = undefined;
+        const text = self.readImeString(alloc, c.GCS_COMPSTR, &utf8_stack) orelse {
             self.core_surface.preeditCallback(null) catch {};
             return;
         };
+        defer text.deinit(alloc);
 
         // Update preedit display and reposition IME window
-        self.core_surface.preeditCallback(utf8_buf[0..utf8_len]) catch {};
+        self.core_surface.preeditCallback(text.bytes) catch {};
         self.positionImeWindow();
     }
 

@@ -150,15 +150,14 @@ pub fn add(
 /// Whether the open handle on the cache file must be released before
 /// `writeCacheFile` atomically renames the new contents over it.
 ///
-/// On Windows it must. A Windows rename-with-replace fails with
+/// On Windows it must. The strict Windows rename-with-replace fails with
 /// `error.AccessDenied` while *any* handle to the destination is open. Only
-/// the relaxed `FILE_RENAME_POSIX_SEMANTICS` rename tolerates that, and
-/// `std.posix.renameatW` only selects it when the build target *guarantees*
-/// Windows 10 1809 (`win10_rs5`) or newer. A build for an explicit target such
-/// as `-Dtarget=aarch64-windows-msvc` carries the default `win10` (build
-/// 10240) floor, so it always takes the strict path -- as do filesystems
-/// without `FileRenameInformationEx` support (exFAT, FAT32, many network
-/// shares), on any build. Those are exactly the configurations we ship.
+/// the relaxed `FILE_RENAME_POSIX_SEMANTICS` rename tolerates that (for an
+/// opener that shares delete), and `std.posix.renameatW` only selects it when
+/// the build target *guarantees* Windows 10 1809 (`win10_rs5`) or newer. Every
+/// Windows target of this build does (src/build/Config.zig), but filesystems
+/// without `FileRenameInformationEx` support (exFAT, FAT32) still take the
+/// strict path.
 /// Releasing the handle early costs nothing here: Windows never took the
 /// advisory lock (see the `tryLock` comment above) and `fixupPermissions` is
 /// a no-op there.
