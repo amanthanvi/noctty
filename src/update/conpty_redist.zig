@@ -2,7 +2,8 @@
 //! document for Microsoft's bundled ConPTY pair.
 //!
 //! `scripts/conpty-redist.ps1` stages `conpty.dll` and `OpenConsole.exe` from
-//! this file, `scripts/verify-published-release.ps1` re-checks the published
+//! this file, for release packages and, through `src/build/ConptyRedist.zig`,
+//! for `zig build`; `scripts/verify-published-release.ps1` re-checks the published
 //! portable ZIP against it, and the in-app portable updater checks the same
 //! two files against the table below. Embedding the packaging script's own
 //! document is what keeps the updater's pins from drifting away from the

@@ -55,9 +55,10 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows application runtime (new in this fork)
 
-- Packaged builds prefer the bundled side-by-side ConPTY and warn before
-  falling back to the in-box conhost, which strips Kitty APC and Sixel DCS
-  payloads. See
+- Packaged and source builds carry the bundled side-by-side ConPTY. If noctty
+  falls back to the in-box conhost, which strips Kitty APC and Sixel DCS
+  payloads and returns no colour-query replies, it shows a banner naming the
+  reason. See
   [windows-vt-conformance.md](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 - Native Win32 windows, tab bar with overflow, a numeric tab overview
   (`toggle_tab_overview`, no default keybind), same-window tab reorder, and

@@ -1107,11 +1107,29 @@ clipboard response from the terminal`, and nothing is typed.
 
 ### ConPTY source
 
-`noctty +version` reports `ConPTY : bundled (<DLL path>)` or
-`ConPTY : inbox`, and `+diagnostic-bundle` records the same selection. Set
+Releases since 1.3.125 ship Microsoft's ConPTY pair, `conpty.dll` and
+`OpenConsole.exe`, beside `noctty.exe`, and `zig build` stages the same pinned
+pair in `zig-out\bin`. `noctty +version` reports `ConPTY : bundled (<DLL path>)`,
+or `ConPTY : inbox` with the reason, for example
+`inbox (conpty.dll is not next to noctty.exe)`. `+diagnostic-bundle` records
+the same selection and reason (`"fallback": "NotFound"`). Set
 `NOCTTY_CONPTY=inbox` before launch to force the in-box conhost for diagnosis.
-noctty warns in-app when it falls back; the shell still works, but the tested
-in-box conhost strips Kitty-graphics APC and Sixel DCS payloads. See the
+
+When noctty falls back on its own it shows a banner naming the reason, in
+every build. One fallback happens only inside a running noctty: if the
+bundled pair loads but fails to create a pseudo console, that process moves to
+the in-box conhost for every terminal it opens from then on, and its banner
+says so, while `+version` and the bundle, which run as separate processes,
+still report `bundled`. The shell still
+works, but the in-box conhost is a different
+terminal path. On the Windows builds measured it re-renders output instead of
+forwarding it, answers DA, DSR and DECRQM itself (reporting synchronized
+output, mode 2026, as unsupported), never returns the OSC 4/10/11/12 colour
+or XTGETTCAP replies, and strips Kitty-graphics APC and Sixel DCS payloads. A
+program that asks for the terminal's colours waits for replies that never
+come. See the
+[query differential](windows-vt-conformance.md#measured-query-ownership-differential)
+and the
 [transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 
 ### GPU floor and OpenGL driver issues

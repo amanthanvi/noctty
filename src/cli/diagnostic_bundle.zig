@@ -162,7 +162,17 @@ test "diagnostic manifest defaults exclude sensitive data" {
     const json = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, json, "example-user") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "dll_path") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "bundled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"conpty\":{\"source\":\"bundled\",\"fallback\":null}") != null);
+
+    // An in-box selection records why, so a report shows a degraded build.
+    writer = std.Io.Writer.fixed(&json_buffer);
+    serialized_manifest.conpty = .{ .source = .inbox, .dll_path = null, .fallback = error.NotFound };
+    try std.json.Stringify.value(serialized_manifest, .{}, &writer);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        writer.buffered(),
+        "\"conpty\":{\"source\":\"inbox\",\"fallback\":\"NotFound\"}",
+    ) != null);
 }
 
 test "diagnostic crash dump copy uses canonical output path" {

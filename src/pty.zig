@@ -15,7 +15,11 @@ pub const ConPtySource = enum {
 pub const ConPtyInfo = struct {
     source: ConPtySource,
     dll_path: ?[]const u8,
+    /// Why the in-box conhost is in use; null on the bundled backend.
+    fallback: ?ConPtyFallback = null,
 
+    /// The DLL path names the user's directories, so only the source and the
+    /// fallback reason are serialized.
     pub fn jsonStringify(
         self: *const ConPtyInfo,
         jws: anytype,
@@ -23,9 +27,39 @@ pub const ConPtyInfo = struct {
         try jws.beginObject();
         try jws.objectField("source");
         try jws.write(self.source);
+        try jws.objectField("fallback");
+        try jws.write(self.fallback);
         try jws.endObject();
     }
 };
+
+/// Why noctty uses Windows' in-box conhost instead of the bundled pair. On the
+/// Windows builds measured, the in-box conhost re-renders output instead of
+/// forwarding it, answers device queries (DA, DSR, DECRQM) itself, never
+/// returns the OSC 4/10/11/12 colour or XTGETTCAP replies, and strips Kitty
+/// graphics and Sixel; see docs/windows.md, "ConPTY source".
+pub const ConPtyFallback = WindowsConPty.BundledLoadError || error{
+    /// `NOCTTY_CONPTY=inbox` asked for it.
+    ForcedInbox,
+    /// The bundled pair loaded but could not create a pseudo console, and no
+    /// bundled pseudo console was open, so the process was demoted.
+    CreateFailed,
+};
+
+pub fn describeConPtyFallback(reason: ConPtyFallback) []const u8 {
+    return switch (reason) {
+        error.ForcedInbox => "NOCTTY_CONPTY=inbox is set",
+        error.PathUnavailable => "bundled ConPTY path could not be resolved",
+        error.NotFound => "conpty.dll is not next to noctty.exe",
+        error.LoadFailed => "bundled ConPTY failed to load",
+        error.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole.exe",
+        error.OpenConsoleWrongArch => "bundled OpenConsole.exe has the wrong architecture",
+        error.CreateSymbolMissing => "bundled ConPTY is missing CreatePseudoConsole",
+        error.ResizeSymbolMissing => "bundled ConPTY is missing ResizePseudoConsole",
+        error.CloseSymbolMissing => "bundled ConPTY is missing ClosePseudoConsole",
+        error.CreateFailed => "bundled ConPTY failed to create a pseudo console",
+    };
+}
 
 /// Returns the process-wide ConPTY selection. On Windows this initializes the
 /// same resolver used by Pty.open; other platforms do not have ConPTY.
@@ -34,17 +68,24 @@ pub fn conPtyInfo() ?ConPtyInfo {
     return WindowsConPty.functions().info();
 }
 
-pub const conpty_fallback_banner =
-    "Bundled ConPTY is unavailable; using the in-box conhost. Kitty graphics and Sixel passthrough may be stripped on this Windows build.";
-
 pub fn hasPendingConPtyFallbackBanner() bool {
     if (comptime builtin.os.tag != .windows) return false;
     return WindowsConPty.fallback_banner_pending.load(.acquire);
 }
 
-pub fn takeConPtyFallbackBanner() bool {
-    if (comptime builtin.os.tag != .windows) return false;
-    return WindowsConPty.fallback_banner_pending.swap(false, .acq_rel);
+/// The fallback banner text, once per signalled fallback.
+pub fn takeConPtyFallbackBanner() ?[]const u8 {
+    if (comptime builtin.os.tag != .windows) return null;
+    if (!WindowsConPty.fallback_banner_pending.swap(false, .acq_rel)) return null;
+    return conPtyFallbackBanner(conPtyInfo().?.fallback orelse return null);
+}
+
+fn conPtyFallbackBanner(reason: ConPtyFallback) []const u8 {
+    return switch (reason) {
+        inline else => |r| "Using Windows' in-box console host because " ++
+            comptime describeConPtyFallback(r) ++
+                ": colour queries, synchronized output, Kitty graphics and Sixel may not work.",
+    };
 }
 
 /// Redeclare this winsize struct so we can just use a Zig struct. This
@@ -386,6 +427,8 @@ const WindowsConPty = struct {
         source: ConPtySource,
         module: ?windows.HMODULE = null,
         bundled_path: ?[]const u8 = null,
+        /// Why an in-box selection was made; null for bundled.
+        fallback: ?ConPtyFallback = null,
         create: windows.exp.CreatePseudoConsoleFn,
         resize: windows.exp.ResizePseudoConsoleFn,
         close: windows.exp.ClosePseudoConsoleFn,
@@ -394,7 +437,14 @@ const WindowsConPty = struct {
             return .{
                 .source = self.source,
                 .dll_path = if (self.source == .bundled) self.bundled_path else null,
+                .fallback = self.fallback,
             };
+        }
+
+        fn inboxBecause(reason: ConPtyFallback) Functions {
+            var result = inbox_functions;
+            result.fallback = reason;
+            return result;
         }
     };
 
@@ -405,6 +455,9 @@ const WindowsConPty = struct {
         .close = &windows.exp.kernel32.ClosePseudoConsole,
     };
     var bundled_functions: Functions = inbox_functions;
+    /// The in-box selection `resolve` makes, written before it is published.
+    var fallback_functions: Functions = inbox_functions;
+    const demoted_functions: Functions = .inboxBecause(error.CreateFailed);
     var selected = std.atomic.Value(*const Functions).init(&inbox_functions);
     var resolver_once = std.once(initialize);
     /// Number of bundled pseudo consoles currently open in this process.
@@ -465,14 +518,11 @@ const WindowsConPty = struct {
 
         if (selected.cmpxchgStrong(
             initial,
-            &inbox_functions,
+            &demoted_functions,
             .acq_rel,
             .acquire,
         ) == null) {
-            log.warn(
-                "bundled ConPTY failed to create a pseudo console; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
-                .{},
-            );
+            log.warn("{s}; {s}", .{ describeConPtyFallback(error.CreateFailed), inbox_consequences });
             signalFallbackBanner();
         }
         if (!context.attempt(&inbox_functions)) return error.CreatePseudoConsoleFailed;
@@ -495,37 +545,22 @@ const WindowsConPty = struct {
         selected.store(resolve(), .release);
     }
 
-    fn resolve() *const Functions {
-        if (forceInbox()) {
-            log.warn(
-                "bundled ConPTY disabled by NOCTTY_CONPTY=inbox; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
-                .{},
-            );
-        } else {
-            if (loadBundled()) |bundled| {
-                log.info("using bundled ConPTY: {s}", .{bundled.bundled_path.?});
-                bundled_functions = bundled;
-                return &bundled_functions;
-            } else |err| {
-                const reason = switch (err) {
-                    error.PathUnavailable => "bundled ConPTY path could not be resolved",
-                    error.NotFound => "bundled ConPTY not found",
-                    error.LoadFailed => "bundled ConPTY failed to load",
-                    error.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole.exe",
-                    error.OpenConsoleWrongArch => "bundled OpenConsole.exe has the wrong architecture",
-                    error.CreateSymbolMissing => "bundled ConPTY is missing CreatePseudoConsole",
-                    error.ResizeSymbolMissing => "bundled ConPTY is missing ResizePseudoConsole",
-                    error.CloseSymbolMissing => "bundled ConPTY is missing ClosePseudoConsole",
-                };
-                log.warn(
-                    "{s}; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
-                    .{reason},
-                );
-                signalFallbackBanner();
-            }
-        }
+    const inbox_consequences = "using the in-box conhost, which re-renders output, answers DA/DSR/DECRQM itself, drops OSC 4/10/11/12 and XTGETTCAP replies, and may strip Kitty graphics (APC) and Sixel (DCS)";
 
-        return &inbox_functions;
+    fn resolve() *const Functions {
+        const reason: ConPtyFallback = reason: {
+            if (forceInbox()) break :reason error.ForcedInbox;
+            const bundled = loadBundled() catch |err| break :reason err;
+            log.info("using bundled ConPTY: {s}", .{bundled.bundled_path.?});
+            bundled_functions = bundled;
+            return &bundled_functions;
+        };
+
+        log.warn("{s}; {s}", .{ describeConPtyFallback(reason), inbox_consequences });
+        // An explicit NOCTTY_CONPTY=inbox is the user's own choice.
+        if (reason != error.ForcedInbox) signalFallbackBanner();
+        fallback_functions = .inboxBecause(reason);
+        return &fallback_functions;
     }
 
     fn forceInbox() bool {
@@ -542,6 +577,10 @@ const WindowsConPty = struct {
         var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         const exe_dir = std.fs.selfExeDirPath(&exe_dir_buf) catch
             return error.PathUnavailable;
+        return loadBundledFrom(exe_dir);
+    }
+
+    fn loadBundledFrom(exe_dir: []const u8) BundledLoadError!Functions {
         const path = std.fs.path.join(
             std.heap.page_allocator,
             &.{ exe_dir, "conpty.dll" },
@@ -561,7 +600,11 @@ const WindowsConPty = struct {
             null,
             flags,
         ) orelse return switch (windows.kernel32.GetLastError()) {
-            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => error.NotFound,
+            // MOD_NOT_FOUND also means a DLL that conpty.dll needs is missing.
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => if (std.fs.accessAbsolute(path, .{}))
+                error.LoadFailed
+            else |_|
+                error.NotFound,
             else => error.LoadFailed,
         };
         errdefer _ = windows.kernel32.FreeLibrary(module);
@@ -625,8 +668,9 @@ const WindowsConPty = struct {
         return std.mem.readInt(u16, pe_header[4..6], .little) == expected;
     }
 
+    /// Source builds stage the bundled pair too (src/build/ConptyRedist.zig),
+    /// so every build mode warns.
     fn signalFallbackBanner() void {
-        if (comptime builtin.mode != .ReleaseFast) return;
         fallback_banner_pending.store(true, .release);
     }
 
@@ -638,6 +682,7 @@ const WindowsConPty = struct {
         if (bundled_functions.module) |module| _ = windows.kernel32.FreeLibrary(module);
         if (bundled_functions.bundled_path) |path| std.heap.page_allocator.free(path);
         bundled_functions = inbox_functions;
+        fallback_functions = inbox_functions;
         resolver_once = std.once(initialize);
         live_bundled_hpcons.store(0, .release);
         fallback_banner_pending.store(false, .release);
@@ -1102,6 +1147,9 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
     WindowsConPty.resetForTest();
     try testing.expectEqual(@as(c_int, 0), internal_os.setenv("NOCTTY_CONPTY", "inbox"));
     try testing.expectEqual(ConPtySource.inbox, conPtyInfo().?.source);
+    try testing.expectEqual(error.ForcedInbox, conPtyInfo().?.fallback.?);
+    // The user asked for it, so there is nothing to warn about.
+    try testing.expect(!hasPendingConPtyFallbackBanner());
     {
         var inbox_pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
         defer inbox_pty.deinit();
@@ -1111,7 +1159,12 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
 
     WindowsConPty.resetForTest();
     try testing.expectEqual(@as(c_int, 0), internal_os.unsetenv("NOCTTY_CONPTY"));
-    try testing.expect(conPtyInfo() != null);
+    // The test binary may or may not sit beside a staged pair; either way an
+    // in-box selection says why and a bundled one does not.
+    const auto = conPtyInfo().?;
+    try testing.expectEqual(auto.source == .inbox, auto.fallback != null);
+    // An automatic fallback is never silent.
+    try testing.expectEqual(auto.source == .inbox, hasPendingConPtyFallbackBanner());
     {
         var auto_pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
         defer auto_pty.deinit();
@@ -1221,6 +1274,7 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
         ConPtySource.inbox,
         WindowsConPty.selected.load(.acquire).source,
     );
+    try testing.expectEqual(error.CreateFailed, conPtyInfo().?.fallback.?);
 
     // A bundled failure that gets there first demotes the process, and every
     // later open — including one that would have succeeded on bundled — is
@@ -1259,6 +1313,27 @@ test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
         try testing.expectEqual(ConPtySource.inbox, racing_success.chosen.?);
         try testing.expectEqual(ConPtySource.inbox, racing_failure.chosen.?);
     }
+}
+
+test "Windows ConPTY fallback names a missing or unloadable bundled pair" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir);
+
+    // What a source build that could not download the pair runs into.
+    try testing.expectError(error.NotFound, WindowsConPty.loadBundledFrom(dir));
+    try testing.expectEqualStrings(
+        "Using Windows' in-box console host because conpty.dll is not next to noctty.exe: colour queries, synchronized output, Kitty graphics and Sixel may not work.",
+        conPtyFallbackBanner(error.NotFound),
+    );
+
+    // A conpty.dll that is there but does not load is not "missing".
+    try tmp.dir.writeFile(.{ .sub_path = "conpty.dll", .data = "stale" });
+    try testing.expectError(error.LoadFailed, WindowsConPty.loadBundledFrom(dir));
 }
 
 test "Windows ConPTY live bundled count follows real pseudo console open and close" {

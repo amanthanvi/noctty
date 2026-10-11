@@ -41,6 +41,10 @@ The release verification contract in
 same values, so a pin refresh must update both files. The in-app portable
 updater embeds `dist/windows/conpty-redist.json` itself
 (`src/update/conpty_redist.zig`), so it needs no separate pin refresh.
+`zig build` stages the same pair into `zig-out\bin` with the same
+`Install-ConPtyRedist`, through `scripts/stage-conpty-redist.ps1`
+(`src/build/ConptyRedist.zig`), and keeps the verified package in the Zig
+global cache under `noctty-conpty`, so it needs no pin refresh either.
 
 The release workflow builds the Windows executable, stages runtime files,
 then produces:

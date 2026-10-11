@@ -156,11 +156,19 @@ jobs:
             throw "Default source build did not report disabled custom shaders."
           }
 
+      - name: Verify source build stages the pinned ConPTY
+        shell: pwsh
+        run: ./test/windows/source-build-conpty.ps1 -Architecture x64
+
       - name: Build ARM64 executable
         env:
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
         # Cross-compilation coverage only; native execution runs in windows-arm64.yml.
         run: zig build -Demit-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+
+      - name: Verify ARM64 source build stages the pinned ConPTY
+        shell: pwsh
+        run: ./test/windows/source-build-conpty.ps1 -Architecture arm64
 
   windows-portable-smoke:
     name: Windows x64 Portable Package Smoke
