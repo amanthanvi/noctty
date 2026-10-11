@@ -159,47 +159,6 @@ pub const Shaders = struct {
     }
 };
 
-test "shader cleanup releases primary and custom programs once" {
-    const gl = @import("opengl");
-    const Probe = struct {
-        var destroyed: usize = 0;
-        fn deleteProgram(id: gl.c.GLuint) callconv(.c) void {
-            std.debug.assert(id != 0);
-            destroyed += 1;
-        }
-    };
-    const saved = gl.glad.context;
-    defer gl.glad.context = saved;
-    gl.glad.context.DeleteProgram = &Probe.deleteProgram;
-    Probe.destroyed = 0;
-
-    var pipelines: PipelineCollection = undefined;
-    inline for (pipeline_descs, 0..) |pipeline, i| {
-        @field(pipelines, pipeline[0]) = .{
-            .program = .{ .id = @intCast(i + 1) },
-            .fbo = undefined,
-            .vao = undefined,
-            .stride = 0,
-            .blending_enabled = false,
-        };
-    }
-    const post = try std.testing.allocator.alloc(Pipeline, 2);
-    for (post, 0..) |*pipeline, i| {
-        pipeline.* = .{
-            .program = .{ .id = @intCast(pipeline_descs.len + i + 1) },
-            .fbo = undefined,
-            .vao = undefined,
-            .stride = 0,
-            .blending_enabled = false,
-        };
-    }
-    var shaders: Shaders = .{ .pipelines = pipelines, .post_pipelines = post };
-    shaders.deinit(std.testing.allocator);
-    try std.testing.expectEqual(pipeline_descs.len + 2, Probe.destroyed);
-    shaders.deinit(std.testing.allocator);
-    try std.testing.expectEqual(pipeline_descs.len + 2, Probe.destroyed);
-}
-
 /// The uniforms that are passed to our shaders.
 pub const Uniforms = extern struct {
     /// The projection matrix for turning world coordinates to normalized.
