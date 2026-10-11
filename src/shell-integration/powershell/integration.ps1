@@ -400,17 +400,30 @@ if (__ghostty_ssh_wrapper_is_ours) {
     $Global:__ghostty_ssh_wrapper_installed = $false
 }
 
-if (__ghostty_has_feature_prefix 'ssh-') {
+if ((__ghostty_has_feature_prefix 'ssh-') -and
+    $null -ne (Get-Command -Name 'ssh' -CommandType Function,Alias -ErrorAction Ignore)) {
+    Write-Warning 'noctty PowerShell SSH integration skipped: a profile function or alias owns ssh.' -WarningAction Continue
+} elseif (__ghostty_has_feature_prefix 'ssh-') {
     function global:ssh {
         # __ghostty_ssh_wrapper_marker — `__ghostty_ssh_wrapper_is_ours`
         # looks for this exact string in the installed function's body, so
         # a re-source replaces our own wrapper and leaves any user-defined
         # `ssh` untouched. Do not remove or rename it.
-        param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+        # A simple function has no common parameters to swallow -v/-A or
+        # reject -i/-o/-E/-p before they reach the native SSH command.
+        [string[]]$Arguments = $args
 
         $ssh_command = __ghostty_find_command_application @('ssh.exe', 'ssh')
         if ($null -eq $ssh_command) {
             throw 'noctty PowerShell SSH integration could not find ssh'
+        }
+
+        # Usage and version requests need neither a destination probe nor
+        # injected options. In particular, never turn no args into @($null).
+        if ($Arguments.Count -eq 0 -or
+            ($Arguments.Count -eq 1 -and $Arguments[0] -ceq '-V')) {
+            & $ssh_command @Arguments
+            return
         }
 
         [string[]]$ssh_config = @()
@@ -439,8 +452,8 @@ if (__ghostty_has_feature_prefix 'ssh-') {
             [string[]]$ssh_argv = @($invocation.Options) + @($invocation.Arguments)
             & $ssh_command @ssh_argv
         } finally {
-            if ($had_term) { $env:TERM = $old_term } else { Remove-Item Env:TERM -ErrorAction SilentlyContinue }
-            if ($had_colorterm) { $env:COLORTERM = $old_colorterm } else { Remove-Item Env:COLORTERM -ErrorAction SilentlyContinue }
+            if ($had_term) { $env:TERM = $old_term } else { Remove-Item Env:TERM -ErrorAction Ignore -Confirm:$false -WhatIf:$false }
+            if ($had_colorterm) { $env:COLORTERM = $old_colorterm } else { Remove-Item Env:COLORTERM -ErrorAction Ignore -Confirm:$false -WhatIf:$false }
         }
     }
 
@@ -465,7 +478,8 @@ if (__ghostty_has_feature_prefix 'ssh-') {
 # `file://HOST/C:/Users/amant/project#v1` where the `#` starts a URL
 # fragment in any RFC-compliant parser.
 function global:__ghostty_encode_cwd_uri {
-    $path = $PWD.Path
+    if ($PWD.Provider.Name -ne 'FileSystem') { return $null }
+    $path = $PWD.ProviderPath
     if ($path.StartsWith('\\')) {
         # UNC — split `\\server\share\rest\...`; authority = server,
         # rest goes in the path.
@@ -770,7 +784,9 @@ function global:__ghostty_prompt_body {
 
             # OSC 7 — current working directory (full file:// URI)
             $cwd_uri = __ghostty_encode_cwd_uri
-            __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
+            if ($null -ne $cwd_uri) {
+                __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
+            }
 
             # OSC 133 A — mark prompt start (jump-to-prompt anchor).
             # `redraw=0`: PowerShell never re-runs `prompt` after a resize,
@@ -987,7 +1003,9 @@ function global:__ghostty_readline {
                     __ghostty_write_osc "${Global:__ghostty_esc}]133;D;${code};aid=${Global:__ghostty_aid}${Global:__ghostty_bel}"
                 }
                 $cwd_uri = __ghostty_encode_cwd_uri
-                __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
+                if ($null -ne $cwd_uri) {
+                    __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
+                }
                 __ghostty_write_osc "${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"
             }
             __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"

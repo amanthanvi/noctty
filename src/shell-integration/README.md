@@ -140,8 +140,8 @@ Shell integration requires Zsh 5.1+.
 
 Automatic PowerShell integration on Windows applies to both Windows
 PowerShell 5.1 (`powershell.exe`) and PowerShell 7+ (`pwsh.exe`).
-Interactive launches are wrapped by appending `-NoExit -Command "& {
-$__ghostty_utf8_console = $true|$false; . '<path>' }"` while preserving the
+Interactive launches append `-NoExit -Command` with a bootstrap inside
+`& { $__ghostty_utf8_console = $true|$false; ... }`, while preserving the
 existing prefix flags such as `-NoProfile`, `-ExecutionPolicy`, or
 `-WorkingDirectory`.
 
@@ -152,6 +152,27 @@ assignment cannot overwrite. The price is that the block scope dies with the
 dot-source, so every top-level name in `integration.ps1` that must outlive
 load carries an explicit `global:` / `$Global:` qualifier. A compile-time test
 in `src/apprt/win32_powershell_install.zig` enforces that.
+
+The bootstrap reads the integration file as UTF-8 and dot-sources its text
+as a scriptblock, so Restricted and RemoteSigned with Mark-of-the-Web do
+not prevent integration. It preserves AllSigned's signing requirement by
+dot-sourcing the file under that policy. An unsigned or failed load gives
+one warning and leaves the interactive shell available. ConstrainedLanguage
+skips integration before installing hooks. No execution-policy setting is
+changed. Typographic apostrophes in the integration path are escaped along
+with ASCII apostrophes.
+
+OSC 7 reports the filesystem provider's native path, including filesystem
+PSDrives. Registry and other providers retain the terminal's previous cwd
+without emitting a replacement URI; OSC 133 prompt and command marks continue.
+UNC paths emit a valid file URI, but noctty deliberately rejects network cwd
+reports before any filesystem access, so it does not inherit UNC directories.
+
+The optional SSH wrapper preserves a profile's existing `ssh` function or
+alias. Otherwise it forwards ordinary SSH flags as native arguments, and
+passes bare `ssh` and `ssh -V` through without injected options or a host
+probe. PowerShell still consumes its own `--` token and rewrites forms such
+as `-p:22`; use ordinary separate SSH option values.
 
 Explicit command / script entrypoints such as `-Command`,
 `-CommandWithArgs`, `-EncodedCommand`, `-File`, help/version flags, and
