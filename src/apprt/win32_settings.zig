@@ -5918,6 +5918,8 @@ const dialog_test = struct {
     extern "user32" fn GetClassLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) usize;
     extern "user32" fn LoadIconW(instance: ?HINSTANCE, name: ?*anyopaque) callconv(.winapi) HICON;
     extern "user32" fn GetNextDlgTabItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
+    extern "user32" fn GetKeyboardState(keys: *[256]u8) callconv(.winapi) BOOL;
+    extern "user32" fn SetKeyboardState(keys: *const [256]u8) callconv(.winapi) BOOL;
     extern "user32" fn GetNextDlgGroupItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
 
     const GCLP_HICON: i32 = -14;
@@ -6139,6 +6141,34 @@ test "settings Enter presses the focused push button and does nothing in a field
             // On the Save button itself it saves.
             _ = sys.SetFocus(settings.btn_save.?);
             try std.testing.expect(fixture.pumpKey(0x0D));
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+        }
+    }.body);
+}
+
+test "settings Ctrl+S reaches Save through the accelerator hook" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            _ = sys.SendMessageW(settings.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCursorStyleFromCombo();
+            _ = sys.SetFocus(settings.edit_font_size.?);
+
+            // Without Ctrl the key is not ours.
+            const focus = sys.GetFocus().?;
+            try std.testing.expect(!settings.handleAccelerator(focus, WM_KEYDOWN, 'S', 0));
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+
+            // With the thread's Ctrl key down it is consumed and saves.
+            var keys: [256]u8 = undefined;
+            try std.testing.expect(dialog_test.GetKeyboardState(&keys) != 0);
+            const original = keys;
+            defer _ = dialog_test.SetKeyboardState(&original);
+            keys[VK_CONTROL] = 0x80;
+            try std.testing.expect(dialog_test.SetKeyboardState(&keys) != 0);
+            try std.testing.expect(settings.handleAccelerator(focus, WM_KEYDOWN, 'S', 0));
             try std.testing.expectEqual(@as(u32, 1), fixture.saved);
         }
     }.body);
