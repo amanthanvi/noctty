@@ -31,7 +31,8 @@ pub fn replaceCachedUtf16(alloc: std.mem.Allocator, target: *?[:0]const u16, tex
 }
 
 test "bounded UTF-16 long ASCII and BMP text preserve buffer guards" {
-    const cases = .{ "a" ** 300, "\u{65e5}" ** 200 };
+    // 300 copies of U+65E5 is 300 units; 200 would fit the 256-unit buffer.
+    const cases = .{ "a" ** 300, "\u{65e5}" ** 300 };
     inline for (cases) |src| {
         var guarded = [_]u16{0xabcd} ** 258;
         const n = utf8ToUtf16LeBounded(guarded[1..257], src);
