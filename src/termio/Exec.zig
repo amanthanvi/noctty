@@ -863,6 +863,9 @@ const Subprocess = struct {
         // Get our env. If a default env isn't provided by the caller
         // then we get it ourselves.
         var env = cfg.env;
+        // The env is ours from the call on, also when we fail: the puts
+        // below can grow it, which leaves the caller's copy stale.
+        errdefer env.deinit();
 
         // If we have a resources dir then set our env var
         if (cfg.resources_dir) |dir| {
@@ -2145,6 +2148,30 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
         .{ .columns = 80, .rows = 24 },
         .{ .width = 640, .height = 480 },
     ));
+}
+
+test "Subprocess.init frees the env it takes when it fails" {
+    // A first put into an empty map allocates this many times.
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = EnvMap.init(counting.allocator());
+    try probe.put("TERM", "xterm-256color");
+    probe.deinit();
+
+    // Without a resources dir, init puts TERM and then COLORTERM: fail the
+    // second put while the env holds the first. Before the fix nobody freed
+    // it, since the caller cannot tell what the env grew into.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = counting.alloc_index,
+    });
+    try std.testing.expectError(error.OutOfMemory, Subprocess.init(std.testing.allocator, .{
+        .env = EnvMap.init(failing.allocator()),
+        .resources_dir = null,
+        .term = "xterm-256color",
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    }));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 /// Builds the argv array for the process we should exec for the
