@@ -165,8 +165,9 @@ with ASCII apostrophes.
 OSC 7 reports the filesystem provider's native path, including filesystem
 PSDrives. Registry and other providers retain the terminal's previous cwd
 without emitting a replacement URI; OSC 133 prompt and command marks continue.
-UNC paths emit a valid file URI, but noctty deliberately rejects network cwd
-reports before any filesystem access, so it does not inherit UNC directories.
+UNC paths also retain the previous cwd without emitting OSC 7. Noctty does not
+inherit network directories, and a local UNC authority such as `localhost`
+would otherwise make the URI's share path look like a POSIX cwd to the receiver.
 
 The optional SSH wrapper preserves a profile's existing `ssh` function or
 alias. Otherwise it forwards ordinary SSH flags as native arguments, and

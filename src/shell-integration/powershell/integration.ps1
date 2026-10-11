@@ -462,14 +462,13 @@ if ((__ghostty_has_feature_prefix 'ssh-') -and
 
 # ── Helper: build full file:// URI for OSC 7 ────────────────────────────
 # Returns the complete URI including `file:` scheme + authority so the
-# caller can emit it verbatim. Handles two path shapes:
+# caller can emit it verbatim for local filesystem paths:
 #
 #   * Regular drive path (`C:\Users\amant\project`) →
 #     `file://<host>/C:/Users/amant/project` with each segment
 #     percent-encoded via EscapeDataString.
-#   * UNC path (`\\server\share\dir`) →
-#     `file://server/share/dir` (server becomes the authority; the
-#     local-host name is omitted per RFC 8089).
+# UNC paths return null. The terminal does not inherit network cwd, and
+# `file://localhost/share/dir` would look like a POSIX cwd to its receiver.
 #
 # Using EscapeDataString PER SEGMENT is critical: EscapeUriString
 # preserves URI separators as literals, which produces malformed
@@ -481,20 +480,7 @@ function global:__ghostty_encode_cwd_uri {
     if ($PWD.Provider.Name -ne 'FileSystem') { return $null }
     $path = $PWD.ProviderPath
     if ($path.StartsWith('\\')) {
-        # UNC — split `\\server\share\rest\...`; authority = server,
-        # rest goes in the path.
-        $rest = $path.Substring(2) -replace '\\', '/'
-        $segments = $rest -split '/'
-        if ($segments.Length -eq 1) {
-            $server = [uri]::EscapeDataString($segments[0])
-            return "file://$server/"
-        } elseif ($segments.Length -gt 1) {
-            $server = [uri]::EscapeDataString($segments[0])
-            $tail_segments = $segments[1..($segments.Length-1)]
-            $tail = ($tail_segments | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
-            return "file://$server/$tail"
-        }
-        return "file://"
+        return $null
     }
     $host_name = $env:COMPUTERNAME
     $segments = ($path -replace '\\', '/') -split '/'

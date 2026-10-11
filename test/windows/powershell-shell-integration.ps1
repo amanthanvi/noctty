@@ -193,16 +193,18 @@ try {
     Assert-True (-not $drawn.Osc.Contains(']133;B')) "OSC 133 B was written directly, ahead of the prompt text: $($drawn.Osc -replace [char]27, '<ESC>')"
     Assert-True ($drawn.Text -ceq "NOCTTYPROBE> $B") "The returned prompt is not the user's text followed by B: $($drawn.Text -replace [char]27, '<ESC>')"
 
+    $unsupportedLocations = @('HKCU:\Software', 'Env:\')
+    if ($UncPath) { $unsupportedLocations += $UncPath }
     New-PSDrive -Name NocttyProbe -PSProvider FileSystem -Root $specialDir | Out-Null
     try {
         Push-Location 'NocttyProbe:\'
         Assert-True ((__ghostty_encode_cwd_uri).TrimEnd('/') -ceq $cwdUri.TrimEnd('/')) "A filesystem PSDrive emitted its logical drive name rather than the native cwd"
         Pop-Location
-        foreach ($providerLocation in @('HKCU:\Software', 'Env:\')) {
+        foreach ($providerLocation in $unsupportedLocations) {
             Push-Location $providerLocation
             $nonFilePrompt = Invoke-TestPrompt
-            Assert-True ($null -eq (__ghostty_encode_cwd_uri)) "A non-filesystem provider emitted a cwd URI"
-            Assert-True (-not $nonFilePrompt.Osc.Contains(']7;')) "A non-filesystem prompt emitted OSC 7"
+            Assert-True ($null -eq (__ghostty_encode_cwd_uri)) "An unsupported cwd emitted a URI: $providerLocation"
+            Assert-True (-not $nonFilePrompt.Osc.Contains(']7;')) "An unsupported cwd prompt emitted OSC 7: $providerLocation"
             Assert-True ($nonFilePrompt.Osc.Contains(']133;D;') -and $nonFilePrompt.Osc.Contains($A)) "Skipping OSC 7 dropped the command or prompt marks"
             Pop-Location
         }
@@ -669,29 +671,29 @@ try {
     }
 
     # Opt-in local share fixture: do not open an arbitrary network server on
-    # machines without a share. This tests the emitter; noctty's cwd ingestion
-    # still intentionally rejects network paths before any filesystem opens.
+    # machines without a share. A local authority would make the URI's share
+    # name look like a POSIX cwd, so omit UNC reports and keep the previous cwd.
     if ($UncPath) {
         $uncQuoted = $UncPath.Replace("'", "''")
         $uncOut = Invoke-NocttyInjectedChild -WithoutPSReadLine `
             -Preamble "Set-Location -LiteralPath '$uncQuoted'; " `
-            -Postamble '; "CWD" + "URI=" + (__ghostty_encode_cwd_uri)'
-        $uncSegments = ($UncPath.Substring(2) -replace '\\', '/') -split '/'
-        $uncUri = 'file://' + (($uncSegments | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
-        Assert-True ($uncOut.Contains("CWDURI=$uncUri")) "UNC cwd carried the provider qualifier or local authority: $uncOut"
+            -Postamble '; if ($null -eq (__ghostty_encode_cwd_uri)) { "UNC" + "-CWD-SKIPPED" }'
+        Assert-True ($uncOut.Contains('UNC-CWD-SKIPPED') -and -not $uncOut.Contains(']7;')) "A UNC child emitted a misleading OSC 7 cwd: $uncOut"
+        Assert-True ($uncOut.Contains(']133;A;') -and $uncOut.Contains(']133;B')) "UNC suppression dropped prompt marks: $uncOut"
     }
 
     # A replaced prompt takes the reader's fallback OSC 7 path. Use the
     # stand-in reader so this is a real host read without PSReadLine pipe errors.
-    foreach ($providerLocation in @('HKCU:\Software', 'Env:\')) {
+    foreach ($providerLocation in $unsupportedLocations) {
+        $providerQuoted = $providerLocation.Replace("'", "''")
         $providerOut = Invoke-NocttyInjectedChild -StandInReader `
             -Lines @(
-                "Set-Location '$providerLocation'; function global:prompt { 'PROVIDER> ' }",
+                "Set-Location -LiteralPath '$providerQuoted'; function global:prompt { 'PROVIDER> ' }",
                 '"PROVIDER" + "-READ"',
                 'exit'
             )
         $afterProvider = $providerOut.Substring($providerOut.IndexOf('PROVIDER> '))
-        Assert-True (-not $afterProvider.Contains(']7;')) "The fallback reader emitted OSC 7 for a non-filesystem provider: $afterProvider"
+        Assert-True (-not $afterProvider.Contains(']7;')) "The fallback reader emitted OSC 7 for an unsupported cwd: $afterProvider"
         Assert-True ($afterProvider.Contains(']133;P;k=i;redraw=0') -and $afterProvider.Contains(']133;B')) "The provider skip dropped the fallback prompt marks: $afterProvider"
     }
 
