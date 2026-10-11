@@ -188,8 +188,11 @@ does. `wsl.exe` passes a Linux process only the Windows variables that
 flag so that a Windows program started from inside WSL does not get the Linux
 values back. It adds `TERM` too when the distribution has a terminfo entry for
 noctty's `term`, which noctty asks the distribution itself with `infocmp`; the
-answer is remembered until noctty exits, so install the entry first, then
-start noctty again. To give a distribution the entry, compile
+answer for an explicitly selected distribution is remembered until noctty
+exits, so install the entry first, then start noctty again. An implicit
+distribution is probed for each launch, so changing WSL's default while
+noctty runs cannot reuse the previous distribution's answer. To give a
+distribution the entry, compile
 `share/terminfo/ghostty.terminfo` from the noctty folder with `tic -x` inside
 it. Without the entry `TERM` stays `xterm-256color`, the value `wsl.exe` sets,
 and the other three are still forwarded. The first WSL tab of a stopped
@@ -203,7 +206,8 @@ PowerShell is not changed: only a launch of `wsl.exe` by noctty is.
 An existing `/w` entry stays Windows-only; noctty does not override that
 choice. Automatic `TERM` probing uses the launch environment and working
 directory, including `--cd`, and caches answers separately for different
-environments or directories. The optional probe resolves only a local `.exe`;
+environments or directories for explicit distribution selections. The
+optional probe resolves only a local `.exe`;
 if resolution would need a network/device path or a mapped network drive,
 it keeps the fallback. For shell-form commands, automatic `TERM` is limited
 to a single `wsl.exe` command without variable expansion, redirection,

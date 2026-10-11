@@ -238,6 +238,23 @@ fn probeArgv(alloc: Allocator, argv: []const [:0]const u8, term: []const u8) All
     return try out.toOwnedSlice(alloc);
 }
 
+/// Only explicit distributions have stable selection across launches. The
+/// user can change WSL's default while noctty runs without changing argv/env.
+/// `probe` contains only selector options followed by `--exec infocmp`.
+fn canCacheProbe(probe: []const []const u8) bool {
+    var i: usize = 1;
+    while (i < probe.len) : (i += 1) {
+        const arg = probe[i];
+        if (std.mem.eql(u8, arg, "--exec")) break;
+        if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--distribution") or
+            std.mem.eql(u8, arg, "--distribution-id") or std.mem.eql(u8, arg, "--system")) return true;
+        // Every other selector takes a value; a value spelled `-d` is not
+        // a distribution selector.
+        i += 1;
+    }
+    return false;
+}
+
 /// A local drive path only. Screen it before any file operation, including
 /// executable lookup; GetDriveType reads the local drive table.
 fn isLocalAbsolute(path: []const u8) bool {
@@ -316,7 +333,7 @@ fn probeKey(alloc: Allocator, env: *const EnvMap, argv: []const []const u8, cwd:
     return hasher.final();
 }
 
-/// What distributions have answered, by a hash of the probe command line and
+/// What explicitly selected distributions have answered, by a hash of the probe command line and
 /// of the variables that steer where the probe looks for terminfo. Asking
 /// costs a `wsl.exe` start, 200 ms or more, and a restored window opens
 /// several tabs at once, so ask once; a probe that times out is a "no" too, so
@@ -324,6 +341,7 @@ fn probeKey(alloc: Allocator, env: *const EnvMap, argv: []const []const u8, cwd:
 /// while noctty runs is therefore seen by the next noctty, not the next tab.
 /// The lock covers the table only: a tab waits for a probe of its own question
 /// and for nothing else.
+/// Implicit distributions bypass this cache so a default change is seen.
 const Answer = enum { pending, yes, no };
 var probe_cache: std.AutoHashMapUnmanaged(u64, Answer) = .empty;
 var probe_mutex: std.Thread.Mutex = .{};
@@ -353,6 +371,7 @@ fn distroHasTerminfo(
     const exe = (localExecutable(alloc, env, probe[0], cwd) catch return false) orelse return false;
     defer alloc.free(exe);
     probe[0] = exe;
+    if (!canCacheProbe(probe)) return runProbe(alloc, env, probe, cwd) orelse false;
     const key = probeKey(alloc, env, probe, cwd) catch return false;
 
     probe_mutex.lock();
@@ -683,6 +702,26 @@ test "CMD AutoRun must be absent in both hives and registry views" {
 test "probeArgv refuses an infocmp option as the terminal name" {
     try std.testing.expectEqual(null, try probeArgv(std.testing.allocator, &.{"wsl.exe"}, "-V"));
     try std.testing.expectEqual(null, try probeArgv(std.testing.allocator, &.{"wsl.exe"}, ""));
+}
+
+test "probe cache requires an explicit distribution before the command" {
+    const cases = [_]struct { argv: []const [:0]const u8, cache: bool }{
+        .{ .argv = &.{"wsl.exe"}, .cache = false },
+        .{ .argv = &.{ "wsl.exe", "-u", "root" }, .cache = false },
+        .{ .argv = &.{ "wsl.exe", "--cd", "/tmp" }, .cache = false },
+        .{ .argv = &.{ "wsl.exe", "--cd", "-d" }, .cache = false },
+        .{ .argv = &.{ "wsl.exe", "--exec", "echo", "-d", "Ubuntu" }, .cache = false },
+        .{ .argv = &.{ "wsl.exe", "echo", "-d", "Ubuntu" }, .cache = false },
+        .{ .argv = &.{ "wsl.exe", "-d", "Ubuntu" }, .cache = true },
+        .{ .argv = &.{ "wsl.exe", "--distribution", "Ubuntu" }, .cache = true },
+        .{ .argv = &.{ "wsl.exe", "-u", "root", "--distribution-id", "id" }, .cache = true },
+        .{ .argv = &.{ "wsl.exe", "--system" }, .cache = true },
+    };
+    for (cases) |case| {
+        const probe = (try probeArgv(std.testing.allocator, case.argv, "xterm-ghostty")).?;
+        defer std.testing.allocator.free(probe);
+        try std.testing.expectEqual(case.cache, canCacheProbe(probe));
+    }
 }
 
 test "probeKey distinguishes forwarded HOME and cwd independent of map order" {
