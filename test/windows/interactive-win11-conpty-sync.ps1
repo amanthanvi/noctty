@@ -464,13 +464,14 @@ if ($Inner) {
     # PowerShell here therefore points PSReadLine at a sandbox file before
     # its first prompt reads or writes one. That needs `-Command`, which
     # turns off noctty's automatic injection, so the integration is
-    # dot-sourced here the way noctty's own launch wrapper does it.
+    # dot-sourced here the way noctty's own launch wrapper does it: as text in
+    # a child scope, so no execution policy stands in the way.
     function Get-SyncPowerShellCommand([string] $Exe, [string] $Name, [string] $ExtraOptions, [string[]] $History) {
         # History a scenario needs is read from the redirected file.
         $historyPath = Join-Path $script:Work "$Name-psreadline-history.txt"
         [IO.File]::WriteAllLines($historyPath, [string[]]@($History), (New-Object System.Text.UTF8Encoding $false))
         $integration = Join-Path $RunRoot 'tools\integration.ps1'
-        return ('{0} -NoLogo -NoProfile -NoExit -Command "Set-PSReadLineOption -HistorySavePath ''{1}'' -HistorySaveStyle SaveAtExit {2}; & {{ $__ghostty_utf8_console = $false; . ''{3}'' }}"' -f
+        return ('{0} -NoLogo -NoProfile -NoExit -Command "Set-PSReadLineOption -HistorySavePath ''{1}'' -HistorySaveStyle SaveAtExit {2}; & {{ $__ghostty_utf8_console = $false; . ([scriptblock]::Create([IO.File]::ReadAllText(''{3}''))) }}"' -f
             $Exe, $historyPath, $ExtraOptions, $integration)
     }
 
