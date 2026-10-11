@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Terminal = @import("../terminal/Terminal.zig");
 
 // These are the set of byte values that are always replaced by
@@ -90,21 +91,23 @@ pub fn encode(
         }
     }
 
+    // Windows console readers need CR even inside bracketed paste. Keep
+    // the const fast path and let callers copy only when LF needs replacing.
+    // Non-bracketed CRLF becomes CRCR, matching xterm's existing behavior;
+    // clipboard callers normalize CRLF to LF before reaching this encoder.
+    if (!opts.bracketed or builtin.os.tag == .windows) {
+        if (comptime mutable) {
+            std.mem.replaceScalar(u8, data, '\n', '\r');
+        } else if (std.mem.indexOfScalar(u8, data, '\n') != null) {
+            return Error.MutableRequired;
+        }
+    }
+
     // Bracketed paste mode (mode 2004) wraps pasted data in
     // fenceposts so that the terminal can ignore things like newlines.
     if (opts.bracketed) {
         result[0] = "\x1b[200~";
         result[2] = "\x1b[201~";
-        return result;
-    }
-
-    // Non-bracketed. We have to replace newline with `\r`. This matches
-    // the behavior of xterm and other terminals. For `\r\n` this will
-    // result in `\r\r` which does match xterm.
-    if (comptime mutable) {
-        std.mem.replaceScalar(u8, data, '\n', '\r');
-    } else if (std.mem.indexOfScalar(u8, data, '\n') != null) {
-        return Error.MutableRequired;
     }
 
     return result;
@@ -201,6 +204,27 @@ test "encode bracketed" {
     try testing.expectEqualStrings("\x1b[200~", result[0]);
     try testing.expectEqualStrings("hello", result[1]);
     try testing.expectEqualStrings("\x1b[201~", result[2]);
+}
+
+test "PKG16 encode Windows bracketed newlines requires mutable data" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try std.testing.expectError(Error.MutableRequired, encode(
+        @as([]const u8, "echo one\necho two"),
+        .{ .bracketed = true },
+    ));
+}
+
+test "PKG16 encode bracketed newlines follows platform convention" {
+    const alloc = std.testing.allocator;
+    const data = try alloc.dupe(u8, "echo one\necho two\n");
+    defer alloc.free(data);
+    const result = encode(data, .{ .bracketed = true });
+    try std.testing.expectEqualStrings("\x1b[200~", result[0]);
+    try std.testing.expectEqualStrings(
+        if (builtin.os.tag == .windows) "echo one\recho two\r" else "echo one\necho two\n",
+        result[1],
+    );
+    try std.testing.expectEqualStrings("\x1b[201~", result[2]);
 }
 
 test "encode unbracketed no newlines" {

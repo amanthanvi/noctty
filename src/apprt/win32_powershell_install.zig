@@ -1081,7 +1081,7 @@ test "integration.ps1 writes OSC 133 B from the line reader" {
         u8,
         integration_script,
         readline,
-        "__ghostty_write_osc \"${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}\"",
+        "__ghostty_write_osc \"${Global:__ghostty_esc}[<99u${Global:__ghostty_esc}[>4;0m${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}\"",
     ).?;
     try std.testing.expect(gate < d_write);
     try std.testing.expect(d_write < p_write);

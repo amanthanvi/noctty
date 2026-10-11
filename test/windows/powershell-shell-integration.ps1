@@ -180,6 +180,7 @@ try {
     }
     $B = "$([char]27)]133;B$([char]7)"
     $A = "]133;A;cl=line;aid=$PID;redraw=0"
+    $modeReset = "$([char]27)[<99u$([char]27)[>4;0m"
 
     $drawn = Invoke-TestPrompt
     # A generated function, not an alias: `Get-Command prompt` stays a
@@ -190,6 +191,7 @@ try {
     Assert-True ($drawn.Osc.Contains("]133;D;0;aid=$PID")) "Prompt output missing OSC 133 D aid metadata"
     Assert-True ($drawn.Osc.Contains(']7;file://')) "Prompt output missing OSC 7 cwd"
     Assert-True ($drawn.Osc.Contains($A)) "Prompt output missing OSC 133 A prompt metadata (redraw=0)"
+    Assert-True ($drawn.Osc.Contains("$modeReset$([char]27)$A")) "Prompt did not reset Kitty and modifyOtherKeys before A"
     Assert-True (-not $drawn.Osc.Contains(']133;B')) "OSC 133 B was written directly, ahead of the prompt text: $($drawn.Osc -replace [char]27, '<ESC>')"
     Assert-True ($drawn.Text -ceq "NOCTTYPROBE> $B") "The returned prompt is not the user's text followed by B: $($drawn.Text -replace [char]27, '<ESC>')"
 
@@ -398,13 +400,14 @@ try {
     # unmarked prompt: written into its running command, a D or B would end
     # it and make the answer typed at the script the terminal's last command.
     $direct = Invoke-TestReadLine 'answer'
+    Assert-True (-not $direct.Osc.Contains($modeReset)) "A script calling the reader reset keyboard modes"
     Assert-True (-not ($direct.Osc -match '\]133;[DPB]|\]7;')) "A script's own call to the reader got prompt marks: $($direct.Osc -replace [char]27, '<ESC>')"
     Assert-True ($direct.Osc.Contains(']133;C;')) "A script's own call to the reader lost its C"
     # The prompt is ours again now (that read wrapped it); replace it anew.
     function global:prompt { 'REPLACED> ' }
     [void](Invoke-TestPrompt)
     $unmarked = Invoke-TestReadLine 'Get-Date' -AsHost
-    Assert-True ($unmarked.Osc -match "^$([char]27)\]133;D;0;aid=$PID$([char]7)$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get D, OSC 7, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
+    Assert-True ($unmarked.Osc -match "^$([char]27)\]133;D;0;aid=$PID$([char]7)$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([regex]::Escape($modeReset))$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))$([regex]::Escape($C))") "An unmarked prompt did not get D, OSC 7, mode reset, P and B: $($unmarked.Osc -replace [char]27, '<ESC>')"
     Assert-True (__ghostty_prompt_is_ours $function:global:prompt) "The line reader did not wrap a replaced prompt"
     [void](Invoke-TestPrompt)
     $marked = Invoke-TestReadLine 'Get-Date' -AsHost
@@ -929,7 +932,7 @@ try {
            Lines = @("function global:prompt { 'RE' + 'PLACED> ' }; cmd /c exit 5",
                      'cmd /c exit 5', 'Get-Date | Out-Null')
            Expect = @(0, 5, 5, 0)
-           Pattern = "REPLACED> $([char]27)\]133;D;5;aid=\d+$([char]7)$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))" }
+           Pattern = "REPLACED> $([char]27)\]133;D;5;aid=\d+$([char]7)$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([regex]::Escape($modeReset))$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))" }
         # The replacing prompt ran a native of its own, which moved
         # $LASTEXITCODE; the failure can then only report 1.
         @{ Name = 'native failure under a prompt that runs a native'
@@ -958,7 +961,7 @@ try {
                      'Get-Date | Out-Null', "throw 'x'",
                      '("ERR" + "COUNT=") + $Error.Count')
            Expect = @(0)
-           Pattern = "LOCKED> $([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))"
+           Pattern = "LOCKED> $([char]27)\]7;file://[^$([char]7)]+$([char]7)$([regex]::Escape($modeReset))$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))"
            ErrorCount = 1 }
         # Likewise a deleted prompt, which the wrapper leaves deleted: the
         # host draws its own default prompt on every line.
@@ -968,7 +971,7 @@ try {
            Lines = @('Remove-Item function:prompt; cmd /c exit 5',
                      'cmd /c exit 5', 'Get-Date | Out-Null')
            Expect = @(0)
-           Pattern = "$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))" }
+           Pattern = "$([char]27)\]7;file://[^$([char]7)]+$([char]7)$([regex]::Escape($modeReset))$([char]27)\]133;P;k=i;redraw=0$([char]7)$([regex]::Escape($B))" }
         # A script that calls the reader itself (here for `answer`) is not
         # the host's read and gets no D; a D there would end the command
         # that is still running.
