@@ -78,6 +78,7 @@ const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
 const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
+const paint_text = @import("win32/text.zig");
 const win32_input = @import("win32/input.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
 const gdi = @import("win32/gdi.zig");
@@ -8445,8 +8446,7 @@ pub const App = struct {
         if (duplicate_slot) |index| {
             if (index != slot_ordinal) {
                 if (self.launcher_quick_slot_keys[slot_ordinal]) |current| {
-                    if (self.launcher_quick_slot_keys[index]) |dupe| self.core_app.alloc.free(dupe);
-                    self.launcher_quick_slot_keys[index] = try self.core_app.alloc.dupeZ(u8, current);
+                    try appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], current);
                 } else {
                     runUiActionOrLog(
                         "quick slot deduplication failed",
@@ -8462,6 +8462,28 @@ pub const App = struct {
             runUiActionOrLog("quick slot profile refresh failed", host.reapplyLauncherProfilePreferences());
             host.refreshProfileChrome();
         }
+    }
+
+    test "setLauncherQuickSlotPreference keeps the other slot's key when the copy fails" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        core_app.alloc = failing.allocator();
+        defer core_app.alloc = std.testing.allocator;
+        app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh");
+        app.launcher_quick_slot_keys[1] = try std.testing.allocator.dupeZ(u8, "cmd");
+        defer for (app.launcher_quick_slot_keys) |value| {
+            if (value) |key| std.testing.allocator.free(key);
+        };
+        // Slot 0 takes "cmd", so slot 1 is to receive a copy of "pwsh".
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectError(error.OutOfMemory, app.setLauncherQuickSlotPreference(0, "cmd"));
+        try std.testing.expectEqualStrings("pwsh", app.launcher_quick_slot_keys[0].?);
+        try std.testing.expectEqualStrings("cmd", app.launcher_quick_slot_keys[1].?);
     }
 
     fn clearLauncherQuickSlotPreferences(self: *App) void {
@@ -19749,6 +19771,44 @@ const Host = struct {
         self.cached_launcher_selected_chip_w = null;
     }
 
+    test "EXT-03 overlay cache OOM remains retryable and chrome teardown frees once" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host }},
+        });
+        defer session.deinit();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        core_app.alloc = failing.allocator();
+        defer core_app.alloc = std.testing.allocator;
+        defer host.freeCachedChromeStrings();
+        inline for (.{
+            "cached_overlay_paint_label_w",
+            "cached_overlay_paint_feedback_w",
+            "cached_overlay_paint_badge_w",
+        }) |field| {
+            const slot = &@field(host, field);
+            try paint_text.replaceCachedUtf16(core_app.alloc, slot, "previous");
+            const old = slot.*.?.ptr;
+            failing.fail_index = failing.alloc_index;
+            try std.testing.expectError(error.OutOfMemory, paint_text.replaceCachedUtf16(core_app.alloc, slot, "replacement"));
+            try std.testing.expectEqual(old, slot.*.?.ptr);
+            try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("previous"), slot.*.?);
+            failing.fail_index = std.math.maxInt(usize);
+            try paint_text.replaceCachedUtf16(core_app.alloc, slot, "replacement");
+        }
+        host.freeCachedChromeStrings();
+        try std.testing.expect(host.cached_overlay_paint_label_w == null);
+        try std.testing.expect(host.cached_overlay_paint_feedback_w == null);
+        try std.testing.expect(host.cached_overlay_paint_badge_w == null);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+
     fn syncWindowTitle(self: *Host) !bool {
         const hwnd = self.hwnd orelse return false;
         const alloc = self.app.core_app.alloc;
@@ -20865,8 +20925,7 @@ const Host = struct {
                         self.confirmText(),
                     ) catch return false;
                 defer alloc.free(overlay_label);
-                if (self.cached_overlay_paint_label_w) |old| alloc.free(old);
-                self.cached_overlay_paint_label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, overlay_label) catch return false;
+                paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_label_w, overlay_label) catch return false;
 
                 const overlay_feedback = if (self.overlay_mode == .profile)
                     if (self.banner_text) |value|
@@ -20905,15 +20964,13 @@ const Host = struct {
                     ) catch return false;
                 };
                 defer alloc.free(overlay_feedback);
-                if (self.cached_overlay_paint_feedback_w) |old| alloc.free(old);
-                self.cached_overlay_paint_feedback_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, overlay_feedback) catch return false;
+                paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_feedback_w, overlay_feedback) catch return false;
 
                 if (self.overlay_mode == .profile) {
                     if (self.selectedProfile()) |profile| {
                         const badge = buildProfileChromeBadgeText(alloc, profile.kind) catch return false;
                         defer alloc.free(badge);
-                        if (self.cached_overlay_paint_badge_w) |old| alloc.free(old);
-                        self.cached_overlay_paint_badge_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, badge) catch return false;
+                        paint_text.replaceCachedUtf16(alloc, &self.cached_overlay_paint_badge_w, badge) catch return false;
                     } else {
                         if (self.cached_overlay_paint_badge_w) |old| alloc.free(old);
                         self.cached_overlay_paint_badge_w = null;
@@ -23350,15 +23407,10 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
 /// string into the rect. Used by the palette list row painter.
 fn drawPaletteRowText(hdc: HDC, text: []const u8, rect: RECT, color: u32) void {
     if (text.len == 0) return;
-    // UTF-16 on the stack — palette titles / actions are short (well
-    // under 256 chars); anything longer gets truncated rather than
-    // allocating per paint.
+    // Configured titles and descriptions can be arbitrarily long. Bound
+    // the conversion before writing and avoid allocation on every paint.
     var buf: [256]u16 = undefined;
-    // On invalid UTF-8 only a prefix was written, so falling back to `buf.len`
-    // would render uninitialized stack. Draw nothing instead.
-    const copied = std.unicode.utf8ToUtf16Le(&buf, text) catch 0;
-    const n: usize = @min(copied, buf.len - 1);
-    buf[n] = 0;
+    const n = paint_text.utf8ToUtf16LeBounded(&buf, text);
 
     _ = sys.SetTextColor(hdc, color);
     var r = rect;
