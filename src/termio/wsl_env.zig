@@ -338,7 +338,11 @@ fn localExecutable(alloc: Allocator, env: *const EnvMap, exe: []const u8, cwd: [
     while (paths.next()) |entry| {
         const dir = std.mem.trim(u8, entry, "\"");
         if (dir.len == 0) continue;
-        if (localPathState(dir) != .safe) return null;
+        switch (localPathState(dir)) {
+            .missing => continue,
+            .unsafe => return null,
+            .safe => {},
+        }
         const path = try std.fs.path.join(alloc, &.{ dir, exe });
         const state = localPathState(path);
         if (state == .safe) return path;
@@ -829,6 +833,18 @@ test "localExecutable refuses remote device and ambiguous search paths" {
     planted.close();
     try env.put("NoDefaultCurrentDirectoryInExePath", "");
     try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
+
+    // CMD skips a removed local directory and can find a later candidate.
+    const missing = try std.fs.path.join(alloc, &.{ cwd, "removed-tool" });
+    defer alloc.free(missing);
+    const search = try std.fmt.allocPrint(alloc, "{s};{s}", .{ missing, cwd });
+    defer alloc.free(search);
+    try env.put("PATH", search);
+    const found = (try localExecutable(alloc, &env, "wsl.exe", cwd)).?;
+    defer alloc.free(found);
+    const expected = try std.fs.path.join(alloc, &.{ cwd, "wsl.exe" });
+    defer alloc.free(expected);
+    try std.testing.expectEqualStrings(expected, found);
 }
 
 test "probe paths refuse ancestor and final symlinks without following them" {
