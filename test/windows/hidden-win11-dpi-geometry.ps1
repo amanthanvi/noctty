@@ -10,8 +10,7 @@ Results contain only monitor geometry, process IDs, window state and assertions.
 param(
     [Parameter(Mandatory)] [string] $Bin,
     [Parameter(Mandatory)] [string] $Run,
-    [switch] $Driver,
-    [switch] $Smoke
+    [switch] $Driver
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -143,8 +142,7 @@ if (-not $Driver) {
     try {
         $env:LOCALAPPDATA=Join-Path $Run 'localappdata'; $env:APPDATA=Join-Path $Run 'appdata'
         $pwsh=(Get-Command pwsh.exe).Source
-        $mode=if($Smoke) {' -Smoke'} else {''}
-        $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Bin "{2}" -Run "{3}" -Driver{4}' -f $pwsh,$PSCommandPath,(Join-Path $Run 'source\bin'),$Run,$mode
+        $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Bin "{2}" -Run "{3}" -Driver' -f $pwsh,$PSCommandPath,(Join-Path $Run 'source\bin'),$Run
         $pi=[DpiGeometry]::Launch($pwsh,$line,$Run,"WinSta0\$desktopName")
         Write-Host "Hidden driver PID=$($pi.pid); evidence=$Run"
         while ([DpiGeometry]::WaitForSingleObject($pi.process,1000) -eq 258) { }
@@ -164,10 +162,6 @@ if (-not $Driver) {
 
 # This branch executes only on the newly created desktop; children inherit it.
 [void][DpiGeometry]::SetThreadDpiAwarenessContext([IntPtr](-4))
-if($Smoke) {
-    & (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) '.pkg20\Run-hidden-smoke-driver.ps1') -Bin $Bin -Run $Run
-    exit $LASTEXITCODE
-}
 $script:checks=[Collections.Generic.List[object]]::new()
 $script:samples=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
@@ -234,15 +228,22 @@ try {
         Check 'ordinary secondary-to-primary DPI' ($returned.Dpi -eq $primary.Dpi) $primary.Dpi $returned.Dpi
         Check 'ordinary secondary-to-primary suggested width' ([Math]::Abs(($returned.Rect.Right-$returned.Rect.Left)-900) -le 3) 900 ($returned.Rect.Right-$returned.Rect.Left)
     } finally {Close-Case $case}
-    foreach($origin in @($primary,$other)) {
-        $destination=if($origin.Primary){$other}else{$primary}
+    $restoreCases=@(
+        @{Origin=$primary;Destination=$other;Width=900;Height=600;Label='normal'},
+        @{Origin=$other;Destination=$primary;Width=900;Height=600;Label='normal'}
+    )
+    foreach($target in @($monitors|Where-Object {$_.Dpi -ne $primary.Dpi})) {
+        $restoreCases+=@{Origin=$primary;Destination=$target;Width=($primary.Work.Right-$primary.Work.Left-40);Height=[Math]::Min(1200,$primary.Work.Bottom-$primary.Work.Top-40);Label='oversized'}
+    }
+    foreach($story in $restoreCases) {
+        $origin=$story.Origin; $destination=$story.Destination
         foreach($maximized in @($false,$true)) {
-            $name="fullscreen-$($origin.Dpi)-$($destination.Dpi)-$maximized"; $case=Launch-Case $name
+            $name="fullscreen-$($origin.Dpi)-$($destination.Dpi)-$($destination.Work.Left)-$($story.Label)-$maximized"; $case=Launch-Case $name
             try {
                 $h=$case.Host
                 # Start on the chosen monitor, then set a known physical normal rect
                 # after Windows has finished its ordinary WM_DPICHANGED suggestion.
-                $r=New-Rect ($origin.Work.Left+150) ($origin.Work.Top+150) 900 600
+                $r=New-Rect ($origin.Work.Left+150) ($origin.Work.Top+150) $story.Width $story.Height
                 Move-Window $h $r; Move-Window $h $r; $initial=Sample "$name-initial" $h
                 Check "$name ordinary DPI" ($initial.Dpi -eq $origin.Dpi) $origin.Dpi $initial.Dpi
                 if($maximized){[void][DpiGeometry]::ShowWindow($h,3); Start-Sleep -Milliseconds 400}
@@ -254,7 +255,11 @@ try {
                 if($maximized){Check "$name restore maximized" $left.Zoomed $true $left.Zoomed; [void][DpiGeometry]::ShowWindow($h,9); Start-Sleep -Milliseconds 400}
                 $restored=Sample "$name-restored" $h
                 $scale=$destination.Dpi/[double]$origin.Dpi
-                $expected=New-Rect ($destination.Work.Left+150) ($destination.Work.Top+150) ([int][Math]::Round(900*$scale)) ([int][Math]::Round(600*$scale))
+                $expectedWidth=[Math]::Min($destination.Work.Right-$destination.Work.Left,[int][Math]::Round($story.Width*$scale))
+                $expectedHeight=[Math]::Min($destination.Work.Bottom-$destination.Work.Top,[int][Math]::Round($story.Height*$scale))
+                $expectedLeft=[Math]::Max($destination.Work.Left,[Math]::Min($destination.Work.Left+150,$destination.Work.Right-$expectedWidth))
+                $expectedTop=[Math]::Max($destination.Work.Top,[Math]::Min($destination.Work.Top+150,$destination.Work.Bottom-$expectedHeight))
+                $expected=New-Rect $expectedLeft $expectedTop $expectedWidth $expectedHeight
                 Check "$name restore geometry" (Rect-Equal $restored.Rect $expected) (Rect-Array $expected) (Rect-Array $restored.Rect)
                 Check "$name restore DPI" ($restored.Dpi -eq $destination.Dpi) $destination.Dpi $restored.Dpi
                 # Ordinary reverse move remains subject to the OS DPI suggestion.
