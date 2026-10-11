@@ -443,6 +443,27 @@ fn settingValueEql(a: SettingValue, b: SettingValue) bool {
 const SettingsTransaction = settings_transaction.Transaction(SettingField, SettingValue, settingValueEql);
 const setting_field_count = std.enums.values(SettingField).len;
 
+/// The lowest background opacity a live preview shows. The Background opacity
+/// field previews every keystroke, so typing 0.85 passes through 0 and the
+/// terminal window turns invisible until the next digit arrives. The floor
+/// applies to the preview of an edit only: the draft, the transaction and the
+/// saved value keep what was typed, and a rollback restores the exact
+/// original. A saved value already below the floor lowers it, so a preview
+/// never shows a window more transparent than the one the user already has.
+const preview_opacity_floor: f64 = 0.2;
+
+/// The value a live edit previews, which differs from the typed one only for
+/// the opacity floor above.
+fn previewValue(transaction: *const SettingsTransaction, typed: SettingValue) SettingValue {
+    switch (typed) {
+        .background_opacity => |opacity| {
+            const saved = (transaction.entryConst(.background_opacity) orelse return typed).current.background_opacity;
+            return .{ .background_opacity = @max(opacity, @min(preview_opacity_floor, saved)) };
+        },
+        else => return typed,
+    }
+}
+
 pub const ConflictResolution = SettingsTransaction.Resolution;
 pub const ApplyId = SettingsTransaction.ApplyId;
 
@@ -1065,6 +1086,10 @@ pub const SettingsWindow = struct {
     emphasis_font: HGDIOBJ = null,
     header_font: HGDIOBJ = null,
     theme_adapter: SettingsThemeAdapter = .{},
+    /// DPI the UI fonts were last built for, and how many times `themeChanged`
+    /// has actually re-themed the window (a test reads the latter).
+    ui_font_dpi: u32 = 0,
+    theme_applications: u32 = 0,
     close_prompt_measure_width: i32 = -1,
     close_prompt_measure_dpi: u32 = 0,
     close_prompt_measure_saving: bool = false,
@@ -1322,6 +1347,10 @@ pub const SettingsWindow = struct {
         } }, &effects) catch |err| {
             std.log.warn("settings: edit transaction failed field={s} err={}", .{ @tagName(field), err });
             return;
+        };
+        if (live_preview) for (emitted) |*effect| switch (effect.*) {
+            .set_preview => |*change| change.value = previewValue(transaction, change.value),
+            else => {},
         };
         self.dispatchEffects(emitted);
         self.refreshNativeSectionText();
@@ -1688,7 +1717,9 @@ pub const SettingsWindow = struct {
         if (self.handle.previewField) |preview| {
             for (transaction.entries) |entry| {
                 if (entry.dirty and entry.previewed) {
-                    preview(self.handle.ctx, entry.field, entry.draft);
+                    // The reload replaced the live config, so the draft is
+                    // previewed again, floored like the keystroke that made it.
+                    preview(self.handle.ctx, entry.field, previewValue(transaction, entry.draft));
                 }
             }
         }
@@ -2258,6 +2289,7 @@ pub const SettingsWindow = struct {
         const previous_secondary = self.secondary_font;
         const previous_emphasis = self.emphasis_font;
         const previous_header = self.header_font;
+        self.ui_font_dpi = self.dpi;
         self.ui_font = next;
         self.secondary_font = next_secondary;
         self.emphasis_font = next_emphasis;
@@ -2336,13 +2368,36 @@ pub const SettingsWindow = struct {
         noteSettingsInput(self, msg, wParam);
     }
 
+    /// Re-theme the window when something it was themed from has changed.
+    /// WM_SETTINGCHANGE, WM_SYSCOLORCHANGE and WM_THEMECHANGED also arrive for
+    /// settings that have nothing to do with it (Environment, taskbar, input),
+    /// and every App-level theme rebuild calls this too, so the callers cannot
+    /// tell. Doing the work anyway costs 80-200 ms of UI thread and blanks
+    /// every control, which is why the work is keyed on what it reads: the
+    /// resolved colors (High Contrast state included) and the DPI the fonts
+    /// were built for. Do not filter by the broadcast's lParam instead; system
+    /// font and High Contrast changes arrive under several names.
     pub fn themeChanged(self: *SettingsWindow) void {
-        if (self.hwnd) |hwnd| {
-            self.theme_adapter.apply(hwnd, self.resolveThemeColors());
-        }
+        const hwnd = self.hwnd orelse return;
+        const colors = self.resolveThemeColors();
+        if (self.themeInputsApplied(colors)) return;
+        self.theme_applications +%= 1;
+        self.theme_adapter.apply(hwnd, colors);
         self.recreateUiFont();
         layoutChildren(self);
-        if (self.hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 1);
+        _ = sys.InvalidateRect(hwnd, null, 1);
+    }
+
+    fn themeInputsApplied(self: *const SettingsWindow, colors: win32_theme.SettingsColors) bool {
+        // `apply` creates the four brushes independently, so a shortage of GDI
+        // objects can leave some of them null; any missing one retries.
+        return self.theme_adapter.window_brush != null and
+            self.theme_adapter.rail_brush != null and
+            self.theme_adapter.edit_brush != null and
+            self.theme_adapter.button_brush != null and
+            self.ui_font != null and
+            self.ui_font_dpi == self.dpi and
+            std.meta.eql(self.theme_adapter.colors, colors);
     }
 
     fn resolveThemeColors(self: *const SettingsWindow) win32_theme.SettingsColors {
@@ -4600,6 +4655,125 @@ test "settings numeric edits reject nonfinite floats and excessive padding" {
     _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("4294967295"));
     settings.syncPaddingFromEdit(.x);
     try std.testing.expect(settings.raw_scalar_error[@intFromEnum(RawScalarField.window_padding_x)] != null);
+}
+
+test "settings opacity preview is floored while the draft keeps the typed value" {
+    const Capture = struct {
+        previews: [8]f64 = undefined,
+        count: usize = 0,
+        fn preview(ctx: *anyopaque, field: SettingField, value: SettingValue) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (field != .background_opacity) return;
+            self.previews[self.count] = value.background_opacity;
+            self.count += 1;
+        }
+    };
+    const edit = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("EDIT"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 1, 1, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(edit);
+    // A saved opacity below the floor lowers it, so a preview never shows a
+    // window more transparent than the one the user already has.
+    for ([_]struct { saved: f64, floor: f64 }{
+        .{ .saved = 1.0, .floor = 0.2 },
+        .{ .saved = 0.1, .floor = 0.1 },
+    }) |case| {
+        var current = try Config.default(std.testing.allocator);
+        current.@"background-opacity" = case.saved;
+        var capture: Capture = .{};
+        var settings: SettingsWindow = .{
+            .handle = .{ .ctx = &capture, .alloc = std.testing.allocator, .hinstance = undefined, .chromeBg = undefined, .textPrimary = undefined, .openInEditor = undefined, .currentConfig = undefined, .saveAndReload = undefined, .notifySuccess = undefined, .onClosed = undefined, .previewField = Capture.preview },
+            .current = current,
+            .original = try current.clone(std.testing.allocator),
+            .pending = try current.clone(std.testing.allocator),
+            .edit_bg_opacity = edit,
+        };
+        settings.initTransaction();
+
+        // Typing 0.85: the intermediate 0 must not turn the window invisible.
+        _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0"));
+        settings.syncBgOpacityFromEdit();
+        try std.testing.expectEqual(@as(f64, 0), settings.pending.?.@"background-opacity");
+        try std.testing.expectEqual(@as(usize, 1), capture.count);
+        try std.testing.expectEqual(case.floor, capture.previews[0]);
+
+        // A config reload replaces the live config, so the draft is previewed
+        // again; that preview is floored too.
+        var reloaded = try Config.default(std.testing.allocator);
+        defer reloaded.deinit();
+        reloaded.@"background-opacity" = case.saved;
+        settings.externalConfigChanged(&reloaded, 100);
+        try std.testing.expectEqual(@as(usize, 2), capture.count);
+        try std.testing.expectEqual(case.floor, capture.previews[1]);
+
+        _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0.85"));
+        settings.syncBgOpacityFromEdit();
+        try std.testing.expectEqual(@as(f64, 0.85), settings.pending.?.@"background-opacity");
+        try std.testing.expectEqual(@as(f64, 0.85), capture.previews[2]);
+
+        // A rollback restores the saved value exactly, floor or not.
+        _ = sys.SetWindowTextW(edit, std.unicode.utf8ToUtf16LeStringLiteral("0"));
+        settings.syncBgOpacityFromEdit();
+        settings.clearPending();
+        try std.testing.expectEqual(case.saved, capture.previews[capture.count - 1]);
+    }
+}
+
+fn stubChromeBg(_: *anyopaque) COLORREF {
+    return 0x202020;
+}
+
+fn stubTextPrimary(_: *anyopaque) COLORREF {
+    return 0xF0F0F0;
+}
+
+fn stubHighContrast(ctx: *anyopaque) bool {
+    const active: *const bool = @ptrCast(@alignCast(ctx));
+    return active.*;
+}
+
+fn stubOpenInEditor(_: *anyopaque) void {}
+
+test "settings theme change with unchanged inputs rebuilds nothing" {
+    // Never shown, but large enough for `layoutChildren` to lay out a pane.
+    const window = sys.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC"), std.unicode.utf8ToUtf16LeStringLiteral(""), 0, 0, 0, 900, 700, null, null, null, null) orelse return error.Unexpected;
+    defer _ = sys.DestroyWindow(window);
+    var high_contrast = false;
+    var settings: SettingsWindow = .{
+        .handle = .{ .ctx = &high_contrast, .alloc = std.testing.allocator, .hinstance = undefined, .chromeBg = stubChromeBg, .textPrimary = stubTextPrimary, .highContrast = stubHighContrast, .openInEditor = stubOpenInEditor, .currentConfig = undefined, .saveAndReload = undefined, .notifySuccess = undefined, .onClosed = undefined },
+        .hwnd = window,
+    };
+    defer {
+        settings.theme_adapter.deinit();
+        for ([_]HGDIOBJ{ settings.ui_font, settings.secondary_font, settings.emphasis_font, settings.header_font }) |font| {
+            if (font) |handle| _ = DeleteObject(handle);
+        }
+    }
+
+    // The first broadcast themes the window; the unrelated ones after it
+    // (Environment, taskbar and input settings arrive as WM_SETTINGCHANGE too)
+    // find the same inputs and leave the 4 brushes and 4 fonts alone.
+    settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 1), settings.theme_applications);
+    for (0..3) |_| settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 1), settings.theme_applications);
+
+    // A change it reads still rebuilds: the High Contrast state, then the DPI.
+    high_contrast = true;
+    settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 2), settings.theme_applications);
+    try std.testing.expect(settings.theme_adapter.colors.high_contrast);
+    settings.dpi = 120;
+    settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 3), settings.theme_applications);
+    try std.testing.expectEqual(@as(u32, 120), settings.ui_font_dpi);
+    settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 3), settings.theme_applications);
+
+    // A brush that could not be created is retried by the next broadcast.
+    if (settings.theme_adapter.button_brush) |brush| _ = sys.DeleteObject(brush);
+    settings.theme_adapter.button_brush = null;
+    settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 4), settings.theme_applications);
+    try std.testing.expect(settings.theme_adapter.button_brush != null);
 }
 
 test "settings save command rechecks dispatch state" {
