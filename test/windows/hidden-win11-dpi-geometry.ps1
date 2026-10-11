@@ -327,10 +327,14 @@ try {
                 Move-Window $h $destination.Full; $moved=Sample "$name-moved" $h
                 Check "$name fullscreen destination DPI" ($moved.Dpi -eq $destination.Dpi) $destination.Dpi $moved.Dpi
                 $scale=$destination.Dpi/[double]$origin.Dpi
-                $expectedWidth=[Math]::Min($destination.Work.Right-$destination.Work.Left,[int][Math]::Round($story.Width*$scale))
-                $expectedHeight=[Math]::Min($destination.Work.Bottom-$destination.Work.Top,[int][Math]::Round($story.Height*$scale))
-                $expectedLeft=[Math]::Max($destination.Work.Left,[Math]::Min($destination.Work.Left+150,$destination.Work.Right-$expectedWidth))
-                $expectedTop=[Math]::Max($destination.Work.Top,[Math]::Min($destination.Work.Top+150,$destination.Work.Bottom-$expectedHeight))
+                # Windows can cap the requested starting rectangle on smaller
+                # displays. Restore the accepted size and work-area offset.
+                $expectedWidth=[Math]::Min($destination.Work.Right-$destination.Work.Left,[int][Math]::Round(($initial.Rect.Right-$initial.Rect.Left)*$scale))
+                $expectedHeight=[Math]::Min($destination.Work.Bottom-$destination.Work.Top,[int][Math]::Round(($initial.Rect.Bottom-$initial.Rect.Top)*$scale))
+                $translatedLeft=$initial.Rect.Left+$destination.Work.Left-$origin.Work.Left
+                $translatedTop=$initial.Rect.Top+$destination.Work.Top-$origin.Work.Top
+                $expectedLeft=[Math]::Max($destination.Work.Left,[Math]::Min($translatedLeft,$destination.Work.Right-$expectedWidth))
+                $expectedTop=[Math]::Max($destination.Work.Top,[Math]::Min($translatedTop,$destination.Work.Bottom-$expectedHeight))
                 $expected=New-Rect $expectedLeft $expectedTop $expectedWidth $expectedHeight
                 Key $h 122
                 $left=Wait-WindowState $h {param($s) if($maximized){$s.Zoomed}else{Rect-Equal $s.Rect $expected}}
