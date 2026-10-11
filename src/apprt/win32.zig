@@ -3581,6 +3581,9 @@ pub const App = struct {
     session_state_excluded_for_elevation: bool = false,
     config_revision: u64 = 1,
     resolved_theme: ThemeColors = darkTheme(),
+    /// Completed `reconfigureTheme` passes; a test reads it to prove that a
+    /// settings preview which cannot change the theme does not run one.
+    theme_rebuilds: u32 = 0,
     hinstance: HINSTANCE,
     class_atom: ATOM = 0,
     host_class_atom: ATOM = 0,
@@ -8293,6 +8296,7 @@ pub const App = struct {
             }
         }
         for (self.windows.items) |surface| surface.invalidateScrollbarWindow();
+        self.theme_rebuilds +%= 1;
         self.settings_window.themeChanged();
     }
 
@@ -23746,12 +23750,62 @@ fn settingsPreviewFieldThunk(
         .auto_update => app.config.@"auto-update" = value.auto_update,
         .auto_update_channel => app.config.@"auto-update-channel" = value.auto_update_channel,
     }
-    app.reconfigureTheme();
-    for (app.windows.items) |surface| {
-        surface.applyRuntimeConfig(&app.config) catch |err| {
-            log.warn("settings live preview apply failed field={} err={}", .{ field, err });
-        };
+    switch (settingsPreviewEffect(field)) {
+        .none => {},
+        .theme => app.reconfigureTheme(),
+        .opacity => for (app.windows.items) |surface| {
+            surface.applyRuntimeConfig(&app.config) catch |err| {
+                log.warn("settings live preview apply failed field={} err={}", .{ field, err });
+            };
+        },
     }
+}
+
+/// What a live preview of `field` has to refresh once it is written to
+/// `app.config`. Rebuilding the theme costs 80-150 ms of UI thread (every host's
+/// brushes, fonts and DWM attributes, a forced redraw of everything, then the
+/// Settings window), and the preview fires on every keystroke, so each field
+/// gets only the work that shows it. Font size, padding, cursor style and
+/// blur have no consumer on a live surface, which reads its own copy of the
+/// config: the written value reaches terminals created afterwards, and
+/// `Surface.applyRuntimeConfig` reads none of them. A previewed field that
+/// gains one must be listed here.
+const PreviewEffect = enum { none, theme, opacity };
+
+fn settingsPreviewEffect(field: win32_settings.SettingField) PreviewEffect {
+    return switch (field) {
+        // `resolveTheme` reads `window-theme`, nothing else a preview edits.
+        .window_theme => .theme,
+        // The layered alpha of the host window is the only thing that makes
+        // `background-opacity` visible on Win32.
+        .background_opacity => .opacity,
+        else => .none,
+    };
+}
+
+test "settings live preview refreshes only what the field shows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core = try CoreApp.create(std.testing.allocator);
+    defer core.destroy();
+    var app: App = undefined;
+    try app.init(core, .{});
+    defer app.terminate();
+
+    const baseline = app.theme_rebuilds;
+    settingsPreviewFieldThunk(&app, .font_size, .{ .font_size = 14 });
+    settingsPreviewFieldThunk(&app, .window_padding_x, .{ .window_padding_x = .{ .top_left = 4, .bottom_right = 4 } });
+    settingsPreviewFieldThunk(&app, .window_padding_y, .{ .window_padding_y = .{ .top_left = 4, .bottom_right = 4 } });
+    settingsPreviewFieldThunk(&app, .cursor_style, .{ .cursor_style = .underline });
+    settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
+    try std.testing.expectEqual(baseline, app.theme_rebuilds);
+    // The write itself still happens: it is what a new terminal inherits.
+    try std.testing.expectEqual(@as(f32, 14), app.config.@"font-size");
+    try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
+
+    settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
+    try std.testing.expectEqual(baseline + 1, app.theme_rebuilds);
+    try std.testing.expect(app.config.@"window-theme" == .light);
 }
 fn settingsNotifyConflictThunk(ctx: *anyopaque, field: win32_settings.SettingField) void {
     const app: *App = @ptrCast(@alignCast(ctx));
