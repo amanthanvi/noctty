@@ -121,10 +121,15 @@ dumps, and SSH host cache go there.
   have no Noctty config file, the Settings window saves to one of the older
   files Noctty does read, `ghostty\config` or `winghostty\config.ghostty`, if
   one exists, rather than creating a new Noctty config.
-- **Session restore:** `session-state.json`, saved when Noctty closes, except
-  in safe mode, when Noctty runs as administrator through UAC, when it was
-  started to run one command (`-e` or `initial-command`), without an initial
-  window (`initial-window = false`), or from its startup profile picker, or
+- **Session restore:** `session-state.json`, saved when Noctty closes, when
+  you sign out or shut down, and when the display configuration changes, by
+  the one Noctty process that owns it: one started normally, which holds
+  `session-state.json.lock` while it runs. Other Noctty processes (a second
+  instance, an "Open noctty here" window, a default terminal handoff) never
+  write it. It is not saved in safe mode, when Noctty runs as administrator
+  through UAC, when it was started to run one command (`-e` or
+  `initial-command`), without an initial window (`initial-window = false`),
+  or from its startup profile picker, or
   if you set `window-save-state = never`. It holds window positions and sizes,
   tabs and splits, each pane's shell profile and last working directory as
   reported by the shell, and titles you gave tabs or panes. It holds terminal

@@ -68,7 +68,7 @@ the normal packaged app environment.
 | Path                                       | Purpose                                                                                                                                                                                                                                                           |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `%LOCALAPPDATA%\noctty\config.ghostty`     | User config, written on first launch.                                                                                                                                                                                                                             |
-| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved on exit except in safe mode, when elevated through UAC, when started with `-e` / `initial-command`, `initial-window = false` or the startup profile picker, or with `window-save-state = never`. |
+| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state, saved only by the noctty process that owns it (see Session restore and recovery), and never in safe mode, when elevated through UAC, or with `window-save-state = never`.                              |
 | `%LOCALAPPDATA%\noctty\layouts\`           | Named layouts, stored as one-window session-state JSON documents.                                                                                                                                                                                                 |
 | `%LOCALAPPDATA%\noctty\crash\`             | Local crash dumps. Nothing here is uploaded automatically.                                                                                                                                                                                                        |
 | `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                                                                                                                                                                                        |
@@ -751,6 +751,24 @@ and the whole snapshot sits above the live prompt in scrollback so the
 shell's startup repaint cannot destroy it. Engaging `toggle_secure_input`
 once excludes that pane from snapshots for the rest of the session, even if
 the indicator is later turned off.
+
+One noctty process owns the saved session: the first one started normally,
+which restores it (or opens its first window when there is nothing to
+restore). Only that process saves it, on exit, at sign-out, shutdown or
+reboot, and when the display configuration changes. The save at sign-out,
+shutdown or reboot is the last one and never deletes the file, even with no
+windows left: the sign-out also ends the shells, so an empty window list
+then says nothing about what was closed on purpose. A launch that forwards
+to a running noctty, a window opened with `--working-directory` (Explorer's
+"Open noctty here" and the jump list's recent folders) or with `-e` or
+`initial-command`, the startup profile picker, a `--launch-layout` or
+`initial-window = false` run, a default terminal handoff and a second
+instance under `single-instance = false` start without the saved session and
+leave it untouched when they exit. When one of these is the first noctty
+running, windows later forwarded into it are not saved either, and the saved
+session stays as it was until a normally started noctty owns it again. The
+owner holds `session-state.json.lock` while it runs, so a second instance
+does not restore the same windows again.
 
 If the session-state file is unreadable, noctty moves it aside to a sibling
 with a `.corrupt` suffix, logs the failure, and starts with a fresh window.

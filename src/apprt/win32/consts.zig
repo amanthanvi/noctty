@@ -129,6 +129,9 @@ pub const WM_RBUTTONUP = 0x0205;
 pub const WM_SETCURSOR = 0x0020;
 pub const WM_SETFOCUS = 0x0007;
 pub const WM_SETTINGCHANGE = 0x001A;
+pub const ENDSESSION_CLOSEAPP: usize = 0x00000001;
+pub const WM_ENDSESSION = 0x0016;
+pub const WM_DISPLAYCHANGE = 0x007E;
 pub const WM_SIZE = 0x0005;
 pub const WM_SHOWWINDOW = 0x0018;
 pub const WM_WINDOWPOSCHANGED = 0x0047;
@@ -155,6 +158,8 @@ pub const WM_WINHOSTTY_RENDER_TRACE_TARGET = WM_APP + 9;
 /// Posted, never sent: the events must not be raised from inside the
 /// handler that changed the state.
 pub const WM_WINHOSTTY_UIA_CAPTION_SYNC = WM_APP + 10;
+/// Save the session from the message loop (see WM_DISPLAYCHANGE).
+pub const WM_WINHOSTTY_SESSION_CHECKPOINT = WM_APP + 11;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
