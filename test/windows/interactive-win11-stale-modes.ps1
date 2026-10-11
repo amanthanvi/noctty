@@ -2,9 +2,10 @@
 param(
     [string] $ExePath,
     [string] $RunRoot,
-    [ValidateSet('cmd', 'pwsh')] [string[]] $Shells = @('cmd', 'pwsh'),
+    [ValidateNotNullOrEmpty()] [ValidateSet('cmd', 'pwsh')] [string[]] $Shells = @('cmd', 'pwsh'),
     [ValidateSet('All', 'Modes', 'Paste')] [string] $Scenario = 'Modes',
     [int] $TimeoutSeconds = 30,
+    [switch] $RequireAdoptedStartupBaseline,
     [switch] $ExerciseParentTimeout,
     [switch] $Worker
 )
@@ -13,6 +14,7 @@ param(
 # Each case owns a portable copy, redirected AppData, and a hidden desktop.
 # Paste additionally requires its own windowstation: clipboard is shared
 # between a station's desktops. Modes alone never access the clipboard.
+# Paste targets cmd only; All runs both mode checks and the cmd paste check.
 # PowerShell loads the copied integration manually so history is redirected
 # before the first interactive prompt. This does not test auto-injection.
 # Marker files prove commands ran; input echo alone is not an oracle.
@@ -22,6 +24,8 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $ExePath) { $ExePath = Join-Path $repoRoot 'zig-out\bin\noctty.exe' }
 if (-not $RunRoot) { $RunRoot = Join-Path $repoRoot ('.zig-cache\pkg16\stale-modes-' + [guid]::NewGuid().ToString('N')) }
 if ($TimeoutSeconds -lt 1) { throw 'TimeoutSeconds must be positive.' }
+if ($Scenario -eq 'Paste' -and $Shells -contains 'pwsh') { throw 'Paste supports cmd only; use -Shells cmd.' }
+if (-not $Worker -and $Scenario -eq 'All' -and $Shells -notcontains 'cmd') { throw 'All requires cmd for its paste check; use -Shells cmd,pwsh.' }
 if ($ExerciseParentTimeout -and $Scenario -ne 'Modes') { throw 'Timeout exercise requires -Scenario Modes.' }
 
 function Get-Fingerprint([string] $Path) {
@@ -228,8 +232,12 @@ if (-not $Worker) {
     $realStartup = Join-Path $env:LOCALAPPDATA 'noctty\startup-attempts.json'
     $startupBefore = Get-Fingerprint $realStartup
     $expectedHash = '7B4F9AA31731DF822E3EC13F8381E76DC759455ABBF8BB458F74E10BF5E2BB9C'
-    if ((Get-FileHash -LiteralPath $realStartup).Hash -ne $expectedHash -or
-        (Get-Item -LiteralPath $realStartup).LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss') -ne '2026-10-10T18:18:34') {
+    # The campaign opts into its adopted incident baseline. Other profiles,
+    # including an absent startup ledger, use the captured preservation check.
+    if ($RequireAdoptedStartupBaseline -and
+        ($startupBefore -eq 'absent' -or
+        (Get-FileHash -LiteralPath $realStartup).Hash -ne $expectedHash -or
+        (Get-Item -LiteralPath $realStartup).LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss') -ne '2026-10-10T18:18:34')) {
         throw 'Real startup-attempts.json differs from the adopted incident baseline; no launch performed.'
     }
     # GetFolderPath deliberately ignores redirected APPDATA, as PSReadLine does.
