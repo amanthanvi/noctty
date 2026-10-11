@@ -78,6 +78,12 @@ pub fn canProbeShell(line: []const u8) bool {
     return !quoted;
 }
 
+/// An unresolved direct executable uses Windows process search, which is not
+/// the shell's child-PATH search below. Probe only the exact prepared path.
+pub fn canProbeDirect(exe: []const u8) bool {
+    return isLocalAbsolute(exe);
+}
+
 /// cmd.exe /C runs user/machine AutoRun hooks before the WSL command. We
 /// cannot verify their resulting environment without running them again.
 /// Check for absence only, without reading or logging any hook contents.
@@ -611,6 +617,19 @@ test "launchArgv finds a WSL launch in either command form" {
     try std.testing.expectEqual(null, try launchArgv(alloc, &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "echo wsl.exe" }, true));
     try std.testing.expectEqual(null, try launchArgv(alloc, &.{ "pwsh.exe", "-NoLogo" }, false));
     try std.testing.expectEqual(null, try launchArgv(alloc, &.{}, false));
+}
+
+test "automatic TERM refuses unresolved direct executables" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    for ([_][]const u8{
+        "wsl.exe",                    ".\\wsl.exe",           "C:wsl.exe", "\\wsl.exe",
+        "\\\\server\\share\\wsl.exe", "\\\\.\\pipe\\wsl.exe",
+    }) |exe| try std.testing.expect(!canProbeDirect(exe));
+    const cwd = try std.process.getCwdAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const exe = try std.fs.path.join(std.testing.allocator, &.{ cwd, "wsl.exe" });
+    defer std.testing.allocator.free(exe);
+    try std.testing.expect(canProbeDirect(exe));
 }
 
 test "automatic TERM is limited to one reproducible shell command" {

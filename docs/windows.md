@@ -215,6 +215,9 @@ and noctty preserves its normal execution rather than running it twice.
 The probe uses the exact executable without `PATHEXT` script fallback and
 honors CMD's `NoDefaultCurrentDirectoryInExePath` choice. Per-tab surface IDs
 do not split the cache unless the user lists them in `WSLENV`.
+Direct launches keep the fallback if their prepared executable is still a
+bare or relative name: Windows process search can select a different binary
+from the probe's shell search.
 
 `ssh.exe` is different. It sends the PTY's `TERM` by itself, and the other
 variables travel only through the opt-in `ssh-env` shell integration feature
