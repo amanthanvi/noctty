@@ -1,0 +1,73 @@
+# cmd at its prompt on the bottom row; the search bar takes two rows and
+# gives them back. Measured (search-bar-cmd): the shrink drops ConPTY's top
+# two rows, the grow adds two blank rows at the bottom, and ConPTY's cursor
+# ends on row 17.
+size 80 20
+pty conpty
+seq L 1 40
+send \r\nsync>
+resize 80 18
+expect
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>
+end
+cursor 5 17
+resize 80 20
+expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>
+end
+cursor 5 17 xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+send \e[18;6Hecho synced
+expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>echo synced
+end

@@ -84,4 +84,7 @@ test {
     _ = @import("hash_map.zig");
     _ = @import("ref_counted_set.zig");
     _ = @import("size.zig");
+
+    // Fork: golden replays of application-shaped streams through resizes.
+    _ = @import("resize_replay.zig");
 }

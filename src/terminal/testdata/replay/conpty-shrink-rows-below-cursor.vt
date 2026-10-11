@@ -1,0 +1,57 @@
+# Rows R01..R20 with the cursor parked on R06 (a TUI footer, a PSReadLine
+# ListView) and the window shrinks to 8 rows. Measured
+# (shrink-rows-below-cursor-powershell): ConPTY keeps the cursor's row on
+# screen, as its top row, and drops what no longer fits below it. The
+# program then writes at the cursor.
+size 80 20
+pty conpty
+send \e[H\e[2J
+seq R0 1 9
+seq R 10 20
+send \e[5;1H
+expect
+|R02
+|R03
+|R04
+|R05
+|R06
+|R07
+|R08
+|R09
+|R10
+|R11
+|R12
+|R13
+|R14
+|R15
+|R16
+|R17
+|R18
+|R19
+|R20
+end
+cursor 0 4
+resize 80 8
+expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
+|R06
+|R07
+|R08
+|R09
+|R10
+|R11
+|R12
+|R13
+end
+cursor 0 0
+send \e[1;1H<W1>
+expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
+|<W1>
+|R07
+|R08
+|R09
+|R10
+|R11
+|R12
+|R13
+end
+cursor 4 0

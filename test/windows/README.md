@@ -303,6 +303,28 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-resize.ps1 -ResetState -TimeoutSeconds 15
 ```
 
+## interactive-win11-conpty-sync.ps1
+
+Differential check that noctty's screen agrees with ConPTY's own buffer after
+resizes, the search bar, splits, maximize, minimize and full-screen programs.
+Each scenario starts a portable copy of noctty on a hidden desktop, puts cmd,
+Windows PowerShell or pwsh into a known state, applies the trigger, and
+compares noctty's visible rows (UIA `TextPattern`) with ConPTY's (a helper that
+attaches to the shell's console and reads it with `ReadConsoleOutputW`), then
+types a marker and compares again. It never takes the foreground or touches
+the real profile, and it redirects PSReadLine's history (which ignores
+`APPDATA`) into the sandbox.
+
+Scenarios marked `Expect = 'desync'` are known bugs: they pass while they
+still differ and fail once they stop, so the fix removes the mark. `-Scenario`
+runs a subset and `-ListScenarios` lists them. Missing optional programs
+(`pwsh.exe`, Git for Windows' `vim.exe`) skip their scenarios. The headless
+counterpart is `src/terminal/resize_replay.zig`.
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-conpty-sync.ps1 -ResetState
+```
+
 ## interactive-win11-ime-candidate.ps1
 
 Interactive Win11 validation for IME candidate anchoring. It launches

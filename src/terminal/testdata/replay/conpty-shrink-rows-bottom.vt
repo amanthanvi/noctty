@@ -1,0 +1,38 @@
+# cmd at its prompt on the bottom row and the window shrinks by 8 rows.
+# Measured (shrink-rows-bottom-cmd): ConPTY drops its top rows and keeps the
+# prompt on the bottom row, which is what the terminal does too.
+size 80 20
+pty conpty
+seq L 1 40
+send \r\nsync>
+resize 80 12
+expect
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>
+end
+cursor 5 11
+send \e[12;6Hecho synced
+expect
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>echo synced
+end

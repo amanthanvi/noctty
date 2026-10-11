@@ -1,0 +1,79 @@
+# cmd at its prompt on the bottom row, then the window grows by 9 rows.
+# Measured (interactive-win11-conpty-sync.ps1, grow-rows-cmd): ConPTY keeps
+# every row where it was and adds blank rows below; its cursor stays on row
+# 19. cmd's line editor then draws typed text at ConPTY's cursor row.
+size 80 20
+pty conpty
+seq L 1 40
+send \r\nsync>
+expect
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>
+end
+cursor 5 19
+resize 80 29
+expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>
+end
+cursor 5 19 xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+send \e[20;6Hecho synced
+expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>echo synced
+end
+cursor 16 19
