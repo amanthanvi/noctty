@@ -40765,8 +40765,13 @@ test "security regression win32 link opener allows local junctions without PATHE
     defer alloc.free(target);
     const junction = try std.fs.path.join(alloc, &.{ root, "junction" });
     defer alloc.free(junction);
-    // Junction creation needs no symlink privilege or developer mode.
-    const result = try std.process.Child.run(.{ .allocator = alloc, .argv = &.{ "C:\\Windows\\System32\\cmd.exe", "/d", "/c", "mklink", "/J", junction, target } });
+    // Junction creation needs no symlink privilege or developer mode. Windows
+    // need not live in C:\Windows, so take cmd.exe from SystemRoot.
+    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    defer alloc.free(system_root);
+    const cmd_exe = try std.fs.path.join(alloc, &.{ system_root, "System32", "cmd.exe" });
+    defer alloc.free(cmd_exe);
+    const result = try std.process.Child.run(.{ .allocator = alloc, .argv = &.{ cmd_exe, "/d", "/c", "mklink", "/J", junction, target } });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
     try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, result.term);
