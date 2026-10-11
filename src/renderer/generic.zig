@@ -851,6 +851,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
 
             try result.initShaders();
+            errdefer result.deinitShaders();
 
             // Ensure our undefined values above are correctly initialized.
             result.updateFontGridUniforms();
