@@ -383,7 +383,8 @@ pub const Option = enum(c_int) {
     color_palette = 14,
 
     /// Upstream libghostty-vt numbers options this fork doesn't have yet,
-    /// so this keeps upstream's value.
+    /// so these keep upstream's values.
+    resize_pull_scrollback = 40,
     program_status = 46,
 
     /// Input type expected for setting the option.
@@ -402,6 +403,7 @@ pub const Option = enum(c_int) {
             .title, .pwd => ?*const lib.String,
             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
             .color_palette => ?*const color.PaletteC,
+            .resize_pull_scrollback => ?*const bool,
         };
     }
 };
@@ -453,6 +455,8 @@ fn setTyped(
             else
                 null;
         },
+        .resize_pull_scrollback => wrapper.terminal.flags.resize_pull_scrollback =
+            if (value) |ptr| ptr.* else true,
         .title => {
             const str = if (value) |v| v.ptr[0..v.len] else "";
             wrapper.terminal.setTitle(str) catch return .out_of_memory;
@@ -1303,6 +1307,29 @@ test "grid_ref null terminal" {
         .tag = .active,
         .value = .{ .active = .{ .x = 0, .y = 0 } },
     }, &out_ref));
+}
+
+test "set resize pull scrollback" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback = 0,
+        },
+    ));
+    defer free(t);
+    try testing.expect(t.?.terminal.flags.resize_pull_scrollback);
+
+    const disabled = false;
+    try testing.expectEqual(Result.success, set(t, .resize_pull_scrollback, &disabled));
+    try testing.expect(!t.?.terminal.flags.resize_pull_scrollback);
+
+    // NULL restores the default.
+    try testing.expectEqual(Result.success, set(t, .resize_pull_scrollback, null));
+    try testing.expect(t.?.terminal.flags.resize_pull_scrollback);
 }
 
 test "set write_pty callback" {

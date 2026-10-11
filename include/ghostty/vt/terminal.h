@@ -737,6 +737,35 @@ typedef enum {
    * Input type: GhosttyTerminalProgramStatusFn
    */
   GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS = 46,
+
+  /**
+   * Set whether a resize may pull rows out of scrollback back into the
+   * active area.
+   *
+   * When true, growing rows reveals scrollback if the cursor is on the
+   * bottom row, and a column reflow that needs fewer rows reveals
+   * scrollback as well. When false, growing rows always appends blank rows
+   * at the bottom and a column reflow keeps the top of the active area on
+   * the same content, so a line that is fully in scrollback stays there. A
+   * soft-wrapped line with at least one row still in the active area may
+   * still unwrap back into view. A shrink that would push the cursor's row
+   * into scrollback drops the rows below the cursor that do not fit
+   * instead, as such a pty does.
+   *
+   * Set this to false when the pty keeps its own screen buffer without
+   * scrollback, since it cannot pull rows back and will otherwise disagree
+   * with the terminal about the screen contents after a resize. Windows
+   * ConPTY is the motivating case.
+   *
+   * This is preserved across a full reset (RIS).
+   *
+   * A NULL value pointer resets to the built-in default of true.
+   *
+   * The value matches upstream libghostty-vt.
+   *
+   * Input type: bool*
+   */
+  GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK = 40,
 } GhosttyTerminalOption;
 
 /**

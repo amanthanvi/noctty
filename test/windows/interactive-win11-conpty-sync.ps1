@@ -34,9 +34,10 @@ param(
 # It then types a marker without Enter and compares again: that is the write
 # that lands on the wrong row when the views disagree.
 #
-# Scenarios marked `Expect = 'desync'` reproduce known bugs (F015, F032;
-# PKG-14). They pass while they still desync (XFAIL) and FAIL once they stop
-# desyncing (XPASS), so the fix has to remove the mark.
+# Scenarios marked `Expect = 'desync'` reproduce known gaps. They pass while
+# they still desync (XFAIL) and FAIL once they stop desyncing (XPASS), so a
+# fix has to remove the mark. `IgnoreRows` leaves out rows a scenario
+# explains, so the rest must still agree.
 #
 # Input is window messages to the terminal HWND: no SendInput, no foreground,
 # no mouse. Every noctty this runs is a copy with a `noctty.portable` marker in
@@ -394,10 +395,11 @@ if ($Inner) {
         return $script:SyncCluster.Replace($Text.TrimEnd(), $script:SyncClusterEvaluator)
     }
 
-    function Compare-SyncViews([string[]] $Noctty, $Conpty) {
+    function Compare-SyncViews([string[]] $Noctty, $Conpty, [int[]] $IgnoreRows = @()) {
         $rows = [Math]::Max($Noctty.Count, $Conpty.Lines.Count)
         $diff = New-Object System.Collections.Generic.List[string]
         for ($i = 0; $i -lt $rows; $i++) {
+            if ($IgnoreRows -contains $i) { continue }
             $a = if ($i -lt $Noctty.Count) { $Noctty[$i] } else { '' }
             $b = if ($i -lt $Conpty.Lines.Count) { $Conpty.Lines[$i] } else { '' }
             if ((Get-SyncNormalized $a) -cne (Get-SyncNormalized $b)) {
@@ -430,7 +432,7 @@ if ($Inner) {
             if ($now -gt $deadline) { break }
             Start-Sleep -Milliseconds 150
         }
-        $cmp = Compare-SyncViews $noctty $conpty
+        $cmp = Compare-SyncViews $noctty $conpty @($Ctx.IgnoreRows)
         $file = Join-Path $script:Evidence ('{0}-{1}.txt' -f $Ctx.Name, $Label)
         $body = @("conpty: $($conpty.Header)", "diff rows=$($cmp.Rows) settled=$settled") + $cmp.Lines +
             @('--- noctty ---') + $noctty + @('--- conpty ---') + $conpty.Lines
@@ -614,6 +616,19 @@ if ($Inner) {
         Wait-SyncText $Ctx 'R20'
     }
 
+    # Run a full-screen program with `$Command`, maximize while it is up,
+    # then leave it.
+    function Invoke-SyncAltScreenMaximize($Ctx, [string] $Command) {
+        $before = Read-SyncConpty $Ctx.ShellPid
+        Send-SyncText $Ctx.Surface ($Command + "`r")
+        Wait-SyncText $Ctx 'ALT SCREEN'
+        [void][NocttyConptySyncNative]::ShowWindow($Ctx.Host, 3) # SW_MAXIMIZE
+        [void](Wait-SyncGrid $Ctx { param($d) $d.Rows -gt $before.Rows } 'maximized grid')
+        Start-Sleep -Milliseconds 500
+        Send-SyncKey $Ctx.Surface 0x51 ([int][char]'q')
+        Wait-SyncCondition -Description 'left the alternate screen' -Condition { -not (((Read-SyncNoctty $Ctx.Surface) -join "`n").Contains('ALT SCREEN')) }
+    }
+
     function Get-SyncVim {
         $vim = Get-Command vim.exe -ErrorAction Ignore | Select-Object -First 1
         if ($vim) { return $vim.Source }
@@ -685,7 +700,7 @@ if ($Inner) {
             Trigger = { param($c) }
         }
         [pscustomobject]@{
-            Name = 'grow-rows-cmd'; Shell = 'cmd'; Expect = 'desync'; Finding = 'F015'
+            Name = 'grow-rows-cmd'; Shell = 'cmd'; Expect = 'sync'; Finding = 'F015'
             Description = 'enlarge the window with the prompt at the bottom'
             Setup = { param($c) Invoke-SyncFill $c }
             Trigger = {
@@ -696,7 +711,7 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
-            Name = 'search-bar-cmd'; Shell = 'cmd'; Expect = 'desync'; Finding = 'F015'
+            Name = 'search-bar-cmd'; Shell = 'cmd'; Expect = 'sync'; Finding = 'F015'
             Description = 'open and close the search bar with the prompt at the bottom'
             Setup = { param($c) Invoke-SyncFill $c }
             Trigger = {
@@ -709,7 +724,7 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
-            Name = 'split-cmd'; Shell = 'cmd'; Expect = 'desync'; Finding = 'F015'
+            Name = 'split-cmd'; Shell = 'cmd'; Expect = 'sync'; Finding = 'F015'
             Description = 'open a split below and close it again'
             Setup = { param($c) Invoke-SyncFill $c }
             Trigger = {
@@ -727,7 +742,7 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
-            Name = 'maximize-cmd'; Shell = 'cmd'; Expect = 'desync'; Finding = 'F015'
+            Name = 'maximize-cmd'; Shell = 'cmd'; Expect = 'sync'; Finding = 'F015'
             Description = 'maximize with the prompt at the bottom'
             Setup = { param($c) Invoke-SyncFill $c }
             Trigger = {
@@ -797,7 +812,7 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
-            Name = 'vim-maximize-powershell'; Shell = 'powershell'; Expect = 'desync'; Finding = 'F015'
+            Name = 'vim-maximize-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F015'
             Description = 'run vim, maximize, quit vim'
             Requires = { if (-not (Get-SyncVim)) { 'vim.exe (Git for Windows) is not installed' } }
             Setup = { param($c) Invoke-SyncFill $c }
@@ -824,8 +839,12 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
-            Name = 'narrow-widen-powershell'; Shell = 'powershell'; Expect = 'desync'; Finding = 'F015'
+            Name = 'narrow-widen-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F015'
             Description = 'narrow until lines wrap, then widen back, prompt at the bottom'
+            # ConPTY lost the head of the line that scrolled off its top while
+            # narrow and shows only its tail on row 0; noctty still has the
+            # head in scrollback and unwraps the whole line back into row 0.
+            IgnoreRows = @(0)
             Setup = {
                 param($c)
                 Send-SyncText $c.Surface ("1..40 | % { 'L{0:D2} ' -f `$_ + 'w' * 60 }`r")
@@ -843,24 +862,32 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
-            Name = 'altscreen-maximize-powershell'; Shell = 'powershell'; Expect = 'desync'; Finding = 'F015'
+            Name = 'altscreen-maximize-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F015'
             Description = 'maximize while a full-screen program runs, then leave it (the vim exit case)'
             Setup = { param($c) Invoke-SyncFill $c }
             Trigger = {
                 param($c)
-                $before = Read-SyncConpty $c.ShellPid
-                $app = "[Console]::Write([char]27 + '[?1049h' + [char]27 + '[HALT' + ' SCREEN'); [void][Console]::ReadKey(`$true); [Console]::Write([char]27 + '[?1049l')"
-                Send-SyncText $c.Surface ($app + "`r")
-                Wait-SyncText $c 'ALT SCREEN'
-                [void][NocttyConptySyncNative]::ShowWindow($c.Host, 3) # SW_MAXIMIZE
-                [void](Wait-SyncGrid $c { param($d) $d.Rows -gt $before.Rows } 'maximized grid')
-                Start-Sleep -Milliseconds 500
-                Send-SyncKey $c.Surface 0x51 ([int][char]'q')
-                Wait-SyncCondition -Description 'left the alternate screen' -Condition { -not (((Read-SyncNoctty $c.Surface) -join "`n").Contains('ALT SCREEN')) }
+                # Started from a command short enough not to wrap; see the
+                # wrapped variant below.
+                Invoke-SyncAltScreenMaximize $c "iex (gc -raw `$env:NOCTTY_SYNC_ALTAPP)"
             }
         }
         [pscustomobject]@{
-            Name = 'shrink-rows-below-cursor-powershell'; Shell = 'powershell'; Expect = 'desync'; Finding = 'F032'
+            Name = 'altscreen-wrapped-maximize-powershell'; Shell = 'powershell'; Expect = 'desync'; Finding = 'saved cursor'
+            Description = 'the same, started from a command line that wraps'
+            Setup = { param($c) Invoke-SyncFill $c }
+            Trigger = {
+                param($c)
+                # The maximize unwraps the command line above the cursor that
+                # the full-screen program saved. noctty moves that saved
+                # cursor with its row; conhost restores it at its old
+                # coordinates, one row lower, so the next prompt lands one row
+                # apart (2 rows differ).
+                Invoke-SyncAltScreenMaximize $c "[Console]::Write([char]27 + '[?1049h' + [char]27 + '[HALT' + ' SCREEN'); [void][Console]::ReadKey(`$true); [Console]::Write([char]27 + '[?1049l')"
+            }
+        }
+        [pscustomobject]@{
+            Name = 'shrink-rows-below-cursor-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F032'
             Description = 'rows shrink with 15 rows of content below the cursor'
             Setup = { param($c) Invoke-SyncParkCursor $c }
             Trigger = {
@@ -875,7 +902,7 @@ if ($Inner) {
             NoMarker = $true
         }
         [pscustomobject]@{
-            Name = 'shrink-cols-below-cursor-powershell'; Shell = 'powershell'; Expect = 'desync'; Finding = 'F032'
+            Name = 'shrink-cols-below-cursor-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F032'
             Description = 'columns shrink so the 60-column rows below the cursor wrap'
             Setup = { param($c) Invoke-SyncParkCursor $c 60 }
             Trigger = {
@@ -918,6 +945,7 @@ if ($Inner) {
                 continue
             }
             $ctx = Start-SyncNoctty $s.Name $s.Shell $s.PSReadLine @($s.History)
+            $ctx | Add-Member -NotePropertyName IgnoreRows -NotePropertyValue @($s.IgnoreRows | Where-Object { $null -ne $_ })
             & $s.Setup $ctx
             $before = Get-SyncComparison $ctx 'before'
             $result.Before = $before.Diff
@@ -1023,6 +1051,15 @@ foreach ($file in @('noctty.exe', 'conpty.dll', 'OpenConsole.exe')) {
 Copy-Item -LiteralPath (Join-Path $zigOut 'share') -Destination (Join-Path $runRoot 'share') -Recurse
 Set-Content -LiteralPath (Join-Path $runRoot 'bin\noctty.portable') -Value 'conpty-sync harness' -Encoding ASCII
 Copy-Item -LiteralPath (Join-Path $repoRoot 'src\shell-integration\powershell\integration.ps1') -Destination (Join-Path $runRoot 'tools')
+# A full-screen program for the alternate-screen scenarios. Its path reaches
+# the shell through the environment so the command that runs it stays short.
+$altApp = Join-Path $runRoot 'tools\altapp.ps1'
+Set-Content -LiteralPath $altApp -Encoding ASCII -Value @(
+    "[Console]::Write([char]27 + '[?1049h' + [char]27 + '[HALT' + ' SCREEN')"
+    '[void][Console]::ReadKey($true)'
+    "[Console]::Write([char]27 + '[?1049l')"
+)
+$env:NOCTTY_SYNC_ALTAPP = $altApp
 Add-Type -TypeDefinition $script:ConptySyncDumpSource -OutputAssembly (Join-Path $runRoot 'tools\conpty-sync-dump.exe') -OutputType ConsoleApplication
 
 $historyLeaksBefore = Get-ConptySyncRealPSReadLineLeaks (Join-Path $runRoot 'work')

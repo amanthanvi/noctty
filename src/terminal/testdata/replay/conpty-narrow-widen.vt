@@ -40,7 +40,7 @@ cursor 8 19
 resize 47 20
 cursor 8 19
 resize 80 20
-expect xfail F015 (PKG-14): the widening pulls scrollback into the active area
+expect
 ?
 |L32 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
 |L33 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
@@ -53,9 +53,9 @@ expect xfail F015 (PKG-14): the widening pulls scrollback into the active area
 |L40 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
 |PS C:\>
 end
-cursor 8 10 xfail F015 (PKG-14): the widening pulls scrollback into the active area
+cursor 8 10
 send \e[20;9Hecho synced
-expect xfail F015 (PKG-14): the widening pulls scrollback into the active area
+expect
 ?
 |L32 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
 |L33 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww

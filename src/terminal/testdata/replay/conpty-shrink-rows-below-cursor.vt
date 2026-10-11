@@ -32,7 +32,7 @@ expect
 end
 cursor 0 4
 resize 80 8
-expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
+expect
 |R06
 |R07
 |R08
@@ -44,7 +44,7 @@ expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
 end
 cursor 0 0
 send \e[1;1H<W1>
-expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
+expect
 |<W1>
 |R07
 |R08

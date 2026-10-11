@@ -933,6 +933,20 @@ pub const Resize = struct {
     /// resize/reflow behavior depends on the cursor position.
     cursor: ?Cursor = null,
 
+    /// Whether the resize may pull rows out of scrollback back into the
+    /// active area. If false, growing rows always appends blank rows at the
+    /// bottom and a column reflow keeps the top of the active area on the
+    /// same content, so a line that is fully in scrollback stays there.
+    /// A wrapped line with at least one row still in the active area may
+    /// still unwrap back into view. And a shrink that would push the
+    /// cursor's row (cursor.pin) into scrollback drops the rows below the
+    /// cursor that don't fit instead, as such a pty does.
+    ///
+    /// This should be false for ptys that keep their own screen buffer
+    /// without scrollback (e.g. Windows ConPTY), since they can't pull
+    /// rows back and would otherwise get out of sync with us.
+    pull_scrollback: bool = true,
+
     pub const Cursor = struct {
         x: size.CellCountInt,
         y: size.CellCountInt,
@@ -983,7 +997,7 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
         .gt => {
             // We grow rows after cols so that we can do our unwrapping/reflow
             // before we do a no-reflow grow.
-            try self.resizeCols(cols, opts.cursor);
+            try self.resizeCols(cols, opts);
             try self.resizeWithoutReflow(opts);
         },
 
@@ -995,7 +1009,7 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
                 copy.cols = self.cols;
                 break :opts copy;
             });
-            try self.resizeCols(cols, opts.cursor);
+            try self.resizeCols(cols, opts);
         },
     }
 
@@ -1014,9 +1028,20 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
 fn resizeCols(
     self: *PageList,
     cols: size.CellCountInt,
-    cursor: ?Resize.Cursor,
+    opts: Resize,
 ) Allocator.Error!void {
     assert(cols != self.cols);
+    const cursor = opts.cursor;
+
+    // The active area is always the last `rows` rows, so a reflow that
+    // changes the number of rows our text needs slides the active area
+    // over the content. If we aren't allowed to pull scrollback then we
+    // track the top of the active area so we can restore it afterwards.
+    const active_top: ?*Pin = if (!opts.pull_scrollback)
+        try self.trackPin(self.getTopLeft(.active))
+    else
+        null;
+    defer if (active_top) |p| self.untrackPin(p);
 
     // If we have a cursor position (x,y), then we try under any col resizing
     // to keep the same number remaining active rows beneath it. This is a
@@ -1171,6 +1196,23 @@ fn resizeCols(
         .pin => if (self.pinIsActive(self.viewport_pin.*)) {
             self.viewport = .active;
         },
+    }
+
+    // If we can't pull scrollback then pad the bottom with blank rows until
+    // the old top of the active area is back at the top. If the reflow
+    // instead pushed it into scrollback (the text needs more rows than
+    // we have) then there is nothing to do. This subsumes the preserved
+    // cursor logic below since that also only exists to avoid a pull.
+    if (active_top) |p| {
+        // Rows below the cursor that wrapped may have pushed the cursor's
+        // own row into history. Like the pty, keep it and lose what doesn't
+        // fit below it.
+        if (preserved_cursor) |c| self.keepRowActive(c.tracked_pin);
+
+        if (self.pointFromPin(.active, p.*)) |pt| {
+            for (0..pt.active.y) |_| _ = try self.grow();
+        }
+        return;
     }
 
     // See preserved_cursor setup for why.
@@ -2156,6 +2198,12 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                 // If we didn't trim enough, just modify our row count and this
                 // will create additional history.
                 self.rows = rows;
+
+                // A pty without scrollback keeps the cursor's row instead
+                // and loses what doesn't fit below it.
+                if (!opts.pull_scrollback) {
+                    if (opts.cursor) |c| if (c.pin) |p| self.keepRowActive(p);
+                }
             },
 
             // Making rows larger we adjust our row count, and then grow
@@ -2165,12 +2213,18 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
                 // we want to try to preserve the y value of the old cursor.
                 // In other words, we don't want to "pull down" scrollback.
                 // This is purely a UX feature.
-                if (opts.cursor) |cursor| cursor: {
-                    if (cursor.y >= self.rows - 1) break :cursor;
-
-                    // Cursor is not at the bottom, so we just grow our
-                    // rows and we're done. Cursor does NOT change for this
-                    // since we're not pulling down scrollback.
+                //
+                // If we're not allowed to pull scrollback at all then we
+                // always do this regardless of the cursor.
+                const pull = pull: {
+                    if (!opts.pull_scrollback) break :pull false;
+                    const cursor = opts.cursor orelse break :pull true;
+                    break :pull cursor.y >= self.rows - 1;
+                };
+                if (!pull) {
+                    // We just grow our rows and we're done. Cursor does
+                    // NOT change for this since we're not pulling down
+                    // scrollback.
                     const delta = rows - self.rows;
                     self.pauseIntegrityChecks(true);
                     defer self.pauseIntegrityChecks(false);
@@ -2431,6 +2485,84 @@ fn resizeWithoutReflowGrowCols(
     // Deallocate the old page.
     self.pages.remove(chunk.node);
     self.destroyNode(chunk.node);
+}
+
+/// If a resize left `p`'s row above the active area, erase rows from the
+/// bottom of the screen until that row is the top of the active area.
+///
+/// A shrink pushes rows into history from the top, so with enough content
+/// below the cursor (a TUI footer, a PSReadLine list) it pushes out the
+/// cursor's own row. A pty without scrollback (ConPTY) keeps that row and
+/// loses what doesn't fit below it instead, so we do the same when we can't
+/// pull scrollback; otherwise the cursor would land on an unrelated line.
+fn keepRowActive(self: *PageList, p: *const Pin) void {
+    if (self.pointFromPin(.active, p.*) != null) return;
+    const row = self.pointFromPin(.screen, p.*) orelse return;
+    const top = self.pointFromPin(.screen, self.getTopLeft(.active)) orelse return;
+    if (row.screen.y >= top.screen.y) return;
+    self.eraseTrailingRows(top.screen.y - row.screen.y);
+
+    // A viewport pinned between that row and the old top is now in the
+    // active area without a full screen below it.
+    switch (self.viewport) {
+        .pin => if (self.pinIsActive(self.viewport_pin.*)) {
+            self.viewport = .active;
+        },
+        .active, .top => {},
+    }
+}
+
+/// Remove the last `n` rows of the screen, content and all. Tracked pins in
+/// them move to the new last row. The caller keeps at least `rows` rows.
+fn eraseTrailingRows(self: *PageList, n: usize) void {
+    assert(self.total_rows - n >= self.rows);
+    var remaining = n;
+    while (remaining > 0) {
+        const node = self.pages.last.?;
+        const page = &node.data;
+        const take: size.CellCountInt = @intCast(@min(remaining, page.size.rows));
+        const keep = page.size.rows - take;
+
+        const dest_node, const dest_y = if (keep > 0)
+            .{ node, keep - 1 }
+        else
+            .{ node.prev.?, node.prev.?.data.size.rows - 1 };
+        for (self.tracked_pins.keys()) |tracked| {
+            if (tracked.node != node or tracked.y < keep) continue;
+            tracked.node = dest_node;
+            tracked.y = dest_y;
+        }
+
+        // Free what the rows hold and reset their flags, since a later
+        // grow() hands the same memory back out.
+        const rows = page.rows.ptr(page.memory);
+        for (rows[keep..page.size.rows]) |*row| {
+            page.clearCells(row, 0, page.size.cols);
+            row.* = .{ .cells = row.cells };
+        }
+
+        if (keep == 0) {
+            self.erasePage(node);
+        } else {
+            page.size.rows = keep;
+            page.assertIntegrity();
+        }
+        self.total_rows -= take;
+        remaining -= take;
+    }
+
+    // The new last row may have wrapped into a row that is gone: it ends
+    // its line now, or a later row would reflow into it.
+    const last = self.pages.last.?;
+    const last_page = &last.data;
+    const last_row = last_page.getRow(last_page.size.rows - 1);
+    if (last_row.wrap) {
+        last_row.wrap = false;
+        const cells = last_page.getCells(last_row);
+        if (cells[cells.len - 1].wide == .spacer_head) {
+            last_page.clearCells(last_row, cells.len - 1, cells.len);
+        }
+    }
 }
 
 /// Trims up to max trailing blank rows from the pagelist and returns the
@@ -13390,6 +13522,100 @@ test "PageList resize reflow less cols cursor not on last line preserves locatio
     try testing.expectEqual(@as(usize, 10), s.totalRows());
 
     // Our cursor should move to the first row
+    try testing.expectEqual(point.Point{ .active = .{
+        .x = 0,
+        .y = 0,
+    } }, s.pointFromPin(.active, p.*).?);
+}
+
+test "PageList erase trailing rows across pages moves pins and frees styles" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 10, 4, null);
+    defer s.deinit();
+
+    // Enough rows for a second page, the last of them styled and wrapped
+    // into each other, with a pin on one that will go.
+    const first_rows = s.pages.first.?.data.capacity.rows;
+    try s.growRows(first_rows + 2);
+    try testing.expect(s.pages.first != s.pages.last);
+    {
+        const page = &s.pages.last.?.data;
+        const style: stylepkg.Style = .{ .flags = .{ .bold = true } };
+        const id = try page.styles.add(page.memory, style);
+        for (0..page.size.rows) |y| {
+            const rac = page.getRowAndCell(0, y);
+            rac.row.styled = true;
+            rac.row.wrap = true;
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = 'x' },
+                .style_id = id,
+            };
+            page.styles.use(page.memory, id);
+        }
+        // `add` implies one `use`.
+        page.styles.release(page.memory, id);
+
+        // The row that will end the screen wraps into a row that goes.
+        const first = &s.pages.first.?.data;
+        first.getRow(first.size.rows - 2).wrap = true;
+    }
+    const doomed = try s.trackPin(s.pin(.{ .active = .{ .y = 3 } }).?);
+    defer s.untrackPin(doomed);
+
+    // Erase every row of the last page and one more.
+    const last_rows = s.pages.last.?.data.size.rows;
+    const total = s.totalRows();
+    s.eraseTrailingRows(last_rows + 1);
+    try testing.expectEqual(total - last_rows - 1, s.totalRows());
+    try testing.expect(s.pages.first == s.pages.last);
+
+    // The pin moved to the new last row, which no longer wraps.
+    const page = &s.pages.last.?.data;
+    try testing.expect(doomed.node == s.pages.last.?);
+    try testing.expectEqual(page.size.rows - 1, doomed.y);
+    try testing.expect(!page.getRow(page.size.rows - 1).wrap);
+    page.assertIntegrity();
+}
+
+test "PageList resize reflow less cols no scrollback pull blank active" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 5, 5, 1);
+    defer s.deinit();
+    try testing.expect(s.pages.first == s.pages.last);
+    const page = &s.pages.first.?.data;
+    for (0..s.rows) |y| {
+        for (0..2) |x| {
+            const rac = page.getRowAndCell(x, y);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = @intCast(x) },
+            };
+        }
+    }
+
+    // Grow blank rows to push our rows back into scrollback
+    try s.growRows(5);
+    try testing.expectEqual(@as(usize, 10), s.totalRows());
+
+    const p = try s.trackPin(s.pin(.{ .active = .{ .x = 0, .y = 0 } }).?);
+    defer s.untrackPin(p);
+
+    // Resize with no cursor. Normally the trailing blank rows would be
+    // trimmed and the active area would slide up over our history.
+    try s.resize(.{
+        .cols = 4,
+        .reflow = true,
+        .pull_scrollback = false,
+    });
+    try testing.expectEqual(@as(usize, 4), s.cols);
+    try testing.expectEqual(@as(usize, 10), s.totalRows());
+
+    // The top of the active area should not move
     try testing.expectEqual(point.Point{ .active = .{
         .x = 0,
         .y = 0,

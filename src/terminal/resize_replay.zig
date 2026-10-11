@@ -193,8 +193,8 @@ fn run(alloc: Allocator, name: []const u8, script: []const u8, verbosity: Verbos
 
         if (std.mem.eql(u8, cmd, "pty")) {
             if (!std.mem.eql(u8, rest, "conpty")) return scriptError(name, line_no, "unknown pty");
-            // The Windows ConPTY backend configures nothing on the terminal
-            // yet: a ConPTY case runs with the defaults every pty gets.
+            // What the Windows backend sets (termio Exec.initTerminal).
+            t.flags.resize_pull_scrollback = false;
         } else if (std.mem.eql(u8, cmd, "send")) {
             try bytes.resize(alloc, rest.len);
             const decoded = unescape(bytes.items, rest) catch return scriptError(name, line_no, "bad escape");

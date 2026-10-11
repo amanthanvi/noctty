@@ -29,7 +29,7 @@ expect
 end
 cursor 5 17
 resize 80 20
-expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+expect
 |L25
 |L26
 |L27
@@ -49,9 +49,9 @@ expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active are
 |
 |sync>
 end
-cursor 5 17 xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+cursor 5 17
 send \e[18;6Hecho synced
-expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+expect
 |L25
 |L26
 |L27

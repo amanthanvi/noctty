@@ -111,6 +111,13 @@ flags: packed struct {
     /// True if the window is focused.
     focused: bool = true,
 
+    /// Whether a resize may pull rows out of scrollback back into the
+    /// active area. This should be false if the pty keeps its own screen
+    /// buffer without scrollback (e.g. Windows ConPTY) so that we stay in
+    /// sync with it. See PageList.Resize for details. This is configuration
+    /// rather than terminal state so it is preserved across a full reset.
+    resize_pull_scrollback: bool = true,
+
     /// True if the terminal is in a password entry mode. This is set
     /// to true based on termios state. This is set
     /// to true based on termios state.
@@ -2950,6 +2957,7 @@ pub fn resize(
         .rows = rows,
         .reflow = self.modes.get(.wraparound),
         .prompt_redraw = self.flags.shell_redraws_prompt,
+        .pull_scrollback = self.flags.resize_pull_scrollback,
     });
 
     // Alternate screen, if it exists, doesn't reflow
@@ -2957,6 +2965,7 @@ pub fn resize(
         .cols = cols,
         .rows = rows,
         .reflow = false,
+        .pull_scrollback = self.flags.resize_pull_scrollback,
     });
 
     // Whenever we resize we just mark it as a screen clear
@@ -3211,8 +3220,13 @@ pub fn fullReset(self: *Terminal) void {
     self.screens.active.reset();
 
     // Rest our basic state
+    const resize_pull_scrollback = self.flags.resize_pull_scrollback;
     self.modes.reset();
-    self.flags = .{};
+    self.flags = .{
+        // This is configuration based on the pty rather than terminal
+        // state, so a terminal reset must not change it.
+        .resize_pull_scrollback = resize_pull_scrollback,
+    };
     self.tabstops.reset(TABSTOP_INTERVAL);
     self.previous_char = null;
     self.pwd.clearRetainingCapacity();
@@ -13086,6 +13100,26 @@ test "Terminal: resize with left and right margin set" {
     try t.printRepeat(1850);
     _ = t.modes.restore(.enable_mode_3);
     try t.resize(alloc, cols, rows);
+}
+
+test "Terminal: resize without scrollback pull" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+    t.flags.resize_pull_scrollback = false;
+
+    // This is configuration so it should survive a reset.
+    t.fullReset();
+    try testing.expect(!t.flags.resize_pull_scrollback);
+
+    try t.printString("1\n2\n3\n4\n5");
+    try t.resize(alloc, 5, 5);
+    try testing.expectEqual(@as(size.CellCountInt, 2), t.screens.active.cursor.y);
+    {
+        const str = try t.plainString(alloc);
+        defer alloc.free(str);
+        try testing.expectEqualStrings("3\n4\n5", str);
+    }
 }
 
 // https://github.com/mitchellh/ghostty/issues/1343

@@ -201,6 +201,13 @@ pub fn deinit(self: *Exec) void {
 /// after termio begins because it may put the internal terminal state
 /// into a bad state.
 pub fn initTerminal(self: *Exec, term: *terminal.Terminal) !void {
+    // Every Windows pty is a pseudo console, which keeps its own screen
+    // buffer without scrollback and sends nothing after a resize. A resize
+    // that pulled our scrollback back into the active area would leave the
+    // two disagreeing about which line is on which row, and the absolute
+    // cursor moves console programs draw with would land on the wrong rows.
+    if (comptime builtin.os.tag == .windows) term.flags.resize_pull_scrollback = false;
+
     // If we have an initial pwd requested by the subprocess, then we
     // set that on the terminal now. This allows rapidly initializing
     // new surfaces to use the proper pwd.
