@@ -267,15 +267,61 @@ fn isLocalAbsolute(path: []const u8) bool {
     };
 }
 
+/// Refuse reparse traversal at any component, before filesystem lookup can
+/// follow a local-looking symlink/junction onto a share. Checking only the
+/// final component with FILE_OPEN_REPARSE_POINT would not protect ancestors.
+const LocalPath = enum { safe, missing, unsafe };
+fn localPathState(path: []const u8) LocalPath {
+    if (comptime builtin.os.tag != .windows) return .unsafe;
+    if (!isLocalAbsolute(path)) return .unsafe;
+    const wide = windows.sliceToPrefixedFileW(null, path) catch return .unsafe;
+    const span = wide.span();
+    var name: windows.UNICODE_STRING = .{
+        .Length = @intCast(span.len * 2),
+        .MaximumLength = @intCast(span.len * 2),
+        .Buffer = @constCast(span.ptr),
+    };
+    var attrs: windows.OBJECT_ATTRIBUTES = .{
+        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
+        .RootDirectory = null,
+        .ObjectName = &name,
+        .Attributes = 0x1000, // OBJ_DONT_REPARSE
+        .SecurityDescriptor = null,
+        .SecurityQualityOfService = null,
+    };
+    var io: windows.IO_STATUS_BLOCK = undefined;
+    var handle: windows.HANDLE = undefined;
+    const status = windows.ntdll.NtCreateFile(
+        &handle,
+        windows.FILE_READ_ATTRIBUTES,
+        &attrs,
+        &io,
+        null,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
+        windows.FILE_OPEN,
+        0,
+        null,
+        0,
+    );
+    switch (status) {
+        .SUCCESS => {},
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return .missing,
+        else => return .unsafe,
+    }
+    std.posix.close(handle);
+    return .safe;
+}
+
 /// Resolve the shell's explicit .exe using its launch cwd and PATH. Stop at
 /// an unsafe search directory rather than touch it or verify a later binary
 /// that the shell might never reach. Direct WSL argv are normally absolute.
 fn localExecutable(alloc: Allocator, env: *const EnvMap, exe: []const u8, cwd: []const u8) !?[]u8 {
-    if (os_path.isNetworkOrDevicePath(exe) or !isLocalAbsolute(cwd)) return null;
+    if (os_path.isNetworkOrDevicePath(exe) or localPathState(cwd) != .safe) return null;
     if (!std.ascii.endsWithIgnoreCase(exe, ".exe")) return null;
     if (std.fs.path.isAbsolute(exe) or std.mem.indexOfAny(u8, exe, "/\\") != null) {
         const path = try std.fs.path.resolve(alloc, &.{ cwd, exe });
-        if (isLocalAbsolute(path)) return path;
+        if (localPathState(path) == .safe) return path;
         alloc.free(path);
         return null;
     }
@@ -283,15 +329,21 @@ fn localExecutable(alloc: Allocator, env: *const EnvMap, exe: []const u8, cwd: [
     // even when its value is empty. Never probe an executable it would skip.
     if (env.get("NoDefaultCurrentDirectoryInExePath") == null) {
         const here = try std.fs.path.join(alloc, &.{ cwd, exe });
-        if (std.fs.accessAbsolute(here, .{})) |_| return here else |_| alloc.free(here);
+        const state = localPathState(here);
+        if (state == .safe) return here;
+        alloc.free(here);
+        if (state == .unsafe) return null;
     }
     var paths = std.mem.splitScalar(u8, env.get("PATH") orelse "", ';');
     while (paths.next()) |entry| {
         const dir = std.mem.trim(u8, entry, "\"");
         if (dir.len == 0) continue;
-        if (!isLocalAbsolute(dir)) return null;
+        if (localPathState(dir) != .safe) return null;
         const path = try std.fs.path.join(alloc, &.{ dir, exe });
-        if (std.fs.accessAbsolute(path, .{})) |_| return path else |_| alloc.free(path);
+        const state = localPathState(path);
+        if (state == .safe) return path;
+        alloc.free(path);
+        if (state == .unsafe) return null;
     }
     return null;
 }
@@ -412,6 +464,7 @@ fn distroHasTerminfo(
 /// Run the probe. Null when it did not start, so a later tab may try again.
 fn runProbe(alloc: Allocator, env: *const EnvMap, probe: []const []const u8, cwd: []const u8) ?bool {
     if (comptime builtin.os.tag != .windows) return false;
+    if (probe.len == 0 or localPathState(cwd) != .safe or localPathState(probe[0]) != .safe) return null;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const temp = arena.allocator();
@@ -775,6 +828,43 @@ test "localExecutable refuses remote device and ambiguous search paths" {
     var planted = try td.dir.createFile("wsl.exe", .{});
     planted.close();
     try env.put("NoDefaultCurrentDirectoryInExePath", "");
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
+}
+
+test "probe paths refuse ancestor and final symlinks without following them" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+    try td.dir.makeDir("target");
+    var exe_file = try td.dir.createFile("target/wsl.exe", .{});
+    exe_file.close();
+    const cwd = try td.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    const target = try std.fs.path.join(alloc, &.{ cwd, "target" });
+    defer alloc.free(target);
+    td.dir.symLink(target, "link", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    try td.dir.symLink("target/wsl.exe", "wsl.exe", .{});
+    const good = try std.fs.path.join(alloc, &.{ target, "wsl.exe" });
+    defer alloc.free(good);
+    const linked_dir = try std.fs.path.join(alloc, &.{ cwd, "link" });
+    defer alloc.free(linked_dir);
+    const linked_exe = try std.fs.path.join(alloc, &.{ linked_dir, "wsl.exe" });
+    defer alloc.free(linked_exe);
+    try std.testing.expectEqual(LocalPath.safe, localPathState(good));
+    try std.testing.expectEqual(LocalPath.unsafe, localPathState(linked_exe));
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try env.put("PATH", target);
+    // A reparse candidate must stop search, not authorize the later PATH exe.
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, linked_exe, cwd));
+    try std.testing.expectEqual(null, try localExecutable(alloc, &env, good, linked_dir));
+    try env.put("NoDefaultCurrentDirectoryInExePath", "");
+    try env.put("PATH", linked_dir);
     try std.testing.expectEqual(null, try localExecutable(alloc, &env, "wsl.exe", cwd));
 }
 

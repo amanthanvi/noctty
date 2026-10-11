@@ -208,7 +208,8 @@ choice. Automatic `TERM` probing uses the launch environment and working
 directory, including `--cd`, and caches answers separately for different
 environments or directories for explicit distribution selections. The
 optional probe resolves only a local `.exe`;
-if resolution would need a network/device path or a mapped network drive,
+if resolution would need a network/device path, a mapped network drive, or
+reparse traversal (including directory symlinks and junctions),
 it keeps the fallback. For shell-form commands, automatic `TERM` is limited
 to a single `wsl.exe` command without variable expansion, redirection,
 command operators, or ambiguous quote/backslash sequences. Complex shell
