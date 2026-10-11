@@ -988,6 +988,14 @@ Invoke-InteractiveWin11HarnessMain `
 # `-Scenario a,b` reaches a bootstrapped child as one string (AGENTS.md).
 $Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
+# One run per worktree at a time: this sandbox is reset and restaged on every
+# run, which would pull it out from under a run in progress. The mutex goes
+# away with this process, however it ends.
+$runMutex = New-Object System.Threading.Mutex($false, ('Local\noctty-conpty-sync-' + (Get-InteractiveWin11WorktreeId -RepoRoot $repoRoot)))
+$haveRunMutex = $false
+try { $haveRunMutex = $runMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $haveRunMutex = $true }
+if (-not $haveRunMutex) { throw 'another interactive-win11-conpty-sync.ps1 run is using this worktree''s sandbox; wait for it to finish' }
+
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'conpty-sync' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
