@@ -4,13 +4,19 @@ Portable, hidden-desktop integration regression for quick-terminal geometry and
 fullscreen restore across physical monitors. Run with -Bin <source bin directory>
 -Run <new evidence directory>. The run directory must not already exist. Requires
 two monitors with different DPI; never switches desktops or injects real input.
+Optional ExpectedStartupHash/ExpectedStartupModified pin an adopted baseline.
+Otherwise even an absent startup-state file is captured and checked unchanged.
+DriverTimeoutSeconds bounds the hidden driver and its owned process job.
 Results contain only monitor geometry, process IDs, window state and assertions.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string] $Bin,
     [Parameter(Mandatory)] [string] $Run,
-    [switch] $Driver
+    [switch] $Driver,
+    [ValidateRange(1,1800)] [int] $DriverTimeoutSeconds = 300,
+    [string] $ExpectedStartupHash,
+    [string] $ExpectedStartupModified
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -62,6 +68,50 @@ public static class DpiGeometry {
     [DllImport("kernel32.dll")] public static extern uint WaitForSingleObject(IntPtr h,uint ms);
     [DllImport("kernel32.dll")] public static extern bool GetExitCodeProcess(IntPtr h,out uint code);
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateJobObjectW(IntPtr a,string name);
+    [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr job,int type,ref JobLimits limits,uint size);
+    [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job,IntPtr process);
+    [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,uint code);
+    [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job,uint code);
+    [DllImport("kernel32.dll")] static extern bool QueryInformationJobObject(IntPtr job,int type,out JobAccounting accounting,uint size,IntPtr returned);
+    [StructLayout(LayoutKind.Sequential)] struct JobAccounting {
+        public long userTime,kernelTime,periodUserTime,periodKernelTime;
+        public uint pageFaults,totalProcesses,activeProcesses,terminatedProcesses;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct BasicLimits {
+        public long processTime,jobTime; public uint flags;
+        public UIntPtr minWorking,maxWorking; public uint activeProcesses;
+        public UIntPtr affinity; public uint priority,scheduling;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct IoCounters { public ulong readOps,writeOps,otherOps,readBytes,writeBytes,otherBytes; }
+    [StructLayout(LayoutKind.Sequential)] struct JobLimits {
+        public BasicLimits basic; public IoCounters io;
+        public UIntPtr processMemory,jobMemory,peakProcessMemory,peakJobMemory;
+    }
+    public static IntPtr CreateOwnedJob() {
+        var job=CreateJobObjectW(IntPtr.Zero,null);
+        if(job==IntPtr.Zero) throw new Exception("CreateJobObject failed");
+        var limits=new JobLimits(); limits.basic.flags=0x2000; // KILL_ON_JOB_CLOSE
+        if(!SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf<JobLimits>())) {
+            CloseHandle(job); throw new Exception("SetInformationJobObject failed");
+        }
+        return job;
+    }
+    public static uint StopOwnedJob(IntPtr job) {
+        try {
+            if(!TerminateJobObject(job,1)) throw new Exception("Terminate owned job failed");
+            var deadline=DateTime.UtcNow.AddSeconds(5);
+            do {
+                JobAccounting accounting;
+                if(!QueryInformationJobObject(job,1,out accounting,(uint)Marshal.SizeOf<JobAccounting>(),IntPtr.Zero))
+                    throw new Exception("Query owned job failed");
+                if(accounting.activeProcesses==0) return accounting.totalProcesses;
+                System.Threading.Thread.Sleep(10);
+            } while(DateTime.UtcNow<deadline);
+            throw new Exception("Owned job cleanup exceeded five seconds");
+        } finally { CloseHandle(job); }
+    }
     public static Monitor[] Monitors() {
         var old=SetThreadDpiAwarenessContext(new IntPtr(-4));
         try { var list=new List<Monitor>();
@@ -104,10 +154,16 @@ public static class DpiGeometry {
         PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1));
         PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L));
     }
-    public static ProcessInfo Launch(string app,string command,string cwd,string desktop) {
+    public static ProcessInfo Launch(string app,string command,string cwd,string desktop,IntPtr job) {
         var si=new Startup { cb=Marshal.SizeOf<Startup>(),desktop=desktop,flags=1,show=0 }; ProcessInfo pi;
-        if(!CreateProcessW(app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x08004000,IntPtr.Zero,cwd,ref si,out pi))
+        // Assign the suspended driver before it can spawn children. The job
+        // owns only this launch and its descendants, including terminal shells.
+        if(!CreateProcessW(app,new StringBuilder(command),IntPtr.Zero,IntPtr.Zero,false,0x08004004,IntPtr.Zero,cwd,ref si,out pi))
             throw new Exception("CreateProcess failed: "+Marshal.GetLastWin32Error());
+        if(!AssignProcessToJobObject(job,pi.process)||ResumeThread(pi.thread)==0xFFFFFFFF) {
+            TerminateProcess(pi.process,1); CloseHandle(pi.thread); CloseHandle(pi.process);
+            throw new Exception("Assign/resume owned driver failed");
+        }
         return pi;
     }
 }
@@ -130,7 +186,7 @@ if (-not $Driver) {
     if (Test-Path -LiteralPath $Run) { throw 'Run directory must be new.' }
     if (-not (Test-Path -LiteralPath (Join-Path $Bin 'noctty.exe'))) { throw 'Source Bin must contain noctty.exe.' }
     $before = Startup-Fingerprint
-    if (-not $before.Exists -or $before.Hash -ne '7b4f9aa31731df822e3ec13f8381e76dc759455abbf8bb458f74e10bf5e2bb9c' -or ([datetime]$before.Modified).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') -ne '2026-10-10T18:18:34Z') { throw 'Real startup state differs from adopted baseline; no launches performed.' }
+    if (($ExpectedStartupHash -and $before.Hash -ne $ExpectedStartupHash) -or ($ExpectedStartupModified -and $before.Modified -ne $ExpectedStartupModified)) { throw 'Real startup state differs from supplied baseline; no launches performed.' }
     [void](New-Item -ItemType Directory -Path $Run)
     Copy-Portable $Bin (Join-Path $Run 'source\bin')
     foreach ($name in @('localappdata','appdata')) { [void](New-Item -ItemType Directory -Path (Join-Path $Run $name)) }
@@ -138,22 +194,30 @@ if (-not $Driver) {
     $desktop = [DpiGeometry]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x10000000,[IntPtr]::Zero)
     if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
     $oldLocal=$env:LOCALAPPDATA; $oldRoaming=$env:APPDATA
-    $pi=$null
+    $pi=$null; $job=[IntPtr]::Zero
     try {
+        $job=[DpiGeometry]::CreateOwnedJob()
         $env:LOCALAPPDATA=Join-Path $Run 'localappdata'; $env:APPDATA=Join-Path $Run 'appdata'
         $pwsh=(Get-Command pwsh.exe).Source
         $line='"{0}" -NoProfile -NonInteractive -File "{1}" -Bin "{2}" -Run "{3}" -Driver' -f $pwsh,$PSCommandPath,(Join-Path $Run 'source\bin'),$Run
-        $pi=[DpiGeometry]::Launch($pwsh,$line,$Run,"WinSta0\$desktopName")
+        $pi=[DpiGeometry]::Launch($pwsh,$line,$Run,"WinSta0\$desktopName",$job)
         Write-Host "Hidden driver PID=$($pi.pid); evidence=$Run"
-        while ([DpiGeometry]::WaitForSingleObject($pi.process,1000) -eq 258) { }
+        $deadline=[datetime]::UtcNow.AddSeconds($DriverTimeoutSeconds)
+        while ([DpiGeometry]::WaitForSingleObject($pi.process,1000) -eq 258) {
+            if([datetime]::UtcNow -ge $deadline) { throw "Hidden driver exceeded $DriverTimeoutSeconds seconds; owned process job will be closed." }
+        }
         [uint32]$code=0; [void][DpiGeometry]::GetExitCodeProcess($pi.process,[ref]$code)
     } finally {
         $env:LOCALAPPDATA=$oldLocal; $env:APPDATA=$oldRoaming
+        $cleanupError=$null; $ownedProcessCount=0
+        if($job -ne [IntPtr]::Zero) { try { $ownedProcessCount=[DpiGeometry]::StopOwnedJob($job) } catch { $cleanupError=$_ } }
         if($pi) { [void][DpiGeometry]::CloseHandle($pi.thread); [void][DpiGeometry]::CloseHandle($pi.process) }
         [void][DpiGeometry]::CloseDesktop($desktop)
         $after=Startup-Fingerprint
-        @{ Before=$before; After=$after; Unchanged=($before.Hash -eq $after.Hash -and $before.Modified -eq $after.Modified) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'startup-state.json')
-        if ($before.Hash -ne $after.Hash -or $before.Modified -ne $after.Modified) { throw 'Real startup state changed; stop launches.' }
+        $unchanged=$before.Exists -eq $after.Exists -and $before.Hash -eq $after.Hash -and $before.Modified -eq $after.Modified
+        @{ Before=$before; After=$after; Unchanged=$unchanged; OwnedJobCleanedUp=($null -eq $cleanupError); OwnedProcessCount=$ownedProcessCount } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'startup-state.json')
+        if (-not $unchanged) { throw 'Real startup state changed; stop launches.' }
+        if($cleanupError) { throw $cleanupError }
     }
     if($code -ne 0) { throw "Hidden driver failed with exit $code; inspect sanitized results in $Run." }
     Write-Host 'Hidden DPI geometry: PASS'
