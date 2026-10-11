@@ -13499,16 +13499,7 @@ const Host = struct {
         }
 
         for (std.enums.values(win32_settings.SettingField)) |field| {
-            const key = @tagName(field);
-            _ = self.appendPaletteDescriptor(.{
-                .item = .{
-                    .id = win32_palette.catalog.stableStringId(.setting, key),
-                    .title = key,
-                    .subtitle = "Setting",
-                    .keywords = "settings preferences configuration",
-                },
-                .payload = .{ .setting = key },
-            });
+            _ = self.appendPaletteDescriptor(win32_settings.paletteDescriptor(field));
         }
 
         self.appendInstalledThemesToPalette(catalog);
@@ -23863,7 +23854,7 @@ fn settingsPreviewFieldThunk(
         .auto_update => app.config.@"auto-update" = value.auto_update,
         .auto_update_channel => app.config.@"auto-update-channel" = value.auto_update_channel,
     }
-    switch (settingsPreviewEffect(field)) {
+    switch (win32_settings.previewEffect(field)) {
         .none => {},
         .theme => app.reconfigureTheme(),
         .opacity => for (app.windows.items) |surface| {
@@ -23872,28 +23863,6 @@ fn settingsPreviewFieldThunk(
             };
         },
     }
-}
-
-/// What a live preview of `field` has to refresh once it is written to
-/// `app.config`. Rebuilding the theme costs 80-150 ms of UI thread (every host's
-/// brushes, fonts and DWM attributes, a forced redraw of everything, then the
-/// Settings window), and the preview fires on every keystroke, so each field
-/// gets only the work that shows it. Font size, padding, cursor style and
-/// blur have no consumer on a live surface, which reads its own copy of the
-/// config: the written value reaches terminals created afterwards, and
-/// `Surface.applyRuntimeConfig` reads none of them. A previewed field that
-/// gains one must be listed here.
-const PreviewEffect = enum { none, theme, opacity };
-
-fn settingsPreviewEffect(field: win32_settings.SettingField) PreviewEffect {
-    return switch (field) {
-        // `resolveTheme` reads `window-theme`, nothing else a preview edits.
-        .window_theme => .theme,
-        // The layered alpha of the host window is the only thing that makes
-        // `background-opacity` visible on Win32.
-        .background_opacity => .opacity,
-        else => .none,
-    };
 }
 
 test "settings live preview refreshes only what the field shows" {

@@ -288,7 +288,8 @@ a composition swapchain for the terminal, so the OpenGL content is not
 flattened opaque on its way through DWM. Enabling `background-blur` logs one
 warning instead, at startup or when a config reload turns it on; like every
 other log line in this runtime it goes to stderr, so it is visible where stderr
-is captured.
+is captured. The Settings window shows the checkbox disabled, labelled "not
+supported on Windows", so nobody there toggles it and waits for a change.
 
 ### Universal palette
 
