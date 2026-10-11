@@ -466,6 +466,8 @@ pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 
 pub extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 
+pub extern "kernel32" fn SetProcessShutdownParameters(dwLevel: DWORD, dwFlags: DWORD) callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn SetThreadErrorMode(dwNewMode: DWORD, lpOldMode: ?*DWORD) callconv(.winapi) BOOL;
 pub extern "kernel32" fn SetDefaultDllDirectories(directory_flags: DWORD) callconv(.winapi) BOOL;
 

@@ -3520,22 +3520,51 @@ fn sessionRestorePolicyAllows(
         !explicit_startup_working_directory;
 }
 
-fn sessionSavePolicyAllows(
-    safe_mode: bool,
-    policy: configpkg.Config.WindowSaveState,
-    initial_window: bool,
-    has_initial_command: bool,
-    startup_profile_picker: bool,
-) bool {
-    return sessionRestorePolicyAllows(
-        safe_mode,
-        policy,
-        initial_window,
-        has_initial_command,
-        startup_profile_picker,
-        false,
-    );
+const SessionSaveKind = enum { final, checkpoint };
+
+/// An empty snapshot ends the saved session only on the owner's final save;
+/// a checkpoint keeps the file. True when the file was removed.
+fn removeEmptySessionState(path: []const u8, kind: SessionSaveKind) bool {
+    if (kind == .checkpoint) return false;
+    win32_session_persistence.deleteFileIfPresent(path) catch |err| {
+        log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
+        return false;
+    };
+    return true;
 }
+
+/// Held for the life of the one process that owns `session-state.json`.
+/// An exclusive byte-range lock on the `.lock` sibling, so the kernel drops
+/// it when the owner exits or crashes and the next launch can take over.
+const SessionOwnerLock = struct {
+    file: std.fs.File,
+
+    /// Null when another live process holds it.
+    fn acquire(alloc: Allocator, state_path: []const u8) !?SessionOwnerLock {
+        if (std.fs.path.dirname(state_path)) |dir| {
+            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
+        const lock_path = try std.fmt.allocPrint(alloc, "{s}.lock", .{state_path});
+        defer alloc.free(lock_path);
+        const file = std.fs.createFileAbsolute(lock_path, .{
+            .read = true,
+            .truncate = false,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+        }) catch |err| switch (err) {
+            error.WouldBlock => return null,
+            else => return err,
+        };
+        return .{ .file = file };
+    }
+
+    fn release(self: SessionOwnerLock) void {
+        self.file.close();
+    }
+};
 
 fn writeOpenUrlTrace(file: std.fs.File, url: []const u8) !void {
     var buffer: [1024]u8 = undefined;
@@ -3661,6 +3690,21 @@ pub const App = struct {
     /// `terminate` runs. Preserve the successful pre-close snapshot instead
     /// of replacing it with an empty snapshot during final teardown.
     session_state_saved_before_last_host_close: bool = false,
+    /// Set only in the process that restored the saved session, or was
+    /// eligible to and started with its first window instead. Only that
+    /// process saves or deletes `session-state.json`: a launch that forwarded
+    /// to the primary, an Explorer "Open noctty here" window, an `-Embedding`
+    /// handoff server or a second `single-instance = false` instance never
+    /// loaded it, so writing their own windows (or none) over it destroys the
+    /// user's workspace.
+    session_owner: ?SessionOwnerLock = null,
+    /// Set once WM_ENDSESSION(TRUE) has saved for a sign-out, shutdown or
+    /// reboot. That snapshot is final: shells the logoff kills afterwards
+    /// close their panes, and the saves those closes would run must not
+    /// shrink or delete it.
+    session_ending: bool = false,
+    /// `GetTickCount64` of the last `checkpointSessionState`.
+    session_checkpoint_ms: ?u64 = null,
     /// True only while the app is synchronously draining every host during
     /// shutdown. Child HWND teardown still repairs native split trees, but it
     /// must not diagnose the intentionally absent per-pane close preflight as
@@ -3867,6 +3911,16 @@ pub const App = struct {
         // for basic terminal function.
         win32_aumid.setProcessAumid();
         win32_aumid.registerAumidDisplayName(core_app.alloc);
+
+        // Be asked to end before the shells under it. Every process starts at
+        // the default level 0x280, and Windows ends processes on one level
+        // in no set order, so a sign-out could otherwise end the shells
+        // first: each pane closes, the last window goes, and `terminate`
+        // would delete the saved session before WM_ENDSESSION could save
+        // it. A higher level is ended first.
+        if (sys.SetProcessShutdownParameters(0x2FF, 0) == 0) {
+            log.warn("win32 SetProcessShutdownParameters failed err={}", .{windows.GetLastError()});
+        }
 
         // Boot the WinRT toast notifier. Failure falls back to the
         // host banner/log path in `showDesktopNotificationWithLaunch`.
@@ -4115,8 +4169,15 @@ pub const App = struct {
                 };
             }
         } else if (!self.embedding_mode and self.config.@"initial-window") {
-            const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
+            // Ownership starts only once the first window exists: a launch
+            // that fails here must not delete, on its way out, the session
+            // it could not bring back, and a save while restore is half done
+            // would keep only the windows restored so far.
+            const owner_lock = if (self.sessionRestoreEligible()) self.acquireSessionOwnerLock() else null;
+            errdefer if (owner_lock) |lock| lock.release();
+            const restored = if (owner_lock != null) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
+            self.session_owner = owner_lock;
             if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
@@ -4401,8 +4462,9 @@ pub const App = struct {
         self.unregisterGlobalHotkeys();
         self.stopIpcServer();
         if (!self.session_state_saved_before_last_host_close or self.hosts.items.len > 0) {
-            _ = self.saveSessionState();
+            _ = self.saveSessionState(.final);
         }
+        self.releaseSessionOwnership();
         self.destroyAllWindows();
         if (self.shell_runtime_initialized) {
             self.shell_runtime.deinit();
@@ -4498,16 +4560,63 @@ pub const App = struct {
     }
 
     fn sessionStateEnabled(self: *const App) bool {
-        // Safe mode is deliberately non-destructive. It starts without
-        // restoring the saved session and must not replace or delete that
-        // session when the diagnostic run exits.
-        return sessionSavePolicyAllows(
-            self.safe_mode,
-            self.config.@"window-save-state",
-            self.config.@"initial-window",
-            self.config.@"initial-command" != null,
-            self.startup_profile_picker,
-        );
+        // Only the owner, the process that was eligible to restore the saved
+        // session and then got its first window, may replace or delete it.
+        // The restore policy is re-checked so a config reload
+        // (window-save-state = never) still stops it.
+        return self.session_owner != null and self.sessionRestoreEligible();
+    }
+
+    /// Take the saved session for this process, on the restore-eligible
+    /// startup path only. One live process owns it (decision D10): with
+    /// `single-instance = false`, or when forwarding failed, a second
+    /// instance starts with a fresh window instead of restoring the same
+    /// workspace a second time, and never saves over it.
+    fn acquireSessionOwnerLock(self: *App) ?SessionOwnerLock {
+        if (self.session_state_excluded_for_elevation) return null;
+        const path = self.sessionStatePath() orelse return null;
+        defer self.core_app.alloc.free(path);
+        return SessionOwnerLock.acquire(self.core_app.alloc, path) catch |err| {
+            log.warn("win32 session: ownership lock unavailable; not restoring or saving err={}", .{err});
+            return null;
+        } orelse {
+            log.info("win32 session: another instance owns the saved session; starting without it", .{});
+            return null;
+        };
+    }
+
+    fn releaseSessionOwnership(self: *App) void {
+        if (self.session_owner) |lock| lock.release();
+        self.session_owner = null;
+    }
+
+    /// WM_ENDSESSION(TRUE): Windows may end the process once every window
+    /// has returned, without `GetMessage` returning, so `terminate` never
+    /// runs at sign-out, shutdown or reboot. Tear nothing down. A Restart
+    /// Manager close (an installer replacing files) may leave noctty
+    /// running, so only a real end of session latches the snapshot.
+    fn saveForEndSession(self: *App, close_app: bool) void {
+        if (self.session_ending) return;
+        self.savePaletteMru();
+        if (close_app) return self.checkpointSessionState();
+        // A checkpoint, never `.final`: the sign-out also ends the shells, so
+        // an empty window list here says nothing about what the user closed.
+        // Latched even when the save fails: any later save would come from
+        // panes closing as their shells die, and could only shrink the
+        // previous snapshot or, from `terminate` with no hosts, delete it.
+        _ = self.saveSessionState(.checkpoint);
+        self.session_ending = true;
+    }
+
+    /// Crash insurance on a display-topology change, the moment a GPU
+    /// driver is most likely to fault (#299), and the save for a Restart
+    /// Manager close. Every host receives the same message, so one save per
+    /// second is plenty.
+    fn checkpointSessionState(self: *App) void {
+        const now = sys.GetTickCount64();
+        if (self.session_checkpoint_ms) |last| if (now -% last < 1000) return;
+        self.session_checkpoint_ms = now;
+        _ = self.saveSessionState(.checkpoint);
     }
 
     fn sessionRestoreEligible(self: *const App) bool {
@@ -4588,7 +4697,7 @@ pub const App = struct {
 
     fn loadSessionState(self: *App) !?std.json.Parsed(win32_session_state.SessionState) {
         if (self.session_state_excluded_for_elevation) return null;
-        if (!self.sessionStateEnabled()) return null;
+        if (!self.sessionRestoreEligible()) return null;
         const path = self.sessionStatePath() orelse return null;
         defer self.core_app.alloc.free(path);
 
@@ -5332,9 +5441,16 @@ pub const App = struct {
         }
     }
 
-    fn saveSessionState(self: *const App) bool {
+    /// `.final` is the owner's save as its windows close: closing every
+    /// one ends the session, so an empty snapshot deletes the file. A
+    /// `.checkpoint` taken while the app keeps running never deletes, and
+    /// leaves alone the snapshot a last-host close already took.
+    fn saveSessionState(self: *const App, kind: SessionSaveKind) bool {
         if (self.session_state_excluded_for_elevation) return false;
         if (!self.sessionStateEnabled()) return false;
+        // A sign-out's snapshot is final; see `session_ending`.
+        if (self.session_ending) return false;
+        if (kind == .checkpoint and self.session_state_saved_before_last_host_close) return false;
         const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
 
@@ -5352,13 +5468,7 @@ pub const App = struct {
                 log.warn("win32 session save: snapshot failed scrollback_lines={d} err={}", .{ attempt_lines, err });
                 continue;
             };
-            if (state.windows.len == 0) {
-                win32_session_persistence.deleteFileIfPresent(path) catch |err| {
-                    log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
-                    return false;
-                };
-                return true;
-            }
+            if (state.windows.len == 0) return removeEmptySessionState(path, kind);
 
             const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
                 log.warn("win32 session save: encode failed scrollback_lines={d} err={}", .{ attempt_lines, err });
@@ -19220,7 +19330,7 @@ const Host = struct {
             return;
         }
         if (self.app.hosts.items.len == 1) {
-            self.app.session_state_saved_before_last_host_close = self.app.saveSessionState();
+            self.app.session_state_saved_before_last_host_close = self.app.saveSessionState(.final);
         }
         for (surfaces.items) |surface| surface.close(false);
     }
@@ -27547,6 +27657,26 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return 1;
         },
 
+        // Sign-out, shutdown, reboot and Restart Manager closes. The save
+        // waits for WM_ENDSESSION, after which the process may be ended
+        // without `terminate` running; WM_QUERYENDSESSION is left to
+        // DefWindowProcW, which answers TRUE.
+        c.WM_ENDSESSION => {
+            if (wParam != 0) if (host) |v| v.app.saveForEndSession((@as(usize, @bitCast(lParam)) & c.ENDSESSION_CLOSEAPP) != 0);
+            return 0;
+        },
+        // Saved from the message loop rather than inside this sent message,
+        // which can arrive while the thread waits in the middle of other
+        // work.
+        c.WM_DISPLAYCHANGE => {
+            _ = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_SESSION_CHECKPOINT, 0, 0);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        c.WM_WINHOSTTY_SESSION_CHECKPOINT => {
+            if (host) |v| v.app.checkpointSessionState();
+            return 0;
+        },
+
         c.WM_SHOWWINDOW => {
             const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
             if (host) |v| {
@@ -29447,6 +29577,11 @@ pub const Surface = struct {
         // DestroyWindow free the Surface under these errdefers, and then
         // `createWindowSurface` frees it again.
         self.destroy_on_wm_destroy = true;
+        // A terminal opened after a last-host close (quit-after-last-window-
+        // closed = false, or inside its delay) is part of the session again.
+        // Not before init commits: a failed one leaves no window, and the
+        // last-host-close snapshot must still stand.
+        app.session_state_saved_before_last_host_close = false;
     }
 
     test "Surface.init that fails after the core starts is unwound once, by init" {
@@ -29533,6 +29668,8 @@ pub const Surface = struct {
         app.startQuitTimer();
         defer app.stopQuitTimer();
         try std.testing.expect(app.quit_timer_id != null);
+        // The owner's last window already took the session's final snapshot.
+        app.session_state_saved_before_last_host_close = true;
 
         // Before the fix, the unwinding DestroyWindow sent WM_DESTROY, which
         // freed the Surface; the errdefers then read it and
@@ -29550,12 +29687,17 @@ pub const Surface = struct {
         try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
         try std.testing.expectEqual(@as(usize, 0), core_app.surfaces.items.len);
         try std.testing.expect(app.quit_timer_id != null);
+        // No terminal opened, so `terminate` must still keep that snapshot
+        // rather than save the empty app over it.
+        try std.testing.expect(app.session_state_saved_before_last_host_close);
 
         // Once init returns, the window owns the Surface: destroying it frees
         // the Surface once, and its tab and button with it.
         Stage.stale = false;
         const created = try app.createWindowSurface(&app.config, default_title, .{ .host_id = host.id });
         try std.testing.expect(created.destroy_on_wm_destroy);
+        // A terminal that did open is part of the session again.
+        try std.testing.expect(!app.session_state_saved_before_last_host_close);
         try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
         // `destroy` unregisters the surfaces whose core it stops, and the
         // stub started none.
@@ -29595,11 +29737,17 @@ pub const Surface = struct {
         };
         Stage.host_hwnd = null;
         app.test_surface_init_stage = &Stage.run;
+        // A new window forwarded in after the owner's last window closed
+        // and took the session's final snapshot.
+        app.session_state_saved_before_last_host_close = true;
 
         try std.testing.expectError(
             error.TestGLContextFailed,
             app.createWindowSurface(&app.config, default_title, .{}),
         );
+        // No window opened, so `terminate` must keep that snapshot rather
+        // than delete the session for an app with no windows.
+        try std.testing.expect(app.session_state_saved_before_last_host_close);
         const host_hwnd = Stage.host_hwnd.?;
         defer if (sys.IsWindow(host_hwnd) != 0) {
             _ = sys.DestroyWindow(host_hwnd);
@@ -29849,7 +29997,13 @@ pub const Surface = struct {
         remaining_budget: *usize,
     ) !?win32_session_state.ScrollbackSnapshot {
         if (max_lines == 0 or self.secure_input_ever_engaged) return null;
-        self.core_surface.renderer_state.mutex.lock();
+        // An end-session save is a sent message. It can arrive while this
+        // surface is mid-init or mid-teardown, still in its tab tree but
+        // without a live core, or while this thread waits inside a call made
+        // under the renderer mutex (the core's copy path holds it across
+        // `EmptyClipboard`, which sends to the previous clipboard owner).
+        if (!self.core_initialized) return null;
+        if (!self.core_surface.renderer_state.mutex.tryLock()) return null;
         defer self.core_surface.renderer_state.mutex.unlock();
         return captureTerminalScrollbackSnapshotAlloc(
             alloc,
@@ -42328,6 +42482,9 @@ test "win32 session state scrollback capture enforces line cap budget and secure
         .mutex = &renderer_mutex,
         .terminal = &terminal_state,
     };
+    // The renderer state above stands in for a live core; capture skips a
+    // surface without one.
+    normal_surface.core_initialized = true;
     var host: Host = .{ .app = &app, .id = 1 };
     defer {
         for (host.tabs.items) |*tab| tab.deinit();
@@ -42359,6 +42516,15 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     const redacted_encoded = try win32_session_state.encodeAlloc(std.testing.allocator, saved_state);
     defer std.testing.allocator.free(redacted_encoded);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, redacted_encoded, "\"scrollback\""));
+
+    // A display-change or end-session save can arrive while a surface is
+    // still in its tab but its core is gone (mid-teardown) or not yet up.
+    normal_surface.core_initialized = false;
+    const torn_down_state = try app.buildSessionState(state_arena.allocator(), 2);
+    for (torn_down_state.windows[0].tabs[0].layout.nodes) |node| switch (node) {
+        .pane => |pane| try std.testing.expect(pane.scrollback == null),
+        .split => {},
+    };
 }
 
 test "win32 session scrollback restore marks snapshots and rejects control lines" {
@@ -43332,12 +43498,118 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true, true));
+}
 
-    // Startup-only restore bypasses must not disable later session saves.
-    try std.testing.expect(sessionSavePolicyAllows(false, .default, true, false, false));
-    try std.testing.expect(!sessionSavePolicyAllows(false, .default, false, false, false));
-    try std.testing.expect(!sessionSavePolicyAllows(false, .default, true, true, false));
-    try std.testing.expect(!sessionSavePolicyAllows(false, .default, true, false, true));
+test "win32 session state is saved only by the process that owns it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
+    defer std.testing.allocator.free(state_path);
+
+    var app: App = undefined;
+    app.safe_mode = false;
+    app.embedding_mode = false;
+    app.startup_profile_picker = false;
+    app.explicit_startup_working_directory = false;
+    app.config.@"window-save-state" = .always;
+    app.config.@"initial-window" = true;
+    app.config.@"initial-command" = null;
+
+    // A launch that forwarded to the primary, lost the IPC race or failed
+    // before its first window never took the session, and with no windows
+    // its save would delete it.
+    app.session_owner = null;
+    try std.testing.expect(!app.sessionStateEnabled());
+
+    app.session_owner = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    defer app.releaseSessionOwnership();
+    try std.testing.expect(app.sessionStateEnabled());
+
+    // A default-terminal handoff server never restored the workspace, so it
+    // must not replace or delete it.
+    app.embedding_mode = true;
+    try std.testing.expect(!app.sessionStateEnabled());
+    app.embedding_mode = false;
+
+    // Neither may an explicit-directory launch (Explorer's "Open noctty
+    // here" verb, a jump-list folder), which never restored it either.
+    app.explicit_startup_working_directory = true;
+    try std.testing.expect(!app.sessionStateEnabled());
+    app.explicit_startup_working_directory = false;
+
+    // A reload to window-save-state = never still stops the owner.
+    app.config.@"window-save-state" = .never;
+    try std.testing.expect(!app.sessionStateEnabled());
+    app.config.@"window-save-state" = .always;
+    try std.testing.expect(app.sessionStateEnabled());
+}
+
+test "win32 sign-out latches the session snapshot and a Restart Manager close does not" {
+    var app: App = undefined;
+    app.session_state_excluded_for_elevation = false;
+    // Not an owner, so the saves themselves are no-ops here.
+    app.session_owner = null;
+    app.palette_mru = .{null} ** 5;
+    app.session_ending = false;
+    app.session_checkpoint_ms = null;
+
+    // ENDSESSION_CLOSEAPP: an installer may leave noctty running.
+    app.saveForEndSession(true);
+    try std.testing.expect(!app.session_ending);
+    try std.testing.expect(app.session_checkpoint_ms != null);
+
+    // A second host's copy of the same message is throttled.
+    const now = sys.GetTickCount64();
+    app.session_checkpoint_ms = now - 500;
+    app.saveForEndSession(true);
+    try std.testing.expectEqual(now - 500, app.session_checkpoint_ms.?);
+    app.session_checkpoint_ms = now - 1500;
+    app.checkpointSessionState();
+    try std.testing.expect(app.session_checkpoint_ms.? >= now);
+
+    // A real sign-out is final: nothing saves after it.
+    app.saveForEndSession(false);
+    try std.testing.expect(app.session_ending);
+    app.session_checkpoint_ms = null;
+    app.saveForEndSession(true);
+    try std.testing.expectEqual(@as(?u64, null), app.session_checkpoint_ms);
+}
+
+test "win32 only a final session save deletes the saved session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = "{}" });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    defer std.testing.allocator.free(path);
+
+    // A display-change or end-session checkpoint with no session windows
+    // (a host kept alive with zero tabs for undo) keeps the file.
+    try std.testing.expect(!removeEmptySessionState(path, .checkpoint));
+    try tmp.dir.access("session-state.json", .{});
+
+    // The owner closing its last window ends the session.
+    try std.testing.expect(removeEmptySessionState(path, .final));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json", .{}));
+}
+
+test "win32 session owner lock admits one live owner" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    // The directory does not exist yet on a first run.
+    const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "noctty", "session-state.json" });
+    defer std.testing.allocator.free(state_path);
+
+    const first = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    // A second instance (single-instance = false) finds it taken.
+    try std.testing.expect((try SessionOwnerLock.acquire(std.testing.allocator, state_path)) == null);
+    first.release();
+    // Once the owner is gone the next launch takes over.
+    const next = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    next.release();
 }
 
 test "win32 session restore transaction preserves first surface state" {
