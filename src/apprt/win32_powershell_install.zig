@@ -1246,7 +1246,9 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
                     "function global:prompt {{ 'BOOTSTRAP-PROBE> ' }}; " ++
                     "$Error.Clear(); {s}; " ++
                     "if (Get-Command __ghostty_write_osc -ErrorAction Ignore) {{ 'HELPER-LOADED' }}; " ++
-                    "'ERROR-COUNT=' + $Error.Count",
+                    // Exercise prompt marks, then end deterministically rather
+                    // than depending on the host reading EOF from Windows NUL.
+                    "'ERROR-COUNT=' + $Error.Count; prompt; exit 0",
                 .{injected[injected.len - 1]},
             );
             defer alloc.free(command);
@@ -1281,6 +1283,16 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             watcher_joined = true;
             const term = try child.wait();
             running = false;
+            if (deadline.timed_out) {
+                std.debug.print("PowerShell bootstrap deadline: host={s} policy={s} helper_loaded={} error_count_seen={} prompt_seen={} stderr_bytes={d}\n", .{
+                    host,
+                    policy,
+                    std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null,
+                    std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=") != null,
+                    std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") != null,
+                    stderr.items.len,
+                });
+            }
             try std.testing.expect(!deadline.timed_out);
             const result = .{ .stdout = stdout.items, .stderr = stderr.items, .term = term };
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "BOOTSTRAP-PROBE> ") != null);
