@@ -98,6 +98,7 @@ public static class NocttyConptySyncNative {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr CreateJobObjectW(IntPtr sa, string name);
     [DllImport("kernel32.dll", SetLastError = true)] public static extern bool SetInformationJobObject(IntPtr job, int cls, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, uint len);
     [DllImport("kernel32.dll", SetLastError = true)] public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool TerminateProcess(IntPtr process, uint code);
 
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
@@ -360,7 +361,9 @@ if ($Inner) {
         if (-not $proc.WaitForExit(10000)) { $proc.Kill(); throw 'console dump timed out' }
         $raw = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
         Remove-Item -LiteralPath $path -Force
-        if ($raw.StartsWith('ERROR')) { throw "console dump failed: $raw" }
+        # A read can fail after the header was written, so the exit code,
+        # not the first line, says whether the rows are real.
+        if ($proc.ExitCode -ne 0) { throw "console dump failed with $($proc.ExitCode): $raw" }
         $lines = @($raw.TrimEnd("`n") -split "`n")
         $header = $lines[0]
         if ($header -notmatch '^BUFFER (\d+)x(\d+) WINDOW (\d+),(\d+) (\d+)x(\d+) CURSOR (-?\d+),(-?\d+)$') { throw "bad dump header: $header" }
@@ -497,12 +500,10 @@ if ($Inner) {
         }
         $configPath = Join-Path $script:Work "$Name.conf"
         [IO.File]::WriteAllLines($configPath, [string[]]$config, (New-Object System.Text.UTF8Encoding $false))
-        $arguments = @(
-            '--single-instance=false'
-            "--class=noctty-conpty-sync-$Name"
-            '--windows-job-object-kill-on-close=true'
-            "`"--config-file=$configPath`""
-        )
+        # The shared composer adds the Job Object containment, a private
+        # single-instance class per scenario, and nothing else.
+        $arguments = @(Get-InteractiveWin11LaunchArguments -Layout ([ordered]@{ SandboxId = "conpty-sync-$Name" })) +
+            @("`"--config-file=$configPath`"")
         $process = Start-Process -FilePath $script:Exe -ArgumentList $arguments -WorkingDirectory $script:Work -PassThru
         $ctx = [pscustomobject]@{
             Name = $Name; Shell = $Shell; ShellExe = $shellExe; Process = $process
@@ -1047,7 +1048,11 @@ try {
     }
     try {
         if (-not [NocttyConptySyncNative]::AssignProcessToJobObject($job, $pi.hProcess)) {
-            throw "AssignProcessToJobObject failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            $assignError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            # It is still suspended and outside the job: end this exact
+            # process before its handle goes.
+            [void][NocttyConptySyncNative]::TerminateProcess($pi.hProcess, 1)
+            throw "AssignProcessToJobObject failed: $assignError"
         }
         [void][NocttyConptySyncNative]::ResumeThread($pi.hThread)
         $wait = [NocttyConptySyncNative]::WaitForSingleObject($pi.hProcess, [uint32]($TimeoutSeconds * 1000))
