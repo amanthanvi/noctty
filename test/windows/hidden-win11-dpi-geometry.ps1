@@ -151,8 +151,8 @@ public static class DpiGeometry {
     }
     public static void Key(IntPtr host,int key) {
         var h=Surface(host); if(h==IntPtr.Zero) throw new Exception("Terminal child absent");
-        PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1));
-        PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L));
+        if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
+        if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
     }
     public static ProcessInfo Launch(string app,string command,string cwd,string desktop,IntPtr job) {
         var si=new Startup { cb=Marshal.SizeOf<Startup>(),desktop=desktop,flags=1,show=0 }; ProcessInfo pi;
@@ -261,7 +261,15 @@ function Launch-Case([string]$Name,[string]$Extra='') {
     $deadline=[datetime]::UtcNow.AddSeconds(15)
     do {
         $hosts=@([DpiGeometry]::Hosts($p.Id))
-        if($hosts.Count -and [DpiGeometry]::Surface($hosts[0]) -ne [IntPtr]::Zero) {
+        $ready=$false
+        $ledger=Join-Path $dir 'startup-attempts.json'
+        if(Test-Path -LiteralPath $ledger) {
+            try {
+                $attempts=(Get-Content -LiteralPath $ledger -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).attempts
+                $ready=$attempts.Count -gt 0 -and $attempts[-1].phase -eq 'ready' -and $null -ne $attempts[-1].ready_at_unix_ms
+            } catch { } # A concurrent ledger write may be incomplete; retry within the deadline.
+        }
+        if($ready -and $hosts.Count -and [DpiGeometry]::Surface($hosts[0]) -ne [IntPtr]::Zero) {
             [void][DpiGeometry]::ShowWindow($hosts[0],4)
             Start-Sleep -Milliseconds 400
             return @{Process=$p; Host=$hosts[0]}
