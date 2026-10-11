@@ -758,7 +758,16 @@ pub fn init(
         .rt_surface = rt_surface,
         .thread = &self.renderer_thread,
     });
-    errdefer renderer_impl.deinit();
+    // The renderer's GL objects belong to this surface's context, which a
+    // later step (`finalizeSurfaceInit`, the renderer thread) can leave
+    // un-current. Rebind it before deleting them, and abandon them if that
+    // fails, as `deinit` does: deletes without it would hit another pane's
+    // objects or no context at all.
+    errdefer if (renderer_impl.prepareSurfaceDeinit(rt_surface)) |_| {
+        renderer_impl.deinit();
+    } else |err| {
+        log.err("abandoning renderer resources after a failed surface init err={}", .{err});
+    };
     if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
         rt_surface.noteBenchmarkMemoryStage(.renderer_initialized, null);
     }
@@ -979,8 +988,6 @@ pub fn init(
         self.renderer_thread.stop.notify() catch |err|
             log.err("error notifying renderer thread to stop, may stall err={}", .{err});
         self.renderer_thr.join();
-        self.renderer.prepareSurfaceDeinit(rt_surface) catch |err|
-            log.err("error preparing renderer surface deinit err={}", .{err});
         renderer_impl = self.renderer;
         render_thread = self.renderer_thread;
     }

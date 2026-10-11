@@ -4880,6 +4880,16 @@ pub const App = struct {
         try std.testing.expectEqual(@as(usize, 2), Hook.calls);
         try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
         try std.testing.expectEqualStrings("New window could not be opened.", host.banner_text.?);
+
+        // With its last tab detached for undo, the host stays open but has
+        // no surface to resolve it through, and still takes the banner.
+        try host.setBanner(.none, null);
+        var detached = host.tabs.orderedRemove(0);
+        detached.deinit();
+        try std.testing.expect(core_app.mailbox.push(.{ .new_window = .{} }, .instant) != 0);
+        try core_app.tick(&app);
+        try std.testing.expectEqual(@as(usize, 3), Hook.calls);
+        try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
     }
 
     /// Record this launch as resolved in the startup ledger.
@@ -6634,9 +6644,12 @@ pub const App = struct {
                 }) catch |err| {
                     // A request forwarded by another process was acknowledged
                     // when it was queued, so say here that nothing opened.
-                    if (source orelse self.primarySurface()) |surface| if (surface.host) |host| {
-                        host.setBanner(.err, "New window could not be opened.") catch {};
-                    };
+                    // The first host still shows a banner while its last tab
+                    // is detached for undo, when it has no surface.
+                    const banner_host: ?*Host = if (source) |surface|
+                        surface.host
+                    else if (self.hosts.items.len > 0) self.hosts.items[0] else null;
+                    if (banner_host) |host| host.setBanner(.err, "New window could not be opened.") catch {};
                     return err;
                 };
                 return true;
@@ -29211,6 +29224,9 @@ pub const Surface = struct {
                 inserted_tab_index,
                 &split_rollback,
             );
+            // The core's `set_title` may have relabelled a host that stays
+            // for the tabs it had; `windowDestroyed` would refresh them.
+            if (!created_host) runUiActionOrLog("failed surface chrome refresh failed", host.refreshChrome());
         }
 
         // The core opens the pty at the size read below. Give a new split its
@@ -29358,6 +29374,9 @@ pub const Surface = struct {
         const host_hwnd = try createTestHostWindow();
         defer _ = sys.DestroyWindow(host_hwnd);
         host.hwnd = host_hwnd;
+        // The rollback's chrome refresh caches the window title, which
+        // `Host.deinit` would free and the test session does not.
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
 
         var shell_window = try app.shell_runtime.prepare(.create_window);
         defer shell_window.deinit();
