@@ -242,6 +242,15 @@ function New-Rect([int]$x,[int]$y,[int]$w,[int]$h) {
 function Move-Window($h,$r) { [DpiGeometry]::Move($h,$r.Left,$r.Top,$r.Right-$r.Left,$r.Bottom-$r.Top); Start-Sleep -Milliseconds 400 }
 function Sample([string]$Name,$h) { $s=[DpiGeometry]::Read($h); $script:samples.Add(@{Name=$Name; State=$s}); return $s }
 function Key($h,[int]$k) { [DpiGeometry]::Key($h,$k); Start-Sleep -Milliseconds 900 }
+function Wait-WindowState($h,[scriptblock]$Predicate) {
+    $deadline=[datetime]::UtcNow.AddSeconds(5)
+    do {
+        $state=[DpiGeometry]::Read($h)
+        if(& $Predicate $state) { return $state }
+        Start-Sleep -Milliseconds 25
+    } while([datetime]::UtcNow -lt $deadline)
+    return $state
+}
 function Launch-Case([string]$Name,[string]$Extra='') {
     $dir=Join-Path $Run "$Name\bin"; Copy-Portable $Bin $dir
     $config=Join-Path $dir 'geometry.ghostty'
@@ -302,7 +311,7 @@ try {
     foreach($story in $restoreCases) {
         $origin=$story.Origin; $destination=$story.Destination
         foreach($maximized in @($false,$true)) {
-            $name="fullscreen-$($origin.Dpi)-$($destination.Dpi)-$($destination.Work.Left)-$($story.Label)-$maximized"; $case=Launch-Case $name
+            $name="fullscreen-$($origin.Dpi)-$($destination.Dpi)-$($destination.Work.Left)-$($destination.Work.Top)-$($story.Label)-$maximized"; $case=Launch-Case $name
             try {
                 $h=$case.Host
                 # Start on the chosen monitor, then set a known physical normal rect
@@ -311,19 +320,24 @@ try {
                 Move-Window $h $r; Move-Window $h $r; $initial=Sample "$name-initial" $h
                 Check "$name ordinary DPI" ($initial.Dpi -eq $origin.Dpi) $origin.Dpi $initial.Dpi
                 if($maximized){[void][DpiGeometry]::ShowWindow($h,3); Start-Sleep -Milliseconds 400}
-                Key $h 122; $entered=Sample "$name-enter" $h
+                Key $h 122; $entered=Wait-WindowState $h {param($s) Rect-Equal $s.Rect $origin.Full}
+                $script:samples.Add(@{Name="$name-enter"; State=$entered})
                 Check "$name entered fullscreen" (Rect-Equal $entered.Rect $origin.Full) (Rect-Array $origin.Full) (Rect-Array $entered.Rect)
+                if(-not (Rect-Equal $entered.Rect $origin.Full)) { throw 'Fullscreen entry was not observed within five seconds.' }
                 Move-Window $h $destination.Full; $moved=Sample "$name-moved" $h
                 Check "$name fullscreen destination DPI" ($moved.Dpi -eq $destination.Dpi) $destination.Dpi $moved.Dpi
-                Key $h 122; $left=Sample "$name-left" $h
-                if($maximized){Check "$name restore maximized" $left.Zoomed $true $left.Zoomed; [void][DpiGeometry]::ShowWindow($h,9); Start-Sleep -Milliseconds 400}
-                $restored=Sample "$name-restored" $h
                 $scale=$destination.Dpi/[double]$origin.Dpi
                 $expectedWidth=[Math]::Min($destination.Work.Right-$destination.Work.Left,[int][Math]::Round($story.Width*$scale))
                 $expectedHeight=[Math]::Min($destination.Work.Bottom-$destination.Work.Top,[int][Math]::Round($story.Height*$scale))
                 $expectedLeft=[Math]::Max($destination.Work.Left,[Math]::Min($destination.Work.Left+150,$destination.Work.Right-$expectedWidth))
                 $expectedTop=[Math]::Max($destination.Work.Top,[Math]::Min($destination.Work.Top+150,$destination.Work.Bottom-$expectedHeight))
                 $expected=New-Rect $expectedLeft $expectedTop $expectedWidth $expectedHeight
+                Key $h 122
+                $left=Wait-WindowState $h {param($s) if($maximized){$s.Zoomed}else{Rect-Equal $s.Rect $expected}}
+                $script:samples.Add(@{Name="$name-left"; State=$left})
+                if($maximized){Check "$name restore maximized" $left.Zoomed $true $left.Zoomed; [void][DpiGeometry]::ShowWindow($h,9)}
+                $restored=Wait-WindowState $h {param($s) Rect-Equal $s.Rect $expected}
+                $script:samples.Add(@{Name="$name-restored"; State=$restored})
                 Check "$name restore geometry" (Rect-Equal $restored.Rect $expected) (Rect-Array $expected) (Rect-Array $restored.Rect)
                 Check "$name restore DPI" ($restored.Dpi -eq $destination.Dpi) $destination.Dpi $restored.Dpi
                 # Ordinary reverse move remains subject to the OS DPI suggestion.

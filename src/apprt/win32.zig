@@ -24289,7 +24289,18 @@ test "win32 DPI suggestions preserve a quick terminal tween but resize ordinary 
     const hwnd = host.hwnd.?;
     var before: RECT = undefined;
     try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
-    const suggested: RECT = .{ .left = before.left, .top = before.top, .right = before.left + 1600, .bottom = before.top + 1000 };
+    const suggested: RECT = .{ .left = before.left + 40, .top = before.top + 30, .right = before.left + 40 + 1600, .bottom = before.top + 30 + 1000 };
+    // DefWindowProc caps the tracking size on small/headless displays. Use
+    // a direct native placement as the ordinary-move oracle, rather than
+    // assuming this monitor permits the requested physical dimensions.
+    try std.testing.expect(sys.SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+    var ordinary: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(hwnd, &ordinary) != 0);
+    // Creation can also permit an oversized rect that a subsequent move
+    // would cap. Establish and read back a smaller native starting rect.
+    try std.testing.expect(sys.SetWindowPos(hwnd, null, before.left, before.top, @divTrunc(ordinary.right - ordinary.left, 2), @divTrunc(ordinary.bottom - ordinary.top, 2), c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+    try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
+    try std.testing.expect(!rectEqual(before, ordinary));
     const param: LPARAM = @bitCast(@intFromPtr(&suggested));
     // A delivered DPI message between tween frames must not override the
     // physical dimensions. This reaches the native handler even when the
@@ -24303,7 +24314,7 @@ test "win32 DPI suggestions preserve a quick terminal tween but resize ordinary 
     // A user move of that same QT still follows the ordinary DPI policy.
     _ = hostWindowProc(hwnd, c.WM_DPICHANGED, 0, param);
     try std.testing.expect(sys.GetWindowRect(hwnd, &actual) != 0);
-    try std.testing.expectEqualDeep(suggested, actual);
+    try std.testing.expectEqualDeep(ordinary, actual);
     try std.testing.expect(!host.quick_terminal_placing);
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
 }
