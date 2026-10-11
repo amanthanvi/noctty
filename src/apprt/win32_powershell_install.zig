@@ -473,7 +473,8 @@ fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) 
     // Dot-source a UTF-8 scriptblock in the SAME child scope. AllSigned is a
     // deliberate signing requirement: keep the file loader and its signature
     // checks. Constrained language is unsupported; skip before defining hooks.
-    // Import the policy cmdlet's binary directly: pwsh's unsigned Security
+    // Load the policy assembly by name: older pwsh has not loaded its cmdlet
+    // type yet. Import the binary directly: pwsh's unsigned Security
     // manifest itself cannot autoload under AllSigned. The cmdlet still
     // computes the effective policy, including Group Policy precedence.
     // A failed load reports one warning and removes only its new errors,
@@ -484,7 +485,7 @@ fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) 
             "try {{ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{ " ++
             "Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue " ++
             "}} else {{ $__ghostty_load_error_head = $null; if ($Error.Count) {{ $__ghostty_load_error_head = $Error[0] }}; " ++
-            "Microsoft.PowerShell.Core\\Import-Module ([Microsoft.PowerShell.Commands.GetExecutionPolicyCommand].Assembly.Location) -ErrorAction Stop; " ++
+            "Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; " ++
             "if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') {{ . $__ghostty_integration_path " ++
             "}} else {{ . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) }} }} " ++
             "}} catch {{ while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) {{ $Error.RemoveAt(0) }}; Microsoft.PowerShell.Utility\\Write-Warning " ++
@@ -1232,6 +1233,13 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
     const path = try tmp.dir.realpathAlloc(alloc, "integration.ps1");
     defer alloc.free(path);
 
+    // Each host rebuilds its own module paths. In particular, a pwsh parent
+    // must not make Windows PowerShell load pwsh's manifests/binaries.
+    var host_env = try std.process.getEnvMap(alloc);
+    defer host_env.deinit();
+    host_env.remove("PSModulePath");
+    host_env.remove("GHOSTTY_SHELL_FEATURES");
+
     for ([_][]const u8{ "powershell.exe", "pwsh.exe" }) |host| {
         for ([_][]const u8{ "Restricted", "RemoteSigned", "AllSigned" }) |policy| {
             const argv = [_][]const u8{ host, "-NoProfile", "-ExecutionPolicy", policy };
@@ -1252,11 +1260,17 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
                 .{injected[injected.len - 1]},
             );
             defer alloc.free(command);
-            const run_argv = try alloc.alloc([]const u8, injected.len);
+            // The fixture draws prompt itself. Disallow unattended host
+            // startup/trust input prompts on Windows NUL.
+            // Keep buildInjectedArgv's interactive production payload intact.
+            const run_argv = try alloc.alloc([]const u8, injected.len + 1);
             defer alloc.free(run_argv);
-            for (injected, 0..) |arg, idx| run_argv[idx] = arg;
+            run_argv[0] = injected[0];
+            run_argv[1] = "-NonInteractive";
+            for (injected[1..], 2..) |arg, idx| run_argv[idx] = arg;
             run_argv[run_argv.len - 1] = command;
             var child = std.process.Child.init(run_argv, alloc);
+            child.env_map = &host_env;
             child.create_no_window = true;
             child.stdin_behavior = .Ignore;
             child.stdout_behavior = .Pipe;
@@ -1283,13 +1297,20 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             watcher_joined = true;
             const term = try child.wait();
             running = false;
-            if (deadline.timed_out) {
-                std.debug.print("PowerShell bootstrap deadline: host={s} policy={s} helper_loaded={} error_count_seen={} prompt_seen={} stderr_bytes={d}\n", .{
+            const helper_loaded = std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null;
+            const expect_helper = !std.mem.eql(u8, policy, "AllSigned");
+            if (deadline.timed_out or helper_loaded != expect_helper or
+                std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=0") == null or
+                std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") == null)
+            {
+                std.debug.print("PowerShell bootstrap fixture: host={s} policy={s} timed_out={} helper_loaded={} error_count_seen={} prompt_seen={} load_warning={} stderr_bytes={d}\n", .{
                     host,
                     policy,
-                    std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null,
+                    deadline.timed_out,
+                    helper_loaded,
                     std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=") != null,
                     std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") != null,
+                    std.mem.indexOf(u8, stdout.items, "could not load") != null,
                     stderr.items.len,
                 });
             }
@@ -1318,7 +1339,7 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
     }
 }
 
-const expected_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Microsoft.PowerShell.Commands.GetExecutionPolicyCommand].Assembly.Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
+const expected_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
 
 test "buildInjectedArgv: interactive shell injects without changing banner semantics" {
     const argv = [_][]const u8{"pwsh.exe"};
