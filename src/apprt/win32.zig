@@ -10043,9 +10043,9 @@ pub const App = struct {
         // extension helper treats those as Unix dotfiles with no extension.
         const basename = std.fs.path.basename(normalized);
         const extension = if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| basename[dot..] else "";
-        // A local-looking path may cross a junction onto a share. Refuse all
-        // reparse traversal before querying attributes or reading file contents.
-        const file = openWin32LocalTargetNoReparse(normalized, extension.len == 0) orelse return null;
+        // Open local reparse targets through a bounded, handle-relative walk;
+        // no unchecked ancestor or symlink target may reach a share or device.
+        const file = @import("win32/local_target.zig").open(alloc, normalized, extension.len == 0) orelse return null;
         defer file.close();
         // The exact dispatched path had to exist for that open. Query its
         // handle: reopening the path here could follow a swapped junction.
@@ -10074,41 +10074,6 @@ pub const App = struct {
             if (std.ascii.eqlIgnoreCase(name, blocked)) return null;
         }
         return normalized;
-    }
-
-    fn openWin32LocalTargetNoReparse(path: []const u8, read_data: bool) ?std.fs.File {
-        const wide = windows.sliceToPrefixedFileW(null, path) catch return null;
-        const span = wide.span();
-        var name: windows.UNICODE_STRING = .{
-            .Length = @intCast(span.len * 2),
-            .MaximumLength = @intCast(span.len * 2),
-            .Buffer = @constCast(span.ptr),
-        };
-        var attributes: windows.OBJECT_ATTRIBUTES = .{
-            .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
-            .RootDirectory = null,
-            .ObjectName = &name,
-            .Attributes = 0x1000, // OBJ_DONT_REPARSE, including ancestors
-            .SecurityDescriptor = null,
-            .SecurityQualityOfService = null,
-        };
-        var io: windows.IO_STATUS_BLOCK = undefined;
-        var handle: windows.HANDLE = undefined;
-        const status = windows.ntdll.NtCreateFile(
-            &handle,
-            windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE | (if (read_data) @as(u32, windows.FILE_READ_DATA) else 0),
-            &attributes,
-            &io,
-            null,
-            windows.FILE_ATTRIBUTE_NORMAL,
-            windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE,
-            windows.FILE_OPEN,
-            windows.FILE_SYNCHRONOUS_IO_NONALERT,
-            null,
-            0,
-        );
-        if (status != .SUCCESS) return null;
-        return .{ .handle = handle };
     }
 
     fn isWin32UncOrDevicePath(path: []const u8) bool {
@@ -40783,6 +40748,97 @@ test "security regression win32 paste WM_DROPFILES matches OLE formatting and cl
         payload,
     );
     try std.testing.expect(win32_paste_protection.inspect(payload).severity != .safe);
+}
+
+test "security regression win32 link opener allows local junctions without PATHEXT retry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("target");
+    try tmp.dir.writeFile(.{ .sub_path = "target/safe.txt", .data = "safe" });
+    try tmp.dir.writeFile(.{ .sub_path = "target/probe.cmd", .data = "@exit /b 0\r\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "target/binary", .data = "MZ\x00\x00" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const target = try std.fs.path.join(alloc, &.{ root, "target" });
+    defer alloc.free(target);
+    const junction = try std.fs.path.join(alloc, &.{ root, "junction" });
+    defer alloc.free(junction);
+    // Junction creation needs no symlink privilege or developer mode.
+    const result = try std.process.Child.run(.{ .allocator = alloc, .argv = &.{ "C:\\Windows\\System32\\cmd.exe", "/d", "/c", "mklink", "/J", junction, target } });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, result.term);
+    // Remove just our junction before tmpDir cleanup, never its target contents.
+    defer tmp.dir.deleteDir("junction") catch {};
+    var writer = try tmp.dir.createFile("target/active.log", .{ .read = true });
+    defer writer.close();
+    const active = try std.fs.path.join(alloc, &.{ junction, "active.log" });
+    defer alloc.free(active);
+    try std.testing.expect(try App.isAllowedWin32OpenTarget(alloc, active));
+    for ([_][]const u8{ "safe.txt", "probe", "binary" }) |name| {
+        const path = try std.fs.path.join(alloc, &.{ junction, name });
+        defer alloc.free(path);
+        try std.testing.expectEqual(std.mem.eql(u8, name, "safe.txt"), try App.isAllowedWin32OpenTarget(alloc, path));
+        if (std.mem.eql(u8, name, "safe.txt")) {
+            const prepared = (try App.prepareWin32OpenTarget(alloc, path)).?;
+            defer alloc.free(prepared);
+            try std.testing.expectEqualStrings(path, prepared);
+        }
+    }
+    try std.testing.expect(try App.isAllowedWin32OpenTarget(alloc, junction));
+}
+
+test "security regression win32 link opener allows local symlinks" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "safe.txt", .data = "safe" });
+    const target = try tmp.dir.realpathAlloc(alloc, "safe.txt");
+    defer alloc.free(target);
+    tmp.dir.symLink(target, "absolute.txt", .{}) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    try tmp.dir.symLink("safe.txt", "relative.txt", .{});
+    try tmp.dir.makeDir("directory");
+    try tmp.dir.writeFile(.{ .sub_path = "directory/safe.txt", .data = "safe" });
+    try tmp.dir.symLink("directory", "folder", .{ .is_directory = true });
+    try tmp.dir.symLink("cycle-b.txt", "cycle-a.txt", .{});
+    try tmp.dir.symLink("cycle-a.txt", "cycle-b.txt", .{});
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    for ([_][]const u8{ "absolute.txt", "relative.txt", "folder/safe.txt", "folder" }) |name| {
+        const path = try std.fs.path.join(alloc, &.{ root, name });
+        defer alloc.free(path);
+        try std.testing.expect(try App.isAllowedWin32OpenTarget(alloc, path));
+    }
+    const cycle = try std.fs.path.join(alloc, &.{ root, "cycle-a.txt" });
+    defer alloc.free(cycle);
+    try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, cycle));
+}
+
+test "security regression win32 link opener refuses UNC symlinks and local chains to UNC" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.symLink("\\\\noctty-invalid-host.invalid\\share\\safe.txt", "network.txt", .{}) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const network = try std.fs.path.join(alloc, &.{ root, "network.txt" });
+    defer alloc.free(network);
+    try tmp.dir.symLink(network, "chain.txt", .{});
+    for ([_][]const u8{ "network.txt", "chain.txt" }) |name| {
+        const path = try std.fs.path.join(alloc, &.{ root, name });
+        defer alloc.free(path);
+        try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, path));
+    }
 }
 
 test "security regression win32 link opener allows known schemes and safe local files" {
