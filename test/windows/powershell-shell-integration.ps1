@@ -792,8 +792,6 @@ try {
     }
 
     # Exercise the binder and cleanup after the bootstrap scope has died.
-    $fakeQuoted = $fakeSsh.Replace("'", "''")
-    $captureQuoted = $fakeCapture.Replace("'", "''")
     $sshChild = Invoke-NocttyInjectedChild -WithoutPSReadLine `
         -Preamble "`$env:GHOSTTY_SHELL_FEATURES = 'ssh-env'; " `
         -Postamble ("; function global:__ghostty_find_command_application { '$fakeQuoted' }; " +

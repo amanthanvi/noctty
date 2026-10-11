@@ -1185,6 +1185,42 @@ test "escapeForPwshSingleQuote: mixed quotes and other Unicode" {
     try std.testing.expectEqualStrings("\u{2018}\u{2018}''\u{2019}\u{2019}\u{201a}\u{201a}\u{201b}\u{201b}\u{201c}\u{1f600}", r);
 }
 
+// The watcher borrows the spawned process handle. Join before Child.wait()
+// closes it; a stalled host must not hold the full suite forever.
+const TestProcessDeadline = struct {
+    handle: std.os.windows.HANDLE,
+    milliseconds: u32,
+    timed_out: bool = false,
+
+    fn run(self: *@This()) void {
+        std.os.windows.WaitForSingleObject(self.handle, self.milliseconds) catch {
+            self.timed_out = true;
+            std.os.windows.TerminateProcess(self.handle, 124) catch {};
+        };
+    }
+};
+
+test "PowerShell child deadline terminates and reaps a stalled host" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    var child = std.process.Child.init(&.{ "powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 300" }, std.testing.allocator);
+    child.create_no_window = true;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    var running = true;
+    errdefer if (running) {
+        _ = child.kill() catch {};
+    };
+    var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = 100 };
+    const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
+    watcher.join();
+    const term = try child.wait();
+    running = false;
+    try std.testing.expect(deadline.timed_out);
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 124 }, term);
+}
+
 test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -1232,13 +1268,20 @@ test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" 
             errdefer if (running) {
                 _ = child.kill() catch {};
             };
+            var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = 30_000 };
+            const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
+            var watcher_joined = false;
+            defer if (!watcher_joined) watcher.join();
             var stdout: std.ArrayList(u8) = .empty;
             defer stdout.deinit(alloc);
             var stderr: std.ArrayList(u8) = .empty;
             defer stderr.deinit(alloc);
             try child.collectOutput(alloc, &stdout, &stderr, 50 * 1024);
+            watcher.join();
+            watcher_joined = true;
             const term = try child.wait();
             running = false;
+            try std.testing.expect(!deadline.timed_out);
             const result = .{ .stdout = stdout.items, .stderr = stderr.items, .term = term };
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "BOOTSTRAP-PROBE> ") != null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ERROR-COUNT=0") != null);
