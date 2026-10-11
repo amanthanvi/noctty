@@ -777,7 +777,10 @@ function global:__ghostty_prompt_body {
             # OSC 133 A — mark prompt start (jump-to-prompt anchor).
             # `redraw=0`: PowerShell never re-runs `prompt` after a resize,
             # so the terminal must not clear the prompt rows expecting it to.
-            __ghostty_write_osc "${Global:__ghostty_esc}]133;A;cl=line;aid=${Global:__ghostty_aid};redraw=0${Global:__ghostty_bel}"
+            # PowerShell never requests Kitty keys or modifyOtherKeys. Pop
+            # all flags left by a killed TUI now that the shell owns input.
+            # Generic OSC 133 A must not reset modes in Kitty-aware shells.
+            __ghostty_write_osc "${Global:__ghostty_esc}[<99u${Global:__ghostty_esc}[>4;0m${Global:__ghostty_esc}]133;A;cl=line;aid=${Global:__ghostty_aid};redraw=0${Global:__ghostty_bel}"
         } catch {
             # Deliberately silent: writing an error here would corrupt the
             # prompt line we are about to draw.
@@ -992,7 +995,9 @@ function global:__ghostty_readline {
                 if ($null -ne $cwd_uri) {
                     __ghostty_write_osc "${Global:__ghostty_esc}]7;${cwd_uri}${Global:__ghostty_bel}"
                 }
-                __ghostty_write_osc "${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"
+                # The replaced/ReadOnly prompt did not run our wrapper;
+                # recover modes here, only for the host's own prompt read.
+                __ghostty_write_osc "${Global:__ghostty_esc}[<99u${Global:__ghostty_esc}[>4;0m${Global:__ghostty_esc}]133;P;k=i;redraw=0${Global:__ghostty_bel}"
             }
             __ghostty_write_osc "${Global:__ghostty_esc}]133;B${Global:__ghostty_bel}"
         }

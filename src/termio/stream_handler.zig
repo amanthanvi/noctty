@@ -2127,6 +2127,101 @@ test "security regression OSC 7 pwd rejects percent-decoded Windows controls" {
     );
 }
 
+test "PKG16 integrated cmd prompt clears stale keyboard modes" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var term = try terminal.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer termio_mailbox.deinit(alloc);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(alloc);
+    defer app_queue.destroy(alloc);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(alloc, .{
+        .alloc = alloc,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    // Use the production integration to construct PROMPT, then expand the
+    // default cmd prompt codes into the bytes ConPTY forwards to this handler.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var env = std.process.EnvMap.init(arena.allocator());
+    const integration = try @import("shell_integration.zig").setup(
+        arena.allocator(),
+        "C:\\unused",
+        .{ .shell = "cmd.exe" },
+        &env,
+        null,
+        false,
+    );
+    try std.testing.expect(integration != null);
+    var drawn: std.ArrayList(u8) = .empty;
+    defer drawn.deinit(alloc);
+    const prompt = env.get("PROMPT").?;
+    var i: usize = 0;
+    while (i < prompt.len) : (i += 1) {
+        if (prompt[i] != '$') {
+            try drawn.append(alloc, prompt[i]);
+            continue;
+        }
+        i += 1;
+        switch (prompt[i]) {
+            'E' => try drawn.append(alloc, 0x1b),
+            'P' => try drawn.appendSlice(alloc, "C:\\work"),
+            'G' => try drawn.append(alloc, '>'),
+            else => return error.UnexpectedPromptCode,
+        }
+    }
+    stream.handler.seen_title = true;
+    // A generic prompt mark must leave a Kitty-aware shell's modes alone.
+    stream.nextSlice("\x1b[>1u\x1b[>31u\x1b[>4;2m\x1b]133;A\x07");
+    try std.testing.expectEqual(@as(u5, 31), term.screens.active.kitty_keyboard.current().int());
+    try std.testing.expect(term.flags.modify_other_keys_2);
+    stream.nextSlice(drawn.items);
+    try std.testing.expectEqual(@as(u5, 0), term.screens.active.kitty_keyboard.current().int());
+    try std.testing.expect(!term.flags.modify_other_keys_2);
+    // Pop every entry, not just the most recent pushed flags.
+    term.screens.active.kitty_keyboard.pop(1);
+    try std.testing.expectEqual(@as(u5, 0), term.screens.active.kitty_keyboard.current().int());
+    while (app_queue.pop()) |value| {
+        var message = value;
+        message.deinit(alloc);
+    }
+}
+
 test "cmd OSC 9;9 URI updates terminal pwd" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
