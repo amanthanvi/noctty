@@ -417,11 +417,11 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 else => log.debug("mailbox message={t}", .{message}),
             }
         }
-        switch (message) {
-            .open_config => try self.performAction(rt_app, .open_config),
-            .new_window => |msg| {
+        const handled = switch (message) {
+            .open_config => self.performAction(rt_app, .open_config),
+            .new_window => |msg| new_window: {
                 defer msg.deinit(self.alloc);
-                try self.newWindow(rt_app, msg);
+                break :new_window self.newWindow(rt_app, msg);
             },
             .automation_window_list => |request| {
                 if (request.lifecycle.claim()) {
@@ -456,8 +456,8 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 request.release();
             },
             .close => |surface| self.closeSurface(surface),
-            .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.message),
-            .redraw_surface => |surface| try self.redrawSurface(rt_app, surface),
+            .surface_message => |msg| self.surfaceMessage(msg.surface, msg.message),
+            .redraw_surface => |surface| self.redrawSurface(rt_app, surface),
 
             // If we're quitting, then we set the quit flag and stop
             // draining the mailbox immediately. This lets us defer
@@ -468,7 +468,11 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 try self.performAction(rt_app, .quit);
                 return;
             },
-        }
+        };
+        // A failed message is dropped, not fatal, whatever the error,
+        // OutOfMemory included. Returning it would end the apprt's run loop
+        // and close every window over, say, one that could not be created.
+        handled catch |err| log.warn("mailbox message={t} failed err={}", .{ message, err });
     }
 }
 
