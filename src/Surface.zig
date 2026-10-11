@@ -3422,6 +3422,10 @@ pub fn keyCallback(
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
+    // Taken now: a key that closes this surface frees it before
+    // keyCallback returns on runtimes that close synchronously (Win32).
+    const alloc = self.alloc;
+
     // Setup our inspector event if we have an inspector.
     var insp_ev: ?inspectorpkg.KeyEvent = if (self.inspector != null) ev: {
         var copy = event;
@@ -3453,7 +3457,16 @@ pub fn keyCallback(
     if (try self.maybeHandleBinding(
         event,
         if (insp_ev) |*ev| ev else null,
-    )) |v| return v;
+    )) |v| {
+        // A closing binding has already freed this surface on runtimes that
+        // close synchronously (Win32): drop the inspector record instead of
+        // letting the defer above read the freed surface.
+        if (v == .closed) {
+            if (insp_ev) |ev| ev.deinit(alloc);
+            insp_ev = null;
+        }
+        return v;
+    }
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
         self.renderer_state.mutex.lock();
@@ -3561,6 +3574,12 @@ pub fn keyCallback(
         // an encoded value, we close the surface. We want to eventually
         // move this behavior to the apprt probably.
         if (self.child_exited) {
+            // Closing can free this surface before `close` returns, so
+            // release what this call still owns first, and disarm the
+            // inspector record deferred above, which would read it.
+            write_req.deinit();
+            if (insp_ev) |ev| ev.deinit(alloc);
+            insp_ev = null;
             self.close();
             return .closed;
         }
