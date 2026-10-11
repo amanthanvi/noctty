@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const EnvMap = std.process.EnvMap;
 const win32_powershell_install = @import("../apprt/win32_powershell_install.zig");
+const windows_shell = @import("../config/windows_shell.zig");
 const config = @import("../config.zig");
 const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
@@ -55,21 +56,71 @@ pub const ShellIntegration = struct {
 pub fn setup(
     alloc_arena: Allocator,
     resource_dir: []const u8,
-    command: config.Command,
+    command_: config.Command,
     env: *EnvMap,
     force_shell: ?Shell,
     utf8_console: bool,
 ) !?ShellIntegration {
-    const shell: Shell = force_shell orelse
-        try detectShell(alloc_arena, command) orelse
-        return null;
+    var command = if (builtin.os.tag == .windows)
+        try windows_shell.executableCommand(alloc_arena, command_)
+    else
+        command_;
+    const detected = if (builtin.os.tag != .windows and force_shell != null)
+        null
+    else
+        try detectShell(alloc_arena, command);
+    const shell: Shell = shell: {
+        if (builtin.os.tag == .windows) {
+            var iter = try command.argIterator(alloc_arena);
+            defer iter.deinit();
+            const exe = std.fs.path.basename(iter.next() orelse return null);
+            if (std.ascii.eqlIgnoreCase(exe, "wsl") or
+                std.ascii.eqlIgnoreCase(exe, "wsl.exe") or
+                std.ascii.eqlIgnoreCase(exe, "ssh") or
+                std.ascii.eqlIgnoreCase(exe, "ssh.exe")) return null;
+            // A forced mode may identify a custom wrapper, but never replace
+            // a recognized shell's integration in another Windows profile.
+            if (detected) |v| break :shell v;
+        }
+        break :shell force_shell orelse detected orelse return null;
+    };
+
+    var shell_fallback = false;
+    // Only these integrations rebuild argv. Cmd/zsh/Elvish keep the string
+    // intact, so their expansion and quoting remain cmd's responsibility.
+    if (builtin.os.tag == .windows and
+        (shell == .bash or shell == .nushell or shell == .powershell))
+    {
+        if (command == .shell and windowsCommandNeedsShell(command.shell)) return null;
+        var iter = try command.argIterator(alloc_arena);
+        defer iter.deinit();
+        const exe = iter.next() orelse return null;
+        // Explicit relative paths in a cmd string are relative to the pane's
+        // cwd. CreateProcess's application name uses the app's cwd instead.
+        if (command == .shell and std.mem.indexOfAny(u8, exe, "\\/:") != null and
+            !(exe.len >= 3 and std.ascii.isAlphabetic(exe[0]) and exe[1] == ':' and
+                (exe[2] == '\\' or exe[2] == '/'))) return null;
+        if (std.mem.indexOfAny(u8, exe, "\\/:") == null) {
+            if (try windows_shell.lookupChildExecutable(alloc_arena, exe, env)) |path| {
+                var argv: std.ArrayList([:0]const u8) = .empty;
+                try argv.append(alloc_arena, path);
+                while (iter.next()) |arg| try argv.append(alloc_arena, try alloc_arena.dupeZ(u8, arg));
+                command = .{ .direct = try argv.toOwnedSlice(alloc_arena) };
+            } else if (command == .shell) {
+                // Preserve main's integrated launch form when lookup cannot
+                // resolve a native file: PowerShell was direct, Bash/Nu cmd.
+                shell_fallback = shell != .powershell;
+            }
+        }
+    }
 
     const new_command: config.Command = switch (shell) {
-        .bash => try setupBash(
+        .bash => try setupBashWithLaunchForm(
             alloc_arena,
             command,
             resource_dir,
             env,
+            shell_fallback,
         ),
 
         .nushell => try setupNushell(
@@ -87,6 +138,10 @@ pub fn setup(
         ),
 
         .elvish, .fish => xdg: {
+            // Fish's MSYS/Cygwin loader needs a POSIX path list, unlike
+            // native Elvish. Leave manual integration available until that
+            // host-to-POSIX resource conversion can be verified.
+            if (builtin.os.tag == .windows and shell == .fish) return null;
             if (!try setupXdgDataDirs(alloc_arena, resource_dir, env)) return null;
             break :xdg try command.clone(alloc_arena);
         },
@@ -108,8 +163,37 @@ pub fn setup(
 
     return .{
         .shell = shell,
-        .command = new_command,
+        .command = if (shell_fallback and shell == .nushell)
+            (try windowsIntegratedShellCommand(alloc_arena, new_command.direct)) orelse return null
+        else
+            new_command,
     };
+}
+
+fn windowsIntegratedShellCommand(alloc: Allocator, argv: []const [:0]const u8) !?config.Command {
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    defer buf.deinit();
+    for (argv, 0..) |arg, i| {
+        if (i != 0) try buf.writer.writeByte(' ');
+        try config.Command.writeDirectArg(&buf.writer, arg);
+    }
+    // Cmd still parses the serialized tail. Never turn quoted literal data
+    // or an injected resource path into expansion or an exposed operator.
+    if (windowsCommandNeedsShell(buf.written())) return null;
+    return .{ .shell = try buf.toOwnedSliceSentinel(0) };
+}
+
+fn windowsCommandNeedsShell(value: []const u8) bool {
+    var quoted = false;
+    for (value) |c| {
+        if (c == '"') quoted = !quoted;
+        // Cmd expands these inside quotes too. A caret outside quotes can
+        // escape a quote or operator, which an argv tokenizer cannot retain.
+        // A newline terminates cmd's command line even inside quotes.
+        if (c == '%' or c == '!' or c == '\r' or c == '\n' or
+            (!quoted and std.mem.indexOfScalar(u8, "&|<>^()@", c) != null)) return true;
+    }
+    return quoted;
 }
 
 test "force shell" {
@@ -131,7 +215,7 @@ test "force shell" {
         const command: config.Command = switch (shell) {
             .powershell => .{ .direct = &.{"pwsh.exe"} },
             .cmd => .{ .direct = &.{"cmd.exe"} },
-            else => .{ .shell = "sh" },
+            else => if (builtin.os.tag == .windows) .{ .direct = &.{"sh"} } else .{ .shell = "sh" },
         };
 
         const result = try setup(
@@ -142,8 +226,9 @@ test "force shell" {
             shell,
             false,
         );
-        if ((shell == .powershell or shell == .cmd) and
-            builtin.os.tag != .windows)
+        if (((shell == .powershell or shell == .cmd) and
+            builtin.os.tag != .windows) or
+            (shell == .fish and builtin.os.tag == .windows))
         {
             try testing.expect(result == null);
         } else {
@@ -175,12 +260,24 @@ test "shell integration failure" {
     try testing.expectEqual(0, env.count());
 }
 
+fn shellNameMatches(expected: []const u8, actual: []const u8) bool {
+    return if (builtin.os.tag == .windows)
+        std.ascii.eqlIgnoreCase(expected, actual)
+    else
+        std.mem.eql(u8, expected, actual);
+}
+
 fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     var arg_iter = try command.argIterator(alloc);
     defer arg_iter.deinit();
 
     const arg0 = arg_iter.next() orelse return null;
-    const exe = std.fs.path.basename(arg0);
+    const basename = std.fs.path.basename(arg0);
+    const exe = if (builtin.os.tag == .windows and
+        std.ascii.endsWithIgnoreCase(basename, ".exe"))
+        basename[0 .. basename.len - 4]
+    else
+        basename;
 
     if (std.ascii.eqlIgnoreCase(exe, "bash") or std.ascii.eqlIgnoreCase(exe, "bash.exe")) {
         // Apple distributes their own patched version of Bash 3.2
@@ -199,10 +296,10 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
         return .bash;
     }
 
-    if (std.mem.eql(u8, "elvish", exe)) return .elvish;
-    if (std.mem.eql(u8, "fish", exe)) return .fish;
-    if (std.mem.eql(u8, "nu", exe)) return .nushell;
-    if (std.mem.eql(u8, "zsh", exe)) return .zsh;
+    if (shellNameMatches("elvish", exe)) return .elvish;
+    if (shellNameMatches("fish", exe)) return .fish;
+    if (shellNameMatches("nu", exe)) return .nushell;
+    if (shellNameMatches("zsh", exe)) return .zsh;
 
     // PowerShell — both Windows PowerShell (5.1) and pwsh (7+). Case-
     // insensitive match on the basename so `pwsh.EXE` from Explorer
@@ -222,6 +319,229 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     }
 
     return null;
+}
+
+test "PKG08 full executable config path is detected before integration" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+    try res.tmp_dir.dir.makeDir("PowerShell 7");
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "PowerShell 7/pwsh.exe", .data = "" });
+    const path = try res.tmp_dir.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
+    var env = EnvMap.init(alloc);
+    const result = (try setup(alloc, res.path, .{
+        .shell = try alloc.dupeZ(u8, path),
+    }, &env, null, false)).?;
+    try std.testing.expectEqual(Shell.powershell, result.shell);
+    try std.testing.expect(result.command == .direct);
+    try std.testing.expectEqualStrings(path, result.command.direct[0]);
+}
+
+test "PKG08 native executable detection" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const cases = .{
+        .{ "C:\\Program Files\\Fish\\fish.exe", Shell.fish },
+        .{ "NU.EXE", Shell.nushell },
+        .{ "ZSH.EXE", Shell.zsh },
+        .{ "Elvish.exe", Shell.elvish },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(case[1], try detectShell(std.testing.allocator, .{ .direct = &.{case[0]} }));
+    }
+}
+
+test "PKG08 forced modes preserve other Windows shell profiles" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    for ([_]Shell{ .bash, .zsh, .fish, .elvish, .nushell }) |forced| {
+        for ([_][:0]const u8{ "pwsh.exe", "powershell.exe", "cmd.exe", "wsl.exe", "ssh.exe" }) |exe| {
+            var env = EnvMap.init(alloc);
+            const result = try setup(alloc, res.path, .{ .direct = &.{exe} }, &env, forced, false);
+            try std.testing.expect(result == null or result.?.shell == .powershell or result.?.shell == .cmd);
+            try std.testing.expect(env.get("GHOSTTY_BASH_INJECT") == null);
+            try std.testing.expect(env.get("XDG_DATA_DIRS") == null);
+        }
+    }
+}
+
+test "PKG08 quoted bash invocation keeps argv while cmd strings keep expansion" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = (try setup(alloc, res.path, .{
+        .shell = "\"C:\\Program Files\\Git\\bin\\bash.exe\" --login -i -- \"a b\"",
+    }, &env, null, false)).?;
+    try std.testing.expect(result.command == .direct);
+    const expected = [_][]const u8{ "C:\\Program Files\\Git\\bin\\bash.exe", "--posix", "--login", "-i", "--", "a b" };
+    try std.testing.expectEqual(expected.len, result.command.direct.len);
+    for (expected, result.command.direct) |want, got| try std.testing.expectEqualStrings(want, got);
+    var plain_env = EnvMap.init(alloc);
+    try std.testing.expect(try setup(alloc, res.path, .{
+        .shell = "bash --login && echo %USERPROFILE%",
+    }, &plain_env, null, false) == null);
+    try std.testing.expectEqual(@as(u32, 0), plain_env.count());
+    try std.testing.expect(try setup(alloc, res.path, .{
+        .shell = "bash.exe --rcfile !BASH_RCFILE! -i",
+    }, &plain_env, null, false) == null);
+    for ([_][:0]const u8{
+        ".\\bash.exe --login -i", "C:bash.exe -i",         "\\bash.exe -i",
+        "@bash.exe --login -i",   "(bash.exe --login -i)",
+    }) |value| {
+        try std.testing.expect(try setup(alloc, res.path, .{ .shell = value }, &plain_env, .bash, false) == null);
+    }
+}
+
+test "PKG08 round2 quoted x86 bash path integrates" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = try setup(alloc, res.path, .{
+        .shell = "\"C:\\Program Files (x86)\\Git\\bin\\bash.exe\" --login -i",
+    }, &env, null, false);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("C:\\Program Files (x86)\\Git\\bin\\bash.exe", result.?.command.direct[0]);
+}
+
+test "PKG08 round2 quoted x86 powershell path integrates" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = try setup(alloc, res.path, .{
+        .shell = "\"C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe\" -NoLogo",
+    }, &env, null, false);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe", result.?.command.direct[0]);
+}
+
+test "PKG08 round2 cmd expansion keeps prompt integration" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    const value = "cmd.exe /k %X%\\a.cmd";
+    const result = try setup(alloc, "C:\\unused", .{ .shell = value }, &env, null, false);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings(value, result.?.command.shell);
+    try std.testing.expect(std.mem.indexOf(u8, env.get("PROMPT").?, "133;A") != null);
+    var bash_env = EnvMap.init(alloc);
+    try std.testing.expect(try setup(alloc, "C:\\unused", .{
+        .shell = "bash -i & echo x",
+    }, &bash_env, null, false) == null);
+    try std.testing.expectEqual(@as(u32, 0), bash_env.count());
+}
+
+test "PKG08 round2 bare bash uses child PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "bash.exe", .data = "child" });
+    const expected = try res.tmp_dir.dir.realpathAlloc(alloc, "bash.exe");
+    var env = EnvMap.init(alloc);
+    try env.put("PATH", try res.tmp_dir.dir.realpathAlloc(alloc, "."));
+    try env.put("PATHEXT", ".exe;.com");
+    const result = (try setup(alloc, res.path, .{ .shell = "bash -i" }, &env, null, false)).?;
+    try std.testing.expectEqualStrings(expected, result.command.direct[0]);
+    try std.testing.expectEqualStrings("--posix", result.command.direct[1]);
+}
+
+test "PKG08 round2 bare powershell uses child PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "child" });
+    const expected = try res.tmp_dir.dir.realpathAlloc(alloc, "pwsh.exe");
+    var env = EnvMap.init(alloc);
+    try env.put("Path", try res.tmp_dir.dir.realpathAlloc(alloc, "."));
+    try env.put("Pathext", ".exe;.com");
+    const result = (try setup(alloc, res.path, .{ .shell = "pwsh -NoLogo" }, &env, null, false)).?;
+    try std.testing.expectEqualStrings(expected, result.command.direct[0]);
+}
+
+test "PKG08 round3 unresolved shells retain their integrated launch forms" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    inline for (.{ Shell.bash, Shell.nushell, Shell.powershell }) |shell| {
+        var env = EnvMap.init(alloc);
+        try env.put("PATH", "relative;\\\\server\\share;\\??\\UNC\\server\\share");
+        var res: TmpResourcesDir = try .init(alloc, shell);
+        defer res.deinit();
+        const value: [:0]const u8 = switch (shell) {
+            .bash => "bash -i",
+            .nushell => "nu",
+            .powershell => "pwsh -NoLogo",
+            else => unreachable,
+        };
+        const result = try setup(alloc, res.path, .{ .shell = value }, &env, null, false);
+        try std.testing.expect(result != null);
+        try std.testing.expectEqual(shell, result.?.shell);
+        if (shell == .powershell) {
+            try std.testing.expect(result.?.command == .direct);
+            try std.testing.expectEqualStrings("pwsh", result.?.command.direct[0]);
+            try std.testing.expectEqualStrings("-Command", result.?.command.direct[result.?.command.direct.len - 2]);
+        } else {
+            try std.testing.expect(result.?.command == .shell);
+            try std.testing.expect(std.mem.startsWith(u8, result.?.command.shell, if (shell == .bash) "bash --posix -i" else "nu --execute "));
+            if (shell == .bash) try std.testing.expect(env.get("GHOSTTY_BASH_INJECT") != null);
+        }
+    }
+}
+
+test "PKG08 round3 rejected bash fallback preserves environment" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    try env.put("PATH", "relative");
+    try env.put("ENV", "user-env.sh");
+    const before = env.count();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    try std.testing.expect(try setup(alloc, res.path, .{
+        .shell = "bash -i -- \"file&name.sh\"",
+    }, &env, null, false) == null);
+    try std.testing.expectEqualStrings("user-env.sh", env.get("ENV").?);
+    try std.testing.expect(env.get("HISTFILE") == null);
+    try std.testing.expectEqual(before, env.count());
+}
+
+test "PKG08 round2 cmd syntax screen respects double quotes" {
+    for ([_][]const u8{
+        "bash \"a&b|c<d>e^f(g)@h\"", "\"C:\\Program Files (x86)\\bash.exe\" -i",
+    }) |value| try std.testing.expect(!windowsCommandNeedsShell(value));
+    for ([_][]const u8{
+        "bash -i & echo x",     "bash \"%X%\"",    "bash \"!X!\"",        "bash ^\"x\"",
+        "bash (x)",             "bash @x",         "bash \"unterminated", "bash\r\necho x",
+        "bash \"a\\\"& echo x", "bash \"a\r\nb\"",
+    }) |value| try std.testing.expect(windowsCommandNeedsShell(value));
 }
 
 test detectShell {
@@ -313,6 +633,10 @@ test "setup powershell: interactive shell command auto injects" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try env.put("PATH", res.path);
+    try env.put("PATHEXT", ".exe");
+    const exe_path = try res.tmp_dir.dir.realpathAlloc(alloc, "powershell.exe");
 
     const command: config.Command = .{ .shell = "powershell.exe -NoProfile" };
     const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
@@ -329,7 +653,7 @@ test "setup powershell: interactive shell command auto injects" {
     try testing.expectEqual(.powershell, result.shell);
     try testing.expect(result.command == .direct);
     try testing.expectEqual(@as(usize, 5), result.command.direct.len);
-    try testing.expectEqualStrings("powershell.exe", result.command.direct[0]);
+    try testing.expectEqualStrings(exe_path, result.command.direct[0]);
     try testing.expectEqualStrings("-NoProfile", result.command.direct[1]);
     try testing.expectEqualStrings("-NoExit", result.command.direct[2]);
     try testing.expectEqualStrings("-Command", result.command.direct[3]);
@@ -414,6 +738,8 @@ test "setup powershell: explicit short command launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "" });
+    try env.put("PATH", res.path);
 
     const result = try setup(
         alloc,
@@ -441,6 +767,8 @@ test "setup powershell: explicit command prefix launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try env.put("PATH", res.path);
 
     const result = try setup(
         alloc,
@@ -468,6 +796,9 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "" });
+    try env.put("PATH", res.path);
+    const exe_path = try res.tmp_dir.dir.realpathAlloc(alloc, "pwsh.exe");
 
     const command: config.Command = .{ .shell = "pwsh.exe /NoProfile" };
     const result = (try setup(alloc, res.path, command, &env, .powershell, false)).?;
@@ -484,7 +815,7 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
     try testing.expectEqual(.powershell, result.shell);
     try testing.expect(result.command == .direct);
     try testing.expectEqual(@as(usize, 5), result.command.direct.len);
-    try testing.expectEqualStrings("pwsh.exe", result.command.direct[0]);
+    try testing.expectEqualStrings(exe_path, result.command.direct[0]);
     try testing.expectEqualStrings("/NoProfile", result.command.direct[1]);
     try testing.expectEqualStrings("-NoExit", result.command.direct[2]);
     try testing.expectEqualStrings("-Command", result.command.direct[3]);
@@ -505,6 +836,8 @@ test "setup powershell: slash version launch is not wrapped" {
 
     var res: TmpResourcesDir = try .init(alloc, .powershell);
     defer res.deinit();
+    try res.tmp_dir.dir.writeFile(.{ .sub_path = "powershell.exe", .data = "" });
+    try env.put("PATH", res.path);
 
     const result = try setup(
         alloc,
@@ -1413,6 +1746,42 @@ test "setup features" {
     }
 }
 
+/// Keep Windows argv structured until Command quotes it for CreateProcess.
+/// POSIX retains the existing shell-string launch contract.
+const IntegrationCommandBuilder = struct {
+    alloc: Allocator,
+    args: std.ArrayList([:0]const u8) = .empty,
+
+    fn init(alloc: Allocator) IntegrationCommandBuilder {
+        return .{ .alloc = alloc };
+    }
+
+    fn deinit(self: *IntegrationCommandBuilder) void {
+        self.args.deinit(self.alloc);
+    }
+
+    fn appendArg(self: *IntegrationCommandBuilder, arg: []const u8) !void {
+        if (builtin.os.tag != .windows and arg.len == 0) return;
+        try self.args.append(self.alloc, try self.alloc.dupeZ(u8, arg));
+    }
+
+    fn finish(self: *IntegrationCommandBuilder) !config.Command {
+        if (builtin.os.tag == .windows)
+            return .{ .direct = try self.args.toOwnedSlice(self.alloc) };
+        return .{ .shell = try std.mem.joinZ(self.alloc, " ", self.args.items) };
+    }
+};
+
+fn expectIntegratedCommand(expected: [:0]const u8, actual: config.Command) !void {
+    if (actual == .shell) return std.testing.expectEqualStrings(expected, actual.shell);
+    var iter = try (config.Command{ .shell = expected }).argIterator(std.testing.allocator);
+    defer iter.deinit();
+    for (actual.direct) |arg| {
+        try std.testing.expectEqualStrings(iter.next() orelse return error.ExtraArgument, arg);
+    }
+    try std.testing.expect(iter.next() == null);
+}
+
 /// Setup the bash automatic shell integration. This works by
 /// starting bash in POSIX mode and using the ENV environment
 /// variable to load our bash integration script. This prevents
@@ -1428,8 +1797,17 @@ fn setupBash(
     resource_dir: []const u8,
     env: *EnvMap,
 ) !?config.Command {
-    var stack_fallback = std.heap.stackFallback(4096, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    return setupBashWithLaunchForm(alloc, command, resource_dir, env, false);
+}
+
+fn setupBashWithLaunchForm(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+    shell_fallback: bool,
+) !?config.Command {
+    var cmd = IntegrationCommandBuilder.init(alloc);
     defer cmd.deinit();
 
     // Iterator that yields each argument in the original command line.
@@ -1488,6 +1866,14 @@ fn setupBash(
         }
     }
 
+    // Validate cmd fallback before changing ENV or history settings. A
+    // rejected rebuild must leave the original command's environment intact.
+    const integrated_command = try cmd.finish();
+    const launch_command = if (shell_fallback)
+        (try windowsIntegratedShellCommand(alloc, integrated_command.direct)) orelse return null
+    else
+        integrated_command;
+
     // Preserve an existing ENV value. We're about to overwrite it.
     if (env.get("ENV")) |v| {
         try env.put("GHOSTTY_BASH_ENV", v);
@@ -1531,7 +1917,29 @@ fn setupBash(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
+    return launch_command;
+}
+
+test "PKG08 bash direct argv preserves Program Files and quoted arguments" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .bash);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = (try setupBash(alloc, .{ .direct = &.{
+        "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i", "--",
+        "a b",                                   "a\"b",    "",   "100% & literal",
+        "C:\\a b\\",
+    } }, res.path, &env)).?;
+    try std.testing.expect(result == .direct);
+    const expected = [_][]const u8{
+        "C:\\Program Files\\Git\\bin\\bash.exe", "--posix", "--login", "-i",             "--",
+        "a b",                                   "a\"b",    "",        "100% & literal", "C:\\a b\\",
+    };
+    try std.testing.expectEqual(expected.len, result.direct.len);
+    for (expected, result.direct) |want, got| try std.testing.expectEqualStrings(want, got);
 }
 
 test "bash" {
@@ -1547,7 +1955,7 @@ test "bash" {
     defer env.deinit();
 
     const command = try setupBash(alloc, .{ .shell = "bash" }, res.path, &env);
-    try testing.expectEqualStrings("bash --posix", command.?.shell);
+    try expectIntegratedCommand("bash --posix", command.?);
     try testing.expectEqualStrings("1", env.get("GHOSTTY_BASH_INJECT").?);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1598,7 +2006,7 @@ test "bash: inject flags" {
         defer env.deinit();
 
         const command = try setupBash(alloc, .{ .shell = "bash --norc" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try expectIntegratedCommand("bash --posix", command.?);
         try testing.expectEqualStrings("1 --norc", env.get("GHOSTTY_BASH_INJECT").?);
     }
 
@@ -1608,7 +2016,7 @@ test "bash: inject flags" {
         defer env.deinit();
 
         const command = try setupBash(alloc, .{ .shell = "bash --noprofile" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try expectIntegratedCommand("bash --posix", command.?);
         try testing.expectEqualStrings("1 --noprofile", env.get("GHOSTTY_BASH_INJECT").?);
     }
 }
@@ -1628,14 +2036,14 @@ test "bash: rcfile" {
     // bash --rcfile
     {
         const command = try setupBash(alloc, .{ .shell = "bash --rcfile profile.sh" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try expectIntegratedCommand("bash --posix", command.?);
         try testing.expectEqualStrings("profile.sh", env.get("GHOSTTY_BASH_RCFILE").?);
     }
 
     // bash --init-file
     {
         const command = try setupBash(alloc, .{ .shell = "bash --init-file profile.sh" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix", command.?.shell);
+        try expectIntegratedCommand("bash --posix", command.?);
         try testing.expectEqualStrings("profile.sh", env.get("GHOSTTY_BASH_RCFILE").?);
     }
 }
@@ -1711,13 +2119,13 @@ test "bash: additional arguments" {
     // "-" argument separator
     {
         const command = try setupBash(alloc, .{ .shell = "bash - --arg file1 file2" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix - --arg file1 file2", command.?.shell);
+        try expectIntegratedCommand("bash --posix - --arg file1 file2", command.?);
     }
 
     // "--" argument separator
     {
         const command = try setupBash(alloc, .{ .shell = "bash -- --arg file1 file2" }, res.path, &env);
-        try testing.expectEqualStrings("bash --posix -- --arg file1 file2", command.?.shell);
+        try expectIntegratedCommand("bash --posix -- --arg file1 file2", command.?);
     }
 }
 
@@ -1788,7 +2196,8 @@ fn setupXdgDataDirs(
         xdg_data_dirs_key,
         try internal_os.prependEnv(
             stack_alloc,
-            env.get(xdg_data_dirs_key) orelse "/usr/local/share:/usr/share",
+            env.get(xdg_data_dirs_key) orelse
+                (if (builtin.os.tag == .windows) "" else "/usr/local/share:/usr/share"),
             integ_path,
         ),
     );
@@ -1854,6 +2263,26 @@ test "xdg: existing XDG_DATA_DIRS" {
     );
 }
 
+test "PKG08 native Elvish path list and Fish manual fallback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .elvish);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    try env.put("XDG_DATA_DIRS", "C:\\custom one;D:\\custom two");
+    const result = (try setup(alloc, res.path, .{ .direct = &.{"elvish.exe"} }, &env, null, false)).?;
+    try std.testing.expectEqual(Shell.elvish, result.shell);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(alloc, "{s}/shell-integration;C:\\custom one;D:\\custom two", .{res.path}), env.get("XDG_DATA_DIRS").?);
+    var empty_env = EnvMap.init(alloc);
+    try std.testing.expect(try setupXdgDataDirs(alloc, res.path, &empty_env));
+    try std.testing.expectEqualStrings(empty_env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR").?, empty_env.get("XDG_DATA_DIRS").?);
+    var fish_env = EnvMap.init(alloc);
+    try std.testing.expect(try setup(alloc, res.path, .{ .direct = &.{"fish.exe"} }, &fish_env, null, false) == null);
+    try std.testing.expectEqual(@as(u32, 0), fish_env.count());
+}
+
 test "xdg: missing resources" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -1888,10 +2317,17 @@ fn setupNushell(
     // Add our XDG_DATA_DIRS entry (for nushell/vendor/autoload/). This
     // makes our 'ghostty' module automatically available, even if any
     // of the later checks abort the rest of our automatic integration.
-    if (!try setupXdgDataDirs(alloc, resource_dir, env)) return null;
+    const native_module: ?[]const u8 = if (builtin.os.tag == .windows) module: {
+        const path = try std.fs.path.join(alloc, &.{
+            resource_dir, "shell-integration", "nushell", "vendor", "autoload", "ghostty.nu",
+        });
+        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+        file.close();
+        break :module path;
+    } else null;
+    if (builtin.os.tag != .windows and !try setupXdgDataDirs(alloc, resource_dir, env)) return null;
 
-    var stack_fallback = std.heap.stackFallback(4096, alloc);
-    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.get());
+    var cmd = IntegrationCommandBuilder.init(alloc);
     defer cmd.deinit();
 
     // Iterator that yields each argument in the original command line.
@@ -1910,7 +2346,15 @@ fn setupNushell(
     // We can consider making this more specific based on the set of
     // enabled shell features (e.g. `use ghostty sudo`). At the moment,
     // shell features are all runtime-guarded in the nushell script.
-    try cmd.appendArg("--execute 'use ghostty *'");
+    if (builtin.os.tag == .windows) {
+        try cmd.appendArg("--execute");
+        // Native Nu ignores XDG_DATA_DIRS. Source our module explicitly so
+        // the user's existing vendor autoload directory stays intact.
+        const path_literal = try std.json.Stringify.valueAlloc(alloc, native_module.?, .{});
+        try cmd.appendArg(try std.fmt.allocPrint(alloc, "source {s}; use ghostty *", .{path_literal}));
+    } else {
+        try cmd.appendArg("--execute 'use ghostty *'");
+    }
 
     // Walk through the rest of the given arguments. If we see an option that
     // would require complex or unsupported integration behavior, we bail out
@@ -1942,7 +2386,29 @@ fn setupNushell(
     }
 
     // Return a copy of our modified command line to use as the shell command.
-    return .{ .shell = try alloc.dupeZ(u8, try cmd.toOwnedSlice()) };
+    return try cmd.finish();
+}
+
+test "PKG08 nushell direct argv keeps module code as one argument" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var res: TmpResourcesDir = try .init(alloc, .nushell);
+    defer res.deinit();
+    var env = EnvMap.init(alloc);
+    const result = (try setupNushell(alloc, .{ .direct = &.{
+        "C:\\Program Files\\Nushell\\nu.exe", "--config", "C:\\a b\\config.nu",
+    } }, res.path, &env)).?;
+    try std.testing.expect(result == .direct);
+    try std.testing.expectEqual(@as(usize, 5), result.direct.len);
+    try std.testing.expectEqualStrings("C:\\Program Files\\Nushell\\nu.exe", result.direct[0]);
+    try std.testing.expectEqualStrings("--execute", result.direct[1]);
+    try std.testing.expectStringStartsWith(result.direct[2], "source \"");
+    try std.testing.expect(std.mem.endsWith(u8, result.direct[2], "; use ghostty *"));
+    try std.testing.expectEqualStrings("--config", result.direct[3]);
+    try std.testing.expectEqualStrings("C:\\a b\\config.nu", result.direct[4]);
+    try std.testing.expect(env.get("XDG_DATA_DIRS") == null);
 }
 
 test "nushell" {
@@ -1958,7 +2424,13 @@ test "nushell" {
     defer env.deinit();
 
     const command = try setupNushell(alloc, .{ .shell = "nu" }, res.path, &env);
-    try testing.expectEqualStrings("nu --execute 'use ghostty *'", command.?.shell);
+    if (builtin.os.tag == .windows) {
+        try testing.expect(command.? == .direct);
+        try testing.expectEqualStrings("--execute", command.?.direct[1]);
+        try testing.expect(env.get("XDG_DATA_DIRS") == null);
+        return;
+    }
+    try expectIntegratedCommand("nu --execute 'use ghostty *'", command.?);
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(
@@ -1992,8 +2464,8 @@ test "nushell: unsupported options" {
         defer env.deinit();
 
         try testing.expect(try setupNushell(alloc, .{ .shell = cmdline }, res.path, &env) == null);
-        try testing.expect(env.get("XDG_DATA_DIRS") != null);
-        try testing.expect(env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") != null);
+        try testing.expectEqual(builtin.os.tag != .windows, env.get("XDG_DATA_DIRS") != null);
+        try testing.expectEqual(builtin.os.tag != .windows, env.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") != null);
     }
 }
 
@@ -2148,6 +2620,13 @@ const TmpResourcesDir = struct {
                 .sub_path = "shell-integration/cmd/clink.lua",
                 .data = "",
             }),
+            .nushell => {
+                try tmp_dir.dir.makePath("shell-integration/nushell/vendor/autoload");
+                try tmp_dir.dir.writeFile(.{
+                    .sub_path = "shell-integration/nushell/vendor/autoload/ghostty.nu",
+                    .data = "export module ghostty {}",
+                });
+            },
             else => {},
         }
 

@@ -28,6 +28,7 @@ sentry: bool = true,
 simd: bool = true,
 i18n: bool = true,
 custom_shaders: bool = false,
+bundled_conpty: bool = true,
 wasm_shared: bool = true,
 
 /// Ghostty exe properties
@@ -176,6 +177,12 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         "custom-shaders",
         "Enable custom shader compilation support. Disabled by default in the Windows-only fork to keep default app builds lighter.",
     ) orelse false;
+
+    config.bundled_conpty = b.option(
+        bool,
+        "bundled-conpty",
+        "Stage Microsoft's pinned ConPTY pair (conpty.dll, OpenConsole.exe) beside the Windows exe, as releases ship it. false skips the step and its one-time download; noctty then uses Windows' in-box conhost unless a pair is already installed, which is left as is and not verified.",
+    ) orelse true;
 
     //---------------------------------------------------------------
     // Ghostty Exe Properties

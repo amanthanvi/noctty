@@ -229,6 +229,178 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
     };
 }
 
+/// Config string quoting is removed before Command parsing. Recover a whole
+/// executable path before splitting it, while preserving actual cmd strings.
+/// The result may borrow command; new argv storage belongs to the arena.
+pub fn executableCommand(alloc: Allocator, command: Command) !Command {
+    if (builtin.os.tag != .windows or command == .direct) return command;
+    var path = std.mem.trim(u8, command.shell, " \t");
+    if (path.len >= 2 and path[0] == '"' and path[path.len - 1] == '"')
+        path = path[1 .. path.len - 1];
+    // A relative executable is resolved against the pane's cwd by cmd, not
+    // the app's cwd used by this probe and lpApplicationName. Keep that
+    // existing contract, including drive-relative and root-relative values.
+    if (path.len < 3 or !std.ascii.isAlphabetic(path[0]) or path[1] != ':' or
+        (path[2] != '\\' and path[2] != '/')) return command;
+    const ext = std.fs.path.extension(path);
+    if (!std.ascii.eqlIgnoreCase(ext, ".exe") and
+        !std.ascii.eqlIgnoreCase(ext, ".com")) return command;
+    // Screen these before querying attributes. A command value must not
+    // introduce a network timeout on the terminal's startup path.
+    if (internal_os.path.isNetworkOrDevicePath(path)) return command;
+    if (internal_os.windows.driveTypeForLetter(path[0]) == internal_os.windows.DRIVE_REMOTE)
+        return command;
+    if (!windowsNonDirectoryPathExists(path)) return command;
+    const argv = try alloc.alloc([:0]const u8, 1);
+    errdefer alloc.free(argv);
+    argv[0] = try alloc.dupeZ(u8, path);
+    return .{ .direct = argv };
+}
+
+/// Resolve a bare integration executable using the child's search environment.
+/// Never consult the app's PATH or cwd, and never probe a network PATH entry.
+/// A batch/script match keeps the caller on its original shell launch path.
+pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.process.EnvMap) !?[:0]const u8 {
+    if (builtin.os.tag != .windows or exe.len == 0 or
+        std.mem.indexOfAny(u8, exe, "\\/:") != null) return null;
+    const path = env.get("PATH") orelse return null;
+    const extension = std.fs.path.extension(exe);
+    var dirs = std.mem.splitScalar(u8, path, ';');
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    while (dirs.next()) |raw_dir| {
+        var dir = std.mem.trim(u8, raw_dir, " \t");
+        if (dir.len >= 2 and dir[0] == '"' and dir[dir.len - 1] == '"')
+            dir = dir[1 .. dir.len - 1];
+        if (internal_os.path.isNetworkOrDevicePath(dir) or dir.len < 3 or
+            !std.ascii.isAlphabetic(dir[0]) or dir[1] != ':' or
+            (dir[2] != '\\' and dir[2] != '/')) continue;
+        if (internal_os.windows.driveTypeForLetter(dir[0]) == internal_os.windows.DRIVE_REMOTE)
+            continue;
+        var extensions = std.mem.splitScalar(u8, if (extension.len > 0) "" else env.get("PATHEXT") orelse ".COM;.EXE;.BAT;.CMD", ';');
+        while (extensions.next()) |raw_ext| {
+            const ext = std.mem.trim(u8, raw_ext, " \t");
+            if (extension.len == 0) {
+                if (ext.len < 2 or ext[0] != '.') continue;
+                // PATHEXT supplies suffixes, not paths or cmd syntax.
+                var valid = true;
+                for (ext[1..]) |c| if (!std.ascii.isAlphanumeric(c)) {
+                    valid = false;
+                    break;
+                };
+                if (!valid) continue;
+            }
+            const candidate = std.fmt.bufPrint(&buf, "{s}\\{s}{s}", .{ dir, exe, ext }) catch continue;
+            if (!windowsNonDirectoryPathExists(candidate)) continue;
+            const found_ext = if (extension.len > 0) extension else ext;
+            if (!std.ascii.eqlIgnoreCase(found_ext, ".exe") and
+                !std.ascii.eqlIgnoreCase(found_ext, ".com")) return null;
+            return try alloc.dupeZ(u8, candidate);
+        }
+    }
+    return null;
+}
+
+/// App Execution Aliases are reparse points whose target cannot be opened
+/// or stat'ed as an ordinary file. Query the path itself, accepting aliases.
+/// Callers must screen network/device paths and remote drives first.
+fn windowsNonDirectoryPathExists(path: []const u8) bool {
+    const path_w = windows.sliceToPrefixedFileW(null, path) catch return false;
+    const attributes = windows.kernel32.GetFileAttributesW(path_w.span().ptr);
+    return attributes != windows.INVALID_FILE_ATTRIBUTES and
+        attributes & windows.FILE_ATTRIBUTE_DIRECTORY == 0;
+}
+
+test "PKG08 round2 child executable lookup respects PATHEXT and local PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "nu.exe", .data = "exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "nu.com", .data = "com" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    var env = std.process.EnvMap.init(alloc);
+    try env.put("PATH", try std.fmt.allocPrint(alloc, "relative;;\\\\server\\share;\\??\\UNC\\server\\share;\"{s}\"", .{dir}));
+    try env.put("PATHEXT", ".com;.exe");
+    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.com"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    try env.put("PATHEXT", ".exe;.com");
+    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu", &env)).?);
+    // An explicit extension is looked up exactly, regardless of PATHEXT.
+    try env.put("PATHEXT", ".com");
+    try std.testing.expectEqualStrings(try tmp.dir.realpathAlloc(alloc, "nu.exe"), (try lookupChildExecutable(alloc, "nu.exe", &env)).?);
+    // Preserve a cmd/batch wrapper that wins PATHEXT instead of skipping it.
+    try tmp.dir.writeFile(.{ .sub_path = "nu.cmd", .data = "wrapper" });
+    try env.put("PATHEXT", ".cmd;.exe");
+    try std.testing.expect(try lookupChildExecutable(alloc, "nu", &env) == null);
+    try std.testing.expect(try lookupChildExecutable(alloc, "missing", &env) == null);
+    try tmp.dir.makeDir("directory.exe");
+    try std.testing.expect(try lookupChildExecutable(alloc, "directory.exe", &env) == null);
+    for ([_][]const u8{ "C:nu", ".\\nu", "\\nu", "\\\\server\\nu" }) |value|
+        try std.testing.expect(try lookupChildExecutable(alloc, value, &env) == null);
+}
+
+test "PKG08 round3 child lookup accepts a real App Execution Alias" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var host_env = try std.process.getEnvMap(alloc);
+    const local_app_data = host_env.get("LOCALAPPDATA") orelse return error.SkipZigTest;
+    const dir = try std.fs.path.join(alloc, &.{ local_app_data, "Microsoft", "WindowsApps" });
+    if (internal_os.path.isNetworkOrDevicePath(dir) or
+        dir.len < 3 or dir[1] != ':' or
+        internal_os.windows.driveTypeForLetter(dir[0]) == internal_os.windows.DRIVE_REMOTE)
+        return error.SkipZigTest;
+    var env = std.process.EnvMap.init(alloc);
+    try env.put("PATH", dir);
+    try env.put("PATHEXT", ".EXE");
+    // These aliases are installed by Store PowerShell or the Windows Python
+    // launcher. Do not launch them: an unconfigured alias can open the Store.
+    for ([_][]const u8{ "pwsh.exe", "python.exe", "python3.exe" }) |name| {
+        const path = try std.fs.path.join(alloc, &.{ dir, name });
+        const attributes = windows.GetFileAttributes(path) catch continue;
+        if (attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 or
+            attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
+        const result = try lookupChildExecutable(alloc, name, &env);
+        try std.testing.expect(result != null);
+        try std.testing.expectEqualStrings(path, result.?);
+        const normalized = try executableCommand(alloc, .{ .shell = try alloc.dupeZ(u8, path) });
+        try std.testing.expect(normalized == .direct);
+        try std.testing.expectEqualStrings(path, normalized.direct[0]);
+        return;
+    }
+    return error.SkipZigTest;
+}
+
+test "PKG08 whole executable path with spaces launches directly" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("PowerShell 7");
+    const exe = try tmp.dir.createFile("PowerShell 7/pwsh.exe", .{});
+    exe.close();
+    const path = try tmp.dir.realpathAlloc(alloc, "PowerShell 7/pwsh.exe");
+    const input: Command = .{ .shell = try alloc.dupeZ(u8, path) };
+    const result = try prepareCommandWithLookup(std.testing.allocator, input, null, false, false, lookupExecutable);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result == .direct);
+    try std.testing.expectEqual(@as(usize, 1), result.direct.len);
+    try std.testing.expectEqualStrings(path, result.direct[0]);
+    const current = try std.process.getCwdAlloc(alloc);
+    const relative = try std.fs.path.relative(alloc, current, path);
+    const relative_input: Command = .{ .shell = try alloc.dupeZ(u8, relative) };
+    const preserved = try executableCommand(alloc, relative_input);
+    try std.testing.expect(preserved == .shell);
+    try std.testing.expectEqualStrings(relative, preserved.shell);
+    for ([_][:0]const u8{ "C:pwsh.exe", "\\pwsh.exe", "\\\\server\\share\\pwsh.exe" }) |value| {
+        try std.testing.expect((try executableCommand(alloc, .{ .shell = value })) == .shell);
+    }
+}
+
 /// Prepare a command for Windows spawning. This applies the guarded UTF-8
 /// preamble to payload-free cmd launches and translates WSL working
 /// directories into `wsl.exe --cd ...` without paying a shell trampoline cost.
@@ -376,12 +548,14 @@ fn currentWindowsDirectory(alloc: Allocator) !?[]const u8 {
 
 fn prepareCommandWithLookup(
     alloc: Allocator,
-    command: Command,
+    command_: Command,
     cwd: ?[]const u8,
     working_directory_home: bool,
     utf8_console: bool,
     lookup: anytype,
 ) !Command {
+    const command = try executableCommand(alloc, command_);
+    defer if (command_ == .shell and command == .direct) command.deinit(alloc);
     if (utf8_console) {
         if (try prepareCmdUtf8(alloc, command)) |prepared| return prepared;
     }

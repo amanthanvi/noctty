@@ -446,14 +446,21 @@ pub fn print(self: *Terminal, c: u21) !void {
                                 const old_rac = old_pin.rowAndCell();
 
                                 if (new_pin.node == old_pin.node) {
-                                    new_pin.node.data.moveGrapheme(prev.cell, new_rac.cell);
-                                    prev.cell.content_tag = .codepoint;
+                                    new_pin.node.data.moveGrapheme(old_rac.cell, new_rac.cell);
+                                    old_rac.cell.content_tag = .codepoint;
                                     new_rac.cell.content_tag = .codepoint_grapheme;
                                     new_rac.row.grapheme = true;
                                 } else {
                                     const cps = old_pin.node.data.lookupGrapheme(old_rac.cell).?;
                                     for (cps) |cp| {
-                                        try self.screens.active.appendGrapheme(new_rac.cell, cp);
+                                        // appendGrapheme can grow the cursor
+                                        // page, so read the destination from
+                                        // the cursor each time rather than
+                                        // holding a pointer across the call.
+                                        try self.screens.active.appendGrapheme(
+                                            self.screens.active.cursor.page_cell,
+                                            cp,
+                                        );
                                     }
                                     old_pin.node.data.clearGrapheme(old_rac.cell);
                                 }
@@ -463,7 +470,7 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                             // Point prev.cell to our new previous cell that
                             // we'll be appending graphemes to
-                            prev.cell = new_rac.cell;
+                            prev.cell = self.screens.active.cursor.page_cell;
                         } else {
                             self.printCell(
                                 0,
@@ -482,7 +489,29 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                     // Write our spacer, since prev.cell is now wide
                     self.screens.active.cursorRight(1);
+
+                    // Writing the spacer can grow the page to make room for
+                    // the cursor hyperlink. Growing replaces the page, which
+                    // invalidates `prev.cell`. Record the page identity first
+                    // so the common case where nothing grows stays free.
+                    //
+                    // A pointer comparison alone isn't enough: pages are
+                    // pooled, so a replacement can reuse the same address.
+                    // The serial makes the pair a unique identity.
+                    const spacer_node = self.screens.active.cursor.page_pin.node;
+                    const spacer_serial = spacer_node.serial;
+
                     self.printCell(0, .spacer_tail);
+
+                    if (self.screens.active.cursor.page_pin.node != spacer_node or
+                        self.screens.active.cursor.page_pin.node.serial != spacer_serial)
+                    {
+                        @branchHint(.unlikely);
+
+                        // The cursor is on the spacer tail we just wrote, so
+                        // the wide cell we append to is the one to its left.
+                        prev.cell = self.screens.active.cursorCellLeft(1);
+                    }
 
                     // Move the cursor again so we're beyond our spacer
                     if (self.screens.active.cursor.x == right_limit - 1) {
@@ -827,7 +856,11 @@ fn printCell(
         self.screens.active.cursorSetHyperlink() catch |err| {
             @branchHint(.unlikely);
             log.warn("error reallocating for more hyperlink space, ignoring hyperlink err={}", .{err});
-            assert(!cell.hyperlink);
+
+            // A partially successful grow can replace the page even when the
+            // call fails, so `cell` may be stale here. The cursor pointers are
+            // always reloaded, so read the cell through the cursor.
+            assert(!self.screens.active.cursor.page_cell.hyperlink);
         };
     } else if (had_hyperlink) {
         // If the previous cell had a hyperlink then we need to clear it.
@@ -4299,6 +4332,187 @@ test "Terminal: VS16 to make wide character on next line with hyperlink" {
     }
 }
 
+test "Terminal: VS16 widening when the spacer tail grows the page" {
+    // Regression test for a stale cell pointer in print's grapheme `.wide`
+    // path: writing the spacer tail can grow the page to fit the hyperlink,
+    // which replaces the page and invalidates the pointer to the wide cell.
+    var t = try init(testing.allocator, .{ .rows = 10, .cols = 20 });
+    defer t.deinit(testing.allocator);
+
+    t.modes.set(.grapheme_cluster, true);
+    try t.screens.active.startHyperlink("http://example.com", null);
+
+    // Fill the page hyperlink map until a single slot is left. The '#' below
+    // takes that slot so the spacer tail is what forces the page to grow.
+    // (This fork's map has no load-factor limit, so it fills to capacity.)
+    while (true) {
+        const page = &t.screens.active.cursor.page_pin.node.data;
+        const map = page.hyperlink_map.map(page.memory);
+        if (map.capacity() - map.count() == 1) break;
+        try t.print('x');
+    }
+
+    const x = t.screens.active.cursor.x;
+    const y = t.screens.active.cursor.y;
+    try t.print('#');
+
+    // Without the fix this crashed appending to a freed page.
+    try t.print(0xFE0F);
+
+    {
+        // '#' is wide and carries the VS16 grapheme.
+        const list_cell = t.screens.active.pages.getCell(.{ .active = .{
+            .x = x,
+            .y = y,
+        } }).?;
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u21, '#'), cell.content.codepoint);
+        try testing.expectEqual(Cell.Wide.wide, cell.wide);
+        try testing.expect(cell.hasGrapheme());
+        try testing.expectEqualSlices(
+            u21,
+            &.{0xFE0F},
+            list_cell.node.data.lookupGrapheme(cell).?,
+        );
+    }
+    {
+        const list_cell = t.screens.active.pages.getCell(.{ .active = .{
+            .x = x + 1,
+            .y = y,
+        } }).?;
+        try testing.expectEqual(Cell.Wide.spacer_tail, list_cell.cell.wide);
+    }
+}
+
+test "Terminal: grapheme transfer when widening wraps to the next line" {
+    // Covers print's grapheme `.wide` path where the previous cell already
+    // holds grapheme data and has to be moved to the wrapped row.
+    var t = try init(testing.allocator, .{ .rows = 5, .cols = 3 });
+    defer t.deinit(testing.allocator);
+
+    t.modes.set(.grapheme_cluster, true);
+    t.cursorRight(2);
+
+    // A narrow emoji, then ZWJ, then a second emoji. The ZWJ attaches
+    // without changing the width, so the cell has grapheme data by the time
+    // the second emoji widens it.
+    try t.print(0x263A);
+    try t.print(0x200D);
+    try t.print(0x2764);
+
+    {
+        // The old cell becomes a spacer head on the wrapped row.
+        const list_cell = t.screens.active.pages.getCell(.{ .screen = .{
+            .x = 2,
+            .y = 0,
+        } }).?;
+        try testing.expectEqual(Cell.Wide.spacer_head, list_cell.cell.wide);
+        try testing.expect(list_cell.row.wrap);
+    }
+    {
+        // The grapheme moved with the base codepoint.
+        const list_cell = t.screens.active.pages.getCell(.{ .screen = .{
+            .x = 0,
+            .y = 1,
+        } }).?;
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u21, 0x263A), cell.content.codepoint);
+        try testing.expectEqual(Cell.Wide.wide, cell.wide);
+        try testing.expectEqualSlices(
+            u21,
+            &.{ 0x200D, 0x2764 },
+            list_cell.node.data.lookupGrapheme(cell).?,
+        );
+    }
+    {
+        const list_cell = t.screens.active.pages.getCell(.{ .screen = .{
+            .x = 1,
+            .y = 1,
+        } }).?;
+        try testing.expectEqual(Cell.Wide.spacer_tail, list_cell.cell.wide);
+    }
+}
+
+// The cross-page variant of the transfer above: the wrapped row is on the
+// next page, whose grapheme storage is full, so appending the first moved
+// codepoint grows that page. The second append must then read its
+// destination from the cursor again rather than through the pointer it
+// had into the replaced page.
+test "Terminal: grapheme transfer across pages when the append grows the page" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .rows = 5, .cols = 40 });
+    defer t.deinit(alloc);
+    t.modes.set(.grapheme_cluster, true);
+    const screen = t.screens.active;
+
+    // Scroll until the first page is full, then two rows more, so the
+    // active area is the first page's last three rows and two rows of a
+    // second page.
+    const first_page_rows = screen.pages.pages.first.?.data.capacity.rows;
+    screen.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_rows - 1) |_| try screen.testWriteString("\n");
+    screen.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try screen.testWriteString("\n\n");
+    try testing.expectEqual(@as(usize, 2), screen.pages.totalPages());
+
+    // Fill the second page's grapheme storage from its second row, leaving
+    // its first row (where the wrap lands) empty.
+    {
+        const page = &screen.pages.pages.last.?.data;
+        const row = page.getRow(1);
+        var full = false;
+        for (page.getCells(row)) |*cell| {
+            cell.* = .{ .content_tag = .codepoint, .content = .{ .codepoint = 'z' } };
+            page.appendGrapheme(row, cell, 0x0301) catch {
+                full = true;
+                break;
+            };
+        }
+        try testing.expect(full);
+    }
+
+    // On the first page's last row, at the right edge: a narrow emoji with
+    // two combining marks, then VS16 to widen it, which wraps it onto the
+    // second page.
+    t.setCursorPos(3, 40);
+    try testing.expect(screen.cursor.page_pin.node == screen.pages.pages.first.?);
+    const second_page = screen.pages.pages.last.?;
+    try t.print(0x263A);
+    try t.print(0x0301);
+    try t.print(0x0301);
+    try t.print(0xFE0F);
+
+    // The transfer grew (replaced) the second page.
+    try testing.expect(screen.pages.pages.last.? != second_page);
+
+    {
+        // The old cell is a spacer head with no graphemes left.
+        const list_cell = screen.pages.getCell(.{ .active = .{
+            .x = 39,
+            .y = 2,
+        } }).?;
+        try testing.expectEqual(Cell.Wide.spacer_head, list_cell.cell.wide);
+        try testing.expect(!list_cell.cell.hasGrapheme());
+        try testing.expect(list_cell.row.wrap);
+    }
+    {
+        // Every grapheme codepoint moved with the base codepoint.
+        const list_cell = screen.pages.getCell(.{ .active = .{
+            .x = 0,
+            .y = 3,
+        } }).?;
+        try testing.expect(list_cell.node == screen.pages.pages.last.?);
+        const cell = list_cell.cell;
+        try testing.expectEqual(@as(u21, 0x263A), cell.content.codepoint);
+        try testing.expectEqual(Cell.Wide.wide, cell.wide);
+        try testing.expectEqualSlices(
+            u21,
+            &.{ 0x0301, 0x0301, 0xFE0F },
+            list_cell.node.data.lookupGrapheme(cell).?,
+        );
+    }
+}
+
 test "Terminal: VS16 to make wide character with pending wrap" {
     var t = try init(testing.allocator, .{ .rows = 5, .cols = 3 });
     defer t.deinit(testing.allocator);
@@ -5441,6 +5655,85 @@ test "Terminal: print wide char at right edge with hyperlink" {
         const list_cell = t.screens.active.pages.getCell(.{ .screen = .{ .x = 1, .y = 1 } }).?;
         try testing.expectEqual(Cell.Wide.spacer_tail, list_cell.cell.wide);
         try testing.expect(list_cell.cell.hyperlink);
+    }
+}
+
+// A cursor style or hyperlink ID is an index into a set stored in the
+// page memory of the page the cursor pin points at. When scrollClear
+// (here via ED 22, kitty's scroll_complete) pushes the active area onto
+// a later page while the cursor pin is still on an earlier one,
+// cursorReload must migrate the cursor's style and hyperlink references
+// to the destination page. It previously replaced the pin directly,
+// leaving the cursor holding an ID that was dead or aliased an unrelated
+// entry on the new page, and the next print attached a live cell to it.
+// Found via fuzzing.
+test "Terminal: scrollClear across pages keeps cursor hyperlink refs page-local" {
+    const alloc = testing.allocator;
+
+    // Minimized from a 774-byte AFL fuzz input. Reading it:
+    //
+    //   A                 print, so REP has something to repeat
+    //   ESC [ 48111 b     REP, filling the page and spilling onto a second
+    //   ESC ] 8 ; ; 0x93  OSC 8; the C1 byte terminates the OSC and makes
+    //                     the URI non-empty, so a hyperlink starts
+    //   ESC [ 11 A        CUU, moving the cursor back onto the first page
+    //   ESC [ 22 J        ED 22, i.e. scroll_complete -> Screen.scrollClear
+    //   B                 print, which attaches the cursor hyperlink
+    //   ESC ] 8 ; ; ESC   OSC 8 with an empty URI, ending the hyperlink
+    //
+    // The grid must be wide enough to fill a page from a single REP, so
+    // this does not reproduce at 80x24.
+    const input = "A\x1b[48111b\x1b]8;;\x93\x1b[11A\x1b[22JB\x1b]8;;\x1b";
+
+    var t = try init(alloc, .{ .cols = 200, .rows = 50 });
+    defer t.deinit(alloc);
+
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice(input);
+    }
+
+    // With slow runtime safety on, the page integrity checks during the
+    // stream above already catch the bug. Verify the ref counts explicitly
+    // as well so this test is meaningful with runtime safety off: every
+    // cell holding a hyperlink ID owns a reference, so a count below the
+    // number of holding cells means a live cell points at an entry that
+    // was already freed.
+    var node_ = t.screens.active.pages.pages.first;
+    while (node_) |node| : (node_ = node.next) {
+        const page = &node.data;
+        const cap = page.hyperlink_set.layout.cap;
+        if (cap == 0) continue;
+
+        const holders = try alloc.alloc(u32, cap);
+        defer alloc.free(holders);
+        @memset(holders, 0);
+
+        for (page.rows.ptr(page.memory)[0..page.size.rows]) |*row| {
+            if (!row.hyperlink) continue;
+            for (row.cells.ptr(page.memory)[0..page.size.cols]) |*cell| {
+                if (!cell.hyperlink) continue;
+                const id = page.lookupHyperlink(cell) orelse continue;
+                if (id < cap) holders[id] += 1;
+            }
+        }
+
+        for (holders, 0..) |held, id| {
+            if (held == 0) continue;
+            const refs = page.hyperlink_set.refCount(page.memory, @intCast(id));
+            try testing.expect(refs >= held);
+        }
+    }
+
+    // If the cursor still has an active hyperlink, its own extra
+    // reference must live on the cursor's page.
+    const cursor = &t.screens.active.cursor;
+    if (cursor.hyperlink_id != 0) {
+        const page = &cursor.page_pin.node.data;
+        try testing.expect(
+            page.hyperlink_set.refCount(page.memory, cursor.hyperlink_id) > 0,
+        );
     }
 }
 

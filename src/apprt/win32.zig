@@ -8637,8 +8637,8 @@ pub const App = struct {
         if (!ptypkg.hasPendingConPtyFallbackBanner()) return;
         const surface = self.primarySurface() orelse return;
         const host = surface.host orelse return;
-        if (!ptypkg.takeConPtyFallbackBanner()) return;
-        host.setBanner(.info, ptypkg.conpty_fallback_banner) catch |err| {
+        const text = ptypkg.takeConPtyFallbackBanner() orelse return;
+        host.setBanner(.info, text) catch |err| {
             log.warn("failed to show ConPTY fallback banner err={}", .{err});
         };
     }

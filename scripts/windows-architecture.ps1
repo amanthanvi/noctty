@@ -37,6 +37,55 @@ function Get-WindowsPackageArchitecture {
     return [pscustomobject]$info
 }
 
+function Get-PeMachine {
+    param([string]$PathToCheck)
+
+    $fullPath = (Resolve-Path -LiteralPath $PathToCheck).Path
+    $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) {
+                throw "Not a PE file: $fullPath"
+            }
+
+            if ($stream.Length -lt 0x40) {
+                throw "PE file is too small to contain a header offset: $fullPath"
+            }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadUInt32()
+            if ($peOffset + 6 -gt $stream.Length) {
+                throw "PE header offset is outside the file bounds: $fullPath"
+            }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "Missing PE signature: $fullPath"
+            }
+
+            return $reader.ReadUInt16()
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeMachine {
+    param(
+        [string]$PathToCheck,
+        [string]$ExpectedArchitecture
+    )
+
+    $expectedMachine = (Get-WindowsPackageArchitecture -Architecture $ExpectedArchitecture).PeMachine
+    $actualMachine = Get-PeMachine -PathToCheck $PathToCheck
+    if ($actualMachine -ne $expectedMachine) {
+        throw ("Expected {0} to be {1} PE machine 0x{2:X4}, got 0x{3:X4}." -f $PathToCheck, $ExpectedArchitecture, $expectedMachine, $actualMachine)
+    }
+}
+
 function New-WindowsPackageArtifactName {
     param(
         [string]$Version,
