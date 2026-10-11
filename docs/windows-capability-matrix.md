@@ -200,10 +200,13 @@ that:
   see the entry. Their `less` and `tput` still report `xterm-ghostty` as
   unknown unless you copy the two files into that `.terminfo` folder or set
   `term = xterm-256color`.
-- WSL does not forward the Windows `TERM` unless `WSLENV` lists it, so
-  distributions start with `xterm-256color`. `ssh.exe` sends `TERM` to the
-  server, so a host without the entry needs the `ssh-env` or `ssh-terminfo`
-  shell integration feature, or `term = xterm-256color`.
+- WSL passes a Linux process only what `WSLENV` lists. For a launch of
+  `wsl.exe`, noctty lists `COLORTERM`, `TERM_PROGRAM` and
+  `TERM_PROGRAM_VERSION`, and `TERM` when the distribution has a terminfo
+  entry for it (asked with `infocmp`); otherwise the distribution keeps
+  `xterm-256color`. `ssh.exe` sends `TERM` to the server, so a host without
+  the entry needs the `ssh-env` or `ssh-terminfo` shell integration feature,
+  or `term = xterm-256color`.
 
 ### Keyboard input
 
