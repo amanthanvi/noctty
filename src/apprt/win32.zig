@@ -9967,7 +9967,7 @@ pub const App = struct {
     fn prepareWin32OpenTarget(alloc: Allocator, target: []const u8) !?[]const u8 {
         if (!windows_shell.isSafeWindowsPath(target)) return null;
         if (windows_shell.isDriveAbsolutePath(target)) {
-            return if (try isAllowedWin32LocalFile(alloc, target)) target else null;
+            return try prepareWin32LocalFile(alloc, target);
         }
         if (isWin32UncOrDevicePath(target)) return null;
 
@@ -10013,49 +10013,54 @@ pub const App = struct {
             decoded_path[1..]
         else
             decoded_path;
-        return if (try isAllowedWin32LocalFile(alloc, local_path)) local_path else null;
+        return try prepareWin32LocalFile(alloc, local_path);
     }
 
-    fn isAllowedWin32LocalFile(alloc: Allocator, path: []const u8) !bool {
+    fn prepareWin32LocalFile(alloc: Allocator, path: []const u8) !?[]const u8 {
         if (!windows_shell.isSafeWindowsPath(path) or
             !windows_shell.isDriveAbsolutePath(path) or
-            isWin32UncOrDevicePath(path)) return false;
+            isWin32UncOrDevicePath(path)) return null;
 
         // Reject NTFS alternate streams as another extension-dispatch bypass.
-        if (std.mem.indexOfScalar(u8, path[2..], ':') != null) return false;
+        if (std.mem.indexOfScalar(u8, path[2..], ':') != null) return null;
 
         // Win32 strips trailing dots/spaces from every component. Refuse those
         // aliases rather than inspect one filename and dispatch another.
         var components = std.mem.tokenizeAny(u8, path[3..], "/\\");
         while (components.next()) |component| {
-            if (component[component.len - 1] == '.' or component[component.len - 1] == ' ') return false;
+            if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) continue;
+            if (component[component.len - 1] == '.' or component[component.len - 1] == ' ') return null;
         }
+        // Resolve navigation only after rejecting ordinary component aliases.
+        // Screen and dispatch the same basename, even for a terminal ".".
+        const normalized = try std.fs.path.resolve(alloc, &.{path});
+        if (!windows_shell.isDriveAbsolutePath(normalized) or
+            isWin32UncOrDevicePath(normalized)) return null;
         const os_windows = @import("../os/windows.zig");
-        if (os_windows.driveTypeForLetter(path[0]) == os_windows.DRIVE_REMOTE) return false;
+        if (os_windows.driveTypeForLetter(normalized[0]) == os_windows.DRIVE_REMOTE) return null;
 
         // Windows associates even a leading-dot basename (".cmd"). Zig's
         // extension helper treats those as Unix dotfiles with no extension.
-        const basename = std.fs.path.basename(path);
+        const basename = std.fs.path.basename(normalized);
         const extension = if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot| basename[dot..] else "";
         // A local-looking path may cross a junction onto a share. Refuse all
-        // reparse traversal before GetFileAttributesW or reading file contents.
-        const file = openWin32LocalTargetNoReparse(path, extension.len == 0) orelse return false;
+        // reparse traversal before querying attributes or reading file contents.
+        const file = openWin32LocalTargetNoReparse(normalized, extension.len == 0) orelse return null;
         defer file.close();
-        const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
-        defer alloc.free(path_w);
-        const attributes = windows.kernel32.GetFileAttributesW(path_w.ptr);
-        if (attributes == windows.INVALID_FILE_ATTRIBUTES) return false;
-        if (attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0) return true;
+        // The exact dispatched path had to exist for that open. Query its
+        // handle: reopening the path here could follow a swapped junction.
+        const stat = file.stat() catch return null;
+        if (stat.kind == .directory) return normalized;
         if (extension.len == 0) {
             // Fail closed for DOS/PE executable signatures, including renamed
             // binaries; short/empty extensionless documents remain viewable.
             var magic: [2]u8 = undefined;
-            const count = file.readAll(&magic) catch return false;
-            return count < 2 or !std.mem.eql(u8, &magic, "MZ");
+            const count = file.readAll(&magic) catch return null;
+            return if (count < 2 or !std.mem.eql(u8, &magic, "MZ")) normalized else null;
         }
         const extension_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, extension);
         defer alloc.free(extension_w);
-        if (sys.AssocIsDangerous(extension_w.ptr) != 0) return false;
+        if (sys.AssocIsDangerous(extension_w.ptr) != 0) return null;
         const name = extension[1..];
         for ([_][]const u8{
             "exe",                "com",               "bat",         "cmd",       "ps1", "psm1",    "psd1",         "ps1xml",
@@ -10066,9 +10071,9 @@ pub const App = struct {
             "searchConnector-ms", "diagcab",           "iso",         "img",       "vhd", "vhdx",    "appinstaller", "msix",
             "appx",               "settingcontent-ms", "theme",       "themepack", "xll", "website", "jnlp",         "wsc",
         }) |blocked| {
-            if (std.ascii.eqlIgnoreCase(name, blocked)) return false;
+            if (std.ascii.eqlIgnoreCase(name, blocked)) return null;
         }
-        return true;
+        return normalized;
     }
 
     fn openWin32LocalTargetNoReparse(path: []const u8, read_data: bool) ?std.fs.File {
@@ -40807,6 +40812,14 @@ test "security regression win32 link opener allows known schemes and safe local 
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "a b.txt");
     defer std.testing.allocator.free(path);
     try std.testing.expect(try App.isAllowedWin32OpenTarget(std.testing.allocator, path));
+    try tmp.dir.makeDir("directory");
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    for ([_][]const u8{ "./a b.txt", "directory/../a b.txt" }) |relative| {
+        const navigation = try std.fs.path.join(std.testing.allocator, &.{ root, relative });
+        defer std.testing.allocator.free(navigation);
+        try std.testing.expect(try App.isAllowedWin32OpenTarget(std.testing.allocator, navigation));
+    }
     const uri = try std.fmt.allocPrint(std.testing.allocator, "file://localhost/{s}", .{path});
     defer std.testing.allocator.free(uri);
     try std.testing.expect(try App.isAllowedWin32OpenTarget(std.testing.allocator, uri));
@@ -40823,7 +40836,7 @@ test "security regression win32 link opener rejects PATHEXT siblings and path al
     try tmp.dir.writeFile(.{ .sub_path = "directory/safe.txt", .data = "safe" });
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
-    for ([_][]const u8{ "probe", "safe.txt.", "safe.txt ", "probe.cmd.", "probe.cmd ", "directory./safe.txt", "directory /safe.txt" }) |name| {
+    for ([_][]const u8{ "probe", "safe.txt.", "safe.txt ", "probe.cmd.", "probe.cmd ", "directory./safe.txt", "directory /safe.txt", "directory./../safe.txt" }) |name| {
         const path = try std.fs.path.join(alloc, &.{ root, name });
         defer alloc.free(path);
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, path));
@@ -40877,6 +40890,27 @@ test "security regression win32 link opener rejects dangerous handler files" {
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, path));
         std.mem.replaceScalar(u8, path, '\\', '/');
         const uri = try std.fmt.allocPrint(alloc, "file:///{s}", .{path});
+        defer alloc.free(uri);
+        try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, uri));
+    }
+}
+
+test "security regression win32 link opener screens normalized navigation targets" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "probe.cmd", .data = "@exit /b 0\r\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "binary", .data = "MZ\x00\x00" });
+    for ([_][]const u8{ "probe.cmd", "binary" }) |name| {
+        const path = try tmp.dir.realpathAlloc(alloc, name);
+        defer alloc.free(path);
+        const navigation = try std.fmt.allocPrint(alloc, "{s}\\.", .{path});
+        defer alloc.free(navigation);
+        try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, navigation));
+        std.mem.replaceScalar(u8, navigation, '\\', '/');
+        try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, navigation));
+        const uri = try std.fmt.allocPrint(alloc, "file:///{s}", .{navigation});
         defer alloc.free(uri);
         try std.testing.expect(!try App.isAllowedWin32OpenTarget(alloc, uri));
     }
@@ -40970,6 +41004,17 @@ test "security regression win32 link opener dispatches the exact decoded file UR
     };
     var probe: Probe = .{ .expected = path };
     try App.openWin32Target(alloc, &probe, uri, Probe.dispatch);
+    try std.testing.expect(probe.called);
+    // Navigation must be resolved before both inspection and dispatch.
+    const navigation_uri = try std.fmt.allocPrint(alloc, "file://localhost/{s}/./a%20b%25.txt", .{root});
+    defer alloc.free(navigation_uri);
+    probe.called = false;
+    try App.openWin32Target(alloc, &probe, navigation_uri, Probe.dispatch);
+    try std.testing.expect(probe.called);
+    const navigation_path = try std.fmt.allocPrint(alloc, "{s}/./a b%.txt", .{root});
+    defer alloc.free(navigation_path);
+    probe.called = false;
+    try App.openWin32Target(alloc, &probe, navigation_path, Probe.dispatch);
     try std.testing.expect(probe.called);
 }
 
@@ -41075,6 +41120,16 @@ test "security regression win32 link opener PATHEXT live probe on hidden desktop
     const thread = try std.Thread.spawn(.{}, Probe.run, .{ desktop, &result });
     thread.join();
     try result;
+    // A successful filtered build is not proof this named test ran. The
+    // wrapper supplies a fresh receipt path and requires this final sentinel.
+    const receipt_path = try std.process.getEnvVarOwned(std.testing.allocator, "NOCTTY_LINK_PATHEXT_PROBE_RECEIPT");
+    defer std.testing.allocator.free(receipt_path);
+    if (!windows_shell.isSafeWindowsPath(receipt_path) or
+        !windows_shell.isDriveAbsolutePath(receipt_path) or
+        internal_os.path.isNetworkOrDevicePath(receipt_path)) return error.UnsafeProbeReceiptPath;
+    const receipt = try std.fs.createFileAbsolute(receipt_path, .{ .exclusive = true });
+    defer receipt.close();
+    try receipt.writeAll("NOCTTY_LINK_PATHEXT_PROBE_COMPLETE\n");
 }
 
 test "win32 win32_ipc.encodeListWindowsRequest carries the response deadline" {
