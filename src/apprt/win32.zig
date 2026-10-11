@@ -9795,59 +9795,26 @@ pub const App = struct {
         const end = win32_quick_terminal.computeEndRect(qt_cfg, mi);
         const start = win32_quick_terminal.computeStartRect(qt_cfg, mi);
         const duration_ms = win32_quick_terminal.animationDurationMs(qt_cfg.animation_duration_s);
-        const flags = c.SWP_NOACTIVATE;
         if (!animate or duration_ms == 0 or rectEqual(start, end)) {
             if (getHost(hwnd)) |host| host.cancelQuickTerminalAnimation();
-            _ = sys.SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                end.left,
-                end.top,
-                end.right - end.left,
-                end.bottom - end.top,
-                flags,
-            );
+            setQuickTerminalRect(hwnd, end);
             return;
         }
 
         const host = getHost(hwnd) orelse {
-            _ = sys.SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                end.left,
-                end.top,
-                end.right - end.left,
-                end.bottom - end.top,
-                flags,
-            );
+            setQuickTerminalRect(hwnd, end);
             return;
         };
 
         const effective_duration_ms = host.effectiveTweenDuration(duration_ms);
         if (effective_duration_ms == 0) {
             host.cancelQuickTerminalAnimation();
-            _ = sys.SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                end.left,
-                end.top,
-                end.right - end.left,
-                end.bottom - end.top,
-                flags,
-            );
+            setQuickTerminalRect(hwnd, end);
             return;
         }
 
         host.cancelQuickTerminalAnimation();
-        _ = sys.SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            start.left,
-            start.top,
-            start.right - start.left,
-            start.bottom - start.top,
-            flags,
-        );
+        setQuickTerminalRect(hwnd, start);
         if (host.addTween(
             0.0,
             1.0,
@@ -9861,15 +9828,7 @@ pub const App = struct {
             };
         } else {
             host.cancelQuickTerminalAnimation();
-            _ = sys.SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                end.left,
-                end.top,
-                end.right - end.left,
-                end.bottom - end.top,
-                flags,
-            );
+            setQuickTerminalRect(hwnd, end);
         }
     }
 
@@ -12087,6 +12046,8 @@ const Host = struct {
     // in the method section. Matches Win32's main-thread-paint model.
     tween_sched: win32_tween.Scheduler = .{},
     quick_terminal_animation: ?QuickTerminalAnimation = null,
+    /// Programmatic QT rectangles are already in target-monitor pixels.
+    quick_terminal_placing: bool = false,
     tween_timer_active: bool = false,
     search_timer_active: bool = false,
     scrollbar_timer_active: bool = false,
@@ -12992,15 +12953,7 @@ const Host = struct {
             if (self.tween_sched.value(anim.id, now)) |value| {
                 const rect = win32_quick_terminal.lerpRect(anim.start, anim.end, value);
                 if (self.hwnd) |hwnd| {
-                    _ = sys.SetWindowPos(
-                        hwnd,
-                        HWND_TOPMOST,
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                        c.SWP_NOACTIVATE,
-                    );
+                    setQuickTerminalRect(hwnd, rect);
                 }
                 quick_terminal_finished = value >= 1.0;
             } else {
@@ -13011,15 +12964,7 @@ const Host = struct {
         if (quick_terminal_finished) {
             if (self.quick_terminal_animation) |anim| {
                 if (self.hwnd) |hwnd| {
-                    _ = sys.SetWindowPos(
-                        hwnd,
-                        HWND_TOPMOST,
-                        anim.end.left,
-                        anim.end.top,
-                        anim.end.right - anim.end.left,
-                        anim.end.bottom - anim.end.top,
-                        c.SWP_NOACTIVATE,
-                    );
+                    setQuickTerminalRect(hwnd, anim.end);
                 }
                 self.quick_terminal_animation = null;
             }
@@ -24308,6 +24253,97 @@ fn rectEqual(a: RECT, b: RECT) bool {
         a.bottom == b.bottom;
 }
 
+/// A QT rect is computed in physical pixels. WM_DPICHANGED still updates
+/// fonts/layout during this call, but must not substitute its suggested size.
+fn setQuickTerminalRect(hwnd: HWND, rect: RECT) void {
+    const host = getHost(hwnd);
+    const was_placing = if (host) |v| v.quick_terminal_placing else false;
+    if (host) |v| v.quick_terminal_placing = true;
+    defer if (host) |v| {
+        v.quick_terminal_placing = was_placing;
+    };
+    const dpi_before = sys.GetDpiForWindow(hwnd);
+    _ = sys.SetWindowPos(hwnd, HWND_TOPMOST, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOACTIVATE);
+    // Settle the computed rectangle after nested DPI scale/layout updates.
+    if (sys.GetDpiForWindow(hwnd) != dpi_before) {
+        _ = sys.SetWindowPos(hwnd, HWND_TOPMOST, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOACTIVATE);
+    }
+}
+
+test "win32 DPI suggestions preserve a quick terminal tween but resize ordinary moves" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const previous_dpi_context = sys.SetThreadDpiAwarenessContext(-4);
+    defer _ = sys.SetThreadDpiAwarenessContext(previous_dpi_context);
+    const core = try CoreApp.create(std.testing.allocator);
+    defer core.destroy();
+    var app: App = undefined;
+    try app.init(core, .{ .safe_mode = true });
+    const hinstance = app.hinstance;
+    defer {
+        app.terminate();
+        _ = sys.UnregisterClassW(host_class_name, hinstance);
+        _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
+        _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
+    }
+    const host = try app.createHost(std.unicode.utf8ToUtf16LeStringLiteral(""), null, true);
+    const hwnd = host.hwnd.?;
+    var before: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
+    const suggested: RECT = .{ .left = before.left, .top = before.top, .right = before.left + 1600, .bottom = before.top + 1000 };
+    const param: LPARAM = @bitCast(@intFromPtr(&suggested));
+    // A delivered DPI message between tween frames must not override the
+    // physical dimensions. This reaches the native handler even when the
+    // OS disables animation on a hidden desktop.
+    host.quick_terminal_animation = .{ .id = 1, .start = before, .end = before };
+    _ = hostWindowProc(hwnd, c.WM_DPICHANGED, 0, param);
+    var actual: RECT = undefined;
+    try std.testing.expect(sys.GetWindowRect(hwnd, &actual) != 0);
+    try std.testing.expectEqualDeep(before, actual);
+    host.quick_terminal_animation = null;
+    // A user move of that same QT still follows the ordinary DPI policy.
+    _ = hostWindowProc(hwnd, c.WM_DPICHANGED, 0, param);
+    try std.testing.expect(sys.GetWindowRect(hwnd, &actual) != 0);
+    try std.testing.expectEqualDeep(suggested, actual);
+    try std.testing.expect(!host.quick_terminal_placing);
+    try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+}
+
+const FullscreenMonitor = struct {
+    monitor: sys.HMONITOR,
+    info: MONITORINFO,
+    dpi: u32,
+};
+
+fn fullscreenRestoreRect(rect: RECT, old_work: RECT, new_work: RECT, old_dpi: u32, new_dpi: u32) RECT {
+    var left = rect.left + new_work.left - old_work.left;
+    var top = rect.top + new_work.top - old_work.top;
+    const width = if (old_dpi > 0 and new_dpi > 0) sys.MulDiv(rect.right - rect.left, @intCast(new_dpi), @intCast(old_dpi)) else rect.right - rect.left;
+    const height = if (old_dpi > 0 and new_dpi > 0) sys.MulDiv(rect.bottom - rect.top, @intCast(new_dpi), @intCast(old_dpi)) else rect.bottom - rect.top;
+    // The destination can be smaller or portrait. Keep the saved logical
+    // size, but put its top-left on screen if the translated rect won't fit.
+    left = @max(new_work.left, @min(left, new_work.right - width));
+    top = @max(new_work.top, @min(top, new_work.bottom - height));
+    return .{ .left = left, .top = top, .right = left + width, .bottom = top + height };
+}
+
+test "win32 fullscreen restore translates work areas and scales only size" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const old_work: RECT = .{ .left = 0, .top = 40, .right = 3840, .bottom = 2160 };
+    const new_work: RECT = .{ .left = -1920, .top = -1080, .right = 0, .bottom = 0 };
+    const rect: RECT = .{ .left = 100, .top = 140, .right = 1500, .bottom = 1040 };
+    try std.testing.expectEqualDeep(rect, fullscreenRestoreRect(rect, old_work, old_work, 144, 144));
+    const moved = fullscreenRestoreRect(rect, old_work, new_work, 144, 96);
+    try std.testing.expectEqualDeep(RECT{ .left = -1820, .top = -980, .right = -887, .bottom = -380 }, moved);
+    // MulDiv rounds the fractional width. Returning to the old scale is
+    // within one physical pixel and never scales absolute desktop origins.
+    const back = fullscreenRestoreRect(moved, new_work, old_work, 96, 144);
+    try std.testing.expectEqualDeep(rect, back);
+    const portrait: RECT = .{ .left = -1080, .top = 0, .right = 0, .bottom = 1872 };
+    const edge: RECT = .{ .left = 3000, .top = 1700, .right = 3800, .bottom = 2100 };
+    const clamped = fullscreenRestoreRect(edge, old_work, portrait, 144, 96);
+    try std.testing.expectEqualDeep(RECT{ .left = -533, .top = 1605, .right = 0, .bottom = 1872 }, clamped);
+}
+
 fn monitorInfo(monitor: sys.HMONITOR) ?win32_quick_terminal.MonitorInfo {
     var info: MONITORINFO = .{
         .cbSize = @sizeOf(MONITORINFO),
@@ -27311,12 +27347,15 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             if (host) |v| {
                 const new_dpi = sys.GetDpiForWindow(hwnd);
                 if (new_dpi > 0) v.current_dpi = new_dpi;
-
-                // Resize window to the suggested rectangle from lParam
-                const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
-                _ = sys.SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
-
                 v.recreateChromeFont();
+
+                // QT placement/tween frames own their physical-pixel rect.
+                // Keep scale and layout updates even when the OS's resized
+                // suggestion would override that rect on a DPI crossing.
+                if (!v.quick_terminal_placing and v.quick_terminal_animation == null) {
+                    const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                    _ = sys.SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+                }
 
                 // Relayout and repaint
                 runUiActionOrLog("DPI update layout failed", v.layout());
@@ -28961,6 +29000,7 @@ pub const Surface = struct {
     /// that was maximized.
     restore_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
     restore_placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT),
+    restore_monitor: ?FullscreenMonitor = null,
     default_client_size: ?apprt.SurfaceSize = null,
     cell_size_pixels: apprt.action.CellSize = .{ .width = 0, .height = 0 },
     background_opacity_default: f64 = 1.0,
@@ -33088,9 +33128,6 @@ pub const Surface = struct {
         self.restore_placement.length = @sizeOf(WINDOWPLACEMENT);
         if (sys.GetWindowPlacement(hwnd, &self.restore_placement) == 0 or
             sys.GetWindowRect(hwnd, &self.restore_rect) == 0) return lastError();
-        self.fullscreen = true;
-        try self.applyWindowStyle();
-
         const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse
             return lastError();
         var info: MONITORINFO = .{
@@ -33102,6 +33139,9 @@ pub const Surface = struct {
         if (sys.GetMonitorInfoW(monitor, &info) == 0) {
             return lastError();
         }
+        self.restore_monitor = .{ .monitor = monitor, .info = info, .dpi = sys.GetDpiForWindow(hwnd) };
+        self.fullscreen = true;
+        try self.applyWindowStyle();
 
         if (sys.SetWindowPos(
             hwnd,
@@ -33118,6 +33158,36 @@ pub const Surface = struct {
 
     fn leaveFullscreen(self: *Surface) !void {
         const hwnd = self.windowHwnd() orelse return;
+        var rect = self.restore_rect;
+        var placement = self.restore_placement;
+        if (self.restore_monitor) |source| {
+            const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
+            var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+            info.cbSize = @sizeOf(MONITORINFO);
+            if (sys.GetMonitorInfoW(monitor, &info) == 0) return lastError();
+            const dpi = sys.GetDpiForWindow(hwnd);
+            if (monitor != source.monitor or dpi != source.dpi) {
+                rect = fullscreenRestoreRect(rect, source.info.rcWork, info.rcWork, source.dpi, dpi);
+                // WINDOWPLACEMENT uses workspace coordinates for a normal
+                // host (no WS_EX_TOOLWINDOW). Convert to screen coordinates
+                // before the work-area translation, and back afterwards.
+                var normal = placement.rcNormalPosition;
+                const old_dx = source.info.rcWork.left - source.info.rcMonitor.left;
+                const old_dy = source.info.rcWork.top - source.info.rcMonitor.top;
+                normal.left += old_dx;
+                normal.right += old_dx;
+                normal.top += old_dy;
+                normal.bottom += old_dy;
+                normal = fullscreenRestoreRect(normal, source.info.rcWork, info.rcWork, source.dpi, dpi);
+                const new_dx = info.rcWork.left - info.rcMonitor.left;
+                const new_dy = info.rcWork.top - info.rcMonitor.top;
+                normal.left -= new_dx;
+                normal.right -= new_dx;
+                normal.top -= new_dy;
+                normal.bottom -= new_dy;
+                placement.rcNormalPosition = normal;
+            }
+        }
         self.fullscreen = false;
         try self.applyWindowStyle();
 
@@ -33127,16 +33197,16 @@ pub const Surface = struct {
         // later restore kept it maximized-size. Any other window returns to
         // its exact rect: the placement of a snapped window holds its
         // pre-snap rect.
-        if (self.restore_placement.showCmd == c.SW_MAXIMIZE) {
-            return maximizeWithPlacement(hwnd, &self.restore_placement);
+        if (placement.showCmd == c.SW_MAXIMIZE) {
+            return maximizeWithPlacement(hwnd, &placement);
         }
         if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
-            self.restore_rect.left,
-            self.restore_rect.top,
-            self.restore_rect.right - self.restore_rect.left,
-            self.restore_rect.bottom - self.restore_rect.top,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
             c.SWP_FRAMECHANGED | c.SWP_NOACTIVATE,
         ) == 0) {
             return lastError();
@@ -33267,6 +33337,7 @@ pub const Surface = struct {
         self.topmost = source.topmost;
         self.restore_rect = source.restore_rect;
         self.restore_placement = source.restore_placement;
+        self.restore_monitor = source.restore_monitor;
         self.default_client_size = source.default_client_size;
         self.cell_size_pixels = source.cell_size_pixels;
         self.background_opacity_default = source.background_opacity_default;
@@ -38573,6 +38644,7 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
     source.fullscreen = true;
     source.topmost = true;
     source.restore_rect = .{ .left = 10, .top = 20, .right = 30, .bottom = 40 };
+    source.restore_monitor = .{ .monitor = @ptrFromInt(1), .info = std.mem.zeroes(MONITORINFO), .dpi = 144 };
     source.restore_placement = std.mem.zeroes(WINDOWPLACEMENT);
     source.restore_placement.showCmd = c.SW_MAXIMIZE;
     source.restore_placement.rcNormalPosition = .{ .left = 50, .top = 60, .right = 70, .bottom = 80 };
@@ -38597,6 +38669,7 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
     try std.testing.expectEqual(source.topmost, dest.topmost);
     try std.testing.expectEqualDeep(source.restore_rect, dest.restore_rect);
     try std.testing.expectEqualDeep(source.restore_placement, dest.restore_placement);
+    try std.testing.expectEqualDeep(source.restore_monitor, dest.restore_monitor);
     try std.testing.expectEqualDeep(source.default_client_size, dest.default_client_size);
     try std.testing.expectEqualDeep(source.cell_size_pixels, dest.cell_size_pixels);
     try std.testing.expectEqual(source.background_opacity_default, dest.background_opacity_default);
