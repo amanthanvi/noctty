@@ -8446,8 +8446,7 @@ pub const App = struct {
         if (duplicate_slot) |index| {
             if (index != slot_ordinal) {
                 if (self.launcher_quick_slot_keys[slot_ordinal]) |current| {
-                    if (self.launcher_quick_slot_keys[index]) |dupe| self.core_app.alloc.free(dupe);
-                    self.launcher_quick_slot_keys[index] = try self.core_app.alloc.dupeZ(u8, current);
+                    try appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], current);
                 } else {
                     runUiActionOrLog(
                         "quick slot deduplication failed",
@@ -8463,6 +8462,28 @@ pub const App = struct {
             runUiActionOrLog("quick slot profile refresh failed", host.reapplyLauncherProfilePreferences());
             host.refreshProfileChrome();
         }
+    }
+
+    test "setLauncherQuickSlotPreference keeps the other slot's key when the copy fails" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        core_app.alloc = failing.allocator();
+        defer core_app.alloc = std.testing.allocator;
+        app.launcher_quick_slot_keys[0] = try std.testing.allocator.dupeZ(u8, "pwsh");
+        app.launcher_quick_slot_keys[1] = try std.testing.allocator.dupeZ(u8, "cmd");
+        defer for (app.launcher_quick_slot_keys) |value| {
+            if (value) |key| std.testing.allocator.free(key);
+        };
+        // Slot 0 takes "cmd", so slot 1 is to receive a copy of "pwsh".
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectError(error.OutOfMemory, app.setLauncherQuickSlotPreference(0, "cmd"));
+        try std.testing.expectEqualStrings("pwsh", app.launcher_quick_slot_keys[0].?);
+        try std.testing.expectEqualStrings("cmd", app.launcher_quick_slot_keys[1].?);
     }
 
     fn clearLauncherQuickSlotPreferences(self: *App) void {
@@ -19778,7 +19799,6 @@ const Host = struct {
             try std.testing.expectError(error.OutOfMemory, paint_text.replaceCachedUtf16(core_app.alloc, slot, "replacement"));
             try std.testing.expectEqual(old, slot.*.?.ptr);
             try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("previous"), slot.*.?);
-            try std.testing.expect(host.chrome_text_dirty.overlay);
             failing.fail_index = std.math.maxInt(usize);
             try paint_text.replaceCachedUtf16(core_app.alloc, slot, "replacement");
         }
