@@ -151,9 +151,11 @@ fn readAndHash(alloc: Allocator, path: []const u8) ?[32]u8 {
 }
 
 /// Atomic write: temp file + rename. Falls back to direct overwrite
-/// if rename fails (Windows `std.fs.Dir.rename` uses
-/// `NtSetInformationFile` / `FileRenameInformation` with replace
-/// semantics -- no `MoveFileExW` needed).
+/// if rename fails. Our Windows 1809 target lets `std.fs.Dir.rename`
+/// try `FileRenameInformationEx` with POSIX replace semantics, which replaces
+/// a file whose opener shares delete access; filesystems without that support
+/// fall back to strict `FileRenameInformation`, and a holder without
+/// `FILE_SHARE_DELETE` still blocks either way.
 fn writeAtomically(path: []const u8) !InstallResult {
     const dir_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
     var dir = try std.fs.openDirAbsolute(dir_path, .{});

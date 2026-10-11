@@ -483,6 +483,15 @@ try {
         }
     }
 
+    # Portable staging's downgrade guard reads noctty.exe's fixed PE version.
+    # Check both the display string and numeric fields, including the zero
+    # fourth component, before producing any release artifacts.
+    $stagedVersion = (Get-Item -LiteralPath (Join-Path $portableRoot "noctty.exe")).VersionInfo
+    $numericVersion = "$($stagedVersion.FileMajorPart).$($stagedVersion.FileMinorPart).$($stagedVersion.FileBuildPart)"
+    if ($stagedVersion.FileVersion -cne $Version -or $numericVersion -cne $Version -or $stagedVersion.FilePrivatePart -ne 0) {
+        throw "Staged noctty.exe version mismatch: expected '$Version' ($Version.0), got '$($stagedVersion.FileVersion)' ($numericVersion.$($stagedVersion.FilePrivatePart))."
+    }
+
     $conptyStaged = Install-ConPtyRedist `
         -PinPath $conptyPinPath `
         -Architecture $Architecture `

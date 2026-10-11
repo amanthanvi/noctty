@@ -9,14 +9,24 @@ RT_MANIFEST 24 "noctty.manifest"
 // invalidate Zig's cached resource compilation.
 ID_ICON_GHOSTTY ICON "noctty.ico"
 
-VS_VERSION_INFO VERSIONINFO
-//FILEVERSION     VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_COMMIT_HEIGHT
-//PRODUCTVERSION  VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_COMMIT_HEIGHT
-//FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
-//FILEFLAGS               VER_DBG
-//FILEOS                  VOS_NT
-//FILETYPE                VFT_APP
-//FILESUBTYPE             VFT2_UNKNOWN
+// Version defines come from GhosttyExe.zig and are part of the resource cache key.
+// These defaults also allow standalone resource compilation.
+#ifndef NOCTTY_VERSION_MAJOR
+#define NOCTTY_VERSION_MAJOR 0
+#define NOCTTY_VERSION_MINOR 0
+#define NOCTTY_VERSION_PATCH 0
+#define NOCTTY_VERSION_STRING "0.0.0-dev"
+#endif
+
+// Standard VS_VERSION_INFO resource ID (1), not a string-named resource.
+1 VERSIONINFO
+FILEVERSION     NOCTTY_VERSION_MAJOR,NOCTTY_VERSION_MINOR,NOCTTY_VERSION_PATCH,0
+PRODUCTVERSION  NOCTTY_VERSION_MAJOR,NOCTTY_VERSION_MINOR,NOCTTY_VERSION_PATCH,0
+FILEFLAGSMASK   0x3f
+FILEFLAGS      0
+FILEOS         0x40004 // VOS_NT_WINDOWS32
+FILETYPE       1 // VFT_APP
+FILESUBTYPE    0
 BEGIN
     BLOCK "StringFileInfo"
     BEGIN
@@ -24,11 +34,11 @@ BEGIN
         BEGIN
         //VALUE "CompanyName",        "???"
         VALUE "FileDescription",    "noctty"
-        //VALUE "FileVersion",        VERSION
+        VALUE "FileVersion",        NOCTTY_VERSION_STRING
         //VALUE "LegalCopyright",     "(C) 2024 ???"
         VALUE "OriginalFilename", "noctty.exe"
         VALUE "ProductName",        "noctty"
-        //VALUE "ProductVersion",     VERSION
+        VALUE "ProductVersion",     NOCTTY_VERSION_STRING
         END
     END
     BLOCK "VarFileInfo"

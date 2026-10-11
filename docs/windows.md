@@ -17,6 +17,21 @@ protocol coverage validated on the Win32 runtime, see
 - `libghostty-vt` stays portable as a library. This repository does not
   ship macOS, Linux, GTK, Wayland, or X11 app runtimes.
 
+Windows build targets use at least `win10_rs5` (1809), including explicit
+`-Dtarget` builds. This selects Zig's POSIX `Dir.rename` semantics when the
+filesystem supports them, so renaming over a file another process holds open
+works when that opener shares delete access. A holder without
+`FILE_SHARE_DELETE`, and filesystems that need Zig's legacy rename fallback,
+still reject the replace.
+
+`noctty.exe` carries the build version in its PE version resource. Release
+builds use `-Dversion-string=major.minor.patch`; the fixed numeric version is
+`major.minor.patch.0`, matching the portable updater's downgrade guard and
+Inno Setup. Without that option, a development build uses the base version
+from `VERSION` or `build.zig.zon` for the numeric fields and retains the
+`-dev` suffix and build metadata in its version strings. Packaging requires
+the staged executable's version string and numeric fields to match `-Version`.
+
 ## Install modes
 
 Each release publishes signed Windows artifacts for x64 and ARM64:
