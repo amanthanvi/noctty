@@ -93,6 +93,18 @@ pub const Message = union(enum) {
         };
     }
 
+    /// Free what a message that will never be handled owns.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .write_alloc => |v| v.alloc.free(v.data),
+            .change_config => |v| {
+                v.ptr.deinit();
+                v.alloc.destroy(v.ptr);
+            },
+            else => {},
+        }
+    }
+
     /// The types of size reports that we support.
     pub const SizeReport = terminal.size_report.Style;
 };

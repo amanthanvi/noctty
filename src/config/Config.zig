@@ -3422,6 +3422,10 @@ term: []const u8 = "xterm-ghostty",
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
+/// Command was filled by automatic Windows shell resolution, rather than
+/// supplied by a config layer. The executable stays available to runtime callers.
+_command_defaulted: bool = false,
+
 /// List of diagnostics that were generated during the loading of
 /// the configuration.
 _diagnostics: cli.DiagnosticList = .{},
@@ -3834,8 +3838,11 @@ fn writeConfigTemplate(path: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir_path| {
         try std.fs.cwd().makePath(dir_path);
     }
-    const file = try std.fs.createFileAbsolute(path, .{});
+    // Recheck on the opened file so a config created since the template
+    // decision is preserved. Never truncate an existing file with content.
+    const file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
     defer file.close();
+    if ((try file.stat()).size != 0) return;
     var buf: [4096]u8 = undefined;
     var file_writer = file.writer(&buf);
     const writer = &file_writer.interface;
@@ -3843,6 +3850,37 @@ fn writeConfigTemplate(path: []const u8) !void {
         @embedFile("./config-template"),
         .{ .path = path },
     );
+    try writer.flush();
+}
+
+test "writeConfigTemplate writes the template with its path" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const path = try std.fs.path.join(alloc, &.{ root, "config.ghostty" });
+    defer alloc.free(path);
+
+    try writeConfigTemplate(path);
+    const content = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 8192);
+    defer alloc.free(content);
+    try std.testing.expect(content.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, content, path) != null);
+
+    const user_content = "# keep this config\nfont-size = 13\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = user_content });
+    try writeConfigTemplate(path);
+    const preserved = try tmp.dir.readFileAlloc(alloc, "config.ghostty", 8192);
+    defer alloc.free(preserved);
+    try std.testing.expectEqualStrings(user_content, preserved);
+}
+
+fn defaultConfigIsEmpty(path: []const u8) bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    defer file.close();
+    const stat = file.stat() catch return false;
+    return stat.kind == .file and stat.size == 0;
 }
 
 /// Load configurations from the default configuration files. The default
@@ -3880,8 +3918,11 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
             }
         }
 
-        break :xdg_loaded xdg_action != .not_found or
-            legacy_xdg_action != .not_found;
+        // Older builds left the default template at exactly zero bytes.
+        // Treat only that file as absent for the template decision; optional
+        // file loading and legacy config precedence keep their semantics.
+        break :xdg_loaded legacy_xdg_action != .not_found or
+            (xdg_action != .not_found and !defaultConfigIsEmpty(xdg_path));
     };
 
     if (!xdg_loaded) {
@@ -3997,6 +4038,16 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             .files = &.{},
             .target = "noctty/config.ghostty",
         },
+        .{
+            .name = "a zero-byte default config gets the template",
+            .files = &.{.{ .path = "noctty/config.ghostty", .content = "" }},
+            .target = "noctty/config.ghostty",
+        },
+        .{
+            .name = "a comment-only default config is preserved",
+            .files = &.{.{ .path = "noctty/config.ghostty", .content = "# user's config\n" }},
+            .target = "noctty/config.ghostty",
+        },
     };
 
     for (cases, 0..) |case, i| {
@@ -4024,6 +4075,19 @@ test "default config files: an edit to the edit-target takes effect on reload" {
             var cfg = try Config.default(alloc);
             defer cfg.deinit();
             try cfg.loadDefaultFiles(alloc);
+        }
+
+        // Migration may fill an empty default file, but never replace content
+        // or a legacy file, including when a legacy config is the edit target.
+        for (case.files) |file| {
+            const content = try home_dir.readFileAlloc(alloc, file.path, 8192);
+            defer alloc.free(content);
+            if (file.content.len == 0 and std.mem.eql(u8, case.target, file.path)) {
+                try testing.expect(content.len > 0);
+                try testing.expect(std.mem.indexOf(u8, content, "# This is the configuration file for noctty.") != null);
+            } else {
+                try testing.expectEqualStrings(file.content, content);
+            }
         }
 
         // `xdg.config` joins the `noctty/config.ghostty` subdir verbatim, so
@@ -4554,9 +4618,7 @@ pub fn finalize(self: *Config) !void {
             switch (builtin.os.tag) {
                 .windows => {
                     if (self.command == null) {
-                        const cmd = try windows_shell.previewCommand(alloc);
-                        log.info("default shell src=windows-preview value={}", .{cmd});
-                        self.command = cmd;
+                        try self.resolveWindowsDefaultCommand();
                     }
 
                     if (wd == .home and !windows_shell.isWslCommand(self.command.?)) {
@@ -4668,6 +4730,15 @@ pub fn finalize(self: *Config) !void {
     self.@"key-remap".finalize();
 }
 
+/// Resolve the automatic Windows command without hiding whether it was explicit.
+pub fn resolveWindowsDefaultCommand(self: *Config) !void {
+    if (self.command != null) return;
+    const cmd = try windows_shell.previewCommand(self._arena.?.allocator());
+    log.info("default shell src=windows-preview value={}", .{cmd});
+    self.command = cmd;
+    self._command_defaulted = true;
+}
+
 /// Callback for src/cli/args.zig to allow us to handle special cases
 /// like `--help` or `-e`. Returns "false" if the CLI parsing should halt.
 pub fn parseManuallyHook(
@@ -4676,6 +4747,9 @@ pub fn parseManuallyHook(
     arg: []const u8,
     iter: anytype,
 ) !bool {
+    if (std.mem.eql(u8, arg, "--command") or std.mem.startsWith(u8, arg, "--command=")) {
+        self._command_defaulted = false;
+    }
     if (builtin.os.tag == .windows and std.ascii.eqlIgnoreCase(arg, "-Embedding")) {
         // COM's SCM appends this switch for local-server activation. It is a
         // process-mode marker, not a user configuration field.
@@ -4914,6 +4988,7 @@ pub fn clone(
 
     // Copy our diagnostics
     result._diagnostics = try self._diagnostics.clone(alloc_arena);
+    result._command_defaulted = self._command_defaulted;
 
     // Preserve our replay steps. We copy them exactly to also preserve
     // the exact conditionals required for some steps.
@@ -10282,9 +10357,33 @@ pub const Theme = struct {
     light: []const u8,
     dark: []const u8,
 
+    test "settings theme paths round trip punctuation and escaping" {
+        var arena = ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var single: Theme = undefined;
+        const absolute = if (builtin.os.tag == .windows) "C:\\themes\\Last, First=A" else "/themes/Last, First=A";
+        try single.parseCLI(alloc, absolute);
+        try std.testing.expectEqualStrings(absolute, single.light);
+        const theme: Theme = .{ .light = "C:\\themes\\Last, First=A", .dark = "C:\\themes\\dark \"quoted\";#\u{1f680}" };
+        const text = try formatterpkg.formatEntryAlloc(Theme, alloc, "theme", theme);
+        var parsed: Theme = undefined;
+        try parsed.parseCLI(alloc, std.mem.trim(u8, text["theme = ".len..], "\r\n"));
+        try std.testing.expectEqualStrings(theme.light, parsed.light);
+        try std.testing.expectEqualStrings(theme.dark, parsed.dark);
+        for ([_][]const u8{ "Last, First", "Name=Value", "Name:Value", " padded ", "line\nname", "C:\\themes\\Last, First=A" }) |name| {
+            const equal: Theme = .{ .light = name, .dark = name };
+            const equal_text = try formatterpkg.formatEntryAlloc(Theme, alloc, "theme", equal);
+            try parsed.parseCLI(alloc, std.mem.trim(u8, equal_text["theme = ".len..], "\r\n"));
+            try std.testing.expectEqualStrings(name, parsed.light);
+            try std.testing.expectEqualStrings(name, parsed.dark);
+        }
+    }
+
     pub fn parseCLI(self: *Theme, alloc: Allocator, input_: ?[]const u8) !void {
         const input = input_ orelse return error.ValueRequired;
         if (input.len == 0) return error.ValueRequired;
+        const trimmed = std.mem.trim(u8, input, cli.args.whitespace);
 
         // If there is a comma, equal sign, or colon, then we assume that
         // we're parsing a light/dark mode theme pair. Note that "=" isn't
@@ -10297,9 +10396,9 @@ pub const Theme = struct {
             if (std.mem.indexOf(u8, input, ":")) |idx| idx != 1 else false
         else
             std.mem.indexOf(u8, input, ":") != null;
-        if (std.mem.indexOf(u8, input, ",") != null or
+        if (!std.fs.path.isAbsolute(trimmed) and (std.mem.indexOf(u8, input, ",") != null or
             std.mem.indexOf(u8, input, "=") != null or
-            has_colon)
+            has_colon))
         {
             self.* = try cli.args.parseAutoStruct(
                 Theme,
@@ -10309,9 +10408,6 @@ pub const Theme = struct {
             );
             return;
         }
-
-        // Trim our value
-        const trimmed = std.mem.trim(u8, input, cli.args.whitespace);
 
         // Set the value to the specified value directly.
         self.* = .{
@@ -10328,22 +10424,40 @@ pub const Theme = struct {
         };
     }
 
+    /// Lossless config value shared by file serialization and the Settings EDIT.
+    pub fn formatValue(self: Theme, writer: *std.Io.Writer) !void {
+        // Equal pair values may still require pair syntax: a comma-bearing
+        // name otherwise looks like a pair, and single values trim whitespace.
+        const single_lossless = self.light.len != 0 and
+            std.mem.trim(u8, self.light, cli.args.whitespace).len == self.light.len and
+            std.mem.indexOfAny(u8, self.light, "\r\n\t\"") == null and
+            (std.fs.path.isAbsolute(self.light) or std.mem.indexOfAny(u8, self.light, ",:=\\") == null);
+        if (std.mem.eql(u8, self.light, self.dark) and single_lossless) {
+            try writer.writeAll(self.light);
+            return;
+        }
+        try writer.writeAll("light:");
+        try formatPairValue(writer, self.light);
+        try writer.writeAll(",dark:");
+        try formatPairValue(writer, self.dark);
+    }
+
+    fn formatPairValue(writer: *std.Io.Writer, value: []const u8) !void {
+        if (std.mem.indexOfAny(u8, value, ",:=\"\\\r\n\t") != null or
+            std.mem.trim(u8, value, cli.args.whitespace).len != value.len)
+        {
+            try writer.print("\"{f}\"", .{std.zig.fmtString(value)});
+        } else try writer.writeAll(value);
+    }
+
     /// Used by Formatter
     pub fn formatEntry(
         self: Theme,
-        formatter: anytype,
+        formatter: formatterpkg.EntryFormatter,
     ) !void {
-        var buf: [4096]u8 = undefined;
-        if (std.mem.eql(u8, self.light, self.dark)) {
-            try formatter.formatEntry([]const u8, self.light);
-            return;
-        }
-
-        const str = std.fmt.bufPrint(&buf, "light:{s},dark:{s}", .{
-            self.light,
-            self.dark,
-        }) catch return error.OutOfMemory;
-        try formatter.formatEntry([]const u8, str);
+        try formatter.writer.print("{s} = ", .{formatter.name});
+        try self.formatValue(formatter.writer);
+        try formatter.writer.writeByte('\n');
     }
 
     test "parse Theme" {
@@ -10734,6 +10848,17 @@ test "parse duration" {
     try std.testing.expectError(error.InvalidValue, Duration.parseCLI("s"));
     try std.testing.expectError(error.InvalidValue, Duration.parseCLI("1x"));
     try std.testing.expectError(error.InvalidValue, Duration.parseCLI("1 "));
+}
+
+test "settings config parser rejects nonfinite font size and opacity" {
+    var cfg = try Config.default(std.testing.allocator);
+    defer cfg.deinit();
+    const alloc = cfg._arena.?.allocator();
+    inline for (.{ "font-size", "background-opacity" }) |key| {
+        for ([_][]const u8{ "nan", "inf", "-inf", "1e999" }) |text| {
+            try std.testing.expectError(error.InvalidValue, cli.args.parseIntoField(Config, alloc, &cfg, key, text));
+        }
+    }
 }
 
 test "test format" {

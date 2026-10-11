@@ -2125,17 +2125,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.config.bg_image_repeat != config.bg_image_repeat or
                 self.config.bg_image_opacity != config.bg_image_opacity;
 
-            const bg_image_changed =
-                if (self.config.bg_image) |old|
-                    if (config.bg_image) |new|
-                        !old.equal(new)
-                    else
-                        true
-                else
-                    config.bg_image != null;
+            // Re-read file-backed assets on config updates even when their
+            // paths are unchanged: reload_config also applies in-place edits.
+            const bg_image_changed = self.config.bg_image != null or config.bg_image != null;
 
             const old_blending = self.config.blending;
-            const custom_shaders_changed = !self.config.custom_shaders.equal(config.custom_shaders);
+            const custom_shaders_changed = self.config.custom_shaders.value.items.len != 0 or config.custom_shaders.value.items.len != 0;
 
             self.config.deinit();
             self.config = config.*;

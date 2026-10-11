@@ -3077,29 +3077,12 @@ fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
 
 const SettingsConfigKey = @import("../config/key.zig").Key;
 const SettingsEditedKeySet = std.StaticBitSet(std.enums.values(SettingsConfigKey).len);
-const settings_explicit_optional_edit_keys = .{
-    SettingsConfigKey.theme,
-    SettingsConfigKey.command,
-    SettingsConfigKey.@"auto-update",
-    SettingsConfigKey.@"auto-update-channel",
-};
-
 fn settingsUserEditedKeys(
     original: *const configpkg.Config,
     pending: *const configpkg.Config,
 ) SettingsEditedKeySet {
     var edited: SettingsEditedKeySet = .initEmpty();
-    inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-        if (field.name[0] == '_') continue;
-        switch (@typeInfo(field.type)) {
-            .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                const key = @field(SettingsConfigKey, field.name);
-                if (original.changed(pending, key)) edited.set(@intFromEnum(key));
-            },
-            else => {},
-        }
-    }
-    inline for (settings_explicit_optional_edit_keys) |key| {
+    inline for (win32_settings.editable_keys) |key| {
         if (original.changed(pending, key)) edited.set(@intFromEnum(key));
     }
     return edited;
@@ -3110,6 +3093,7 @@ fn settingsEditedValueMasked(
     reloaded: *const configpkg.Config,
     comptime key: SettingsConfigKey,
 ) bool {
+    if (key == .command and pending.command == null and reloaded._command_defaulted) return false;
     if (key == SettingsConfigKey.@"auto-update-channel") {
         const expected = pending.@"auto-update-channel" orelse build_config.release_channel;
         const actual = reloaded.@"auto-update-channel" orelse build_config.release_channel;
@@ -3723,6 +3707,9 @@ pub const App = struct {
     // Live-resize state is tracked PER HOST (`Host.is_live_resize`),
     // not per App. Dragging window A must NOT freeze renderer
     // invalidations for unrelated background windows B/C.
+    /// Whether the current core-app tick already spent its one synchronous
+    /// renderer paint. See `rendererTickRepaintMode`.
+    renderer_sync_paint_spent: bool = false,
     /// Cached CF_HTML clipboard format ID — lazy-registered on
     /// first HTML copy. Process-local so one cache per App is
     /// enough; re-registering on every copy is documented as
@@ -4839,8 +4826,16 @@ pub const App = struct {
     }
 
     fn tickCoreApp(self: *App) !void {
+        self.renderer_sync_paint_spent = false;
         try self.core_app.tick(self);
         self.resolveRecoveryStartup();
+    }
+
+    fn rendererRepaintModeThisTick(self: *App, host: ?*const Host) SurfaceRepaintRequestMode {
+        return rendererTickRepaintMode(
+            rendererRepaintRequestMode(host, sys.GetTickCount64()),
+            &self.renderer_sync_paint_spent,
+        );
     }
 
     /// Record this launch as resolved in the startup ledger.
@@ -6949,14 +6944,14 @@ pub const App = struct {
                 return switch (target) {
                     .app => blk: {
                         for (self.windows.items) |surface| {
-                            try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                            try surface.requestRepaintWithMode(self.rendererRepaintModeThisTick(surface.host));
                             surface.drainTerminalAccessibilityOutput();
                             if (surface.terminal_accessibility) |session| session.rendererUpdated();
                         }
                         break :blk true;
                     },
                     .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
-                        try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                        try surface.requestRepaintWithMode(self.rendererRepaintModeThisTick(surface.host));
                         surface.drainTerminalAccessibilityOutput();
                         if (surface.terminal_accessibility) |session| session.rendererUpdated();
                         break :blk true;
@@ -10097,25 +10092,7 @@ pub const App = struct {
         // settings-window caller surfaces this differently from a
         // generic write failure.
         var any_masked = false;
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (field.name[0] == '_') continue;
-            switch (@typeInfo(field.type)) {
-                .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                    const key = @field(SettingsConfigKey, field.name);
-                    if (user_edited.isSet(@intFromEnum(key))) {
-                        if (pending.changed(&reloaded, key)) {
-                            std.log.warn(
-                                "settings save: field '{s}' was saved but is masked by a later config-file layer; the effective value after reload differs",
-                                .{field.name},
-                            );
-                            any_masked = true;
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-        inline for (settings_explicit_optional_edit_keys) |key| {
+        inline for (win32_settings.editable_keys) |key| {
             if (user_edited.isSet(@intFromEnum(key)) and settingsEditedValueMasked(pending, &reloaded, key)) {
                 std.log.warn(
                     "settings save: field '{s}' was saved but is masked by a later config-file layer",
@@ -11787,6 +11764,11 @@ const Host = struct {
     scrollbar_timer_active: bool = false,
     resize_settle_timer_active: bool = false,
     resize_settle_repaint_ticks: u8 = 0,
+    /// `GetTickCount64` past which resize-settle paint mode is over even while
+    /// its timer is still armed. WM_TIMER is the lowest-priority message, so a
+    /// busy pump can hold off the timer's last tick indefinitely, and settle
+    /// mode used to last exactly that long.
+    resize_settle_until_ms: u64 = 0,
     structural_history_disposing: bool = false,
     destroy_after_structural_dispose: bool = false,
     structural_undo_entries: win32_structural_history.List(StructuralUndoEntry) = .empty,
@@ -12772,6 +12754,7 @@ const Host = struct {
 
     fn startResizeSettleRepaints(self: *Host) void {
         self.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
+        self.resize_settle_until_ms = sys.GetTickCount64() +| resize_settle_deadline_ms;
         self.ensureResizeSettleTimer();
     }
 
@@ -22545,22 +22528,54 @@ const RendererHealthSurfaceAction = enum {
     recover_with_followup_repaint,
 };
 
-fn surfaceRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
+/// Settle mode normally ends with its timer's last tick. Its 12 ticks of 16 ms
+/// can take about twice that, because at the default 15.6 ms clock resolution
+/// a 16 ms timer fires about every 31 ms, so the deadline only cuts settle
+/// short when a busy pump starves WM_TIMER.
+const resize_settle_deadline_ms: u64 = 2 * @as(u64, c.RESIZE_SETTLE_REPAINT_TICKS) * c.RESIZE_SETTLE_TIMER_INTERVAL_MS;
+
+fn resizeSettleActive(h: *const Host, now_ms: u64) bool {
+    return h.resize_settle_timer_active and now_ms < h.resize_settle_until_ms;
+}
+
+fn surfaceRepaintRequestMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
     const h = host orelse return .queue;
     if (h.is_live_resize.load(.acquire)) return .defer_until_flush;
-    if (h.resize_settle_timer_active) return .update_now;
+    if (resizeSettleActive(h, now_ms)) return .update_now;
     return .queue;
 }
 
-fn rendererRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
-    return surfaceRepaintRequestMode(host);
+fn rendererRepaintRequestMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
+    return surfaceRepaintRequestMode(host, now_ms);
 }
 
-fn surfaceSizeChangeRepaintMode(host: ?*const Host) SurfaceRepaintRequestMode {
-    const h = host orelse return surfaceRepaintRequestMode(null);
+/// Renderer frames reach the UI thread as `redraw_surface` mailbox messages,
+/// and `App.drainMailbox` pops until the mailbox is empty. An `update_now`
+/// paint blocks in SwapBuffers until vblank and only then releases the
+/// surface's repaint reservation, so when a present takes longer than the
+/// renderer's frame interval (a 60 Hz display against the 8 ms animation
+/// timer, or heavy output) the next frame is usually queued before the drain
+/// looks again. With every frame painted synchronously, drains ran back to
+/// back, and each frame also posted a WAKE, which outranks input and WM_TIMER:
+/// the backlog grew faster than the pump retired it, and typing waited for
+/// seconds (#297). One synchronous paint per core-app tick keeps settle mode's
+/// prompt present; later frames in the same tick queue an invalidate, whose
+/// WM_PAINT ranks below input.
+fn rendererTickRepaintMode(
+    mode: SurfaceRepaintRequestMode,
+    sync_paint_spent: *bool,
+) SurfaceRepaintRequestMode {
+    if (mode != .update_now) return mode;
+    if (sync_paint_spent.*) return .queue;
+    sync_paint_spent.* = true;
+    return mode;
+}
+
+fn surfaceSizeChangeRepaintMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
+    const h = host orelse return surfaceRepaintRequestMode(null, now_ms);
     if (h.is_live_resize.load(.acquire)) return .update_now;
-    if (h.resize_settle_timer_active) return .update_now;
-    return surfaceRepaintRequestMode(h);
+    if (resizeSettleActive(h, now_ms)) return .update_now;
+    return surfaceRepaintRequestMode(h, now_ms);
 }
 
 fn surfaceSizeChangePrimesRenderer(repaint_mode: SurfaceRepaintRequestMode) bool {
@@ -24104,6 +24119,10 @@ fn forwardedActivationExtraArgCount(arguments: ?[]const [:0]const u8) usize {
 fn cliConfigFileOverride(alloc: std.mem.Allocator) !?[]u8 {
     const argv = std.process.argsAlloc(alloc) catch return null;
     defer std.process.argsFree(alloc, argv);
+    return cliConfigFileOverrideArgs(alloc, argv);
+}
+
+fn cliConfigFileOverrideArgs(alloc: std.mem.Allocator, argv: []const []const u8) !?[]u8 {
     const key = "--config-file";
     // Pick the LAST `--config-file` occurrence, not the first:
     // `Config.loadRecursiveFiles` applies files in argv order and
@@ -24114,6 +24133,8 @@ fn cliConfigFileOverride(alloc: std.mem.Allocator) !?[]u8 {
     var i: usize = 1; // skip argv[0]
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        // Config.parseManuallyHook consumes everything after -e as child argv.
+        if (std.mem.eql(u8, arg, "-e")) break;
         if (std.mem.eql(u8, arg, key)) {
             if (i + 1 < argv.len) {
                 last_path = argv[i + 1];
@@ -24155,126 +24176,261 @@ fn leadingIndentLen(line: []const u8) usize {
     return i;
 }
 
-/// Patch GUI-edited config keys while preserving unchanged source text.
-///
-/// A line matches `<name>` when its trimmed-left form starts with
-/// `<name>` followed by optional whitespace and `=`. Comment lines are
-/// ignored. Duplicate key lines preserve load semantics by rewriting
-/// only the last occurrence; missing edited keys are appended.
+/// Return an assignment's key without treating literal value text as comments.
+fn settingsAssignmentKey(line: []const u8) ?SettingsConfigKey {
+    const stripped = std.mem.trimLeft(u8, line, " \t");
+    if (stripped.len == 0 or stripped[0] == '#' or stripped[0] == ';') return null;
+    const eq = std.mem.indexOfScalar(u8, stripped, '=') orelse return null;
+    return std.meta.stringToEnum(SettingsConfigKey, std.mem.trimRight(u8, stripped[0..eq], " \t"));
+}
+
+fn appendSettingsPayload(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), payload: []const u8, ending: []const u8) !void {
+    var start: usize = 0;
+    for (payload, 0..) |byte, i| {
+        if (byte != '\n') continue;
+        try out.appendSlice(alloc, payload[start..i]);
+        try out.appendSlice(alloc, ending);
+        start = i + 1;
+    }
+    try out.appendSlice(alloc, payload[start..]);
+}
+
+/// Patch only edited assignments. Scalars keep last-wins semantics; repeatable
+/// strings replace the full list at its last assignment and reset lower layers.
 fn patchOrAppendEdits(
     alloc: std.mem.Allocator,
     raw: []const u8,
     pending: *const configpkg.Config,
-    user_edited: std.StaticBitSet(std.enums.values(@import("../config/key.zig").Key).len),
+    user_edited: SettingsEditedKeySet,
     out: *std.ArrayListUnmanaged(u8),
 ) !void {
-    // Three `inline for`s over every Config field run here. Adding
-    // `auto-update-feed-url` pushes that past the default 1000-branch quota,
-    // which surfaces as a compile error in this file rather than at the new
-    // option. State the budget so the next option added does not do it again.
     @setEvalBranchQuota(10_000);
-    const ConfigKey = @import("../config/key.zig").Key;
     const ConfigFormatter = @import("../config/formatter.zig");
-
-    // Pass 1: scan lines to find the LAST occurrence of each
-    // user-edited key. Replacing only the LAST occurrence matches
-    // `Config.loadRecursiveFiles`'s "last value wins" semantic — a
-    // user who has two `font-size = 12` lines (e.g. one in a theme
-    // section, one in an override block) keeps the earlier line
-    // untouched and only sees the later one updated. Replacing
-    // every occurrence would collapse intentional overrides.
-    //
-    // Line indices are 0-based; we store them in an array keyed on
-    // `Config.Key`'s enum int. -1 / max-usize means "no match seen".
-    const keys_total = comptime std.enums.values(ConfigKey).len;
-    var last_line: [keys_total]usize = [_]usize{std.math.maxInt(usize)} ** keys_total;
-
-    // Split into line slices once so we can index by line number
-    // during the emit pass.
+    const keys_total = comptime std.enums.values(SettingsConfigKey).len;
+    var last_line: [keys_total]usize = @splat(std.math.maxInt(usize));
     var lines: std.ArrayListUnmanaged([]const u8) = .{};
     defer lines.deinit(alloc);
-    {
-        var it = std.mem.splitScalar(u8, raw, '\n');
-        while (it.next()) |line| try lines.append(alloc, line);
-    }
-
-    for (lines.items, 0..) |line, line_idx| {
-        const stripped = std.mem.trimLeft(u8, line, " \t");
-        if (stripped.len == 0 or stripped[0] == '#' or stripped[0] == ';') continue;
-        const eq_idx = std.mem.indexOfScalar(u8, stripped, '=') orelse continue;
-        const key_slice = std.mem.trimRight(u8, stripped[0..eq_idx], " \t");
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (field.name[0] != '_' and std.mem.eql(u8, field.name, key_slice)) {
-                const key = @field(ConfigKey, field.name);
-                if (user_edited.isSet(@intFromEnum(key))) {
-                    last_line[@intFromEnum(key)] = line_idx;
-                }
-            }
+    var crlf_count: usize = 0;
+    var lf_count: usize = 0;
+    var it = std.mem.splitScalar(u8, raw, '\n');
+    while (it.next()) |line| {
+        try lines.append(alloc, line);
+        if (it.index != null) {
+            if (std.mem.endsWith(u8, line, "\r")) crlf_count += 1 else lf_count += 1;
         }
     }
+    const dominant_ending: []const u8 = if (crlf_count > lf_count) "\r\n" else "\n";
 
-    // Track which keys we've emitted so the append pass can pick up
-    // the leftovers.
-    var written: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
+    for (lines.items, 0..) |line, index| {
+        const key = settingsAssignmentKey(line) orelse continue;
+        if (user_edited.isSet(@intFromEnum(key))) last_line[@intFromEnum(key)] = index;
+    }
 
-    // Pass 2: emit. Every line is written verbatim EXCEPT the
-    // recorded last-occurrence lines for user-edited keys, which
-    // get the fresh serialised value.
-    for (lines.items, 0..) |line, line_idx| {
-        if (line_idx > 0) try out.append(alloc, '\n');
-
-        var replaced = false;
+    var written: SettingsEditedKeySet = .initEmpty();
+    for (lines.items, 0..) |line, index| {
+        var handled = false;
+        const line_key = settingsAssignmentKey(line);
         inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (!replaced and field.name[0] != '_') {
-                const key = @field(ConfigKey, field.name);
-                if (user_edited.isSet(@intFromEnum(key)) and
-                    last_line[@intFromEnum(key)] == line_idx)
-                {
+            if (field.name[0] == '_') continue;
+            const key = @field(SettingsConfigKey, field.name);
+            if (line_key == key and user_edited.isSet(@intFromEnum(key))) {
+                const repeatable = field.type == configpkg.Config.RepeatableString;
+                if (last_line[@intFromEnum(key)] == index) {
                     var scratch: std.Io.Writer.Allocating = .init(alloc);
                     defer scratch.deinit();
-                    ConfigFormatter.formatEntry(
-                        field.type,
-                        field.name,
-                        @field(pending, field.name),
-                        &scratch.writer,
-                    ) catch return error.OutOfMemory;
-                    var payload = scratch.written();
-                    if (payload.len > 0 and payload[payload.len - 1] == '\n') {
-                        payload = payload[0 .. payload.len - 1];
-                    }
-                    // Preserve indentation from the original assignment. The
-                    // config grammar has no inline comments: `#` or `;` after
-                    // `=` is value data and must not survive replacement.
-                    const indent_end = leadingIndentLen(line);
-                    const leading = line[0..indent_end];
-                    try out.appendSlice(alloc, leading);
-                    try out.appendSlice(alloc, payload);
+                    // An empty list's formatter already emits its reset.
+                    if (repeatable and @field(pending, field.name).list.items.len != 0)
+                        try scratch.writer.print("{s} = \n", .{field.name});
+                    try ConfigFormatter.formatEntry(field.type, field.name, @field(pending, field.name), &scratch.writer);
+                    const payload = std.mem.trimEnd(u8, scratch.written(), "\n");
+                    const has_cr = std.mem.endsWith(u8, line, "\r");
+                    const ending: []const u8 = if (has_cr) "\r\n" else if (index + 1 < lines.items.len) "\n" else dominant_ending;
+                    try out.appendSlice(alloc, line[0..leadingIndentLen(line)]);
+                    try appendSettingsPayload(alloc, out, payload, ending);
+                    if (has_cr) try out.append(alloc, '\r');
+                    if (index + 1 < lines.items.len) try out.append(alloc, '\n');
                     written.set(@intFromEnum(key));
-                    replaced = true;
+                    handled = true;
+                } else if (repeatable) {
+                    // Remove the whole old assignment, including its newline.
+                    handled = true;
                 }
             }
         }
-        if (!replaced) try out.appendSlice(alloc, line);
+        if (!handled) {
+            try out.appendSlice(alloc, line);
+            if (index + 1 < lines.items.len) try out.append(alloc, '\n');
+        }
     }
 
-    // Pass 3: append user-edited keys that didn't appear in the
-    // source at all (first-save / new-key cases).
     inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
         if (field.name[0] == '_') continue;
-        const key = @field(ConfigKey, field.name);
+        const key = @field(SettingsConfigKey, field.name);
         if (user_edited.isSet(@intFromEnum(key)) and !written.isSet(@intFromEnum(key))) {
-            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
-                try out.append(alloc, '\n');
-            }
+            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n')
+                try out.appendSlice(alloc, dominant_ending);
             var scratch: std.Io.Writer.Allocating = .init(alloc);
             defer scratch.deinit();
-            ConfigFormatter.formatEntry(
-                field.type,
-                field.name,
-                @field(pending, field.name),
-                &scratch.writer,
-            ) catch return error.OutOfMemory;
-            try out.appendSlice(alloc, scratch.written());
+            if (field.type == configpkg.Config.RepeatableString and @field(pending, field.name).list.items.len != 0)
+                try scratch.writer.print("{s} = \n", .{field.name});
+            try ConfigFormatter.formatEntry(field.type, field.name, @field(pending, field.name), &scratch.writer);
+            try appendSettingsPayload(alloc, out, scratch.written(), dominant_ending);
+        }
+    }
+}
+
+test "win32 settings automatic command is not masked by default resolution" {
+    var pending = try configpkg.Config.default(std.testing.allocator);
+    defer pending.deinit();
+    var reloaded = try configpkg.Config.default(std.testing.allocator);
+    defer reloaded.deinit();
+    try reloaded.resolveWindowsDefaultCommand();
+    try std.testing.expect(reloaded.command != null);
+    try std.testing.expect(!settingsEditedValueMasked(&pending, &reloaded, .command));
+    try settingsTestLoadText(&reloaded, "command = direct:cmd.exe\n");
+    try std.testing.expect(settingsEditedValueMasked(&pending, &reloaded, .command));
+}
+
+test "win32 settings save target stops at the child command boundary" {
+    const alloc = std.testing.allocator;
+    const target = (try cliConfigFileOverrideArgs(alloc, &.{ "noctty", "--config-file=first.conf", "--config-file", "last.conf", "-e", "tool", "--config-file=tool.conf" })).?;
+    defer alloc.free(target);
+    const expected = try absolutizePath(alloc, "last.conf");
+    defer alloc.free(expected);
+    try std.testing.expectEqualStrings(expected, target);
+    try std.testing.expectEqual(@as(?[]u8, null), try cliConfigFileOverrideArgs(alloc, &.{ "noctty", "-e", "tool", "--config-file=tool.conf" }));
+}
+
+fn settingsTestLoadText(config: *configpkg.Config, text: []const u8) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.ghostty");
+    defer std.testing.allocator.free(path);
+    try config.loadFile(std.testing.allocator, path);
+    try std.testing.expect(config._diagnostics.empty());
+}
+
+test "win32 settings patch replaces the whole font list and resets lower layers" {
+    const alloc = std.testing.allocator;
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "C");
+    var edited: SettingsEditedKeySet = .initEmpty();
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(alloc);
+    try patchOrAppendEdits(alloc, "# keep\nfont-family = A\ncopy-on-select = false\n  font-family = B\n", &pending, edited, &out);
+    try std.testing.expectEqualStrings("# keep\ncopy-on-select = false\n  font-family = \nfont-family = C\n", out.items);
+    var loaded = try configpkg.Config.default(alloc);
+    defer loaded.deinit();
+    try loaded.@"font-family".parseCLI(loaded._arena.?.allocator(), "lower layer");
+    try settingsTestLoadText(&loaded, out.items);
+    try std.testing.expect(!pending.changed(&loaded, .@"font-family"));
+    pending.@"font-family" = .{};
+    out.clearRetainingCapacity();
+    try patchOrAppendEdits(alloc, "font-family = A\nfont-family = B\n", &pending, edited, &out);
+    try std.testing.expectEqualStrings("font-family = \n", out.items);
+}
+
+test "win32 settings patch preserves CRLF including multiline and appended edits" {
+    const alloc = std.testing.allocator;
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    pending.@"font-size" = 13.25;
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "A");
+    try pending.@"font-family".parseCLI(pending._arena.?.allocator(), "B");
+    var edited: SettingsEditedKeySet = .initEmpty();
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-size"));
+    edited.set(@intFromEnum(SettingsConfigKey.@"font-family"));
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(alloc);
+    try patchOrAppendEdits(alloc, "# keep\r\nfont-size = 12\r\ncopy-on-select = false", &pending, edited, &out);
+    try std.testing.expectEqualStrings("# keep\r\nfont-size = 13.25\r\ncopy-on-select = false\r\nfont-family = \r\nfont-family = A\r\nfont-family = B\r\n", out.items);
+}
+
+test "win32 settings clone does not edit include or shader paths" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = "config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = false\n";
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = raw });
+    try tmp.dir.writeFile(.{ .sub_path = "extra.conf", .data = "config-file = nested.conf\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "nested.conf", .data = "cursor-style = block\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    try original.loadFile(alloc, path);
+    try original.loadRecursiveFiles(alloc);
+    try std.testing.expect(original._diagnostics.empty());
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    try std.testing.expectEqual(@as(usize, 0), settingsUserEditedKeys(&original, &pending).count());
+    pending.@"copy-on-select" = .true;
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try std.testing.expectEqual(@as(usize, 1), edited.count());
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    defer out.deinit(alloc);
+    try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
+    try std.testing.expectEqualStrings("config-file = extra.conf\nconfig-file = ?optional.conf\ncustom-shader = shader.glsl\nfont-size = 13.25\nbackground-opacity = 0.875\ncopy-on-select = true\n", out.items);
+}
+
+test "win32 settings every editable key round trips through a file" {
+    const alloc = std.testing.allocator;
+    const ConfigFormatter = @import("../config/formatter.zig");
+    var defaults = try configpkg.Config.default(alloc);
+    defer defaults.deinit();
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    try settingsTestLoadText(&pending,
+        \\scrollback-limit = 123456
+        \\font-size = 13.25
+        \\background-opacity = 0.875
+        \\window-padding-x = 5,7
+        \\window-padding-y = 9,11
+        \\clipboard-trim-trailing-spaces = false
+        \\desktop-notifications = false
+        \\app-notifications = no-clipboard-copy,no-config-reload
+        \\confirm-close-surface = always
+        \\copy-on-select = clipboard
+        \\clipboard-read = deny
+        \\clipboard-write = deny
+        \\link-url = true
+        \\link-previews = false
+        \\window-theme = dark
+        \\shell-integration = none
+        \\cursor-style = bar
+        \\background-blur = true
+        \\window-padding-balance = true
+        \\auto-update = off
+        \\auto-update-channel = tip
+        \\font-family = Font #; 🚀
+        \\font-family = Second Font
+        \\theme = light:Light,dark:Dark
+        \\command = direct:pwsh.exe -NoLogo -Command "echo #; literal"
+    );
+    inline for (win32_settings.editable_keys) |key| {
+        var edited: SettingsEditedKeySet = .initEmpty();
+        edited.set(@intFromEnum(key));
+        var old: std.Io.Writer.Allocating = .init(alloc);
+        defer old.deinit();
+        const value = @field(defaults, @tagName(key));
+        try ConfigFormatter.formatEntry(@TypeOf(value), @tagName(key), value, &old.writer);
+        const duplicates = try std.fmt.allocPrint(alloc, "# preserve this comment\n{s}# between duplicates\r\n{s}", .{ old.written(), old.written() });
+        defer alloc.free(duplicates);
+        for ([_][]const u8{ "# preserve this comment\n", old.written(), duplicates }) |raw| {
+            var out: std.ArrayListUnmanaged(u8) = .{};
+            defer out.deinit(alloc);
+            try patchOrAppendEdits(alloc, raw, &pending, edited, &out);
+            var loaded = try configpkg.Config.default(alloc);
+            defer loaded.deinit();
+            try settingsTestLoadText(&loaded, out.items);
+            try std.testing.expect(!settingsEditedValueMasked(&pending, &loaded, key));
+            if (raw.ptr == duplicates.ptr) {
+                try std.testing.expect(std.mem.startsWith(u8, out.items, "# preserve this comment\n"));
+                try std.testing.expect(std.mem.indexOf(u8, out.items, "# between duplicates\r\n") != null);
+            }
         }
     }
 }
@@ -29830,7 +29986,7 @@ pub const Surface = struct {
             .recover_with_followup_repaint => {
                 _ = self.beginRendererRepaintRequest();
                 self.renderer_repaint_retry_pending.store(true, .release);
-                self.requestRepaintWithMode(rendererRepaintRequestMode(self.host)) catch |err| {
+                self.requestRepaintWithMode(self.app.rendererRepaintModeThisTick(self.host)) catch |err| {
                     log.warn("win32 renderer health repaint request failed err={}", .{err});
                     return false;
                 };
@@ -29968,7 +30124,7 @@ pub const Surface = struct {
         // enters a drag. Surfaces outside a Host (quick-terminal
         // pre-host-attach, pre-init paint) fall through without
         // gating.
-        const repaint_mode = surfaceRepaintRequestMode(self.host);
+        const repaint_mode = surfaceRepaintRequestMode(self.host, sys.GetTickCount64());
         try self.requestRepaintWithMode(repaint_mode);
     }
 
@@ -32848,7 +33004,7 @@ pub const Surface = struct {
         // guaranteeing a follow-up paint for the newly exposed pixels. Request
         // one from the child itself after `WM_SIZE`, when the default
         // framebuffer and client rect have both advanced to the new size.
-        const repaint_mode = surfaceSizeChangeRepaintMode(self.host);
+        const repaint_mode = surfaceSizeChangeRepaintMode(self.host, sys.GetTickCount64());
         if (surfaceSizeChangePrimesRenderer(repaint_mode)) _ = self.beginRendererRepaintRequest();
         self.requestRepaintWithMode(repaint_mode) catch |err| {
             log.err("win32 size-change repaint request failed err={}", .{err});
@@ -43565,35 +43721,97 @@ test "win32 installer apply args double embedded quotes" {
 test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(null));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(null, 1000));
 
     var host: Host = undefined;
     host.is_live_resize = .init(false);
     host.resize_settle_timer_active = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 0;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceRepaintRequestMode(&host, 1000));
 
     host.resize_settle_timer_active = true;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceRepaintRequestMode(&host, 1000));
 
     host.is_live_resize = .init(true);
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, surfaceRepaintRequestMode(&host));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, surfaceRepaintRequestMode(&host, 1000));
 }
 
-test "win32 rendererRepaintRequestMode prefers synchronous paints outside live resize" {
+test "win32 rendererRepaintRequestMode paints synchronously only during resize settle" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(null));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(null, 1000));
 
     var host: Host = undefined;
     host.is_live_resize = .init(false);
     host.resize_settle_timer_active = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 0;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 1000));
 
     host.resize_settle_timer_active = true;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host));
+    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host, 1000));
 
     host.is_live_resize = .init(true);
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererRepaintRequestMode(&host));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererRepaintRequestMode(&host, 1000));
+}
+
+test "win32 resize settle paint mode ends with its timer or at its deadline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var host: Host = undefined;
+    host.hwnd = null;
+    host.is_live_resize = .init(false);
+    host.resize_settle_timer_active = false;
+    const start_ms = sys.GetTickCount64();
+    host.startResizeSettleRepaints();
+    try std.testing.expect(host.resize_settle_until_ms >= start_ms + resize_settle_deadline_ms);
+    try std.testing.expect(host.resize_settle_until_ms <= sys.GetTickCount64() + resize_settle_deadline_ms);
+
+    // The timer's last tick ends settle mode before the deadline.
+    host.resize_settle_timer_active = false;
+    host.resize_settle_until_ms = 5000;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 4999));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceSizeChangeRepaintMode(&host, 4999));
+
+    // A busy pump delays WM_TIMER, so the timer can still be armed, with
+    // repaint ticks left, after the deadline has passed.
+    host.resize_settle_timer_active = true;
+    host.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
+    host.resize_settle_until_ms = 5000;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host, 4999));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 5000));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceSizeChangeRepaintMode(&host, 4999));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceSizeChangeRepaintMode(&host, 5000));
+}
+
+test "win32 a core-app tick spends at most one synchronous renderer paint" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var spent = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.queue, &spent));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererTickRepaintMode(.defer_until_flush, &spent));
+    try std.testing.expect(!spent);
+
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererTickRepaintMode(.update_now, &spent));
+    try std.testing.expect(spent);
+    // Every later settle-mode frame in the same tick queues, so the pump can
+    // reach input before it paints again.
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.update_now, &spent));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.update_now, &spent));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererTickRepaintMode(.defer_until_flush, &spent));
+
+    // The App's per-tick budget, as `tickCoreApp` resets it for each tick.
+    var host: Host = undefined;
+    host.is_live_resize = .init(false);
+    host.resize_settle_timer_active = true;
+    host.resize_settle_until_ms = std.math.maxInt(u64);
+    var app: App = undefined;
+    app.renderer_sync_paint_spent = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, app.rendererRepaintModeThisTick(&host));
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, app.rendererRepaintModeThisTick(&host));
+    app.renderer_sync_paint_spent = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, app.rendererRepaintModeThisTick(&host));
 }
 
 test "win32 renderer health policy recovers unhealthy frames and clears healthy state" {
@@ -43820,28 +44038,30 @@ test "win32 surface size-change repaint stays synchronous during live resize" {
 
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.queue,
-        surfaceSizeChangeRepaintMode(null),
+        surfaceSizeChangeRepaintMode(null, 1000),
     );
 
     var host: Host = undefined;
     host.is_live_resize = .init(false);
     host.resize_settle_timer_active = false;
+    host.resize_settle_until_ms = 0;
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.queue,
-        surfaceSizeChangeRepaintMode(&host),
+        surfaceSizeChangeRepaintMode(&host, 1000),
     );
 
     host.resize_settle_timer_active = true;
+    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.update_now,
-        surfaceSizeChangeRepaintMode(&host),
+        surfaceSizeChangeRepaintMode(&host, 1000),
     );
 
     host.resize_settle_timer_active = false;
     host.is_live_resize = .init(true);
     try std.testing.expectEqual(
         SurfaceRepaintRequestMode.update_now,
-        surfaceSizeChangeRepaintMode(&host),
+        surfaceSizeChangeRepaintMode(&host, 1000),
     );
 
     try std.testing.expect(!surfaceSizeChangePrimesRenderer(.queue));
