@@ -966,13 +966,29 @@ const Subprocess = struct {
         else
             false;
 
+        // Integration can turn a config string into direct argv. Its bare
+        // executable lookup must see the PATH/PATHEXT the child will receive.
+        // Keep all other user overrides last, including integration variables.
+        if (builtin.os.tag == .windows) {
+            var it = cfg.env_override.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (std.ascii.eqlIgnoreCase(key, "PATH") or std.ascii.eqlIgnoreCase(key, "PATHEXT"))
+                    try env.put(key, entry.value_ptr.*);
+            }
+        }
+
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
-            const default_shell_command: configpkg.Command =
+            const configured_shell_command: configpkg.Command =
                 cfg.command orelse switch (builtin.os.tag) {
                     .windows => try windows_shell.previewCommand(alloc),
                     else => .{ .shell = "sh" },
                 };
+            const default_shell_command = if (builtin.os.tag == .windows)
+                try windows_shell.executableCommand(alloc, configured_shell_command)
+            else
+                configured_shell_command;
 
             // Always set up shell features (GHOSTTY_SHELL_FEATURES). These are
             // used by both automatic and manual shell integrations.

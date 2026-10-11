@@ -88,6 +88,9 @@ allowing us to automatically integrate with the shell. For details
 on the Fish startup process, see the
 [Fish documentation](https://fishshell.com/docs/current/language.html).
 
+On Windows, Fish automatic injection is skipped until resource paths can be
+converted for its MSYS/Cygwin environment. Load the integration manually there.
+
 ### Nushell
 
 For [Nushell](https://www.nushell.sh/), noctty prepends to the
@@ -95,15 +98,20 @@ For [Nushell](https://www.nushell.sh/), noctty prepends to the
 Nushell's vendor autoload mechanism. noctty then automatically imports
 the module using the `-e "use ghostty *"` flag when starting Nushell.
 
+Native Windows Nushell ignores `XDG_DATA_DIRS`, so noctty instead sources the
+distributed module by its absolute path in the startup clause. A user-supplied
+`--execute` or `-e` clause takes precedence; load the module manually in that case.
+
 Nushell provides many shell features itself, such as `title` and `cursor`,
 so our integration focuses on noctty-specific features like `sudo`,
 `ssh-env`, and `ssh-terminfo`.
 
 The shell integration is automatically enabled when running Nushell in noctty,
-but you can also load it manually is shell integration is disabled:
+but you can also load it manually if shell integration is disabled. Replace the
+example path with the absolute path to `ghostty.nu` in your installed resources:
 
 ```nushell
-source $GHOSTTY_RESOURCES_DIR/shell-integration/nushell/vendor/autoload/ghostty.nu
+source "C:/path/to/noctty/share/ghostty/shell-integration/nushell/vendor/autoload/ghostty.nu"
 use ghostty *
 ```
 

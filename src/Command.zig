@@ -754,7 +754,7 @@ fn windowsCreateCommandLine(
             continue;
         }
 
-        if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
+        if (arg.len > 0 and mem.indexOfAny(u8, arg, " \t\n\"") == null) {
             try writer.writeAll(arg);
             continue;
         }
@@ -844,6 +844,22 @@ test "Command: windows-cmd-shell-command-line preserves cmd tail" {
         defer allocator.free(actual);
         try testing.expectEqualStrings(case.expected, actual);
     }
+}
+
+test "PKG08 Windows command line round trips argv including empty arguments" {
+    const allocator = testing.allocator;
+    const args = [_][]const u8{
+        "C:\\Program Files\\Git\\bin\\bash.exe", "--posix",        "",               "a b", "a\"b",
+        "C:\\a b\\",                             "100% & literal", "\\\"quoted\\\"",
+    };
+    const line = try windowsCreateCommandLine(allocator, &args, false);
+    defer allocator.free(line);
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, line);
+    defer allocator.free(wide);
+    var iter = try std.process.ArgIteratorWindows.init(allocator, wide);
+    defer iter.deinit();
+    for (args) |arg| try testing.expectEqualStrings(arg, iter.next() orelse return error.MissingArgument);
+    try testing.expect(iter.next() == null);
 }
 
 test "Command: windows-direct-command-line keeps argv quoting" {
