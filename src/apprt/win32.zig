@@ -38662,6 +38662,19 @@ test "win32 leaveFullscreen and new_window keep the normal rect of a maximized w
             return placement.rcNormalPosition;
         }
 
+        const Monitors = struct {
+            handles: [8]sys.HMONITOR = undefined,
+            count: usize = 0,
+
+            fn collect(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
+                const self: *@This() = @ptrFromInt(@as(usize, @bitCast(data)));
+                if (self.count == self.handles.len) return 0;
+                self.handles[self.count] = monitor;
+                self.count += 1;
+                return 1;
+            }
+        };
+
         // Maximizing shows a window, so these live on a desktop of their
         // own and never reach the user's.
         fn body(desktop: *anyopaque) !void {
@@ -38704,6 +38717,50 @@ test "win32 leaveFullscreen and new_window keep the normal rect of a maximized w
             try clone.inheritWindowStateFrom(&surface);
             try std.testing.expect(sys.IsZoomed(clone.hwnd.?) != 0);
             try std.testing.expectEqualDeep(normal, try normalRect(clone.hwnd.?));
+
+            // Exercise real monitor/DPI transitions on this hidden desktop.
+            var monitors: Monitors = .{};
+            _ = sys.EnumDisplayMonitors(null, null, Monitors.collect, @bitCast(@intFromPtr(&monitors)));
+            for (monitors.handles[0..monitors.count]) |source_monitor| {
+                const source_info = monitorInfo(source_monitor) orelse return lastError();
+                for (monitors.handles[0..monitors.count]) |dest_monitor| {
+                    if (source_monitor == dest_monitor) continue;
+                    const dest_info = monitorInfo(dest_monitor) orelse return lastError();
+                    for ([_]bool{ false, true }) |maximized| {
+                        _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+                        try std.testing.expect(sys.SetWindowPos(hwnd, null, source_info.work_area.left + 100, source_info.work_area.top + 100, 600, 400, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+                        const source_dpi = sys.GetDpiForWindow(hwnd);
+                        var before: RECT = undefined;
+                        try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
+                        const placement_before = try normalRect(hwnd);
+                        if (maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+                        try surface.enterFullscreen();
+                        try std.testing.expect(sys.SetWindowPos(hwnd, null, dest_info.full_rect.left, dest_info.full_rect.top, dest_info.full_rect.width(), dest_info.full_rect.height(), c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+                        const dest_dpi = sys.GetDpiForWindow(hwnd);
+                        try surface.leaveFullscreen();
+                        try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
+                        try std.testing.expectEqual(dest_monitor, sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST).?);
+                        const width = sys.MulDiv(before.right - before.left, @intCast(dest_dpi), @intCast(source_dpi));
+                        const height = sys.MulDiv(before.bottom - before.top, @intCast(dest_dpi), @intCast(source_dpi));
+                        if (maximized) {
+                            const placed = try normalRect(hwnd);
+                            try std.testing.expectEqual(placement_before.left + dest_info.full_rect.left - source_info.full_rect.left, placed.left);
+                            try std.testing.expectEqual(placement_before.top + dest_info.full_rect.top - source_info.full_rect.top, placed.top);
+                            try std.testing.expectEqual(width, placed.right - placed.left);
+                            try std.testing.expectEqual(height, placed.bottom - placed.top);
+                            _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+                            try std.testing.expectEqual(dest_monitor, sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST).?);
+                        } else {
+                            var restored: RECT = undefined;
+                            try std.testing.expect(sys.GetWindowRect(hwnd, &restored) != 0);
+                            try std.testing.expectEqual(before.left + dest_info.work_area.left - source_info.work_area.left, restored.left);
+                            try std.testing.expectEqual(before.top + dest_info.work_area.top - source_info.work_area.top, restored.top);
+                            try std.testing.expectEqual(width, restored.right - restored.left);
+                            try std.testing.expectEqual(height, restored.bottom - restored.top);
+                        }
+                    }
+                }
+            }
         }
     };
 
