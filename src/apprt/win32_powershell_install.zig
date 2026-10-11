@@ -7,7 +7,8 @@
 //!      `integration_script_sha256`. Writes atomically (temp + rename) only
 //!      when the hash differs or the file is missing.
 //!   3. `buildInjectedArgv` wraps interactive PowerShell launches with
-//!      `-NoExit -Command "& { $__ghostty_utf8_console = $true|$false; . '<path>' }"`
+//!      `-NoExit -Command "& { $__ghostty_utf8_console = $true|$false; ... }"`
+//!      loads UTF-8 script text, retaining file signature checks under AllSigned,
 //!      while preserving existing prefix flags and skipping explicit command /
 //!      script entry points. The sentinel is always bound, both ways, so it
 //!      shadows any same-named variable a profile may have defined.
@@ -466,36 +467,68 @@ fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) 
     //
     // A profile can still defeat this by declaring the sentinel with
     // `-Option AllScope,ReadOnly`, which makes the name unbindable in child
-    // scopes too. Hardening against that would mean prefixing a
-    // `Microsoft.PowerShell.Utility\Remove-Variable __ghostty_utf8_console
-    // -Scope Global -Force` inside the braces; deliberately not done here to
-    // keep the pinned payload string stable.
+    // scopes too. Do not remove or change a profile's variable to defeat it.
+    //
+    // Restricted and RemoteSigned (including MotW) still allow -Command text.
+    // Dot-source a UTF-8 scriptblock in the SAME child scope. AllSigned is a
+    // deliberate signing requirement: keep the file loader and its signature
+    // checks. Constrained language is unsupported; skip before defining hooks.
+    // Load the policy assembly by name: older pwsh has not loaded its cmdlet
+    // type yet. Import the binary directly: pwsh's unsigned Security
+    // manifest itself cannot autoload under AllSigned. The cmdlet still
+    // computes the effective policy, including Group Policy precedence.
+    // A failed load reports one warning and removes only its new errors,
+    // preserving the user's existing $Error history.
     return std.fmt.allocPrint(
         alloc,
-        "& {{ ${s} = ${s}; . '{s}' }}",
+        "& {{ ${s} = ${s}; $__ghostty_integration_path = '{s}'; " ++
+            "try {{ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{ " ++
+            "Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue " ++
+            "}} else {{ $__ghostty_load_error_head = $null; if ($Error.Count) {{ $__ghostty_load_error_head = $Error[0] }}; " ++
+            "Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; " ++
+            "if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') {{ . $__ghostty_integration_path " ++
+            "}} else {{ . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) }} }} " ++
+            "}} catch {{ while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) {{ $Error.RemoveAt(0) }}; Microsoft.PowerShell.Utility\\Write-Warning " ++
+            "'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue }} }}",
         .{ utf8_console_variable, if (utf8_console) "true" else "false", escaped },
     );
 }
 
-/// Escape a path for a PowerShell single-quoted string (`'` -> `''`).
+/// PowerShell recognizes ASCII and U+2018..U+201B as single-quote delimiters.
+/// Double the whole UTF-8 character so its literal value survives parsing.
 pub fn escapeForPwshSingleQuote(alloc: Allocator, input: []const u8) ![]u8 {
     var extra: usize = 0;
-    for (input) |c| {
-        if (c == '\'') extra += 1;
+    var i: usize = 0;
+    while (i < input.len) {
+        const quote_len = pwshSingleQuoteLen(input[i..]);
+        extra += quote_len;
+        i += @max(1, quote_len);
     }
     if (extra == 0) return alloc.dupe(u8, input);
 
     const out = try alloc.alloc(u8, input.len + extra);
     var j: usize = 0;
-    for (input) |c| {
-        if (c == '\'') {
-            out[j] = '\'';
-            j += 1;
+    i = 0;
+    while (i < input.len) {
+        const quote_len = pwshSingleQuoteLen(input[i..]);
+        const len = @max(1, quote_len);
+        const bytes = input[i..][0..len];
+        if (quote_len != 0) {
+            @memcpy(out[j..][0..len], bytes);
+            j += len;
         }
-        out[j] = c;
-        j += 1;
+        @memcpy(out[j..][0..len], bytes);
+        j += len;
+        i += len;
     }
     return out;
+}
+
+fn pwshSingleQuoteLen(input: []const u8) usize {
+    if (input[0] == '\'') return 1;
+    if (input.len >= 3 and input[0] == 0xe2 and input[1] == 0x80 and
+        input[2] >= 0x98 and input[2] <= 0x9b) return 3;
+    return 0;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1139,6 +1172,205 @@ test "escapeForPwshSingleQuote: consecutive quotes" {
     try std.testing.expectEqualStrings("a''''b", r);
 }
 
+test "escapeForPwshSingleQuote: typographic quotes preserve UTF-8" {
+    inline for (.{ "\u{2018}", "\u{2019}", "\u{201a}", "\u{201b}" }) |quote| {
+        const r = try escapeForPwshSingleQuote(std.testing.allocator, "O" ++ quote ++ "Brien");
+        defer std.testing.allocator.free(r);
+        try std.testing.expectEqualStrings("O" ++ quote ++ quote ++ "Brien", r);
+    }
+}
+
+test "escapeForPwshSingleQuote: mixed quotes and other Unicode" {
+    const r = try escapeForPwshSingleQuote(std.testing.allocator, "\u{2018}'\u{2019}\u{201a}\u{201b}\u{201c}\u{1f600}");
+    defer std.testing.allocator.free(r);
+    try std.testing.expectEqualStrings("\u{2018}\u{2018}''\u{2019}\u{2019}\u{201a}\u{201a}\u{201b}\u{201b}\u{201c}\u{1f600}", r);
+}
+
+// The watcher borrows the spawned process handle. Join before Child.wait()
+// closes it; a stalled host must not hold the full suite forever.
+const TestProcessDeadline = struct {
+    handle: std.os.windows.HANDLE,
+    milliseconds: u32,
+    timed_out: bool = false,
+
+    fn run(self: *@This()) void {
+        std.os.windows.WaitForSingleObject(self.handle, self.milliseconds) catch {
+            self.timed_out = true;
+            std.os.windows.TerminateProcess(self.handle, 124) catch {};
+        };
+    }
+};
+
+test "PowerShell child deadline terminates and reaps a stalled host" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    var child = std.process.Child.init(&.{ "powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 300" }, std.testing.allocator);
+    child.create_no_window = true;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    var running = true;
+    errdefer if (running) {
+        _ = child.kill() catch {};
+    };
+    var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = 100 };
+    const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
+    watcher.join();
+    const term = try child.wait();
+    running = false;
+    try std.testing.expect(deadline.timed_out);
+    try std.testing.expectEqual(std.process.Child.Term{ .Exited = 124 }, term);
+}
+
+test "buildInjectedArgv: policy bootstrap executes in Windows PowerShell hosts" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "integration.ps1", .data = integration_script });
+    // A downloaded resources copy is the RemoteSigned failure case.
+    try tmp.dir.writeFile(.{ .sub_path = "integration.ps1:Zone.Identifier", .data = "[ZoneTransfer]\r\nZoneId=3\r\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "integration.ps1");
+    defer alloc.free(path);
+
+    // Each host rebuilds its own module paths. In particular, a pwsh parent
+    // must not make Windows PowerShell load pwsh's manifests/binaries.
+    var host_env = try std.process.getEnvMap(alloc);
+    defer host_env.deinit();
+    host_env.remove("PSModulePath");
+    host_env.remove("GHOSTTY_SHELL_FEATURES");
+
+    for ([_][]const u8{ "powershell.exe", "pwsh.exe" }) |host| {
+        // Cold Windows PowerShell startup on hosted ARM64 can exceed 30s.
+        // Warm each host once and allow the same generous bound for every
+        // policy case. This is a liveness guard, not a performance assertion.
+        const host_deadline_ms = 90_000;
+        var warmup = std.process.Child.init(&.{ host, "-NoProfile", "-NonInteractive", "-Command", "exit 0" }, alloc);
+        warmup.env_map = &host_env;
+        warmup.create_no_window = true;
+        warmup.stdin_behavior = .Ignore;
+        warmup.stdout_behavior = .Ignore;
+        warmup.stderr_behavior = .Ignore;
+        warmup.spawn() catch |err| switch (err) {
+            // Only an absent optional host is omitted. Startup failures and
+            // timeouts must fail rather than turn missing coverage into a pass.
+            error.FileNotFound => if (std.mem.eql(u8, host, "pwsh.exe")) {
+                std.debug.print("PowerShell bootstrap fixture: optional host={s} absent during warm-up; omitting its policy cases\n", .{host});
+                continue;
+            } else return err,
+            else => return err,
+        };
+        var warmup_running = true;
+        errdefer if (warmup_running) {
+            _ = warmup.kill() catch {};
+        };
+        var warmup_deadline: TestProcessDeadline = .{ .handle = warmup.id, .milliseconds = host_deadline_ms };
+        const warmup_watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&warmup_deadline});
+        warmup_watcher.join();
+        const warmup_term = try warmup.wait();
+        warmup_running = false;
+        if (warmup_deadline.timed_out or !std.meta.eql(warmup_term, std.process.Child.Term{ .Exited = 0 })) {
+            std.debug.print("PowerShell bootstrap fixture: host={s} warmup_timed_out={} warmup_term={any}\n", .{ host, warmup_deadline.timed_out, warmup_term });
+        }
+        try std.testing.expect(!warmup_deadline.timed_out);
+        try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, warmup_term);
+
+        for ([_][]const u8{ "Restricted", "RemoteSigned", "AllSigned" }) |policy| {
+            const argv = [_][]const u8{ host, "-NoProfile", "-ExecutionPolicy", policy };
+            const injected = (try buildInjectedArgv(alloc, &argv, path, false)).?;
+            defer {
+                for (injected) |arg| alloc.free(arg);
+                alloc.free(injected);
+            }
+            const command = try std.fmt.allocPrint(
+                alloc,
+                "Remove-Module PSReadLine -Force -ErrorAction Ignore; " ++
+                    "function global:prompt {{ 'BOOTSTRAP-PROBE> ' }}; " ++
+                    "$Error.Clear(); {s}; " ++
+                    "if (Get-Command __ghostty_write_osc -ErrorAction Ignore) {{ 'HELPER-LOADED' }}; " ++
+                    // Exercise prompt marks, then end deterministically rather
+                    // than depending on the host reading EOF from Windows NUL.
+                    "'ERROR-COUNT=' + $Error.Count; prompt; exit 0",
+                .{injected[injected.len - 1]},
+            );
+            defer alloc.free(command);
+            // The fixture draws prompt itself. Disallow unattended host
+            // startup/trust input prompts on Windows NUL.
+            // Keep buildInjectedArgv's interactive production payload intact.
+            const run_argv = try alloc.alloc([]const u8, injected.len + 1);
+            defer alloc.free(run_argv);
+            run_argv[0] = injected[0];
+            run_argv[1] = "-NonInteractive";
+            for (injected[1..], 2..) |arg, idx| run_argv[idx] = arg;
+            run_argv[run_argv.len - 1] = command;
+            var child = std.process.Child.init(run_argv, alloc);
+            child.env_map = &host_env;
+            child.create_no_window = true;
+            child.stdin_behavior = .Ignore;
+            child.stdout_behavior = .Pipe;
+            child.stderr_behavior = .Pipe;
+            try child.spawn();
+            var running = true;
+            errdefer if (running) {
+                _ = child.kill() catch {};
+            };
+            var deadline: TestProcessDeadline = .{ .handle = child.id, .milliseconds = host_deadline_ms };
+            const watcher = try std.Thread.spawn(.{}, TestProcessDeadline.run, .{&deadline});
+            var watcher_joined = false;
+            defer if (!watcher_joined) watcher.join();
+            var stdout: std.ArrayList(u8) = .empty;
+            defer stdout.deinit(alloc);
+            var stderr: std.ArrayList(u8) = .empty;
+            defer stderr.deinit(alloc);
+            try child.collectOutput(alloc, &stdout, &stderr, 50 * 1024);
+            watcher.join();
+            watcher_joined = true;
+            const term = try child.wait();
+            running = false;
+            const helper_loaded = std.mem.indexOf(u8, stdout.items, "HELPER-LOADED") != null;
+            const expect_helper = !std.mem.eql(u8, policy, "AllSigned");
+            if (deadline.timed_out or helper_loaded != expect_helper or
+                std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=0") == null or
+                std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") == null)
+            {
+                std.debug.print("PowerShell bootstrap fixture: host={s} policy={s} timed_out={} helper_loaded={} error_count_seen={} prompt_seen={} load_warning={} stderr_bytes={d}\n", .{
+                    host,
+                    policy,
+                    deadline.timed_out,
+                    helper_loaded,
+                    std.mem.indexOf(u8, stdout.items, "ERROR-COUNT=") != null,
+                    std.mem.indexOf(u8, stdout.items, "BOOTSTRAP-PROBE> ") != null,
+                    std.mem.indexOf(u8, stdout.items, "could not load") != null,
+                    stderr.items.len,
+                });
+            }
+            try std.testing.expect(!deadline.timed_out);
+            const result = .{ .stdout = stdout.items, .stderr = stderr.items, .term = term };
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "BOOTSTRAP-PROBE> ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ERROR-COUNT=0") != null);
+            if (std.mem.eql(u8, policy, "AllSigned")) {
+                try std.testing.expect(std.mem.indexOf(u8, result.stdout, "HELPER-LOADED") == null);
+                try std.testing.expect(std.mem.indexOf(u8, result.stdout, "noctty PowerShell integration could not load") != null);
+            } else {
+                try std.testing.expect(std.mem.indexOf(u8, result.stdout, "HELPER-LOADED") != null);
+                try std.testing.expect(std.mem.indexOf(u8, result.stdout, "]133;A;") != null);
+            }
+            // pwsh tries to autoload PSReadLine BEFORE -Command, which file
+            // policy can deny. That host warning is independent of our load.
+            // Accept only that exact diagnostic, never an integration error.
+            if (result.stderr.len != 0) {
+                try std.testing.expectEqualStrings("Cannot load PSReadline module.  Console is running without PSReadline.\r\n", result.stderr);
+            }
+            switch (result.term) {
+                .Exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+                else => return error.UnexpectedChildTermination,
+            }
+        }
+    }
+}
+
+const expected_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
+
 test "buildInjectedArgv: interactive shell injects without changing banner semantics" {
     const argv = [_][]const u8{"pwsh.exe"};
     const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\Users\\test\\integration.ps1", false)).?;
@@ -1150,7 +1382,7 @@ test "buildInjectedArgv: interactive shell injects without changing banner seman
     try std.testing.expectEqualStrings("pwsh.exe", r[0]);
     try std.testing.expectEqualStrings("-NoExit", r[1]);
     try std.testing.expectEqualStrings("-Command", r[2]);
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\Users\\test\\integration.ps1' }", r[3]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\Users\\test\\integration.ps1" ++ expected_bootstrap_suffix, r[3]);
 }
 
 test "buildInjectedArgv: utf8 console travels in the command payload" {
@@ -1163,7 +1395,7 @@ test "buildInjectedArgv: utf8 console travels in the command payload" {
     try std.testing.expectEqual(@as(usize, 4), r.len);
     try std.testing.expectEqualStrings("-Command", r[2]);
     try std.testing.expectEqualStrings(
-        "& { $__ghostty_utf8_console = $true; . 'C:\\int.ps1' }",
+        "& { $__ghostty_utf8_console = $true; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix,
         r[3],
     );
 
@@ -1185,7 +1417,7 @@ test "buildInjectedArgv: a negative utf8 decision is bound explicitly" {
         std.testing.allocator.free(r);
     }
     try std.testing.expectEqualStrings(
-        "& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }",
+        "& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix,
         r[3],
     );
 }
@@ -1204,7 +1436,7 @@ test "buildInjectedArgv: preserves existing prefix flags" {
     try std.testing.expectEqualStrings("-NoProfile", r[3]);
     try std.testing.expectEqualStrings("-NoExit", r[4]);
     try std.testing.expectEqualStrings("-Command", r[5]);
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[6]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[6]);
 }
 
 test "buildInjectedArgv: preserves slash-prefixed interactive flags" {
@@ -1219,7 +1451,7 @@ test "buildInjectedArgv: preserves slash-prefixed interactive flags" {
     try std.testing.expectEqualStrings("/NoProfile", r[1]);
     try std.testing.expectEqualStrings("-NoExit", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[4]);
 }
 
 test "buildInjectedArgv: existing noexit is not duplicated for powershell.exe" {
@@ -1234,7 +1466,7 @@ test "buildInjectedArgv: existing noexit is not duplicated for powershell.exe" {
     try std.testing.expectEqualStrings("-NoExit", r[1]);
     try std.testing.expectEqualStrings("-NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[4]);
 }
 
 test "buildInjectedArgv: existing slash noexit is not duplicated" {
@@ -1249,7 +1481,7 @@ test "buildInjectedArgv: existing slash noexit is not duplicated" {
     try std.testing.expectEqualStrings("/NoExit", r[1]);
     try std.testing.expectEqualStrings("/NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[4]);
 }
 
 test "buildInjectedArgv: path with single quote" {
@@ -1259,7 +1491,7 @@ test "buildInjectedArgv: path with single quote" {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
     }
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\don''t\\integration.ps1' }", r[3]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\don''t\\integration.ps1" ++ expected_bootstrap_suffix, r[3]);
 }
 
 test "buildInjectedArgv: skips explicit command mode" {
@@ -1314,7 +1546,7 @@ test "buildInjectedArgv: existing noexit prefix is not duplicated" {
     try std.testing.expectEqualStrings("-NoEx", r[1]);
     try std.testing.expectEqualStrings("-NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[4]);
 }
 
 test "buildInjectedArgv: skips ambiguous no prefix" {

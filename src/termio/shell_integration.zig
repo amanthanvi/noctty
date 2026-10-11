@@ -582,6 +582,8 @@ test detectShell {
     try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "\"/a b/bash\"" }));
 }
 
+const expected_powershell_bootstrap_suffix = "'; try { if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration skipped: unsupported language mode.' -WarningAction Continue } else { $__ghostty_load_error_head = $null; if ($Error.Count) { $__ghostty_load_error_head = $Error[0] }; Microsoft.PowerShell.Core\\Import-Module ([Reflection.Assembly]::Load('Microsoft.PowerShell.Security').Location) -ErrorAction Stop; if ((Microsoft.PowerShell.Security\\Get-ExecutionPolicy -ErrorAction Stop) -eq 'AllSigned') { . $__ghostty_integration_path } else { . ([scriptblock]::Create([IO.File]::ReadAllText($__ghostty_integration_path))) } } } catch { while ($Error.Count -gt 0 -and -not [object]::ReferenceEquals($Error[0], $__ghostty_load_error_head)) { $Error.RemoveAt(0) }; Microsoft.PowerShell.Utility\\Write-Warning 'noctty PowerShell integration could not load (execution policy or script error).' -WarningAction Continue } }";
+
 test "setup powershell: interactive direct command auto injects" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -604,8 +606,8 @@ test "setup powershell: interactive direct command auto injects" {
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
-        .{expected_path},
+        "& {{ $__ghostty_utf8_console = $false; $__ghostty_integration_path = '{s}{s}",
+        .{ expected_path, expected_powershell_bootstrap_suffix },
     );
     defer alloc.free(expected_command);
 
@@ -645,8 +647,8 @@ test "setup powershell: interactive shell command auto injects" {
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
-        .{expected_path},
+        "& {{ $__ghostty_utf8_console = $false; $__ghostty_integration_path = '{s}{s}",
+        .{ expected_path, expected_powershell_bootstrap_suffix },
     );
     defer alloc.free(expected_command);
 
@@ -682,8 +684,8 @@ test "setup powershell: interactive shell command with quoted exe path auto inje
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
-        .{expected_path},
+        "& {{ $__ghostty_utf8_console = $false; $__ghostty_integration_path = '{s}{s}",
+        .{ expected_path, expected_powershell_bootstrap_suffix },
     );
     defer alloc.free(expected_command);
 
@@ -807,8 +809,8 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
-        .{expected_path},
+        "& {{ $__ghostty_utf8_console = $false; $__ghostty_integration_path = '{s}{s}",
+        .{ expected_path, expected_powershell_bootstrap_suffix },
     );
     defer alloc.free(expected_command);
 
