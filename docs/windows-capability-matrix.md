@@ -212,16 +212,18 @@ encoder, with Caps Lock, Num Lock, and left/right modifier state on every
 physical event. A key's text is what `TranslateMessage` typed for it, taken
 from the message queue when the key arrives, so a dead key composes with the
 next key (`'` then `e` types `é` on US-International), every key after it is
-sent once, and an accent that cannot combine with Enter, Backspace, Tab or Esc
-is typed before that key, so Backspace cancels it. While a client has Kitty
-`report_all` enabled, ordinary keys carry that text on the physical event
-instead of a separate character commit, so press and release keep one
-identity: the `e` after a dead key reports `é`, AltGr chords ride the same
-path with the synthetic Ctrl+Alt collapsed, a dead key reports neither its
-press nor its release, and a dead key that cannot combine delivers both
-characters on the next key. IME commits remain text without a physical key.
-Unit tests drive the US-International, German and French layouts through the
-real `TranslateMessage`; a physical non-US keyboard has not been used.
+sent once, and an accent that cannot combine with a key the terminal encodes
+itself (Enter, Backspace, Tab, Esc, Ctrl+[) is typed before that key, so
+Backspace cancels it. While a client has Kitty `report_all` enabled, ordinary
+keys carry that text on the physical event instead of a separate character
+commit, so press and release keep one identity: the `e` after a dead key
+reports `é`, AltGr chords ride the same path with the synthetic Ctrl+Alt
+collapsed, a dead key reports neither its press nor its release (held down,
+its first repeat that types text is reported as its press), and a dead key
+that cannot combine delivers both characters on the next key. IME commits
+remain text without a physical key. Unit tests drive the US-International,
+German and French layouts through the real `TranslateMessage`; a physical
+non-US keyboard has not been used.
 
 Kitty and modifyOtherKeys encodings survive the pseudo console byte for byte
 on the two sources measured here — the in-box conhost of Windows

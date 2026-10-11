@@ -88,8 +88,8 @@ pub const TypedChars = struct {
     }
 
     /// The text a pending dead key left in front of this key's own control
-    /// character: after `'` on US-International, Enter queues `'` then CR
-    /// and Backspace queues `'` then BS (measured).
+    /// character: after `'` on US-International, Enter queues `'` then CR,
+    /// Backspace `'` then BS and Ctrl+[ `'` then ESC (measured).
     fn accentBeforeControl(self: *const TypedChars) []const u16 {
         for (self.slice(), 0..) |unit, i| {
             if (isControlCodepoint(unit)) return self.units[0..i];
@@ -1243,19 +1243,25 @@ pub fn dispatchKeyMessage(
     // `message` lives for the rest of this function, which covers every read
     // of `event.utf8` below including the accessibility notification.
     var message = keyMessage(msg, wParam, lParam, defer_plain_text, typed) orelse return;
-    message.bindText();
-    const event = message.event;
     const vk: UINT = @intCast(wParam & 0xFFFF);
-
-    if (event.action == .release) {
-        if (chars.dead_key_vk == vk) {
+    if (chars.dead_key_vk == vk) switch (message.event.action) {
+        // Its press only latched a dead key and sent nothing.
+        .release => {
             chars.dead_key_vk = null;
             return;
-        }
-    } else if (message.deferred_utf16_units == 0 and event.utf8.len == 0) {
-        // The core encodes this key itself. An accent that a dead key could
-        // not combine with it comes first, as in any other Windows program
-        // (so Backspace cancels the accent rather than deleting a character).
+        },
+        // A dead key held down: the client has not seen it pressed yet.
+        .repeat => message.event.action = .press,
+        .press => {},
+    };
+    message.bindText();
+    const event = message.event;
+
+    if (event.action != .release and message.deferred_utf16_units == 0) {
+        // No text is committed after this key's event. An accent a dead key
+        // could not combine with it is typed first, as in any other Windows
+        // program: `'` then Enter types `'` and a line break, and Backspace
+        // cancels the accent instead of deleting a character.
         const accent = typed.accentBeforeControl();
         if (accent.len > 0 and commitUnits(target, chars, accent, ime_composing, lParam) == .closed) return;
     }
@@ -1274,7 +1280,10 @@ pub fn dispatchKeyMessage(
     if (event.utf8.len != 0) target.noteInput(event.utf8);
     if (event.action == .release) return;
 
-    if (typed.dead and typed.len == 0) {
+    // A press that only latched a dead key sent nothing, so its release must
+    // not be sent either. A binding that consumed the press leaves the
+    // release to the core, which swallows it.
+    if (effect == .ignored and event.action == .press and typed.dead and typed.len == 0) {
         chars.dead_key_vk = vk;
     } else if (chars.dead_key_vk == vk) {
         chars.dead_key_vk = null;
@@ -2358,7 +2367,7 @@ fn testingDeliverKeyMessage(
     var queued: sys.MSG = undefined;
     while (sys.PeekMessageW(&queued, hwnd, c.WM_CHAR, c.WM_DEADCHAR, c.PM_REMOVE) != 0) {
         if (queued.message == c.WM_QUIT) {
-            sys.PostQuitMessage(@intCast(queued.wParam));
+            sys.PostQuitMessage(@bitCast(@as(u32, @truncate(queued.wParam))));
             break;
         }
         dispatchCharMessage(terminal, chars, queued.message, queued.wParam, queued.lParam, false);
@@ -2368,8 +2377,9 @@ fn testingDeliverKeyMessage(
 const TestingKey = struct {
     vk: UINT,
     ctrl: bool = false,
-    /// Press and release, or only one half, to hold a key across others.
-    stroke: enum { tap, down, up } = .tap,
+    /// Press and release, or only one half to hold a key across others, or
+    /// an autorepeat of a key held down.
+    stroke: enum { tap, down, up, repeat } = .tap,
 };
 
 /// Type each key in turn, with the thread's key state set the way the
@@ -2394,9 +2404,10 @@ fn testingTypeKeys(
             state[key.vk] = 0x80;
             if (key.stroke == .down) held[key.vk] = 0x80;
             _ = sys.SetKeyboardState(&state);
-            testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYDOWN, key.vk, @bitCast(down), defer_plain_text);
+            const repeat: usize = if (key.stroke == .repeat) 1 << 30 else 0;
+            testingDeliverKeyMessage(terminal, &chars, hwnd, c.WM_KEYDOWN, key.vk, @bitCast(down | repeat), defer_plain_text);
         }
-        if (key.stroke != .down) {
+        if (key.stroke == .tap or key.stroke == .up) {
             state[key.vk] = 0;
             held[key.vk] = 0;
             _ = sys.SetKeyboardState(&state);
@@ -2427,6 +2438,7 @@ test "win32 dead keys on real layouts deliver every key exactly once" {
     const backspace: TestingKey = .{ .vk = c.VK_BACK };
     const tab: TestingKey = .{ .vk = c.VK_TAB };
     const ctrl_c: TestingKey = .{ .vk = c.VK_A + 2, .ctrl = true };
+    const Case = struct { keys: []const TestingKey, expect: []const u8 };
 
     const layouts = [_]struct {
         klid: []const u8,
@@ -2444,7 +2456,7 @@ test "win32 dead keys on real layouts deliver every key exactly once" {
             defer active.deinit();
             ran += 1;
 
-            const cases = [_]struct { keys: []const TestingKey, expect: []const u8 }{
+            const cases = [_]Case{
                 .{ .keys = &.{ layout.dead, e, enter }, .expect = layout.composed_e ++ "\r" },
                 .{ .keys = &.{ layout.dead, e, backspace }, .expect = layout.composed_e ++ "\x7f" },
                 .{ .keys = &.{ layout.dead, e, ctrl_c }, .expect = layout.composed_e ++ "\x03" },
@@ -2452,7 +2464,11 @@ test "win32 dead keys on real layouts deliver every key exactly once" {
                 .{ .keys = &.{ layout.dead, x, enter }, .expect = layout.accent ++ "x\r" },
                 .{ .keys = &.{ layout.dead, enter }, .expect = layout.accent ++ "\r" },
                 .{ .keys = &.{ layout.dead, backspace }, .expect = layout.accent ++ "\x7f" },
-            };
+            } ++ if (comptime std.mem.eql(u8, layout.klid, "00020409")) [_]Case{
+                // Ctrl+[ carries `[` on its event but queues the accent and
+                // then ESC; the chord itself encodes as CSI 91;5u.
+                .{ .keys = &.{ layout.dead, .{ .vk = c.VK_OEM_4, .ctrl = true } }, .expect = layout.accent ++ "\x1b[91;5u" },
+            } else [_]Case{};
             for (cases) |case| {
                 var terminal: TestingTerminal = .{ .opts = .{ .alt_esc_prefix = true } };
                 testingTypeKeys(&terminal, hwnd, case.keys, true);
@@ -2474,7 +2490,8 @@ test "win32 dead keys on real layouts deliver every key exactly once" {
 // `é` on the `e` key, or the accent and the letter together when they do not
 // combine. The dead key sends nothing, not even its release, because its
 // press only latched an accent; that holds when the next key is pressed
-// before the dead key is released, too.
+// before the dead key is released, too. A dead key held down types its
+// accent twice on its first repeat, and that repeat is reported as its press.
 test "win32 kitty report_all dead keys carry the composed text on the next key" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const hwnd = testingKeyWindow() orelse return error.SkipZigTest;
@@ -2499,6 +2516,10 @@ test "win32 kitty report_all dead keys carry the composed text on the next key" 
             .expect = "\x1b[101;;233u\x1b[101;1:3u",
         },
         .{ .keys = &.{ quote, .{ .vk = c.VK_RETURN } }, .expect = "\x1b[39;;39u\x1b[13u\x1b[13;1:3u" },
+        .{
+            .keys = &.{ .{ .vk = c.VK_OEM_7, .stroke = .down }, .{ .vk = c.VK_OEM_7, .stroke = .repeat }, .{ .vk = c.VK_OEM_7, .stroke = .up } },
+            .expect = "\x1b[39;;39:39u\x1b[39;1:3u",
+        },
     };
     for (cases) |case| {
         var terminal: TestingTerminal = .{ .opts = .{ .kitty_flags = flags } };
