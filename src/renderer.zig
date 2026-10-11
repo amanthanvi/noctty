@@ -26,6 +26,7 @@ pub const WebGL = if (build_config.renderer == .webgl)
     @import("renderer/WebGL.zig")
 else
     struct {};
+pub const Direct3D11 = if (build_config.d3d11) @import("renderer/Direct3D11.zig") else struct {};
 pub const Options = @import("renderer/Options.zig");
 pub const Overlay = @import("renderer/Overlay.zig");
 pub const Thread = @import("renderer/Thread.zig");
@@ -41,10 +42,10 @@ pub const Padding = size.Padding;
 pub const cursorStyle = cursor.style;
 pub const lib = @import("lib/main.zig");
 
-/// The implementation to use for the renderer. This is comptime chosen
-/// so that every build has exactly one renderer implementation.
+/// Comptime-selected platform renderer. Win32 optionally dispatches between
+/// two generic graphics APIs using each surface's runtime preference.
 pub const Renderer = switch (build_config.renderer) {
-    .opengl => GenericRenderer(OpenGL),
+    .opengl => if (build_config.d3d11) @import("renderer/Windows.zig") else GenericRenderer(OpenGL),
     .webgl => WebGL,
 };
 

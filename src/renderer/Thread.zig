@@ -372,6 +372,9 @@ fn syncDrawTimer(self: *Thread) void {
     }
 
     skip: {
+        if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
+            if (self.renderer.hasPendingPresentation()) break :skip;
+        }
         // If our renderer supports animations and has them, then we
         // can apply draw timer based on custom shader animation configuration.
         if (@hasDecl(rendererpkg.Renderer, "hasAnimations") and
@@ -397,7 +400,7 @@ fn syncDrawTimer(self: *Thread) void {
     // even checking the active state in case we have a pending shutdown.
     self.draw_active = true;
 
-    const delay_ms = self.nextPresentTimerDelayMs() orelse {
+    const delay_ms = self.nextDrawTimerDelayMs() orelse {
         self.draw_active = false;
         return;
     };
@@ -581,9 +584,7 @@ fn drainMailbox(self: *Thread) !bool {
 
                 // Note we don't free the new value because we expect our
                 // allocators to match.
-                if (self.renderer.search_matches) |*m| m.deinit();
-                self.renderer.search_matches = payload;
-                self.renderer.search_matches_dirty = true;
+                self.renderer.setSearchMatches(payload);
             },
 
             .search_selected_match => |v| search: {
@@ -595,18 +596,13 @@ fn drainMailbox(self: *Thread) !bool {
 
                 // Note we don't free the new value because we expect our
                 // allocators to match.
-                if (self.renderer.search_selected_match) |*m| m.arena.deinit();
-                self.renderer.search_selected_match = payload.match;
-                self.renderer.search_matches_dirty = true;
+                self.renderer.setSearchSelectedMatch(payload.match);
             },
 
             .search_clear => |generation| search: {
                 if (!self.shouldAcceptSearchGeneration(generation)) break :search;
-                if (self.renderer.search_matches) |*m| m.deinit();
-                self.renderer.search_matches = null;
-                if (self.renderer.search_selected_match) |*m| m.arena.deinit();
-                self.renderer.search_selected_match = null;
-                self.renderer.search_matches_dirty = true;
+                self.renderer.setSearchMatches(null);
+                self.renderer.setSearchSelectedMatch(null);
             },
 
             .inspector => |v| {
@@ -664,6 +660,14 @@ fn nextPresentTimerDelayMs(self: *const Thread) ?u64 {
     const interval_ms = self.minimumPresentIntervalMs() orelse return null;
     const wait_ms = self.presentWaitMs(interval_ms);
     return if (wait_ms > 0) wait_ms else interval_ms;
+}
+
+fn nextDrawTimerDelayMs(self: *const Thread) ?u64 {
+    const delay = self.nextPresentTimerDelayMs() orelse return null;
+    if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
+        if (self.renderer.hasPendingPresentation()) return @max(250, delay);
+    }
+    return delay;
 }
 
 fn notePresentRequest(self: *Thread, interval_ms: u64) void {
@@ -903,6 +907,11 @@ fn wakeupCallback(
     if (t.renderOnce(true)) {
         t.scheduleRenderFollowup();
     }
+    // A UI-thread backend atomically requests presentation retries. Reconcile
+    // after every wake rather than relying on room in the bounded mailbox.
+    if (comptime @hasDecl(rendererpkg.Renderer, "hasPendingPresentation")) {
+        if (t.renderer.takePresentationPendingChanged()) t.syncDrawTimer();
+    }
 
     return .rearm;
 }
@@ -959,7 +968,7 @@ fn drawCallback(
     // which may already have re-armed this (dead) completion. Running it a
     // second time would corrupt libxev's timer queue.
     if (t.draw_active and t.draw_c.state() == .dead) {
-        if (t.nextPresentTimerDelayMs()) |delay_ms| {
+        if (t.nextDrawTimerDelayMs()) |delay_ms| {
             t.draw_h.run(&t.loop, &t.draw_c, delay_ms, Thread, t, drawCallback);
             if (apprt.runtime == apprt.win32) {
                 t.draw_timer_due_ms = win32_power.tickCountMs() +| delay_ms;

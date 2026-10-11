@@ -16,6 +16,7 @@ pub const Mailbox = apprt.surface.Mailbox;
 pub const Message = apprt.surface.Message;
 
 const std = @import("std");
+const build_config = @import("build_config.zig");
 const builtin = @import("builtin");
 const assert = @import("quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -687,10 +688,18 @@ pub fn init(
     var derived_config = try DerivedConfig.init(alloc, config);
     errdefer derived_config.deinit();
 
+    if (comptime !build_config.d3d11 and apprt.runtime == apprt.win32) {
+        if (config.renderer != .opengl) rt_surface.showRendererNotice("OpenGL: this build omits the D3D11 beta backend.") catch {};
+    }
+
     // Initialize our renderer with our initialized surface.
     try Renderer.surfaceInit(rt_surface);
     if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
-        rt_surface.noteBenchmarkMemoryStage(.opengl_functions_loaded, null);
+        if (comptime build_config.d3d11) {
+            if (rt_surface.renderer_gl_prepared) rt_surface.noteBenchmarkMemoryStage(.opengl_functions_loaded, null);
+        } else {
+            rt_surface.noteBenchmarkMemoryStage(.opengl_functions_loaded, null);
+        }
     }
 
     // Determine our DPI configurations so we can properly configure

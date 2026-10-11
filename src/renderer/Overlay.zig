@@ -19,7 +19,9 @@ const terminal = @import("../terminal/main.zig");
 const size = @import("size.zig");
 const Size = size.Size;
 const CellSize = size.CellSize;
-const Image = @import("image.zig").Image;
+const Image = struct {
+    const Pending = @import("image.zig").PendingImage;
+};
 
 const log = std.log.scoped(.renderer_overlay);
 

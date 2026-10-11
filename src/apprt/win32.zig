@@ -28374,6 +28374,64 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
+        0x8050, 0x8051, 0x8052, 0x8053, 0x8054, 0x8058 => { // Test-only renderer lifecycle actions.
+            if (build_config.renderer_test_tools and build_config.d3d11) {
+                if (surface) |v| {
+                    if (!v.core_initialized) return 0;
+                    if (msg == 0x8052 or msg == 0x8053 or msg == 0x8058) {
+                        if (!v.core_surface.renderer.setTestFailures(msg == 0x8052, msg == 0x8053)) return 0;
+                    }
+                    if (msg == 0x8054) {
+                        if (!v.core_surface.renderer.failNextPresent()) return 0;
+                    } else if (msg != 0x8051 and !v.core_surface.renderer.requestDeviceLoss()) return 0;
+                    v.redraw() catch return 0;
+                    return 1;
+                }
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        0x8056 => { // Test-only actions through the production binding path.
+            if (build_config.renderer_test_tools) {
+                if (surface) |v| {
+                    if (!v.core_initialized) return 0;
+                    const action: input.Binding.Action = switch (wParam) {
+                        1 => .new_tab,
+                        2 => .{ .new_split = .right },
+                        3 => .{ .new_split = .down },
+                        4 => .previous_tab,
+                        5 => .next_tab,
+                        6 => .close_surface,
+                        7 => .reload_config,
+                        else => return 0,
+                    };
+                    return @intFromBool(v.core_surface.performBindingAction(action) catch false);
+                }
+            }
+            return 0;
+        },
+        0x8057 => { // Test-only DPI scale notification, without moving monitors.
+            if (build_config.renderer_test_tools) {
+                if (surface) |v| {
+                    if (!v.core_initialized or wParam < 96 or wParam > 384) return 0;
+                    const scale: f32 = @as(f32, @floatFromInt(wParam)) / 96;
+                    v.content_scale = .{ .x = scale, .y = scale };
+                    v.core_surface.contentScaleCallback(v.content_scale) catch return 0;
+                    return 1;
+                }
+            }
+            return 0;
+        },
+        0x0317, 0x0318 => { // Test-only in-app GPU readback (no DWM evidence).
+            if (build_config.renderer_test_tools and build_config.d3d11) {
+                if (surface) |v| {
+                    if (v.core_initialized and wParam != 0) {
+                        v.core_surface.renderer.capture(@ptrFromInt(wParam)) catch return 0;
+                        return 1;
+                    }
+                }
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
         c.WM_PAINT => {
             var ps: PAINTSTRUCT = undefined;
             _ = sys.BeginPaint(hwnd, &ps) orelse return 0;
@@ -28772,6 +28830,7 @@ pub const Surface = struct {
     inspector_visible: bool = false,
     paint_pending: bool = false,
     live_resize_repaint_deferred: bool = false,
+    renderer_gl_prepared: bool = false,
     renderer_repaint_requested: std.atomic.Value(bool) = .init(false),
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
     /// One-shot post-show frame handshake for #224. Only ever touched from
@@ -29133,17 +29192,16 @@ pub const Surface = struct {
         log.debug("surface.init hwnd created", .{});
         self.noteBenchmarkMemoryStage(.child_hwnd_created, null);
 
-        if (app.test_surface_init_stage) |stage| try stage(self, .gl_context) else {
-            const gl = try app.createGLContext(hwnd);
-            self.hdc = gl.hdc;
-            self.hglrc = gl.hglrc;
-            // Must precede the stage note: `MemoryStageTrace.note` only emits
-            // the wgl_* provenance fields once the format has been published.
-            self.setBenchmarkWglPixelFormat(gl.provenance);
+        if (app.test_surface_init_stage) |stage| {
+            try stage(self, .gl_context);
+            self.noteBenchmarkMemoryStage(.gl_context_created, null);
+        } else if (!build_config.d3d11 or config.renderer == .opengl) {
+            // `ensureGLContext` publishes the pixel format before its stage
+            // note, which only emits the wgl_* provenance fields after that.
+            try self.ensureGLContext();
+            log.debug("surface.init gl context created", .{});
         }
         errdefer self.destroyGL();
-        self.noteBenchmarkMemoryStage(.gl_context_created, null);
-        log.debug("surface.init gl context created", .{});
 
         // `addSurface` below stops a running quit timer. If init then fails,
         // restart it once this Surface has left `windows`, or an app left
@@ -30442,11 +30500,11 @@ pub const Surface = struct {
         const hwnd = self.hwnd orelse return;
         if (sys.IsWindowVisible(hwnd) == 0) return;
         if (self.size.width == 0 or self.size.height == 0) return;
-        if (self.hdc == null or self.hglrc == null) return;
+        if (!build_config.d3d11 and (self.hdc == null or self.hglrc == null)) return;
         if (self.draw_in_progress) return;
         self.draw_in_progress = true;
         defer self.draw_in_progress = false;
-        try self.makeGLContextCurrent();
+        if (self.hglrc != null) try self.makeGLContextCurrent();
         try self.core_surface.draw();
     }
 
@@ -30486,6 +30544,24 @@ pub const Surface = struct {
             } else null,
             cursor_blinking,
         );
+    }
+
+    /// UI-thread-only notice using the same banner as other host diagnostics.
+    pub fn showRendererNotice(self: *Surface, message: []const u8) !void {
+        const host = self.host orelse return error.NoHost;
+        try host.setBanner(.info, message);
+    }
+
+    /// Lazily prepare WGL for an opted-in surface that needs OpenGL fallback.
+    /// Called on the UI thread, before publishing the replacement renderer.
+    pub fn ensureGLContext(self: *Surface) !void {
+        if (self.hglrc != null) return;
+        const hwnd = self.hwnd orelse return error.NoWindow;
+        const gl_context = try self.app.createGLContext(hwnd);
+        self.hdc = gl_context.hdc;
+        self.hglrc = gl_context.hglrc;
+        self.setBenchmarkWglPixelFormat(gl_context.provenance);
+        self.noteBenchmarkMemoryStage(.gl_context_created, null);
     }
 
     pub fn makeGLContextCurrent(self: *Surface) !void {
@@ -30553,6 +30629,11 @@ pub const Surface = struct {
             const err = windows.kernel32.GetLastError();
             return windows.unexpectedError(err);
         }
+        self.noteSuccessfulPresent();
+    }
+
+    /// Shared successful-content handshake for WGL and DXGI (S_OK only).
+    pub fn noteSuccessfulPresent(self: *Surface) void {
         self.render_trace.noteSwapBuffers();
         // Real content reached the screen, so the post-show handshake is
         // finished for good and can never wake the renderer again.

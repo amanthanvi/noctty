@@ -86,6 +86,24 @@ jobs:
             throw "noctty.com +version did not report custom shader support."
           }
 
+      - name: Build ARM64 D3D11 smoke tools
+        shell: pwsh
+        timeout-minutes: 20
+        run: zig build -Doptimize=ReleaseFast -Dcustom-shaders=true -Dd3d11=true -Drenderer-test-tools=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline --prefix renderer-smoke --summary all
+
+      - name: Hidden-desktop ARM64 WARP lifecycle smoke
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./test/windows/renderer/Invoke-RendererParity.ps1 -Binary ./renderer-smoke/bin/noctty.exe -OutputDirectory ./renderer-smoke/evidence -WarpOnly
+
+      - name: Upload ARM64 renderer evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: renderer-arm64-${{ github.run_id }}
+          path: renderer-smoke/evidence
+          if-no-files-found: ignore
+
       - name: Run packaged ARM64 CLI smoke
         shell: pwsh
         run: |

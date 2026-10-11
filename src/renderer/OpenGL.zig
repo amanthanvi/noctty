@@ -126,7 +126,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
         .rt_surface = opts.rt_surface,
         .vsync_enabled = opts.config.vsync,
         .default_framebuffer = default_framebuffer.framebuffer,
-        .default_framebuffer_srgb = default_framebuffer.srgb,
+        .default_framebuffer_srgb = default_framebuffer.srgb and !build_config.renderer_test_tools,
     };
 }
 
@@ -234,15 +234,28 @@ fn glDebugMessageCallback(
     });
 }
 
+// GLAD is shared by every context on this thread. Keep the last successfully
+// prepared table so a failed new context cannot poison existing OpenGL panes.
+threadlocal var prepared_dispatch: ?gl.glad.Context = null;
+
 /// Prepares the provided GL context, loading it with glad.
 fn prepareContext(getProcAddress: anytype) !void {
+    // A loader can fail before initializing its handle or any function slots.
+    // Stage a zeroed candidate; cleanup and rollback are valid even then.
+    gl.glad.context = std.mem.zeroes(gl.glad.Context);
+    errdefer {
+        if (prepared_dispatch) |previous| {
+            gl.glad.context = previous;
+        } else {
+            gl.glad.unload();
+        }
+    }
     const version = gl.glad.load(getProcAddress) catch |err| {
         recordWin32OpenGLStartupError(.load_functions, err);
         return err;
     };
     const major = gl.glad.versionMajor(@intCast(version));
     const minor = gl.glad.versionMinor(@intCast(version));
-    errdefer gl.glad.unload();
     log.debug("loaded OpenGL {}.{}", .{ major, minor });
 
     // Need to check version before trying to enable it
@@ -277,6 +290,30 @@ fn prepareContext(getProcAddress: anytype) !void {
         recordWin32OpenGLStartupError(.framebuffer_srgb, err);
         return err;
     };
+    prepared_dispatch = gl.glad.context;
+}
+
+test "failed context preparation preserves the previous GL dispatch" {
+    const previous = prepared_dispatch;
+    defer {
+        prepared_dispatch = previous;
+        if (previous) |dispatch| gl.glad.context = dispatch;
+    }
+    var dispatch = std.mem.zeroes(gl.glad.Context);
+    dispatch.VERSION_4_3 = 1;
+    prepared_dispatch = dispatch;
+    gl.glad.context = dispatch;
+    const Loader = struct {
+        fn missing(_: [*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+            return null;
+        }
+    };
+    try std.testing.expectError(error.GLInitFailed, prepareContext(&Loader.missing));
+    try std.testing.expectEqual(@as(c_int, 1), gl.glad.context.VERSION_4_3);
+    prepared_dispatch = null;
+    gl.glad.context = undefined;
+    try std.testing.expectError(error.GLInitFailed, prepareContext(&Loader.missing));
+    try std.testing.expect(prepared_dispatch == null);
 }
 
 fn recordWin32OpenGLStartupError(step: apprt.win32.OpenGLStartupStep, err: anyerror) void {
@@ -333,6 +370,7 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
             try surface.makeGLContextCurrent();
             log.debug("OpenGL.surfaceInit win32 current", .{});
             try prepareContext(&apprt.win32.getProcAddress);
+            surface.renderer_gl_prepared = true;
             apprt.win32.clearOpenGLStartupFailure();
             log.debug("OpenGL.surfaceInit win32 prepared", .{});
         },
@@ -598,6 +636,34 @@ pub fn present(self: *OpenGL, target: Target) !void {
 pub fn presentLastTarget(self: *OpenGL) !void {
     if (self.last_target) |target| try self.present(target);
 }
+
+/// Test-only PrintWindow transport, compiled with -Drenderer-test-tools=true.
+pub fn capture(self: *OpenGL, hdc: *anyopaque) !void {
+    if (!build_config.renderer_test_tools) return error.TestToolsDisabled;
+    const target = self.last_target orelse return error.NoCapturedFrame;
+    if (target.storage != .offscreen) return error.CaptureDefaultFramebufferUnsupported;
+    const pixels = try self.alloc.alloc(u8, target.width * target.height * 4);
+    defer self.alloc.free(pixels);
+    var previous_framebuffer: gl.c.GLint = 0;
+    var previous_buffer: gl.c.GLint = 0;
+    gl.glad.context.GetIntegerv.?(gl.c.GL_READ_FRAMEBUFFER_BINDING, &previous_framebuffer);
+    gl.glad.context.GetIntegerv.?(gl.c.GL_READ_BUFFER, &previous_buffer);
+    defer {
+        gl.glad.context.BindFramebuffer.?(gl.c.GL_READ_FRAMEBUFFER, @intCast(previous_framebuffer));
+        gl.glad.context.ReadBuffer.?(@intCast(previous_buffer));
+    }
+    gl.glad.context.BindFramebuffer.?(gl.c.GL_READ_FRAMEBUFFER, target.framebuffer.id);
+    gl.glad.context.ReadBuffer.?(gl.c.GL_COLOR_ATTACHMENT0);
+    gl.glad.context.ReadPixels.?(0, 0, @intCast(target.width), @intCast(target.height), gl.c.GL_RGBA, gl.c.GL_UNSIGNED_BYTE, pixels.ptr);
+    try gl.errors.getError();
+    log.info("renderer readback storage={s} framebuffer={d} first_pixel={d},{d},{d},{d}", .{
+        @tagName(target.storage), target.framebuffer.id, pixels[0], pixels[1], pixels[2], pixels[3],
+    });
+    if (noctty_renderer_blit(hdc, pixels.ptr, @intCast(target.width), @intCast(target.height), 1) == 0)
+        return error.CaptureBlitFailed;
+}
+
+extern fn noctty_renderer_blit(*anyopaque, [*]u8, u32, u32, c_int) c_int;
 
 /// Returns the options to use when constructing buffers.
 pub inline fn bufferOptions(self: OpenGL) bufferpkg.Options {
