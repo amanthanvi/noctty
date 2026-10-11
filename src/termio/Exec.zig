@@ -2709,6 +2709,8 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
         try env.put("WSLENV", "inherited/p");
         var overrides: configpkg.RepeatableStringMap = .{};
         try overrides.parseCLI(arena.allocator(), "WSLENV=GOPATH/l");
+        try overrides.parseCLI(arena.allocator(), "PATH=C:\\ext02-child-path");
+        try overrides.parseCLI(arena.allocator(), "PATHEXT=.EXE;.CMD");
         var subprocess = try Subprocess.init(testing.allocator, .{
             .command = wsl_command,
             .env = env,
@@ -2724,6 +2726,8 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
             subprocess.env.?.get("WSLENV").?,
         );
         try testing.expectEqualStrings("xterm-ghostty", subprocess.wsl_probe.?.term);
+        try testing.expectEqualStrings("C:\\ext02-child-path", subprocess.env.?.get("PATH").?);
+        try testing.expectEqualStrings(".EXE;.CMD", subprocess.env.?.get("PATHEXT").?);
     }
 
     // A TERM the configuration sets is the user's: listed, never probed.
