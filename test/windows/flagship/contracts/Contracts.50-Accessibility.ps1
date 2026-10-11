@@ -1589,7 +1589,7 @@ $settingsSourcePins = @(
         Description = 'close prompt display and measurement share closePromptText'
     },
     @{
-        Pattern = '(?s)clickedButton\(id, notify, BTN_SAVE\).*?IsWindowEnabled\(button\).*?IsWindowVisible\(button\).*?saveCommandCanDispatch\(\s*o\.close_prompt_visible,\s*o\.save_in_flight,\s*o\.close_posted,\s*button_enabled,\s*button_visible,\s*\).*?o\.save\(\)'
+        Pattern = '(?s)fn saveIfAllowed\(self: \*SettingsWindow\).*?IsWindowEnabled\(button\).*?IsWindowVisible\(button\).*?saveCommandCanDispatch\(\s*self\.close_prompt_visible,\s*self\.save_in_flight,\s*self\.close_posted,\s*button_enabled,\s*button_visible,\s*\).*?self\.save\(\).*?clickedButton\(id, notify, BTN_SAVE\).*?o\.saveIfAllowed\(\)'
         Description = 'save dispatch revalidates the live prompt and button state'
     },
     @{

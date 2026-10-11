@@ -39,6 +39,7 @@ const HBRUSH = win32_types.HBRUSH;
 const HCURSOR = win32_types.HCURSOR;
 const HDC = win32_types.HDC;
 const HGDIOBJ = win32_types.HGDIOBJ;
+const HICON = win32_types.HICON;
 const HRGN = *anyopaque;
 const HMENU = win32_types.HMENU;
 const LPCWSTR = win32_types.LPCWSTR;
@@ -92,6 +93,25 @@ const WM_MOUSEMOVE: UINT = 0x0200;
 const WM_MOUSELEAVE: UINT = 0x02A3;
 const WM_KEYDOWN: UINT = 0x0100;
 const WM_SYSKEYDOWN: UINT = 0x0104;
+const WM_ACTIVATE: UINT = 0x0006;
+const WM_SETICON: UINT = 0x0080;
+/// `WM_ACTIVATE` low word: the window is being deactivated.
+const WA_INACTIVE: usize = 0;
+const ICON_SMALL: usize = 0;
+const ICON_BIG: usize = 1;
+const VK_RETURN: usize = 0x0D;
+const VK_ESCAPE: usize = 0x1B;
+const BM_CLICK: UINT = 0x00F5;
+const DLGC_DEFPUSHBUTTON: LRESULT = 0x0010;
+const DLGC_UNDEFPUSHBUTTON: LRESULT = 0x0020;
+const WM_GETDLGCODE: UINT = 0x0087;
+const SPI_GETWHEELSCROLLLINES: UINT = 0x0068;
+const WHEEL_DELTA: i32 = 120;
+const WHEEL_PAGESCROLL: u32 = 0xFFFF_FFFF;
+const CB_GETDROPPEDSTATE: UINT = 0x0157;
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12;
+const VK_SHIFT: i32 = 0x10;
 const WM_MENUCHAR: UINT = 0x0120;
 /// `WM_MENUCHAR` reply: close the active menu without a beep.
 const MNC_CLOSE: u32 = 1;
@@ -149,9 +169,11 @@ const BTN_CONFLICT_KEEP: usize = 303;
 const BTN_CONFLICT_USE_DISK: usize = 304;
 const BTN_CLOSE_SAVE: usize = 305;
 const BTN_CLOSE_DISCARD: usize = 306;
-// IsDialogMessageW maps Escape to the conventional cancel control ID,
-// including when focus is inside an EDIT or COMBO child.
-const BTN_CLOSE_KEEP_EDITING: usize = 2;
+// IsDialogMessageW maps Escape to the conventional cancel command ID
+// (IDCANCEL), including when focus is inside an EDIT or COMBO child. The
+// close prompt's "Keep editing" button owns that ID.
+const IDCANCEL: usize = 2;
+const BTN_CLOSE_KEEP_EDITING: usize = IDCANCEL;
 const EDIT_SCROLLBACK: usize = 401;
 const EDIT_FONT_SIZE: usize = 402;
 const COMBO_CONFIRM_CLOSE: usize = 403;
@@ -642,6 +664,7 @@ const MoveWindow = sys.MoveWindow;
 
 extern "user32" fn AdjustWindowRectExForDpi(lpRect: *RECT, dwStyle: u32, bMenu: BOOL, dwExStyle: u32, dpi: UINT) callconv(.winapi) BOOL;
 extern "user32" fn GetUpdateRect(hWnd: HWND, lpRect: ?*RECT, bErase: BOOL) callconv(.winapi) BOOL;
+extern "user32" fn GetDlgCtrlID(hWnd: HWND) callconv(.winapi) c_int;
 extern "user32" fn SetScrollInfo(hWnd: HWND, nBar: c_int, lpsi: *const SCROLLINFO, redraw: BOOL) callconv(.winapi) c_int;
 extern "user32" fn GetScrollInfo(hWnd: HWND, nBar: c_int, lpsi: *SCROLLINFO) callconv(.winapi) BOOL;
 extern "user32" fn FrameRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) i32;
@@ -966,6 +989,10 @@ pub const AppHandle = struct {
     /// HINSTANCE used for window class registration + creation.
     hinstance: HINSTANCE,
     ownerWindow: ?*const fn (ctx: *anyopaque) ?HWND = null,
+    /// The application icon at the caption size (`small`) or the Alt+Tab and
+    /// taskbar size. Without one the window shows the generic application
+    /// glyph.
+    appIcon: ?*const fn (ctx: *anyopaque, small: bool) HICON = null,
     /// Chrome background color (COLORREF) to paint into the settings
     /// content pane. Queried per paint so theme swaps propagate.
     chromeBg: *const fn (ctx: *anyopaque) COLORREF,
@@ -1172,6 +1199,18 @@ pub const SettingsWindow = struct {
     /// Guard flag so the EN_CHANGE handler doesn't fire a cascade
     /// when we programmatically set the EDIT text on open.
     suppress_edit_events: bool = false,
+    /// The child that held keyboard focus when the window was deactivated.
+    /// `DefWindowProc` hands focus to the frame on activation, so without this
+    /// the field the user was typing in stops receiving keys after Alt+Tab.
+    focus_before_deactivate: ?HWND = null,
+    /// Wheel movement not yet turned into whole pixels, in 1/`WHEEL_DELTA`
+    /// pixel: a precision touchpad sends deltas far below one notch.
+    wheel_remainder: i32 = 0,
+    /// Set while `forwardFrameFocus` moves focus, so the focus notification
+    /// does not scroll the form.
+    restoring_focus: bool = false,
+    /// Lines per wheel notch for tests; null reads the system setting.
+    wheel_lines_override: ?u32 = null,
 
     pub fn init(handle: AppHandle) SettingsWindow {
         return .{ .handle = handle };
@@ -1187,6 +1226,55 @@ pub const SettingsWindow = struct {
 
     fn px(self: *const SettingsWindow, logical: i32) i32 {
         return scaleForDpi(logical, self.dpi);
+    }
+
+    fn appIcon(self: *const SettingsWindow, small: bool) HICON {
+        const provide = self.handle.appIcon orelse return null;
+        return provide(self.handle.ctx, small);
+    }
+
+    /// What clicking Save does, gated on the button's own state so a shortcut
+    /// cannot save while the button is disabled, hidden or the prompt is open.
+    fn saveIfAllowed(self: *SettingsWindow) void {
+        const button_enabled = if (self.btn_save) |button| sys.IsWindowEnabled(button) != 0 else false;
+        const button_visible = if (self.btn_save) |button| sys.IsWindowVisible(button) != 0 else false;
+        if (saveCommandCanDispatch(
+            self.close_prompt_visible,
+            self.save_in_flight,
+            self.close_posted,
+            button_enabled,
+            button_visible,
+        )) self.save();
+    }
+
+    /// Keys the dialog manager does not handle the way a settings window needs.
+    /// The App pump asks this BEFORE `IsDialogMessageW`; true means consumed.
+    ///   * Ctrl+S saves. (Enter never saves: in a field it does nothing.)
+    ///   * Enter presses the focused push button.
+    ///   * An auto-repeated Escape is swallowed, so holding the key does not
+    ///     toggle the close prompt open and shut.
+    pub fn handleAccelerator(self: *SettingsWindow, target: ?HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) bool {
+        // Cheapest test first: this runs for every message while Settings is open.
+        if (msg != WM_KEYDOWN) return false;
+        if (wParam != 'S' and wParam != VK_RETURN and wParam != VK_ESCAPE) return false;
+        const hwnd = self.hwnd orelse return false;
+        const control = target orelse return false;
+        if (control != hwnd and IsChild(hwnd, control) == 0) return false;
+        const repeat = (lParam & (1 << 30)) != 0;
+        switch (wParam) {
+            'S' => {
+                if (!isSaveShortcut(
+                    'S',
+                    win32_input.keyPressed(VK_CONTROL),
+                    win32_input.keyPressed(VK_MENU),
+                    win32_input.keyPressed(VK_SHIFT),
+                )) return false;
+                self.saveIfAllowed();
+                return true;
+            },
+            VK_RETURN => return self.pressFocusedButton(repeat),
+            else => return repeat,
+        }
     }
 
     fn deleteUiFont(self: *SettingsWindow) void {
@@ -1224,6 +1312,7 @@ pub const SettingsWindow = struct {
         // reached by whatever opened it, not by the keys pressed in the
         // previous one, so it starts ring-less like a fresh one.
         self.focus_input_mode = .pointer;
+        self.focus_before_deactivate = null;
         self.text_uia_prev_proc = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
@@ -1392,7 +1481,12 @@ pub const SettingsWindow = struct {
         self.raw_scalar_error[index] = null;
         if (self.active_raw_validation == field) {
             self.active_raw_validation = null;
-            self.surfaceNextValidation(true);
+            // The remaining errors go to the status line. Moving the user to
+            // another field, or another section, while they type a valid value
+            // here would take the keyboard out from under them. Only the close
+            // prompt's "Save and close" moves focus to an error (Save itself
+            // is disabled while one exists).
+            self.surfaceNextValidation(false);
         }
     }
 
@@ -1903,6 +1997,7 @@ pub const SettingsWindow = struct {
         self.section_button_prev_proc = null;
         self.section_hovered = null;
         self.focus_input_mode = .pointer;
+        self.focus_before_deactivate = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
         self.btn_conflict_keep = null;
@@ -2244,6 +2339,133 @@ pub const SettingsWindow = struct {
         self.content_scroll_y = clamped;
         layoutChildren(self);
         if (self.hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 1);
+    }
+
+    /// Height of one "page" of the form for Page Up/Down and page-scroll wheels.
+    fn contentPage(self: *SettingsWindow) i32 {
+        const hwnd = self.hwnd orelse return self.px(240);
+        var client: RECT = undefined;
+        if (GetClientRect(hwnd, &client) == 0) return self.px(240);
+        const viewport = @max(1, settingsContentViewportBottom(self, client) - settingsContentViewportTop(self, client));
+        return @max(1, viewport - self.px(settings_control_height));
+    }
+
+    /// Scroll the form by one wheel message. Notches and precision-touchpad
+    /// deltas (a fraction of a notch each) take the same path: the movement is
+    /// accumulated until it is a whole pixel, scaled by the user's "lines per
+    /// notch" setting, so nothing is truncated to zero.
+    fn scrollByWheel(self: *SettingsWindow, delta: i16) void {
+        const lines = self.wheel_lines_override orelse systemWheelScrollLines();
+        const notch_px: i32 = if (lines == WHEEL_PAGESCROLL)
+            self.contentPage()
+        else
+            wheelNotchPixels(self.px(settings_wheel_notch_px), lines);
+        const pixels = wheelScrollPixels(&self.wheel_remainder, delta, notch_px);
+        if (pixels != 0) self.setContentScroll(self.content_scroll_y - pixels);
+    }
+
+    /// Enter on a focused push button presses it. A window class that is not
+    /// a dialog has no default button for the dialog manager to ask about
+    /// (`DM_GETDEFID`), so Enter would do nothing at all; answering it with the
+    /// focused button instead would leave the manager stripping the default
+    /// style from the previous answer. So the key is taken before the manager
+    /// and the button is clicked directly. Returns whether the key was consumed;
+    /// an auto-repeat is consumed without clicking again.
+    fn pressFocusedButton(self: *SettingsWindow, repeat: bool) bool {
+        const hwnd = self.hwnd orelse return false;
+        const focused = GetFocus() orelse return false;
+        if (IsChild(hwnd, focused) == 0 or sys.IsWindowEnabled(focused) == 0) return false;
+        const code = SendMessageW(focused, WM_GETDLGCODE, 0, 0);
+        if ((code & (DLGC_DEFPUSHBUTTON | DLGC_UNDEFPUSHBUTTON)) == 0) return false;
+        if (!repeat) _ = SendMessageW(focused, BM_CLICK, 0, 0);
+        return true;
+    }
+
+    /// A close request from the caption, Alt+F4 or Escape: close at once when
+    /// clean, otherwise ask what to do with the unsaved changes.
+    fn requestClose(self: *SettingsWindow, hwnd: HWND) void {
+        switch (closeRequestAction(self.hasPendingChanges(), self.close_prompt_visible, self.close_posted)) {
+            .close_now => self.closeNow(hwnd),
+            .show_prompt, .focus_prompt => self.showClosePrompt(),
+            .ignore => {},
+        }
+    }
+
+    /// Escape arrives as IDCANCEL. With the close prompt open it is the
+    /// prompt's "Keep editing"; otherwise it is a close request.
+    fn cancelRequested(self: *SettingsWindow, hwnd: HWND) void {
+        if (self.close_prompt_visible) return self.cancelClosePrompt();
+        self.requestClose(hwnd);
+    }
+
+    /// Whether `control` can take keyboard focus back: still a live, visible,
+    /// enabled descendant of this window.
+    fn focusTargetUsable(self: *const SettingsWindow, control: HWND) bool {
+        const settings_hwnd = self.hwnd orelse return false;
+        return control != settings_hwnd and
+            sys.IsWindow(control) != 0 and
+            IsChild(settings_hwnd, control) != 0 and
+            sys.IsWindowVisible(control) != 0 and
+            sys.IsWindowEnabled(control) != 0;
+    }
+
+    /// `WA_INACTIVE`: keep the focused child, the way `DefDlgProc` does.
+    fn rememberFocus(self: *SettingsWindow) void {
+        self.focus_before_deactivate = if (GetFocus()) |focused|
+            (if (self.focusTargetUsable(focused)) focused else null)
+        else
+            null;
+    }
+
+    /// The frame itself received focus (`DefWindowProc` puts it there when the
+    /// window is activated or restored from minimized): hand it to the child
+    /// that had it, or to the section rail when that is gone. Done from
+    /// `WM_SETFOCUS` rather than `WM_ACTIVATE` because restoring a minimized
+    /// window sets frame focus without a second `WM_ACTIVATE`. Focusing the
+    /// child must not scroll the form: after a click-activation the click has
+    /// already been hit-tested against the controls where they are.
+    fn forwardFrameFocus(self: *SettingsWindow) void {
+        self.restoring_focus = true;
+        defer self.restoring_focus = false;
+        if (self.focus_before_deactivate) |control| {
+            if (self.focusTargetUsable(control)) {
+                _ = SetFocus(control);
+                return;
+            }
+            self.focus_before_deactivate = null;
+        }
+        if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
+    }
+
+    /// Put the controls in the order Tab should visit them: the rail, then each
+    /// section's fields as laid out, then the action bar. Tab follows z-order,
+    /// which is creation order, and creation order is by control type with Save
+    /// before every field. Moving each control to the bottom in turn leaves the
+    /// z-order (and with it the UIA sibling order) equal to the visual order.
+    ///
+    /// Only the Appearance rail button starts a dialog group, so without more
+    /// the arrow-key group of the rail would run on into the fields and Save:
+    /// each section's first field and the action bar start their own.
+    fn applyTabOrder(self: *SettingsWindow) void {
+        for (std.enums.values(Section)) |section| for (formItemsForSection(section), 0..) |item, index| {
+            const control = self.controlHwnd(item.control_index) orelse continue;
+            sendToBottom(control);
+            if (index == 0) startGroup(control);
+        };
+        // Conflict choices sit left of Save; the close prompt replaces them all.
+        var first_action = true;
+        for ([_]?HWND{
+            self.btn_conflict_keep,
+            self.btn_conflict_use_disk,
+            self.btn_save,
+            self.btn_close_save,
+            self.btn_close_discard,
+            self.btn_close_keep_editing,
+        }) |button| if (button) |control| {
+            sendToBottom(control);
+            if (first_action) startGroup(control);
+            first_action = false;
+        };
     }
 
     fn refreshNativeSectionText(self: *SettingsWindow) void {
@@ -3559,6 +3781,8 @@ pub const SettingsWindow = struct {
         }
         self.resetClosePromptState();
         self.close_notified = false;
+        self.focus_before_deactivate = null;
+        self.wheel_remainder = 0;
 
         // Fresh owned snapshots of the live config. Discarded on close
         // or atomically refreshed after a successful save.
@@ -3572,12 +3796,12 @@ pub const SettingsWindow = struct {
                 .cbClsExtra = 0,
                 .cbWndExtra = 0,
                 .hInstance = self.handle.hinstance,
-                .hIcon = null,
+                .hIcon = self.appIcon(false),
                 .hCursor = sys.LoadCursorW(null, @ptrFromInt(IDC_ARROW)),
                 .hbrBackground = null,
                 .lpszMenuName = null,
                 .lpszClassName = class_name,
-                .hIconSm = null,
+                .hIconSm = self.appIcon(true),
             };
             self.class_atom = sys.RegisterClassExW(&wc);
             if (self.class_atom == 0) {
@@ -3609,6 +3833,10 @@ pub const SettingsWindow = struct {
         ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
         self.hwnd = hwnd;
         self.dpi = normalizedDpi(sys.GetDpiForWindow(hwnd));
+        // The class icon is what Alt+Tab shows; the caption and taskbar sizes
+        // are set on the window itself, as the terminal windows do.
+        if (self.appIcon(false)) |icon| _ = sys.SendMessageW(hwnd, WM_SETICON, ICON_BIG, @bitCast(@intFromPtr(icon)));
+        if (self.appIcon(true)) |icon| _ = sys.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @bitCast(@intFromPtr(icon)));
 
         // PerMonitorV2 coordinates are physical pixels. Start at the intended
         // logical size, capped to the current work area, so a high-DPI monitor
@@ -3956,6 +4184,10 @@ pub const SettingsWindow = struct {
         // through the UI Automation bridge. Values remain owned by the native
         // controls and are not conflated with their accessible names.
         annotateAccessibleControls(self);
+        // Before the UIA providers: they subclass the same HWNDs and call
+        // down to whatever procedure is installed when they arrive.
+        for (self.comboControls()) |combo| if (combo) |control| subclassCombo(control);
+        self.applyTabOrder();
         self.initializeControlUiaProviders();
 
         self.refreshAllControls();
@@ -4298,6 +4530,8 @@ const settings_control_height: i32 = settings_metrics.space_9;
 const settings_combo_item_height: i32 = settings_metrics.space_9;
 const settings_field_group_gap: i32 = settings_metrics.space_5;
 const settings_field_row_pitch: i32 = 64;
+/// What one wheel notch scrolls at the default of three lines per notch.
+const settings_wheel_notch_px: i32 = 64;
 const settings_column_gap: i32 = settings_metrics.space_8;
 const settings_column_min_width: i32 = 320;
 const settings_two_column_min_width: i32 = 664;
@@ -4378,8 +4612,10 @@ fn closeActionRowGeometry(available_width: i32, available_height: i32, dpi: u32)
         .stacked = false,
     };
 
-    const width = @max(0, available_width);
-    const height = @max(0, available_height);
+    // Typed: `@max(0, x)` alone is a u31, and `height - 3` below wraps when the
+    // pane is shorter than 3 px (the closed prompt asks with a height of 0).
+    const width: i32 = @max(0, available_width);
+    const height: i32 = @max(0, available_height);
     const vertical_gap = @min(scaleForDpi(6, dpi), @divTrunc(@max(0, height - 3), 2));
     const button_height = @min(preferred_height, @divTrunc(@max(0, height - 2 * vertical_gap), 3));
     return .{
@@ -4416,8 +4652,8 @@ fn normalActionRowGeometry(pane_width: i32, available_height: i32, conflict: boo
     const preferred_save_width = scaleForDpi(96, dpi);
     const preferred_conflict_width = scaleForDpi(112, dpi);
     const preferred_height = scaleForDpi(settings_control_height, dpi);
-    const width = @max(0, pane_width);
-    const height = @max(0, available_height);
+    const width: i32 = @max(0, pane_width);
+    const height: i32 = @max(0, available_height);
     if (!conflict) {
         const save_width = @min(preferred_save_width, width);
         const save_x = width - save_width;
@@ -4505,7 +4741,10 @@ fn closePromptActions(visible: bool, save_in_flight: bool, close_posted: bool) C
     return .{
         .save = can_choose and !save_in_flight,
         .discard = can_choose and !save_in_flight,
-        .keep_editing = can_choose,
+        // The button that owns IDCANCEL stays enabled while it is hidden:
+        // `IsDialogMessageW` does not send Escape to a disabled cancel button,
+        // and Escape without the prompt is a close request.
+        .keep_editing = !close_posted,
     };
 }
 
@@ -4523,6 +4762,10 @@ fn closePromptText(save_in_flight: bool) []const u8 {
 fn pendingCloseReopenAction(close_posted: bool, close_after_save: bool) PendingCloseReopenAction {
     if (!close_posted) return .none;
     return if (close_after_save) .cancel_saved_close else .cancel_discard_close;
+}
+
+fn isSaveShortcut(vk: u32, ctrl: bool, alt: bool, shift: bool) bool {
+    return vk == 'S' and ctrl and !alt and !shift;
 }
 
 fn saveCommandCanDispatch(
@@ -4563,6 +4806,12 @@ test "settings dirty close actions prevent discard during save" {
     try std.testing.expectEqual(
         ClosePromptActions{ .save = false, .discard = false, .keep_editing = false },
         closePromptActions(true, false, true),
+    );
+    // The hidden prompt keeps IDCANCEL's button enabled so Escape reaches it,
+    // and nothing else is pressable.
+    try std.testing.expectEqual(
+        ClosePromptActions{ .save = false, .discard = false, .keep_editing = true },
+        closePromptActions(false, false, false),
     );
     try std.testing.expect(closePromptCanCancel(true, false));
     try std.testing.expect(!closePromptCanCancel(true, true));
@@ -4774,6 +5023,14 @@ test "settings theme change with unchanged inputs rebuilds nothing" {
     settings.themeChanged();
     try std.testing.expectEqual(@as(u32, 4), settings.theme_applications);
     try std.testing.expect(settings.theme_adapter.button_brush != null);
+}
+
+test "settings Ctrl+S is the only save shortcut" {
+    try std.testing.expect(isSaveShortcut('S', true, false, false));
+    try std.testing.expect(!isSaveShortcut('S', false, false, false));
+    try std.testing.expect(!isSaveShortcut('S', true, true, false));
+    try std.testing.expect(!isSaveShortcut('S', true, false, true));
+    try std.testing.expect(!isSaveShortcut('A', true, false, false));
 }
 
 test "settings save command rechecks dispatch state" {
@@ -5376,7 +5633,7 @@ fn actionBarAvailableHeight(self: *SettingsWindow, client_rect: RECT) i32 {
 }
 
 fn closePromptLayoutGeometry(self: *SettingsWindow, pane_width: i32, client_height: i32) ClosePromptLayoutGeometry {
-    const available_height = @max(0, client_height);
+    const available_height: i32 = @max(0, client_height);
     const desired_padding = self.px(settings_action_padding);
     if (!self.close_prompt_visible) {
         const conflict_visible = self.active_conflict_field != null or self.active_owned_conflict_field != null;
@@ -5644,6 +5901,545 @@ fn layoutChildren(self: *SettingsWindow) void {
     self.proof_layout_redraw_succeeded = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE) != 0;
 }
 
+/// Dialog-semantics tests drive a real Settings window. They run on a desktop
+/// of their own (the window is shown, and `SetThreadDesktop` fails on a thread
+/// that already owns one), so nothing reaches or takes focus from the user's.
+const dialog_test = struct {
+    extern "user32" fn CreateDesktopW(
+        name: [*:0]const u16,
+        device: ?*anyopaque,
+        mode: ?*anyopaque,
+        flags: u32,
+        access: u32,
+        attributes: ?*anyopaque,
+    ) callconv(.winapi) ?*anyopaque;
+    extern "user32" fn SetThreadDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+    extern "user32" fn CloseDesktop(desktop: *anyopaque) callconv(.winapi) BOOL;
+    extern "user32" fn GetClassLongPtrW(hwnd: HWND, index: i32) callconv(.winapi) usize;
+    extern "user32" fn LoadIconW(instance: ?HINSTANCE, name: ?*anyopaque) callconv(.winapi) HICON;
+    extern "user32" fn GetNextDlgTabItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
+    extern "user32" fn GetKeyboardState(keys: *[256]u8) callconv(.winapi) BOOL;
+    extern "user32" fn SetKeyboardState(keys: *const [256]u8) callconv(.winapi) BOOL;
+    extern "user32" fn GetNextDlgGroupItem(dialog: HWND, control: ?HWND, previous: BOOL) callconv(.winapi) ?HWND;
+
+    const GCLP_HICON: i32 = -14;
+    const GCLP_HICONSM: i32 = -34;
+    const WM_GETICON: UINT = 0x007F;
+    const IDI_APPLICATION: usize = 32512;
+    const WA_ACTIVE: usize = 1;
+
+    fn run(desktop: *anyopaque, result: *anyerror!void, body: *const fn () anyerror!void) void {
+        if (SetThreadDesktop(desktop) == 0) {
+            result.* = error.SkipZigTest;
+            return;
+        }
+        body() catch |err| {
+            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            result.* = err;
+        };
+    }
+
+    fn onHiddenDesktop(body: *const fn () anyerror!void) !void {
+        const desktop = CreateDesktopW(
+            std.unicode.utf8ToUtf16LeStringLiteral("noctty-test-settings-dialog"),
+            null,
+            null,
+            0,
+            0x10000000, // GENERIC_ALL
+            null,
+        ) orelse return error.SkipZigTest;
+        defer _ = CloseDesktop(desktop);
+        var result: anyerror!void = {};
+        const thread = try std.Thread.spawn(.{}, run, .{ desktop, &result, body });
+        thread.join();
+        try result;
+    }
+
+    /// A Settings window opened over stub callbacks that count what reaches the App.
+    const Fixture = struct {
+        config: Config,
+        settings: SettingsWindow,
+        icon: HICON,
+        closed: u32 = 0,
+        editor_opened: u32 = 0,
+        saved: u32 = 0,
+        custom_uia: bool = false,
+
+        fn start() !*Fixture {
+            return startWith(false);
+        }
+
+        fn startWith(custom_uia: bool) !*Fixture {
+            const self = try std.testing.allocator.create(Fixture);
+            errdefer std.testing.allocator.destroy(self);
+            self.* = .{
+                .config = try Config.default(std.testing.allocator),
+                .settings = undefined,
+                .icon = LoadIconW(null, @ptrFromInt(IDI_APPLICATION)),
+                .custom_uia = custom_uia,
+            };
+            errdefer self.config.deinit();
+            self.settings = SettingsWindow.init(.{
+                .ctx = self,
+                .alloc = std.testing.allocator,
+                .hinstance = sys.GetModuleHandleW(null),
+                .appIcon = &appIcon,
+                .chromeBg = &stubChromeBg,
+                .textPrimary = &stubTextPrimary,
+                .openInEditor = &openInEditor,
+                .currentConfig = &currentConfig,
+                .saveAndReload = &saveAndReload,
+                .notifySuccess = &notifySuccess,
+                .customUiaProvidersEnabled = &customUia,
+                .onClosed = &onClosed,
+            });
+            self.settings.wheel_lines_override = 3;
+            try self.settings.open();
+            return self;
+        }
+
+        fn finish(self: *Fixture) void {
+            self.settings.deinit();
+            _ = sys.UnregisterClassW(class_name, self.settings.handle.hinstance);
+            self.config.deinit();
+            std.testing.allocator.destroy(self);
+        }
+
+        fn hwnd(self: *const Fixture) HWND {
+            return self.settings.hwnd.?;
+        }
+
+        fn appIcon(ctx: *anyopaque, _: bool) HICON {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            return self.icon;
+        }
+
+        fn openInEditor(ctx: *anyopaque) void {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.editor_opened += 1;
+        }
+
+        fn currentConfig(ctx: *anyopaque) *const Config {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            return &self.config;
+        }
+
+        fn saveAndReload(ctx: *anyopaque, _: *const Config, _: *const Config) SaveError!void {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.saved += 1;
+        }
+
+        fn customUia(ctx: *anyopaque) bool {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            return self.custom_uia;
+        }
+
+        fn notifySuccess(_: *anyopaque, _: []const u8, _: []const u8) void {}
+
+        fn onClosed(ctx: *anyopaque) void {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.closed += 1;
+        }
+
+        /// Hand a key down to Settings the way the App pump does: the
+        /// accelerators first, then the dialog manager.
+        fn pumpKey(self: *Fixture, vk: u32) bool {
+            return self.pumpKeyRepeat(vk, false);
+        }
+
+        fn pumpKeyRepeat(self: *Fixture, vk: u32, repeat: bool) bool {
+            const target = sys.GetFocus() orelse self.hwnd();
+            var msg: sys.MSG = .{
+                .hwnd = target,
+                .message = WM_KEYDOWN,
+                .wParam = vk,
+                .lParam = if (repeat) 1 << 30 else 0,
+                .time = 0,
+                .pt = .{ .x = 0, .y = 0 },
+                .lPrivate = 0,
+            };
+            if (self.settings.handleAccelerator(msg.hwnd, msg.message, msg.wParam, msg.lParam)) return true;
+            return sys.IsDialogMessageW(self.hwnd(), &msg) != 0;
+        }
+
+        fn wheel(target: HWND, delta: i16) void {
+            const high: usize = @as(u16, @bitCast(delta));
+            _ = sys.SendMessageW(target, WM_MOUSEWHEEL, high << 16, 0);
+        }
+
+        /// Shrink to the minimum size, where a single column of Appearance
+        /// fields no longer fits and the form scrolls.
+        fn makeFormScrollable(self: *Fixture) !void {
+            const swp_nomove: UINT = 0x0002;
+            _ = SetWindowPos(self.hwnd(), null, 0, 0, self.settings.px(720), self.settings.px(520), SWP_NOZORDER | SWP_NOACTIVATE | swp_nomove);
+            try std.testing.expect(self.settings.content_scroll_max > 0);
+        }
+    };
+};
+
+test "settings Escape without the close prompt closes a clean window and prompts a dirty one" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+
+            // A dirty window asks first; Escape is the same request as the X.
+            settings.markRawScalarEdit(.font_size);
+            _ = sys.SetFocus(settings.edit_font_size.?);
+            try std.testing.expect(fixture.pumpKey(0x1B));
+            try std.testing.expect(settings.close_prompt_visible);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+
+            // With the prompt open Escape still means "keep editing".
+            try std.testing.expect(fixture.pumpKey(0x1B));
+            try std.testing.expect(!settings.close_prompt_visible);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            // ... and focus goes back to the field it was taken from.
+            try std.testing.expectEqual(settings.edit_font_size.?, sys.GetFocus().?);
+
+            // A clean window closes.
+            settings.raw_scalar_dirty[@intFromEnum(RawScalarField.font_size)] = false;
+            try std.testing.expect(fixture.pumpKey(0x1B));
+            try std.testing.expectEqual(@as(u32, 1), fixture.closed);
+            try std.testing.expect(sys.IsWindow(hwnd) == 0);
+        }
+    }.body);
+}
+
+test "settings Enter presses the focused push button and does nothing in a field" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+
+            settings.setActiveSection(.advanced);
+            _ = sys.SetFocus(settings.btn_open_editor.?);
+            try std.testing.expectEqual(settings.btn_open_editor.?, sys.GetFocus().?);
+            try std.testing.expect(fixture.pumpKey(0x0D));
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+
+            // A held key clicks once.
+            try std.testing.expect(fixture.pumpKeyRepeat(0x0D, true));
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+
+            // With a change pending (Save enabled), Enter in a field neither
+            // saves nor closes the window.
+            settings.setActiveSection(.appearance);
+            _ = sys.SendMessageW(settings.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCursorStyleFromCombo();
+            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
+            _ = sys.SetFocus(settings.edit_font_size.?);
+            _ = fixture.pumpKey(0x0D);
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+            try std.testing.expectEqual(@as(u32, 1), fixture.editor_opened);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            try std.testing.expect(sys.IsWindow(fixture.hwnd()) != 0);
+
+            // On the Save button itself it saves.
+            _ = sys.SetFocus(settings.btn_save.?);
+            try std.testing.expect(fixture.pumpKey(0x0D));
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+        }
+    }.body);
+}
+
+test "settings Ctrl+S reaches Save through the accelerator hook" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            _ = sys.SendMessageW(settings.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCursorStyleFromCombo();
+            _ = sys.SetFocus(settings.edit_font_size.?);
+
+            // Without Ctrl the key is not ours.
+            const focus = sys.GetFocus().?;
+            try std.testing.expect(!settings.handleAccelerator(focus, WM_KEYDOWN, 'S', 0));
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+
+            // With the thread's Ctrl key down it is consumed and saves.
+            var keys: [256]u8 = undefined;
+            try std.testing.expect(dialog_test.GetKeyboardState(&keys) != 0);
+            const original = keys;
+            defer _ = dialog_test.SetKeyboardState(&original);
+            keys[VK_CONTROL] = 0x80;
+            try std.testing.expect(dialog_test.SetKeyboardState(&keys) != 0);
+            try std.testing.expect(settings.handleAccelerator(focus, WM_KEYDOWN, 'S', 0));
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+        }
+    }.body);
+}
+
+test "settings Ctrl+S gate follows the Save button and a held Escape does not flap the prompt" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+
+            // Clean: Save is disabled, so the shortcut's path saves nothing.
+            settings.saveIfAllowed();
+            try std.testing.expectEqual(@as(u32, 0), fixture.saved);
+            _ = sys.SendMessageW(settings.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCursorStyleFromCombo();
+            settings.saveIfAllowed();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+
+            // Dirty again: Escape opens the prompt, its auto-repeats do not
+            // toggle it, and nothing closes while a close is already posted.
+            _ = sys.SendMessageW(settings.combo_cursor_style.?, CB_SETCURSEL, 3, 0);
+            settings.syncCursorStyleFromCombo();
+            _ = sys.SetFocus(settings.edit_font_size.?);
+            try std.testing.expect(fixture.pumpKey(0x1B));
+            try std.testing.expect(settings.close_prompt_visible);
+            for (0..3) |_| try std.testing.expect(fixture.pumpKeyRepeat(0x1B, true));
+            try std.testing.expect(settings.close_prompt_visible);
+            // The prompt blocks Save, so the shortcut's path saves nothing there.
+            settings.saveIfAllowed();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            settings.close_posted = true;
+            _ = fixture.pumpKey(0x1B);
+            try std.testing.expectEqual(@as(u32, 0), fixture.closed);
+            settings.close_posted = false;
+        }
+    }.body);
+}
+
+test "settings wheel accumulates touchpad deltas and scrolls the form" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            try fixture.makeFormScrollable();
+
+            // Four precision deltas of 30 are one notch (120) between them.
+            for (0..4) |_| dialog_test.Fixture.wheel(fixture.hwnd(), -30);
+            try std.testing.expectEqual(settings.px(64), settings.content_scroll_y);
+
+            // A whole notch up scrolls back.
+            dialog_test.Fixture.wheel(fixture.hwnd(), 120);
+            try std.testing.expectEqual(@as(i32, 0), settings.content_scroll_y);
+        }
+    }.body);
+}
+
+test "settings wheel over a closed dropdown scrolls the form instead of changing it" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            try fixture.makeFormScrollable();
+
+            const combo = settings.combo_cursor_style.?;
+            _ = sys.SendMessageW(combo, CB_SETCURSEL, 1, 0);
+            _ = sys.SetFocus(combo);
+            // Focusing the combo may scroll it into view; measure from there.
+            const before = settings.content_scroll_y;
+            dialog_test.Fixture.wheel(combo, -120);
+            try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(@min(before + settings.px(64), settings.content_scroll_max), settings.content_scroll_y);
+        }
+    }.body);
+}
+
+test "settings reactivation restores the focused field" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+
+            const field = settings.edit_font_size.?;
+            _ = sys.SetFocus(field);
+            try std.testing.expectEqual(field, sys.GetFocus().?);
+
+            // Alt+Tab away and back: the system leaves focus on the frame.
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0);
+            _ = sys.SetFocus(hwnd);
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, dialog_test.WA_ACTIVE, 0);
+            try std.testing.expectEqual(field, sys.GetFocus().?);
+
+            // A control that vanished meanwhile falls back to the section.
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0);
+            _ = sys.ShowWindow(field, SW_HIDE);
+            _ = sys.SetFocus(hwnd);
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, dialog_test.WA_ACTIVE, 0);
+            try std.testing.expectEqual(settings.sectionButton(.appearance).?, sys.GetFocus().?);
+        }
+    }.body);
+}
+
+test "settings Tab visits the fields in form order and Save last" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+
+            // A pending change enables Save, which is created before every field.
+            _ = sys.SendMessageW(settings.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCursorStyleFromCombo();
+            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
+
+            for (std.enums.values(Section)) |section| {
+                settings.setActiveSection(section);
+                const items = settings.formItems();
+                const first = settings.controlHwnd(items[0].control_index).?;
+                var visited: [16]HWND = undefined;
+                var count: usize = 0;
+                var current = first;
+                while (count < visited.len) {
+                    visited[count] = current;
+                    count += 1;
+                    current = dialog_test.GetNextDlgTabItem(hwnd, current, 0) orelse break;
+                    if (current == first) break;
+                }
+                // Every field in form order, then Save, then the rail wraps.
+                try std.testing.expectEqual(items.len + 2, count);
+                for (items, 0..) |item, index| {
+                    try std.testing.expectEqual(settings.controlHwnd(item.control_index).?, visited[index]);
+                }
+                try std.testing.expectEqual(settings.btn_save.?, visited[items.len]);
+                try std.testing.expectEqual(settings.sectionButton(section).?, visited[items.len + 1]);
+
+                // Shift+Tab walks it back: Save, the fields in reverse, the rail.
+                var back = settings.btn_save.?;
+                var index = items.len;
+                while (index > 0) {
+                    index -= 1;
+                    back = dialog_test.GetNextDlgTabItem(hwnd, back, 1).?;
+                    try std.testing.expectEqual(settings.controlHwnd(items[index].control_index).?, back);
+                }
+                try std.testing.expectEqual(settings.sectionButton(section).?, dialog_test.GetNextDlgTabItem(hwnd, back, 1).?);
+            }
+        }
+    }.body);
+}
+
+test "settings arrow-key groups stop at the rail and the action bar" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+
+            // Down from the last rail button wraps to the first, rather than
+            // running on into the fields.
+            try std.testing.expectEqual(
+                settings.btn_section_appearance.?,
+                dialog_test.GetNextDlgGroupItem(hwnd, settings.btn_section_advanced.?, 0).?,
+            );
+        }
+    }.body);
+}
+
+test "settings focus forwarded to a saved field does not scroll the form" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const hwnd = fixture.hwnd();
+            try fixture.makeFormScrollable();
+
+            const field = settings.edit_pad_y.?;
+            _ = sys.SetFocus(field);
+            _ = sys.SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE, 0);
+            // The click that reactivates the window was aimed at the form as
+            // it is now; restoring focus must not move it.
+            settings.setContentScroll(0);
+            _ = sys.SetFocus(hwnd);
+            try std.testing.expectEqual(field, sys.GetFocus().?);
+            try std.testing.expectEqual(@as(i32, 0), settings.content_scroll_y);
+        }
+    }.body);
+}
+
+test "settings dropdown wheel forwarding survives the UIA control subclass" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.startWith(true);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            try fixture.makeFormScrollable();
+
+            const combo = settings.combo_cursor_style.?;
+            // The UIA subclass sits on top of the combo subclass.
+            try std.testing.expect(settings.controlIndex(combo) != null);
+            try std.testing.expect(settings.control_uia_providers[settings.controlIndex(combo).?] != null);
+            _ = sys.SendMessageW(combo, CB_SETCURSEL, 1, 0);
+            const before = settings.content_scroll_y;
+            dialog_test.Fixture.wheel(combo, -120);
+            try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            try std.testing.expectEqual(@min(before + settings.px(64), settings.content_scroll_max), settings.content_scroll_y);
+        }
+    }.body);
+}
+
+test "settings correcting one invalid field does not move to another section" {
+    var settings: SettingsWindow = .{ .handle = undefined };
+    settings.edit_scrollback = @ptrFromInt(0x201);
+    settings.edit_font_size = @ptrFromInt(0x202);
+
+    settings.markRawScalarEdit(.scrollback_limit);
+    settings.setRawScalarValidationError(.scrollback_limit, settings.edit_scrollback.?, "Scrollback limit is required.");
+    settings.active_section = .appearance;
+    settings.markRawScalarEdit(.font_size);
+    settings.setRawScalarValidationError(.font_size, settings.edit_font_size.?, "Font size is required.");
+
+    // Typing a valid size leaves the user in Appearance; the other error stays
+    // in the status line for them to find.
+    settings.finishRawScalarEdit(.font_size);
+    try std.testing.expectEqual(Section.appearance, settings.active_section);
+    try std.testing.expectEqual(RawScalarField.scrollback_limit, settings.active_raw_validation.?);
+    try std.testing.expectEqual(settings.edit_scrollback.?, settings.validation_control.?);
+}
+
+test "settings window carries the application icon" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const hwnd = fixture.hwnd();
+            const icon: usize = @intFromPtr(fixture.icon.?);
+
+            try std.testing.expectEqual(icon, dialog_test.GetClassLongPtrW(hwnd, dialog_test.GCLP_HICON));
+            try std.testing.expectEqual(icon, dialog_test.GetClassLongPtrW(hwnd, dialog_test.GCLP_HICONSM));
+            try std.testing.expectEqual(
+                @as(LRESULT, @bitCast(icon)),
+                sys.SendMessageW(hwnd, dialog_test.WM_GETICON, ICON_BIG, 0),
+            );
+        }
+    }.body);
+}
+
+test "settings action row geometry holds for panes shorter than its gaps" {
+    // `@max(0, height)` is a u31, so `height - 3` wrapped below 3 px.
+    for ([_]i32{ -20, -1, 0, 1, 2, 3, 4 }) |height| {
+        for ([_]i32{ 0, 90, 300 }) |width| {
+            const close = closeActionRowGeometry(width, height, 96);
+            try std.testing.expect(close.stacked);
+            try std.testing.expect(close.button_height >= 0);
+            try std.testing.expect(close.second_y >= 0 and close.third_y >= close.second_y);
+
+            const normal = normalActionRowGeometry(width, height, true, 96);
+            try std.testing.expect(normal.stacked);
+            try std.testing.expect(normal.button_height >= 0);
+            try std.testing.expect(normal.use_disk_y >= 0 and normal.save_y >= normal.use_disk_y);
+        }
+    }
+}
+
 fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
@@ -5694,6 +6490,102 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
         }
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/// Subclass for the dropdowns. A closed COMBOBOX changes its selection on the
+/// wheel, so scrolling the page past one silently edits it; the wheel goes to
+/// the window instead, and stays with the combo only while its list is open.
+/// The previous procedure lives in the combo's own `GWLP_USERDATA` (a stock
+/// control leaves it unused) so the subclass reads no `SettingsWindow` state
+/// and cannot outlive it: it detaches itself in `WM_NCDESTROY`.
+fn settingsComboProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const previous = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (previous == 0) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_MOUSEWHEEL and sys.SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0) == 0) {
+        const parent = sys.GetParent(hwnd) orelse return 0;
+        return sys.SendMessageW(parent, msg, wParam, lParam);
+    }
+    const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+    if (msg == WM_NCDESTROY) {
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+        _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    }
+    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+}
+
+fn subclassCombo(combo: HWND) void {
+    // Already ours (the prior procedure is recorded): nothing to do.
+    if (sys.GetWindowLongPtrW(combo, GWLP_USERDATA) != 0) return;
+    const previous = sys.SetWindowLongPtrW(
+        combo,
+        GWLP_WNDPROC,
+        @as(LONG_PTR, @intCast(@intFromPtr(&settingsComboProc))),
+    );
+    if (previous == 0) return;
+    _ = sys.SetWindowLongPtrW(combo, GWLP_USERDATA, previous);
+}
+
+/// Lines a full wheel notch moves, per the user's mouse setting.
+fn systemWheelScrollLines() u32 {
+    var lines: u32 = 3;
+    if (sys.SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0) == 0) return 3;
+    return lines;
+}
+
+/// Pixels one notch moves at `lines` lines per notch, where the default of
+/// three lines moves `default_px`.
+fn wheelNotchPixels(default_px: i32, lines: u32) i32 {
+    const capped: i32 = @intCast(@min(lines, 100));
+    return @divTrunc(default_px * capped, 3);
+}
+
+/// Turn a wheel delta into whole pixels. `remainder` carries what is left of a
+/// pixel, in 1/`WHEEL_DELTA` pixel, between messages: a precision touchpad
+/// sends many deltas far below one notch, and dividing each by the notch size
+/// on its own rounds every one of them to nothing.
+fn wheelScrollPixels(remainder: *i32, delta: i32, notch_px: i32) i32 {
+    // The leftover belongs to the previous direction.
+    if (delta != 0 and remainder.* != 0 and (delta < 0) != (remainder.* < 0)) remainder.* = 0;
+    const total: i64 = @as(i64, remainder.*) + @as(i64, delta) * notch_px;
+    const pixels: i64 = @divTrunc(total, WHEEL_DELTA);
+    remainder.* = @intCast(total - pixels * WHEEL_DELTA);
+    return @intCast(std.math.clamp(pixels, std.math.minInt(i32), std.math.maxInt(i32)));
+}
+
+fn startGroup(control: HWND) void {
+    const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(control, GWL_STYLE))));
+    if (style & WS_GROUP == 0) _ = sys.SetWindowLongPtrW(control, GWL_STYLE, @intCast(style | WS_GROUP));
+}
+
+fn sendToBottom(control: HWND) void {
+    const hwnd_bottom: ?*anyopaque = @ptrFromInt(1);
+    const flags: UINT = 0x0002 | 0x0001 | SWP_NOACTIVATE | SWP_NOREDRAW; // SWP_NOMOVE | SWP_NOSIZE
+    _ = sys.SetWindowPos(control, hwnd_bottom, 0, 0, 0, 0, flags);
+}
+
+test "settings wheel carries sub-pixel movement between messages" {
+    var remainder: i32 = 0;
+    // 30/120 of a 64 px notch is exactly 16 px each.
+    try std.testing.expectEqual(@as(i32, -16), wheelScrollPixels(&remainder, -30, 64));
+    // Ten units on a 3 px notch is a quarter of a pixel: a pixel every fourth
+    // message, and two over eight, where each message alone rounds to zero.
+    remainder = 0;
+    var total: i32 = 0;
+    for (0..8) |_| total += wheelScrollPixels(&remainder, 10, 3);
+    try std.testing.expectEqual(@as(i32, 2), total);
+    // Reversing direction drops the leftover rather than cancelling against it.
+    remainder = 0;
+    _ = wheelScrollPixels(&remainder, 10, 5);
+    try std.testing.expect(remainder > 0);
+    _ = wheelScrollPixels(&remainder, -10, 5);
+    try std.testing.expect(remainder <= 0);
+}
+
+test "settings wheel notch honours lines per notch" {
+    try std.testing.expectEqual(@as(i32, 64), wheelNotchPixels(64, 3));
+    try std.testing.expectEqual(@as(i32, 21), wheelNotchPixels(64, 1));
+    try std.testing.expectEqual(@as(i32, 0), wheelNotchPixels(64, 0));
+    try std.testing.expectEqual(wheelNotchPixels(64, 100), wheelNotchPixels(64, 4000));
 }
 
 fn shouldDrawSettingsSectionFocusRing(
@@ -6065,20 +6957,30 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         WM_MOUSEWHEEL => {
             if (owner) |o| {
                 const delta: i16 = @bitCast(@as(u16, @truncate(wParam >> 16)));
-                const steps = @divTrunc(@as(i32, delta), 120);
-                if (steps != 0) o.setContentScroll(o.content_scroll_y - steps * o.px(64));
+                o.scrollByWheel(delta);
             }
             return 0;
+        },
+        WM_ACTIVATE => {
+            // Deactivation (Alt+Tab away, minimize): remember the focused
+            // child. Activation needs nothing here: DefWindowProc focuses the
+            // frame, and WM_SETFOCUS below hands that on.
+            if (owner) |o| if ((wParam & 0xFFFF) == WA_INACTIVE) o.rememberFocus();
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        WM_SETFOCUS => {
+            // Focus landed on the frame itself (activation, restore from
+            // minimized): forward it to the field the user was typing in.
+            if (owner) |o| {
+                o.forwardFrameFocus();
+                return 0;
+            }
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_VSCROLL => {
             if (owner) |o| {
                 const code = wParam & 0xFFFF;
-                var client: RECT = undefined;
-                const viewport_height = if (GetClientRect(hwnd, &client) != 0)
-                    @max(1, settingsContentViewportBottom(o, client) - settingsContentViewportTop(o, client))
-                else
-                    o.px(240);
-                const page = @max(1, viewport_height - o.px(settings_control_height));
+                const page = o.contentPage();
                 var tracking: SCROLLINFO = .{
                     .cbSize = @sizeOf(SCROLLINFO),
                     .fMask = SIF_TRACKPOS,
@@ -6107,15 +7009,17 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const id: usize = wParam & 0xFFFF;
             const notify: u16 = @intCast((wParam >> 16) & 0xFFFF);
             // IsDialogMessageW maps Escape to IDCANCEL as a synthetic
-            // command with no originating control HWND. Do not treat the
-            // button's BN_SETFOCUS notification as cancellation, or the
+            // command with no originating control HWND. Only a click counts:
+            // the button's BN_SETFOCUS notification must not cancel, or the
             // conservative default focus immediately dismisses the prompt.
-            if (id == BTN_CLOSE_KEEP_EDITING and lParam == 0) {
-                if (owner) |o| o.cancelClosePrompt();
+            // The prompt's "Keep editing" button shares the ID, so a click
+            // arrives here too; with no prompt open it is a close request.
+            if (id == IDCANCEL and notify == BN_CLICKED) {
+                if (owner) |o| o.cancelRequested(hwnd);
                 return 0;
             }
             if (lParam != 0 and (notify == EN_SETFOCUS or notify == CBN_SETFOCUS or notify == BN_SETFOCUS)) {
-                if (owner) |o| o.ensureControlVisible(@ptrFromInt(@as(usize, @bitCast(lParam))));
+                if (owner) |o| if (!o.restoring_focus) o.ensureControlVisible(@ptrFromInt(@as(usize, @bitCast(lParam))));
             }
             if (clickedButton(id, notify, BTN_OPEN_EDITOR)) {
                 if (owner) |o| o.handle.openInEditor(o.handle.ctx);
@@ -6126,17 +7030,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 return 0;
             }
             if (clickedButton(id, notify, BTN_SAVE)) {
-                if (owner) |o| {
-                    const button_enabled = if (o.btn_save) |button| sys.IsWindowEnabled(button) != 0 else false;
-                    const button_visible = if (o.btn_save) |button| sys.IsWindowVisible(button) != 0 else false;
-                    if (saveCommandCanDispatch(
-                        o.close_prompt_visible,
-                        o.save_in_flight,
-                        o.close_posted,
-                        button_enabled,
-                        button_visible,
-                    )) o.save();
-                }
+                if (owner) |o| o.saveIfAllowed();
                 return 0;
             }
             if (clickedButton(id, notify, BTN_CLOSE_SAVE)) {
@@ -6145,10 +7039,6 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             }
             if (clickedButton(id, notify, BTN_CLOSE_DISCARD)) {
                 if (owner) |o| o.discardAndClose();
-                return 0;
-            }
-            if (clickedButton(id, notify, BTN_CLOSE_KEEP_EDITING)) {
-                if (owner) |o| o.cancelClosePrompt();
                 return 0;
             }
             if (id == BTN_CONFLICT_KEEP and notify == BN_CLICKED) {
@@ -6305,13 +7195,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_CLOSE => {
-            if (owner) |o| {
-                switch (closeRequestAction(o.hasPendingChanges(), o.close_prompt_visible, o.close_posted)) {
-                    .close_now => o.closeNow(hwnd),
-                    .show_prompt, .focus_prompt => o.showClosePrompt(),
-                    .ignore => {},
-                }
-            }
+            if (owner) |o| o.requestClose(hwnd);
             return 0;
         },
         WM_SETTINGS_CLOSE_NOW => {
