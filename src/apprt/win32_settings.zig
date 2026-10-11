@@ -2389,7 +2389,12 @@ pub const SettingsWindow = struct {
     }
 
     fn themeInputsApplied(self: *const SettingsWindow, colors: win32_theme.SettingsColors) bool {
+        // `apply` creates the four brushes independently, so a shortage of GDI
+        // objects can leave some of them null; any missing one retries.
         return self.theme_adapter.window_brush != null and
+            self.theme_adapter.rail_brush != null and
+            self.theme_adapter.edit_brush != null and
+            self.theme_adapter.button_brush != null and
             self.ui_font != null and
             self.ui_font_dpi == self.dpi and
             std.meta.eql(self.theme_adapter.colors, colors);
@@ -4762,6 +4767,13 @@ test "settings theme change with unchanged inputs rebuilds nothing" {
     try std.testing.expectEqual(@as(u32, 120), settings.ui_font_dpi);
     settings.themeChanged();
     try std.testing.expectEqual(@as(u32, 3), settings.theme_applications);
+
+    // A brush that could not be created is retried by the next broadcast.
+    if (settings.theme_adapter.button_brush) |brush| _ = sys.DeleteObject(brush);
+    settings.theme_adapter.button_brush = null;
+    settings.themeChanged();
+    try std.testing.expectEqual(@as(u32, 4), settings.theme_applications);
+    try std.testing.expect(settings.theme_adapter.button_brush != null);
 }
 
 test "settings save command rechecks dispatch state" {
