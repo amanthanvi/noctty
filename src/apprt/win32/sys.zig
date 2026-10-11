@@ -676,6 +676,8 @@ pub extern "shell32" fn ShellExecuteW(
 
 pub extern "shell32" fn DragAcceptFiles(hWnd: HWND, fAccept: BOOL) callconv(.winapi) void;
 
+pub extern "shlwapi" fn AssocIsDangerous(pszAssoc: LPCWSTR) callconv(.winapi) BOOL;
+
 pub extern "shell32" fn DragQueryFileW(hDrop: *anyopaque, iFile: UINT, lpszFile: ?[*]u16, cch: UINT) callconv(.winapi) UINT;
 
 pub extern "shell32" fn DragFinish(hDrop: *anyopaque) callconv(.winapi) void;
