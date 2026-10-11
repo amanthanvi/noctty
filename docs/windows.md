@@ -206,8 +206,9 @@ directory, including `--cd`, and caches answers separately for different
 environments or directories. The optional probe resolves only a local `.exe`;
 if resolution would need a network/device path or a mapped network drive,
 it keeps the fallback. For shell-form commands, automatic `TERM` is limited
-to a single `wsl.exe` command without variable expansion, redirection or
-command operators. Complex shell commands and a bare `wsl` without `.exe`
+to a single `wsl.exe` command without variable expansion, redirection,
+command operators, or ambiguous quote/backslash sequences. Complex shell
+commands and a bare `wsl` without `.exe`
 still receive the identity variables, but keep WSL's default terminal type.
 Shell-form launches also keep the fallback when a CMD AutoRun hook is present
 or cannot be checked: the hook may change the environment before WSL starts,

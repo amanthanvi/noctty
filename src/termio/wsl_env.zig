@@ -66,13 +66,18 @@ pub fn launchArgv(
 /// pipeline. Shell expansion also prevents reproducing its selector/cwd.
 pub fn canProbeShell(line: []const u8) bool {
     var quoted = false;
-    for (line) |c| {
+    for (line, 0..) |c, i| {
         switch (c) {
-            '"' => quoted = !quoted,
+            '"' => {
+                // Windows argv parsing treats backslashes before quotes and
+                // adjacent quotes differently from our simple splitter.
+                if (i > 0 and (line[i - 1] == '\\' or line[i - 1] == '"')) return false;
+                quoted = !quoted;
+            },
             '%', '^', '!' => return false,
             '&', '|', '<', '>', '(', ')' => if (!quoted) return false,
             '\r', '\n' => return false,
-            else => {},
+            else => if (c < 0x20 and c != '\t') return false,
         }
     }
     return !quoted;
@@ -643,6 +648,9 @@ test "automatic TERM is limited to one reproducible shell command" {
         "wsl.exe -d !DISTRO!",
         "wsl.exe -d My^ Distro",
         "wsl.exe \"unfinished",
+        "wsl.exe --cd \"/tmp/probe\\\\\" --exec tput colors",
+        "wsl.exe --cd \"/tmp/\"\"probe\" --exec tput colors",
+        "wsl.exe --cd /tmp/probe\x0c --exec tput colors",
         "wsl.exe\nother.exe",
     }) |line| try std.testing.expect(!canProbeShell(line));
 }
