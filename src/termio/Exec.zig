@@ -21,6 +21,7 @@ const shell_integration = @import("shell_integration.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
 const termio = @import("../termio.zig");
+const wsl_env = @import("wsl_env.zig");
 const Command = @import("../Command.zig");
 const windows_shell = configpkg.windows_shell;
 const ptypkg = @import("../pty.zig");
@@ -802,6 +803,10 @@ const Subprocess = struct {
     /// on other platforms, where `start` failing means no child exists.
     windows_process_created: bool = false,
 
+    /// A WSL launch whose `TERM` `start` still has to list in `WSLENV`, once
+    /// the distribution has said it knows the entry. See `wsl_env`.
+    wsl_probe: ?wsl_env.Probe = null,
+
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
     windows_job_object_plan: WindowsJobObjectPlan,
@@ -858,6 +863,9 @@ const Subprocess = struct {
         // Get our env. If a default env isn't provided by the caller
         // then we get it ourselves.
         var env = cfg.env;
+        // The env is ours from the call on, also when we fail: the puts
+        // below can grow it, which leaves the caller's copy stale.
+        errdefer env.deinit();
 
         // If we have a resources dir then set our env var
         if (cfg.resources_dir) |dir| {
@@ -1142,6 +1150,24 @@ const Subprocess = struct {
         // https://github.com/ghostty-org/ghostty/discussions/7769
         if (shell_pwd) |pwd| try env.put("PWD", pwd);
 
+        // wsl.exe passes a Linux process only what WSLENV lists, so the
+        // terminal's identity has to be listed there. Do it after every
+        // override, to merge the user's own WSLENV instead of replacing it.
+        // TERM waits for `start`, which can ask the distribution.
+        const wsl_probe: ?wsl_env.Probe = if (comptime builtin.os.tag == .windows) wsl: {
+            const argv = try wsl_env.launchArgv(
+                alloc,
+                exec_command.args,
+                exec_command.windows_cmd_shell,
+            ) orelse break :wsl null;
+            try wsl_env.forwardIdentity(&env, term_overridden);
+            if (term_overridden or std.mem.eql(u8, cfg.term, "xterm-256color")) break :wsl null;
+            if (!exec_command.windows_cmd_shell and !wsl_env.canProbeDirect(argv[0])) break :wsl null;
+            if (exec_command.windows_cmd_shell and !wsl_env.canProbeShell(exec_command.args[2])) break :wsl null;
+            if (exec_command.windows_cmd_shell and !wsl_env.cmdAutoRunAbsent()) break :wsl null;
+            break :wsl .{ .argv = argv, .term = try alloc.dupe(u8, cfg.term), .cwd = cwd };
+        } else null;
+
         return .{
             .arena = arena,
             .env = env,
@@ -1152,6 +1178,7 @@ const Subprocess = struct {
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
             .windows_job_object_plan = cfg.windows_job_object_plan,
+            .wsl_probe = wsl_probe,
 
             // Should be initialized with initTerminal call.
             .grid_size = .{},
@@ -1185,6 +1212,13 @@ const Subprocess = struct {
         };
 
         assert(self.pty == null and self.process == null);
+
+        // The distribution decides whether it can take our TERM. Ask it here,
+        // off the UI thread, which `init` runs on.
+        if (comptime builtin.os.tag == .windows) if (self.wsl_probe) |probe| {
+            self.wsl_probe = null;
+            if (self.env) |*env| try wsl_env.forwardProbedTerm(alloc, env, probe);
+        };
 
         // This function is funny because on POSIX systems it can
         // fail in the forked process. This is flipped to true if
@@ -2116,6 +2150,30 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
     ));
 }
 
+test "Subprocess.init frees the env it takes when it fails" {
+    // A first put into an empty map allocates this many times.
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe = EnvMap.init(counting.allocator());
+    try probe.put("TERM", "xterm-256color");
+    probe.deinit();
+
+    // Without a resources dir, init puts TERM and then COLORTERM: fail the
+    // second put while the env holds the first. Before the fix nobody freed
+    // it, since the caller cannot tell what the env grew into.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = counting.alloc_index,
+    });
+    try std.testing.expectError(error.OutOfMemory, Subprocess.init(std.testing.allocator, .{
+        .env = EnvMap.init(failing.allocator()),
+        .resources_dir = null,
+        .term = "xterm-256color",
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    }));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
 /// Builds the argv array for the process we should exec for the
 /// configured command. This isn't as straightforward as it seems since
 /// we deal with shell-wrapping, macOS login shells, etc.
@@ -2659,6 +2717,130 @@ test "putWindowsTerm falls back without a usable HOME and leaves other TERMs alo
     try env.put("TERM", "xterm-kitty");
     try putWindowsTerm(testing.allocator, &env, "xterm-kitty");
     try testing.expectEqualStrings("xterm-kitty", env.get("TERM").?);
+}
+
+test "a WSL launch lists the terminal's identity in WSLENV" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const wsl_command: configpkg.Command = .{ .direct = &.{
+        "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu",
+    } };
+
+    // The WSLENV the configuration sets wins over the inherited one and is
+    // extended, not replaced; TERM waits for the distribution's answer.
+    {
+        var env = EnvMap.init(testing.allocator);
+        try env.put("WSLENV", "inherited/p");
+        var overrides: configpkg.RepeatableStringMap = .{};
+        try overrides.parseCLI(arena.allocator(), "WSLENV=GOPATH/l");
+        try overrides.parseCLI(arena.allocator(), "PATH=C:\\ext02-child-path");
+        try overrides.parseCLI(arena.allocator(), "PATHEXT=.EXE;.CMD");
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = wsl_command,
+            .env = env,
+            .env_override = overrides,
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqualStrings(
+            "GOPATH/l:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u",
+            subprocess.env.?.get("WSLENV").?,
+        );
+        try testing.expectEqualStrings("xterm-ghostty", subprocess.wsl_probe.?.term);
+        try testing.expectEqualStrings("C:\\ext02-child-path", subprocess.env.?.get("PATH").?);
+        try testing.expectEqualStrings(".EXE;.CMD", subprocess.env.?.get("PATHEXT").?);
+    }
+
+    // A TERM the configuration sets is the user's: listed, never probed.
+    {
+        const env = EnvMap.init(testing.allocator);
+        var overrides: configpkg.RepeatableStringMap = .{};
+        try overrides.parseCLI(arena.allocator(), "TERM=xterm-kitty");
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = wsl_command,
+            .env = env,
+            .env_override = overrides,
+            .resources_dir = null,
+            .term = "xterm-256color",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqualStrings(
+            "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u:TERM/u",
+            subprocess.env.?.get("WSLENV").?,
+        );
+        try testing.expectEqual(null, subprocess.wsl_probe);
+    }
+
+    // `command = wsl.exe -d Ubuntu`, which runs through `cmd.exe /C`, is one.
+    {
+        const env = EnvMap.init(testing.allocator);
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = .{ .shell = "wsl.exe -d Ubuntu" },
+            .env = env,
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqualStrings(
+            "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u",
+            subprocess.env.?.get("WSLENV").?,
+        );
+        if (wsl_env.cmdAutoRunAbsent()) {
+            const probe = subprocess.wsl_probe.?;
+            try testing.expectEqual(@as(usize, 3), probe.argv.len);
+            try testing.expectEqualStrings("Ubuntu", probe.argv[2]);
+        } else {
+            try testing.expectEqual(null, subprocess.wsl_probe);
+        }
+    }
+
+    // Another program is not a WSL launch.
+    {
+        const env = EnvMap.init(testing.allocator);
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} },
+            .env = env,
+            .resources_dir = null,
+            .term = "xterm-256color",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqual(null, subprocess.env.?.get("WSLENV"));
+        try testing.expectEqual(null, subprocess.wsl_probe);
+    }
+
+    // One distribution's answer must not become TERM for another command
+    // in the same cmd.exe environment. Identity names can still be listed.
+    for ([_][:0]const u8{
+        "wsl.exe -d Ubuntu -e true & wsl.exe -d kali-linux",
+        "wsl.exe -d %DISTRO%",
+    }) |line| {
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = .{ .shell = line },
+            .env = EnvMap.init(testing.allocator),
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqual(null, subprocess.wsl_probe);
+        try testing.expectEqualStrings(
+            "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u",
+            subprocess.env.?.get("WSLENV").?,
+        );
+    }
 }
 
 test "samePath" {

@@ -767,7 +767,16 @@ pub fn init(
         .rt_surface = rt_surface,
         .thread = &self.renderer_thread,
     });
-    errdefer renderer_impl.deinit();
+    // The renderer's GL objects belong to this surface's context, which a
+    // later step (`finalizeSurfaceInit`, the renderer thread) can leave
+    // un-current. Rebind it before deleting them, and abandon them if that
+    // fails, as `deinit` does: deletes without it would hit another pane's
+    // objects or no context at all.
+    errdefer if (renderer_impl.prepareSurfaceDeinit(rt_surface)) |_| {
+        renderer_impl.deinit();
+    } else |err| {
+        log.err("abandoning renderer resources after a failed surface init err={}", .{err});
+    };
     if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
         rt_surface.noteBenchmarkMemoryStage(.renderer_initialized, null);
     }
@@ -852,7 +861,10 @@ pub fn init(
             break :env internal_os.getEnvMap(alloc) catch
                 std.process.EnvMap.init(alloc);
         };
-        errdefer env.deinit();
+        // `Exec.init` takes `env`, also when it fails, and its `deinit`
+        // frees it, so this errdefer must not outlive the hand-off.
+        var env_owned = true;
+        errdefer if (env_owned) env.deinit();
 
         // don't leak GHOSTTY_LOG to any subprocesses
         env.remove("GHOSTTY_LOG");
@@ -864,7 +876,7 @@ pub fn init(
         );
 
         // Initialize our IO backend
-        var io_exec = try termio.Exec.init(alloc, .{
+        const exec_config: termio.Exec.Config = .{
             .command = command,
             .env = env,
             .env_override = config.env,
@@ -887,7 +899,9 @@ pub fn init(
             .adopted_session = if (builtin.os.tag == .windows)
                 rt_surface.takeAdoptedSession()
             else {},
-        });
+        };
+        env_owned = false;
+        var io_exec = try termio.Exec.init(alloc, exec_config);
         errdefer io_exec.deinit();
 
         // Initialize our IO mailbox
@@ -976,6 +990,16 @@ pub fn init(
     if (comptime @hasDecl(apprt.Surface, "noteBenchmarkRendererThreadSpawned")) {
         rt_surface.noteBenchmarkRendererThreadSpawned(self.id);
     }
+    // The errdefers above free state this thread uses, so a failure from
+    // here on must stop it first, as `deinit` does. They free the copies
+    // taken before it started, so hand them what it allocated since.
+    errdefer {
+        self.renderer_thread.stop.notify() catch |err|
+            log.err("error notifying renderer thread to stop, may stall err={}", .{err});
+        self.renderer_thr.join();
+        renderer_impl = self.renderer;
+        render_thread = self.renderer_thread;
+    }
 
     // Start our IO thread
     self.io_thr = try std.Thread.spawn(
@@ -985,21 +1009,24 @@ pub fn init(
     );
     self.io_thr.setName("io") catch {};
 
+    // Both threads are running and only `deinit` stops them in order, so
+    // nothing below may fail. A title the runtime cannot take is not worth
+    // the terminal.
     if (config.title) |title| {
-        _ = try rt_app.performAction(
+        _ = rt_app.performAction(
             .{ .surface = self },
             .set_title,
             .{ .title = title },
-        );
+        ) catch |err| log.warn("unable to set initial title err={}", .{err});
     } else if (command) |cmd| switch (cmd) {
         // If a user specifies a command it is appropriate to set the title as argv[0]
         // we know in the case of a direct command it has been supplied by the user
         .direct => |cmd_str| if (cmd_str.len != 0) {
-            _ = try rt_app.performAction(
+            _ = rt_app.performAction(
                 .{ .surface = self },
                 .set_title,
                 .{ .title = cmd_str[0] },
-            );
+            ) catch |err| log.warn("unable to set initial title err={}", .{err});
         },
 
         // We won't set the title in the case the shell expands the command

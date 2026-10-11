@@ -61,6 +61,9 @@ args: []const [:0]const u8,
 /// It must bypass argv quoting because cmd.exe uses its own quote rules.
 windows_cmd_shell: bool = false,
 
+/// Start an auxiliary Windows command without allocating a console window.
+windows_create_no_window: bool = false,
+
 /// Environment variables for the child process. If this is null, inherits
 /// the environment variables from this process. These are the exact
 /// environment variables to set; these are /not/ merged.
@@ -384,6 +387,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
 
     const flags: std.os.windows.CreateProcessFlags = .{
         .create_unicode_environment = true,
+        .create_no_window = self.windows_create_no_window,
         .extended_startupinfo_present = attribute_list != null,
         .create_suspended = job_handle != null,
     };

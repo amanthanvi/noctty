@@ -3599,6 +3599,10 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) anyerror!*Surface = null,
+    /// Test-only seam that stands in for the GL context and the core surface
+    /// in `Surface.init`, neither of which a unit test can create. The window,
+    /// tab, shell and unwind steps around them run for real.
+    test_surface_init_stage: ?*const fn (surface: *Surface, stage: Surface.InitStage) anyerror!void = null,
     /// Test-only seam for automation snapshots built without a live core
     /// surface. Returned strings are owned by the caller.
     test_automation_pwd: ?*const fn (Allocator, *Surface) anyerror!?[]const u8 = null,
@@ -4838,6 +4842,56 @@ pub const App = struct {
         );
     }
 
+    test "a failed new window request leaves the app running and the mailbox draining" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+            .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+            .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+        });
+        defer session.deinit();
+
+        const Hook = struct {
+            var calls: usize = 0;
+
+            fn createSurface(_: *App, _: *const configpkg.Config, _: LPCWSTR, _: SurfaceInitOptions) anyerror!*Surface {
+                calls += 1;
+                return error.TestWindowCreateFailed;
+            }
+        };
+        Hook.calls = 0;
+        app.test_create_window_surface = &Hook.createSurface;
+
+        // Two `+new-window` requests forwarded by other processes, and no
+        // window can be created for either. Before the fix the first error
+        // left `App.run`, and every existing window closed with it.
+        for (0..2) |_| {
+            try std.testing.expect(core_app.mailbox.push(.{ .new_window = .{} }, .instant) != 0);
+        }
+        try core_app.tick(&app);
+        try std.testing.expectEqual(@as(usize, 2), Hook.calls);
+        try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+        try std.testing.expectEqualStrings("New window could not be opened.", host.banner_text.?);
+
+        // With its last tab detached for undo, the host stays open but has
+        // no surface to resolve it through, and still takes the banner.
+        try host.setBanner(.none, null);
+        var detached = host.tabs.orderedRemove(0);
+        detached.deinit();
+        try std.testing.expect(core_app.mailbox.push(.{ .new_window = .{} }, .instant) != 0);
+        try core_app.tick(&app);
+        try std.testing.expectEqual(@as(usize, 3), Hook.calls);
+        try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+    }
+
     /// Record this launch as resolved in the startup ledger.
     ///
     /// A launch is unresolved until the outer Win32 message loop completes its
@@ -5050,19 +5104,115 @@ pub const App = struct {
         const first = tab_surface orelse return error.EmptyLayout;
         const selected = selected_surface orelse first;
         if (self.findTabForSurface(selected)) |found| {
-            var restored_tree = try buildRestoredSessionSplitTree(
+            // No errdefer: nothing can fail before the tab takes the tree, and
+            // from then on the tab frees it, also when `layout` fails.
+            const restored_tree = try buildRestoredSessionSplitTree(
                 self.core_app.alloc,
                 saved_tab.layout,
                 node_surfaces,
             );
-            errdefer restored_tree.deinit();
-
             found.tab.tree.deinit();
             found.tab.tree = restored_tree;
             if (found.tab.findHandle(selected)) |handle| found.tab.focused = handle;
             try found.host.layout();
         }
         return selected;
+    }
+
+    test "restoreSessionTab leaves the restored tree to the tab when layout fails" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var left: Surface = undefined;
+        var right: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{
+                .{ .storage = &left, .host = &host },
+                .{ .storage = &right, .host = &host },
+            },
+        });
+        defer session.deinit();
+        const host_hwnd = try createTestHostWindow();
+        defer _ = sys.DestroyWindow(host_hwnd);
+        host.hwnd = host_hwnd;
+
+        // The saved ratio tells the restored tree from the one the panes
+        // were created with.
+        const nodes = [_]win32_session_state.Node{
+            .{ .split = .{ .axis = .horizontal, .ratio = 0.25, .first = 1, .second = 2 } },
+            .{ .pane = .{} },
+            .{ .pane = .{} },
+        };
+        const layout: win32_session_state.LayoutTree = .{ .root = 0, .nodes = &nodes };
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var dry_run = try buildRestoredSessionSplitTree(counting.allocator(), layout, &.{ null, &left, &right });
+        dry_run.deinit();
+
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        core_app.alloc = failing.allocator();
+        defer core_app.alloc = std.testing.allocator;
+
+        const Hook = struct {
+            var panes: [2]*Surface = undefined;
+            var created: usize = 0;
+            var failing_ref: *std.testing.FailingAllocator = undefined;
+            var build_allocations: usize = 0;
+
+            fn createSurface(
+                hook_app: *App,
+                _: *const configpkg.Config,
+                _: LPCWSTR,
+                opts: SurfaceInitOptions,
+            ) anyerror!*Surface {
+                const alloc = hook_app.core_app.alloc;
+                const surface = panes[created];
+                created += 1;
+                const target = hook_app.findHostById(opts.host_id.?).?;
+                const source = opts.clone_state_from orelse {
+                    var tab = try Tab.init(alloc, target.nextTabId(), surface);
+                    errdefer tab.deinit();
+                    try target.tabs.append(alloc, tab);
+                    return surface;
+                };
+                const found = hook_app.findTabForSurface(@constCast(source)).?;
+                var inserted = try SplitTreeSurface.init(alloc, surface);
+                defer inserted.deinit();
+                const next = try found.tab.tree.split(alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
+                found.tab.tree.deinit();
+                found.tab.tree = next;
+                // The last pane is in. Fail the first allocation after the
+                // restored tree is built: the one `layout` makes once the
+                // tab has taken that tree.
+                failing_ref.fail_index = failing_ref.alloc_index + build_allocations;
+                return surface;
+            }
+        };
+        Hook.panes = .{ &left, &right };
+        Hook.created = 0;
+        Hook.failing_ref = &failing;
+        Hook.build_allocations = counting.alloc_index;
+        app.test_create_window_surface = &Hook.createSurface;
+
+        var transaction = SessionRestoreTransaction.init(&app);
+        // Before the fix the restore's own errdefer freed the restored tree
+        // while the tab kept it, and the session teardown freed it again.
+        try std.testing.expectError(error.OutOfMemory, app.restoreSessionTab(
+            .{ .selected_leaf = 1, .layout = layout },
+            &host,
+            0,
+            &transaction,
+        ));
+        try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+        const tab = &host.tabs.items[0];
+        try std.testing.expectEqual(@as(f16, 0.25), tab.tree.nodes[0].split.ratio);
+        try std.testing.expectEqual(@as(usize, 2), tab.leafCount());
+        try std.testing.expectEqual(&right, tab.focusedSurface().?);
     }
 
     fn restoreSessionPane(
@@ -6488,9 +6638,20 @@ pub const App = struct {
                     _ = self.launchNamedLayout(name, banner_host);
                     return true;
                 }
-                _ = try self.createWindowSurface(&config, default_title, .{
-                    .clone_state_from = self.findSurfaceForTarget(target),
-                });
+                const source = self.findSurfaceForTarget(target);
+                _ = self.createWindowSurface(&config, default_title, .{
+                    .clone_state_from = source,
+                }) catch |err| {
+                    // A request forwarded by another process was acknowledged
+                    // when it was queued, so say here that nothing opened.
+                    // The first host still shows a banner while its last tab
+                    // is detached for undo, when it has no surface.
+                    const banner_host: ?*Host = if (source) |surface|
+                        surface.host
+                    else if (self.hosts.items.len > 0) self.hosts.items[0] else null;
+                    if (banner_host) |host| host.setBanner(.err, "New window could not be opened.") catch {};
+                    return err;
+                };
                 return true;
             },
 
@@ -27952,7 +28113,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 // UIA may query the child HWND reentrantly while DestroyWindow
                 // is unwinding. Surface.destroy clears this flag before it
                 // releases the owner context, so never recreate that context
-                // once teardown has begun (or before core init completes).
+                // once teardown has begun (or before init completes).
                 if (!v.destroy_on_wm_destroy) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                 const provider = v.terminalUiaProvider() catch |err| {
                     log.warn("uia: terminal provider init failed err={}", .{err});
@@ -28898,6 +29059,9 @@ pub const Surface = struct {
         return initialDecorationsVisibleForSource(config, opts.clone_state_from);
     }
 
+    /// The `Surface.init` steps `App.test_surface_init_stage` stands in for.
+    const InitStage = enum { gl_context, core_surface };
+
     pub fn init(
         self: *Surface,
         app: *App,
@@ -28916,7 +29080,18 @@ pub const Surface = struct {
         const host = existing_host orelse
             try app.createHost(title, opts.clone_state_from, opts.quick_terminal);
         const created_host = existing_host == null;
-        errdefer if (created_host) app.removeHost(host);
+        errdefer if (created_host) {
+            // Its shell window was never committed. Clear it, or the focus
+            // change while the window is destroyed audits this host as a
+            // window the shell is missing.
+            host.shell_id = null;
+            // As `createHost` unwinds: the Host stays registered through
+            // WM_DESTROY, which detaches its shell compositor.
+            if (host.hwnd) |host_hwnd| {
+                if (sys.DestroyWindow(host_hwnd) == 0) app.detachShellCompositorWindow(host_hwnd);
+            }
+            app.removeHost(host);
+        };
         self.* = .{
             .app = app,
             .host = host,
@@ -28941,6 +29116,14 @@ pub const Surface = struct {
                 &surfaceDropPayloadCallback,
             ),
         };
+        // `destroy` never runs for a Surface whose init fails, so free here
+        // what it would: the strings, among them the launch command cloned
+        // below and a title the core sets as it starts, and the traces.
+        errdefer {
+            self.freeOwnedStrings();
+            self.render_trace.deinit(app.core_app.alloc);
+            self.memory_stage_trace.deinit(app.core_app.alloc);
+        }
         errdefer if (self.adopted_session) |*session| {
             session.pty.deinit();
             _ = windows.CloseHandle(session.client_process);
@@ -28951,10 +29134,6 @@ pub const Surface = struct {
         else
             config.command;
         if (launch_command) |command| self.launch_command = try command.clone(app.core_app.alloc);
-        errdefer if (self.launch_command) |*command| {
-            command.deinit(app.core_app.alloc);
-            self.launch_command = null;
-        };
         // The DropTarget's surface_ctx must be `self`, but we can't
         // initialise it until `self.*` has been fully assigned above
         // (taking the address of an in-progress struct literal is
@@ -29013,11 +29192,26 @@ pub const Surface = struct {
         log.debug("surface.init hwnd created", .{});
         self.noteBenchmarkMemoryStage(.child_hwnd_created, null);
 
-        if (!build_config.d3d11 or config.renderer == .opengl) try self.ensureGLContext();
+        if (app.test_surface_init_stage) |stage| {
+            try stage(self, .gl_context);
+            self.noteBenchmarkMemoryStage(.gl_context_created, null);
+        } else if (!build_config.d3d11 or config.renderer == .opengl) {
+            // `ensureGLContext` publishes the pixel format before its stage
+            // note, which only emits the wgl_* provenance fields after that.
+            try self.ensureGLContext();
+            log.debug("surface.init gl context created", .{});
+        }
         errdefer self.destroyGL();
 
+        // `addSurface` below stops a running quit timer. If init then fails,
+        // restart it once this Surface has left `windows`, or an app left
+        // with no window would never quit.
+        const quit_timer_was_running = app.quit_timer_id != null;
         try app.windows.append(app.core_app.alloc, self);
-        errdefer app.removeWindow(self);
+        errdefer {
+            app.removeWindow(self);
+            if (quit_timer_was_running) app.startQuitTimer();
+        }
         log.debug("surface.init appended to app windows", .{});
         try app.core_app.addSurface(self);
         errdefer app.core_app.deleteSurface(self);
@@ -29077,6 +29271,9 @@ pub const Surface = struct {
         // Without this, a zombie tab with a dangling surface pointer would remain
         // in host.tabs, causing use-after-free on subsequent refreshChrome/layout.
         errdefer {
+            // The chrome may have given the new tab a button and a UIA
+            // provider, which the tab must not outlive (`Tab.deinit`).
+            if (inserted_tab_index) |index| if (index < host.tabs.items.len) host.destroyTabButton(&host.tabs.items[index]);
             rollbackFailedSurfaceAttach(
                 &host.tabs,
                 &host.active_tab,
@@ -29085,6 +29282,9 @@ pub const Surface = struct {
                 inserted_tab_index,
                 &split_rollback,
             );
+            // The core's `set_title` may have relabelled a host that stays
+            // for the tabs it had; `windowDestroyed` would refresh them.
+            if (!created_host) runUiActionOrLog("failed surface chrome refresh failed", host.refreshChrome());
         }
 
         // The core opens the pty at the size read below. Give a new split its
@@ -29122,25 +29322,29 @@ pub const Surface = struct {
             }
         }
 
-        try self.core_surface.init(
-            app.core_app.alloc,
-            config,
-            app.core_app,
-            app,
-            self,
-        );
-        self.core_initialized = true;
-        self.destroy_on_wm_destroy = true;
-        log.debug("surface.init core surface initialized", .{});
-        // The core read the child's size when its init began, and the core's
-        // own init-time actions can lay the host out again before it ends.
-        // `syncCoreSizeFromClientRect` recorded any such move in `self.size`
-        // but could not forward it yet, and from here on it compares against
-        // that record, so nothing would ever forward it. The core ignores a
-        // size it already has.
-        self.core_surface.sizeCallback(self.size) catch |err| {
-            log.err("win32 size callback failed err={}", .{err});
-        };
+        if (app.test_surface_init_stage) |stage| try stage(self, .core_surface) else {
+            try self.core_surface.init(
+                app.core_app.alloc,
+                config,
+                app.core_app,
+                app,
+                self,
+            );
+            self.core_initialized = true;
+            log.debug("surface.init core surface initialized", .{});
+            // The core read the child's size when its init began, and the
+            // core's own init-time actions can lay the host out again before
+            // it ends. `syncCoreSizeFromClientRect` recorded any such move in
+            // `self.size` but could not forward it yet, and from here on it
+            // compares against that record, so nothing would ever forward it.
+            // The core ignores a size it already has.
+            self.core_surface.sizeCallback(self.size) catch |err| {
+                log.err("win32 size callback failed err={}", .{err});
+            };
+        }
+        // Stop the core if a later step fails. This runs first, while the GL
+        // context and the window its threads draw to are still alive.
+        errdefer self.deinitCore();
 
         // Same-host tabs/splits must stay hidden through init, but they still
         // need an initial occlusion sync so hidden child GL surfaces stop
@@ -29196,6 +29400,171 @@ pub const Surface = struct {
         // the shell reducer selects the new entity before the caller activates
         // its native surface. The activation path performs the stable audit.
         if (opts.host_id == null) app.auditShellNativeMapping("surface-create");
+        // Only now does WM_DESTROY own the Surface: it runs `destroy`, which
+        // frees it. Set any earlier, a failed step above has its unwinding
+        // DestroyWindow free the Surface under these errdefers, and then
+        // `createWindowSurface` frees it again.
+        self.destroy_on_wm_destroy = true;
+    }
+
+    test "Surface.init that fails after the core starts is unwound once, by init" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var existing: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+            .surfaces = &.{.{ .storage = &existing, .host = &host }},
+            .tabs = &.{.{ .host = &host, .surface = &existing, .id = 1 }},
+            .shell_runtime_initialized = true,
+        });
+        defer session.deinit();
+        // With COM, a tab button gets a UIA provider, as in the app.
+        app.initComApartment();
+        defer if (app.com_initialized) sys.CoUninitialize();
+        try app.ensureWindowClass();
+        defer _ = sys.UnregisterClassW(class_name, app.hinstance);
+        const host_hwnd = try createTestHostWindow();
+        defer _ = sys.DestroyWindow(host_hwnd);
+        host.hwnd = host_hwnd;
+        // The rollback's chrome refresh caches the window title, which
+        // `Host.deinit` would free and the test session does not.
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+
+        var shell_window = try app.shell_runtime.prepare(.create_window);
+        defer shell_window.deinit();
+        try shell_window.commit(&app.shell_runtime);
+        host.shell_id = shell_window.created.window;
+
+        const Stage = struct {
+            var stale: bool = false;
+            var surface_hwnd: ?HWND = null;
+
+            fn run(surface: *Surface, stage: InitStage) anyerror!void {
+                surface_hwnd = surface.hwnd;
+                if (stage != .core_surface) return;
+                // What the core's `set_title` leaves as it starts: the
+                // title, and a button with a UIA provider for the new tab.
+                // `syncTabButtons` cannot make the button here, since the
+                // test executable has no manifest for the layered chrome.
+                surface.title = try surface.app.core_app.alloc.dupeZ(u8, "PKG-05");
+                const owner = surface.host.?;
+                const tab = &owner.tabs.items[owner.tabs.items.len - 1];
+                tab.button_hwnd = sys.CreateWindowExW(
+                    0,
+                    prompt_button_class,
+                    std.unicode.utf8ToUtf16LeStringLiteral(""),
+                    c.WS_CHILD,
+                    0,
+                    0,
+                    1,
+                    1,
+                    owner.hwnd,
+                    null,
+                    surface.app.hinstance,
+                    null,
+                ) orelse return lastError();
+                tab.uia_provider = owner.createChromeUiaProvider(tab.button_hwnd.?, .{
+                    .ctx = @ptrCast(owner),
+                    .role = .tab_item,
+                    .tag = tab.id,
+                    .name = &Host.tabItemUiaName,
+                });
+                // Something commits to the shell runtime meanwhile, as an
+                // interleaved focus change can, so the new tab's prepared
+                // transaction no longer applies.
+                if (stale) surface.app.shell_runtime.revision +%= 1;
+            }
+        };
+        Stage.stale = true;
+        Stage.surface_hwnd = null;
+        app.test_surface_init_stage = &Stage.run;
+
+        // The app has no window, and its quit timer is counting down.
+        app.running = true;
+        app.config.@"quit-after-last-window-closed-delay" = .{ .duration = 60 * std.time.ns_per_s };
+        app.startQuitTimer();
+        defer app.stopQuitTimer();
+        try std.testing.expect(app.quit_timer_id != null);
+
+        // Before the fix, the unwinding DestroyWindow sent WM_DESTROY, which
+        // freed the Surface; the errdefers then read it and
+        // `createWindowSurface` freed it a second time. The title, the tab's
+        // UIA provider (`Tab.deinit` asserts it is gone) and the quit timer
+        // `addSurface` stopped are left for init's errdefers to undo.
+        try std.testing.expectError(
+            error.StaleRevision,
+            app.createWindowSurface(&app.config, default_title, .{ .host_id = host.id }),
+        );
+        app.running = false;
+        try std.testing.expect(sys.IsWindow(Stage.surface_hwnd.?) == 0);
+        try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+        try std.testing.expectEqual(&existing, host.tabs.items[0].focusedSurface().?);
+        try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
+        try std.testing.expectEqual(@as(usize, 0), core_app.surfaces.items.len);
+        try std.testing.expect(app.quit_timer_id != null);
+
+        // Once init returns, the window owns the Surface: destroying it frees
+        // the Surface once, and its tab and button with it.
+        Stage.stale = false;
+        const created = try app.createWindowSurface(&app.config, default_title, .{ .host_id = host.id });
+        try std.testing.expect(created.destroy_on_wm_destroy);
+        try std.testing.expectEqual(@as(usize, 2), host.tabs.items.len);
+        // `destroy` unregisters the surfaces whose core it stops, and the
+        // stub started none.
+        core_app.deleteSurface(created);
+        try std.testing.expect(sys.DestroyWindow(created.hwnd.?) != 0);
+        try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
+        try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
+    }
+
+    test "Surface.init that fails before the core starts destroys the host window it created" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app });
+        defer session.deinit();
+        const hinstance = app.hinstance;
+        defer {
+            // `createHost` registers its classes and nothing unregisters them.
+            _ = sys.UnregisterClassW(class_name, hinstance);
+            _ = sys.UnregisterClassW(host_class_name, hinstance);
+            _ = sys.UnregisterClassW(palette_list_class_name, hinstance);
+            _ = sys.UnregisterClassW(scrollbar_class_name, hinstance);
+        }
+        try app.ensureWindowClass();
+
+        const Stage = struct {
+            var host_hwnd: ?HWND = null;
+
+            fn run(surface: *Surface, stage: InitStage) anyerror!void {
+                std.debug.assert(stage == .gl_context);
+                host_hwnd = surface.host.?.hwnd;
+                // As a lost or below-floor GPU fails a new window.
+                return error.TestGLContextFailed;
+            }
+        };
+        Stage.host_hwnd = null;
+        app.test_surface_init_stage = &Stage.run;
+
+        try std.testing.expectError(
+            error.TestGLContextFailed,
+            app.createWindowSurface(&app.config, default_title, .{}),
+        );
+        const host_hwnd = Stage.host_hwnd.?;
+        defer if (sys.IsWindow(host_hwnd) != 0) {
+            _ = sys.DestroyWindow(host_hwnd);
+        };
+        // Before the fix the Host was freed and its hidden window left behind.
+        try std.testing.expect(sys.IsWindow(host_hwnd) == 0);
+        try std.testing.expectEqual(@as(usize, 0), app.hosts.items.len);
     }
 
     pub fn deinit(self: *Surface) void {
@@ -33345,17 +33714,7 @@ pub const Surface = struct {
         }
         self.drop_target.deinit();
 
-        if (self.core_initialized) {
-            if (self.inspector_visible) {
-                self.core_surface.deactivateInspector();
-                self.inspector_visible = false;
-            }
-            self.app.core_app.deleteSurface(self);
-            self.core_surface.deinit();
-            self.core_initialized = false;
-        }
-        // Outside the `core_initialized` branch so the stage is still
-        // emitted for a surface that failed before core init.
+        self.deinitCore();
         self.noteBenchmarkMemoryStage(.core_deinit_complete, null);
 
         // Drain the undo stack. Entries own scrollback / title bytes
@@ -33381,7 +33740,41 @@ pub const Surface = struct {
         self.render_trace.deinit(alloc);
 
         self.destroyGL();
+        self.freeOwnedStrings();
 
+        // App-level detachment is still per-pane teardown: `windowDestroyed`
+        // removes this surface from `App.windows`, discards the structural
+        // history entries referencing it, deinitializes the owning tab and
+        // its split tree when this was the tab's last pane, drops any
+        // prepared close tree, and reconciles pending shell state. Sampling
+        // before that draws the private-memory boundary in the wrong place
+        // and misattributes those still-held bytes to allocator or driver
+        // behaviour.
+        //
+        // Safe to sample afterwards: `windowDestroyed` reads `self`
+        // throughout but never frees it — `alloc.destroy(self)` below is the
+        // sole owner-side free, so `self` and its trace are necessarily live
+        // when the call returns.
+        self.app.windowDestroyed(self);
+
+        // The final stage, then the trace itself. `MemoryStageTrace.deinit`
+        // clears `path`, after which `note` is a no-op — so this must stay
+        // the last thing before the Surface is freed, and in particular
+        // after `destroyGL` emits its teardown stages.
+        //
+        // The Surface and memory-stage trace path are both still live here
+        // and are freed immediately below. Both predate `surface_begin`, so
+        // stage deltas cancel them; the external pane-memory metric still
+        // includes one trace-path allocation per traced surface.
+        self.noteBenchmarkMemoryStage(.surface_destroy_complete, null);
+        self.memory_stage_trace.deinit(alloc);
+        alloc.destroy(self);
+    }
+
+    /// Frees the strings this Surface owns. `init` calls it too when it fails,
+    /// since the core can set some of them, such as the title, as it starts.
+    fn freeOwnedStrings(self: *Surface) void {
+        const alloc = self.app.core_app.alloc;
         if (self.title) |title| {
             alloc.free(title);
             self.title = null;
@@ -33422,34 +33815,19 @@ pub const Surface = struct {
             alloc.free(value);
             self.progress_status = null;
         }
+    }
 
-        // App-level detachment is still per-pane teardown: `windowDestroyed`
-        // removes this surface from `App.windows`, discards the structural
-        // history entries referencing it, deinitializes the owning tab and
-        // its split tree when this was the tab's last pane, drops any
-        // prepared close tree, and reconciles pending shell state. Sampling
-        // before that draws the private-memory boundary in the wrong place
-        // and misattributes those still-held bytes to allocator or driver
-        // behaviour.
-        //
-        // Safe to sample afterwards: `windowDestroyed` reads `self`
-        // throughout but never frees it — `alloc.destroy(self)` below is the
-        // sole owner-side free, so `self` and its trace are necessarily live
-        // when the call returns.
-        self.app.windowDestroyed(self);
-
-        // The final stage, then the trace itself. `MemoryStageTrace.deinit`
-        // clears `path`, after which `note` is a no-op — so this must stay
-        // the last thing before the Surface is freed, and in particular
-        // after `destroyGL` emits its teardown stages.
-        //
-        // The Surface and memory-stage trace path are both still live here
-        // and are freed immediately below. Both predate `surface_begin`, so
-        // stage deltas cancel them; the external pane-memory metric still
-        // includes one trace-path allocation per traced surface.
-        self.noteBenchmarkMemoryStage(.surface_destroy_complete, null);
-        self.memory_stage_trace.deinit(alloc);
-        alloc.destroy(self);
+    /// Joins the core's renderer and IO threads, so the GL context and window
+    /// they use must still be alive.
+    fn deinitCore(self: *Surface) void {
+        if (!self.core_initialized) return;
+        if (self.inspector_visible) {
+            self.core_surface.deactivateInspector();
+            self.inspector_visible = false;
+        }
+        self.app.core_app.deleteSurface(self);
+        self.core_surface.deinit();
+        self.core_initialized = false;
     }
 
     fn setMouseShape(self: *Surface, shape: terminal.MouseShape) void {
