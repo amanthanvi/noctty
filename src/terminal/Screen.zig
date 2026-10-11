@@ -355,6 +355,16 @@ pub fn assertIntegrity(self: *const Screen) void {
         ) orelse unreachable;
         assert(self.cursor.x == pt.active.x);
         assert(self.cursor.y == pt.active.y);
+
+        // The cursor style and hyperlink if non-zero must reference
+        // real data in the page the pin is in.
+        const page: *const Page = &self.cursor.page_pin.node.data;
+        if (self.cursor.style_id != style.default_id) {
+            assert(page.styles.refCount(page.memory, self.cursor.style_id) > 0);
+        }
+        if (self.cursor.hyperlink_id != 0) {
+            assert(page.hyperlink_set.refCount(page.memory, self.cursor.hyperlink_id) > 0);
+        }
     }
 }
 
@@ -762,12 +772,34 @@ pub fn cursorReload(self: *Screen) void {
         .active,
         self.cursor.page_pin.*,
     ) orelse reset: {
+        // Our cached row/cell pointers may be invalid (that is often
+        // the reason cursorReload is being called), so refresh them
+        // from the pin first since cursorChangePin below marks the
+        // old cursor row as dirty.
+        const old_rac = self.cursor.page_pin.rowAndCell();
+        self.cursor.page_row = old_rac.row;
+        self.cursor.page_cell = old_rac.cell;
+
+        // The cursor style and hyperlink IDs are only valid within the
+        // page that the pin points at, so the pin change must go through
+        // cursorChangePin, which migrates them when the active top-left
+        // is on a different page. Writing the pin directly here would
+        // leave the cursor holding IDs that are dead or alias unrelated
+        // entries on the new page.
         const pin = self.pages.pin(.{ .active = .{} }).?;
-        self.cursor.page_pin.* = pin;
+        self.cursor.x = 0; // Must be set before cursorChangePin
+        self.cursor.y = 0;
+        self.cursorChangePin(pin);
 
         // A pending wrap belonged to the position the cursor just lost.
         self.cursor.pending_wrap = false;
-        break :reset self.pages.pointFromPin(.active, pin).?;
+
+        // cursorChangePin can trigger a page capacity adjustment which
+        // moves the pin again, so we re-read it to derive our point.
+        break :reset self.pages.pointFromPin(
+            .active,
+            self.cursor.page_pin.*,
+        ).?;
     };
 
     self.cursor.x = @intCast(pt.active.x);
@@ -775,20 +807,6 @@ pub fn cursorReload(self: *Screen) void {
     const page_rac = self.cursor.page_pin.rowAndCell();
     self.cursor.page_row = page_rac.row;
     self.cursor.page_cell = page_rac.cell;
-
-    // If we have a style, we need to ensure it is in the page because this
-    // method may also be called after a page change.
-    if (self.cursor.style_id != style.default_id) {
-        self.manualStyleUpdate() catch |err| {
-            // This failure should not happen because manualStyleUpdate
-            // handles page splitting, overflow, and more. This should only
-            // happen if we're out of RAM. In this case, we'll just degrade
-            // gracefully back to the default style.
-            log.err("failed to update style on cursor reload err={}", .{err});
-            self.cursor.style = .{};
-            self.cursor.style_id = 0;
-        };
-    }
 }
 
 /// Scroll the active area and keep the cursor at the bottom of the screen.
@@ -1013,23 +1031,85 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
     var current = self.pages.pages.last.?;
     while (current != self.cursor.page_pin.node) : (current = current.prev.?) {
         const prev = current.prev.?;
-        const prev_page = &prev.data;
-        const cur_page = &current.data;
-        const prev_rows = prev_page.rows.ptr(prev_page.memory.ptr);
-        const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
 
         // Rotate the pages down: [ 0 1 2 3 ] => [ 3 0 1 2 ]
-        fastmem.rotateOnceR(Row, cur_rows[0..cur_page.size.rows]);
+        {
+            const cur_page = &current.data;
+            const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
+            fastmem.rotateOnceR(Row, cur_rows[0..cur_page.size.rows]);
+        }
 
         // Copy the last row of the previous page to the top of current.
-        try cur_page.cloneRowFrom(
-            prev_page,
-            &cur_rows[0],
-            &prev_rows[prev_page.size.rows - 1],
-        );
+        // If the current page doesn't have enough capacity for the
+        // managed memory of the copied row (styles, hyperlinks, etc.)
+        // then we increase its capacity and retry, the same way that
+        // insertLines/deleteLines handle their cross-page copies.
+        while (true) {
+            const prev_page = &prev.data;
+            const cur_page = &current.data;
+            const prev_rows = prev_page.rows.ptr(prev_page.memory.ptr);
+            const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
+            cur_page.cloneRowFrom(
+                prev_page,
+                &cur_rows[0],
+                &prev_rows[prev_page.size.rows - 1],
+            ) catch |err| {
+                // Adjust our page capacity to make
+                // room for what we didn't have space for
+                const new_node = self.increaseCapacity(
+                    current,
+                    switch (err) {
+                        // Rehash the sets
+                        error.StyleSetNeedsRehash,
+                        error.HyperlinkSetNeedsRehash,
+                        => null,
+
+                        // Increase style memory
+                        error.StyleSetOutOfMemory,
+                        => .styles,
+
+                        // Increase string memory
+                        error.StringAllocOutOfMemory,
+                        => .string_bytes,
+
+                        // Increase hyperlink memory
+                        error.HyperlinkSetOutOfMemory,
+                        error.HyperlinkMapOutOfMemory,
+                        => .hyperlink_bytes,
+
+                        // Increase grapheme memory
+                        error.GraphemeMapOutOfMemory,
+                        error.GraphemeAllocOutOfMemory,
+                        => .grapheme_bytes,
+                    },
+                ) catch |e| switch (e) {
+                    // See insertLines which takes the same approach for
+                    // the same errors. We can't gracefully recover from
+                    // either of these here: the rows have already been
+                    // rotated, so returning an error would leave the
+                    // page list half-mutated (and corrupt), so a crash
+                    // is better.
+                    error.OutOfMemory,
+                    => @panic("increaseCapacity system allocator OOM"),
+
+                    error.OutOfSpace,
+                    => @panic("increaseCapacity OutOfSpace"),
+                };
+
+                // increaseCapacity replaces the node in the page list
+                // so our iteration node must be updated to the
+                // replacement.
+                current = new_node;
+
+                // Retry the row copy with the increased capacity.
+                continue;
+            };
+
+            break;
+        }
 
         // Mark dirty on the page, since we are dirtying all rows with this.
-        cur_page.dirty = true;
+        current.data.dirty = true;
     }
 
     // Our current is our cursor page, we need to rotate down from
@@ -1171,9 +1251,16 @@ inline fn cursorChangePin(self: *Screen, new: Pin) void {
     }
 
     // If we have a hyperlink then we need to release it from the old page.
-    if (self.cursor.hyperlink != null) {
+    // A zero ID with a hyperlink means we are nested inside an outer
+    // cursorChangePin (a style migration split the page) that already
+    // released it, so there is nothing on the old page to release.
+    if (self.cursor.hyperlink != null and self.cursor.hyperlink_id != 0) {
         const old_page: *Page = &self.cursor.page_pin.node.data;
         old_page.hyperlink_set.release(old_page.memory, self.cursor.hyperlink_id);
+        // Zero the ID, it is invalid now and style changes below may
+        // run integrity checks. We still have self.cursor.hyperlink to
+        // rebuild this later.
+        self.cursor.hyperlink_id = 0;
     }
 
     // Update our pin to the new page
@@ -1194,9 +1281,17 @@ inline fn cursorChangePin(self: *Screen, new: Pin) void {
     }
 
     // On the new page, we need to migrate our hyperlink
-    if (self.cursor.hyperlink) |link| {
-        // So we don't attempt to free any memory in the replaced page.
-        self.cursor.hyperlink_id = 0;
+    if (self.cursor.hyperlink) |link| migrate: {
+        // The ID was zeroed above, so a non-zero ID means the style
+        // migration already put the hyperlink on the new page, either in
+        // Screen.increaseCapacity or in the cursorChangePin a page split
+        // ran, and `link` is the replacement. Starting it again would make
+        // endHyperlink unwrap the null link below.
+        if (self.cursor.hyperlink_id != 0) break :migrate;
+
+        // startHyperlink will try to free old hyperlinks, so set this
+        // to null. We free it ourselves later since we're doing some
+        // ref-counting shenanigans in this function.
         self.cursor.hyperlink = null;
 
         // Re-add
@@ -1295,6 +1390,42 @@ pub inline fn scroll(self: *Screen, behavior: Scroll) void {
 /// to be on top.
 pub inline fn scrollClear(self: *Screen) !void {
     defer self.assertIntegrity();
+
+    // The cursor style and hyperlink IDs belong to the cursor's page. The
+    // growth below pushes the cursor row into scrollback, where the
+    // scrollback limit can prune that very page, and PageList then moves
+    // the cursor pin to the new first page: the IDs are gone with the old
+    // page and the new one never held them. Release both first and add
+    // them back on the cursor's final page, as resize does, keeping the
+    // hyperlink's own ID.
+    const cursor_style = self.cursor.style;
+    self.cursor.style = .{};
+    self.manualStyleUpdate() catch unreachable;
+    const cursor_hyperlink = self.cursor.hyperlink;
+    if (cursor_hyperlink != null) {
+        const page = &self.cursor.page_pin.node.data;
+        page.hyperlink_set.release(page.memory, self.cursor.hyperlink_id);
+        self.cursor.hyperlink_id = 0;
+        self.cursor.hyperlink = null;
+    }
+    defer {
+        self.cursor.style = cursor_style;
+        self.manualStyleUpdate() catch |err| {
+            log.err("failed to restore style on scroll clear err={}", .{err});
+            self.cursor.style = .{};
+            self.cursor.style_id = style.default_id;
+        };
+        if (cursor_hyperlink) |link| {
+            self.startHyperlinkLink(link.*) catch |err| {
+                log.err("failed to restore hyperlink on scroll clear err={}", .{err});
+            };
+            link.deinit(self.alloc);
+            self.alloc.destroy(link);
+        }
+    }
+
+    // A grow that fails partway can still have moved the cursor pin.
+    errdefer self.cursorReload();
 
     try self.pages.scrollClear();
     self.cursorReload();
@@ -2273,6 +2404,15 @@ pub fn startHyperlink(
         .implicit => self.cursor.hyperlink_implicit_id -= 1,
     };
 
+    try self.startHyperlinkLink(link);
+}
+
+/// Start the hyperlink state for an existing hyperlink, keeping its ID
+/// (explicit or implicit), and grow the page as needed to fit it.
+fn startHyperlinkLink(
+    self: *Screen,
+    link: hyperlink.Hyperlink,
+) PageList.IncreaseCapacityError!void {
     // Loop until we have enough page memory to add the hyperlink
     while (true) {
         if (self.startHyperlinkOnce(link)) {
@@ -3755,6 +3895,325 @@ test "Screen cursorCopy hyperlink deref" {
     try s2.cursorCopy(s.cursor, .{});
     try testing.expectEqual(@as(usize, 0), page.hyperlink_set.count());
     try testing.expect(s2.cursor.hyperlink_id == 0);
+}
+
+// The cursor style and hyperlink IDs are only meaningful within the page
+// the cursor pin points at. scrollClear can move the active area onto a
+// later page while the cursor pin stays with its content on an earlier
+// page (now scrollback), so the reset in cursorReload must migrate both
+// references to the destination page. It previously replaced the pin
+// directly and then released the old style ID on the new page.
+test "Screen scrollClear across pages migrates cursor style and hyperlink" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{
+        .cols = 10,
+        .rows = 10,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer s.deinit();
+
+    // Fill the first page so the active area spans two pages.
+    const first_page_size = s.pages.pages.first.?.data.capacity.rows;
+    s.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_size - 5) |_| {
+        try s.testWriteString("\n");
+    }
+    s.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try s.testWriteString("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+
+    // Move the cursor to the top of the active area, which is on the
+    // first page, and give it a style and a hyperlink there.
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", null);
+
+    const old_page: *Page = &s.cursor.page_pin.node.data;
+    const old_style_id = s.cursor.style_id;
+    const old_hyperlink_id = s.cursor.hyperlink_id;
+    try testing.expect(old_style_id != style.default_id);
+    try testing.expect(old_hyperlink_id != 0);
+
+    // All ten active rows are non-empty, so this moves the active area
+    // fully onto the second page while the cursor pin stays with its
+    // old row, which is now scrollback.
+    try s.scrollClear();
+
+    // The cursor was moved to the new active top-left on the second
+    // page with its style and hyperlink references rebuilt there.
+    const new_page: *Page = &s.cursor.page_pin.node.data;
+    try testing.expect(new_page != old_page);
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expect(new_page.styles.refCount(
+        new_page.memory,
+        s.cursor.style_id,
+    ) > 0);
+    try testing.expect(new_page.hyperlink_set.refCount(
+        new_page.memory,
+        s.cursor.hyperlink_id,
+    ) > 0);
+
+    // The cursor's references on the old page were released. Nothing
+    // else referenced either entry, so both are dead there now.
+    try testing.expectEqual(0, old_page.styles.refCount(
+        old_page.memory,
+        old_style_id,
+    ));
+    try testing.expectEqual(0, old_page.hyperlink_set.refCount(
+        old_page.memory,
+        old_hyperlink_id,
+    ));
+
+    // Printing attaches the migrated style and hyperlink to a cell.
+    try s.testWriteString("B");
+}
+
+// scrollClear pushes the cursor row into scrollback. With a small
+// scrollback limit, the same growth can then prune and reuse the page the
+// cursor is on, taking the cursor's style and hyperlink entries with it,
+// and PageList moves the tracked cursor pin to the new first page. There
+// is no old page left to release the IDs from, and the new page never
+// held them.
+test "Screen scrollClear that prunes the cursor page keeps cursor style and hyperlink live" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Wide rows make each page hold barely more than one screen, and the
+    // minimum scrollback allows only one page besides the active area.
+    var s = try init(alloc, .{ .cols = 2000, .rows = 20, .max_scrollback = 1 });
+    defer s.deinit();
+    const page_rows = s.pages.pages.first.?.data.capacity.rows;
+    try testing.expect(page_rows > 20 and page_rows < 40);
+
+    // Write a row of text on every line until the second page holds half
+    // the active area, so the active top-left is on the first page.
+    for (0..page_rows + 9) |_| try s.testWriteString("x\n");
+    try s.testWriteString("x");
+    try testing.expectEqual(@as(usize, 2), s.pages.totalPages());
+
+    s.cursorAbsolute(0, 0);
+    const old_first = s.pages.pages.first.?;
+    try testing.expect(s.cursor.page_pin.node == old_first);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", null);
+    const implicit_id = s.cursor.hyperlink.?.id.implicit;
+
+    try s.scrollClear();
+
+    // The growth pruned the page the cursor was on, and the new active
+    // top-left is on the page the cursor pin was moved to.
+    try testing.expect(s.pages.pages.first.? != old_first);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expect(page.styles.refCount(page.memory, s.cursor.style_id) > 0);
+    try testing.expect(page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ) > 0);
+
+    // The link keeps its implicit ID, so it stays one link across the clear.
+    try testing.expectEqual(implicit_id, s.cursor.hyperlink.?.id.implicit);
+
+    // Printing attaches the style and hyperlink to a cell.
+    try s.testWriteString("B");
+}
+
+// The other shape of the prune above: an under-filled page between the
+// pruned page and the active area means the new active top-left is not
+// on the page the cursor pin was moved to.
+test "Screen scrollClear that prunes the cursor page before a partial page" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 2000, .rows = 20, .max_scrollback = 1 });
+    defer s.deinit();
+    const page_rows = s.pages.pages.first.?.data.capacity.rows;
+    try testing.expect(page_rows > 20 and page_rows < 40);
+    for (0..page_rows + 9) |_| try s.testWriteString("x\n");
+    try s.testWriteString("x");
+
+    // Split the second page so a three-row page sits in the middle.
+    try s.pages.split(.{ .node = s.pages.pages.last.?, .y = 3 });
+    s.cursorReload();
+    const middle = s.pages.pages.first.?.next.?;
+
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", "explicit-id");
+
+    try s.scrollClear();
+
+    // The cursor's page was pruned, the pin was moved to the middle page,
+    // and the cursor ended up on a later page.
+    try testing.expect(s.pages.pages.first.? == middle);
+    try testing.expect(s.cursor.page_pin.node != middle);
+
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expect(page.styles.refCount(page.memory, s.cursor.style_id) > 0);
+    try testing.expect(page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ) > 0);
+    try testing.expectEqualStrings(
+        "explicit-id",
+        s.cursor.hyperlink.?.id.explicit,
+    );
+
+    // Printing attaches the style and hyperlink to a cell.
+    try s.testWriteString("B");
+}
+
+// cursorChangePin migrates the style before the hyperlink. If the
+// destination page's style set is full, the style migration grows that
+// page, and Screen.increaseCapacity re-adds the cursor hyperlink to it
+// on the way. The hyperlink migration that follows must then leave that
+// re-added hyperlink alone rather than start it a second time.
+test "Screen cursorChangePin hyperlink after style migration grows the page" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{
+        .cols = 10,
+        .rows = 10,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer s.deinit();
+
+    // Fill the first page so the active area spans two pages.
+    const first_page_size = s.pages.pages.first.?.data.capacity.rows;
+    s.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_size - 5) |_| {
+        try s.testWriteString("\n");
+    }
+    s.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try s.testWriteString("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+
+    // Give the cursor a style and a hyperlink on the first page.
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", null);
+
+    // Fill the second page's style set with styles other than the
+    // cursor's, so migrating the cursor style there must grow the page.
+    {
+        const page = &s.pages.pages.last.?.data;
+        var i: u8 = 0;
+        while (page.styles.add(page.memory, .{
+            .fg_color = .{ .palette = i },
+        })) |_| i += 1 else |_| {}
+    }
+
+    // Move onto the second page.
+    s.cursorAbsolute(0, 9);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.last.?);
+
+    // The style and the hyperlink each hold exactly the cursor's own
+    // reference on the new page: one migration, no leaked second start.
+    // No cell on this page has a hyperlink, so the cursor's is the only
+    // live entry.
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink != null);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expectEqual(1, page.hyperlink_set.count());
+    try testing.expectEqual(1, page.styles.refCount(
+        page.memory,
+        s.cursor.style_id,
+    ));
+    try testing.expectEqual(1, page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ));
+
+    // Printing attaches the migrated style and hyperlink to a cell.
+    try s.testWriteString("B");
+}
+
+// Like the test above, but the destination page is already at its
+// maximum style capacity, so the style migration splits the page instead
+// of growing it. The split moves the cursor row to a new node and runs
+// cursorChangePin again from inside the first call, while the hyperlink
+// is released from its old page but not yet on the new one.
+test "Screen cursorChangePin hyperlink after style migration splits the page" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{
+        .cols = 10,
+        .rows = 10,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer s.deinit();
+
+    // Fill the first page so the active area spans two pages.
+    const first_page_size = s.pages.pages.first.?.data.capacity.rows;
+    s.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_size - 5) |_| {
+        try s.testWriteString("\n");
+    }
+    s.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try s.testWriteString("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+
+    // Give the cursor a style and a hyperlink on the first page.
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.setAttribute(.{ .bold = {} });
+    try s.startHyperlink("https://example.com/", null);
+
+    // Grow the second page's style capacity to its maximum, then fill the
+    // style set, so migrating the cursor style there must split the page.
+    const max_styles = std.math.maxInt(size.CellCountInt);
+    while (s.pages.pages.last.?.data.capacity.styles < max_styles) {
+        _ = s.increaseCapacity(s.pages.pages.last.?, .styles) catch break;
+    }
+    {
+        const page = &s.pages.pages.last.?.data;
+        try testing.expectEqual(max_styles, page.capacity.styles);
+        var n: u24 = 1;
+        while (page.styles.add(page.memory, .{
+            .bg_color = .{ .rgb = @bitCast(n) },
+        })) |_| n += 1 else |_| {}
+    }
+
+    // Move onto the last active row, the second page's last row. The
+    // split keeps the larger part of the page in place and moves the
+    // cursor row to a new node.
+    const node_before = s.pages.pages.last.?;
+    s.cursorAbsolute(0, 9);
+    try testing.expect(s.cursor.page_pin.node != node_before);
+    try testing.expect(s.cursor.page_pin.node != s.pages.pages.first.?);
+
+    // The cursor ends up with exactly one style and one hyperlink
+    // reference on the node it is now on.
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(s.cursor.style_id != style.default_id);
+    try testing.expect(s.cursor.hyperlink != null);
+    try testing.expect(s.cursor.hyperlink_id != 0);
+    try testing.expectEqual(1, page.hyperlink_set.count());
+    try testing.expectEqual(1, page.styles.refCount(
+        page.memory,
+        s.cursor.style_id,
+    ));
+    try testing.expectEqual(1, page.hyperlink_set.refCount(
+        page.memory,
+        s.cursor.hyperlink_id,
+    ));
+
+    // Printing attaches the migrated style and hyperlink to a cell.
+    try s.testWriteString("B");
 }
 
 test "Screen cursorCopy hyperlink deref new page" {
@@ -5329,6 +5788,167 @@ test "Screen: scroll above no scrollback bottom of page" {
     try testing.expect(s.pages.isDirty(.{ .active = .{ .x = 0, .y = 1 } }));
     // Page 0 row 3 (active row 2) is dirty because it is new.
     try testing.expect(s.pages.isDirty(.{ .active = .{ .x = 0, .y = 2 } }));
+}
+
+test "Screen: scroll above hyperlink-dense row to fresh page" {
+    // Regression test for https://github.com/ghostty-org/ghostty/discussions/13160
+    //
+    // When a scroll-above operation pushes a row carrying more unique
+    // hyperlinks than a fresh page's default hyperlink capacity across
+    // a page boundary, the cross-page row clone must increase the
+    // destination page's capacity (like insertLines/deleteLines do)
+    // rather than error out mid-operation, which leaves the page list
+    // half-mutated and aborts later (e.g. in clearCells).
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10000 });
+    defer s.deinit();
+
+    // Fill the first page so it is exactly full and the cursor is on
+    // its last row (which is also the bottom row of the active area).
+    // The next grow() will then allocate a fresh page.
+    const first_page_rows = s.pages.pages.first.?.data.capacity.rows;
+    s.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_rows - 1) |_| try s.testWriteString("\n");
+    s.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try testing.expect(s.pages.pages.first == s.pages.pages.last);
+    try testing.expectEqual(
+        s.pages.pages.first.?.data.capacity.rows,
+        s.pages.pages.first.?.data.size.rows,
+    );
+    try testing.expectEqual(s.pages.rows - 1, s.cursor.y);
+
+    // Fill the bottom row with unique hyperlinks: more than a fresh
+    // page can hold with default hyperlink capacity.
+    for (0..s.pages.cols) |i| {
+        var buf: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{i});
+        try s.startHyperlink(uri, null);
+        try s.testWriteString("A");
+        s.endHyperlink();
+    }
+    try testing.expectEqual(
+        @as(usize, s.pages.cols),
+        s.cursor.page_pin.node.data.hyperlink_set.count(),
+    );
+
+    // Move the cursor above the bottom row and scroll. The dense row is
+    // pushed across the page boundary into the freshly allocated page.
+    s.cursorAbsolute(0, 1);
+    try s.cursorScrollAbove();
+
+    // We must have created a second page and the dense row must now be
+    // the top row of that page.
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+
+    // All hyperlinks must have survived the scroll intact: every cell
+    // flagged as a hyperlink must resolve to a real entry in its page's
+    // hyperlink map. A half-applied scroll leaves cells whose hyperlink
+    // flag is set but that have no map entry, which aborts in
+    // clearCells later.
+    var node_: ?*PageList.List.Node = s.pages.pages.first;
+    while (node_) |node| : (node_ = node.next) {
+        const page: *Page = &node.data;
+        page.assertIntegrity();
+        for (0..page.size.rows) |y| {
+            const row = page.getRow(y);
+            if (!row.hyperlink) continue;
+            for (page.getCells(row)) |*cell| {
+                if (!cell.hyperlink) continue;
+                try testing.expect(page.lookupHyperlink(cell) != null);
+            }
+        }
+    }
+    {
+        const last_page: *Page = &s.pages.pages.last.?.data;
+        try testing.expectEqual(
+            @as(usize, s.pages.cols),
+            last_page.hyperlink_set.count(),
+        );
+    }
+
+    // The dense row is still the bottom row of the active area.
+    for (0..s.pages.cols) |x| {
+        const list_cell = s.pages.getCell(.{ .active = .{
+            .x = @intCast(x),
+            .y = 4,
+        } }).?;
+        try testing.expect(list_cell.cell.hyperlink);
+        const page: *Page = &list_cell.node.data;
+        const id = page.lookupHyperlink(list_cell.cell).?;
+        const link = page.hyperlink_set.get(page.memory, id);
+        var buf: [64]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        try testing.expectEqualStrings(expected, link.uri.slice(page.memory));
+    }
+}
+
+test "Screen: scroll above hyperlink-dense row to existing page" {
+    // Same as the fresh page variant above but the destination page
+    // already exists (grow() did not allocate a new page).
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10000 });
+    defer s.deinit();
+
+    // Fill the first page so it is exactly full and the cursor is on
+    // its last row.
+    const first_page_rows = s.pages.pages.first.?.data.capacity.rows;
+    s.pages.pages.first.?.data.pauseIntegrityChecks(true);
+    for (0..first_page_rows - 1) |_| try s.testWriteString("\n");
+    s.pages.pages.first.?.data.pauseIntegrityChecks(false);
+    try testing.expectEqual(s.pages.rows - 1, s.cursor.y);
+
+    // Fill the last row of the first page with unique hyperlinks:
+    // more than a page can hold with default hyperlink capacity.
+    for (0..s.pages.cols) |i| {
+        var buf: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{i});
+        try s.startHyperlink(uri, null);
+        try s.testWriteString("A");
+        s.endHyperlink();
+    }
+
+    // Scroll twice so the active area straddles the page boundary:
+    // the last two active rows are on a second page while the dense
+    // row remains the last row of the first page.
+    try s.testWriteString("\n\n");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.last.?);
+
+    // Move the cursor to an active row that is still on the first page
+    // and above the dense row, then scroll. grow() has capacity in the
+    // last page so no fresh page is allocated, but the dense row still
+    // crosses the page boundary during the rotate.
+    s.cursorAbsolute(0, 0);
+    try testing.expect(s.cursor.page_pin.node == s.pages.pages.first.?);
+    try s.cursorScrollAbove();
+
+    // All hyperlinks must have survived the scroll intact: every cell
+    // flagged as a hyperlink must resolve to a real entry in its page's
+    // hyperlink map.
+    var node_: ?*PageList.List.Node = s.pages.pages.first;
+    while (node_) |node| : (node_ = node.next) {
+        const page: *Page = &node.data;
+        page.assertIntegrity();
+        for (0..page.size.rows) |y| {
+            const row = page.getRow(y);
+            if (!row.hyperlink) continue;
+            for (page.getCells(row)) |*cell| {
+                if (!cell.hyperlink) continue;
+                try testing.expect(page.lookupHyperlink(cell) != null);
+            }
+        }
+    }
+    {
+        const last_page: *Page = &s.pages.pages.last.?.data;
+        try testing.expectEqual(
+            @as(usize, s.pages.cols),
+            last_page.hyperlink_set.count(),
+        );
+    }
 }
 
 test "Screen: clone" {

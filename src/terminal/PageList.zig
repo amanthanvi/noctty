@@ -13,6 +13,7 @@ const tripwire = @import("../tripwire.zig");
 const DoublyLinkedList = @import("../datastruct/main.zig").IntrusiveDoublyLinkedList;
 const color = @import("color.zig");
 const highlight = @import("highlight.zig");
+const hyperlink = @import("hyperlink.zig");
 const kitty = @import("kitty.zig");
 const point = @import("point.zig");
 const pagepkg = @import("page.zig");
@@ -1621,32 +1622,9 @@ const ReflowCursor = struct {
 
             // Ensure that the string alloc has sufficient capacity
             // to dupe the link (and the ID if it's not implicit).
-            const additional_required_string_capacity =
-                src_link.uri.len +
-                switch (src_link.id) {
-                    .explicit => |v| v.len,
-                    .implicit => 0,
-                };
-            // Keep trying until we have enough capacity.
-            while (true) {
-                if (self.page.string_alloc.alloc(
-                    u8,
-                    self.page.memory,
-                    additional_required_string_capacity,
-                )) |slice| {
-                    // We have enough capacity, free the test alloc.
-                    self.page.string_alloc.free(
-                        self.page.memory,
-                        slice,
-                    );
-                    break;
-                } else |_| {
-                    // Grow our capacity until we can fit the extra bytes.
-                    try self.increaseCapacity(
-                        list,
-                        .string_bytes,
-                    );
-                }
+            // Grow our capacity until the hyperlink fits.
+            while (!self.hyperlinkStringsFit(src_link)) {
+                try self.increaseCapacity(list, .string_bytes);
             }
 
             const dst_link = src_link.dupe(
@@ -1682,6 +1660,14 @@ const ReflowCursor = struct {
                     error.OutOfMemory => .hyperlink_bytes,
                     error.NeedsRehash => null,
                 });
+
+                // The increaseCapacity call above swapped self.page
+                // for a new page, so the string capacity check done
+                // before the first dupe no longer applies. Re-establish
+                // it against the current page before duping again.
+                while (!self.hyperlinkStringsFit(src_link)) {
+                    try self.increaseCapacity(list, .string_bytes);
+                }
 
                 // We need to recreate the link into the new page.
                 const dst_link2 = src_link.dupe(
@@ -1909,6 +1895,43 @@ const ReflowCursor = struct {
         self.* = .init(node);
         self.cursorAbsolute(old_x, old_y);
         self.total_rows = old_total_rows;
+    }
+
+    /// True if the string allocator of the current page can fit the
+    /// allocations that duping the given source hyperlink performs.
+    /// The test allocations are freed before returning.
+    ///
+    /// This must mirror the exact allocation pattern of
+    /// hyperlink.PageEntry.dupe: the URI and the explicit ID (if any)
+    /// are allocated separately. The string allocator rounds every
+    /// allocation up to its chunk size and requires each allocation to
+    /// be contiguous, so a single combined allocation of the total byte
+    /// length can succeed where the two separate allocations performed
+    /// by dupe would fail.
+    fn hyperlinkStringsFit(
+        self: *const ReflowCursor,
+        src_link: *const hyperlink.PageEntry,
+    ) bool {
+        const uri_buf = self.page.string_alloc.alloc(
+            u8,
+            self.page.memory,
+            src_link.uri.len,
+        ) catch return false;
+        defer self.page.string_alloc.free(self.page.memory, uri_buf);
+
+        switch (src_link.id) {
+            .implicit => {},
+            .explicit => |v| {
+                const id_buf = self.page.string_alloc.alloc(
+                    u8,
+                    self.page.memory,
+                    v.len,
+                ) catch return false;
+                self.page.string_alloc.free(self.page.memory, id_buf);
+            },
+        }
+
+        return true;
     }
 
     /// True if this cursor is at the bottom of the page by capacity,
@@ -11950,6 +11973,140 @@ test "PageList resize reflow exceeds hyperlink memory forcing capacity increase"
 
     // Resize to 1 column wider, unwrapping the row.
     try s.resize(.{ .cols = s.cols + 1, .reflow = true });
+}
+
+test "PageList resize reflow hyperlink dupe string alloc chunk rounding" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 2, 10, 0);
+    defer s.deinit();
+    try testing.expectEqual(@as(usize, 1), s.totalPages());
+
+    // Grow to the capacity of the first page and add
+    // one more row so that we have two pages total.
+    {
+        const page = &s.pages.first.?.data;
+        page.pauseIntegrityChecks(true);
+        for (page.size.rows..page.capacity.rows) |_| {
+            _ = try s.grow();
+        }
+        page.pauseIntegrityChecks(false);
+        try testing.expectEqual(@as(usize, 1), s.totalPages());
+        try s.growRows(1);
+        try testing.expectEqual(@as(usize, 2), s.totalPages());
+
+        // We now have two pages.
+        try std.testing.expect(s.pages.first.? != s.pages.last.?);
+        try std.testing.expectEqual(s.pages.last.?, s.pages.first.?.next);
+    }
+
+    // The string allocator hands out 32-byte chunks and every allocation
+    // is rounded up to the chunk size independently. Duping a hyperlink
+    // during reflow allocates the URI and the explicit ID separately, so
+    // two separate allocations can require one more chunk than a single
+    // combined allocation of the same total byte length.
+    //
+    // We arrange for the reflow target page to have exactly two free
+    // chunks (64 bytes) remaining when a hyperlink with a 33-byte URI
+    // (2 chunks) and a 31-byte explicit ID (1 chunk) is reflowed into
+    // it. The combined byte length (64 bytes -> 2 chunks) fits, but the
+    // separate allocations (3 chunks) do not, so the reflow must grow
+    // the string capacity rather than panic or drop the hyperlink.
+    //
+    // The two hyperlinked cells are joined as a single wrapped row so
+    // that they are always reflowed into the same target page.
+    //
+    //  +--+ = PAGE 0
+    //  :  :
+    //  | A… <- A is hyperlinked with all but 64 bytes of string cap.
+    //  +--+
+    //  +--+ = PAGE 1
+    //  …B | <- B is hyperlinked with a 33-byte URI and 31-byte ID.
+    //  +--+
+
+    const uri_a = "a" ** (pagepkg.string_bytes_default - 64);
+    const uri_b = "b" ** 33;
+    const id_b = "i" ** 31;
+
+    // Hyperlink A in the bottom right of the first page. Mark the final
+    // row as wrapped.
+    {
+        const page = &s.pages.first.?.data;
+        const id = try page.insertHyperlink(.{
+            .id = .{ .implicit = 0 },
+            .uri = uri_a,
+        });
+        const rac = page.getRowAndCell(page.size.cols - 1, page.size.rows - 1);
+        rac.row.wrap = true;
+        rac.cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = 'A' },
+        };
+        try page.setHyperlink(rac.row, rac.cell, id);
+
+        // Sanity check the chunk math: the remaining 64 bytes fit as a
+        // single allocation but not as the two separate allocations that
+        // inserting (or duping) hyperlink B performs.
+        const buf = try page.string_alloc.alloc(u8, page.memory, 64);
+        page.string_alloc.free(page.memory, buf);
+        try std.testing.expectError(
+            error.StringsOutOfMemory,
+            page.insertHyperlink(.{
+                .id = .{ .explicit = id_b },
+                .uri = uri_b,
+            }),
+        );
+    }
+
+    // Hyperlink B in the top left of the second page. Mark the first
+    // row as a wrap continuation.
+    {
+        const page = &s.pages.last.?.data;
+        const id = try page.insertHyperlink(.{
+            .id = .{ .explicit = id_b },
+            .uri = uri_b,
+        });
+        const rac = page.getRowAndCell(0, 0);
+        rac.row.wrap_continuation = true;
+        rac.cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = 'B' },
+        };
+        try page.setHyperlink(rac.row, rac.cell, id);
+    }
+
+    // Resize to 1 column wider, unwrapping the row.
+    try s.resize(.{ .cols = s.cols + 1, .reflow = true });
+
+    // Both hyperlinks must have survived the reflow intact.
+    var found: usize = 0;
+    var node_it = s.pages.first;
+    while (node_it) |node| : (node_it = node.next) {
+        const page = &node.data;
+        for (0..page.size.rows) |y| {
+            for (0..page.size.cols) |x| {
+                const rac = page.getRowAndCell(x, y);
+                if (!rac.cell.hyperlink) continue;
+                found += 1;
+
+                const link_id = page.lookupHyperlink(rac.cell).?;
+                const entry = page.hyperlink_set.get(page.memory, link_id);
+                const uri = entry.uri.slice(page.memory);
+                switch (entry.id) {
+                    .implicit => try testing.expectEqualStrings(uri_a, uri),
+                    .explicit => |slice| {
+                        try testing.expectEqualStrings(uri_b, uri);
+                        try testing.expectEqualStrings(
+                            id_b,
+                            slice.slice(page.memory),
+                        );
+                    },
+                }
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), found);
 }
 
 test "PageList resize reflow exceeds grapheme memory forcing capacity increase" {
