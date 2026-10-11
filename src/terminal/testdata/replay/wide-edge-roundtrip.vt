@@ -1,0 +1,23 @@
+# A line ending in a wide character exactly at the right edge, then the pane
+# narrows by one column (the wide character no longer fits and wraps) and
+# widens back. The line and the cursor come back unchanged.
+size 10 4
+send abcdefgh中\r\n$\x20
+expect
+|abcdefgh中
+|$
+end
+cursor 2 1
+resize 9 4
+expect
+|abcdefgh
+|中
+|$
+end
+cursor 2 2
+resize 10 4
+expect
+|abcdefgh中
+|$
+end
+cursor 2 1

@@ -1,0 +1,36 @@
+# A full-screen program draws a frame on the alternate screen with absolute
+# moves, the window grows, and the program clears and redraws at the new
+# size (what it does on SIGWINCH or a console resize event). Nothing from
+# the old frame may survive, and leaving the alternate screen restores the
+# shell's screen as it was.
+size 20 6
+send P1\r\nP2\r\nprompt$\x20
+send \e[?1049h\e[H\e[2J
+send \e[1;1H+------------------+\e[2;1H| old frame\e[2;20H|\e[3;3Hstale\e[6;1H+------------------+
+expect
+|+------------------+
+|| old frame        |
+|  stale
+|
+|
+|+------------------+
+end
+resize 30 8
+send \e[H\e[2J\e[1;1H+----------------------------+\e[2;1H| new frame\e[2;30H|\e[8;1H+----------------------------+
+expect
+|+----------------------------+
+|| new frame                  |
+|
+|
+|
+|
+|
+|+----------------------------+
+end
+send \e[?1049l
+expect
+|P1
+|P2
+|prompt$
+end
+cursor 8 2

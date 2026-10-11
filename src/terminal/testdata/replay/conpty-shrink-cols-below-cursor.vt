@@ -1,0 +1,79 @@
+# Sixty-column rows R01..R20, cursor parked on R06, and the window narrows
+# to 43 columns so every row below the cursor wraps. Measured
+# (shrink-cols-below-cursor-powershell): ConPTY keeps the cursor's row on
+# top and drops the wrapped rows that no longer fit below.
+size 80 20
+pty conpty
+send \e[H\e[2J
+seq R0 1 9 \x20xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+seq R 10 20 \x20xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+send \e[5;1H
+expect
+|R02 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R03 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R04 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R05 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R06 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R07 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R08 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R09 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R10 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R11 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R12 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R13 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R14 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R15 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R16 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R18 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R19 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|R20 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+end
+cursor 0 4
+resize 43 20
+expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
+|R06 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R07 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R08 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R09 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R10 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R11 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R12 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R13 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R14 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R15 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+end
+cursor 0 0
+send \e[1;1H<W1>
+expect xfail F032 (PKG-14): the shrink pushes the cursor row into scrollback
+|<W1>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R07 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R08 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R09 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R10 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R11 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R12 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R13 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R14 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+|R15 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+|xxxxxxxxxxxxxxxxx
+end

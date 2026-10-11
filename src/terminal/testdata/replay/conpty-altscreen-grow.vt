@@ -1,0 +1,59 @@
+# cmd's prompt on the bottom row, a full-screen program starts, the window
+# grows (a maximize), the program redraws and exits. Measured
+# (vim-maximize-powershell, altscreen-maximize-powershell): ConPTY's main
+# buffer keeps its rows where they were and adds blank rows below, so the
+# shell's next absolute write goes to the old prompt row.
+size 80 20
+pty conpty
+seq L 1 40
+send \r\nsync>
+send \e[?1049h\e[H\e[2JFULL SCREEN
+resize 80 29
+send \e[H\e[2JFULL SCREEN
+send \e[?1049l
+expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>
+end
+cursor 5 19 xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+send \e[20;6Hecho synced
+expect xfail F015 (PKG-14): the grid growth pulls scrollback into the active area
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|L31
+|L32
+|L33
+|L34
+|L35
+|L36
+|L37
+|L38
+|L39
+|L40
+|
+|sync>echo synced
+end

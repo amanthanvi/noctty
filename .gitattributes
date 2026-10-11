@@ -30,6 +30,7 @@ Makefile text eol=lf
 
 # Text data files - always LF (embedded in Zig, parsed with \n split)
 *.txt text eol=lf
+src/terminal/testdata/replay/*.vt text eol=lf
 
 # Static site sources - always LF
 site/*.html text eol=lf
