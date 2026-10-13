@@ -12,6 +12,7 @@ const Terminal = @import("../Terminal.zig");
 const Layout = @import("layout.zig").Layout;
 const control = @import("control.zig");
 const output = @import("output.zig");
+const TerminalStream = @import("../stream_terminal.zig").Stream;
 
 const log = std.log.scoped(.terminal_tmux_viewer);
 
@@ -258,8 +259,28 @@ pub const Viewer = struct {
 
     pub const Pane = struct {
         terminal: Terminal,
+        output_stream: ?*TerminalStream = null,
+
+        fn outputStream(self: *Pane, alloc: Allocator) Allocator.Error!*TerminalStream {
+            if (self.output_stream == null) {
+                const stream = try alloc.create(TerminalStream);
+                stream.* = self.terminal.vtStream();
+                self.output_stream = stream;
+            }
+
+            const stream = self.output_stream.?;
+            // Pane values can move when the pane map is rebuilt.
+            stream.handler.terminal = &self.terminal;
+            return stream;
+        }
 
         pub fn deinit(self: *Pane, alloc: Allocator) void {
+            if (self.output_stream) |stream| {
+                // The pane may have moved since its last output.
+                stream.handler.terminal = &self.terminal;
+                stream.deinit();
+                alloc.destroy(stream);
+            }
             self.terminal.deinit(alloc);
         }
     };
@@ -1116,10 +1137,7 @@ pub const Viewer = struct {
             return;
         };
         const pane: *Pane = entry.value_ptr;
-        const t: *Terminal = &pane.terminal;
-
-        var stream = t.vtStream();
-        defer stream.deinit();
+        const stream = try pane.outputStream(self.alloc);
         stream.nextSlice(data);
     }
 
@@ -2303,6 +2321,57 @@ test "two pane flow with pane state" {
             .contains_tags = &.{.exit},
         },
     });
+}
+
+test "tmux output state unsplit CSI" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    var terminal: Terminal = try .init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+
+    viewer.panes.put(testing.allocator, 42, .{
+        .terminal = terminal,
+    }) catch |err| {
+        terminal.deinit(testing.allocator);
+        return err;
+    };
+
+    try viewer.receivedOutput(42, "\x1b[32mX");
+
+    const entry = viewer.panes.getEntry(42) orelse return error.ExpectedPane42;
+    const screen = entry.value_ptr.terminal.screens.active;
+    const text = try screen.dumpStringAlloc(testing.allocator, .{ .active = .{} });
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("X", text);
+}
+
+test "tmux output state split CSI" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    var terminal: Terminal = try .init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+
+    viewer.panes.put(testing.allocator, 42, .{
+        .terminal = terminal,
+    }) catch |err| {
+        terminal.deinit(testing.allocator);
+        return err;
+    };
+
+    try viewer.receivedOutput(42, "\x1b[32");
+    try viewer.receivedOutput(42, "mX");
+
+    const entry = viewer.panes.getEntry(42) orelse return error.ExpectedPane42;
+    const screen = entry.value_ptr.terminal.screens.active;
+    const text = try screen.dumpStringAlloc(testing.allocator, .{ .active = .{} });
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("X", text);
 }
 
 test "tmux raw startup selects primary screen" {
