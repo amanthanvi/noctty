@@ -1044,6 +1044,12 @@ pub const Viewer = struct {
                     size.CellCountInt,
                     data.scroll_region_lower,
                 ) orelse break :scroll;
+
+                // Ignore invalid regions. The terminal assumes the scroll
+                // region is always within the screen bounds.
+                if (scroll_top >= scroll_bottom or
+                    scroll_bottom >= t.rows) break :scroll;
+
                 t.scrolling_region.top = scroll_top;
                 t.scrolling_region.bottom = scroll_bottom;
             }
@@ -2372,6 +2378,122 @@ test "tmux output state split CSI" {
     const text = try screen.dumpStringAlloc(testing.allocator, .{ .active = .{} });
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("X", text);
+}
+
+test "pane state ignores out of bounds scroll region" {
+    var viewer = try Viewer.init(testing.allocator);
+    defer viewer.deinit();
+
+    try testViewer(&viewer, &.{
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{
+            .input = .{ .tmux = .{ .session_changed = .{
+                .id = 0,
+                .name = "0",
+            } } },
+            .contains_command = "display-message",
+        },
+        .{
+            .input = .{ .tmux = .{ .block_end = "3.5a" } },
+            .contains_command = "list-windows",
+        },
+        .{
+            .input = .{ .tmux = .{
+                .block_end = "$0 @0 80 24 b25d,80x24,0,0,0",
+            } },
+            .contains_tags = &.{ .windows, .command },
+        },
+        // capture-pane primary/alternate history/visible
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        // list-panes with a scroll region bottom far past the screen
+        .{
+            .input = .{ .tmux = .{
+                .block_end = "%0;0;5;1;;;0;0;4294967295;4294967295;0;1;0;0;0;0;0;0;0;0;0;0;0;60000;",
+            } },
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    const pane: *Viewer.Pane = v.panes.getEntry(0).?.value_ptr;
+                    const t: *Terminal = &pane.terminal;
+                    // Verify the line parsed and was applied.
+                    try testing.expectEqual(5, t.screens.active.cursor.y);
+                    try testing.expectEqual(0, t.scrolling_region.top);
+                    try testing.expectEqual(t.rows - 1, t.scrolling_region.bottom);
+                }
+            }).check,
+        },
+        // Vertical tabs act as linefeeds and must scroll within the screen.
+        .{
+            .input = .{ .tmux = .{ .output = .{
+                .pane_id = 0,
+                .data = "\x0b" ** 30,
+            } } },
+            .check = (struct {
+                fn check(v: *Viewer, _: []const Viewer.Action) anyerror!void {
+                    const pane: *Viewer.Pane = v.panes.getEntry(0).?.value_ptr;
+                    const t: *Terminal = &pane.terminal;
+                    try testing.expectEqual(t.rows - 1, t.screens.active.cursor.y);
+                }
+            }).check,
+        },
+    });
+}
+
+test "pane state scroll region bounds" {
+    const Case = struct {
+        origin: u1 = 0,
+        upper: u32,
+        lower: u32,
+        top: size.CellCountInt,
+        bottom: size.CellCountInt,
+    };
+    const cases = [_]Case{
+        // In bounds, so applied.
+        .{ .upper = 2, .lower = 10, .top = 2, .bottom = 10 },
+        .{ .upper = 1, .lower = 23, .top = 1, .bottom = 23 },
+        // Past the last row, inverted, or empty, so ignored.
+        .{ .upper = 0, .lower = 24, .top = 0, .bottom = 23 },
+        .{ .upper = 10, .lower = 5, .top = 0, .bottom = 23 },
+        .{ .upper = 7, .lower = 7, .top = 0, .bottom = 23 },
+        // Origin mode positions the cursor relative to the region.
+        .{ .origin = 1, .upper = 0, .lower = 65535, .top = 0, .bottom = 23 },
+    };
+
+    for (cases) |case| {
+        var viewer = try Viewer.init(testing.allocator);
+        defer viewer.deinit();
+
+        try testViewer(&viewer, &.{
+            .{ .input = .{ .tmux = .{ .block_end = "" } } },
+            .{ .input = .{ .tmux = .{ .session_changed = .{ .id = 0, .name = "0" } } } },
+            .{ .input = .{ .tmux = .{ .block_end = "3.5a" } } },
+            .{ .input = .{ .tmux = .{ .block_end = "$0 @0 80 24 b25d,80x24,0,0,0" } } },
+            .{ .input = .{ .tmux = .{ .block_end = "" } } },
+            .{ .input = .{ .tmux = .{ .block_end = "" } } },
+            .{ .input = .{ .tmux = .{ .block_end = "" } } },
+            .{ .input = .{ .tmux = .{ .block_end = "" } } },
+        });
+
+        var buf: [128]u8 = undefined;
+        const line = try std.fmt.bufPrint(
+            &buf,
+            "%0;0;5;1;;;0;0;4294967295;4294967295;0;1;0;0;{d};0;0;0;0;0;0;0;{d};{d};",
+            .{ case.origin, case.upper, case.lower },
+        );
+        _ = viewer.next(.{ .tmux = .{ .block_end = line } });
+
+        const t: *Terminal = &viewer.panes.getEntry(0).?.value_ptr.terminal;
+        try testing.expectEqual(case.top, t.scrolling_region.top);
+        try testing.expectEqual(case.bottom, t.scrolling_region.bottom);
+
+        _ = viewer.next(.{ .tmux = .{ .output = .{
+            .pane_id = 0,
+            .data = "\x1b[30;1H" ++ "\x0b" ** 30,
+        } } });
+        try testing.expect(t.screens.active.cursor.y < t.rows);
+    }
 }
 
 test "tmux raw startup selects primary screen" {
