@@ -77,11 +77,11 @@ pub fn run(alloc: Allocator) !u8 {
     const name = keybind_name orelse option_name orelse positional orelse {
         var stderr: std.fs.File = .stderr();
         var buffer: [4096]u8 = undefined;
-        var stderr_writer = stderr.writer(&buffer);
+        var stderr_writer = stderr.writerStreaming(&buffer);
         try stderr_writer.interface.writeAll("Usage: noctty +explain-config <option>\n");
         try stderr_writer.interface.writeAll("       noctty +explain-config --option=<option>\n");
         try stderr_writer.interface.writeAll("       noctty +explain-config --keybind=<action>\n");
-        try stderr_writer.end();
+        try stderr_writer.interface.flush();
         return 1;
     };
 

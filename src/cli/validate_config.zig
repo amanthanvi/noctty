@@ -39,11 +39,15 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
         try args.parse(Options, alloc, &opts, &iter);
     }
 
+    // Streaming, not positional: stdout may be a pipe or a file opened for
+    // append (`>>`). A positional writer starts at offset 0 and `end()`
+    // truncates there, which wipes an appended log and, on a Windows pipe,
+    // fails with FileTooBig.
     var buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&buffer);
+    var stdout_writer = std.fs.File.stdout().writerStreaming(&buffer);
     const stdout = &stdout_writer.interface;
     const result = runInner(alloc, opts, stdout);
-    try stdout_writer.end();
+    try stdout.flush();
     return result;
 }
 
