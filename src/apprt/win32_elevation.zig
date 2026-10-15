@@ -15,8 +15,6 @@ const token_elevation_class: c_int = 20;
 const sw_show_normal: c_int = 1;
 const see_mask_flag_no_ui: windows.ULONG = 0x00000400;
 const sddl_revision_1: windows.DWORD = 1;
-const invalid_file_attributes: windows.DWORD = 0xFFFF_FFFF;
-const file_attribute_directory: windows.DWORD = 0x0000_0010;
 
 const TokenElevation = extern struct {
     token_is_elevated: windows.DWORD,
@@ -562,85 +560,19 @@ pub const LaunchResult = enum {
     cancelled,
 };
 
-/// Resolve the Windows-local directory for `ShellExecuteExW`'s `lpDirectory`.
-///
-/// The terminal cwd is not always a host path: a WSL-backed surface reports a
-/// live POSIX pwd such as `/home/user` (see `windows_shell.osc7PathToLocal`,
-/// which keeps WSL paths WSL-style on purpose), and the shell API rejects that
-/// outright. `SEE_MASK_FLAG_NO_UI` then turns the rejection into a silent
-/// failure, so the elevated window never appears. This applies the same
-/// translate-or-fall-back rule the ordinary `CreateProcessW` spawn uses in
-/// `termio.Exec`; the terminal path itself still travels untouched in
-/// `--working-directory`, where the child's own seam handles it.
-///
-/// `null` means "inherit this process's directory".
-pub fn resolveElevatedHostDirectory(
-    alloc: Allocator,
-    cwd: []const u8,
-) !?[]const u8 {
-    return try resolveElevatedHostDirectoryWithProbe(
-        alloc,
-        cwd,
-        realDirectoryProbe,
-    );
-}
-
-fn realDirectoryProbe(path: [*:0]const u16) windows.DWORD {
-    return GetFileAttributesW(path);
-}
-
-/// Does `attributes` describe something `ShellExecuteExW` will accept as
-/// `lpDirectory`? Fails CLOSED: `INVALID_FILE_ATTRIBUTES` (the path does not
-/// exist, or is not a legal Win32 name) and plain files both answer no.
-fn hostDirectoryAttributesUsable(attributes: windows.DWORD) bool {
-    if (attributes == invalid_file_attributes) return false;
-    return attributes & file_attribute_directory != 0;
-}
-
-/// `safeCurrentDirectory` passes a drive-absolute cwd through UNCHANGED; it
-/// is a syntax check, not an existence check. A directory the shell reported
-/// before it was deleted, or one carrying characters Win32 forbids, therefore
-/// reaches `lpDirectory` and makes `ShellExecuteExW` fail the whole launch --
-/// silently, because `SEE_MASK_FLAG_NO_UI` suppresses the shell's own error.
-/// Probe it here and answer null instead, which is the documented
-/// inherit-this-process's-directory fallback rather than a failed launch.
-fn resolveElevatedHostDirectoryWithProbe(
-    alloc: Allocator,
-    cwd: []const u8,
-    probe: *const fn ([*:0]const u16) windows.DWORD,
-) !?[]const u8 {
-    const resolved = try configpkg.windows_shell.safeCurrentDirectory(
-        alloc,
-        cwd,
-        false,
-        false,
-    ) orelse return null;
-    errdefer alloc.free(resolved);
-
-    const resolved_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, resolved) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            log.warn("dropping elevated host directory that is not valid UTF-8 cwd={s}", .{resolved});
-            alloc.free(resolved);
-            return null;
-        },
-    };
-    defer alloc.free(resolved_w);
-
-    if (!hostDirectoryAttributesUsable(probe(resolved_w.ptr))) {
-        log.warn(
-            "dropping elevated host directory that is not an existing directory cwd={s}",
-            .{resolved},
-        );
-        alloc.free(resolved);
-        return null;
-    }
-
-    return resolved;
+/// The elevated host starts in the system directory, never in a directory
+/// reported by a terminal program. The terminal still receives its original
+/// path through `--working-directory` in buildRelaunchParameters.
+pub fn elevatedHostDirectory(alloc: Allocator) ![]const u8 {
+    var buf: [windows.MAX_PATH:0]u16 = undefined;
+    const len = windows.kernel32.GetSystemDirectoryW(&buf, buf.len);
+    if (len == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (len >= buf.len) return error.NameTooLong;
+    return std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..len]);
 }
 
 /// Relaunch the current executable with the Windows `runas` verb. `cwd` must
-/// already be a Windows-local directory; see `resolveElevatedHostDirectory`.
+/// already be a Windows-local directory; see `elevatedHostDirectory`.
 pub fn launchElevated(
     alloc: Allocator,
     parameters: [:0]const u8,
@@ -770,10 +702,6 @@ extern "kernel32" fn LocalFree(
     memory: ?*anyopaque,
 ) callconv(.winapi) ?*anyopaque;
 
-extern "kernel32" fn GetFileAttributesW(
-    file_name: [*:0]const u16,
-) callconv(.winapi) windows.DWORD;
-
 extern "shell32" fn ShellExecuteExW(
     info: *ShellExecuteInfoW,
 ) callconv(.winapi) windows.BOOL;
@@ -883,93 +811,16 @@ test "elevation launch boundary maps non-cancellation Win32 failures to an error
     );
 }
 
-test "elevated host directory never forwards a WSL pwd to the shell API" {
+test "PKG48 elevated host starts in the system directory" {
     const testing = std.testing;
-
-    // A WSL-backed surface reports a live POSIX pwd, which ShellExecuteExW
-    // rejects. The host directory falls back to a Windows-local one; the
-    // terminal path keeps travelling in `--working-directory`.
-    const wsl = try resolveElevatedHostDirectory(testing.allocator, "/home/user");
-    defer if (wsl) |value| testing.allocator.free(value);
-    if (wsl) |value| {
-        try testing.expect(!std.mem.eql(u8, value, "/home/user"));
-        try testing.expect(value.len >= 3 and value[1] == ':');
-    }
-
-    const wsl_unc = try resolveElevatedHostDirectory(
-        testing.allocator,
-        "\\\\wsl$\\Ubuntu\\home\\user",
-    );
-    defer if (wsl_unc) |value| testing.allocator.free(value);
-    if (wsl_unc) |value| {
-        try testing.expect(!std.mem.startsWith(u8, value, "\\\\wsl"));
-    }
-
-    // A drive-absolute pwd that really exists is already a host path and
-    // passes through. Use this process's own cwd so the assertion does not
-    // depend on a directory that happens to exist on the runner.
-    const real_cwd = try std.process.getCwdAlloc(testing.allocator);
-    defer testing.allocator.free(real_cwd);
-    const host = try resolveElevatedHostDirectory(testing.allocator, real_cwd);
-    defer if (host) |value| testing.allocator.free(value);
-    try testing.expectEqualStrings(real_cwd, host.?);
-}
-
-test "elevated host directory drops a drive-absolute cwd that is not a directory" {
-    const testing = std.testing;
-
-    // `safeCurrentDirectory` returns a drive-absolute value verbatim, so the
-    // existence check is the only thing standing between a deleted or
-    // syntactically illegal path and a `ShellExecuteExW` that fails the whole
-    // launch with no UI. Both failure shapes must answer null, which
-    // `launchElevated` turns into a null `lpDirectory`.
-    const Probe = struct {
-        fn missing(_: [*:0]const u16) windows.DWORD {
-            return invalid_file_attributes;
-        }
-
-        fn plainFile(_: [*:0]const u16) windows.DWORD {
-            return 0x0000_0080; // FILE_ATTRIBUTE_NORMAL
-        }
-
-        fn directory(_: [*:0]const u16) windows.DWORD {
-            return file_attribute_directory | 0x0000_0020; // + ARCHIVE
-        }
-    };
-
-    try testing.expectEqual(
-        @as(?[]const u8, null),
-        try resolveElevatedHostDirectoryWithProbe(
-            testing.allocator,
-            "C:\\deleted-since-the-shell-reported-it",
-            Probe.missing,
-        ),
-    );
-
-    try testing.expectEqual(
-        @as(?[]const u8, null),
-        try resolveElevatedHostDirectoryWithProbe(
-            testing.allocator,
-            "C:\\a-file-not-a-directory",
-            Probe.plainFile,
-        ),
-    );
-
-    // An existing directory is still forwarded unchanged; the probe is a
-    // filter, not a rewrite.
-    const kept = try resolveElevatedHostDirectoryWithProbe(
-        testing.allocator,
-        "C:\\work",
-        Probe.directory,
-    );
-    defer if (kept) |value| testing.allocator.free(value);
-    try testing.expectEqualStrings("C:\\work", kept.?);
-
-    // The attribute bits Windows also sets on a real directory must not make
-    // the check reject it.
-    try testing.expect(hostDirectoryAttributesUsable(file_attribute_directory));
-    try testing.expect(!hostDirectoryAttributesUsable(invalid_file_attributes));
-    try testing.expect(!hostDirectoryAttributesUsable(0));
+    const host = try elevatedHostDirectory(testing.allocator);
+    defer testing.allocator.free(host);
+    var buf: [windows.MAX_PATH:0]u16 = undefined;
+    const len = windows.kernel32.GetSystemDirectoryW(&buf, buf.len);
+    try testing.expect(len > 0 and len < buf.len);
+    const expected = try std.unicode.utf16LeToUtf8Alloc(testing.allocator, buf[0..len]);
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, host);
 }
 
 test "elevation launch boundary omits lpDirectory when there is no host cwd" {

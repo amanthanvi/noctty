@@ -240,7 +240,7 @@ fn readRecordedHash(dir: std.fs.Dir) ?[32]u8 {
 /// partial file. The temporary name is random and created exclusively, so
 /// two noctty processes never write into the same one, and an existing file
 /// or link of that name is never followed.
-fn writeAtomically(dir: std.fs.Dir, name: []const u8, data: []const u8) !void {
+pub fn writeAtomically(dir: std.fs.Dir, name: []const u8, data: []const u8) !void {
     var random: [8]u8 = undefined;
     std.crypto.random.bytes(&random);
     const random_hex = std.fmt.bytesToHex(random, .lower);

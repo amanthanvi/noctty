@@ -338,11 +338,34 @@ pub const TerminalFormatter = struct {
         screen_formatter.content = self.content;
         screen_formatter.extra = self.extra.screen;
         screen_formatter.pin_map = self.pin_map;
+
+        // The cursor position is emitted last, below: the tab stops and the
+        // scrolling region that follow the screen move the cursor.
+        screen_formatter.extra.cursor = false;
         try screen_formatter.format(writer);
 
         // Extra terminal state to emit after the screen contents so that
         // it doesn't impact the emitted contents.
         if (self.opts.emit == .vt) {
+            // Emit tabstop positions. Before the scrolling region: in origin
+            // mode, which the modes above restore, CHA counts from the left
+            // margin and stops at the right one, so with the margins already
+            // set the stops would land in the wrong columns.
+            if (self.extra.tabstops) {
+                // Clear all tabs (CSI 3 g)
+                try writer.print("\x1b[3g", .{});
+
+                // Set each configured tabstop by moving cursor and using HTS
+                for (0..self.terminal.cols) |col| {
+                    if (self.terminal.tabstops.get(col)) {
+                        // Move cursor to the column (1-indexed)
+                        try writer.print("\x1b[{d}G", .{col + 1});
+                        // Set tab (HTS)
+                        try writer.print("\x1bH", .{});
+                    }
+                }
+            }
+
             // Emit scrolling region using DECSTBM and DECSLRM
             if (self.extra.scrolling_region) {
                 const region = &self.terminal.scrolling_region;
@@ -357,22 +380,6 @@ pub const TerminalFormatter = struct {
                 // Only emit if not the full width
                 if (region.left != 0 or region.right != self.terminal.cols - 1) {
                     try writer.print("\x1b[{d};{d}s", .{ region.left + 1, region.right + 1 });
-                }
-            }
-
-            // Emit tabstop positions
-            if (self.extra.tabstops) {
-                // Clear all tabs (CSI 3 g)
-                try writer.print("\x1b[3g", .{});
-
-                // Set each configured tabstop by moving cursor and using HTS
-                for (0..self.terminal.cols) |col| {
-                    if (self.terminal.tabstops.get(col)) {
-                        // Move cursor to the column (1-indexed)
-                        try writer.print("\x1b[{d}G", .{col + 1});
-                        // Set tab (HTS)
-                        try writer.print("\x1bH", .{});
-                    }
                 }
             }
 
@@ -416,6 +423,28 @@ pub const TerminalFormatter = struct {
                     std.math.cast(usize, discarding.count) orelse return error.WriteFailed,
                 ) catch return error.WriteFailed;
             }
+
+            // Restore the cursor now that nothing else moves it.
+            if (self.extra.screen.cursor) {
+                screen_formatter.content = .none;
+                screen_formatter.extra = .none;
+                screen_formatter.extra.cursor = true;
+
+                // In origin mode (DECOM), which the modes above restore, CUP
+                // counts from the corner of the scrolling region restored
+                // above, so the position is written relative to it.
+                if (self.extra.modes and
+                    self.extra.scrolling_region and
+                    self.terminal.modes.get(.origin))
+                {
+                    screen_formatter.cursor_origin = .{
+                        .x = self.terminal.scrolling_region.left,
+                        .y = self.terminal.scrolling_region.top,
+                    };
+                }
+
+                try screen_formatter.format(writer);
+            }
         }
     }
 };
@@ -446,6 +475,16 @@ pub const ScreenFormatter = struct {
     ///
     /// Warning: there is a significant performance hit to track this
     pin_map: ?PinMap,
+
+    /// The point the emitted cursor position (CUP) counts from. This is the
+    /// top-left of the screen unless the output is replayed in origin mode
+    /// (DECOM), where CUP counts from the top-left of the scrolling region.
+    cursor_origin: CursorOrigin = .{},
+
+    pub const CursorOrigin = struct {
+        x: size.CellCountInt = 0,
+        y: size.CellCountInt = 0,
+    };
 
     pub const Content = union(enum) {
         /// Emit no content, only terminal state such as modes, palette, etc.
@@ -655,8 +694,12 @@ pub const ScreenFormatter = struct {
         // Emit cursor position using CUP (CSI H)
         if (self.extra.cursor) {
             const cursor = &self.screen.cursor;
+            const origin = self.cursor_origin;
             // CUP is 1-indexed
-            try writer.print("\x1b[{d};{d}H", .{ cursor.y + 1, cursor.x + 1 });
+            try writer.print("\x1b[{d};{d}H", .{
+                (cursor.y -| origin.y) + 1,
+                (cursor.x -| origin.x) + 1,
+            });
         }
 
         // If we have a pin_map, we need to count how many bytes the extras
@@ -1003,6 +1046,10 @@ pub const PageFormatter = struct {
         // when the hyperlink changes or ends.
         var current_hyperlink_id: ?hyperlink.Id = null;
 
+        // Whether the current hyperlink got an opening tag. A link whose URI
+        // is not exportable keeps its text but gets neither tag.
+        var anchor_open = false;
+
         for (start_y..end_y + 1) |y_usize| {
             const y: size.CellCountInt = @intCast(y_usize);
             const row: *Row = self.page.getRow(y);
@@ -1263,8 +1310,9 @@ pub const PageFormatter = struct {
                     // If our prior hyperlink ID was non-null, we need to
                     // close it because the ID has changed.
                     if (current_hyperlink_id != null) {
-                        try self.formatHyperlinkClose(writer);
+                        if (anchor_open) try self.formatHyperlinkClose(writer);
                         current_hyperlink_id = null;
+                        anchor_open = false;
                     }
 
                     // Set our current hyperlink ID
@@ -1279,6 +1327,8 @@ pub const PageFormatter = struct {
                         );
                         break :uri link.uri.offset.ptr(self.page.memory)[0..link.uri.len];
                     };
+                    if (!hyperlink.isExportableUri(uri)) break :hyperlink;
+                    anchor_open = true;
                     try self.formatHyperlinkOpen(
                         writer,
                         uri,
@@ -1340,7 +1390,7 @@ pub const PageFormatter = struct {
         if (!style.default()) try self.formatStyleClose(writer);
 
         // Close any open hyperlink for HTML output
-        if (current_hyperlink_id != null) try self.formatHyperlinkClose(writer);
+        if (anchor_open) try self.formatHyperlinkClose(writer);
 
         // Close the monospace wrapper for HTML output
         if (self.opts.emit == .html) {
@@ -5071,6 +5121,125 @@ test "Terminal vt with tabstops" {
     try testing.expect(!t2.tabstops.get(8)); // Not a tab
 }
 
+/// Replays `stream` into a fresh terminal, snapshots it with every extra
+/// (the local undo snapshot's shape) and replays that into a second one. The
+/// pin map must account for every byte the snapshot wrote.
+fn roundTripSnapshot(
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
+    stream: []const u8,
+) !struct { Terminal, Terminal } {
+    const alloc = std.testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .cols = cols, .rows = rows });
+    errdefer t.deinit(alloc);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice(stream);
+
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+    var pin_map: std.ArrayList(Pin) = .empty;
+    defer pin_map.deinit(alloc);
+    var formatter: TerminalFormatter = .init(&t, .vt);
+    formatter.extra = .all;
+    formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
+    try formatter.format(&builder.writer);
+    try std.testing.expectEqual(builder.writer.buffered().len, pin_map.items.len);
+
+    var t2 = try Terminal.init(alloc, .{ .cols = cols, .rows = rows });
+    errdefer t2.deinit(alloc);
+    var s2 = t2.vtStream();
+    defer s2.deinit();
+    s2.nextSlice(builder.writer.buffered());
+    return .{ t, t2 };
+}
+
+test "Terminal vt with every extra restores the cursor after the tabstops" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The default stops sit every 8 columns, so the last one on 80 columns is
+    // 72: replaying the tabstops used to leave the cursor there.
+    var t, var t2 = try roundTripSnapshot(80, 24, "line1\r\nline2\r\nline3");
+    defer t.deinit(alloc);
+    defer t2.deinit(alloc);
+
+    try testing.expectEqual(@as(size.CellCountInt, 5), t.screens.active.cursor.x);
+    try testing.expectEqual(t.screens.active.cursor.x, t2.screens.active.cursor.x);
+    try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
+}
+
+test "Terminal vt with every extra restores the cursor after a scrolling region" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // DECSTBM and DECSLRM home the cursor, so the position comes after them.
+    var t, var t2 = try roundTripSnapshot(
+        20,
+        10,
+        "\x1b[?69h\x1b[3;8r\x1b[4;15s\x1b[6;9H",
+    );
+    defer t.deinit(alloc);
+    defer t2.deinit(alloc);
+
+    try testing.expectEqual(@as(size.CellCountInt, 8), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 5), t.screens.active.cursor.y);
+    try testing.expectEqual(t.screens.active.cursor.x, t2.screens.active.cursor.x);
+    try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
+    try testing.expectEqual(t.scrolling_region.top, t2.scrolling_region.top);
+    try testing.expectEqual(t.scrolling_region.left, t2.scrolling_region.left);
+}
+
+test "Terminal vt with every extra restores the cursor in origin mode" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // In origin mode CUP counts from the corner of the scrolling region that
+    // the snapshot restores before the cursor.
+    const streams = [_][]const u8{
+        "\x1b[3;8r\x1b[?6h\x1b[2;5H",
+        "\x1b[?69h\x1b[3;8r\x1b[4;15s\x1b[?6h\x1b[2;3H",
+    };
+    for (streams) |stream| {
+        var t, var t2 = try roundTripSnapshot(20, 10, stream);
+        defer t.deinit(alloc);
+        defer t2.deinit(alloc);
+
+        try testing.expect(t2.modes.get(.origin));
+        try testing.expectEqual(t.screens.active.cursor.x, t2.screens.active.cursor.x);
+        try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
+
+        // Setting a tab stop moves the cursor with CHA, which origin mode
+        // makes relative to the left margin: the stops go out while the
+        // margins are still the whole screen.
+        for (0..20) |col| {
+            try testing.expectEqual(t.tabstops.get(col), t2.tabstops.get(col));
+        }
+    }
+}
+
+test "Terminal vt cursor stays absolute in origin mode without the region" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+
+    var t = try Terminal.init(alloc, .{ .cols = 20, .rows = 10 });
+    defer t.deinit(alloc);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[3;8r\x1b[?6h\x1b[2;5H");
+
+    // The replaying terminal keeps full-screen margins, so row 4 is absolute.
+    var formatter: TerminalFormatter = .init(&t, .vt);
+    formatter.extra = .all;
+    formatter.extra.scrolling_region = false;
+    try formatter.format(&builder.writer);
+    try testing.expect(std.mem.endsWith(u8, builder.writer.buffered(), "\x1b[4;5H"));
+}
+
 test "Terminal vt with keyboard modes" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -6276,4 +6445,131 @@ test "Page HTML hyperlink point map maps closing to previous cell" {
     for (closing_idx..closing_idx + "</a>".len) |i| {
         try testing.expectEqual(expected_coord, point_map.items[i]);
     }
+}
+
+test "Page HTML keeps the text of a hyperlink whose scheme is not allowed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Program output picks the URI, so only web and mail links may become
+    // anchors in rich text that is pasted elsewhere. The text stays, with no
+    // open tag and no unmatched close tag, and the point map still covers
+    // every byte.
+    const uris = [_][]const u8{
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        " javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "file://attacker/share/x",
+        "file:///C:/Windows/System32/calc.exe",
+        "ms-officecmd:payload",
+        "\\\\attacker\\share\\x",
+        "//attacker/share/x",
+        "data:text/html,x",
+        "noctty",
+        "",
+    };
+    for (uris) |uri| {
+        var builder: std.Io.Writer.Allocating = .init(alloc);
+        defer builder.deinit();
+
+        var t = try Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+        defer t.deinit(alloc);
+
+        var s = t.vtStream();
+        defer s.deinit();
+
+        s.nextSlice("\x1b]8;;");
+        s.nextSlice(uri);
+        s.nextSlice("\x1b\\\x1b[1mlink\x1b[0m\x1b]8;;\x1b\\ plain");
+
+        const page = &t.screens.active.pages.pages.last.?.data;
+        var formatter: PageFormatter = .init(page, .{ .emit = .html });
+        var point_map: std.ArrayList(Coordinate) = .empty;
+        defer point_map.deinit(alloc);
+        formatter.point_map = .{ .alloc = alloc, .map = &point_map };
+
+        try formatter.format(&builder.writer);
+        const output = builder.writer.buffered();
+
+        testing.expectEqualStrings(
+            "<div style=\"font-family: monospace; white-space: pre;\">" ++
+                "<div style=\"display: inline;font-weight: bold;\">" ++
+                "link</div> plain" ++
+                "</div>",
+            output,
+        ) catch |err| {
+            std.debug.print("uri: {s}\n", .{uri});
+            return err;
+        };
+        try testing.expectEqual(output.len, point_map.items.len);
+    }
+}
+
+test "Page HTML anchors web, mail and ftp links in any letter case" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const uris = [_][]const u8{
+        "http://example.com",
+        "HTTPS://example.com/a",
+        "mailto:someone@example.com",
+        "ftp://example.com/file",
+    };
+    for (uris) |uri| {
+        var builder: std.Io.Writer.Allocating = .init(alloc);
+        defer builder.deinit();
+
+        var t = try Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+        defer t.deinit(alloc);
+
+        var s = t.vtStream();
+        defer s.deinit();
+
+        s.nextSlice("\x1b]8;;");
+        s.nextSlice(uri);
+        s.nextSlice("\x1b\\link\x1b]8;;\x1b\\");
+
+        const page = &t.screens.active.pages.pages.last.?.data;
+        var formatter: PageFormatter = .init(page, .{ .emit = .html });
+        try formatter.format(&builder.writer);
+
+        const expected = try std.fmt.allocPrint(
+            alloc,
+            "<div style=\"font-family: monospace; white-space: pre;\">" ++
+                "<a href=\"{s}\">link</a></div>",
+            .{uri},
+        );
+        defer alloc.free(expected);
+        try testing.expectEqualStrings(expected, builder.writer.buffered());
+    }
+}
+
+test "Page HTML switches from a dropped link to an allowed one" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+
+    var t = try Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    s.nextSlice("\x1b]8;;javascript:x\x1b\\bad\x1b]8;;https://ok.example\x1b\\good\x1b]8;;\x1b\\");
+    s.nextSlice(" \x1b]8;;https://ok.example\x1b\\good\x1b]8;;file://h/x\x1b\\bad\x1b]8;;\x1b\\");
+
+    const page = &t.screens.active.pages.pages.last.?.data;
+    var formatter: PageFormatter = .init(page, .{ .emit = .html });
+    try formatter.format(&builder.writer);
+
+    try testing.expectEqualStrings(
+        "<div style=\"font-family: monospace; white-space: pre;\">" ++
+            "bad<a href=\"https://ok.example\">good</a> " ++
+            "<a href=\"https://ok.example\">good</a>bad" ++
+            "</div>",
+        builder.writer.buffered(),
+    );
 }

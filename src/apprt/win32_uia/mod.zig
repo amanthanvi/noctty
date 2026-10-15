@@ -9,8 +9,9 @@
 //!     have no HWND at all, are fragment children of that root.
 //!
 //! Per-widget providers (tabs, command palette rows, settings fields)
-//! are added with the widgets they expose. Terminal text is exposed
-//! through a read-only `ITextProvider` / `ITextRangeProvider` slice.
+//! are added with the widgets they expose. Terminal text is exposed by
+//! `TerminalProvider` as a read-only `ITextProvider` / `ITextRangeProvider`
+//! over a bounded `AccessibleTextSnapshot`.
 
 const std = @import("std");
 const com = @import("com.zig");
@@ -27,7 +28,6 @@ pub const CaptionButtonsState = root.CaptionButtonsState;
 pub const captionButtonName = root.captionButtonName;
 pub const UiaRect = com.UiaRect;
 pub const OffsetRange = text.OffsetRange;
-pub const TerminalTextSnapshot = text.TerminalTextSnapshot;
 pub const AccessibleTextSnapshot = text.AccessibleTextSnapshot;
 pub const TerminalCellPosition = text.TerminalCellPosition;
 pub const PaletteListProvider = widgets.PaletteListProvider;
@@ -50,7 +50,6 @@ pub const returnSettingsSectionGroupProvider = widgets.returnSettingsSectionGrou
 pub const returnSettingsControlProvider = widgets.returnSettingsControlProvider;
 pub const returnPaletteListProvider = widgets.returnPaletteListProvider;
 pub const returnChromeControlProvider = widgets.returnChromeControlProvider;
-pub const handleTerminalGetObject = widgets.handleTerminalGetObject;
 pub const returnTerminalProvider = widgets.returnTerminalProvider;
 pub const returnRootProvider = root.returnProvider;
 pub const HRESULT = com.HRESULT;
@@ -59,40 +58,7 @@ pub const RPC_E_CANTCALLOUT_ININPUTSYNCCALL = com.RPC_E_CANTCALLOUT_ININPUTSYNCC
 pub const UiaRootObjectId = com.UiaRootObjectId;
 pub const IRawElementProviderSimple = com.IRawElementProviderSimple;
 pub const disconnectAllProviders = com.UiaDisconnectAllProviders;
-pub const snapshotTerminalPlainText = text.snapshotTerminalPlainText;
-pub const snapshotTerminalVisiblePlainText = text.snapshotTerminalVisiblePlainText;
 pub const snapshotTerminalAccessiblePlainText = text.snapshotTerminalAccessiblePlainText;
-pub const visibleRangeInDocument = text.visibleRangeInDocument;
-
-/// Handle `WM_GETOBJECT` for the main host HWND. Returns `null` if the
-/// caller should fall through to `DefWindowProcW`; otherwise returns
-/// the `LRESULT` the window proc should return directly.
-///
-/// Creates a new `RootProvider` per call; `UiaReturnRawElementProvider`
-/// takes an AddRef internally so we drop our local reference before
-/// returning. If the provider cannot be built (OOM, WinRT-less sandbox),
-/// returns `null` and lets the system fall back to its default
-/// accessibility tree — that is safer than returning a partial provider
-/// for unsupported UIA surface.
-pub fn handleGetObject(
-    alloc: std.mem.Allocator,
-    hwnd: com.HWND,
-    wParam: com.WPARAM,
-    lParam: com.LPARAM,
-) ?com.LRESULT {
-    // Only the UIA root object ID is handled here; other
-    // accessibility queries (MSAA IAccessible, etc.) fall through.
-    if (lParam != com.UiaRootObjectId) return null;
-
-    const provider = root.RootProvider.create(alloc, hwnd) catch |err| {
-        std.log.warn("uia: RootProvider.create failed err={}", .{err});
-        return null;
-    };
-    defer _ = root.RootProvider.Release(&provider.base);
-
-    const lr = com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
-    return lr;
-}
 
 test {
     // Force comptime analysis of the child modules so their tests are

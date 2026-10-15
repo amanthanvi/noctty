@@ -4,6 +4,12 @@ const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 const conpty_redist = @import("conpty_redist.zig");
 pub const portable_apply = @import("portable_apply.zig");
+const http_windows = @import("http_windows.zig");
+const update_util = @import("util.zig");
+const portableRelativePathAlloc = update_util.portableRelativePathAlloc;
+const parseSha256Hex = update_util.parseSha256Hex;
+const sha256File = update_util.sha256File;
+const sha256OpenFile = update_util.sha256OpenFile;
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -1566,7 +1572,7 @@ fn launchPortableHelper(
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
-    try child.spawn();
+    try internal_os.windows.spawnChildHoldingInheritLock(&child);
     var child_open = true;
     errdefer if (child_open) {
         std.os.windows.TerminateProcess(child.id, 1) catch {};
@@ -1897,7 +1903,7 @@ fn spawnInstalledNoctty(
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
-    try child.spawn();
+    try internal_os.windows.spawnChildHoldingInheritLock(&child);
     child.env_map = null;
     return child;
 }
@@ -2049,42 +2055,11 @@ const max_metadata_response_bytes: u64 = 4 * 1024 * 1024;
 const max_download_response_bytes: u64 = 512 * 1024 * 1024;
 const max_redirect_body_bytes: u64 = 1024 * 1024;
 
-/// Pump `reader` into `writer`, refusing a body longer than `max_bytes`.
-/// At most one byte past the cap reaches `writer` before the error, and
-/// every caller discards its destination on error.
-fn streamBounded(
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    max_bytes: u64,
-) !void {
-    var streamed: u64 = 0;
-    while (true) {
-        const room = max_bytes + 1 - streamed;
-        if (room == 0) return error.HttpResponseTooLarge;
-        streamed += reader.stream(writer, .limited64(room)) catch |err| switch (err) {
-            error.EndOfStream => return,
-            else => |other| return other,
-        };
-        if (streamed > max_bytes) return error.HttpResponseTooLarge;
-    }
-}
+const streamBounded = http_windows.streamBounded;
 
 fn clearOptionalOwned(alloc: Allocator, slot: *?[]u8) void {
     if (slot.*) |old| alloc.free(old);
     slot.* = null;
-}
-
-/// The one `User-Agent` every updater request carries. `std.http.Client`
-/// always writes its own `zig/<version> (std.http)` unless it is told to
-/// override it, so naming the header in `extra_headers` sent both.
-const user_agent = "noctty-updater";
-
-fn requestOptions(extra_headers: []const std.http.Header) std.http.Client.RequestOptions {
-    return .{
-        .redirect_behavior = .unhandled,
-        .headers = .{ .user_agent = .{ .override = user_agent } },
-        .extra_headers = extra_headers,
-    };
 }
 
 fn fetchHttps(
@@ -2096,71 +2071,39 @@ fn fetchHttps(
     max_response_bytes: u64,
 ) !void {
     _ = try validateHttpsUrl(initial_url);
-
-    var client: std.http.Client = .{ .allocator = alloc };
-    defer client.deinit();
-
     var current_url = try alloc.dupe(u8, initial_url);
     defer alloc.free(current_url);
 
     var redirect_count: u8 = 0;
     while (true) {
-        var next_url: ?[]u8 = null;
-        {
-            const uri = try validateHttpsUrl(current_url);
-            var request = try client.request(.GET, uri, requestOptions(extra_headers));
-            defer request.deinit();
+        const uri = try validateHttpsUrl(current_url);
+        var response = try http_windows.Response.open(alloc, uri, extra_headers);
+        defer response.deinit();
 
-            try request.sendBodiless();
-            var response = try request.receiveHead(&.{});
-
-            if (response.head.status.class() == .redirect) {
-                if (redirect_count >= 3) return error.TooManyHttpRedirects;
-                const location = response.head.location orelse return error.HttpRedirectLocationMissing;
-                next_url = try resolveRedirectTarget(alloc, current_url, location);
-                errdefer if (next_url) |value| alloc.free(value);
-
-                const redirect_reader = response.reader(&.{});
-                var discarded: u64 = 0;
-                while (true) {
-                    const room = max_redirect_body_bytes + 1 - discarded;
-                    if (room == 0) return error.HttpResponseTooLarge;
-                    discarded += redirect_reader.discard(.limited64(room)) catch |err| switch (err) {
-                        error.EndOfStream => break,
-                        error.ReadFailed => return response.bodyErr().?,
-                    };
-                    if (discarded > max_redirect_body_bytes) return error.HttpResponseTooLarge;
-                }
-                redirect_count += 1;
-            } else {
-                try requireOkHttpStatus(context, current_url, response.head.status);
-
-                const decompress_buffer: []u8 = switch (response.head.content_encoding) {
-                    .identity => &.{},
-                    .zstd => try alloc.alloc(u8, std.compress.zstd.default_window_len),
-                    .deflate, .gzip => try alloc.alloc(u8, std.compress.flate.max_window_len),
-                    .compress => return error.UnsupportedCompressionMethod,
-                };
-                defer if (decompress_buffer.len > 0) alloc.free(decompress_buffer);
-
-                var transfer_buffer: [64]u8 = undefined;
-                var decompress: std.http.Decompress = undefined;
-                const body_reader = response.readerDecompressing(
-                    &transfer_buffer,
-                    &decompress,
-                    decompress_buffer,
-                );
-                streamBounded(body_reader, response_writer, max_response_bytes) catch |err| switch (err) {
-                    error.ReadFailed => return response.bodyErr().?,
-                    else => |other| return other,
-                };
-                return;
+        if (response.status.class() == .redirect) {
+            if (redirect_count >= 3) return error.TooManyHttpRedirects;
+            const location = try response.header(alloc, 33) orelse return error.HttpRedirectLocationMissing;
+            defer alloc.free(location);
+            const next_url = try resolveRedirectTarget(alloc, current_url, location);
+            errdefer alloc.free(next_url);
+            var discarded: u64 = 0;
+            var buffer: [16 * 1024]u8 = undefined;
+            while (true) {
+                const room = max_redirect_body_bytes + 1 - discarded;
+                const n = try response.read(buffer[0..@min(room, buffer.len)]);
+                if (n == 0) break;
+                discarded += n;
+                if (discarded > max_redirect_body_bytes) return error.HttpResponseTooLarge;
             }
+            alloc.free(current_url);
+            current_url = next_url;
+            redirect_count += 1;
+            continue;
         }
+        try requireOkHttpStatus(context, current_url, response.status);
 
-        const replacement = next_url orelse unreachable;
-        alloc.free(current_url);
-        current_url = replacement;
+        try response.streamBody(alloc, response_writer, max_response_bytes);
+        return;
     }
 }
 
@@ -2342,48 +2285,6 @@ fn checksumLine(line: []const u8) ?ChecksumLine {
     const filename = if (raw_filename[0] == '*') raw_filename[1..] else raw_filename;
     if (filename.len == 0) return null;
     return .{ .hex = hex, .filename = filename };
-}
-
-fn parseSha256Hex(hex: []const u8) ![Sha256.digest_length]u8 {
-    if (hex.len != Sha256.digest_length * 2) return error.InvalidChecksum;
-    var digest: [Sha256.digest_length]u8 = undefined;
-    for (&digest, 0..) |*byte, i| {
-        byte.* = (try hexNibble(hex[i * 2]) << 4) | try hexNibble(hex[i * 2 + 1]);
-    }
-    return digest;
-}
-
-fn hexNibble(c: u8) !u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => error.InvalidChecksum,
-    };
-}
-
-fn sha256File(path: []const u8) ![Sha256.digest_length]u8 {
-    var file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-
-    return sha256OpenFile(&file);
-}
-
-fn sha256OpenFile(file: *std.fs.File) ![Sha256.digest_length]u8 {
-    try file.seekTo(0);
-
-    var hasher = Sha256.init(.{});
-    var buf: [64 * 1024]u8 = undefined;
-    while (true) {
-        const len = try file.read(&buf);
-        if (len == 0) break;
-        hasher.update(buf[0..len]);
-    }
-
-    var digest: [Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-    try file.seekTo(0);
-    return digest;
 }
 
 const max_portable_zip_bytes: u64 = 128 * 1024 * 1024;
@@ -2763,14 +2664,6 @@ fn readPeMachine(path: []const u8) !u16 {
         return error.InvalidPortableExecutable;
     }
     return std.mem.readInt(u16, pe_prefix[4..6], .little);
-}
-
-fn portableRelativePathAlloc(alloc: Allocator, path: []const u8) ![]u8 {
-    const result = try alloc.dupe(u8, path);
-    for (result) |*byte| {
-        if (byte.* == '\\') byte.* = '/';
-    }
-    return result;
 }
 
 fn openLockedInstaller(path: []const u8) !std.fs.File {
@@ -5231,73 +5124,6 @@ test "http status mapping distinguishes update response failures" {
         error.UnexpectedHttpStatus,
         requireOkHttpStatus("test", "https://example.invalid/client-error", .bad_request),
     );
-}
-
-test "update requests send exactly one User-Agent" {
-    const alloc = std.testing.allocator;
-
-    const address = try std.net.Address.parseIp("127.0.0.1", 0);
-    var server = try address.listen(.{});
-    defer server.deinit();
-
-    const Capture = struct {
-        server: *std.net.Server,
-        head: [2048]u8 = undefined,
-        len: usize = 0,
-
-        fn serve(self: *@This()) void {
-            const conn = self.server.accept() catch return;
-            defer conn.stream.close();
-            var read_buf: [2048]u8 = undefined;
-            var write_buf: [256]u8 = undefined;
-            var stream_reader = conn.stream.reader(&read_buf);
-            var stream_writer = conn.stream.writer(&write_buf);
-            var http_server = std.http.Server.init(stream_reader.interface(), &stream_writer.interface);
-            var request = http_server.receiveHead() catch return;
-            const head = request.head_buffer;
-            const len = @min(head.len, self.head.len);
-            @memcpy(self.head[0..len], head[0..len]);
-            self.len = len;
-            request.respond("", .{ .keep_alive = false }) catch {};
-        }
-    };
-    var capture: Capture = .{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Capture.serve, .{&capture});
-    // If the client fails before it connects, the worker is still blocked in
-    // `accept`: connect once so it returns, then join it before the capture
-    // and the listener go away.
-    var joined = false;
-    defer if (!joined) {
-        if (std.net.tcpConnectToAddress(server.listen_address)) |stream| stream.close() else |_| {}
-        thread.join();
-    };
-
-    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/", .{server.listen_address.getPort()});
-    defer alloc.free(url);
-
-    var client: std.http.Client = .{ .allocator = alloc };
-    defer client.deinit();
-    {
-        var request = try client.request(.GET, try std.Uri.parse(url), requestOptions(&.{
-            .{ .name = "accept", .value = "application/octet-stream" },
-        }));
-        defer request.deinit();
-        try request.sendBodiless();
-        _ = try request.receiveHead(&.{});
-    }
-    thread.join();
-    joined = true;
-
-    const head = capture.head[0..capture.len];
-    var count: usize = 0;
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
-    while (lines.next()) |line| {
-        if (std.ascii.startsWithIgnoreCase(line, "user-agent:")) {
-            count += 1;
-            try std.testing.expectEqualStrings("user-agent: noctty-updater", line);
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 test "update redirect target resolution accepts absolute HTTPS URL" {

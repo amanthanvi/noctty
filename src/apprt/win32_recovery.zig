@@ -153,12 +153,15 @@ pub fn parseAlloc(
     });
     defer header.deinit();
 
+    if (header.value.schema_version > current_schema_version) return error.NewerSchema;
     if (header.value.schema_version != current_schema_version) {
         return error.UnsupportedVersion;
     }
 
+    // A field a later build adds within this version must not make an older
+    // build read the history as empty and replace it.
     var parsed = try std.json.parseFromSlice(StartupAttemptRecord, alloc, raw, .{
-        .ignore_unknown_fields = false,
+        .ignore_unknown_fields = true,
     });
     errdefer parsed.deinit();
 
@@ -518,15 +521,23 @@ test "win32 recovery merge keeps error coupled to furthest phase" {
     try std.testing.expectEqual(@as(?u32, 32), reverse.attempts[0].last_win32_error);
 }
 
-test "win32 recovery parser rejects unsupported and unknown schema" {
+test "win32 recovery parser separates newer schema and skips unknown fields" {
     try std.testing.expectError(
-        error.UnsupportedVersion,
+        error.NewerSchema,
         parseAlloc(std.testing.allocator, "{\"schema_version\":2,\"attempts\":[]}"),
     );
     try std.testing.expectError(
-        error.UnknownField,
-        parseAlloc(std.testing.allocator, "{\"schema_version\":1,\"attempts\":[],\"future\":true}"),
+        error.UnsupportedVersion,
+        parseAlloc(std.testing.allocator, "{\"schema_version\":0,\"attempts\":[]}"),
     );
+
+    var parsed = try parseAlloc(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"future\":true,\"attempts\":[{\"started_at_unix_ms\":100,\"ready_at_unix_ms\":120,\"build\":\"1.4.0\"}]}",
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.attempts.len);
+    try std.testing.expectEqual(@as(?u64, 120), parsed.value.attempts[0].ready_at_unix_ms);
 }
 
 test "win32 recovery validation rejects malformed history" {

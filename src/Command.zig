@@ -393,7 +393,8 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     };
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
-    try std.os.windows.CreateProcessW(
+    windows.inheritable_spawn_lock.lock();
+    const created = std.os.windows.CreateProcessW(
         application_name_w,
         if (command_line_w) |w| w.ptr else null,
         null,
@@ -405,6 +406,8 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
     );
+    windows.inheritable_spawn_lock.unlock();
+    try created;
     // Past this point a child was created. Everything below can still fail
     // and unwind through the errdefer below, which attempts to terminate it
     // — but whatever the outcome of that attempt, "no child process was
@@ -741,8 +744,10 @@ fn windowsCreateCommandLine(
     const writer = &buf.writer;
 
     if (cmd_shell) {
-        debug.assert(argv.len == 3);
-        debug.assert(mem.eql(u8, argv[1], "/C"));
+        debug.assert(argv.len == 3 or argv.len == 4 or argv.len == 5);
+        if (argv.len >= 4) debug.assert(mem.eql(u8, argv[1], "/D"));
+        if (argv.len == 5) debug.assert(mem.eql(u8, argv[2], "/V:ON") or mem.eql(u8, argv[2], "/V:OFF"));
+        debug.assert(mem.eql(u8, argv[argv.len - 2], "/C"));
     }
 
     for (argv, 0..) |arg, arg_i| {
@@ -751,7 +756,7 @@ fn windowsCreateCommandLine(
         // cmd.exe applies its own quote rules to the raw command after `/C`.
         // Applying MSVCRT quoting here would turn inner quotes into literal
         // `\"` bytes, which cmd.exe does not treat as escapes.
-        if (cmd_shell and arg_i == 2) {
+        if (cmd_shell and arg_i == argv.len - 1) {
             try writer.writeByte('"');
             try writer.writeAll(arg);
             try writer.writeByte('"');
@@ -950,6 +955,134 @@ test "Command: windows-cmd-shell-command-line executes quoted command" {
     const contents = try stdout.readToEndAlloc(testing.allocator, 1024);
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("QUOTED_A \r\nQUOTED_B\r\n", contents);
+}
+
+test "PKG48 shell wrapper ignores implicit cwd programs and retains native syntax" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var td = try TempDir.init();
+    defer td.deinit();
+    try td.dir.makeDir("trusted tools");
+    try td.dir.makeDir("untrusted");
+    try td.dir.writeFile(.{ .sub_path = "untrusted/pkg48probe.cmd", .data = "@echo PLANTED\r\n" });
+    try td.dir.writeFile(.{ .sub_path = "trusted tools/my.tool.cmd", .data = "@echo DOTTED\r\n" });
+    const trusted = try td.dir.realpathAlloc(alloc, "trusted tools");
+    const cwd = try td.dir.realpathAlloc(alloc, "untrusted");
+    var env = try std.process.getEnvMap(alloc);
+    const cmd_path = try std.fs.path.joinZ(alloc, &.{ env.get("WINDIR").?, "System32", "cmd.exe" });
+    const probe = try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" });
+    try std.fs.copyFileAbsolute(cmd_path, probe, .{});
+    try env.put("PATH", trusted);
+    try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+    env.remove("NoDefaultCurrentDirectoryInExePath");
+    try configpkg.windows_shell.configureShellSearch(&env, true);
+    try td.dir.writeFile(.{ .sub_path = "untrusted/echo.cmd", .data = "@echo PLANTED\r\n" });
+    const dotted_probe = try std.fs.path.join(alloc, &.{ cwd, "echo.message" });
+    try std.fs.copyFileAbsolute(cmd_path, dotted_probe, .{});
+    const cases = .{
+        .{ "pkg48probe /d /c \"echo TRUSTED&&if defined NoDefaultCurrentDirectoryInExePath echo GUARD\"", "TRUSTED\r\nGUARD\r\n" },
+        .{ "pkg48missing || echo FALLBACK", "FALLBACK\r\n" },
+        .{ "my.tool", "DOTTED\r\n" },
+        .{ "if.foo || echo FALLBACK", "FALLBACK\r\n" },
+        .{ "for.foo || echo FALLBACK", "FALLBACK\r\n" },
+        .{ "\"echo\" HELLO || echo SAFE", "SAFE\r\n" },
+        .{ "echo.message /d /c echo PLANTED || echo SAFE", "SAFE\r\n" },
+        .{ "echo[HELLO", "HELLO\r\n" },
+        .{ "echo.", "\r\n" },
+        .{ "rem. harmless", "" },
+        .{ ".\\pkg48probe.cmd", "PLANTED\r\n" },
+    };
+    inline for (cases) |case| {
+        var stdout = try createTestStdout(td.dir);
+        defer stdout.close();
+        var stderr = try createTestStderr(td.dir);
+        defer stderr.close();
+        var cmd: Command = .{
+            .path = cmd_path,
+            .args = &.{ cmd_path, "/D", "/C", case[0] },
+            .windows_cmd_shell = true,
+            .windows_create_no_window = true,
+            .cwd = cwd,
+            .env = &env,
+            .stdout = stdout,
+            .stderr = stderr,
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        try cmd.testingStart();
+        const status = try cmd.wait(true);
+        if (status.Exited != 0) std.debug.print("PKG48 failed fixture: {s}\n", .{case[0]});
+        try testing.expectEqual(@as(u32, 0), status.Exited);
+        try stdout.seekTo(0);
+        const output = try stdout.readToEndAlloc(alloc, 4096);
+        try testing.expectEqualStrings(case[1], output);
+    }
+}
+
+test "PKG48 shell wrapper supports literal expansion characters in PATH" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var td = try TempDir.init();
+    defer td.deinit();
+    try td.dir.makePath("untrusted/bin");
+    inline for (.{ "untrusted/pkg48probe.cmd", "untrusted/bin/pkg48probe.cmd", "untrusted/my.tool.cmd" }) |path|
+        try td.dir.writeFile(.{ .sub_path = path, .data = "@echo PLANTED\r\n" });
+    const cwd = try td.dir.realpathAlloc(alloc, "untrusted");
+    var env = try std.process.getEnvMap(alloc);
+    const cmd_path = try std.fs.path.joinZ(alloc, &.{ env.get("WINDIR").?, "System32", "cmd.exe" });
+    try env.put("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+    try env.put("PKG48_PATH", "WRONG");
+    try env.put("PKG48_PATH^", "ALSO_WRONG");
+    try env.put("PKG48_ARG", "EXPANDED");
+    inline for (.{ "trusted %PKG48_PATH%", "trusted !PKG48_PATH!", "trusted %PKG48_PATH% !PKG48_PATH! ^caret!" }) |directory| {
+        try td.dir.makeDir(directory);
+        const trusted = try td.dir.realpathAlloc(alloc, directory);
+        try std.fs.copyFileAbsolute(cmd_path, try std.fs.path.join(alloc, &.{ trusted, "pkg48probe.exe" }), .{});
+        try td.dir.writeFile(.{ .sub_path = try std.fs.path.join(alloc, &.{ directory, "my.tool.cmd" }), .data = "@echo SCRIPT\r\n" });
+        inline for (.{ false, true }) |delayed| {
+            inline for (.{
+                .{ "pkg48probe /d /c echo TRUSTED && echo %PKG48_ARG% && echo !PKG48_ARG!", if (delayed) "TRUSTED \r\nEXPANDED \r\nEXPANDED\r\n" else "TRUSTED \r\nEXPANDED \r\n!PKG48_ARG!\r\n" },
+                .{ "\"pkg48probe\" /d /c echo QUOTED", "QUOTED\r\n" },
+                .{ "pkg48probe /d /c exit 9 || echo FALLBACK", "FALLBACK\r\n" },
+                .{ "my.tool", "SCRIPT\r\n" },
+            }) |case| {
+                try env.put("PATH", trusted);
+                // An empty existing guard is effective too; do not overwrite it.
+                if (delayed) try env.put("NoDefaultCurrentDirectoryInExePath", "") else env.remove("NoDefaultCurrentDirectoryInExePath");
+                try configpkg.windows_shell.configureShellSearch(&env, true);
+                var stdout = try createTestStdout(td.dir);
+                defer stdout.close();
+                var stderr = try createTestStderr(td.dir);
+                defer stderr.close();
+                var cmd: Command = .{
+                    .path = cmd_path,
+                    .args = &.{ cmd_path, "/D", if (delayed) "/V:ON" else "/V:OFF", "/C", case[0] },
+                    .windows_cmd_shell = true,
+                    .windows_create_no_window = true,
+                    .cwd = cwd,
+                    .env = &env,
+                    .stdout = stdout,
+                    .stderr = stderr,
+                    .os_pre_exec = null,
+                    .rt_pre_exec = null,
+                    .rt_post_fork = null,
+                    .rt_pre_exec_info = undefined,
+                    .rt_post_fork_info = undefined,
+                };
+                try cmd.testingStart();
+                try testing.expectEqual(@as(u32, 0), (try cmd.wait(true)).Exited);
+                try stdout.seekTo(0);
+                try testing.expectEqualStrings(case[1], try stdout.readToEndAlloc(alloc, 4096));
+            }
+        }
+    }
 }
 
 test "createNullDelimitedEnvMap" {

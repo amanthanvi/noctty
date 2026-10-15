@@ -163,7 +163,9 @@ fn appendConfiguredSshProfiles(
     // shells rather than propagating, because the caller treats an error as
     // "no profiles at all" and would leave the user with no picker.
     const hosts = windows_ssh_hosts.load(alloc) catch |err| {
-        warnSshDiscoveryOnce(err);
+        // Busy: another discovery was reading the config at the same
+        // moment. Not worth a warning; the incomplete list is retried.
+        if (err != error.SshConfigReadBusy) warnSshDiscoveryOnce(err);
         if (complete) |value| value.* = false;
         return shell_profiles;
     };
@@ -192,6 +194,80 @@ pub fn profileOrderHint(alloc: Allocator) ?[:0]const u8 {
 pub fn deinitProfiles(alloc: Allocator, profiles: []Profile) void {
     for (profiles) |*profile| profile.deinit(alloc);
     alloc.free(profiles);
+}
+
+/// Deep-copy `profiles` into `alloc` (a discovery that ran on another
+/// thread allocates from its own allocator).
+pub fn cloneProfiles(alloc: Allocator, profiles: []const Profile) ![]Profile {
+    const out = try alloc.alloc(Profile, profiles.len);
+    var copied: usize = 0;
+    errdefer {
+        for (out[0..copied]) |*profile| profile.deinit(alloc);
+        alloc.free(out);
+    }
+    for (profiles, out) |src, *dst| {
+        const key = try alloc.dupe(u8, src.key);
+        errdefer alloc.free(key);
+        const label = try alloc.dupe(u8, src.label);
+        errdefer alloc.free(label);
+        const palette_title = if (src.palette_title) |value| try alloc.dupe(u8, value) else null;
+        errdefer if (palette_title) |value| alloc.free(value);
+        dst.* = .{
+            .kind = src.kind,
+            .key = key,
+            .label = label,
+            .palette_title = palette_title,
+            .command = try src.command.clone(alloc),
+        };
+        copied += 1;
+    }
+    return out;
+}
+
+test "cloneProfiles copies every field into the target allocator" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const src_alloc = arena.allocator();
+    const argv = try src_alloc.alloc([:0]const u8, 2);
+    argv[0] = try src_alloc.dupeZ(u8, "wsl.exe");
+    argv[1] = try src_alloc.dupeZ(u8, "-d");
+    const source = [_]Profile{
+        .{ .kind = .pwsh, .key = "pwsh", .label = "PowerShell", .command = .{ .shell = try src_alloc.dupeZ(u8, "pwsh.exe") } },
+        .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "Ubuntu", .palette_title = "WSL: Ubuntu", .command = .{ .direct = argv } },
+    };
+    const copy = try cloneProfiles(testing.allocator, &source);
+    // Freeing the copy with the testing allocator proves nothing still
+    // points into the arena.
+    defer deinitProfiles(testing.allocator, copy);
+    try testing.expectEqual(source.len, copy.len);
+    for (source, copy) |a, b| {
+        try testing.expectEqual(a.kind, b.kind);
+        try testing.expectEqualStrings(a.key, b.key);
+        try testing.expectEqualStrings(a.label, b.label);
+        try testing.expect(a.key.ptr != b.key.ptr);
+    }
+    try testing.expectEqualStrings("WSL: Ubuntu", copy[1].palette_title.?);
+    try testing.expectEqualStrings("-d", copy[1].command.direct[1]);
+    try testing.expectEqualStrings("pwsh.exe", copy[0].command.shell);
+}
+
+test "cloneProfiles frees what it copied when an allocation fails" {
+    const source = [_]Profile{
+        .{ .kind = .pwsh, .key = "pwsh", .label = "PowerShell", .palette_title = "PS", .command = .{ .shell = "pwsh.exe" } },
+        .{ .kind = .powershell, .key = "powershell", .label = "Windows PowerShell", .command = .{ .shell = "powershell.exe" } },
+        .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "Ubuntu", .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu" } } },
+    };
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const copy = cloneProfiles(failing.allocator(), &source) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        deinitProfiles(failing.allocator(), copy);
+        break;
+    }
 }
 
 pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic {
@@ -298,6 +374,32 @@ pub fn lookupChildExecutable(alloc: Allocator, exe: []const u8, env: *const std.
         }
     }
     return null;
+}
+
+/// Disable cmd's implicit cwd executable search for the final shell wrapper.
+/// Keep this in its environment: clearing it before the target immediately
+/// restores cwd lookup. Explicit paths and PATH entries retain cmd semantics.
+pub fn configureShellSearch(env: *std.process.EnvMap, windows_cmd_shell: bool) !void {
+    if (builtin.os.tag == .windows and windows_cmd_shell and
+        env.get("NoDefaultCurrentDirectoryInExePath") == null)
+        try env.put("NoDefaultCurrentDirectoryInExePath", "1");
+}
+
+test "PKG48 only shell wrappers receive the inherited cwd search guard" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var env = std.process.EnvMap.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "relative;C:\\Tools!;%literal%");
+    try configureShellSearch(&env, false);
+    try std.testing.expect(env.get("NoDefaultCurrentDirectoryInExePath") == null);
+    try configureShellSearch(&env, true);
+    try std.testing.expectEqualStrings("1", env.get("NoDefaultCurrentDirectoryInExePath").?);
+    inline for (.{ "user-value", "" }) |value| {
+        try env.put("NoDefaultCurrentDirectoryInExePath", value);
+        try configureShellSearch(&env, true);
+        try std.testing.expectEqualStrings(value, env.get("NoDefaultCurrentDirectoryInExePath").?);
+    }
+    try std.testing.expectEqualStrings("relative;C:\\Tools!;%literal%", env.get("PATH").?);
 }
 
 /// App Execution Aliases are reparse points whose target cannot be opened
@@ -1148,7 +1250,7 @@ fn probeWslExecutable(alloc: Allocator, exe_path: []const u8) !bool {
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
 
-    child.spawn() catch |err| {
+    win32.spawnChildHoldingInheritLock(&child) catch |err| {
         log.warn("failed to probe wsl responsiveness exe={s} err={}", .{ exe_path, err });
         return false;
     };
@@ -1474,7 +1576,7 @@ fn listWslDistros(alloc: Allocator, exe_path: []const u8) ![][]u8 {
     child.stderr_behavior = .Ignore;
     child.create_no_window = true;
 
-    try child.spawn();
+    try win32.spawnChildHoldingInheritLock(&child);
     var child_running = true;
     errdefer {
         if (child_running) _ = child.kill() catch {};

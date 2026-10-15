@@ -390,9 +390,11 @@ installed by another shell integration path or manually added to the SSH cache.
 
 Interactive `cmd.exe` launches are auto-integrated by wrapping the inherited
 `PROMPT` (or cmd's `$P$G` default) with OSC 133 A/B prompt marks and OSC 9;9 cwd
-reports. When Clink is detected, noctty prepends the shipped cmd Lua directory
+reports. When the shipped cmd Lua script is present, noctty prepends its directory
 to `CLINK_PATH`, but does not activate Clink. An already-active Clink discovers
-the script and adds OSC 133 C/D command boundaries; without it, prompt/cwd marks
+`noctty-shell-integration.lua` and adds OSC 133 C/D command boundaries. The script
+also preserves marks around the final normal prompt after Clink themes replace
+it, while respecting existing prompt marks; without Clink, prompt/cwd marks
 remain available. See [windows.md](../../docs/windows.md#shells) for configured
 `PROMPT` precedence and Clink exit-code details.
 

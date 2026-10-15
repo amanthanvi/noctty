@@ -213,7 +213,7 @@ if ($termioRuntimeText.Contains('self.surface_mailbox.pushTerminalOutput(buf)') 
     -not $termioRuntimeText.Contains('self.terminal_stream.handler.semantic_output.begin(') -or
     -not $termioRuntimeText.Contains('self.terminal_stream.handler.semantic_output.finish()') -or
     -not $termioRuntimeText.Contains('self.terminal_output_transport.captureEpoch()') -or
-    -not $termioRuntimeText.Contains('self.terminal_output_transport.pushSemanticBatchForEpoch(') -or
+    -not $termioRuntimeText.Contains('self.terminal_output_transport.pushSemanticCapture(') -or
     -not $termioRuntimeText.Contains('decision.semantic_output.slice()')) {
     throw 'Termio must publish parser-derived semantic batches instead of forwarding raw PTY bytes.'
 }

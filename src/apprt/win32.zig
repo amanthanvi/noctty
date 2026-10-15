@@ -3005,10 +3005,55 @@ const UpdateCheckCompletion = struct {
     }
 };
 
+/// A profile discovery that ran off the UI thread (`App.startProfileDiscovery`).
+const ProfileDiscoveryCompletion = struct {
+    /// Owns everything the discovery allocated, and for the detached worker
+    /// the completion itself; its child is the page allocator there, so the
+    /// worker borrows nothing from the App.
+    arena: std.heap.ArenaAllocator,
+    result: anyerror!windows_shell.ProfileDiscovery = error.NotStarted,
+    /// `App.profiles_generation` when the discovery started.
+    generation: u64,
+    /// `App.profile_discovery_attempt` of the worker that ran it, 0 for the
+    /// synchronous path.
+    attempt: u64 = 0,
+
+    /// Frees the arena, and with it a completion that lives in it.
+    fn deinit(self: *ProfileDiscoveryCompletion) void {
+        var arena = self.arena;
+        arena.deinit();
+    }
+};
+
+test "an undelivered profile discovery frees what it found" {
+    for ([_]bool{ true, false }) |found| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        const completion = try arena.allocator().create(ProfileDiscoveryCompletion);
+        completion.* = .{ .arena = arena, .result = error.WslListTimeout, .generation = 0 };
+        const alloc = completion.arena.allocator();
+        if (found) {
+            const profiles = try alloc.alloc(windows_shell.Profile, 1);
+            const argv = try alloc.alloc([:0]const u8, 1);
+            argv[0] = try alloc.dupeZ(u8, "pwsh.exe");
+            profiles[0] = .{
+                .kind = .pwsh,
+                .key = try alloc.dupe(u8, "pwsh"),
+                .label = try alloc.dupe(u8, "PowerShell"),
+                .command = .{ .direct = argv },
+            };
+            completion.result = .{ .profiles = profiles, .complete = true };
+        }
+        var payload: AppDeliveryPayload = .{ .profiles = completion };
+        payload.deinit();
+    }
+}
+
 const AppDeliveryPayload = union(enum) {
     update: *UpdateCheckCompletion,
     toast: win32_toast_activation.ActivationTarget,
     uia_disconnect: *DeferredUiaDisconnect,
+    profiles: *ProfileDiscoveryCompletion,
+    jump_list: *win32_jump_list.RebuildJob,
 
     pub fn deinit(self: *AppDeliveryPayload) void {
         switch (self.*) {
@@ -3017,6 +3062,8 @@ const AppDeliveryPayload = union(enum) {
                 completion.deinit();
                 alloc.destroy(completion);
             },
+            .profiles => |completion| completion.deinit(),
+            .jump_list => |job| job.deinit(),
             .toast => {},
             .uia_disconnect => |pending| {
                 pending.release(pending.ctx);
@@ -3142,30 +3189,65 @@ const RecoveryLedgerLock = struct {
     }
 };
 
-/// Read and parse the ledger at `path`. Missing, unreadable and invalid
-/// ledgers all read as empty; `context` names the caller in the log line.
+const RecoveryLedgerRead = union(enum) {
+    /// Missing or invalid: reads as empty history.
+    empty,
+    /// Written by a newer build, or larger than any history this build writes
+    /// (16 attempts are under 2 KiB). It is valid, only not understood here,
+    /// and replacing it would reset that build's crash history: callers read
+    /// it as empty and write nothing. Waiting does not change that.
+    left_alone,
+    /// It exists and could not be read just now (a scanner holds it, the
+    /// allocator failed). It may be a newer build's, so nothing replaces it;
+    /// unlike `left_alone` it may be readable a moment later, and the ready
+    /// marker retries.
+    unreadable,
+    record: std.json.Parsed(win32_recovery.StartupAttemptRecord),
+
+    fn deinit(self: *RecoveryLedgerRead) void {
+        if (self.* == .record) self.record.deinit();
+    }
+};
+
+/// Read and parse the ledger at `path`; `context` names the caller in the log
+/// line.
 fn readRecoveryLedgerAlloc(
     alloc: Allocator,
     path: []const u8,
     context: []const u8,
-) ?std.json.Parsed(win32_recovery.StartupAttemptRecord) {
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => {},
-            else => log.warn("win32 recovery: {s} open failed err={}", .{ context, err }),
-        }
-        return null;
+) RecoveryLedgerRead {
+    // A ledger that exists but cannot be read now (a scanner holds it, the
+    // allocator failed) may be a newer build's: reading it as empty would
+    // replace it.
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .empty,
+        else => {
+            log.warn("win32 recovery: {s} open failed err={}; leaving it untouched", .{ context, err });
+            return .unreadable;
+        },
     };
     defer file.close();
     const raw = file.readToEndAlloc(alloc, 64 * 1024) catch |err| {
-        log.warn("win32 recovery: {s} read failed err={}", .{ context, err });
-        return null;
+        if (err == error.FileTooBig) {
+            log.warn("win32 recovery: {s} history is larger than this build writes; leaving it untouched", .{context});
+            return .left_alone;
+        }
+        log.warn("win32 recovery: {s} read failed err={}; leaving it untouched", .{ context, err });
+        return .unreadable;
     };
     defer alloc.free(raw);
-    return win32_recovery.parseAlloc(alloc, raw) catch |err| {
+    return .{ .record = win32_recovery.parseAlloc(alloc, raw) catch |err| {
+        if (err == error.NewerSchema) {
+            log.warn("win32 recovery: {s} history was written by a newer noctty; leaving it untouched", .{context});
+            return .left_alone;
+        }
+        if (err == error.OutOfMemory) {
+            log.warn("win32 recovery: {s} history could not be parsed; leaving it untouched", .{context});
+            return .unreadable;
+        }
         log.warn("win32 recovery: {s} ignored invalid history err={}", .{ context, err });
-        return null;
-    };
+        return .empty;
+    } };
 }
 
 fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
@@ -3753,9 +3835,13 @@ fn beginRecoveryStartupAtPath(
     }
 
     var record: win32_recovery.StartupAttemptRecord = .{};
-    var parsed_record = readRecoveryLedgerAlloc(alloc, path, "startup history");
-    defer if (parsed_record) |*parsed| parsed.deinit();
-    if (parsed_record) |*parsed| record = parsed.value;
+    var ledger = readRecoveryLedgerAlloc(alloc, path, "startup history");
+    defer ledger.deinit();
+    // A history that is not this build's to replace, or could not be read
+    // now, is neither counted nor replaced: this launch goes unrecorded, as it
+    // does when the lock is unavailable.
+    if (ledger == .left_alone or ledger == .unreadable) return result;
+    if (ledger == .record) record = ledger.record.value;
 
     var retained_paths: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
@@ -4199,6 +4285,26 @@ pub const App = struct {
     /// Published before any producer starts; retained until producers stop.
     /// Detached update workers hold their own reference, without borrowing App.
     delivery: ?*AppDelivery = null,
+    /// Bumped whenever a Host's profiles are replaced or dropped, so a
+    /// discovery that finishes off the UI thread can tell it went stale.
+    profiles_generation: u64 = 0,
+    /// A discovery result from `startProfileDiscovery`, waiting for the top
+    /// of the outer pump.
+    pending_profile_discovery: ?*ProfileDiscoveryCompletion = null,
+    /// When the running discovery started (GetTickCount64), so one that never
+    /// finishes does not block every later attempt.
+    profile_discovery_started_ms: u64 = 0,
+    /// Fires once after a worker starts, unless its result arrived, to start
+    /// another attempt: nothing else re-arms the jump list's timer when a
+    /// worker hangs or cannot deliver.
+    profile_discovery_watchdog_id: ?UINT_PTR = null,
+    /// The host inside `Host.requestProfiles`. With no worker the discovery
+    /// runs synchronously within that call, and the host re-checks its list
+    /// itself instead of being called back from inside its own chrome sync.
+    profiles_requesting_host: ?*Host = null,
+    /// Numbers each worker, so a late result from an abandoned one leaves the
+    /// running state and watchdog of the attempt that replaced it alone.
+    profile_discovery_attempt: u64 = 0,
     message_hwnd: ?HWND = null,
     core_ticking: bool = false,
     quit_timer_id: ?UINT_PTR = null,
@@ -4230,6 +4336,11 @@ pub const App = struct {
     /// loaded it, so writing their own windows (or none) over it destroys the
     /// user's workspace.
     session_owner: ?SessionOwnerLock = null,
+    /// The saved session is not this build's to replace: a newer build wrote
+    /// it, or it is larger than any session this build writes. This process
+    /// neither restores it nor takes ownership, so it never saves over it or
+    /// deletes it.
+    session_state_left_alone: bool = false,
     /// Set once WM_ENDSESSION(TRUE) has saved for a sign-out, shutdown or
     /// reboot. That snapshot is final: shells the logoff kills afterwards
     /// close their panes, and the saves those closes would run must not
@@ -4688,7 +4799,10 @@ pub const App = struct {
             self.stopRecoveryRetryTimer();
             self.stopProgramStatusNotifyTimer();
             self.stopUpdateRecheckTimer();
+            self.stopProfileDiscoveryWatchdog();
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
+            if (self.pending_profile_discovery) |pending| pending.deinit();
+            self.pending_profile_discovery = null;
             self.closeMessageWindow();
             self.running = false;
         }
@@ -4756,7 +4870,7 @@ pub const App = struct {
             errdefer if (owner_lock) |lock| lock.release();
             const restored = if (owner_lock != null) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
-            self.session_owner = owner_lock;
+            self.adoptSessionOwner(owner_lock);
             if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
@@ -4832,6 +4946,7 @@ pub const App = struct {
             // with no window procedure on the stack.
             if (try self.drainDeferredOpens()) break;
             self.drainPendingHandoffs();
+            self.applyPendingProfileDiscovery();
 
             const result = sys.GetMessageW(&msg, null, 0, 0);
             if (result == -1) return lastError();
@@ -4874,17 +4989,10 @@ pub const App = struct {
                             jump_list.startupProfileDiscoveryPending())
                         {
                             const host = self.hosts.items[0];
-                            if (host.profiles == null or !host.profiles_complete) {
-                                _ = host.reloadProfiles() catch |err| {
-                                    log.warn("jump list deferred profile discovery failed err={}", .{err});
-                                    jump_list.retryStartupProfileDiscovery();
-                                    continue;
-                                };
-                            }
                             if (host.profiles != null and host.profiles_complete) {
                                 jump_list.completeStartupProfileDiscovery();
                             } else {
-                                jump_list.retryStartupProfileDiscovery();
+                                self.startProfileDiscovery();
                             }
                         }
                         continue;
@@ -4916,6 +5024,14 @@ pub const App = struct {
                 if (self.update_recheck_timer_id) |timer_id| {
                     if (@intFromPtr(msg.hwnd) == 0 and msg.wParam == timer_id) {
                         self.onUpdateRecheckTimer();
+                        continue;
+                    }
+                }
+                if (self.profile_discovery_watchdog_id) |timer_id| {
+                    if (@intFromPtr(msg.hwnd) == 0 and msg.wParam == timer_id) {
+                        self.stopProfileDiscoveryWatchdog();
+                        const pending = if (self.jump_list) |*jump_list| jump_list.startupProfileDiscoveryPending() else false;
+                        if ((pending or self.anyHostRequestedProfiles()) and self.hosts.items.len > 0) self.startProfileDiscovery();
                         continue;
                     }
                 }
@@ -5056,7 +5172,27 @@ pub const App = struct {
 
     fn initializeJumpList(self: *App) void {
         const jump_list = if (self.jump_list) |*value| value else return;
+        if (self.delivery != null) jump_list.runner = .{ .ctx = self, .start = startJumpListRebuild };
         jump_list.startup();
+    }
+
+    /// The jump list's Shell commit, on a detached worker with an STA of
+    /// its own. Like the profile discovery worker it borrows nothing from
+    /// the App, so quitting never waits for it; the job comes back as
+    /// WM_WINHOSTTY_JUMP_LIST.
+    fn startJumpListRebuild(ctx: *anyopaque, job: *win32_jump_list.RebuildJob) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const delivery = self.delivery orelse return false;
+        delivery.retain();
+        // Windows' default stack: Zig's 16 MiB default is committed, not
+        // just reserved, and a wedged commit keeps its thread.
+        const thread = std.Thread.spawn(.{ .stack_size = 1024 * 1024 }, jumpListRebuildThreadMain, .{ delivery, job }) catch |err| {
+            delivery.release();
+            log.warn("jump list rebuild thread unavailable err={}", .{err});
+            return false;
+        };
+        thread.detach();
+        return true;
     }
 
     /// Resolve `%LOCALAPPDATA%\noctty\palette-mru.txt`. Caller frees
@@ -5105,6 +5241,16 @@ pub const App = struct {
             log.info("win32 session: another instance owns the saved session; starting without it", .{});
             return null;
         };
+    }
+
+    /// Ownership is for a session this process may replace. One it left alone
+    /// stays free, so the build that wrote it can still restore it.
+    fn adoptSessionOwner(self: *App, lock: ?SessionOwnerLock) void {
+        if (self.session_state_left_alone) {
+            if (lock) |held| held.release();
+            return;
+        }
+        self.session_owner = lock;
     }
 
     fn releaseSessionOwnership(self: *App) void {
@@ -5222,7 +5368,10 @@ pub const App = struct {
         if (!self.sessionRestoreEligible()) return null;
         const path = self.sessionStatePath() orelse return null;
         defer self.core_app.alloc.free(path);
+        return self.loadSessionStateAt(path);
+    }
 
+    fn loadSessionStateAt(self: *App, path: []const u8) !?std.json.Parsed(win32_session_state.SessionState) {
         return switch (win32_session_persistence.loadAlloc(
             self.core_app.alloc,
             path,
@@ -5230,10 +5379,22 @@ pub const App = struct {
         )) {
             .missing => null,
             .oversized => oversized: {
-                log.warn("win32 session restore: state exceeds size limit; leaving file untouched", .{});
+                log.warn("win32 session restore: state exceeds size limit; leaving file untouched and not saving over it", .{});
+                self.session_state_left_alone = true;
                 break :oversized null;
             },
-            .transient => |err| return err,
+            .transient => |err| {
+                // Unreadable now is not unwanted: a scanner may hold a newer
+                // build's file for a moment, and the next checkpoint would
+                // replace what this run never saw.
+                self.session_state_left_alone = true;
+                return err;
+            },
+            .newer_schema => newer: {
+                log.warn("win32 session restore: state was written by a newer noctty; leaving file untouched and not saving over it", .{});
+                self.session_state_left_alone = true;
+                break :newer null;
+            },
             .corrupt => |err| corrupt: {
                 self.quarantineInvalidSessionState(path, err);
                 break :corrupt null;
@@ -5279,6 +5440,11 @@ pub const App = struct {
             .transient => |err| {
                 log.warn("named layout launch read failed name={s} path={s} err={}", .{ name, path, err });
                 if (banner_host) |host| host.setBanner(.err, "Layout could not be read.") catch {};
+                return false;
+            },
+            .newer_schema => {
+                log.warn("named layout launch file was written by a newer noctty name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout was saved by a newer noctty.") catch {};
                 return false;
             },
             .corrupt => |err| {
@@ -5530,11 +5696,19 @@ pub const App = struct {
         delivery.close();
         while (delivery.pop()) |value| {
             var payload = value;
-            if (payload == .uia_disconnect) {
-                processDeferredUiaDisconnect(null, payload.uia_disconnect);
-            } else payload.deinit();
+            switch (payload) {
+                .uia_disconnect => |pending| processDeferredUiaDisconnect(null, pending),
+                .jump_list => |job| {
+                    // The Shell already reset its removed list for this
+                    // commit; record the removals before the state is saved.
+                    if (self.jump_list) |*jump_list| jump_list.completeRebuild(job);
+                    payload.deinit();
+                },
+                else => payload.deinit(),
+            }
         }
         delivery.update_running.store(false, .release);
+        delivery.profiles_running.store(false, .release);
         delivery.toast_pending.store(false, .release);
         if (self.message_hwnd) |hwnd| {
             setWindowData(hwnd, null);
@@ -5700,6 +5874,12 @@ pub const App = struct {
         };
         defer lock.release();
 
+        // A newer build may have written its own history since this launch
+        // recorded its attempt: that file is not ours to replace.
+        var ledger = readRecoveryLedgerAlloc(self.core_app.alloc, path, "window-created marker");
+        defer ledger.deinit();
+        if (ledger == .left_alone or ledger == .unreadable) return;
+
         var persisted: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
         @memcpy(persisted[0..current.len], current);
         persisted[current.len - 1].phase = .window_created;
@@ -5737,9 +5917,15 @@ pub const App = struct {
         defer lock.release();
 
         var disk_record: win32_recovery.StartupAttemptRecord = .{};
-        var parsed_record = readRecoveryLedgerAlloc(self.core_app.alloc, path, "ready merge");
-        defer if (parsed_record) |*parsed| parsed.deinit();
-        if (parsed_record) |*parsed| disk_record = parsed.value;
+        var ledger = readRecoveryLedgerAlloc(self.core_app.alloc, path, "ready merge");
+        defer ledger.deinit();
+        // Deterministic, so not an error that spends the caller's retries.
+        if (ledger == .left_alone) return;
+        // A transient failure is what that retry budget is for: dropping the
+        // marker would leave this launch unresolved on disk, which the next
+        // launch counts as a failed start.
+        if (ledger == .unreadable) return error.RecoveryLedgerUnreadable;
+        if (ledger == .record) disk_record = ledger.record.value;
 
         var merged_attempts: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
         const merged = win32_recovery.mergeMarkReady(
@@ -6046,16 +6232,45 @@ pub const App = struct {
         window: win32_session_state.Window,
     ) !void {
         const hwnd = host.hwnd orelse return;
-        if (try sessionStateWindowRect(window)) |rect| {
-            if (sys.SetWindowPos(
-                hwnd,
-                null,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                c.SWP_NOZORDER | c.SWP_NOACTIVATE,
-            ) == 0) return lastError();
+        if (try sessionStateWindowRect(window)) |saved| {
+            // The saved rect is where the window was, not where there is room
+            // for it now: its monitor may be gone.
+            const works = WorkAreas.collect();
+            const dpi_before = sys.GetDpiForWindow(hwnd);
+            var target = restoredRectOnScreen(saved, works.slice(), restore_grab);
+            // The rect is in the pixels of the monitor it was saved on, and is
+            // where the window goes: a crossing from the monitor the host was
+            // created on must not swap in the DPI suggestion's rescaled size.
+            host.restore_placing = true;
+            defer host.restore_placing = false;
+            for (0..3) |attempt| {
+                if (sys.SetWindowPos(
+                    hwnd,
+                    null,
+                    target.left,
+                    target.top,
+                    target.right - target.left,
+                    target.bottom - target.top,
+                    c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+                ) == 0) return lastError();
+                // Windows caps what it is given (a left edge to 16 bits, a
+                // width to the largest window), so whether the title bar can
+                // be reached is judged on the rect the window ended up with.
+                var actual: RECT = undefined;
+                if (sys.GetWindowRect(hwnd, &actual) == 0) return lastError();
+                const moved = restoredRectOnScreen(actual, works.slice(), restore_grab);
+                if (!rectEqual(moved, actual)) {
+                    if (attempt == 2) {
+                        log.warn("win32 session restore: window stayed off every monitor", .{});
+                        break;
+                    }
+                    target = moved;
+                    continue;
+                }
+                // The layout that follows a DPI change can resize it once
+                // more: apply the same rect again once.
+                if (sys.GetDpiForWindow(hwnd) == dpi_before or rectEqual(actual, target)) break;
+            }
         }
         if ((window.state orelse .normal) == .maximized) {
             _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
@@ -6174,14 +6389,14 @@ pub const App = struct {
         };
         // Geometry is restore state, not layout shape.
         if (scope == .layout) return window;
-        if (sessionWindowRect(host)) |rect| {
-            window.x = rect.left;
-            window.y = rect.top;
-            window.width = rect.right - rect.left;
-            window.height = rect.bottom - rect.top;
-        }
-        if (host.hwnd) |hwnd| {
-            window.state = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
+        if (sessionWindowPlacement(host)) |placed| {
+            if (placed.rect) |rect| {
+                window.x = rect.left;
+                window.y = rect.top;
+                window.width = rect.right - rect.left;
+                window.height = rect.bottom - rect.top;
+            }
+            window.state = if (placed.maximized) .maximized else .normal;
         }
         return window;
     }
@@ -6429,29 +6644,48 @@ pub const App = struct {
         };
     }
 
-    fn sessionWindowRect(host: *Host) ?RECT {
+    const SessionWindowPlacement = struct {
+        /// The window's normal rect in screen coordinates.
+        rect: ?RECT,
+        /// It is, or restores to, maximized.
+        maximized: bool,
+    };
+
+    fn sessionWindowPlacement(host: *Host) ?SessionWindowPlacement {
+        return sessionWindowPlacementOn(host, null);
+    }
+
+    /// `monitor` stands in for the window's monitor, so a test can give it
+    /// the taskbar this machine lacks.
+    fn sessionWindowPlacementOn(host: *Host, monitor: ?MONITORINFO) ?SessionWindowPlacement {
         const hwnd = host.hwnd orelse return null;
+        var maximized = sys.IsZoomed(hwnd) != 0;
         var rect: RECT = undefined;
-        if (sys.IsZoomed(hwnd) != 0 or sys.IsIconic(hwnd) != 0) {
-            var placement: WINDOWPLACEMENT = .{
-                .length = @sizeOf(WINDOWPLACEMENT),
-                .flags = 0,
-                .showCmd = 0,
-                .ptMinPosition = .{ .x = 0, .y = 0 },
-                .ptMaxPosition = .{ .x = 0, .y = 0 },
-                .rcNormalPosition = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-            };
+        if (maximized or sys.IsIconic(hwnd) != 0) {
+            var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
+            placement.length = @sizeOf(WINDOWPLACEMENT);
             if (sys.GetWindowPlacement(hwnd, &placement) != 0) {
+                maximized = restoresMaximized(hwnd, &placement);
+                // Workspace coordinates, offset from the screen's by a taskbar
+                // on the top or left. Every other state saves screen
+                // coordinates, and restore applies them as such.
                 rect = placement.rcNormalPosition;
+                if (monitor) |info| {
+                    rect = workspaceRectToScreen(rect, info);
+                } else if (sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST)) |nearest| {
+                    var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+                    info.cbSize = @sizeOf(MONITORINFO);
+                    if (sys.GetMonitorInfoW(nearest, &info) != 0) rect = workspaceRectToScreen(rect, info);
+                }
             } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
-                return null;
+                return .{ .rect = null, .maximized = maximized };
             }
         } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
-            return null;
+            return .{ .rect = null, .maximized = maximized };
         }
 
-        if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
-        return rect;
+        if (rect.right <= rect.left or rect.bottom <= rect.top) return .{ .rect = null, .maximized = maximized };
+        return .{ .rect = rect, .maximized = maximized };
     }
 
     /// Push an action string onto the palette MRU list, dedup'd by
@@ -6975,6 +7209,136 @@ pub const App = struct {
         errdefer delivery.release();
         const thread = try std.Thread.spawn(.{}, updateCheckThreadMain, .{request});
         thread.detach();
+    }
+
+    /// Run the jump list's deferred startup profile discovery off the UI
+    /// thread. Discovery starts `wsl.exe --status` and `wsl.exe -l -q` and
+    /// waits for each (up to 1.5 s apiece), which held the UI thread about
+    /// 90 ms half a second after start-up here. Like the update check, the
+    /// worker is detached and borrows nothing from the App, so quitting never
+    /// waits for it; its result arrives as WM_WINHOSTTY_PROFILES.
+    fn startProfileDiscovery(self: *App) void {
+        const delivery = self.delivery orelse return self.discoverStartupProfilesNow();
+        const now_ms = sys.GetTickCount64();
+        if (delivery.profiles_running.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+            // Running, or its result is still queued. A worker can hang for
+            // good: a shell spawned at the same moment can inherit the write
+            // end of `wsl.exe -l -q`'s stdout pipe, and its drain then never
+            // ends. Give up on it then; the generation keeps a late result
+            // from doing harm.
+            if (now_ms -| self.profile_discovery_started_ms < profile_discovery_abandon_ms) return;
+            log.warn("profile discovery worker unfinished after {d} ms; starting another", .{profile_discovery_abandon_ms});
+        }
+        self.profile_discovery_started_ms = now_ms;
+        self.profile_discovery_attempt +%= 1;
+        delivery.retain();
+        const thread = std.Thread.spawn(.{}, profileDiscoveryThreadMain, .{
+            delivery,
+            self.config.@"ssh-config-hosts",
+            self.profiles_generation,
+            self.profile_discovery_attempt,
+        }) catch |err| {
+            delivery.release();
+            delivery.profiles_running.store(false, .release);
+            log.warn("profile discovery thread unavailable; discovering on the UI thread err={}", .{err});
+            return self.discoverStartupProfilesNow();
+        };
+        thread.detach();
+        self.stopProfileDiscoveryWatchdog();
+        const timer_id = sys.SetTimer(null, 0, @intCast(profile_discovery_abandon_ms + std.time.ms_per_s), null);
+        if (timer_id != 0) self.profile_discovery_watchdog_id = timer_id;
+    }
+
+    fn stopProfileDiscoveryWatchdog(self: *App) void {
+        if (self.profile_discovery_watchdog_id) |timer_id| {
+            _ = sys.KillTimer(null, timer_id);
+            self.profile_discovery_watchdog_id = null;
+        }
+    }
+
+    fn applyPendingProfileDiscovery(self: *App) void {
+        const pending = self.pending_profile_discovery orelse return;
+        self.pending_profile_discovery = null;
+        defer pending.deinit();
+        if (pending.attempt == self.profile_discovery_attempt) {
+            if (self.delivery) |delivery| delivery.profiles_running.store(false, .release);
+            self.stopProfileDiscoveryWatchdog();
+        }
+        self.handleProfileDiscovery(pending);
+    }
+
+    /// A discovery's list goes to every host that asked for one (the
+    /// picker, the palette) and, for the jump list, to the first host while
+    /// its startup discovery is pending and that host has no complete list.
+    fn handleProfileDiscovery(self: *App, completion: *const ProfileDiscoveryCompletion) void {
+        // With no host, `scheduleIfStartupPending` re-arms when one appears.
+        if (self.hosts.items.len == 0) return;
+        const primary = self.hosts.items[0];
+        const jump_list: ?*win32_jump_list.JumpList = if (self.jump_list) |*value|
+            if (value.startupProfileDiscoveryPending()) value else null
+        else
+            null;
+        defer if (jump_list) |list| {
+            if (primary.profiles != null and primary.profiles_complete) {
+                list.completeStartupProfileDiscovery();
+            } else {
+                list.retryStartupProfileDiscovery();
+            }
+        };
+        const primary_wants = jump_list != null and !(primary.profiles != null and primary.profiles_complete);
+
+        if (completion.generation != self.profiles_generation) {
+            // A list was applied or dropped since this one started. The
+            // jump list re-arms its timer; a host that asked starts over.
+            if (self.anyHostRequestedProfiles()) self.startProfileDiscovery();
+            return;
+        }
+        const discovery = completion.result catch |err| {
+            log.warn("deferred profile discovery failed err={}", .{err});
+            for (self.hosts.items) |host| {
+                if (!host.profiles_requested) continue;
+                host.profiles_requested = false;
+                if (host != self.profiles_requesting_host) host.profilesArrived(host.profiles != null);
+            }
+            return;
+        };
+        for (self.hosts.items) |host| {
+            if (!host.profiles_requested and !(host == primary and primary_wants)) continue;
+            host.profiles_requested = false;
+            const had_profiles = host.profiles != null;
+            // An incomplete list (a probe timed out, the SSH config was
+            // busy) does not replace a complete one.
+            if (!discovery.complete and host.profiles_complete) {
+                if (host != self.profiles_requesting_host) host.profilesArrived(had_profiles);
+                continue;
+            }
+            const profiles = windows_shell.cloneProfiles(self.core_app.alloc, discovery.profiles) catch |err| {
+                log.warn("deferred profile discovery failed err={}", .{err});
+                continue;
+            };
+            _ = host.applyProfileDiscovery(.{ .profiles = profiles, .complete = discovery.complete }) catch |err| {
+                log.warn("deferred profile discovery failed err={}", .{err});
+            };
+            if (host != self.profiles_requesting_host) host.profilesArrived(had_profiles);
+        }
+    }
+
+    fn anyHostRequestedProfiles(self: *const App) bool {
+        for (self.hosts.items) |host| {
+            if (host.profiles_requested) return true;
+        }
+        return false;
+    }
+
+    /// The synchronous path, for when no thread can run it.
+    fn discoverStartupProfilesNow(self: *App) void {
+        var completion: ProfileDiscoveryCompletion = .{
+            .arena = .init(self.core_app.alloc),
+            .generation = self.profiles_generation,
+        };
+        defer completion.deinit();
+        completion.result = windows_shell.discoverProfiles(completion.arena.allocator(), self.config.@"ssh-config-hosts");
+        self.handleProfileDiscovery(&completion);
     }
 
     fn handleUpdateCheckCompletion(self: *App, completion: *UpdateCheckCompletion) void {
@@ -7738,15 +8102,10 @@ pub const App = struct {
                 );
                 errdefer alloc.free(parameters);
 
-                // `--working-directory` above carries the terminal path
-                // verbatim; ShellExecuteExW needs a Windows-local directory
-                // instead, or a WSL-backed surface's POSIX pwd fails the
-                // launch before the child ever parses that argument.
-                const host_cwd = try win32_elevation.resolveElevatedHostDirectory(
-                    alloc,
-                    cwd,
-                );
-                errdefer if (host_cwd) |directory| alloc.free(directory);
+                // The terminal keeps its pwd in --working-directory; the
+                // elevated host must not search that directory for programs.
+                const host_cwd = try win32_elevation.elevatedHostDirectory(alloc);
+                errdefer alloc.free(host_cwd);
 
                 try self.deferShellRequest(.{ .elevated_window = .{
                     .parameters = parameters,
@@ -7823,20 +8182,21 @@ pub const App = struct {
                         if (background_blur_newly_requested) logBackgroundBlurUnsupported();
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
-                        var jump_list_profiles_pending = ssh_config_hosts_changed and self.jump_list != null;
+                        // Also with no Host open: a discovery still running
+                        // used the old setting.
+                        if (ssh_config_hosts_changed) self.profiles_generation +%= 1;
+                        const jump_list_profiles_pending = ssh_config_hosts_changed and self.jump_list != null;
                         if (jump_list_profiles_pending) self.jump_list.?.updateProfiles(&.{});
+                        // Drop every list before asking for a new one: each drop
+                        // bumps the generation, which would make a discovery
+                        // started in between stale.
+                        if (ssh_config_hosts_changed) {
+                            for (self.hosts.items) |host| host.invalidateProfiles();
+                        }
                         for (self.hosts.items) |host| {
-                            if (ssh_config_hosts_changed) {
-                                host.invalidateProfiles();
-                                if (host.overlay_mode == .profile or jump_list_profiles_pending) {
-                                    _ = host.reloadProfiles() catch |err| blk: {
-                                        log.warn("SSH profile reload after config change failed err={}", .{err});
-                                        break :blk false;
-                                    };
-                                    if (host.profiles != null and host.profiles_complete) {
-                                        jump_list_profiles_pending = false;
-                                    }
-                                }
+                            if (ssh_config_hosts_changed and host.overlay_mode == .profile) {
+                                host.requestProfiles();
+                                host.refreshProfileChrome();
                             }
                             if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
                         }
@@ -8260,7 +8620,7 @@ pub const App = struct {
 
             .search_total => {
                 if (self.findSurfaceForTarget(target)) |surface| {
-                    try surface.setSearchTotal(value.total);
+                    try surface.setSearchTotal(value.total, value.invalid);
                     return true;
                 }
                 return false;
@@ -8434,7 +8794,13 @@ pub const App = struct {
             },
 
             .open_url => {
-                try self.openUrl(value.url);
+                self.openUrl(value.url) catch |err| {
+                    // A click that does nothing reads as a broken terminal.
+                    if (err == error.OpenUrlRejected) {
+                        _ = self.showHostBanner(target, .info, labels.open_refused_banner) catch false;
+                    }
+                    return err;
+                };
                 return true;
             },
 
@@ -8853,7 +9219,7 @@ pub const App = struct {
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Ignore;
         child.stderr_behavior = .Ignore;
-        try child.spawn();
+        try internal_os.windows.spawnChildHoldingInheritLock(&child);
         return true;
     }
 
@@ -9596,9 +9962,9 @@ pub const App = struct {
         }
 
         for (self.hosts.items) |host| {
-            if (host.profiles != null) {
-                _ = host.reloadProfiles() catch false;
-            }
+            // The pins reordered the list in place; a fresh one from the
+            // discovery worker restores discovery order.
+            if (host.profiles != null) host.requestProfiles();
             host.refreshProfileChrome();
         }
     }
@@ -11687,6 +12053,60 @@ pub const App = struct {
         try std.testing.expectEqual(@as(usize, 2), Hook.count);
     }
 
+    test "a refused link open says so in the window's banner" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+            .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+            .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+        });
+        defer session.deinit();
+        defer app.discardDeferredOpens();
+
+        // A missing file, a program, a share and a device path never reach the
+        // shell, and the click says so.
+        for ([_][]const u8{
+            "C:\\pkg42-missing-dir\\missing.txt",
+            "C:\\Windows\\System32\\cmd.exe",
+            "\\\\server\\share\\a.txt",
+            "\\\\.\\pipe\\x",
+            "search-ms:query=*.exe",
+        }) |target| {
+            try host.setBanner(.none, null);
+            try std.testing.expectError(error.OpenUrlRejected, app.performAction(.app, .open_url, .{
+                .kind = .unknown,
+                .url = target,
+            }));
+            try std.testing.expectEqual(HostBannerKind.info, host.banner_kind);
+            try std.testing.expectEqualStrings(labels.open_refused_banner, host.banner_text.?);
+            try std.testing.expectEqual(@as(usize, 0), app.deferred_opens.items.len);
+        }
+
+        // An accepted open leaves the banner alone.
+        try host.setBanner(.none, null);
+        try std.testing.expect(try app.performAction(.app, .open_url, .{
+            .kind = .unknown,
+            .url = "https://example.com/",
+        }));
+        try std.testing.expectEqual(HostBannerKind.none, host.banner_kind);
+        try std.testing.expectEqual(@as(usize, 1), app.deferred_opens.items.len);
+
+        // Quick select says why nothing happened, in the same banner.
+        try host.setBanner(.none, null);
+        surface.showQuickSelectNotice(labels.quick_select_no_targets_banner);
+        try std.testing.expectEqualStrings(labels.quick_select_no_targets_banner, host.banner_text.?);
+        surface.showQuickSelectNotice(labels.quick_select_too_many_banner);
+        try std.testing.expectEqualStrings(labels.quick_select_too_many_banner, host.banner_text.?);
+    }
+
     test "deferred shell requests own payloads and run after their callers return" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         var core_app: CoreApp = undefined;
@@ -12654,6 +13074,164 @@ fn automationHostFocused(
 ) bool {
     const hwnd = host_hwnd orelse return surface_focused_fallback;
     return foreground_hwnd == hwnd;
+}
+
+/// `App.startProfileDiscovery`'s detached worker. It holds a reference on
+/// the delivery channel and allocates from the page allocator, so it may
+/// outlive the App; a result nobody takes is freed by the channel. When it
+/// cannot deliver, the App's watchdog timer starts another attempt.
+fn profileDiscoveryThreadMain(delivery: *AppDelivery, include_ssh_hosts: bool, generation: u64, attempt: u64) void {
+    defer delivery.release();
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const completion = arena.allocator().create(ProfileDiscoveryCompletion) catch {
+        arena.deinit();
+        log.warn("profile discovery result unavailable err=OutOfMemory", .{});
+        delivery.profiles_running.store(false, .release);
+        return;
+    };
+    completion.* = .{ .arena = arena, .generation = generation, .attempt = attempt };
+    completion.result = windows_shell.discoverProfiles(completion.arena.allocator(), include_ssh_hosts);
+    var payload: AppDeliveryPayload = .{ .profiles = completion };
+    if (!delivery.post(c.WM_WINHOSTTY_PROFILES, payload)) {
+        payload.deinit();
+        delivery.profiles_running.store(false, .release);
+    }
+}
+
+fn jumpListRebuildThreadMain(delivery: *AppDelivery, job: *win32_jump_list.RebuildJob) void {
+    defer delivery.release();
+    job.runInOwnApartment();
+    var payload: AppDeliveryPayload = .{ .jump_list = job };
+    if (!delivery.post(c.WM_WINHOSTTY_JUMP_LIST, payload)) payload.deinit();
+}
+
+/// Longer than a discovery can take when it works (two 1.5 s wsl.exe
+/// timeouts and the SSH config read budget).
+const profile_discovery_abandon_ms: u64 = 10 * std.time.ms_per_s;
+
+fn testProfileList(alloc: Allocator, keys: []const []const u8) ![]windows_shell.Profile {
+    var source: [4]windows_shell.Profile = undefined;
+    for (keys, 0..) |key, index| source[index] = .{
+        .kind = .pwsh,
+        .key = key,
+        .label = key,
+        .command = .{ .direct = &.{"pwsh.exe"} },
+    };
+    return try windows_shell.cloneProfiles(alloc, source[0..keys.len]);
+}
+
+fn testFreeHostProfiles(app: *App, hosts: []const *Host) void {
+    const alloc = app.core_app.alloc;
+    for (hosts) |host| {
+        if (host.profiles) |profiles| windows_shell.deinitProfiles(alloc, profiles);
+        host.profiles = null;
+        appendOwnedString(alloc, &host.selected_profile_key, null) catch unreachable;
+    }
+    appendOwnedString(alloc, &app.launcher_profile_key, null) catch unreachable;
+}
+
+test "win32 a window without profiles borrows another window's complete list" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var first: Host = undefined;
+    var second: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &first, .register = true, .id = 1 },
+            .{ .storage = &second, .register = true, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{ &first, &second });
+
+    first.profiles = try testProfileList(app.core_app.alloc, &.{ "pwsh", "cmd" });
+    first.profiles_complete = true;
+    const generation = app.profiles_generation;
+
+    // No discovery: the list is copied, and the generation is left alone so
+    // a discovery in flight still applies.
+    try std.testing.expect(second.profilesForChrome());
+    try std.testing.expect(!second.profiles_requested);
+    try std.testing.expectEqual(generation, app.profiles_generation);
+    try std.testing.expectEqual(@as(usize, 2), second.profiles.?.len);
+    try std.testing.expectEqualStrings("cmd", second.profiles.?[1].key);
+    try std.testing.expect(second.profiles.?[0].key.ptr != first.profiles.?[0].key.ptr);
+}
+
+test "win32 a finished discovery reaches only the windows that asked for it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var first: Host = undefined;
+    var second: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &first, .register = true, .id = 1 },
+            .{ .storage = &second, .register = true, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{ &first, &second });
+
+    second.profiles = try testProfileList(app.core_app.alloc, &.{"old"});
+    second.profiles_complete = true;
+    first.profiles_requested = true;
+
+    var completion: ProfileDiscoveryCompletion = .{
+        .arena = .init(std.testing.allocator),
+        .generation = app.profiles_generation,
+    };
+    defer completion.deinit();
+    completion.result = .{
+        .profiles = try testProfileList(completion.arena.allocator(), &.{ "pwsh", "cmd" }),
+        .complete = true,
+    };
+    app.handleProfileDiscovery(&completion);
+
+    try std.testing.expect(!first.profiles_requested);
+    try std.testing.expectEqual(@as(usize, 2), first.profiles.?.len);
+    try std.testing.expect(first.profiles_complete);
+    try std.testing.expectEqual(@as(usize, 1), second.profiles.?.len);
+    try std.testing.expectEqualStrings("old", second.profiles.?[0].key);
+
+    // An incomplete list does not replace a complete one.
+    second.profiles_requested = true;
+    var partial: ProfileDiscoveryCompletion = .{
+        .arena = .init(std.testing.allocator),
+        .generation = app.profiles_generation,
+    };
+    defer partial.deinit();
+    partial.result = .{
+        .profiles = try testProfileList(partial.arena.allocator(), &.{"partial"}),
+        .complete = false,
+    };
+    app.handleProfileDiscovery(&partial);
+    try std.testing.expect(!second.profiles_requested);
+    try std.testing.expectEqualStrings("old", second.profiles.?[0].key);
+
+    // A result that started before a list was applied is dropped.
+    first.profiles_requested = false;
+    second.profiles_requested = false;
+    var stale: ProfileDiscoveryCompletion = .{
+        .arena = .init(std.testing.allocator),
+        .generation = app.profiles_generation -% 1,
+    };
+    defer stale.deinit();
+    stale.result = .{
+        .profiles = try testProfileList(stale.arena.allocator(), &.{"stale"}),
+        .complete = true,
+    };
+    app.handleProfileDiscovery(&stale);
+    try std.testing.expectEqualStrings("pwsh", first.profiles.?[0].key);
 }
 
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
@@ -13819,6 +14397,9 @@ const Host = struct {
     overlay_completion_result_id: ?PaletteStableId = null,
     profiles: ?[]windows_shell.Profile = null,
     profiles_complete: bool = false,
+    /// The picker or the palette asked the discovery worker for a list;
+    /// its result is applied here even when a list is already loaded.
+    profiles_requested: bool = false,
     selected_profile: usize = 0,
     selected_profile_key: ?[:0]const u8 = null,
     chrome_brush: HBRUSH = null,
@@ -14028,6 +14609,8 @@ const Host = struct {
     quick_terminal_animation: ?QuickTerminalAnimation = null,
     /// Programmatic QT rectangles are already in target-monitor pixels.
     quick_terminal_placing: bool = false,
+    /// A restored window's saved rect is being applied; same reason.
+    restore_placing: bool = false,
     tween_timer_active: bool = false,
     search_timer_active: bool = false,
     scrollbar_timer_active: bool = false,
@@ -15490,10 +16073,7 @@ const Host = struct {
             }
         }
 
-        const profiles_ready = self.ensureProfiles() catch |err| blk: {
-            logUiActionError("palette profile load failed", err);
-            break :blk false;
-        };
+        const profiles_ready = self.profilesForChrome();
         if (profiles_ready) {
             for (self.profiles.?) |profile| {
                 _ = self.appendPaletteDescriptor(.{
@@ -17903,11 +18483,22 @@ const Host = struct {
     }
 
     fn reloadProfiles(self: *Host) !bool {
-        const replacing = self.profiles != null;
-        const discovery = try windows_shell.discoverProfiles(
+        return try self.applyProfileDiscovery(try windows_shell.discoverProfiles(
             self.app.core_app.alloc,
             self.app.config.@"ssh-config-hosts",
-        );
+        ));
+    }
+
+    /// Takes ownership of `discovery`'s profiles, also on error.
+    fn applyProfileDiscovery(self: *Host, discovery: windows_shell.ProfileDiscovery) !bool {
+        // A discovery still running started from an older list.
+        self.app.profiles_generation +%= 1;
+        return try self.applyProfiles(discovery);
+    }
+
+    /// Takes ownership of `discovery`'s profiles, also on error.
+    fn applyProfiles(self: *Host, discovery: windows_shell.ProfileDiscovery) !bool {
+        const replacing = self.profiles != null;
         const next_profiles = discovery.profiles;
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
@@ -17942,6 +18533,7 @@ const Host = struct {
     }
 
     fn invalidateProfiles(self: *Host) void {
+        self.app.profiles_generation +%= 1;
         if (self.profiles) |profiles| {
             windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
             self.profiles = null;
@@ -17967,12 +18559,82 @@ const Host = struct {
         _ = try self.setSelectedProfileIndex(self.selected_profile);
     }
 
+    /// For actions that need a list now (open a profile by key or index,
+    /// pin a quick slot). Borrows another window's list, complete or not,
+    /// and discovers on this thread only when no window has one.
     fn ensureProfiles(self: *Host) !bool {
-        if (self.profiles == null) return try self.reloadProfiles();
+        if (self.profiles == null and
+            !self.adoptProfilesFromAnotherHost(true) and
+            !self.adoptProfilesFromAnotherHost(false))
+        {
+            return try self.reloadProfiles();
+        }
         const profiles = self.profiles.?;
         if (profiles.len == 0) return false;
         if (self.selected_profile >= profiles.len) self.selected_profile = 0;
         return true;
+    }
+
+    /// The picker's and the palette's way to a list: never discovers on
+    /// the UI thread. With none loaded it borrows another window's, else
+    /// asks the discovery worker and answers false until that list lands.
+    fn profilesForChrome(self: *Host) bool {
+        if (self.profiles == null and !self.adoptProfilesFromAnotherHost(true)) {
+            self.requestProfiles();
+            // With no worker to run it, the discovery ran on this thread.
+            if (self.profiles == null) return false;
+        }
+        const profiles = self.profiles.?;
+        if (profiles.len == 0) return false;
+        if (self.selected_profile >= profiles.len) self.selected_profile = 0;
+        return true;
+    }
+
+    fn requestProfiles(self: *Host) void {
+        self.profiles_requested = true;
+        const previous = self.app.profiles_requesting_host;
+        self.app.profiles_requesting_host = self;
+        defer self.app.profiles_requesting_host = previous;
+        self.app.startProfileDiscovery();
+    }
+
+    /// Copy a list another window already has (`complete_only`: only a
+    /// complete one). The copy is no newer than a discovery in flight, so it
+    /// leaves the generation alone.
+    fn adoptProfilesFromAnotherHost(self: *Host, complete_only: bool) bool {
+        for (self.app.hosts.items) |other| {
+            if (other == self or (complete_only and !other.profiles_complete)) continue;
+            const source = other.profiles orelse continue;
+            const copy = windows_shell.cloneProfiles(self.app.core_app.alloc, source) catch return false;
+            _ = self.applyProfiles(.{ .profiles = copy, .complete = other.profiles_complete }) catch |err| {
+                log.warn("profile list copy failed err={}", .{err});
+            };
+            return self.profiles != null;
+        }
+        return false;
+    }
+
+    /// A list this host asked the discovery worker for arrived, or the
+    /// discovery failed. `had_profiles`: a list was already showing.
+    fn profilesArrived(self: *Host, had_profiles: bool) void {
+        switch (self.overlay_mode) {
+            .profile => {
+                const profiles = self.profiles orelse &.{};
+                if (profiles.len == 0) {
+                    self.hideOverlay();
+                    runUiActionOrLog("profile overlay dismiss layout failed", self.layout());
+                    runUiActionOrLog(
+                        "profile availability banner failed",
+                        self.setBanner(.err, "No supported Windows profiles detected."),
+                    );
+                    return;
+                }
+                self.refreshProfileChrome();
+            },
+            // Not after a failure: the palette would ask again at once.
+            .command_palette => if (!had_profiles and self.profiles != null) self.rebuildPaletteList(),
+            else => {},
+        }
     }
 
     fn selectedProfileIndex(self: *Host) ?usize {
@@ -18041,19 +18703,19 @@ const Host = struct {
     }
 
     fn toggleProfileOverlay(self: *Host) bool {
-        if (!(self.reloadProfiles() catch false)) {
-            runUiActionOrLog(
-                "profile availability banner failed",
-                self.setBanner(.err, "No supported Windows profiles detected."),
-            );
-            return false;
-        }
         if (self.overlay_mode == .profile) {
             self.hideOverlay();
             runUiActionOrLog("profile overlay dismiss layout failed", self.layout());
             self.forceHostCompositionPaint();
             return true;
         }
+        // Each opening refreshes the list, so a shell installed meanwhile
+        // shows up, but on the discovery worker: until it answers the
+        // picker shows the list it has, or says it is detecting one.
+        // One request either way: a list borrowed from another window is
+        // refreshed too, and with no worker it is one synchronous discovery.
+        if (self.profiles == null) _ = self.adoptProfilesFromAnotherHost(true);
+        self.requestProfiles();
         const initial = self.overlayInitialText(.profile);
         defer if (initial) |value| self.app.core_app.alloc.free(value);
         self.hideOverlay();
@@ -18063,7 +18725,7 @@ const Host = struct {
 
     fn stepProfileSelection(self: *Host, reverse: bool) !bool {
         if (self.overlay_mode != .profile) return false;
-        if (!(try self.ensureProfiles())) return false;
+        if (!self.profilesForChrome()) return false;
         const profiles = self.profiles.?;
         const edit_hwnd = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
@@ -18124,7 +18786,8 @@ const Host = struct {
     }
 
     fn submitProfileOverlay(self: *Host, open_target: ProfileOpenTarget) !bool {
-        if (!(try self.ensureProfiles())) {
+        if (!self.profilesForChrome()) {
+            if (self.profiles_requested) return false;
             try self.setBanner(.err, "No supported Windows profiles detected.");
             return false;
         }
@@ -20525,7 +21188,7 @@ const Host = struct {
                 host_overlay_command_palette_label_utf8,
             ),
             .profile => {
-                if (!(try self.ensureProfiles())) {
+                if (!self.profilesForChrome()) {
                     return try syncWindowTextUtf8Cached(
                         alloc,
                         label_hwnd,
@@ -20786,6 +21449,14 @@ const Host = struct {
             );
         }
         if (self.overlay_mode == .profile) {
+            if (self.profiles == null and self.profiles_requested) {
+                return try syncWindowTextUtf8Cached(
+                    alloc,
+                    hint_hwnd,
+                    &self.cached_overlay_hint,
+                    "Detecting Windows profiles...",
+                );
+            }
             const hint = try buildProfileHintText(
                 alloc,
                 self.profiles,
@@ -21184,8 +21855,9 @@ const Host = struct {
         const hwnd = self.hwnd orelse return;
         const button = self.overflow_hwnd orelse return;
 
-        // Ensure profiles are loaded before building the menu
-        runUiActionOrLog("overflow profile load failed", self.ensureProfiles());
+        // The menu lists what is loaded; with nothing yet, the discovery
+        // worker fills it for the next opening.
+        _ = self.profilesForChrome();
 
         // Position menu below the dropdown chevron button
         var rect: RECT = undefined;
@@ -27927,6 +28599,13 @@ test "win32 DPI suggestions preserve a quick terminal tween but resize ordinary 
     _ = hostWindowProc(hwnd, c.WM_DPICHANGED, 0, param);
     try std.testing.expect(sys.GetWindowRect(hwnd, &actual) != 0);
     try std.testing.expectEqualDeep(ordinary, actual);
+    // So does a restored window's saved rect while it is being applied.
+    try std.testing.expect(sys.SetWindowPos(hwnd, null, before.left, before.top, before.right - before.left, before.bottom - before.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+    host.restore_placing = true;
+    _ = hostWindowProc(hwnd, c.WM_DPICHANGED, 0, param);
+    try std.testing.expect(sys.GetWindowRect(hwnd, &actual) != 0);
+    try std.testing.expectEqualDeep(before, actual);
+    host.restore_placing = false;
     try std.testing.expect(!host.quick_terminal_placing);
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
 }
@@ -28347,12 +29026,8 @@ fn newWindowPlacement(app: *App, source: HWND, fullscreen: bool, destination: ?H
     // taskbar once the source is minimized.
     if (fullscreen) return .{ .rect = info.rcMonitor, .maximize = null, .copied = true };
 
-    // A window minimized from maximized restores to maximized. The flag
-    // alone says nothing about a window that was restored since: Windows
-    // keeps it set on a normal window.
     const iconic = sys.IsIconic(source) != 0;
-    const zoomed = sys.IsZoomed(source) != 0 or (iconic and (placement.flags & c.WPF_RESTORETOMAXIMIZED) != 0);
-    if (zoomed) {
+    if (restoresMaximized(source, &placement)) {
         // It is maximized again, never minimized with it.
         placement.showCmd = c.SW_MAXIMIZE;
         return .{
@@ -28514,6 +29189,78 @@ fn allMonitorsInfo() ?win32_quick_terminal.MonitorInfo {
     if (search.failed) return null;
     if (!search.found) return null;
     return search.info;
+}
+
+/// Whether the window is, or when restored becomes, maximized. A window
+/// minimized from maximized restores to maximized. The flag alone says
+/// nothing about a window that was restored since: Windows keeps it set on a
+/// normal window.
+fn restoresMaximized(hwnd: HWND, placement: *const WINDOWPLACEMENT) bool {
+    return sys.IsZoomed(hwnd) != 0 or
+        (sys.IsIconic(hwnd) != 0 and (placement.flags & c.WPF_RESTORETOMAXIMIZED) != 0);
+}
+
+/// The work areas of the monitors there are now, in screen coordinates.
+const WorkAreas = struct {
+    rects: [16]RECT = undefined,
+    count: usize = 0,
+
+    fn collect() WorkAreas {
+        var areas: WorkAreas = .{};
+        _ = sys.EnumDisplayMonitors(null, null, enumProc, @as(LPARAM, @bitCast(@intFromPtr(&areas))));
+        return areas;
+    }
+
+    fn slice(self: *const WorkAreas) []const RECT {
+        return self.rects[0..self.count];
+    }
+
+    fn enumProc(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
+        const areas: *WorkAreas = @ptrFromInt(@as(usize, @bitCast(data)));
+        if (areas.count == areas.rects.len) return 0;
+        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
+        info.cbSize = @sizeOf(MONITORINFO);
+        if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
+        areas.rects[areas.count] = info.rcWork;
+        areas.count += 1;
+        return 1;
+    }
+};
+
+/// How much of a restored window's title bar must be on a monitor for the
+/// user to be able to grab it: this wide and half as tall, in physical
+/// pixels. The saved rect is in the pixels of a monitor this process may not
+/// have seen yet, and the host being placed is on another, so no DPI is
+/// right to scale by; a caption at 100%, still a target at 300%.
+const restore_grab: i32 = 48;
+
+/// Where a window saved at `rect` (screen coordinates) goes now that the
+/// monitors' work areas are `works`. One whose title bar can still be grabbed
+/// stays exactly where it was, whatever its other edges do: a snapped window
+/// overhangs its monitor by its invisible frame. One that cannot (its monitor
+/// was unplugged, or the layout changed) moves to the nearest work area, its
+/// size capped to it.
+fn restoredRectOnScreen(rect: RECT, works: []const RECT, grab: i32) RECT {
+    if (works.len == 0) return rect;
+    // The rect comes from a file on disk: any i32 is possible, so differences
+    // of coordinates are taken in 64 bits.
+    const grab_width = @min(grab, rect.right - rect.left);
+    var nearest = works[0];
+    var nearest_gap: i64 = std.math.maxInt(i64);
+    for (works) |work| {
+        const visible_width = @as(i64, @min(rect.right, work.right)) - @max(rect.left, work.left);
+        const visible_height = @as(i64, @min(rect.top, work.bottom - grab) + grab) - @max(rect.top, work.top);
+        if (visible_width >= grab_width and visible_height >= @divTrunc(grab, 2)) return rect;
+
+        const gap_x: i64 = @max(0, @max(@as(i64, work.left) - rect.right, @as(i64, rect.left) - work.right));
+        const gap_y: i64 = @max(0, @max(@as(i64, work.top) - rect.bottom, @as(i64, rect.top) - work.bottom));
+        const gap = gap_x + gap_y;
+        if (gap < nearest_gap) {
+            nearest = work;
+            nearest_gap = gap;
+        }
+    }
+    return fitRectInWork(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, nearest);
 }
 
 // Keep helper modules reachable from the exe's module graph. Zig prunes
@@ -30156,6 +30903,41 @@ test "stripHtmlTags preserves plain text" {
     try testing.expectEqualStrings("no tags here", out);
 }
 
+test "copied terminal text keeps only web and mail links as anchors" {
+    const alloc = std.testing.allocator;
+
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 4 });
+    defer t.deinit(alloc);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]8;;javascript:alert(1)\x1b\\evil\x1b]8;;\x1b\\ ");
+    stream.nextSlice("\x1b]8;;file://attacker/share/x\x1b\\unc\x1b]8;;\x1b\\ ");
+    stream.nextSlice("\x1b]8;;https://example.com\x1b\\good\x1b]8;;\x1b\\");
+
+    // The same formatter the mixed copy runs, then the CF_HTML envelope
+    // `Surface.writeClipboardHtml` hands the clipboard, with no clipboard
+    // involved.
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var formatter: terminal.formatter.ScreenFormatter = .init(
+        t.screens.active,
+        .{ .emit = .html },
+    );
+    try formatter.format(&aw.writer);
+
+    const out = try win32_clipboard_html.wrapFragment(alloc, aw.writer.buffered());
+    defer alloc.free(out);
+    const range = win32_clipboard_html.fragmentRange(out).?;
+    const fragment = out[range.start..range.end];
+
+    try std.testing.expect(std.mem.indexOf(u8, fragment, "evil unc ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fragment, "<a href=\"https://example.com\">good</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fragment, "javascript:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, fragment, "file://") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fragment, "<a "));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, fragment, "</a>"));
+}
+
 test "win32 appendOwnedString replaces existing value and frees old allocation" {
     const testing = std.testing;
     var target: ?[:0]const u8 = null;
@@ -30633,20 +31415,6 @@ const buildSearchBarResultsText = labels.buildSearchBarResultsText;
 const SearchBarResultsVisual = labels.SearchBarResultsVisual;
 const SearchBarToolbarVisual = labels.SearchBarToolbarVisual;
 
-const SearchBarChromeLayout = struct {
-    pad_x: i32,
-    pad_y: i32,
-    gap: i32,
-    section_gap: i32,
-    close_gap: i32,
-    nav_w: i32,
-    toggle_w: i32,
-    close_w: i32,
-    results_w: i32,
-    min_edit_w: i32,
-    control_h: i32,
-};
-
 const SearchBarButtonRole = labels.SearchBarButtonRole;
 
 const search_bar_button_roles = [_]SearchBarButtonRole{
@@ -30668,22 +31436,8 @@ const searchBarShouldInvalidateCoreSearchOnEdit = labels.searchBarShouldInvalida
 
 const shouldAcceptCoreSearchUpdates = labels.shouldAcceptCoreSearchUpdates;
 
-fn searchBarChromeLayout(host: *const Host, frame_rect: RECT) SearchBarChromeLayout {
-    _ = frame_rect;
-    return .{
-        .pad_x = host.scaled(8),
-        .pad_y = host.scaled(6),
-        .gap = host.scaled(2),
-        .section_gap = host.scaled(10),
-        .close_gap = host.scaled(10),
-        .nav_w = host.scaled(30),
-        .toggle_w = host.scaled(30),
-        .close_w = host.scaled(30),
-        .results_w = host.scaled(72),
-        .min_edit_w = host.scaled(120),
-        .control_h = host.scaled(28),
-    };
-}
+const searchBarChromeLayout = chrome_layout.searchBarChromeLayout;
+const searchBarFit = chrome_layout.searchBarFit;
 
 const searchBarButtonShowsLabel = labels.searchBarButtonShowsLabel;
 
@@ -31020,12 +31774,28 @@ fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARA
             app.tickCoreAppModal();
             return 0;
         },
-        c.WM_WINHOSTTY_UPDATE, c.WM_WINHOSTTY_TOAST_ACTIVATION, c.WM_WINHOSTTY_UIA_DISCONNECT => {
+        c.WM_WINHOSTTY_UPDATE,
+        c.WM_WINHOSTTY_TOAST_ACTIVATION,
+        c.WM_WINHOSTTY_UIA_DISCONNECT,
+        c.WM_WINHOSTTY_PROFILES,
+        c.WM_WINHOSTTY_JUMP_LIST,
+        => {
             var payload = delivery.take(message, @bitCast(lparam)) orelse return 0;
             switch (payload) {
                 .update => |completion| {
                     defer payload.deinit();
                     app.handleUpdateCheckCompletion(completion);
+                },
+                .profiles => |completion| {
+                    // Applied at the top of the outer pump: this can run
+                    // inside a modal loop, with a menu built from the
+                    // profiles being replaced still open.
+                    if (app.pending_profile_discovery) |pending| pending.deinit();
+                    app.pending_profile_discovery = completion;
+                },
+                .jump_list => |job| {
+                    defer payload.deinit();
+                    if (app.jump_list) |*jump_list| jump_list.completeRebuild(job);
                 },
                 .toast => |activation| {
                     defer delivery.toast_pending.store(false, .release);
@@ -32572,10 +33342,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
                 }
             }
             if (v.overlay_mode == .profile) {
-                const profiles_ready = v.ensureProfiles() catch |err| blk: {
-                    logUiActionError("profile keyboard load failed", err);
-                    break :blk false;
-                };
+                const profiles_ready = v.profilesForChrome();
                 if (profiles_ready) {
                     if (clearQuickSlotPinsRequested(wParam, keyPressed(c.VK_MENU), keyPressed(c.VK_SHIFT))) {
                         if (v.clearQuickSlotPins()) return 0;
@@ -32910,7 +33677,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // QT placement/tween frames own their physical-pixel rect.
                 // Keep scale and layout updates even when the OS's resized
                 // suggestion would override that rect on a DPI crossing.
-                if (!v.quick_terminal_placing and v.quick_terminal_animation == null) {
+                if (!v.quick_terminal_placing and !v.restore_placing and v.quick_terminal_animation == null) {
                     const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                     _ = sys.SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
                 }
@@ -37104,6 +37871,7 @@ pub const Surface = struct {
         errdefer scan.deinit(alloc);
         if (scan.matches.len == 0) {
             scan.deinit(alloc);
+            self.showQuickSelectNotice(labels.quick_select_no_targets_banner);
             return true;
         }
 
@@ -37152,6 +37920,7 @@ pub const Surface = struct {
         if (!self.ensureQuickSelectLabelRects(client, metrics, host.current_dpi)) {
             log.warn("quick select has more visible labels than fit without overlap", .{});
             self.closeQuickSelect(false);
+            self.showQuickSelectNotice(labels.quick_select_too_many_banner);
             return true;
         }
 
@@ -37167,6 +37936,15 @@ pub const Surface = struct {
         _ = sys.SetCapture(hwnd);
         _ = sys.InvalidateRect(hwnd, null, 0);
         return true;
+    }
+
+    /// Say why the key press did nothing. Call with no session open: the
+    /// banner does not touch focus, and a closed overlay has nothing to free.
+    fn showQuickSelectNotice(self: *Surface, message: []const u8) void {
+        _ = self.app.showHostBanner(.{ .surface = self.core() }, .info, message) catch |err| {
+            log.warn("quick select notice failed err={}", .{err});
+            return;
+        };
     }
 
     fn ensureQuickSelectWindow(self: *Surface) !void {
@@ -37410,11 +38188,9 @@ pub const Surface = struct {
 
         self.closeQuickSelect(true);
         if (action == .open) {
-            _ = try self.app.performAction(
-                .{ .surface = self.core() },
-                .open_url,
-                .{ .kind = .unknown, .url = payload },
-            );
+            // The same resolution a Ctrl+click gets: a relative path against
+            // the pane's directory, and no line or column in the file name.
+            try self.core().openLinkText(payload);
             return;
         }
         if (action == .paste) {
@@ -38316,6 +39092,17 @@ pub const Surface = struct {
         self.search_bar_frame_rect = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     }
 
+    /// Hides a search bar button the pane is too narrow for. The edit takes
+    /// the focus the button had: hiding the window that has it leaves the
+    /// keyboard with no window of ours.
+    fn hideSearchBarButton(self: *Surface, role: SearchBarButtonRole) bool {
+        const hwnd = self.searchBarButtonHwnd(role) orelse return false;
+        if (sys.GetFocus() == hwnd) {
+            if (self.search_bar_edit_hwnd) |edit| _ = sys.SetFocus(edit);
+        }
+        return applyChildVisibility(hwnd, self.searchBarButtonPlacement(role), false);
+    }
+
     fn layoutSearchBarControls(self: *Surface, frame_rect: RECT, visible: bool) !bool {
         if (!visible or !self.search_bar.visible) return self.hideSearchBarControls();
 
@@ -38324,7 +39111,8 @@ pub const Surface = struct {
 
         var changed = false;
         var bg_changed = false;
-        const layout = searchBarChromeLayout(host, frame_rect);
+        const layout = searchBarChromeLayout(host.current_dpi);
+        const fit = searchBarFit(frame_rect.right - frame_rect.left, layout);
         const control_top = frame_rect.top + layout.pad_y;
         const left = frame_rect.left + layout.pad_x;
         var right = frame_rect.right - layout.pad_x;
@@ -38349,65 +39137,76 @@ pub const Surface = struct {
         ) or changed;
         right -= layout.close_w + layout.close_gap;
 
-        changed = applyChildRect(
-            self.search_bar_word_hwnd.?,
-            &self.search_bar_word_placement,
-            childRect(right - layout.toggle_w, control_top, layout.toggle_w, layout.control_h),
-        ) or changed;
-        changed = applyChildVisibility(
-            self.search_bar_word_hwnd.?,
-            &self.search_bar_word_placement,
-            true,
-        ) or changed;
-        right -= layout.toggle_w + layout.gap;
+        if (fit.toggles) {
+            changed = applyChildRect(
+                self.search_bar_word_hwnd.?,
+                &self.search_bar_word_placement,
+                childRect(right - layout.toggle_w, control_top, layout.toggle_w, layout.control_h),
+            ) or changed;
+            changed = applyChildVisibility(
+                self.search_bar_word_hwnd.?,
+                &self.search_bar_word_placement,
+                true,
+            ) or changed;
+            right -= layout.toggle_w + layout.gap;
 
-        changed = applyChildRect(
-            self.search_bar_case_hwnd.?,
-            &self.search_bar_case_placement,
-            childRect(right - layout.toggle_w, control_top, layout.toggle_w, layout.control_h),
-        ) or changed;
-        changed = applyChildVisibility(
-            self.search_bar_case_hwnd.?,
-            &self.search_bar_case_placement,
-            true,
-        ) or changed;
-        right -= layout.toggle_w + layout.gap;
+            changed = applyChildRect(
+                self.search_bar_case_hwnd.?,
+                &self.search_bar_case_placement,
+                childRect(right - layout.toggle_w, control_top, layout.toggle_w, layout.control_h),
+            ) or changed;
+            changed = applyChildVisibility(
+                self.search_bar_case_hwnd.?,
+                &self.search_bar_case_placement,
+                true,
+            ) or changed;
+            right -= layout.toggle_w + layout.gap;
 
-        changed = applyChildRect(
-            self.search_bar_regex_hwnd.?,
-            &self.search_bar_regex_placement,
-            childRect(right - layout.toggle_w, control_top, layout.toggle_w, layout.control_h),
-        ) or changed;
-        changed = applyChildVisibility(
-            self.search_bar_regex_hwnd.?,
-            &self.search_bar_regex_placement,
-            true,
-        ) or changed;
-        right -= layout.toggle_w + layout.section_gap;
+            changed = applyChildRect(
+                self.search_bar_regex_hwnd.?,
+                &self.search_bar_regex_placement,
+                childRect(right - layout.toggle_w, control_top, layout.toggle_w, layout.control_h),
+            ) or changed;
+            changed = applyChildVisibility(
+                self.search_bar_regex_hwnd.?,
+                &self.search_bar_regex_placement,
+                true,
+            ) or changed;
+            right -= layout.toggle_w + layout.section_gap;
+        } else {
+            changed = self.hideSearchBarButton(.whole_word) or changed;
+            changed = self.hideSearchBarButton(.case_sensitive) or changed;
+            changed = self.hideSearchBarButton(.regex) or changed;
+        }
 
-        changed = applyChildRect(
-            self.search_bar_next_hwnd.?,
-            &self.search_bar_next_placement,
-            childRect(right - layout.nav_w, control_top, layout.nav_w, layout.control_h),
-        ) or changed;
-        changed = applyChildVisibility(
-            self.search_bar_next_hwnd.?,
-            &self.search_bar_next_placement,
-            true,
-        ) or changed;
-        right -= layout.nav_w + layout.gap;
+        if (fit.nav) {
+            changed = applyChildRect(
+                self.search_bar_next_hwnd.?,
+                &self.search_bar_next_placement,
+                childRect(right - layout.nav_w, control_top, layout.nav_w, layout.control_h),
+            ) or changed;
+            changed = applyChildVisibility(
+                self.search_bar_next_hwnd.?,
+                &self.search_bar_next_placement,
+                true,
+            ) or changed;
+            right -= layout.nav_w + layout.gap;
 
-        changed = applyChildRect(
-            self.search_bar_prev_hwnd.?,
-            &self.search_bar_prev_placement,
-            childRect(right - layout.nav_w, control_top, layout.nav_w, layout.control_h),
-        ) or changed;
-        changed = applyChildVisibility(
-            self.search_bar_prev_hwnd.?,
-            &self.search_bar_prev_placement,
-            true,
-        ) or changed;
-        right -= layout.nav_w + layout.section_gap;
+            changed = applyChildRect(
+                self.search_bar_prev_hwnd.?,
+                &self.search_bar_prev_placement,
+                childRect(right - layout.nav_w, control_top, layout.nav_w, layout.control_h),
+            ) or changed;
+            changed = applyChildVisibility(
+                self.search_bar_prev_hwnd.?,
+                &self.search_bar_prev_placement,
+                true,
+            ) or changed;
+            right -= layout.nav_w + layout.section_gap;
+        } else {
+            changed = self.hideSearchBarButton(.next) or changed;
+            changed = self.hideSearchBarButton(.prev) or changed;
+        }
 
         const show_results = showSearchBarResults(&self.search_bar) and
             (right - layout.results_w - layout.section_gap - left) >= layout.min_edit_w;
@@ -40046,6 +40845,7 @@ pub const Surface = struct {
         self.search_selected = null;
         self.search_bar.total = null;
         self.search_bar.selected = null;
+        self.search_bar.invalid = false;
         if (!active) {
             self.search_bar.searched = self.search_bar.query.len == 0;
             self.search_bar.last_edit_ms = 0;
@@ -40069,12 +40869,13 @@ pub const Surface = struct {
         self.invalidateStatusBarState();
     }
 
-    fn setSearchTotal(self: *Surface, total: ?usize) !void {
+    fn setSearchTotal(self: *Surface, total: ?usize, invalid: bool) !void {
         if (!shouldAcceptCoreSearchUpdates(&self.search_bar)) return;
         const selected = searchSelectedDisplayFromRaw(self.search_selected_raw, total);
         const searched = searchBarSearchedStateForTotal(total);
         if (self.search_total == total and
             self.search_selected == selected and
+            self.search_bar.invalid == invalid and
             !searchBarDisplayStateChanged(&self.search_bar, searched, total, selected))
         {
             return;
@@ -40082,6 +40883,7 @@ pub const Surface = struct {
         self.search_total = total;
         self.search_bar.searched = searched;
         self.search_bar.total = total;
+        self.search_bar.invalid = invalid;
         self.search_selected = selected;
         self.search_bar.selected = selected;
         _ = try self.syncSearchBarResultsText();
@@ -44542,12 +45344,21 @@ test "win32 terminal undo snapshot restores terminal state" {
     stream.nextSlice("line1\r\nline2\r\nline3");
 
     const expected_scrollbar = t.screens.active.pages.scrollbar();
+    const expected_x = t.screens.active.cursor.x;
+    const expected_y = t.screens.active.cursor.y;
+    // After "line3" the cursor is at column 5, short of the last tab stop.
+    try std.testing.expectEqual(@as(@TypeOf(expected_x), 5), expected_x);
     const snapshot = try captureTerminalUndoStateBytes(alloc, &t);
     defer alloc.free(snapshot);
 
     t.fullReset();
 
     const restored = restoreTerminalUndoState(&t, snapshot);
+
+    // The snapshot sets the tab stops after the cursor position, which used
+    // to leave the cursor on the last stop (column 8 of 12).
+    try std.testing.expectEqual(expected_x, t.screens.active.cursor.x);
+    try std.testing.expectEqual(expected_y, t.screens.active.cursor.y);
 
     const plain = try t.plainString(alloc);
     defer alloc.free(plain);
@@ -50793,6 +51604,74 @@ test "win32 recovery startup leaves another instance's in-flight write temp alon
     try std.testing.expectEqualStrings(in_flight_json, survivor);
 }
 
+test "win32 recovery startup keeps a newer build's history and counts one with an added field" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+
+    // Three unfinished launches, each with a field this build has never heard of.
+    const added_field =
+        \\{"schema_version":1,"attempts":[{"started_at_unix_ms":100,"build":"9"},{"started_at_unix_ms":200,"build":"9"},{"started_at_unix_ms":300,"build":"9"}]}
+    ;
+    try win32_session_persistence.writeFileInPlace(target, added_field);
+    const counted = beginRecoveryStartupAtPath(std.testing.allocator, target, 400, recovery_ledger_lock_wait_ms);
+    try std.testing.expectEqual(win32_recovery.Decision.safe_mode, counted.decision);
+    try std.testing.expectEqual(@as(usize, 4), counted.count);
+
+    // A newer schema is read as empty and left byte for byte as it was.
+    const newer =
+        \\{"schema_version":2,"attempts":[{"started_at_unix_ms":100,"phase":"init","where":"x"}],"hist":{}}
+    ;
+    try win32_session_persistence.writeFileInPlace(target, newer);
+    const skipped = beginRecoveryStartupAtPath(std.testing.allocator, target, 500, recovery_ledger_lock_wait_ms);
+    try std.testing.expectEqual(win32_recovery.Decision.normal, skipped.decision);
+    try std.testing.expectEqual(@as(usize, 0), skipped.count);
+    const after = try std.fs.cwd().readFileAlloc(std.testing.allocator, target, 64 * 1024);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(newer, after);
+
+    // Nor is one larger than this build ever writes, whatever it says.
+    {
+        const file = try tmp.dir.createFile("startup-attempts.json", .{});
+        defer file.close();
+        try file.writeAll("{\"schema_version\":3,\"pad\":\"");
+        const chunk = [_]u8{'x'} ** 4096;
+        for (0..17) |_| try file.writeAll(&chunk);
+        try file.writeAll("\"}");
+    }
+    const big_before = try tmp.dir.statFile("startup-attempts.json");
+    const big = beginRecoveryStartupAtPath(std.testing.allocator, target, 600, recovery_ledger_lock_wait_ms);
+    try std.testing.expectEqual(@as(usize, 0), big.count);
+    const big_after = try tmp.dir.statFile("startup-attempts.json");
+    try std.testing.expectEqual(big_before.size, big_after.size);
+
+    // Nor is one that exists but cannot be read: a scanner holds it, and it may
+    // be a newer build's.
+    {
+        const file = try tmp.dir.createFile("startup-attempts.json", .{});
+        defer file.close();
+        try file.writeAll(newer);
+    }
+    {
+        const held = try tmp.dir.openFile("startup-attempts.json", .{ .mode = .read_write, .lock = .exclusive });
+        defer held.close();
+        const blocked = beginRecoveryStartupAtPath(std.testing.allocator, target, 700, recovery_ledger_lock_wait_ms);
+        try std.testing.expectEqual(@as(usize, 0), blocked.count);
+    }
+    const unblocked = try std.fs.cwd().readFileAlloc(std.testing.allocator, target, 64 * 1024);
+    defer std.testing.allocator.free(unblocked);
+    try std.testing.expectEqualStrings(newer, unblocked);
+
+    var names = tmp.dir.iterate();
+    while (try names.next()) |entry| {
+        try std.testing.expect(std.mem.eql(u8, entry.name, "startup-attempts.json") or
+            std.mem.endsWith(u8, entry.name, ".lock"));
+    }
+}
+
 test "win32 recovery ledger lock excludes a second holder until released" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -51240,6 +52119,77 @@ test "win32 session state is saved only by the process that owns it" {
     try std.testing.expect(app.sessionStateEnabled());
 }
 
+test "win32 a session a newer build wrote, or one too large to be ours, is left alone and never owned" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
+    defer std.testing.allocator.free(state_path);
+
+    var core_app: CoreApp = undefined;
+    core_app.alloc = std.testing.allocator;
+    var app: App = undefined;
+    app.core_app = &core_app;
+    app.session_owner = null;
+    app.session_state_left_alone = false;
+
+    // A field a later build added within this version loads.
+    const added = "{\"schema_version\":1,\"added_later\":1,\"windows\":[]}";
+    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = added });
+    var loaded = (try app.loadSessionStateAt(state_path)).?;
+    loaded.deinit();
+    try std.testing.expect(!app.session_state_left_alone);
+
+    // A newer schema is neither restored, quarantined nor owned.
+    const newer = "{\"schema_version\":2,\"windows\":[{\"layout_v2\":true}]}";
+    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = newer });
+    try std.testing.expect((try app.loadSessionStateAt(state_path)) == null);
+    try std.testing.expect(app.session_state_left_alone);
+    const lock = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    app.adoptSessionOwner(lock);
+    try std.testing.expect(app.session_owner == null);
+    const kept = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 1024);
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings(newer, kept);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("session-state.json.corrupt", .{}));
+    // The lock was given back, so the build that wrote the file can take it.
+    const next = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    next.release();
+
+    // A file that cannot be read now is not replaced either: it may be a
+    // newer build's, held for a moment.
+    app.session_state_left_alone = false;
+    try tmp.dir.makeDir("session-state.d");
+    const unreadable = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.d" });
+    defer std.testing.allocator.free(unreadable);
+    try std.testing.expect(std.meta.isError(app.loadSessionStateAt(unreadable)));
+    try std.testing.expect(app.session_state_left_alone);
+
+    // So is a file larger than this build ever writes.
+    app.session_state_left_alone = false;
+    {
+        var file = try tmp.dir.createFile("session-state.json", .{});
+        defer file.close();
+        const chunk = [_]u8{' '} ** 4096;
+        var remaining: usize = win32_session_persistence.default_max_state_bytes + 1;
+        while (remaining > 0) {
+            const count = @min(remaining, chunk.len);
+            try file.writeAll(chunk[0..count]);
+            remaining -= count;
+        }
+    }
+    try std.testing.expect((try app.loadSessionStateAt(state_path)) == null);
+    try std.testing.expect(app.session_state_left_alone);
+
+    // Otherwise the process owns what it restored.
+    app.session_state_left_alone = false;
+    const mine = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    app.adoptSessionOwner(mine);
+    try std.testing.expect(app.session_owner != null);
+    app.releaseSessionOwnership();
+}
+
 test "win32 sign-out latches the session snapshot and a Restart Manager close does not" {
     var app: App = undefined;
     app.session_state_excluded_for_elevation = false;
@@ -51349,6 +52299,213 @@ test "win32 session state window rect requires complete geometry" {
     try std.testing.expectEqual(@as(i32, 20), rect.top);
     try std.testing.expectEqual(@as(i32, 310), rect.right);
     try std.testing.expectEqual(@as(i32, 220), rect.bottom);
+}
+
+test "win32 a saved window rect on a monitor that is gone moves to the nearest work area" {
+    const grab = restore_grab;
+    // A laptop's screen with a second monitor to its left, taskbar at the bottom.
+    const left: RECT = .{ .left = -1920, .top = 0, .right = 0, .bottom = 1040 };
+    const main_work: RECT = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1040 };
+    const works = [_]RECT{ main_work, left };
+    const wide: RECT = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 };
+
+    // Where there is a monitor, the rect is kept as saved.
+    try std.testing.expectEqualDeep(wide, restoredRectOnScreen(wide, &works, grab));
+    const straddling: RECT = .{ .left = -400, .top = 50, .right = 400, .bottom = 650 };
+    try std.testing.expectEqualDeep(straddling, restoredRectOnScreen(straddling, &works, grab));
+    // A snapped window overhangs its monitor by its invisible frame.
+    const snapped: RECT = .{ .left = -7, .top = 0, .right = 967, .bottom = 1047 };
+    try std.testing.expectEqualDeep(snapped, restoredRectOnScreen(snapped, &works, grab));
+    // The caption on a monitor and the body hanging off the bottom stays too.
+    const hanging: RECT = .{ .left = 100, .top = 900, .right = 900, .bottom = 1500 };
+    try std.testing.expectEqualDeep(hanging, restoredRectOnScreen(hanging, &works, grab));
+
+    // Saved on a monitor to the right that was unplugged.
+    const unplugged: RECT = .{ .left = 2100, .top = 200, .right = 2900, .bottom = 800 };
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 1120, .top = 200, .right = 1920, .bottom = 800 },
+        restoredRectOnScreen(unplugged, &works, grab),
+    );
+    // Below every monitor, and above them.
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 100, .top = 440, .right = 900, .bottom = 1040 },
+        restoredRectOnScreen(.{ .left = 100, .top = 3000, .right = 900, .bottom = 3600 }, &works, grab),
+    );
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 100, .top = 0, .right = 900, .bottom = 600 },
+        restoredRectOnScreen(.{ .left = 100, .top = -900, .right = 900, .bottom = -300 }, &works, grab),
+    );
+    // Only a sliver of the title bar on a monitor is not enough to grab.
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 1120, .top = 100, .right = 1920, .bottom = 700 },
+        restoredRectOnScreen(.{ .left = 1900, .top = 100, .right = 2700, .bottom = 700 }, &works, grab),
+    );
+    // The nearest is the monitor to the left when that is where it was.
+    try std.testing.expectEqualDeep(
+        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
+        restoredRectOnScreen(.{ .left = -4000, .top = 100, .right = -3200, .bottom = 700 }, &works, grab),
+    );
+    // Larger than the monitor it lands on: capped to it.
+    try std.testing.expectEqualDeep(
+        left,
+        restoredRectOnScreen(.{ .left = -9000, .top = -50, .right = -4000, .bottom = 3000 }, &works, grab),
+    );
+    // No monitor list, no opinion.
+    try std.testing.expectEqualDeep(unplugged, restoredRectOnScreen(unplugged, &.{}, grab));
+
+    // The file can say anything an i32 holds, and a window cannot be that far
+    // away: no differences of these overflow.
+    const min: i32 = std.math.minInt(i32);
+    const max: i32 = std.math.maxInt(i32);
+    try std.testing.expectEqualDeep(
+        RECT{ .left = -1920, .top = 100, .right = -1120, .bottom = 700 },
+        restoredRectOnScreen(.{ .left = min, .top = 100, .right = min + 800, .bottom = 700 }, &works, grab),
+    );
+    try std.testing.expectEqualDeep(
+        RECT{ .left = 1120, .top = 440, .right = 1920, .bottom = 1040 },
+        restoredRectOnScreen(.{ .left = max - 800, .top = max - 600, .right = max, .bottom = max }, &works, grab),
+    );
+    try std.testing.expectEqualDeep(
+        main_work,
+        restoredRectOnScreen(.{ .left = min, .top = min, .right = -1, .bottom = -1 }, &.{main_work}, grab),
+    );
+}
+
+test "win32 session placement saves the normal rect in screen coordinates for every window state" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            _ = sys.SetThreadDpiAwarenessContext(-4);
+            var app: App = undefined;
+            app.os_build = c.OS_BUILD_WIN11_21H2;
+            app.config = .{};
+            app.hosts = .empty;
+            const surface = try placementTestSurface(&app, 120, 140);
+            defer _ = sys.DestroyWindow(surface.hwnd.?);
+            const hwnd = surface.hwnd.?;
+            var host: Host = .{ .app = &app, .id = 1, .hwnd = hwnd };
+            _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+            var normal: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(hwnd, &normal) != 0);
+
+            var placed = App.sessionWindowPlacement(&host).?;
+            try std.testing.expectEqualDeep(normal, placed.rect.?);
+            try std.testing.expect(!placed.maximized);
+
+            // Maximized, the rect is still the one to un-maximize to.
+            _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
+            placed = App.sessionWindowPlacement(&host).?;
+            try std.testing.expectEqualDeep(normal, placed.rect.?);
+            try std.testing.expect(placed.maximized);
+
+            // With a taskbar on the left, Windows reports that normal rect
+            // relative to the work area, which starts 48 px in: the file
+            // gets screen coordinates.
+            const left_taskbar: MONITORINFO = .{
+                .cbSize = @sizeOf(MONITORINFO),
+                .rcMonitor = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1080 },
+                .rcWork = .{ .left = 48, .top = 0, .right = 1920, .bottom = 1080 },
+                .dwFlags = 0,
+            };
+            placed = App.sessionWindowPlacementOn(&host, left_taskbar).?;
+            try std.testing.expectEqual(normal.left + 48, placed.rect.?.left);
+            try std.testing.expectEqual(normal.top, placed.rect.?.top);
+            try std.testing.expectEqual(normal.right - normal.left, placed.rect.?.right - placed.rect.?.left);
+
+            // Minimized from maximized, it comes back maximized, which is
+            // what the session has to say. `IsZoomed` alone said normal.
+            _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+            try std.testing.expect(sys.IsIconic(hwnd) != 0);
+            placed = App.sessionWindowPlacement(&host).?;
+            try std.testing.expectEqualDeep(normal, placed.rect.?);
+            try std.testing.expect(placed.maximized);
+
+            // Minimized from a normal window, it comes back normal, even
+            // though Windows left the restore-to-maximized flag on it.
+            _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+            _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
+            try std.testing.expect(sys.IsZoomed(hwnd) == 0 and sys.IsIconic(hwnd) == 0);
+            _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
+            placed = App.sessionWindowPlacement(&host).?;
+            try std.testing.expectEqualDeep(normal, placed.rect.?);
+            try std.testing.expect(!placed.maximized);
+        }
+    }.body);
+}
+
+test "win32 session restore keeps a window on a monitor and brings one back from a missing monitor" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            _ = sys.SetThreadDpiAwarenessContext(-4);
+            var app: App = undefined;
+            app.os_build = c.OS_BUILD_WIN11_21H2;
+            app.config = .{};
+            app.hosts = .empty;
+            const surface = try placementTestSurface(&app, 120, 140);
+            defer _ = sys.DestroyWindow(surface.hwnd.?);
+            const hwnd = surface.hwnd.?;
+            var host: Host = .{ .app = &app, .id = 1, .hwnd = hwnd };
+            _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+            const works = WorkAreas.collect();
+            try std.testing.expect(works.count > 0);
+            const work = works.slice()[0];
+
+            // On screen: exactly where it was saved.
+            var window: win32_session_state.Window = .{
+                .x = work.left + 40,
+                .y = work.top + 50,
+                .width = 640,
+                .height = 480,
+                .state = .normal,
+                .selected_tab = 0,
+                .tabs = &.{},
+            };
+            try App.applyRestoredWindowPlacement(&host, window);
+            var rect: RECT = undefined;
+            try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
+            try std.testing.expectEqualDeep(RECT{ .left = work.left + 40, .top = work.top + 50, .right = work.left + 680, .bottom = work.top + 530 }, rect);
+
+            // Saved where no monitor is: on one, at the size it had.
+            window.x = 30_000;
+            window.y = 30_000;
+            try App.applyRestoredWindowPlacement(&host, window);
+            try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
+            try std.testing.expect(insideAWorkArea(rect, works.slice()));
+            try std.testing.expectEqual(@as(i32, 640), rect.right - rect.left);
+            try std.testing.expectEqual(@as(i32, 480), rect.bottom - rect.top);
+
+            // Windows caps what it is given: a left edge to 16 bits, a width to
+            // the largest window. This rect spans every monitor as saved, and
+            // is off all of them once Windows is done with it.
+            window.state = .normal;
+            window.x = -2_000_000_000;
+            window.y = work.top + 50;
+            window.width = 2_100_000_000;
+            window.height = 480;
+            try App.applyRestoredWindowPlacement(&host, window);
+            try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
+            try std.testing.expect(rectEqual(restoredRectOnScreen(rect, works.slice(), restore_grab), rect));
+            try std.testing.expect(rect.right - rect.left <= work.right - work.left);
+
+            // The rect a maximized window comes back to is on a monitor too.
+            window.x = -30_000;
+            window.y = -30_000;
+            window.state = .maximized;
+            try App.applyRestoredWindowPlacement(&host, window);
+            try std.testing.expect(sys.IsZoomed(hwnd) != 0);
+            const normal = App.sessionWindowPlacement(&host).?.rect.?;
+            try std.testing.expect(insideAWorkArea(normal, works.slice()));
+        }
+
+        fn insideAWorkArea(rect: RECT, works: []const RECT) bool {
+            for (works) |work| {
+                if (rect.left >= work.left and rect.top >= work.top and
+                    rect.right <= work.right and rect.bottom <= work.bottom) return true;
+            }
+            return false;
+        }
+    }.body);
 }
 
 test "win32 session state file write replaces through temp file" {

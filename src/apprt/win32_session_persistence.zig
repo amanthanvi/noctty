@@ -13,6 +13,9 @@ pub const LoadResult = union(enum) {
     missing,
     oversized,
     transient: anyerror,
+    /// Written by a newer build: valid, only not understood here. The file
+    /// is the newer build's, so nothing quarantines or replaces it.
+    newer_schema,
     corrupt: anyerror,
     loaded: std.json.Parsed(schema.SessionState),
 
@@ -49,6 +52,7 @@ fn loadWithParser(
     // owns every string and survives the `raw` free above.
     const parsed = parse(alloc, raw) catch |err| return switch (err) {
         error.OutOfMemory => .{ .transient = err },
+        error.NewerSchema => .newer_schema,
         else => .{ .corrupt = err },
     };
     return .{ .loaded = parsed };
@@ -249,6 +253,34 @@ test "win32 session persistence load distinguishes missing corrupt oversized and
     var transient = loadAlloc(std.testing.allocator, root_path, default_max_state_bytes);
     defer transient.deinit();
     try std.testing.expectEqual(std.meta.Tag(LoadResult).transient, std.meta.activeTag(transient));
+}
+
+test "win32 session persistence reads a newer schema as newer, not corrupt, and a v1 file with an extra field as loaded" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const newer_text = "{\"schema_version\":2,\"windows\":[{\"layout_v2\":true}]}";
+    const extra_text = "{\"schema_version\":1,\"added_later\":1,\"windows\":[]}";
+    try tmp.dir.writeFile(.{ .sub_path = "newer.json", .data = newer_text });
+    try tmp.dir.writeFile(.{ .sub_path = "extra.json", .data = extra_text });
+    const newer_path = try tmp.dir.realpathAlloc(std.testing.allocator, "newer.json");
+    defer std.testing.allocator.free(newer_path);
+    const extra_path = try tmp.dir.realpathAlloc(std.testing.allocator, "extra.json");
+    defer std.testing.allocator.free(extra_path);
+
+    inline for (.{ loadAlloc, loadLayoutAlloc }) |load| {
+        var newer = load(std.testing.allocator, newer_path, default_max_state_bytes);
+        defer newer.deinit();
+        try std.testing.expectEqual(std.meta.Tag(LoadResult).newer_schema, std.meta.activeTag(newer));
+    }
+    var extra = loadAlloc(std.testing.allocator, extra_path, default_max_state_bytes);
+    defer extra.deinit();
+    try std.testing.expectEqual(std.meta.Tag(LoadResult).loaded, std.meta.activeTag(extra));
+
+    // Loading touches neither file.
+    const after = try tmp.dir.readFileAlloc(std.testing.allocator, "newer.json", 256);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(newer_text, after);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("newer.json.corrupt", .{}));
 }
 
 test "win32 session persistence atomic write replaces existing file and delete is idempotent" {

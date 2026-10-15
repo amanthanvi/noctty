@@ -2685,6 +2685,10 @@ pub const Set = struct {
         return self.reverse.get(a);
     }
 
+    fn isAsciiLetter(cp: u21) bool {
+        return cp < 0x80 and std.ascii.isAlphabetic(@intCast(cp));
+    }
+
     /// Get an entry for the given key event. This will attempt to find
     /// a binding using multiple parts of the event in the following order:
     ///
@@ -2718,6 +2722,22 @@ pub const Set = struct {
         // to verify this.
         if (event.unshifted_codepoint > 0) {
             trigger.key = .{ .unicode = event.unshifted_codepoint };
+            if (self.get(trigger)) |v| return v;
+        }
+
+        // A letter key whose layout types no Latin letter (Cyrillic, Greek,
+        // Hebrew, Arabic, Turkish dotless i, Greek's `;` on the Q key) gives
+        // the Latin shortcuts, such as the default ctrl+shift+c, nothing to
+        // match above. The key's own US letter stands in, after every lookup on
+        // what the layout types so a binding on the layout's own letters still
+        // wins. A letter key that types a Latin letter keeps it, so a layout
+        // that moves letters around is never handed QWERTY positions, and no
+        // other key stands in: digits and punctuation differ between layouts
+        // (the AZERTY number row types accented letters on purpose).
+        if (event.unshifted_codepoint > 0 and !isAsciiLetter(event.unshifted_codepoint)) ascii: {
+            const cp = event.key.codepoint() orelse break :ascii;
+            if (cp < 'a' or cp > 'z') break :ascii;
+            trigger.key = .{ .unicode = cp };
             if (self.get(trigger)) |v| return v;
         }
 
@@ -4475,6 +4495,135 @@ test "set: getEvent codepoint case folding" {
         });
         try testing.expect(action == null);
     }
+}
+
+/// The action `set` binds `event` to, or null when it binds nothing, so a
+/// test that finds no binding fails instead of aborting on an unwrapped null.
+fn testingEventAction(set: *const Set, event: KeyEvent) ?Action.Key {
+    const entry = set.getEvent(event) orelse return null;
+    return std.meta.activeTag(entry.value_ptr.*.leaf.action);
+}
+
+test "set: getEvent falls back to the physical letter on a non-Latin layout" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "ctrl+shift+c=new_window");
+    try s.parseAndPut(alloc, "ctrl+shift+q=close_surface");
+
+    // Russian: the physical C key types Cyrillic Es, so neither the text nor
+    // the unshifted codepoint is the Latin letter the default binding names.
+    try testing.expectEqual(@as(?Action.Key, .new_window), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true, .shift = true },
+        .utf8 = "\u{421}",
+        .unshifted_codepoint = 0x441,
+    }));
+
+    // Greek, and no text at all, only the layout's unshifted codepoint.
+    try testing.expectEqual(@as(?Action.Key, .new_window), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = 0x3C8,
+    }));
+
+    // A letter key can type ASCII that is no letter: the Greek Q key types `;`.
+    try testing.expectEqual(@as(?Action.Key, .close_surface), testingEventAction(&s, .{
+        .key = .key_q,
+        .mods = .{ .ctrl = true, .shift = true },
+        .utf8 = ":",
+        .unshifted_codepoint = ';',
+    }));
+
+    // A letter key that types a Latin letter keeps it, whichever letter: this
+    // is a layout that leaves the key's code in place and types J on C, and
+    // the position must not stand in for the letter.
+    try testing.expectEqual(@as(?Action.Key, null), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true, .shift = true },
+        .utf8 = "J",
+        .unshifted_codepoint = 'j',
+    }));
+
+    // Only letter keys stand in. The AZERTY number row types accented
+    // letters, punctuation differs between layouts, and the keypad is not a
+    // layout's to redefine.
+    try s.parseAndPut(alloc, "ctrl+2=new_window");
+    try s.parseAndPut(alloc, "ctrl+[=new_window");
+    try testing.expectEqual(@as(?Action.Key, null), testingEventAction(&s, .{
+        .key = .digit_2,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 0xE9,
+    }));
+    try testing.expectEqual(@as(?Action.Key, null), testingEventAction(&s, .{
+        .key = .bracket_left,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 0x445,
+    }));
+    try testing.expectEqual(@as(?Action.Key, null), testingEventAction(&s, .{
+        .key = .numpad_2,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 0x662,
+    }));
+
+    // Different modifiers do not match, as for any other key.
+    try testing.expectEqual(@as(?Action.Key, null), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true },
+        .unshifted_codepoint = 0x441,
+    }));
+
+    // No layout information at all is no reason to guess.
+    try testing.expectEqual(@as(?Action.Key, null), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true, .shift = true },
+    }));
+}
+
+test "set: getEvent prefers the layout's own letter to the physical fallback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "ctrl+shift+c=new_window");
+    try s.parseAndPut(alloc, "ctrl+shift+\u{441}=close_surface");
+
+    try testing.expectEqual(@as(?Action.Key, .close_surface), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true, .shift = true },
+        .utf8 = "\u{421}",
+        .unshifted_codepoint = 0x441,
+    }));
+}
+
+test "set: getEvent physical binding and catch_all still win over the letter fallback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s: Set = .{};
+    defer s.deinit(alloc);
+
+    try s.parseAndPut(alloc, "ctrl+shift+c=new_window");
+    try s.parseAndPut(alloc, "ctrl+shift+key_c=close_surface");
+    try testing.expectEqual(@as(?Action.Key, .close_surface), testingEventAction(&s, .{
+        .key = .key_c,
+        .mods = .{ .ctrl = true, .shift = true },
+        .utf8 = "\u{421}",
+        .unshifted_codepoint = 0x441,
+    }));
+
+    // The fallback sits before catch_all, so an unrelated key still reaches it.
+    try s.parseAndPut(alloc, "catch_all=ignore");
+    try testing.expectEqual(@as(?Action.Key, .ignore), testingEventAction(&s, .{
+        .key = .key_d,
+        .mods = .{ .ctrl = true, .shift = true },
+        .unshifted_codepoint = 0x432,
+    }));
 }
 
 test "set: getEvent catch_all fallback" {

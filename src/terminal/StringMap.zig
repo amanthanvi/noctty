@@ -230,6 +230,48 @@ test "StringMap searchIterator URL detection" {
     try testing.expect(try it.next() == null);
 }
 
+// A double click asks `Surface.linkAtPin` for the link under the pointer before
+// it selects a word, and that is this search plus `contains`. ':' is a word
+// boundary, so without a link the drive letter was cut off.
+test "StringMap searchIterator Windows path with click position" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const url = @import("../config/url.zig");
+
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(url.regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
+    defer re.deinit();
+
+    var s = try Screen.init(alloc, .{ .cols = 60, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+    try s.testWriteString("see C:\\Users\\amant\\file.txt:12:5 end");
+
+    // On the drive letter, on the ':' after it, and inside the path.
+    for ([_]u16{ 4, 5, 14, 31 }) |x| {
+        const click_pin = s.pages.pin(.{ .active = .{ .x = x, .y = 0 } }).?;
+        const line = s.selectLine(.{ .pin = click_pin }).?;
+        var map: StringMap = undefined;
+        alloc.free(try s.selectionString(alloc, .{ .sel = line, .trim = false, .map = &map }));
+        defer map.deinit(alloc);
+
+        var it = map.searchIterator(re);
+        var found = false;
+        while (try it.next()) |found_match| {
+            var match = found_match;
+            defer match.deinit();
+            const sel = match.selection();
+            if (!sel.contains(&s, click_pin)) continue;
+            found = true;
+            try testing.expectEqual(point.Point{ .screen = .{ .x = 4, .y = 0 } }, s.pages.pointFromPin(.screen, sel.start()).?);
+            try testing.expectEqual(point.Point{ .screen = .{ .x = 31, .y = 0 } }, s.pages.pointFromPin(.screen, sel.end()).?);
+            break;
+        }
+        try testing.expect(found);
+    }
+}
+
 test "StringMap searchIterator URL with click position" {
     if (comptime !build_options.oniguruma) return error.SkipZigTest;
 

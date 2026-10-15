@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 6 October 2026
+Last updated: 15 October 2026
 
 This policy covers Noctty, the Windows terminal published by Aman Thanvi at
 [github.com/amanthanvi/noctty](https://github.com/amanthanvi/noctty): the app
@@ -164,16 +164,28 @@ dumps, and SSH host cache go there.
   record to the `.terminfo` folder in your home directory, so Git for
   Windows' tools recognize it.
 - **SSH host cache:** with `ssh-terminfo` only,
-  `%LOCALAPPDATA%\ghostty\ssh_cache` (in portable mode, `ghostty\ssh_cache`
-  next to `noctty.exe`) lists each `user@host` that received the terminal
-  description, with a date.
+  `ssh_cache` lists each `user@host` that received the terminal description,
+  with a date. It lives in `%LOCALAPPDATA%\noctty` (or `noctty` under
+  `XDG_STATE_HOME`), and directly next to `noctty.exe` in portable mode.
+  Older versions used a `ghostty\ssh_cache` file; Noctty leaves that file
+  alone and rebuilds its new cache as needed.
 - **Screen files:** the write-screen-to-file actions
   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd> and its variants) write the
   terminal's contents, including scrollback, or the selection to a new folder
   in your temp directory and leave it there.
 - **Diagnostic bundle:** `noctty +diagnostic-bundle` writes a folder in the
   current directory, or where `--output` says, with the Noctty version and
-  platform. It includes crash dumps only if you add `--include-crash-dumps`.
+  build settings, Windows version and build, build and native architectures,
+  emulation status, install kind, the embedded PowerShell integration script's
+  SHA-256, ConPTY source and fallback reason, and a crash-report count.
+  It also lists recognized config key names written directly in the default
+  config files, when readable. It collects no config values or paths and does
+  not expand includes, themes, or command-line overrides. It includes no
+  terminal text, command lines, working directories, or environment values.
+  Crash dumps are included only if you add `--include-crash-dumps`; those
+  dumps can contain sensitive process memory. Nothing is uploaded. An
+  existing output directory is refused, so older dumps are never mixed into
+  a new bundle.
 - **Opt-in traces:** setting `NOCTTY_HANDOFF_TRACE` writes `handoff.log`
   (always in `%LOCALAPPDATA%\noctty`), and the `NOCTTY_*_TRACE_FILE`
   environment variables write diagnostic traces to the files you name.

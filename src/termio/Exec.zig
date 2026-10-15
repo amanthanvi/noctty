@@ -1121,6 +1121,10 @@ const Subprocess = struct {
             error.SystemError => return err,
         };
 
+        // Only the final cmd /C wrapper needs this guard. Apply it after
+        // integration, launch preparation and user environment overrides.
+        try windows_shell.configureShellSearch(&env, exec_command.windows_cmd_shell);
+
         // We separate the terminal-visible PWD from the Windows host cwd.
         // For WSL launches, the shell may start in `~` or another WSL path
         // via `wsl.exe --cd ...`, while CreateProcess still needs a valid
@@ -2732,6 +2736,40 @@ test "putWindowsTerm falls back without a usable HOME and leaves other TERMs alo
     try env.put("TERM", "xterm-kitty");
     try putWindowsTerm(testing.allocator, &env, "xterm-kitty");
     try testing.expectEqualStrings("xterm-kitty", env.get("TERM").?);
+}
+
+test "PKG48 final launch form scopes the cwd search guard after environment overrides" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const commands = [_]configpkg.Command{
+        .{ .shell = "pkg48probe arg || echo fallback" },
+        .{ .direct = &.{ "C:\\pkg48\\probe.exe", "arg" } },
+    };
+    for (commands) |command| {
+        const env = EnvMap.init(testing.allocator);
+        var overrides: configpkg.RepeatableStringMap = .{};
+        try overrides.parseCLI(alloc, "PATH=C:\\Tools!;%literal%");
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = command,
+            .env = env,
+            .env_override = overrides,
+            .resources_dir = null,
+            .utf8_console = .never,
+            .term = "xterm-256color",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expectEqual(command == .shell, subprocess.windows_cmd_shell);
+        if (command == .shell) {
+            try testing.expectEqualStrings("1", subprocess.env.?.get("NoDefaultCurrentDirectoryInExePath").?);
+            try testing.expectEqualStrings(command.shell, subprocess.args[subprocess.args.len - 1]);
+        } else try testing.expect(subprocess.env.?.get("NoDefaultCurrentDirectoryInExePath") == null);
+        try testing.expectEqualStrings("C:\\Tools!;%literal%", subprocess.env.?.get("PATH").?);
+    }
 }
 
 test "a WSL launch lists the terminal's identity in WSLENV" {

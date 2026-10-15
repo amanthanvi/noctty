@@ -52,6 +52,19 @@ jobs:
         shell: powershell
         run: ./test/windows/powershell-shell-integration.ps1
 
+      - name: Cmd and Clink integration tests (portable)
+        shell: pwsh
+        run: |
+          $clinkRoot = Join-Path $env:RUNNER_TEMP 'noctty-clink'
+          New-Item -ItemType Directory -Path $clinkRoot | Out-Null
+          $archive = Join-Path $clinkRoot 'clink.zip'
+          Invoke-WebRequest 'https://github.com/chrisant996/clink/releases/download/v1.9.34/clink.1.9.34.4e8ae4.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '50F6EE0474E3BD02B48CE8C8F63ED933A14AEE5127FC7072CB976CE10A43CE23') {
+            throw 'Portable Clink checksum mismatch'
+          }
+          Expand-Archive $archive -DestinationPath (Join-Path $clinkRoot 'portable')
+          ./test/windows/cmd-clink.ps1 -Clink (Join-Path $clinkRoot 'portable/clink_x64.exe') -Run (Join-Path $clinkRoot 'run')
+
       - name: Bash shell integration tests (Git Bash)
         shell: pwsh
         run: ./test/windows/bash-shell-integration.ps1

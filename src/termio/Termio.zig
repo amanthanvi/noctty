@@ -1085,14 +1085,14 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
     if (decision.semantic_output_epoch) |epoch| {
         if (decision.semantic_output.len != 0 or
             decision.semantic_output.omitted_after or
-            decision.semantic_output.reset_before)
+            decision.semantic_output.reset_at != null)
         {
             const semantic_bytes = decision.semantic_output.slice();
-            _ = self.terminal_output_transport.pushSemanticBatchForEpoch(
+            _ = self.terminal_output_transport.pushSemanticCapture(
                 epoch,
                 semantic_bytes,
                 decision.semantic_output.omitted_after,
-                decision.semantic_output.reset_before,
+                decision.semantic_output.reset_at,
             );
         }
     }

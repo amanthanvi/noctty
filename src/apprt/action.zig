@@ -1094,6 +1094,11 @@ pub const StartSearch = struct {
 pub const SearchTotal = struct {
     total: ?usize,
 
+    /// The query does not compile (an invalid regular expression), so
+    /// `total` is zero for a reason other than "nothing matched". The
+    /// C API does not carry it.
+    invalid: bool = false,
+
     // Sync with: ghostty_action_search_total_s
     pub const C = extern struct {
         total: isize,

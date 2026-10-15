@@ -8,6 +8,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const paste_protection = @import("win32_paste_protection.zig");
 
+/// Not a new version, because older builds skip or tolerate it: a new optional
+/// field anywhere in the document (beside `pane` or `split` in a node too), and
+/// a new `state` name, which restores as normal. A new version, because an
+/// older build would reject or misread it: a new kind of node (a key other than
+/// `pane` or `split` on its own), a new `axis` name, a changed meaning of an
+/// existing field, or a required field.
 pub const current_schema_version: u32 = 1;
 pub const max_scrollback_lines: usize = 10_000;
 pub const max_scrollback_line_bytes: usize = 16 * 1024;
@@ -42,8 +48,8 @@ const VersionHeader = struct {
 
 /// Named layouts share the session schema but treat window placement as
 /// opaque input. Decode those fields as arbitrary JSON so stale state names
-/// or mistyped geometry cannot reject an otherwise valid layout shape, while
-/// keeping every non-placement field strict.
+/// or mistyped geometry cannot reject an otherwise valid layout shape; every
+/// other field keeps its type and validation.
 const LayoutState = struct {
     schema_version: u32 = current_schema_version,
     windows: []const LayoutWindow = &.{},
@@ -87,6 +93,26 @@ pub const Window = struct {
 pub const WindowState = enum {
     normal,
     maximized,
+
+    /// A state a later build adds (fullscreen, say) restores as a normal
+    /// window; the window's rect is still its own. `std.json` would reject
+    /// the whole document for an unknown name.
+    pub fn jsonParse(
+        alloc: Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !WindowState {
+        const token = try source.nextAllocMax(alloc, .alloc_if_needed, options.max_value_len.?);
+        defer switch (token) {
+            .allocated_number, .allocated_string => |slice| alloc.free(slice),
+            else => {},
+        };
+        const name = switch (token) {
+            inline .string, .allocated_string => |slice| slice,
+            else => return error.UnexpectedToken,
+        };
+        return std.meta.stringToEnum(WindowState, name) orelse .normal;
+    }
 };
 
 pub const Tab = struct {
@@ -102,6 +128,48 @@ pub const LayoutTree = struct {
 pub const Node = union(enum) {
     pane: Pane,
     split: Split,
+
+    /// `std.json` rejects a tagged union whose object has a second key, so a
+    /// field a later build adds beside `pane` or `split` (an id, say) would
+    /// reject the whole document whatever `ignore_unknown_fields` says. Take
+    /// the kind this build knows and skip the other keys. An object with no
+    /// known kind is a new kind of node, which is not additive: it fails.
+    pub fn jsonParse(
+        alloc: Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !Node {
+        if (try source.next() != .object_begin) return error.UnexpectedToken;
+
+        var result: ?Node = null;
+        while (true) {
+            const token = try source.nextAllocMax(alloc, .alloc_if_needed, options.max_value_len.?);
+            const key = switch (token) {
+                .object_end => break,
+                inline .string, .allocated_string => |slice| slice,
+                else => return error.UnexpectedToken,
+            };
+            // Parsing the value can allocate, and the key is not needed
+            // after the comparison.
+            const kind: enum { pane, split, other } = if (std.mem.eql(u8, key, "pane"))
+                .pane
+            else if (std.mem.eql(u8, key, "split"))
+                .split
+            else
+                .other;
+            switch (token) {
+                .allocated_string => |slice| alloc.free(slice),
+                else => {},
+            }
+            if (result != null and kind != .other) return error.UnexpectedToken;
+            switch (kind) {
+                .pane => result = .{ .pane = try std.json.innerParse(Pane, alloc, source, options) },
+                .split => result = .{ .split = try std.json.innerParse(Split, alloc, source, options) },
+                .other => try source.skipValue(),
+            }
+        }
+        return result orelse error.UnknownField;
+    }
 };
 
 pub const Pane = struct {
@@ -164,14 +232,18 @@ fn parseAllocMode(
     });
     defer header.deinit();
 
+    if (header.value.schema_version > current_schema_version) return error.NewerSchema;
     if (header.value.schema_version != current_schema_version) {
         return error.UnsupportedVersion;
     }
 
+    // Unknown fields are skipped: a field added within this version is
+    // additive by definition, and a build that does not know it must still
+    // read the rest. Only an incompatible change bumps the version.
     if (strip_placement) {
         var layout = try std.json.parseFromSlice(LayoutState, alloc, raw, .{
             .allocate = .alloc_always,
-            .ignore_unknown_fields = false,
+            .ignore_unknown_fields = true,
         });
         errdefer layout.deinit();
 
@@ -196,7 +268,7 @@ fn parseAllocMode(
 
     var parsed = try std.json.parseFromSlice(SessionState, alloc, raw, .{
         .allocate = .alloc_always,
-        .ignore_unknown_fields = false,
+        .ignore_unknown_fields = true,
     });
     errdefer parsed.deinit();
 
@@ -771,25 +843,35 @@ test "win32 named layout parsing strips placement before validation" {
     }
 }
 
-test "win32 named layout parsing stays strict outside placement" {
+test "win32 named layout parsing skips fields it does not know" {
     const raw =
-        \\{"schema_version":1,"windows":[{"future_placement":true,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"future_placement":true,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"future_pane_field":1}}]}}]}]}
     ;
 
-    try std.testing.expectError(
-        error.UnknownField,
-        parseLayoutAlloc(std.testing.allocator, raw),
-    );
+    var parsed = try parseLayoutAlloc(std.testing.allocator, raw);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.windows.len);
+    try std.testing.expect(parsed.value.windows[0].x == null);
 }
 
-test "win32 session state parse rejects unsupported schema version" {
-    const raw =
-        \\{"schema_version":9,"windows":[]}
-    ;
-
+test "win32 session state parse separates newer from unsupported schema versions" {
+    try std.testing.expectError(
+        error.NewerSchema,
+        parseAlloc(std.testing.allocator,
+            \\{"schema_version":9,"windows":[]}
+        ),
+    );
+    try std.testing.expectError(
+        error.NewerSchema,
+        parseLayoutAlloc(std.testing.allocator,
+            \\{"schema_version":2,"windows":[]}
+        ),
+    );
     try std.testing.expectError(
         error.UnsupportedVersion,
-        parseAlloc(std.testing.allocator, raw),
+        parseAlloc(std.testing.allocator,
+            \\{"schema_version":0,"windows":[]}
+        ),
     );
 }
 
@@ -843,14 +925,62 @@ test "win32 session state parse rejects newer schema before unknown field errors
     ;
 
     try std.testing.expectError(
-        error.UnsupportedVersion,
+        error.NewerSchema,
         parseAlloc(std.testing.allocator, raw),
     );
 }
 
-test "win32 session state parse keeps current schema strict about unknown fields" {
+test "win32 session state parse skips unknown fields within the current schema" {
+    // A field a later build adds without a version bump, at every level a
+    // document nests: an older build still restores the rest.
     const raw =
-        \\{"schema_version":1,"windows":[],"future":{"layout_generation":1}}
+        \\{"schema_version":1,"future":{"a":[1,2]},"windows":[{"x":10,"y":20,"width":1280,"height":720,"state":"normal","monitor":"\\\\.\\DISPLAY2","selected_tab":0,"tabs":[{"selected_leaf":0,"pinned":true,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2,"gap":4}},{"pane":{"cwd":"C:\\src\\noctty","env":{"A":"b"},"scrollback":{"captured_at_unix_ms":1,"lines":["x"],"wrapped":true}}},{"pane":{"profile":"pwsh"}}]}}]}]}
+    ;
+
+    var parsed = try parseAlloc(std.testing.allocator, raw);
+    defer parsed.deinit();
+    const window = parsed.value.windows[0];
+    try std.testing.expectEqual(@as(?i32, 1280), window.width);
+    try std.testing.expectEqual(@as(usize, 3), window.tabs[0].layout.nodes.len);
+    try std.testing.expectEqualStrings("C:\\src\\noctty", window.tabs[0].layout.nodes[1].pane.cwd.?);
+    try std.testing.expectEqualStrings("x", window.tabs[0].layout.nodes[1].pane.scrollback.?.lines[0]);
+}
+
+test "win32 session state parse tolerates what a later build adds beside a node kind and to a window state" {
+    // `Node` is a tagged union, which `std.json` rejects for a second key
+    // whatever `ignore_unknown_fields` says; and an unknown `state` name
+    // rejects the document unless it is read leniently.
+    const raw =
+        \\{"schema_version":1,"windows":[{"state":"fullscreen","selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"id":7,"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2},"label":{"a":[1]}},{"pane":{"cwd":"C:\\src"},"id":8},{"future":null,"pane":{}}]}}]}]}
+    ;
+
+    var parsed = try parseAlloc(std.testing.allocator, raw);
+    defer parsed.deinit();
+    const window = parsed.value.windows[0];
+    try std.testing.expectEqual(WindowState.normal, window.state.?);
+    const nodes = window.tabs[0].layout.nodes;
+    try std.testing.expectEqual(@as(usize, 3), nodes.len);
+    try std.testing.expectEqual(@as(u16, 2), nodes[0].split.second);
+    try std.testing.expectEqualStrings("C:\\src", nodes[1].pane.cwd.?);
+}
+
+test "win32 session state parse rejects a node with two kinds, none, or an axis it does not know" {
+    inline for (.{
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{},"split":{"axis":"horizontal","ratio":0.5,"first":0,"second":0}}]}}]}]}
+        ,
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"id":1}]}}]}]}
+        ,
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"diagonal","ratio":0.5,"first":1,"second":2}},{"pane":{}},{"pane":{}}]}}]}]}
+        ,
+    }) |raw| {
+        try std.testing.expect(std.meta.isError(parseAlloc(std.testing.allocator, raw)));
+    }
+}
+
+test "win32 session state parse still rejects a node kind it does not know" {
+    // A new kind of node is an incompatible change, not an additive field.
+    const raw =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"browser":{"url":"x"}}]}}]}]}
     ;
 
     try std.testing.expectError(

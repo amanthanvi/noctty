@@ -76,6 +76,10 @@ fn loadFromHome(alloc: Allocator, home_dir: []const u8) ![]Host {
         .ssh_config_read_started_ns = std.time.nanoTimestamp(),
     };
     try load_context.parseFile(config_path, 0);
+    // Another discovery was reading a config file at the same moment, so
+    // this list may be missing hosts. Say so instead of returning it as
+    // the whole answer; the caller marks its discovery incomplete.
+    if (load_context.busy) return error.SshConfigReadBusy;
     return try hosts.toOwnedSlice(alloc);
 }
 
@@ -93,6 +97,8 @@ const LoadContext = struct {
     hosts: *std.ArrayList(Host),
     includes_read: usize = 0,
     ssh_config_read_started_ns: i128,
+    /// A file was skipped because another read was in progress.
+    busy: bool = false,
 
     fn parseFile(self: *LoadContext, path: []const u8, depth: u8) Allocator.Error!void {
         const contents = switch (try self.readFileWithinBudget(path)) {
@@ -115,6 +121,10 @@ const LoadContext = struct {
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.FileNotFound => return .missing,
+            error.SshConfigReadBusy => {
+                self.busy = true;
+                return .skipped;
+            },
             else => {
                 warnReadOnce(path, err);
                 return .skipped;
@@ -133,7 +143,10 @@ const LoadContext = struct {
         while (try paths.next(self.alloc)) |raw_path| {
             defer self.alloc.free(raw_path);
             if (raw_path.len == 0) continue;
-            if (hasGlobMetacharacter(raw_path)) continue;
+            if (hasGlobMetacharacter(raw_path)) {
+                warnReadOnce(raw_path, error.GlobIncludeUnsupported);
+                continue;
+            }
             // Reject known remote/device paths before the bounded worker opens
             // them. An uncapped include count would still multiply worker and
             // filesystem overhead on every profile refresh.
@@ -438,7 +451,7 @@ fn readSshConfigFileBounded(
 ) !?[]u8 {
     if (timeout_ns == 0) return null;
     if (ssh_config_read_in_progress.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
-        return null;
+        return error.SshConfigReadBusy;
     }
 
     const worker_alloc = std.heap.page_allocator;
@@ -893,6 +906,25 @@ test "ssh config bounds file opens away from the caller" {
         }
         std.Thread.sleep(std.time.ns_per_ms);
     }
+}
+
+test "ssh config load reports a read skipped for a concurrent one" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath(".ssh");
+    try tmp.dir.writeFile(.{ .sub_path = ".ssh/config", .data = "Host alpha\n" });
+    const home = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(home);
+
+    // Another discovery's read holds the single slot.
+    try testing.expect(ssh_config_read_in_progress.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
+    defer ssh_config_read_in_progress.store(false, .release);
+    const config_path = try std.fs.path.join(alloc, &.{ home, ".ssh", "config" });
+    defer alloc.free(config_path);
+    try testing.expectError(error.SshConfigReadBusy, readSshConfigFileBounded(alloc, config_path, std.time.ns_per_s, readFile));
+    try testing.expectError(error.SshConfigReadBusy, loadFromHome(alloc, home));
 }
 
 test "ssh config missing unreadable and oversized roots produce empty lists" {

@@ -5,7 +5,8 @@
 //!      powershell\integration.ps1`, creating intermediate dirs as needed.
 //!   2. `installIfStale` compares the on-disk SHA-256 against the comptime
 //!      `integration_script_sha256`. Writes atomically (temp + rename) only
-//!      when the hash differs or the file is missing.
+//!      when the hash differs or the file is missing, and not over a copy
+//!      that declares a newer `# noctty-integration-revision`.
 //!   3. `buildInjectedArgv` wraps interactive PowerShell launches with
 //!      `-NoExit -Command "& { $__ghostty_utf8_console = $true|$false; ... }"`
 //!      loads UTF-8 script text, retaining file signature checks under AllSigned,
@@ -51,6 +52,7 @@
 const std = @import("std");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
+const win32_terminfo = @import("win32_terminfo.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.win32_powershell_install);
 
@@ -113,16 +115,77 @@ pub fn resolveInstallPath(alloc: Allocator) ![]u8 {
 // ── Install gate ────────────────────────────────────────────────────
 
 pub const InstallResult = enum {
-    skipped, // destination matched embedded SHA-256
+    skipped, // destination matched embedded SHA-256, or is a newer revision
     installed, // wrote new file (first run OR hash changed)
     failed, // couldn't write; caller logs and continues
 };
 
+const revision_prefix = "# noctty-integration-revision:";
+
+/// The revision a script declares in its `# noctty-integration-revision: N`
+/// line, among its first lines; null for a script without one, such as a copy
+/// an older build installed. A line whose number cannot be read counts as the
+/// highest revision: such a copy is left alone, not replaced. An older build
+/// sharing the folder (a stale Scoop
+/// or portable copy, a rollback) must not put its script over a newer one,
+/// which would bring back shell integration bugs the newer script fixed. The
+/// number rises when a script change must not be undone that way.
+pub fn scriptRevision(script: []const u8) ?u32 {
+    var lines = std.mem.splitScalar(u8, script, '\n');
+    var seen: usize = 0;
+    while (lines.next()) |line| : (seen += 1) {
+        if (seen == 16) return null;
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (!std.mem.startsWith(u8, trimmed, revision_prefix)) continue;
+        return std.fmt.parseInt(u32, std.mem.trim(u8, trimmed[revision_prefix.len..], " \t"), 10) catch std.math.maxInt(u32);
+    }
+    return null;
+}
+
 /// Install `integration.ps1` at `path` unless its SHA-256 already
-/// matches the embedded blob. Atomic via temp-file + rename.
+/// matches the embedded blob, or it declares a newer revision than the
+/// embedded one. Atomic via temp-file + rename.
 pub fn installIfStale(alloc: Allocator, path: []const u8) InstallResult {
-    if (readAndHash(alloc, path)) |on_disk_hash| {
-        if (std.mem.eql(u8, &on_disk_hash, &integration_script_sha256)) return .skipped;
+    // The read, the revision check and the replacement are one step: two
+    // builds starting together must not both read an older copy and then
+    // replace each other's newer one. A launch that finds another installing
+    // leaves it to that one and the next launch.
+    const lock_path = std.mem.concat(alloc, u8, &.{ path, ".lock" }) catch return .failed;
+    defer alloc.free(lock_path);
+    const lock = std.fs.createFileAbsolute(lock_path, .{
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }) catch |err| switch (err) {
+        error.WouldBlock => {
+            log.info("powershell integration install left to another instance", .{});
+            return .skipped;
+        },
+        // No lock file (a read-only folder, say) is how installs went before.
+        else => return installLocked(alloc, path),
+    };
+    defer lock.close();
+    return installLocked(alloc, path);
+}
+
+fn installLocked(alloc: Allocator, path: []const u8) InstallResult {
+    const installed = readInstalled(alloc, path) catch |err| switch (err) {
+        // Not a script this build wrote or any build would: replace it.
+        error.FileTooBig => null,
+        // Present but unreadable (a sharing violation, say): it may be a
+        // newer build's, so leave it for the next launch.
+        else => {
+            log.warn("powershell integration left alone: unreadable path={s} err={}", .{ path, err });
+            return .skipped;
+        },
+    };
+    if (installed) |on_disk| {
+        if (std.mem.eql(u8, &on_disk.hash, &integration_script_sha256)) return .skipped;
+        const embedded = scriptRevision(integration_script) orelse 0;
+        if ((on_disk.revision orelse 0) > embedded) {
+            log.info("powershell integration kept: installed copy is revision {d}, this build's is {d}", .{ on_disk.revision.?, embedded });
+            return .skipped;
+        }
     }
     return writeAtomically(path) catch |err| {
         log.warn("powershell integration install failed path={s} err={}", .{ path, err });
@@ -130,25 +193,23 @@ pub fn installIfStale(alloc: Allocator, path: []const u8) InstallResult {
     };
 }
 
-fn readAndHash(alloc: Allocator, path: []const u8) ?[32]u8 {
-    const contents = blk: {
-        const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => {
-                log.debug("powershell integration hash read skipped path={s} err={}", .{ path, err });
-                return null;
-            },
-        };
-        defer file.close();
-        break :blk file.readToEndAlloc(alloc, 1024 * 1024) catch |err| {
-            log.debug("powershell integration hash read failed path={s} err={}", .{ path, err });
-            return null;
-        };
+const Installed = struct {
+    hash: [32]u8,
+    revision: ?u32,
+};
+
+/// Null when there is no file.
+fn readInstalled(alloc: Allocator, path: []const u8) !?Installed {
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
     };
+    defer file.close();
+    const contents = try file.readToEndAlloc(alloc, 1024 * 1024);
     defer alloc.free(contents);
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(contents, &hash, .{});
-    return hash;
+    return .{ .hash = hash, .revision = scriptRevision(contents) };
 }
 
 /// Atomic write: temp file + rename. Falls back to direct overwrite
@@ -163,34 +224,17 @@ fn writeAtomically(path: []const u8) !InstallResult {
     defer dir.close();
     const basename = std.fs.path.basename(path);
 
-    if (atomicWriteViaTemp(dir, basename)) return .installed;
+    // The temporary name is random and created exclusively, so two instances
+    // starting together cannot truncate each other's half-written copy.
+    win32_terminfo.writeAtomically(dir, basename, integration_script) catch |err| {
+        log.debug("powershell integration atomic write failed target={s} err={}", .{ basename, err });
 
-    // Fallback: direct overwrite.
-    const file = try dir.createFile(basename, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(integration_script);
+        // Fallback: direct overwrite.
+        const file = try dir.createFile(basename, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(integration_script);
+    };
     return .installed;
-}
-
-fn atomicWriteViaTemp(dir: std.fs.Dir, basename: []const u8) bool {
-    const tmp = ".integration.ps1.tmp";
-    const f = dir.createFile(tmp, .{ .truncate = true }) catch |err| {
-        log.debug("powershell integration temp create failed name={s} err={}", .{ tmp, err });
-        return false;
-    };
-    f.writeAll(integration_script) catch |err| {
-        log.debug("powershell integration temp write failed name={s} err={}", .{ tmp, err });
-        f.close();
-        dir.deleteFile(tmp) catch {};
-        return false;
-    };
-    f.close();
-    dir.rename(tmp, basename) catch |err| {
-        log.debug("powershell integration temp rename failed name={s} target={s} err={}", .{ tmp, basename, err });
-        dir.deleteFile(tmp) catch {};
-        return false;
-    };
-    return true;
 }
 
 // ── Argv injection builder ──────────────────────────────────────────
@@ -1629,6 +1673,165 @@ test "installIfStale: different content on disk triggers reinstall" {
     const contents = try verify.readToEndAlloc(std.testing.allocator, 1024 * 1024);
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings(integration_script, contents);
+}
+
+const InstallFixture = struct {
+    tmp: std.testing.TmpDir,
+    path: []u8,
+
+    fn init(existing: ?[]const u8) !InstallFixture {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        errdefer tmp.cleanup();
+        if (existing) |text| try tmp.dir.writeFile(.{ .sub_path = "integration.ps1", .data = text });
+        const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+        defer std.testing.allocator.free(dir_path);
+        return .{
+            .tmp = tmp,
+            .path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "integration.ps1" }),
+        };
+    }
+
+    fn deinit(self: *InstallFixture) void {
+        std.testing.allocator.free(self.path);
+        self.tmp.cleanup();
+    }
+
+    fn read(self: *InstallFixture) ![]u8 {
+        return self.tmp.dir.readFileAlloc(std.testing.allocator, "integration.ps1", 1024 * 1024);
+    }
+};
+
+test "integration.ps1 declares its revision near the top" {
+    const embedded = scriptRevision(integration_script) orelse return error.TestExpectedRevision;
+    try std.testing.expect(embedded >= 1);
+}
+
+test "scriptRevision reads the declaration line only among the first lines" {
+    try std.testing.expectEqual(@as(?u32, 7), scriptRevision("# a\r\n# noctty-integration-revision: 7\r\nx"));
+    try std.testing.expectEqual(@as(?u32, 12), scriptRevision("# noctty-integration-revision:12"));
+    try std.testing.expectEqual(@as(?u32, null), scriptRevision("# no revision\n$x = 1\n"));
+    // A declaration that cannot be read fails closed: leave that copy alone.
+    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# noctty-integration-revision: next\n"));
+    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), scriptRevision("# noctty-integration-revision: -1\n"));
+    // A mention deep in the body is not a declaration.
+    const deep = "\n" ** 20 ++ "# noctty-integration-revision: 9\n";
+    try std.testing.expectEqual(@as(?u32, null), scriptRevision(deep));
+}
+
+test "installIfStale: a newer revision is not replaced by an older build" {
+    const newer = std.fmt.comptimePrint("# noctty-integration-revision: {d}\n# a newer script\n", .{9999});
+    var fx = try InstallFixture.init(newer);
+    defer fx.deinit();
+
+    try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, fx.path));
+    const script = try fx.read();
+    defer std.testing.allocator.free(script);
+    try std.testing.expectEqualStrings(newer, script);
+}
+
+test "integration.ps1 changes only with its revision" {
+    // A change to the script that an older build must not undo needs a higher
+    // revision. Any edit to the script fails here until this pair is updated
+    // to the revision and SHA-256 it now has, which puts the question of
+    // whether to bump in front of the author and the reviewer; it cannot judge
+    // whether the change needed one.
+    const pinned_revision: u32 = 1;
+    const pinned_sha256 = "328192524f590570ff521cd52043a6c016c86627fab3848951eea1317571d14b";
+    const hex = std.fmt.bytesToHex(integration_script_sha256, .lower);
+    try std.testing.expectEqual(@as(?u32, pinned_revision), scriptRevision(integration_script));
+    try std.testing.expectEqualStrings(pinned_sha256, &hex);
+}
+
+test "installIfStale: the same or an older revision, or none, is replaced" {
+    const embedded = scriptRevision(integration_script).?;
+    var buf: [2][96]u8 = undefined;
+    const same = try std.fmt.bufPrint(&buf[0], "# noctty-integration-revision: {d}\n# edited\n", .{embedded});
+    const older = try std.fmt.bufPrint(&buf[1], "# noctty-integration-revision: {d}\n# older\n", .{embedded - 1});
+    for ([_][]const u8{ same, older, "# stale, no revision" }) |existing| {
+        var fx = try InstallFixture.init(existing);
+        defer fx.deinit();
+
+        try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fx.path));
+        const script = try fx.read();
+        defer std.testing.allocator.free(script);
+        try std.testing.expectEqualStrings(integration_script, script);
+    }
+}
+
+test "installIfStale: a revision line that cannot be read leaves the copy alone" {
+    const garbled = "# noctty-integration-revision: garbage\n# edited by hand\n";
+    var fx = try InstallFixture.init(garbled);
+    defer fx.deinit();
+
+    try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, fx.path));
+    const script = try fx.read();
+    defer std.testing.allocator.free(script);
+    try std.testing.expectEqualStrings(garbled, script);
+}
+
+test "installIfStale: a copy that cannot be read is left for the next launch, one too large to be a script is replaced" {
+    var held_fx = try InstallFixture.init("# noctty-integration-revision: 9999\n");
+    defer held_fx.deinit();
+    {
+        // Exclusive: its bytes cannot be read, as when a scanner has the file.
+        var held = try held_fx.tmp.dir.openFile("integration.ps1", .{ .mode = .read_write, .lock = .exclusive });
+        defer held.close();
+        try std.testing.expectError(error.LockViolation, readInstalled(std.testing.allocator, held_fx.path));
+        try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, held_fx.path));
+    }
+    const kept = try held_fx.read();
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("# noctty-integration-revision: 9999\n", kept);
+
+    var big_fx = try InstallFixture.init(null);
+    defer big_fx.deinit();
+    {
+        const file = try big_fx.tmp.dir.createFile("integration.ps1", .{});
+        defer file.close();
+        const chunk = [_]u8{'#'} ** 4096;
+        for (0..257) |_| try file.writeAll(&chunk);
+    }
+    try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, big_fx.path));
+    const script = try big_fx.read();
+    defer std.testing.allocator.free(script);
+    try std.testing.expectEqualStrings(integration_script, script);
+}
+
+test "installIfStale: an install in progress in another instance is not raced" {
+    var fx = try InstallFixture.init("# stale");
+    defer fx.deinit();
+    {
+        const lock_path = try std.mem.concat(std.testing.allocator, u8, &.{ fx.path, ".lock" });
+        defer std.testing.allocator.free(lock_path);
+        const other = try std.fs.createFileAbsolute(lock_path, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
+        defer other.close();
+        try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, fx.path));
+        const untouched = try fx.read();
+        defer std.testing.allocator.free(untouched);
+        try std.testing.expectEqualStrings("# stale", untouched);
+    }
+    // Once it is done the next launch installs, and its lock is given back.
+    try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fx.path));
+    try std.testing.expectEqual(InstallResult.skipped, installIfStale(std.testing.allocator, fx.path));
+}
+
+test "installIfStale: leaves a file with the old fixed temporary name alone" {
+    var fx = try InstallFixture.init("# stale");
+    defer fx.deinit();
+    try fx.tmp.dir.writeFile(.{ .sub_path = ".integration.ps1.tmp", .data = "another instance's copy" });
+
+    try std.testing.expectEqual(InstallResult.installed, installIfStale(std.testing.allocator, fx.path));
+    const other = try fx.tmp.dir.readFileAlloc(std.testing.allocator, ".integration.ps1.tmp", 1024);
+    defer std.testing.allocator.free(other);
+    try std.testing.expectEqualStrings("another instance's copy", other);
+
+    // And no temporary of its own is left behind.
+    var count: usize = 0;
+    var names = fx.tmp.dir.iterate();
+    while (try names.next()) |entry| {
+        if (std.mem.endsWith(u8, entry.name, ".tmp")) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 // ── What the terminal makes of the script's marks ───────────────────

@@ -1364,6 +1364,80 @@ test "terminal focus loss cancels speech and echo backlog" {
     try std.testing.expectEqual(@as(usize, 0), session.recent_input_len);
 }
 
+test "a screen switch makes the echo check forget typed input at that point of the output" {
+    const TerminalOutputTransport = @import("surface.zig").TerminalOutputTransport;
+    const SemanticOutputCapture = @import("../termio/semantic_output_capture.zig").SemanticOutputCapture;
+
+    // The consumer win32.zig wires to the transport. `spoken` records whether
+    // any text survived the echo check right after each data item: a reset
+    // clears the normalizer, so looking only at the end would hide it.
+    const Consumer = struct {
+        session: *TerminalAccessibilitySession,
+        spoken: bool = false,
+
+        fn callback(raw: *anyopaque, item: TerminalOutputTransport.Item) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (item) {
+                .reset => self.session.resetSemanticOutputContinuity(),
+                .data => |output| {
+                    self.session.noteSemanticOutput(output);
+                    self.spoken = self.spoken or self.session.announcement_normalizer.has_text;
+                },
+                .omitted => self.session.noteOutputOmitted(),
+            }
+        }
+
+        /// `ls` is typed, then a batch holding the line `ls` arrives with a
+        /// screen switch before it or after it. `reset_ahead` pushes the batch
+        /// with its reset before every byte instead of where the capture put it.
+        /// Returns whether the line was spoken.
+        fn deliver(session: *TerminalAccessibilitySession, switch_first: bool, reset_ahead: bool) !bool {
+            var transport: TerminalOutputTransport = .{};
+            transport.setInterested(true);
+            const epoch = transport.captureEpoch().?;
+            var capture: SemanticOutputCapture = .{};
+
+            session.resetSemanticOutputContinuity();
+            session.noteInput("ls");
+            capture.begin(true);
+            if (switch_first) capture.noteScreenSwitch();
+            for ("ls") |ch| capture.recordPrint(ch);
+            capture.recordCarriageReturn();
+            capture.recordLinefeed();
+            if (!switch_first) capture.noteScreenSwitch();
+            const batch = capture.finish();
+            try std.testing.expectEqual(@as(?usize, if (switch_first) 0 else 4), batch.reset_at);
+
+            const reset_at: ?usize = if (reset_ahead) 0 else batch.reset_at;
+            _ = transport.pushSemanticCapture(epoch, batch.slice(), batch.omitted_after, reset_at);
+            var consumer: @This() = .{ .session = session };
+            transport.drain(&consumer, callback);
+            return consumer.spoken;
+        }
+    };
+
+    var ctx: u8 = 0;
+    const session = try TerminalAccessibilitySession.create(
+        std.testing.allocator,
+        TestOps.ops(&ctx),
+        0,
+        0,
+    );
+    defer session.deinit();
+
+    // `ls` was typed into a full-screen program, and when it exits a
+    // primary-screen line that is exactly `ls` is real output: it is spoken.
+    try std.testing.expect(try Consumer.deliver(session, true, false));
+
+    // The echo of typed text that comes before the switch in the same batch
+    // is still recognised as the echo, because the reset is placed after it.
+    try std.testing.expect(!try Consumer.deliver(session, false, false));
+
+    // The same batch with the reset ahead of every byte would speak that echo:
+    // what a batch-wide reset flag does, and what the check above tells apart.
+    try std.testing.expect(try Consumer.deliver(session, false, true));
+}
+
 test "terminal name cache refreshes without an event listener" {
     var ctx: MutableTestOps.Context = .{
         .focused = true,

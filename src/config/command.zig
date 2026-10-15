@@ -161,7 +161,15 @@ pub const Command = union(enum) {
             .shell => |v| .{ .shell = try alloc.dupeZ(u8, v) },
             .direct => |v| direct: {
                 const copy = try alloc.alloc([:0]const u8, v.len);
-                for (v, 0..) |arg, i| copy[i] = try alloc.dupeZ(u8, arg);
+                var copied: usize = 0;
+                errdefer {
+                    for (copy[0..copied]) |arg| alloc.free(arg);
+                    alloc.free(copy);
+                }
+                for (v, 0..) |arg, i| {
+                    copy[i] = try alloc.dupeZ(u8, arg);
+                    copied += 1;
+                }
                 break :direct .{ .direct = copy };
             },
         };

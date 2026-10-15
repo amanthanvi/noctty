@@ -148,6 +148,26 @@ pub const TerminalOutputTransport = struct {
         return .enqueued;
     }
 
+    /// Push what one PTY read batch captured. `reset_at` is where its consumer
+    /// forgets what it holds (typed input waiting to be seen echoed): null for
+    /// nowhere, 0 before everything, otherwise between two bytes, so the bytes
+    /// ahead of it are still matched against what was held.
+    pub fn pushSemanticCapture(
+        self: *TerminalOutputTransport,
+        epoch: InterestEpoch,
+        output: []const u8,
+        omitted_after: bool,
+        reset_at: ?usize,
+    ) PushResult {
+        const at = reset_at orelse return self.pushSemanticBatchForEpoch(epoch, output, omitted_after, false);
+        if (at == 0) return self.pushSemanticBatchForEpoch(epoch, output, omitted_after, true);
+        // Anything but `.enqueued` left an omission barrier or a newer
+        // epoch behind, and the omission forgets what the consumer holds too.
+        const head = self.pushSemanticBatchForEpoch(epoch, output[0..at], false, false);
+        if (head != .enqueued) return head;
+        return self.pushSemanticBatchForEpoch(epoch, output[at..], omitted_after, true);
+    }
+
     fn omissionPendingForEpoch(
         self: *TerminalOutputTransport,
         epoch: InterestEpoch,
@@ -254,6 +274,9 @@ pub const Message = union(enum) {
     pub const SearchTotal = struct {
         generation: u64,
         total: ?usize,
+        /// The query does not compile, so `total` is zero for a reason
+        /// other than "nothing matched".
+        invalid: bool = false,
     };
     pub const SearchSelected = struct {
         generation: u64,
@@ -772,6 +795,47 @@ test "terminal output transport orders silent reset before post reset data" {
         "before|<reset>|after|<reset>|later|",
         ctx.events.items,
     );
+}
+
+test "terminal output transport places a capture's reset between its bytes" {
+    const Context = struct {
+        events: std.ArrayList(u8) = .empty,
+
+        fn callback(raw: *anyopaque, item: TerminalOutputTransport.Item) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (item) {
+                .reset => self.events.appendSlice(std.testing.allocator, "<reset>|") catch unreachable,
+                .data => |data| self.events.appendSlice(std.testing.allocator, data) catch unreachable,
+                .omitted => self.events.appendSlice(std.testing.allocator, "<omitted>|") catch unreachable,
+            }
+        }
+    };
+
+    var transport: TerminalOutputTransport = .{};
+    transport.setInterested(true);
+    const epoch = transport.captureEpoch().?;
+    var ctx: Context = .{};
+    defer ctx.events.deinit(std.testing.allocator);
+
+    // No reset, a reset before everything, and one in the middle: the bytes
+    // ahead of it stay ahead of it.
+    const E = TerminalOutputTransport.PushResult.enqueued;
+    try std.testing.expectEqual(E, transport.pushSemanticCapture(epoch, "none|", false, null));
+    try std.testing.expectEqual(E, transport.pushSemanticCapture(epoch, "all|", false, 0));
+    try std.testing.expectEqual(E, transport.pushSemanticCapture(epoch, "head|tail|", false, 5));
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqualStrings(
+        "none|<reset>|all|head|<reset>|tail|",
+        ctx.events.items,
+    );
+
+    // A reset at the very end of the bytes waits behind them, and the next
+    // data comes after it.
+    ctx.events.clearRetainingCapacity();
+    try std.testing.expectEqual(E, transport.pushSemanticCapture(epoch, "last|", false, 5));
+    try std.testing.expectEqual(E, transport.pushSemanticCapture(epoch, "next|", false, null));
+    transport.drain(&ctx, Context.callback);
+    try std.testing.expectEqualStrings("last|<reset>|next|", ctx.events.items);
 }
 
 /// Context for new surface creation to determine inheritance behavior

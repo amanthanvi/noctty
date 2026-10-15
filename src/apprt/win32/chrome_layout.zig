@@ -513,8 +513,107 @@ fn bannerButtonRect(right: *i32, width: i32, top: i32, height: i32, gap: i32) ?R
     return button;
 }
 
+/// The sizes of the docked search bar's controls at one DPI, in pixels.
+pub const SearchBarChromeLayout = struct {
+    pad_x: i32,
+    pad_y: i32,
+    gap: i32,
+    section_gap: i32,
+    close_gap: i32,
+    nav_w: i32,
+    toggle_w: i32,
+    close_w: i32,
+    results_w: i32,
+    min_edit_w: i32,
+    control_h: i32,
+};
+
+pub fn searchBarChromeLayout(dpi: u32) SearchBarChromeLayout {
+    return .{
+        .pad_x = scaledBy(8, dpi),
+        .pad_y = scaledBy(6, dpi),
+        .gap = scaledBy(2, dpi),
+        .section_gap = scaledBy(10, dpi),
+        .close_gap = scaledBy(10, dpi),
+        .nav_w = scaledBy(30, dpi),
+        .toggle_w = scaledBy(30, dpi),
+        .close_w = scaledBy(30, dpi),
+        // The results chip clips on its left: its longest text, "Invalid
+        // pattern", is 98 px wide in the 14 px chrome font at 100%.
+        .results_w = scaledBy(104, dpi),
+        .min_edit_w = scaledBy(120, dpi),
+        .control_h = scaledBy(28, dpi),
+    };
+}
+
+/// Which optional controls of the docked search bar fit in a frame of
+/// `frame_width`. The close button and the edit always stay.
+pub const SearchBarFit = struct {
+    /// The regex, case and whole-word toggles.
+    toggles: bool,
+    /// The previous and next buttons. Enter, Shift+Enter and the arrow keys
+    /// in the edit still step through the matches without them.
+    nav: bool,
+};
+
+/// In a narrow pane the controls used to be placed right to left without
+/// regard to the left edge, so they overlapped each other and the next pane
+/// while the edit shrank to 1 px. The toggles go first, then previous and
+/// next, whenever the edit would be narrower than `min_edit_w` beside them.
+pub fn searchBarFit(frame_width: i32, layout: SearchBarChromeLayout) SearchBarFit {
+    const room = frame_width - 2 * layout.pad_x - layout.close_w - layout.close_gap;
+    const nav_w = 2 * layout.nav_w + layout.gap + layout.section_gap;
+    const toggles_w = 3 * layout.toggle_w + 2 * layout.gap + layout.section_gap;
+    return .{
+        .toggles = room - nav_w - toggles_w >= layout.min_edit_w,
+        .nav = room - nav_w >= layout.min_edit_w,
+    };
+}
+
 fn scaledBy(base: i32, dpi: u32) i32 {
     return win32_chrome_state.scaled(base, dpi);
+}
+
+test "searchBarFit drops the toggles, then previous and next, as the pane narrows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_]u32{ 96, 120, 144, 192, 288 }) |dpi| {
+        const layout = searchBarChromeLayout(dpi);
+        // Everything the bar can show, and the edit at its minimum.
+        const room_all = 2 * layout.pad_x + layout.close_w + layout.close_gap +
+            (2 * layout.nav_w + layout.gap + layout.section_gap) +
+            (3 * layout.toggle_w + 2 * layout.gap + layout.section_gap) + layout.min_edit_w;
+        const room_nav = room_all - (3 * layout.toggle_w + 2 * layout.gap + layout.section_gap);
+
+        try std.testing.expectEqual(SearchBarFit{ .toggles = true, .nav = true }, searchBarFit(room_all, layout));
+        try std.testing.expectEqual(SearchBarFit{ .toggles = true, .nav = true }, searchBarFit(room_all + 500, layout));
+        try std.testing.expectEqual(SearchBarFit{ .toggles = false, .nav = true }, searchBarFit(room_all - 1, layout));
+        try std.testing.expectEqual(SearchBarFit{ .toggles = false, .nav = true }, searchBarFit(room_nav, layout));
+        try std.testing.expectEqual(SearchBarFit{ .toggles = false, .nav = false }, searchBarFit(room_nav - 1, layout));
+        try std.testing.expectEqual(SearchBarFit{ .toggles = false, .nav = false }, searchBarFit(0, layout));
+        try std.testing.expectEqual(SearchBarFit{ .toggles = false, .nav = false }, searchBarFit(-40, layout));
+    }
+}
+
+test "searchBarFit at 232 px leaves an edit that can be typed in" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // 232 px at 96 DPI is exactly the width the fixed controls need, which
+    // used to leave the edit 1 px wide.
+    const layout = searchBarChromeLayout(96);
+    const fit = searchBarFit(232, layout);
+    try std.testing.expect(!fit.toggles);
+    try std.testing.expect(!fit.nav);
+    const edit_w = 232 - 2 * layout.pad_x - layout.close_w - layout.close_gap;
+    try std.testing.expect(edit_w >= layout.min_edit_w);
+
+    // The two thresholds at 96 DPI, written out: 16 px of padding, the close
+    // button and its gap (40), previous and next with their gaps (72), the
+    // toggles with theirs (104) and the 120 px edit.
+    try std.testing.expect(searchBarFit(352, layout).toggles);
+    try std.testing.expect(!searchBarFit(351, layout).toggles);
+    try std.testing.expect(searchBarFit(248, layout).nav);
+    try std.testing.expect(!searchBarFit(247, layout).nav);
 }
 
 test "hostLayoutClientRect follows the live client rect while it has an area" {

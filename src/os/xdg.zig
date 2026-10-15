@@ -279,6 +279,12 @@ test "portable marker detection requires a regular file" {
     const expected_crash = try std.fs.path.join(alloc, &.{ path_root, "crash" });
     defer alloc.free(expected_crash);
     try testing.expectEqualStrings(expected_crash, crash_path);
+
+    const ssh_path = try portablePath(alloc, path_root, "noctty/ssh_cache");
+    defer alloc.free(ssh_path);
+    const expected_ssh = try std.fs.path.join(alloc, &.{ path_root, "ssh_cache" });
+    defer alloc.free(expected_ssh);
+    try testing.expectEqualStrings(expected_ssh, ssh_path);
 }
 
 test "ambiguous portable config marker does not override an installer-managed directory" {

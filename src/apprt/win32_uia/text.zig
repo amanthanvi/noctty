@@ -1,8 +1,6 @@
-//! Pure terminal-text helpers for future UIA text-pattern providers.
-//!
-//! This first slice deliberately stops before COM registration. It
-//! snapshots the terminal's plain-text document and line boundaries so
-//! later `ITextProvider` / `ITextRangeProvider` wiring can stay thin.
+//! Terminal text for the UIA text pattern: the bounded, pointer-free document
+//! snapshot `TerminalProvider` serves, built while the caller holds the
+//! renderer lock.
 
 const std = @import("std");
 const terminal = @import("../../terminal/main.zig");
@@ -10,82 +8,6 @@ const terminal = @import("../../terminal/main.zig");
 pub const OffsetRange = struct {
     start: usize,
     end: usize,
-};
-
-pub const TerminalTextMetadata = struct {
-    byte_len: usize,
-    utf16_len: usize,
-    line_count: usize,
-};
-
-pub const TerminalTextSnapshot = struct {
-    alloc: std.mem.Allocator,
-    /// UTF-8 plain text with `\n` separators for hard and soft line breaks.
-    text: []u8,
-    /// Terminal pin for each byte in `text`; `\n` bytes reuse the pin from
-    /// the row they terminate rather than naming a distinct source cell.
-    pin_map: []terminal.Pin,
-    /// UTF-16 code-unit offset for each byte in `text`, plus a sentinel for
-    /// `text.len`. Multibyte scalars therefore repeat the same start offset.
-    utf16_offset_for_byte: []usize,
-    /// Byte offsets into `text` for each line start.
-    line_start_byte_offsets: []usize,
-
-    pub fn deinit(self: *TerminalTextSnapshot) void {
-        self.alloc.free(self.line_start_byte_offsets);
-        self.alloc.free(self.utf16_offset_for_byte);
-        self.alloc.free(self.pin_map);
-        self.alloc.free(self.text);
-        self.* = undefined;
-    }
-
-    /// Transfer ownership of the plain-text buffer to the caller. `deinit`
-    /// still releases the snapshot side tables after this call.
-    pub fn takeText(self: *TerminalTextSnapshot) []u8 {
-        const text = self.text;
-        self.text = text[0..0];
-        return text;
-    }
-
-    pub fn lineCount(self: *const TerminalTextSnapshot) usize {
-        return self.line_start_byte_offsets.len;
-    }
-
-    pub fn utf16Len(self: *const TerminalTextSnapshot) usize {
-        return self.utf16_offset_for_byte[self.text.len];
-    }
-
-    pub fn metadata(self: *const TerminalTextSnapshot) TerminalTextMetadata {
-        return .{
-            .byte_len = self.text.len,
-            .utf16_len = self.utf16Len(),
-            .line_count = self.lineCount(),
-        };
-    }
-
-    /// Return a half-open UTF-8 byte range for the requested line.
-    pub fn lineByteRange(self: *const TerminalTextSnapshot, line_index: usize) ?OffsetRange {
-        if (line_index >= self.line_start_byte_offsets.len) return null;
-
-        const start = self.line_start_byte_offsets[line_index];
-        const end = if (line_index + 1 < self.line_start_byte_offsets.len)
-            self.line_start_byte_offsets[line_index + 1] - 1
-        else blk: {
-            var line_end = self.text.len;
-            if (line_end > start and self.text[line_end - 1] == '\n') line_end -= 1;
-            break :blk line_end;
-        };
-        return .{ .start = start, .end = end };
-    }
-
-    /// Return a half-open UTF-16 code-unit range for the requested line.
-    pub fn lineUtf16Range(self: *const TerminalTextSnapshot, line_index: usize) ?OffsetRange {
-        const byte_range = self.lineByteRange(line_index) orelse return null;
-        return .{
-            .start = self.utf16_offset_for_byte[byte_range.start],
-            .end = self.utf16_offset_for_byte[byte_range.end],
-        };
-    }
 };
 
 pub const TerminalCellPosition = struct {
@@ -127,68 +49,38 @@ pub fn accessibleHistoryRows(columns: usize, scrollback_enabled: bool) usize {
     return @min(rows_for_cell_budget, accessible_history_max_rows);
 }
 
-/// Return metadata using the same line-start semantics as
-/// `TerminalTextSnapshot`: empty text counts as one line, interior blank lines
-/// are preserved, and a trailing newline terminates the last line instead of
-/// creating a phantom empty line.
-pub fn terminalTextMetadata(text: []const u8) !TerminalTextMetadata {
-    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+const Node = @typeInfo(@FieldType(terminal.Pin, "node")).pointer.child;
 
-    var line_count: usize = 1;
-    for (text, 0..) |c, i| {
-        if (c == '\n' and i + 1 < text.len) line_count += 1;
+/// Screen rows of pins taken in document order. `pointFromPin` finds a pin by
+/// walking the page list from its first page, so a call costs as much as the
+/// scrollback is deep. Only the first pin (or one that is out of order) pays
+/// that; every later pin on the same page or the next one follows from the
+/// page's first row, which is how the formatter's pin map is laid out.
+const ScreenRows = struct {
+    pages: *const terminal.PageList,
+    /// The page of the last pin resolved and the screen row of its first row.
+    node: ?*Node = null,
+    node_top: usize = 0,
+    /// How many pins had to be located from the first page.
+    walks: usize = 0,
+
+    fn of(self: *ScreenRows, pin: terminal.Pin) ?usize {
+        if (self.node) |node| {
+            if (pin.node == node) return self.node_top + pin.y;
+            if (pin.node == node.next) {
+                self.node = pin.node;
+                self.node_top += node.data.size.rows;
+                return self.node_top + pin.y;
+            }
+        }
+
+        const point = self.pages.pointFromPin(.screen, pin) orelse return null;
+        self.walks += 1;
+        self.node = pin.node;
+        self.node_top = point.screen.y - pin.y;
+        return point.screen.y;
     }
-
-    return .{
-        .byte_len = text.len,
-        .utf16_len = try std.unicode.calcUtf16LeLen(text),
-        .line_count = line_count,
-    };
-}
-
-pub fn snapshotTerminalPlainText(
-    alloc: std.mem.Allocator,
-    terminal_state: *const terminal.Terminal,
-) !TerminalTextSnapshot {
-    var text_writer: std.Io.Writer.Allocating = .init(alloc);
-    defer text_writer.deinit();
-
-    var pin_map: std.ArrayList(terminal.Pin) = .empty;
-    defer pin_map.deinit(alloc);
-
-    var formatter = terminal.formatter.TerminalFormatter.init(
-        terminal_state,
-        .plain,
-    );
-    formatter.extra = .none;
-    formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
-    try formatter.format(&text_writer.writer);
-
-    return snapshotFromTextAndPins(alloc, &text_writer, &pin_map);
-}
-
-pub fn snapshotTerminalVisiblePlainText(
-    alloc: std.mem.Allocator,
-    terminal_state: *const terminal.Terminal,
-) !TerminalTextSnapshot {
-    var text_writer: std.Io.Writer.Allocating = .init(alloc);
-    defer text_writer.deinit();
-
-    var pin_map: std.ArrayList(terminal.Pin) = .empty;
-    defer pin_map.deinit(alloc);
-
-    const screen = terminal_state.screens.active;
-    var formatter = terminal.formatter.PageListFormatter.init(
-        &screen.pages,
-        .plain,
-    );
-    formatter.top_left = screen.pages.getTopLeft(.viewport);
-    formatter.bottom_right = screen.pages.getBottomRight(.viewport) orelse return error.UnknownPoint;
-    formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
-    try formatter.format(&text_writer.writer);
-
-    return snapshotFromTextAndPins(alloc, &text_writer, &pin_map);
-}
+};
 
 /// Capture a recent, hard-capped document window plus exact viewport-relative
 /// grid positions. Terminal page pointers are converted while the caller owns
@@ -254,14 +146,15 @@ pub fn snapshotTerminalAccessiblePlainText(
     const viewport_screen = pages.pointFromPin(.screen, viewport_top) orelse return error.UnknownPoint;
     const viewport_y: i64 = @intCast(viewport_screen.screen.y);
 
+    var rows: ScreenRows = .{ .pages = pages };
     var visible_start: ?usize = null;
     var visible_end: usize = 0;
     for (pin_map.items, 0..) |pin, index| {
-        const screen_point = pages.pointFromPin(.screen, pin) orelse return error.UnknownPoint;
+        const screen_y = rows.of(pin) orelse return error.UnknownPoint;
         const cell = pin.node.data.getRowAndCell(pin.x, pin.y).cell;
         cell_for_byte[index] = .{
-            .row = @intCast(@as(i64, @intCast(screen_point.screen.y)) - viewport_y),
-            .column = @intCast(screen_point.screen.x),
+            .row = @intCast(@as(i64, @intCast(screen_y)) - viewport_y),
+            .column = pin.x,
             .width = if (text[index] == '\n') 0 else @intCast(cell.gridWidth()),
         };
         if (pin.isBetween(viewport_top, viewport_bottom)) {
@@ -312,6 +205,13 @@ fn selectionOffsets(
     if (selection.rectangle) {
         const active = screen.pages.pointFromPin(.screen, selection.end()) orelse return null;
         const anchor = screen.pages.pointFromPin(.screen, selection.start()) orelse return null;
+        // `Selection.contains` derives both corners again on every call, which
+        // is a handful of page list walks per byte. The active row is an
+        // endpoint's row, so it is inside the rectangle's rows and only the
+        // columns decide.
+        const left = (screen.pages.pointFromPin(.screen, selection.topLeft(screen)) orelse return null).screen.x;
+        const right = (screen.pages.pointFromPin(.screen, selection.bottomRight(screen)) orelse return null).screen.x;
+        var rows: ScreenRows = .{ .pages = &screen.pages };
         var first: ?usize = null;
         var last_end: usize = 0;
         var index: usize = 0;
@@ -322,8 +222,8 @@ fn selectionOffsets(
                 continue;
             }
             const pin = pin_map[index];
-            const point = screen.pages.pointFromPin(.screen, pin) orelse return null;
-            if (point.screen.y == active.screen.y and selection.contains(screen, pin)) {
+            const screen_y = rows.of(pin) orelse return null;
+            if (screen_y == active.screen.y and pin.x >= left and pin.x <= right) {
                 if (first == null) first = index;
                 last_end = index + scalar_len;
             }
@@ -424,217 +324,6 @@ fn caretOffsetForGridPosition(
         index += scalar_len;
     }
     return row_end orelse text.len;
-}
-
-pub fn visibleRangeInDocument(
-    document: *const TerminalTextSnapshot,
-    visible: *const TerminalTextSnapshot,
-) ?OffsetRange {
-    if (visible.text.len == 0) return .{ .start = 0, .end = 0 };
-    if (visible.pin_map.len > document.pin_map.len) return null;
-
-    const max_start = document.pin_map.len - visible.pin_map.len;
-    for (0..max_start + 1) |start| {
-        if (!pinSlicesEqual(
-            document.pin_map[start .. start + visible.pin_map.len],
-            visible.pin_map,
-        )) continue;
-
-        return .{ .start = start, .end = start + visible.text.len };
-    }
-
-    return null;
-}
-
-fn pinSlicesEqual(lhs: []const terminal.Pin, rhs: []const terminal.Pin) bool {
-    if (lhs.len != rhs.len) return false;
-    for (lhs, rhs) |a, b| {
-        if (a.node != b.node or a.x != b.x or a.y != b.y or a.garbage != b.garbage) return false;
-    }
-    return true;
-}
-
-fn snapshotFromTextAndPins(
-    alloc: std.mem.Allocator,
-    text_writer: *std.Io.Writer.Allocating,
-    pin_map: *std.ArrayList(terminal.Pin),
-) !TerminalTextSnapshot {
-    const text = try text_writer.toOwnedSlice();
-    errdefer alloc.free(text);
-
-    if (pin_map.items.len != text.len) return error.PinMapLengthMismatch;
-    const owned_pin_map = try pin_map.toOwnedSlice(alloc);
-    errdefer alloc.free(owned_pin_map);
-
-    const utf16_offset_for_byte = try buildUtf16OffsetMap(alloc, text);
-    errdefer alloc.free(utf16_offset_for_byte);
-
-    const line_start_byte_offsets = try buildLineStartByteOffsets(alloc, text);
-    errdefer alloc.free(line_start_byte_offsets);
-
-    return .{
-        .alloc = alloc,
-        .text = text,
-        .pin_map = owned_pin_map,
-        .utf16_offset_for_byte = utf16_offset_for_byte,
-        .line_start_byte_offsets = line_start_byte_offsets,
-    };
-}
-
-fn buildLineStartByteOffsets(
-    alloc: std.mem.Allocator,
-    text: []const u8,
-) ![]usize {
-    var line_start_byte_offsets: std.ArrayList(usize) = .empty;
-    defer line_start_byte_offsets.deinit(alloc);
-
-    try line_start_byte_offsets.append(alloc, 0);
-
-    // Preserve interior blank lines, but treat a terminal trailing '\n' as the
-    // last line terminator instead of the start of a phantom empty line.
-    for (text, 0..) |c, i| {
-        if (c == '\n' and i + 1 < text.len) try line_start_byte_offsets.append(alloc, i + 1);
-    }
-
-    return try line_start_byte_offsets.toOwnedSlice(alloc);
-}
-
-fn buildUtf16OffsetMap(
-    alloc: std.mem.Allocator,
-    text: []const u8,
-) ![]usize {
-    const utf16_offset_for_byte = try alloc.alloc(usize, text.len + 1);
-    errdefer alloc.free(utf16_offset_for_byte);
-
-    var byte_index: usize = 0;
-    var utf16_offset: usize = 0;
-    while (byte_index < text.len) {
-        const utf8_len = try std.unicode.utf8ByteSequenceLength(text[byte_index]);
-        if (byte_index + utf8_len > text.len) return error.TruncatedUtf8;
-        const codepoint = try std.unicode.utf8Decode(text[byte_index .. byte_index + utf8_len]);
-        @memset(utf16_offset_for_byte[byte_index .. byte_index + utf8_len], utf16_offset);
-        byte_index += utf8_len;
-        utf16_offset += if (codepoint <= 0xFFFF) 1 else 2;
-    }
-    utf16_offset_for_byte[text.len] = utf16_offset;
-
-    return utf16_offset_for_byte;
-}
-
-test "snapshotTerminalPlainText captures terminal rows" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
-        .cols = 80,
-        .rows = 24,
-        .max_scrollback = 10_000,
-    });
-    defer t.deinit(std.testing.allocator);
-
-    try t.printString("Hello\nWorld");
-
-    var snapshot = try snapshotTerminalPlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer snapshot.deinit();
-
-    try std.testing.expectEqualStrings("Hello\nWorld", snapshot.text);
-    try std.testing.expectEqual(@as(usize, 2), snapshot.lineCount());
-
-    const first = snapshot.lineByteRange(0).?;
-    try std.testing.expectEqualStrings("Hello", snapshot.text[first.start..first.end]);
-    try std.testing.expectEqual(
-        OffsetRange{ .start = 0, .end = 5 },
-        snapshot.lineUtf16Range(0).?,
-    );
-
-    const second = snapshot.lineByteRange(1).?;
-    try std.testing.expectEqualStrings("World", snapshot.text[second.start..second.end]);
-    try std.testing.expectEqual(
-        OffsetRange{ .start = 6, .end = 11 },
-        snapshot.lineUtf16Range(1).?,
-    );
-
-    try std.testing.expectEqual(
-        TerminalTextMetadata{
-            .byte_len = 11,
-            .utf16_len = 11,
-            .line_count = 2,
-        },
-        snapshot.metadata(),
-    );
-}
-
-test "TerminalTextSnapshot takeText transfers text ownership" {
-    const alloc = std.testing.allocator;
-    const text = try alloc.dupe(u8, "owned text");
-    var snapshot = TerminalTextSnapshot{
-        .alloc = alloc,
-        .text = text,
-        .pin_map = try alloc.alloc(terminal.Pin, text.len),
-        .utf16_offset_for_byte = try buildUtf16OffsetMap(alloc, text),
-        .line_start_byte_offsets = try buildLineStartByteOffsets(alloc, text),
-    };
-
-    const taken = snapshot.takeText();
-    defer alloc.free(taken);
-
-    try std.testing.expectEqualSlices(u8, text, taken);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.text.len);
-    snapshot.deinit();
-}
-
-test "snapshotTerminalPlainText includes scrollback rows" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
-        .cols = 80,
-        .rows = 3,
-        .max_scrollback = 10_000,
-    });
-    defer t.deinit(std.testing.allocator);
-
-    try t.printString("line1\nline2\nline3\nline4\nline5\n");
-
-    var snapshot = try snapshotTerminalPlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer snapshot.deinit();
-
-    try std.testing.expectEqualStrings(
-        "line1\nline2\nline3\nline4\nline5",
-        snapshot.text,
-    );
-    try std.testing.expectEqual(@as(usize, 5), snapshot.lineCount());
-    try std.testing.expectEqual(
-        OffsetRange{ .start = 24, .end = 29 },
-        snapshot.lineUtf16Range(4).?,
-    );
-}
-
-test "snapshotTerminalVisiblePlainText excludes scrollback rows" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
-        .cols = 80,
-        .rows = 3,
-        .max_scrollback = 10_000,
-    });
-    defer t.deinit(std.testing.allocator);
-
-    try t.printString("line1\nline2\nline3\nline4\nline5\n");
-
-    var document = try snapshotTerminalPlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer document.deinit();
-
-    var visible = try snapshotTerminalVisiblePlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer visible.deinit();
-
-    try std.testing.expect(std.mem.indexOf(u8, document.text, "line1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, visible.text, "line1") == null);
-    try std.testing.expect(std.mem.indexOf(u8, visible.text, "line5") != null);
 }
 
 test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
@@ -935,141 +624,121 @@ test "accessible caret mapping uses UTF-8 grid boundaries and line ends" {
     try std.testing.expectEqual(@as(usize, 8), caretOffsetForGridPosition(text, &cells, 1, 1));
 }
 
-test "visibleRangeInDocument maps viewport pins into document offsets" {
-    var t = try terminal.Terminal.init(std.testing.allocator, .{
-        .cols = 80,
-        .rows = 3,
-        .max_scrollback = 10_000,
-    });
-    defer t.deinit(std.testing.allocator);
+const numbered_rows: usize = 5_000;
 
-    try t.printString("line1\nline2\nline3\nline4\nline5\n");
-
-    var document = try snapshotTerminalPlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer document.deinit();
-
-    var visible = try snapshotTerminalVisiblePlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer visible.deinit();
-
-    const range = visibleRangeInDocument(&document, &visible).?;
-    try std.testing.expect(range.start > 0);
-    try std.testing.expectEqualStrings(visible.text, document.text[range.start..range.end]);
+/// Print `numbered_rows` lines ("row-00000" ...), enough to fill several
+/// pages (579 rows each at 80 columns), so that the document window crosses a
+/// page boundary.
+fn printNumberedRows(t: *terminal.Terminal) !void {
+    var line: [32]u8 = undefined;
+    for (0..numbered_rows) |index| {
+        const value = try std.fmt.bufPrint(&line, "row-{d:0>5}\r\n", .{index});
+        try t.printString(value);
+    }
 }
 
-test "snapshotTerminalPlainText preserves blank rows in line map" {
+test "screen rows are derived from the page, not walked per pin" {
     var t = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 10_000,
+        .max_scrollback = 10_000_000,
     });
     defer t.deinit(std.testing.allocator);
+    try printNumberedRows(&t);
 
-    try t.printString("top\n\nbottom");
+    const pages = &t.screens.active.pages;
+    var page_count: usize = 0;
+    var node = pages.pages.first;
+    while (node) |page| : (node = page.next) page_count += 1;
+    try std.testing.expect(page_count > 5);
 
-    var snapshot = try snapshotTerminalPlainText(
-        std.testing.allocator,
-        &t,
-    );
-    defer snapshot.deinit();
+    // Every row, in order and across every page boundary: the same answer as
+    // the page list gives, from one walk.
+    var rows: ScreenRows = .{ .pages = pages };
+    for (0..pages.total_rows) |y| {
+        const pin = pages.pin(.{ .screen = .{ .x = 3, .y = @intCast(y) } }).?;
+        try std.testing.expectEqual(y, rows.of(pin).?);
+    }
+    try std.testing.expectEqual(@as(usize, 1), rows.walks);
 
-    try std.testing.expectEqualStrings("top\n\nbottom", snapshot.text);
-    try std.testing.expectEqual(@as(usize, 3), snapshot.lineCount());
-
-    const blank = snapshot.lineByteRange(1).?;
-    try std.testing.expectEqual(@as(usize, blank.start), blank.end);
-    try std.testing.expectEqual(
-        OffsetRange{ .start = 4, .end = 4 },
-        snapshot.lineUtf16Range(1).?,
-    );
+    // A pin from a page that is neither the same nor the next is located from
+    // the first page again, and still comes out right.
+    const first = pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    try std.testing.expectEqual(@as(usize, 0), rows.of(first).?);
+    try std.testing.expectEqual(@as(usize, 2), rows.walks);
+    const jump = pages.pin(.{ .screen = .{ .x = 0, .y = numbered_rows / 2 } }).?;
+    try std.testing.expectEqual(@as(usize, numbered_rows / 2), rows.of(jump).?);
+    try std.testing.expectEqual(@as(usize, 3), rows.walks);
 }
 
-test "snapshotTerminalPlainText line map ignores trailing newline terminator" {
-    const alloc = std.testing.allocator;
-    const text = "top\n\n";
-
-    var snapshot = TerminalTextSnapshot{
-        .alloc = alloc,
-        .text = try alloc.dupe(u8, text),
-        .pin_map = try alloc.alloc(terminal.Pin, text.len),
-        .utf16_offset_for_byte = try buildUtf16OffsetMap(alloc, text),
-        .line_start_byte_offsets = try buildLineStartByteOffsets(alloc, text),
-    };
-    defer snapshot.deinit();
-
-    try std.testing.expectEqual(@as(usize, 2), snapshot.lineCount());
-    try std.testing.expectEqualSlices(usize, &.{ 0, 4 }, snapshot.line_start_byte_offsets);
-
-    const first = snapshot.lineByteRange(0).?;
-    try std.testing.expectEqualStrings("top", snapshot.text[first.start..first.end]);
-
-    const second = snapshot.lineByteRange(1).?;
-    try std.testing.expectEqual(@as(usize, second.start), second.end);
-    try std.testing.expectEqual(
-        OffsetRange{ .start = 4, .end = 4 },
-        snapshot.lineUtf16Range(1).?,
-    );
-    try std.testing.expect(snapshot.lineByteRange(2) == null);
-}
-
-test "snapshotTerminalPlainText tracks multibyte text for UIA offsets" {
+test "accessible snapshot rows match the page list across many pages" {
     var t = try terminal.Terminal.init(std.testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 10_000,
+        .max_scrollback = 10_000_000,
     });
     defer t.deinit(std.testing.allocator);
+    try printNumberedRows(&t);
 
-    try t.printString("A\xf0\x9f\x94\xa5B");
-
-    var snapshot = try snapshotTerminalPlainText(
-        std.testing.allocator,
-        &t,
-    );
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
     defer snapshot.deinit();
 
-    try std.testing.expectEqualStrings("A🔥B", snapshot.text);
-    try std.testing.expectEqual(@as(usize, snapshot.text.len), snapshot.pin_map.len);
-    try std.testing.expectEqual(@as(usize, snapshot.text.len + 1), snapshot.utf16_offset_for_byte.len);
-    try std.testing.expectEqualSlices(
-        usize,
-        &.{ 0, 1, 1, 1, 1, 3, 4 },
-        snapshot.utf16_offset_for_byte,
-    );
-
-    try std.testing.expectEqual(@as(usize, 0), snapshot.pin_map[0].x);
-    for (1..5) |i| try std.testing.expectEqual(@as(usize, 1), snapshot.pin_map[i].x);
-    try std.testing.expectEqual(@as(usize, 3), snapshot.pin_map[5].x);
-    try std.testing.expectEqual(
-        OffsetRange{ .start = 0, .end = 4 },
-        snapshot.lineUtf16Range(0).?,
-    );
-
-    try std.testing.expectEqual(
-        TerminalTextMetadata{
-            .byte_len = 6,
-            .utf16_len = 4,
-            .line_count = 1,
-        },
-        try terminalTextMetadata(snapshot.text),
-    );
+    // The last line printed is the screen's second to last row (the cursor is
+    // on the blank one below it), which places every other line; its row is
+    // that relative to the viewport's top, however many pages the window spans.
+    // The newline between two pages is skipped: the formatter gives it the
+    // next page's pin, which is not what is under test.
+    const pages = &t.screens.active.pages;
+    const viewport_y: i64 = @intCast(pages.pointFromPin(.screen, pages.getTopLeft(.viewport)).?.screen.y);
+    const last_y: i64 = @as(i64, @intCast(pages.total_rows)) - 2;
+    var offset: usize = 0;
+    var lines: usize = 0;
+    var page_changes: usize = 0;
+    var last_node: ?*Node = null;
+    while (offset < snapshot.text.len) {
+        const end = std.mem.indexOfScalarPos(u8, snapshot.text, offset, '\n') orelse snapshot.text.len;
+        const number = try std.fmt.parseInt(usize, snapshot.text[offset + 4 .. offset + 9], 10);
+        const screen_y = last_y - (@as(i64, numbered_rows - 1) - @as(i64, @intCast(number)));
+        const expected: i32 = @intCast(screen_y - viewport_y);
+        for (offset..end) |index| {
+            try std.testing.expectEqual(expected, snapshot.cell_for_byte[index].row);
+        }
+        const pin = pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(screen_y) } }).?;
+        if (pin.node != last_node) page_changes += 1;
+        last_node = pin.node;
+        lines += 1;
+        offset = end + 1;
+    }
+    try std.testing.expect(lines > 400);
+    try std.testing.expect(page_changes > 1);
 }
 
-test "snapshotTerminalPlainText utf16 map rejects truncated utf8" {
-    const alloc = std.testing.allocator;
+test "rectangular selection finds its active row past the first page" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 10_000_000,
+    });
+    defer t.deinit(std.testing.allocator);
+    try printNumberedRows(&t);
 
-    try std.testing.expectError(
-        error.TruncatedUtf8,
-        buildUtf16OffsetMap(alloc, &.{ 0xF0, 0x9F }),
-    );
+    // Both rows are on a later page, where a pin's own `y` is not its screen
+    // row, so a row taken from the pin would select another row or none.
+    const screen = t.screens.active;
+    const total: u32 = @intCast(screen.pages.total_rows);
+    const anchor = screen.pages.pin(.{ .screen = .{ .x = 1, .y = total - 6 } }).?;
+    const active = screen.pages.pin(.{ .screen = .{ .x = 3, .y = total - 4 } }).?;
+    try std.testing.expect(@as(u32, active.y) != total - 4);
+    try screen.select(terminal.Selection.init(anchor, active, true));
+    var snapshot = try snapshotTerminalAccessiblePlainText(std.testing.allocator, &t);
+    defer snapshot.deinit();
 
-    try std.testing.expectError(
-        error.InvalidUtf8,
-        terminalTextMetadata(&.{ 0xF0, 0x9F }),
-    );
+    // The last line printed is the second to last row, so the active row is
+    // the line two before it.
+    const range = snapshot.selection_range orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ow-", snapshot.text[range.start..range.end]);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, snapshot.text[0..range.start], '\n')) |i| i + 1 else 0;
+    const number = try std.fmt.parseInt(usize, snapshot.text[line_start + 4 .. line_start + 9], 10);
+    try std.testing.expectEqual(numbered_rows - 1 - 2, number);
+    try std.testing.expectEqual(range.end, snapshot.selection_active_offset.?);
 }

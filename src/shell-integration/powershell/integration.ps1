@@ -1,5 +1,8 @@
 # Noctty shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
+# noctty-integration-revision: 1
+#   Raise it when a change must not be undone by an older noctty that shares
+#   the installed copy; see src/apprt/win32_powershell_install.zig.
 #
 # ── Scope contract ───────────────────────────────────────────────────────
 # noctty dot-sources this file from INSIDE a `& { ... }` script block:

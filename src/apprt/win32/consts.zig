@@ -172,6 +172,10 @@ pub const WM_WINHOSTTY_SESSION_CHECKPOINT = WM_APP + 11;
 /// Quit from the message loop (see `App.postQuit`).
 pub const WM_WINHOSTTY_QUIT = WM_APP + 12;
 pub const WM_WINHOSTTY_CONSOLE_VISIBILITY = WM_APP + 13;
+/// A profile discovery that ran off the UI thread finished (`App.startProfileDiscovery`).
+pub const WM_WINHOSTTY_PROFILES = WM_APP + 14;
+/// A jump-list commit that ran off the UI thread finished (`App.startJumpListRebuild`).
+pub const WM_WINHOSTTY_JUMP_LIST = WM_APP + 15;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
@@ -443,6 +447,7 @@ pub const VK_OEM_MINUS = 0xBD;
 pub const VK_OEM_PERIOD = 0xBE;
 pub const VK_OEM_2 = 0xBF;
 pub const VK_OEM_3 = 0xC0;
+pub const VK_ABNT_C1 = 0xC1;
 pub const VK_OEM_4 = 0xDB;
 pub const VK_OEM_5 = 0xDC;
 pub const VK_OEM_6 = 0xDD;

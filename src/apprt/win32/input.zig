@@ -642,6 +642,11 @@ fn keyFromVirtualKey(vk: UINT, lParam: LPARAM) input.Key {
         c.VK_OEM_5 => .backslash,
         c.VK_OEM_6 => .bracket_right,
         c.VK_OEM_7 => .quote,
+        // The `<>|` key beside left Shift on ISO keyboards, and the Brazilian
+        // ABNT2 key beside right Shift. `hotkeyPhysicalVirtualKey` names them
+        // the same way, so a global hotkey and a key event agree on the key.
+        c.VK_OEM_102 => .intl_backslash,
+        c.VK_ABNT_C1 => .intl_ro,
         c.VK_0...c.VK_9 => input.Key.fromASCII(@as(u8, @intCast('0' + (vk - c.VK_0)))) orelse .unidentified,
         c.VK_A...c.VK_Z => input.Key.fromASCII(@as(u8, @intCast('a' + (vk - c.VK_A)))) orelse .unidentified,
         c.VK_NUMPAD0...c.VK_NUMPAD9 => @enumFromInt(
@@ -737,6 +742,8 @@ fn hotkeyPhysicalVirtualKey(key: input.Key) ?UINT {
         .backslash => c.VK_OEM_5,
         .bracket_right => c.VK_OEM_6,
         .quote => c.VK_OEM_7,
+        .intl_backslash => c.VK_OEM_102,
+        .intl_ro => c.VK_ABNT_C1,
         else => null,
     };
 }
@@ -1594,6 +1601,26 @@ test "win32 keyFromVirtualKey maps core keys" {
     try std.testing.expectEqual(input.Key.arrow_left, keyFromVirtualKey(c.VK_LEFT, 0));
     try std.testing.expectEqual(input.Key.f12, keyFromVirtualKey(c.VK_F1 + 11, 0));
     try std.testing.expectEqual(input.Key.quote, keyFromVirtualKey(c.VK_OEM_7, 0));
+}
+
+test "win32 keyFromVirtualKey identifies the ISO and ABNT keys" {
+    // The `<>|` key every European ISO keyboard has beside left Shift and the
+    // extra ABNT2 key beside right Shift.
+    try std.testing.expectEqual(input.Key.intl_backslash, keyFromVirtualKey(c.VK_OEM_102, 0));
+    try std.testing.expectEqual(input.Key.intl_ro, keyFromVirtualKey(c.VK_ABNT_C1, 0));
+}
+
+test "win32 global hotkeys can name the ISO and ABNT keys" {
+    for ([_]struct { input.Key, UINT }{
+        .{ .intl_backslash, c.VK_OEM_102 },
+        .{ .intl_ro, c.VK_ABNT_C1 },
+    }) |case| {
+        const spec = hotkeySpecForTrigger(.{
+            .mods = .{ .ctrl = true },
+            .key = .{ .physical = case[0] },
+        }).?;
+        try std.testing.expectEqual(case[1], spec.vk);
+    }
 }
 
 /// The layout-sensitive tests below assert plain-US results, so skip them on any

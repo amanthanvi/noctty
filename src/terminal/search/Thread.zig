@@ -334,9 +334,15 @@ fn select(self: *Thread, sel: ScreenSearch.Select) !void {
     s.feed(self.alloc, self.opts.terminal);
     const screen_search = s.screens.getPtr(s.last_screen.key) orelse return;
 
+    // With nothing selected yet, either direction starts at the newest match,
+    // the one nearest the bottom of the screen. `.prev` alone would start at
+    // the oldest, which sends the first Enter after typing to the top of the
+    // scrollback.
+    const dir: ScreenSearch.Select = if (screen_search.selected == null) .next else sel;
+
     // Make the selection. Ignore the result because we don't
     // care if the selection didn't change.
-    _ = try screen_search.select(sel);
+    _ = try screen_search.select(dir);
 
     // Grab our match if we have one. If we don't have a selection
     // then we do nothing.
@@ -399,8 +405,6 @@ fn changeQuery(
     });
     self.event_generation = generation;
 
-    // Stop the previous search
-    var cleared_previous = false;
     if (self.search) |*s| {
         // If our search is unchanged, do nothing.
         if (queryEquals(s.viewport.needle(), s.viewport.window.query_options, needle, query_options)) {
@@ -426,31 +430,47 @@ fn changeQuery(
             }
             return;
         }
+    }
 
+    // Setup our search state. This comes before the previous search is
+    // stopped so that a query that cannot be searched for is reported by the
+    // one event that clears the previous results, not by a second one after
+    // it (which a consumer would show as "no matches" first).
+    var invalid = false;
+    var out_of_memory = false;
+    var next: ?Search = null;
+    if (needle.len > 0) {
+        if (Search.init(self.alloc, needle, query_options)) |search| {
+            next = search;
+        } else |err| switch (err) {
+            error.OutOfMemory => out_of_memory = true,
+            else => {
+                log.warn("error initializing search query err={}", .{err});
+                invalid = true;
+            },
+        }
+    }
+
+    // Stop the previous search. When the search changes then we need to emit
+    // that it stopped.
+    var cleared_previous = false;
+    if (self.search) |*s| {
         {
             self.opts.mutex.lock();
             defer self.opts.mutex.unlock();
             s.deinit(self.opts.terminal);
         }
         self.search = null;
-
-        // When the search changes then we need to emit that it stopped.
-        self.notifySearchCleared();
         cleared_previous = true;
     }
+    if (cleared_previous or invalid) self.notifySearchCleared(invalid);
 
-    // No needle means stop the search.
-    if (needle.len == 0) return;
+    // The previous search is gone even when the new one could not be set up:
+    // its results would otherwise be published for the new query.
+    if (out_of_memory) return error.OutOfMemory;
 
-    // Setup our search state.
-    self.search = Search.init(self.alloc, needle, query_options) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            log.warn("error initializing search query err={}", .{err});
-            if (!cleared_previous) self.notifySearchCleared();
-            return;
-        },
-    };
+    // No needle means stop the search, and an invalid one starts none.
+    self.search = next orelse return;
 
     // We need to grab the terminal lock and do an initial feed.
     self.opts.mutex.lock();
@@ -458,10 +478,12 @@ fn changeQuery(
     self.search.?.feed(self.alloc, self.opts.terminal);
 }
 
-fn notifySearchCleared(self: *Thread) void {
+/// Report that the search was cleared. The first event is the total of zero
+/// matches, or for a query that cannot be searched for, `invalid_query`.
+fn notifySearchCleared(self: *Thread, invalid: bool) void {
     if (self.opts.event_cb) |cb| {
         cb(
-            .{ .total_matches = 0 },
+            if (invalid) .invalid_query else .{ .total_matches = 0 },
             self.event_generation,
             self.opts.event_userdata,
         );
@@ -677,6 +699,12 @@ pub const Event = union(enum) {
     /// The memory is owned by the search thread and is only valid during
     /// the callback.
     match_rows: []const u32,
+
+    /// The query cannot be searched for: a regular expression that does not
+    /// compile, or options the build does not support. The search is cleared,
+    /// as for `total_matches = 0`, which this event replaces, so a consumer
+    /// can tell the query from one that matches nothing.
+    invalid_query,
 
     pub const SelectedMatch = struct {
         idx: usize,
@@ -1133,6 +1161,8 @@ const TestUserData = struct {
     const Self = @This();
     reset: std.Thread.ResetEvent = .{},
     total: usize = 0,
+    total_events: usize = 0,
+    invalid: bool = false,
     selected: ?Event.SelectedMatch = null,
     viewport: []FlattenedHighlight = &.{},
     rows: []u32 = &.{},
@@ -1149,6 +1179,7 @@ const TestUserData = struct {
         testing.allocator.free(self.rows);
 
         self.total = 0;
+        self.invalid = false;
         self.selected = null;
         self.viewport = &.{};
         self.rows = &.{};
@@ -1160,7 +1191,11 @@ const TestUserData = struct {
         switch (event) {
             .quit => {},
             .complete => ud.reset.set(),
-            .total_matches => |v| ud.total = v,
+            .total_matches => |v| {
+                ud.total = v;
+                ud.total_events += 1;
+            },
+            .invalid_query => ud.invalid = true,
             .selected_match => |v| ud.selected = v,
             .viewport_matches => |v| {
                 for (ud.viewport) |*hl| hl.deinit(testing.allocator);
@@ -1288,6 +1323,91 @@ test "invalid regex query clears search and stops refresh polling" {
     try testing.expectEqual(0, ud.total);
     try testing.expectEqual(0, ud.viewport.len);
     try testing.expectEqualSlices(u32, &.{}, ud.rows);
+    // The invalid query is the clear of the previous search. A zero total
+    // before it would show as "no matches" for a moment.
+    try testing.expect(ud.invalid);
+    try testing.expectEqual(0, ud.total_events);
+}
+
+test "a query that matches nothing is not reported as invalid" {
+    if (comptime !build_options.oniguruma) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var mutex: std.Thread.Mutex = .{};
+    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Hello, world");
+
+    var ud: TestUserData = .{};
+    defer ud.deinit();
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+        .event_cb = &TestUserData.callback,
+        .event_userdata = &ud,
+    });
+    defer thread.deinit();
+
+    // A valid regex with no match, and a literal that holds regex syntax.
+    try thread.changeQuery("w[x]+", .{ .regex = true }, 1);
+    try testing.expect(thread.search != null);
+    try thread.changeQuery("[", .{}, 2);
+    try testing.expect(thread.search != null);
+    try testing.expect(!ud.invalid);
+
+    // The invalid pattern reports itself once per query, whether or not a
+    // search was running, and the next valid query searches again.
+    try thread.changeQuery("[", .{ .regex = true }, 3);
+    try testing.expect(thread.search == null);
+    try testing.expect(ud.invalid);
+    ud.invalid = false;
+    try thread.changeQuery("(", .{ .regex = true }, 4);
+    try testing.expect(thread.search == null);
+    try testing.expect(ud.invalid);
+    ud.invalid = false;
+    try thread.changeQuery("world", .{ .regex = true }, 5);
+    try testing.expect(thread.search != null);
+    try testing.expect(!ud.invalid);
+}
+
+test "a query that runs out of memory still stops the previous search" {
+    // The new query already owns the event generation, so the previous
+    // search must not keep publishing results under it.
+    const alloc = testing.allocator;
+    var mutex: std.Thread.Mutex = .{};
+    var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("Hello, world");
+
+    var ud: TestUserData = .{};
+    defer ud.deinit();
+    var thread: Thread = try .init(alloc, .{
+        .mutex = &mutex,
+        .terminal = &t,
+        .event_cb = &TestUserData.callback,
+        .event_userdata = &ud,
+    });
+    defer thread.deinit();
+
+    try thread.changeQuery("world", .{}, 1);
+    try testing.expect(thread.search != null);
+
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    thread.alloc = failing.allocator();
+    defer thread.alloc = alloc;
+    try testing.expectError(error.OutOfMemory, thread.changeQuery("hello", .{}, 2));
+
+    try testing.expect(thread.search == null);
+    try testing.expect(!ud.invalid);
+    try testing.expectEqual(1, ud.total_events);
 }
 
 test "equivalent query replays search state" {
@@ -1430,6 +1550,43 @@ test "select after the searched screen is removed" {
     try thread.select(.next);
     try testing.expectEqual(ScreenSet.Key.primary, thread.search.?.last_screen.key);
     try testing.expect(!thread.search.?.screens.contains(.alternate));
+}
+
+test "the first select with nothing selected starts at the newest match" {
+    // `.prev` from no selection used to pick the oldest match, so the first
+    // Enter after typing a query scrolled to the top of the scrollback.
+    const alloc = testing.allocator;
+    var mutex: std.Thread.Mutex = .{};
+
+    for ([_]ScreenSearch.Select{ .next, .prev }) |first| {
+        var t: Terminal = try .init(alloc, .{ .cols = 20, .rows = 4 });
+        defer t.deinit(alloc);
+
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("needle a\r\nneedle b\r\nneedle c");
+
+        var thread: Thread = try .init(alloc, .{ .mutex = &mutex, .terminal = &t });
+        defer thread.deinit();
+        try thread.changeQuery("needle", .{}, 1);
+
+        try thread.select(first);
+        const searcher = thread.search.?.screens.getPtr(.primary).?;
+        try testing.expectEqual(@as(usize, 0), searcher.selected.?.idx);
+        const row = t.screens.active.pages.pointFromPin(
+            .screen,
+            searcher.selectedMatch().?.startPin(),
+        ).?;
+        try testing.expectEqual(@as(u32, 2), row.screen.y);
+
+        // Once something is selected, `.prev` steps toward the newer matches
+        // as before, which wraps past the newest to the oldest.
+        try thread.select(.prev);
+        try testing.expectEqual(
+            @as(usize, 2),
+            thread.search.?.screens.getPtr(.primary).?.selected.?.idx,
+        );
+    }
 }
 
 /// Keeps the last freed block of one size and hands it to the next allocation

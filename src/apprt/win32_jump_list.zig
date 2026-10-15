@@ -45,6 +45,7 @@ const max_shell_link_chars: usize = 32_768;
 const profile_description_prefix = "noctty-profile:";
 
 const CLSCTX_INPROC_SERVER: DWORD = 0x1;
+const COINIT_APARTMENTTHREADED: DWORD = 0x2;
 const CO_E_NOTINITIALIZED: HRESULT = @bitCast(@as(u32, 0x800401F0));
 const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 const VT_LPWSTR: u16 = 31;
@@ -1045,6 +1046,19 @@ pub const JumpList = struct {
     startup_profile_discovery_pending: bool = false,
     startup_profile_discovery_retry_count: u8 = 0,
     use_guards_rebuild_committed: bool = false,
+    /// Bumped by every change that dirties the Shell list, so a commit
+    /// built from an older copy of the model does not mark it clean.
+    rebuild_seq: u64 = 0,
+    rebuild_in_flight: ?InFlightRebuild = null,
+    /// Commits handed to the runner whose result has not landed, including
+    /// ones given up on.
+    rebuild_outstanding: u32 = 0,
+    watchdog_timer_id: ?UINT_PTR = null,
+    /// Commits given up on since the last one that finished.
+    rebuild_abandons: u8 = 0,
+    next_rebuild_id: u64 = 0,
+    /// Runs the commit on another thread; null runs it on the caller's.
+    runner: ?RebuildRunner = null,
 
     pub fn init(alloc: Allocator, state_path: []const u8) !JumpList {
         const owned_state_path = try alloc.dupe(u8, state_path);
@@ -1069,6 +1083,7 @@ pub const JumpList = struct {
     }
 
     pub fn deinit(self: *JumpList) void {
+        self.stopWatchdog();
         self.stopTimer();
         if (self.persist_dirty) _ = self.persist();
         self.stopTimer();
@@ -1172,8 +1187,7 @@ pub const JumpList = struct {
         self.clearProfiles();
         self.profiles.deinit(self.alloc);
         self.profiles = next;
-        self.rebuild_retry_count = 0;
-        self.rebuild_dirty = true;
+        self.markRebuildDirty();
         self.schedule();
     }
 
@@ -1193,8 +1207,7 @@ pub const JumpList = struct {
         _ = recorded;
         self.persist_dirty = true;
         self.persist_retry_count = 0;
-        self.rebuild_retry_count = 0;
-        self.rebuild_dirty = true;
+        self.markRebuildDirty();
         self.schedule();
     }
 
@@ -1235,8 +1248,7 @@ pub const JumpList = struct {
         self.persist_dirty = true;
         self.persist_retry_count = 0;
         if (changed or reinstated or recorded) {
-            self.rebuild_retry_count = 0;
-            self.rebuild_dirty = true;
+            self.markRebuildDirty();
         }
         // Directory activity is an external recovery trigger after the
         // bounded startup discovery retries have been exhausted.
@@ -1249,6 +1261,14 @@ pub const JumpList = struct {
     }
 
     pub fn handleTimer(self: *JumpList, timer_id: UINT_PTR) bool {
+        if (self.watchdog_timer_id) |watchdog| {
+            if (timer_id == watchdog) {
+                // A commit outlived its wait: `startRebuild` replaces it.
+                self.stopWatchdog();
+                self.flush();
+                return true;
+            }
+        }
         if (self.timer_id == null or timer_id != self.timer_id.?) return false;
         self.stopTimer();
         self.flush();
@@ -1256,28 +1276,7 @@ pub const JumpList = struct {
     }
 
     pub fn flush(self: *JumpList) void {
-        var rebuild_committed = false;
-        if (self.rebuild_dirty and !self.com_disabled) {
-            if (self.rebuildCom()) |_| {
-                self.rebuild_dirty = false;
-                self.rebuild_retry_count = 0;
-                rebuild_committed = true;
-            } else |err| switch (err) {
-                error.ComNotInitialized => {
-                    self.com_disabled = true;
-                    log.warn("jump list COM unavailable; disabling rebuilds for this process", .{});
-                },
-                else => {
-                    log.warn("jump list rebuild unavailable err={}", .{err});
-                    if (nextRebuildRetryCount(self.rebuild_retry_count)) |next| {
-                        self.rebuild_retry_count = next;
-                        self.schedule();
-                    } else {
-                        log.warn("jump list rebuild retries exhausted; waiting for a model change", .{});
-                    }
-                },
-            }
-        }
+        if (self.rebuild_dirty and !self.com_disabled) self.startRebuild();
         const persisted = if (self.persist_dirty) self.persist() else true;
         if (persisted) {
             self.persist_retry_count = 0;
@@ -1287,11 +1286,13 @@ pub const JumpList = struct {
         } else {
             log.warn("jump list persistence retries exhausted; waiting for a model change", .{});
         }
-        if (rebuild_committed) self.use_guards_rebuild_committed = true;
         self.finishUseGuards(persisted);
     }
 
     fn finishUseGuards(self: *JumpList, persisted: bool) void {
+        // A commit still out (one given up on included) was built with these
+        // guards; its removals are applied against them when it lands.
+        if (self.rebuild_outstanding > 0) return;
         if (self.use_guards_rebuild_committed and persisted) {
             self.pending_recent_uses.deinit(self.alloc);
             self.pending_profile_uses.deinit(self.alloc);
@@ -1324,6 +1325,23 @@ pub const JumpList = struct {
         if (self.timer_id) |timer_id| {
             _ = KillTimer(null, timer_id);
             self.timer_id = null;
+        }
+    }
+
+    fn armWatchdog(self: *JumpList, ms: u64) void {
+        self.stopWatchdog();
+        const timer_id = SetTimer(null, 0, @intCast(@min(ms, std.math.maxInt(UINT))), null);
+        if (timer_id == 0) {
+            log.warn("jump list rebuild watchdog unavailable", .{});
+            return;
+        }
+        self.watchdog_timer_id = timer_id;
+    }
+
+    fn stopWatchdog(self: *JumpList) void {
+        if (self.watchdog_timer_id) |timer_id| {
+            _ = KillTimer(null, timer_id);
+            self.watchdog_timer_id = null;
         }
     }
 
@@ -1427,8 +1445,7 @@ pub const JumpList = struct {
         self.pending_profile_hides.deinit(self.alloc);
         self.persist_dirty = false;
         if (model_changed) {
-            self.rebuild_retry_count = 0;
-            self.rebuild_dirty = true;
+            self.markRebuildDirty();
             self.schedule();
         }
         return true;
@@ -1544,10 +1561,255 @@ pub const JumpList = struct {
         self.profiles.clearRetainingCapacity();
     }
 
-    fn rebuildCom(self: *JumpList) !void {
+    fn markRebuildDirty(self: *JumpList) void {
+        self.rebuild_retry_count = 0;
+        self.rebuild_dirty = true;
+        self.rebuild_seq +%= 1;
+    }
+
+    /// Commit the Shell list from a copy of the model, on the runner's
+    /// thread when there is one. The commit took 33-46 ms of the UI
+    /// thread after every directory change here (CommitList alone about
+    /// 9 ms), so it does not run there unless no thread can.
+    fn startRebuild(self: *JumpList) void {
+        if (self.rebuild_in_flight) |in_flight| {
+            // Its completion re-checks `rebuild_seq`. One that never ends
+            // must not keep the list from updating again.
+            // Its watchdog replaces it once the wait is over.
+            const wait_ms = rebuildAbandonMs(self.rebuild_abandons);
+            const elapsed_ms = sys.GetTickCount64() -| in_flight.started_ms;
+            if (elapsed_ms < wait_ms) {
+                if (self.watchdog_timer_id == null) self.armWatchdog(wait_ms - elapsed_ms);
+                return;
+            }
+            log.warn("jump list rebuild unfinished after {d} ms; starting another", .{wait_ms});
+            // A wedged worker never exits; wait longer each time so a hung
+            // Shell does not collect one thread per interval.
+            self.rebuild_abandons +|= 1;
+        }
+        const job = self.snapshotRebuild() catch |err| {
+            self.rebuildFailed(err);
+            return;
+        };
+        self.next_rebuild_id +%= 1;
+        job.id = self.next_rebuild_id;
+        self.rebuild_in_flight = .{ .id = job.id, .started_ms = sys.GetTickCount64() };
+        if (self.runner) |runner| {
+            job.handed_off = true;
+            if (runner.start(runner.ctx, job)) {
+                self.rebuild_outstanding += 1;
+                // Replaces the commit if it hangs or its result is lost.
+                self.armWatchdog(rebuildAbandonMs(self.rebuild_abandons));
+                return;
+            }
+            job.handed_off = false;
+            log.warn("jump list rebuild thread unavailable; rebuilding on this thread", .{});
+        }
+        job.run();
+        self.completeRebuild(job);
+        job.deinit();
+    }
+
+    fn snapshotRebuild(self: *const JumpList) !*RebuildJob {
         const exe_path = self.exe_path orelse return error.ExecutableUnavailable;
-        const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, exe_path);
-        defer self.alloc.free(exe_w);
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+        const job = try alloc.create(RebuildJob);
+        job.* = .{
+            .arena = undefined,
+            .seq = self.rebuild_seq,
+            .exe_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, exe_path),
+            .recents = try copyRecentList(alloc, &self.recents),
+            .recent_uses = try copyRecentList(alloc, &self.pending_recent_uses),
+            .hidden_profiles = try copyTombstones(alloc, &self.hidden_profiles),
+            .profile_uses = try copyTombstones(alloc, &self.pending_profile_uses),
+            .profiles = try alloc.alloc(ProfileItem, self.profiles.items.len),
+        };
+        for (self.profiles.items, job.profiles) |item, *copy| copy.* = .{
+            .key = try alloc.dupe(u8, item.key),
+            .title = try alloc.dupe(u8, item.title),
+            .arguments = try alloc.dupe(u8, item.arguments),
+        };
+        job.arena = arena;
+        return job;
+    }
+
+    /// Apply a finished rebuild to the model. Runs on the UI thread; the
+    /// caller still owns `job`.
+    pub fn completeRebuild(self: *JumpList, job: *const RebuildJob) void {
+        const current = if (self.rebuild_in_flight) |in_flight| in_flight.id == job.id else false;
+        if (current) {
+            self.rebuild_in_flight = null;
+            self.stopWatchdog();
+        }
+        if (job.handed_off) self.rebuild_outstanding -|= 1;
+        self.rebuild_abandons = 0;
+        // As before the move off the UI thread, removals BeginList reported
+        // are recorded even when the commit itself failed.
+        self.applyRemoved(&job.removed) catch |err| {
+            log.warn("jump list removal snapshot failed err={}", .{err});
+        };
+        if (job.result) |_| {
+            if (current and job.seq == self.rebuild_seq) {
+                self.rebuild_dirty = false;
+                self.rebuild_retry_count = 0;
+                self.use_guards_rebuild_committed = true;
+            } else {
+                // Built from an older model, or an abandoned commit that
+                // landed after a newer one.
+                self.markRebuildDirty();
+                self.schedule();
+            }
+        } else |err| {
+            if (current) self.rebuildFailed(err);
+        }
+        if (self.persist_dirty) self.schedule();
+        self.finishUseGuards(!self.persist_dirty);
+    }
+
+    fn rebuildFailed(self: *JumpList, err: anyerror) void {
+        switch (err) {
+            error.ComNotInitialized => {
+                self.com_disabled = true;
+                log.warn("jump list COM unavailable; disabling rebuilds for this process", .{});
+            },
+            else => {
+                log.warn("jump list rebuild unavailable err={}", .{err});
+                if (nextRebuildRetryCount(self.rebuild_retry_count)) |next| {
+                    self.rebuild_retry_count = next;
+                    self.schedule();
+                } else {
+                    log.warn("jump list rebuild retries exhausted; waiting for a model change", .{});
+                }
+            },
+        }
+    }
+
+    /// Record the entries the user removed from the Shell list: removed
+    /// directories become tombstones and removed profiles are hidden,
+    /// unless the item was used since the last commit.
+    fn applyRemoved(self: *JumpList, removed: *const RemovedArguments) !void {
+        if (try self.recents.removeArguments(
+            self.alloc,
+            removed.items.items,
+            &self.pending_recent_uses,
+            &self.pending_recent_removals,
+        )) {
+            for (self.pending_recent_removals.items.items) |path| {
+                _ = try self.removed_recents.insert(self.alloc, path);
+                _ = self.pending_recent_additions.removePath(self.alloc, path) catch false;
+                try self.pending_recent_events.upsert(
+                    self.alloc,
+                    path,
+                    .removed,
+                    eventTimestamp(),
+                );
+            }
+            self.persist_dirty = true;
+            self.persist_retry_count = 0;
+        }
+        for (self.profiles.items) |item| {
+            if (!removed.profile_keys.contains(item.key) and
+                !containsArguments(removed.items.items, item.arguments)) continue;
+            if (self.pending_profile_uses.contains(item.key)) continue;
+            if (try self.hidden_profiles.insert(self.alloc, item.key)) {
+                _ = try self.pending_profile_hides.insert(self.alloc, item.key);
+                try self.pending_profile_events.upsert(
+                    self.alloc,
+                    item.key,
+                    .hidden,
+                    eventTimestamp(),
+                );
+                self.persist_dirty = true;
+                self.persist_retry_count = 0;
+            }
+        }
+    }
+};
+
+/// Starts a rebuild on another thread. `start` takes ownership of `job`
+/// when it returns true and must hand it back through
+/// `JumpList.completeRebuild` on the UI thread, then `RebuildJob.deinit`.
+pub const RebuildRunner = struct {
+    ctx: *anyopaque,
+    start: *const fn (ctx: *anyopaque, job: *RebuildJob) bool,
+};
+
+const InFlightRebuild = struct {
+    id: u64,
+    started_ms: u64,
+};
+
+/// How long a commit may run before another replaces it: far longer than
+/// one takes when it works, doubling per commit already given up on, up to
+/// about 10 minutes.
+fn rebuildAbandonMs(abandons: u8) u64 {
+    const doublings: u6 = @intCast(@min(abandons, 6));
+    return @as(u64, 10 * std.time.ms_per_s) << doublings;
+}
+
+/// One Shell list commit, built from a copy of the model so it can run on a
+/// thread of its own. Everything lives in `arena`, so it borrows nothing
+/// from the JumpList and may outlive it.
+pub const RebuildJob = struct {
+    arena: std.heap.ArenaAllocator,
+    id: u64 = 0,
+    /// `JumpList.rebuild_seq` when the copy was taken.
+    seq: u64,
+    exe_w: [:0]u16,
+    recents: RecentList,
+    recent_uses: RecentList,
+    hidden_profiles: ProfileTombstones,
+    profile_uses: ProfileTombstones,
+    profiles: []ProfileItem,
+    /// What BeginList reported the user removed since the last commit.
+    removed: RemovedArguments = .{},
+    /// Went to the runner's thread rather than running inline.
+    handed_off: bool = false,
+    result: anyerror!void = error.NotStarted,
+
+    pub fn deinit(self: *RebuildJob) void {
+        var arena = self.arena;
+        arena.deinit();
+    }
+
+    /// Worker side: the commit in a single-threaded apartment of this
+    /// thread's own, so no interface crosses apartments.
+    pub fn runInOwnApartment(self: *RebuildJob) void {
+        const hr = sys.CoInitializeEx(null, COINIT_APARTMENTTHREADED);
+        if (hr < 0) {
+            // Retried like any failed commit; ComNotInitialized would turn
+            // the jump list off for the whole process.
+            log.warn("jump list rebuild apartment unavailable hr=0x{x}", .{@as(u32, @bitCast(hr))});
+            self.result = error.RebuildApartmentUnavailable;
+            return;
+        }
+        defer sys.CoUninitialize();
+        self.run();
+    }
+
+    /// The commit in the calling thread's apartment.
+    pub fn run(self: *RebuildJob) void {
+        self.result = self.commit();
+    }
+
+    /// The filtering `JumpList.applyRemoved` does to the model, applied to
+    /// this copy so the list committed now leaves the removed items out.
+    fn dropRemoved(self: *RebuildJob) !void {
+        const alloc = self.arena.allocator();
+        var removals: RecentList = .{};
+        _ = try self.recents.removeArguments(alloc, self.removed.items.items, &self.recent_uses, &removals);
+        for (self.profiles) |item| {
+            if (!self.removed.profile_keys.contains(item.key) and
+                !containsArguments(self.removed.items.items, item.arguments)) continue;
+            if (self.profile_uses.contains(item.key)) continue;
+            _ = try self.hidden_profiles.insert(alloc, item.key);
+        }
+    }
+
+    fn commit(self: *RebuildJob) !void {
+        const alloc = self.arena.allocator();
         const aumid_w = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
 
         var raw_destination: ?*anyopaque = null;
@@ -1582,52 +1844,16 @@ pub const JumpList = struct {
             if (abort_hr < 0) log.debug("jump list AbortList failed hr=0x{x}", .{@as(u32, @bitCast(abort_hr))});
         };
 
-        var removed_arguments: RemovedArguments = .{};
-        defer removed_arguments.deinit(self.alloc);
         if (raw_removed) |raw| {
             const removed = IObjectArray.fromRaw(raw);
             defer removed.release();
-            removed_arguments = try self.readRemovedArguments(removed);
+            self.removed = try readRemovedArguments(alloc, removed);
         }
-        if (try self.recents.removeArguments(
-            self.alloc,
-            removed_arguments.items.items,
-            &self.pending_recent_uses,
-            &self.pending_recent_removals,
-        )) {
-            for (self.pending_recent_removals.items.items) |path| {
-                _ = try self.removed_recents.insert(self.alloc, path);
-                _ = self.pending_recent_additions.removePath(self.alloc, path) catch false;
-                try self.pending_recent_events.upsert(
-                    self.alloc,
-                    path,
-                    .removed,
-                    eventTimestamp(),
-                );
-            }
-            self.persist_dirty = true;
-            self.persist_retry_count = 0;
-        }
-        for (self.profiles.items) |item| {
-            if (!removed_arguments.profile_keys.contains(item.key) and
-                !containsArguments(removed_arguments.items.items, item.arguments)) continue;
-            if (self.pending_profile_uses.contains(item.key)) continue;
-            if (try self.hidden_profiles.insert(self.alloc, item.key)) {
-                _ = try self.pending_profile_hides.insert(self.alloc, item.key);
-                try self.pending_profile_events.upsert(
-                    self.alloc,
-                    item.key,
-                    .hidden,
-                    eventTimestamp(),
-                );
-                self.persist_dirty = true;
-                self.persist_retry_count = 0;
-            }
-        }
-        if (!removed_arguments.complete) return error.RemovedDestinationsIncomplete;
+        try self.dropRemoved();
+        if (!self.removed.complete) return error.RemovedDestinationsIncomplete;
 
         var visible_profile_count: usize = 0;
-        for (self.profiles.items) |item| {
+        for (self.profiles) |item| {
             if (!self.hidden_profiles.contains(item.key)) visible_profile_count += 1;
         }
         const recent_count = recentSlotCount(
@@ -1636,11 +1862,11 @@ pub const JumpList = struct {
             visible_profile_count,
         );
         if (recent_count > 0) {
-            try self.appendRecentCategory(destination, exe_w, recent_count);
+            try appendRecentCategory(alloc, destination, self.exe_w, self.recents.items.items[0..recent_count]);
         }
         const profile_count = profileSlotCount(slot_budget, recent_count, visible_profile_count);
         if (profile_count > 0) {
-            try self.appendProfilesCategory(destination, exe_w, profile_count);
+            try appendProfilesCategory(alloc, destination, self.exe_w, self.profiles, &self.hidden_profiles, profile_count);
         }
         // Named layouts (C17, #133) will add a third category here, built
         // from win32_layouts.listNamesAlloc + launchArgvAlloc rather than
@@ -1649,228 +1875,244 @@ pub const JumpList = struct {
         if (destination.vtbl.CommitList(destination.asRaw()) < 0) return error.CommitListFailed;
         transaction_open = false;
     }
+};
 
-    fn appendRecentCategory(
-        self: *JumpList,
-        destination: *ICustomDestinationList,
-        exe_w: [:0]const u16,
-        count: usize,
-    ) !void {
-        const collection = try createObjectCollection();
-        defer collection.release();
+fn copyRecentList(alloc: Allocator, list: *const RecentList) !RecentList {
+    var copy: RecentList = .{};
+    try copy.items.ensureTotalCapacity(alloc, list.items.items.len);
+    for (list.items.items) |item| copy.items.appendAssumeCapacity(try alloc.dupe(u8, item));
+    return copy;
+}
 
-        for (self.recents.items.items[0..count]) |path| {
-            const title = try buildTitleAlloc(self.alloc, path);
-            defer self.alloc.free(title);
-            const arguments = try buildWorkingDirectoryArgumentsAlloc(self.alloc, path);
-            defer self.alloc.free(arguments);
-            const link = try self.createShellLink(exe_w, arguments, title, path, null);
-            defer link.release();
-            if (collection.addObject(link.asRaw()) < 0) return error.AddRecentLinkFailed;
-        }
+fn copyTombstones(alloc: Allocator, tombstones: *const ProfileTombstones) !ProfileTombstones {
+    var copy: ProfileTombstones = .{};
+    try copy.items.ensureTotalCapacity(alloc, tombstones.items.items.len);
+    for (tombstones.items.items) |item| copy.items.appendAssumeCapacity(try alloc.dupe(u8, item));
+    return copy;
+}
 
-        const category = std.unicode.utf8ToUtf16LeStringLiteral("Recent");
-        if (destination.vtbl.AppendCategory(destination.asRaw(), category, collection.asArray()) < 0) {
-            return error.AppendRecentCategoryFailed;
-        }
+fn appendRecentCategory(
+    alloc: Allocator,
+    destination: *ICustomDestinationList,
+    exe_w: [:0]const u16,
+    paths: []const []const u8,
+) !void {
+    const collection = try createObjectCollection();
+    defer collection.release();
+
+    for (paths) |path| {
+        const title = try buildTitleAlloc(alloc, path);
+        defer alloc.free(title);
+        const arguments = try buildWorkingDirectoryArgumentsAlloc(alloc, path);
+        defer alloc.free(arguments);
+        const link = try createShellLink(alloc, exe_w, arguments, title, path, null);
+        defer link.release();
+        if (collection.addObject(link.asRaw()) < 0) return error.AddRecentLinkFailed;
     }
 
-    fn appendProfilesCategory(
-        self: *JumpList,
-        destination: *ICustomDestinationList,
-        exe_w: [:0]const u16,
-        count: usize,
-    ) !void {
-        const collection = try createObjectCollection();
-        defer collection.release();
+    const category = std.unicode.utf8ToUtf16LeStringLiteral("Recent");
+    if (destination.vtbl.AppendCategory(destination.asRaw(), category, collection.asArray()) < 0) {
+        return error.AppendRecentCategoryFailed;
+    }
+}
 
-        var appended: usize = 0;
-        for (self.profiles.items) |item| {
-            if (self.hidden_profiles.contains(item.key)) continue;
-            if (appended == count) break;
-            const link = try self.createShellLink(exe_w, item.arguments, item.title, null, item.key);
-            defer link.release();
-            if (collection.addObject(link.asRaw()) < 0) return error.AddProfileLinkFailed;
-            appended += 1;
-        }
+fn appendProfilesCategory(
+    alloc: Allocator,
+    destination: *ICustomDestinationList,
+    exe_w: [:0]const u16,
+    profiles: []const ProfileItem,
+    hidden_profiles: *const ProfileTombstones,
+    count: usize,
+) !void {
+    const collection = try createObjectCollection();
+    defer collection.release();
 
-        const category = std.unicode.utf8ToUtf16LeStringLiteral("Profiles");
-        if (destination.vtbl.AppendCategory(destination.asRaw(), category, collection.asArray()) < 0) {
-            return error.AppendProfilesCategoryFailed;
-        }
+    var appended: usize = 0;
+    for (profiles) |item| {
+        if (hidden_profiles.contains(item.key)) continue;
+        if (appended == count) break;
+        const link = try createShellLink(alloc, exe_w, item.arguments, item.title, null, item.key);
+        defer link.release();
+        if (collection.addObject(link.asRaw()) < 0) return error.AddProfileLinkFailed;
+        appended += 1;
     }
 
-    fn readRemovedArguments(
-        self: *JumpList,
-        removed: *IObjectArray,
-    ) !RemovedArguments {
-        var result: RemovedArguments = .{};
-        errdefer result.deinit(self.alloc);
+    const category = std.unicode.utf8ToUtf16LeStringLiteral("Profiles");
+    if (destination.vtbl.AppendCategory(destination.asRaw(), category, collection.asArray()) < 0) {
+        return error.AppendProfilesCategoryFailed;
+    }
+}
 
-        var count: UINT = 0;
-        if (removed.vtbl.GetCount(removed.asRaw(), &count) < 0) {
-            log.debug("jump list removed item count unavailable", .{});
-            result.complete = false;
-            return result;
-        }
-        const arguments_buffer = try self.alloc.alloc(u16, max_shell_link_chars);
-        defer self.alloc.free(arguments_buffer);
+fn readRemovedArguments(
+    alloc: Allocator,
+    removed: *IObjectArray,
+) !RemovedArguments {
+    var result: RemovedArguments = .{};
+    errdefer result.deinit(alloc);
 
-        for (0..count) |index| {
-            var raw_link: ?*anyopaque = null;
-            const get_hr = removed.vtbl.GetAt(
-                removed.asRaw(),
-                @intCast(index),
-                &IID_IShellLinkW,
-                &raw_link,
-            );
-            if (get_hr == E_NOINTERFACE) continue;
-            if (get_hr < 0 or raw_link == null) {
-                log.debug("jump list removed item ignored index={d} hr=0x{x}", .{
-                    index,
-                    @as(u32, @bitCast(get_hr)),
-                });
-                result.complete = false;
-                continue;
-            }
-            const link = IShellLinkW.fromRaw(raw_link.?);
-            defer link.release();
-
-            @memset(arguments_buffer, 0);
-            if (link.vtbl.GetArguments(
-                link.asRaw(),
-                arguments_buffer.ptr,
-                @intCast(arguments_buffer.len),
-            ) < 0) {
-                log.debug("jump list removed link arguments unavailable index={d}", .{index});
-                result.complete = false;
-                continue;
-            }
-            const arguments_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse {
-                log.debug("jump list removed link arguments too long index={d}", .{index});
-                result.complete = false;
-                continue;
-            };
-            const arguments = std.unicode.utf16LeToUtf8Alloc(
-                self.alloc,
-                arguments_buffer[0..arguments_len],
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => {
-                    log.debug("jump list removed link arguments invalid index={d} err={}", .{ index, err });
-                    result.complete = false;
-                    continue;
-                },
-            };
-            var arguments_owned = true;
-            errdefer if (arguments_owned) self.alloc.free(arguments);
-            try result.items.append(self.alloc, arguments);
-            arguments_owned = false;
-
-            @memset(arguments_buffer, 0);
-            if (link.vtbl.GetDescription(
-                link.asRaw(),
-                arguments_buffer.ptr,
-                @intCast(arguments_buffer.len),
-            ) < 0) {
-                log.debug("jump list removed link description unavailable index={d}", .{index});
-                result.complete = false;
-                continue;
-            }
-            const description_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse {
-                log.debug("jump list removed link description too long index={d}", .{index});
-                result.complete = false;
-                continue;
-            };
-            const description = std.unicode.utf16LeToUtf8Alloc(
-                self.alloc,
-                arguments_buffer[0..description_len],
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => {
-                    log.debug("jump list removed link description invalid index={d} err={}", .{ index, err });
-                    result.complete = false;
-                    continue;
-                },
-            };
-            defer self.alloc.free(description);
-            if (std.mem.startsWith(u8, description, profile_description_prefix)) {
-                const key = description[profile_description_prefix.len..];
-                _ = try result.profile_keys.insert(self.alloc, key);
-            }
-        }
+    var count: UINT = 0;
+    if (removed.vtbl.GetCount(removed.asRaw(), &count) < 0) {
+        log.debug("jump list removed item count unavailable", .{});
+        result.complete = false;
         return result;
     }
+    const arguments_buffer = try alloc.alloc(u16, max_shell_link_chars);
+    defer alloc.free(arguments_buffer);
 
-    fn createShellLink(
-        self: *JumpList,
-        exe_w: [:0]const u16,
-        arguments: []const u8,
-        title: []const u8,
-        working_directory: ?[]const u8,
-        profile_key: ?[]const u8,
-    ) !*IShellLinkW {
+    for (0..count) |index| {
         var raw_link: ?*anyopaque = null;
-        const create_hr = CoCreateInstance(
-            &CLSID_ShellLink,
-            null,
-            CLSCTX_INPROC_SERVER,
+        const get_hr = removed.vtbl.GetAt(
+            removed.asRaw(),
+            @intCast(index),
             &IID_IShellLinkW,
             &raw_link,
         );
-        if (create_hr == CO_E_NOTINITIALIZED) return error.ComNotInitialized;
-        if (create_hr < 0 or raw_link == null) return error.ShellLinkUnavailable;
+        if (get_hr == E_NOINTERFACE) continue;
+        if (get_hr < 0 or raw_link == null) {
+            log.debug("jump list removed item ignored index={d} hr=0x{x}", .{
+                index,
+                @as(u32, @bitCast(get_hr)),
+            });
+            result.complete = false;
+            continue;
+        }
         const link = IShellLinkW.fromRaw(raw_link.?);
-        errdefer link.release();
+        defer link.release();
 
-        const arguments_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, arguments);
-        defer self.alloc.free(arguments_w);
-        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, title);
-        defer self.alloc.free(title_w);
-
-        if (link.vtbl.SetPath(link.asRaw(), exe_w.ptr) < 0) return error.SetLinkPathFailed;
-        if (link.vtbl.SetArguments(link.asRaw(), arguments_w.ptr) < 0) return error.SetLinkArgumentsFailed;
-        if (link.vtbl.SetIconLocation(link.asRaw(), exe_w.ptr, 0) < 0) return error.SetLinkIconFailed;
-
-        if (profile_key) |key| {
-            const description = try std.fmt.allocPrint(
-                self.alloc,
-                "{s}{s}",
-                .{ profile_description_prefix, key },
-            );
-            defer self.alloc.free(description);
-            const description_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, description);
-            defer self.alloc.free(description_w);
-            if (link.vtbl.SetDescription(link.asRaw(), description_w.ptr) < 0) {
-                return error.SetLinkDescriptionFailed;
-            }
+        @memset(arguments_buffer, 0);
+        if (link.vtbl.GetArguments(
+            link.asRaw(),
+            arguments_buffer.ptr,
+            @intCast(arguments_buffer.len),
+        ) < 0) {
+            log.debug("jump list removed link arguments unavailable index={d}", .{index});
+            result.complete = false;
+            continue;
         }
+        const arguments_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse {
+            log.debug("jump list removed link arguments too long index={d}", .{index});
+            result.complete = false;
+            continue;
+        };
+        const arguments = std.unicode.utf16LeToUtf8Alloc(
+            alloc,
+            arguments_buffer[0..arguments_len],
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                log.debug("jump list removed link arguments invalid index={d} err={}", .{ index, err });
+                result.complete = false;
+                continue;
+            },
+        };
+        var arguments_owned = true;
+        errdefer if (arguments_owned) alloc.free(arguments);
+        try result.items.append(alloc, arguments);
+        arguments_owned = false;
 
-        if (working_directory) |path| {
-            const path_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, path);
-            defer self.alloc.free(path_w);
-            if (link.vtbl.SetWorkingDirectory(link.asRaw(), path_w.ptr) < 0) {
-                return error.SetLinkWorkingDirectoryFailed;
-            }
+        @memset(arguments_buffer, 0);
+        if (link.vtbl.GetDescription(
+            link.asRaw(),
+            arguments_buffer.ptr,
+            @intCast(arguments_buffer.len),
+        ) < 0) {
+            log.debug("jump list removed link description unavailable index={d}", .{index});
+            result.complete = false;
+            continue;
         }
-
-        var raw_store: ?*anyopaque = null;
-        if (link.vtbl.QueryInterface(link.asRaw(), &IID_IPropertyStore, &raw_store) < 0 or raw_store == null) {
-            return error.PropertyStoreUnavailable;
+        const description_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse {
+            log.debug("jump list removed link description too long index={d}", .{index});
+            result.complete = false;
+            continue;
+        };
+        const description = std.unicode.utf16LeToUtf8Alloc(
+            alloc,
+            arguments_buffer[0..description_len],
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                log.debug("jump list removed link description invalid index={d} err={}", .{ index, err });
+                result.complete = false;
+                continue;
+            },
+        };
+        defer alloc.free(description);
+        if (std.mem.startsWith(u8, description, profile_description_prefix)) {
+            const key = description[profile_description_prefix.len..];
+            _ = try result.profile_keys.insert(alloc, key);
         }
-        const store = IPropertyStore.fromRaw(raw_store.?);
-        defer store.release();
-
-        const aumid_w = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
-        const aumid_value = PROPVARIANT.fromString(aumid_w);
-        if (store.setValue(&PKEY_AppUserModel_ID, &aumid_value) < 0) return error.SetLinkAumidFailed;
-        const title_value = PROPVARIANT.fromString(title_w);
-        if (store.setValue(&PKEY_Title, &title_value) < 0) return error.SetLinkTitleFailed;
-        if (store.vtbl.Commit(store.asRaw()) < 0) return error.CommitLinkPropertiesFailed;
-
-        return link;
     }
-};
+    return result;
+}
+
+fn createShellLink(
+    alloc: Allocator,
+    exe_w: [:0]const u16,
+    arguments: []const u8,
+    title: []const u8,
+    working_directory: ?[]const u8,
+    profile_key: ?[]const u8,
+) !*IShellLinkW {
+    var raw_link: ?*anyopaque = null;
+    const create_hr = CoCreateInstance(
+        &CLSID_ShellLink,
+        null,
+        CLSCTX_INPROC_SERVER,
+        &IID_IShellLinkW,
+        &raw_link,
+    );
+    if (create_hr == CO_E_NOTINITIALIZED) return error.ComNotInitialized;
+    if (create_hr < 0 or raw_link == null) return error.ShellLinkUnavailable;
+    const link = IShellLinkW.fromRaw(raw_link.?);
+    errdefer link.release();
+
+    const arguments_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, arguments);
+    defer alloc.free(arguments_w);
+    const title_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, title);
+    defer alloc.free(title_w);
+
+    if (link.vtbl.SetPath(link.asRaw(), exe_w.ptr) < 0) return error.SetLinkPathFailed;
+    if (link.vtbl.SetArguments(link.asRaw(), arguments_w.ptr) < 0) return error.SetLinkArgumentsFailed;
+    if (link.vtbl.SetIconLocation(link.asRaw(), exe_w.ptr, 0) < 0) return error.SetLinkIconFailed;
+
+    if (profile_key) |key| {
+        const description = try std.fmt.allocPrint(
+            alloc,
+            "{s}{s}",
+            .{ profile_description_prefix, key },
+        );
+        defer alloc.free(description);
+        const description_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, description);
+        defer alloc.free(description_w);
+        if (link.vtbl.SetDescription(link.asRaw(), description_w.ptr) < 0) {
+            return error.SetLinkDescriptionFailed;
+        }
+    }
+
+    if (working_directory) |path| {
+        const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
+        defer alloc.free(path_w);
+        if (link.vtbl.SetWorkingDirectory(link.asRaw(), path_w.ptr) < 0) {
+            return error.SetLinkWorkingDirectoryFailed;
+        }
+    }
+
+    var raw_store: ?*anyopaque = null;
+    if (link.vtbl.QueryInterface(link.asRaw(), &IID_IPropertyStore, &raw_store) < 0 or raw_store == null) {
+        return error.PropertyStoreUnavailable;
+    }
+    const store = IPropertyStore.fromRaw(raw_store.?);
+    defer store.release();
+
+    const aumid_w = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
+    const aumid_value = PROPVARIANT.fromString(aumid_w);
+    if (store.setValue(&PKEY_AppUserModel_ID, &aumid_value) < 0) return error.SetLinkAumidFailed;
+    const title_value = PROPVARIANT.fromString(title_w);
+    if (store.setValue(&PKEY_Title, &title_value) < 0) return error.SetLinkTitleFailed;
+    if (store.vtbl.Commit(store.asRaw()) < 0) return error.CommitLinkPropertiesFailed;
+
+    return link;
+}
 
 fn profileItemsEqual(lhs: []const ProfileItem, rhs: []const ProfileItem) bool {
     if (lhs.len != rhs.len) return false;
@@ -2569,6 +2811,204 @@ test "jump_list clears use guards after a committed rebuild is persisted later" 
     try std.testing.expectEqual(@as(usize, 0), jump.pending_recent_uses.items.items.len);
     try std.testing.expectEqual(@as(usize, 0), jump.pending_profile_uses.items.items.len);
     try std.testing.expect(!jump.use_guards_rebuild_committed);
+}
+
+fn testJumpListWithExe(alloc: Allocator) !JumpList {
+    return .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = try alloc.dupe(u8, "C:\\noctty\\noctty.exe"),
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+}
+
+fn testAddProfile(jump: *JumpList, key: []const u8) !void {
+    try jump.profiles.append(jump.alloc, .{
+        .key = try jump.alloc.dupe(u8, key),
+        .title = try jump.alloc.dupe(u8, key),
+        .arguments = try std.fmt.allocPrint(jump.alloc, "--profile-{s}", .{key}),
+    });
+}
+
+test "jump_list a rebuild copy does not change with the model" {
+    const alloc = std.testing.allocator;
+    var jump = try testJumpListWithExe(alloc);
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    try std.testing.expect(try jump.recents.insert(alloc, "C:\\one"));
+    try testAddProfile(&jump, "cmd");
+    try std.testing.expect(try jump.pending_recent_uses.insert(alloc, "C:\\one"));
+
+    const job = try jump.snapshotRebuild();
+    defer job.deinit();
+    try std.testing.expectEqual(jump.rebuild_seq, job.seq);
+
+    jump.noteRecent("D:\\two");
+    jump.clearProfiles();
+    try std.testing.expectEqual(@as(usize, 1), job.recents.items.items.len);
+    try std.testing.expectEqualStrings("C:\\one", job.recents.items.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), job.profiles.len);
+    try std.testing.expectEqualStrings("cmd", job.profiles[0].key);
+    try std.testing.expect(try job.recent_uses.contains(job.arena.allocator(), "C:\\one"));
+    try std.testing.expect(job.seq != jump.rebuild_seq);
+}
+
+test "jump_list a rebuild copy leaves out what the user removed unless it was used" {
+    const alloc = std.testing.allocator;
+    var jump = try testJumpListWithExe(alloc);
+    defer jump.deinit();
+    try std.testing.expect(try jump.recents.insert(alloc, "C:\\removed"));
+    try std.testing.expect(try jump.recents.insert(alloc, "C:\\used-again"));
+    try std.testing.expect(try jump.pending_recent_uses.insert(alloc, "C:\\used-again"));
+    try testAddProfile(&jump, "cmd");
+    try testAddProfile(&jump, "pwsh");
+
+    const job = try jump.snapshotRebuild();
+    defer job.deinit();
+    const job_alloc = job.arena.allocator();
+    try job.removed.items.append(job_alloc, try buildWorkingDirectoryArgumentsAlloc(job_alloc, "C:\\removed"));
+    try job.removed.items.append(job_alloc, try buildWorkingDirectoryArgumentsAlloc(job_alloc, "C:\\used-again"));
+    _ = try job.removed.profile_keys.insert(job_alloc, "pwsh");
+    try job.dropRemoved();
+
+    try std.testing.expectEqual(@as(usize, 1), job.recents.items.items.len);
+    try std.testing.expectEqualStrings("C:\\used-again", job.recents.items.items[0]);
+    try std.testing.expect(job.hidden_profiles.contains("pwsh"));
+    try std.testing.expect(!job.hidden_profiles.contains("cmd"));
+}
+
+test "jump_list a finished rebuild marks the list clean only for the current copy" {
+    const alloc = std.testing.allocator;
+    var jump = try testJumpListWithExe(alloc);
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    jump.rebuild_dirty = true;
+
+    // A change after the copy was taken keeps the list dirty and re-arms.
+    const stale = try jump.snapshotRebuild();
+    defer stale.deinit();
+    stale.id = 1;
+    jump.rebuild_in_flight = .{ .id = 1, .started_ms = 0 };
+    jump.markRebuildDirty();
+    stale.result = {};
+    jump.completeRebuild(stale);
+    try std.testing.expect(jump.rebuild_in_flight == null);
+    try std.testing.expect(jump.rebuild_dirty);
+    try std.testing.expect(jump.timer_id != null);
+
+    const current = try jump.snapshotRebuild();
+    defer current.deinit();
+    current.id = 2;
+    jump.rebuild_in_flight = .{ .id = 2, .started_ms = 0 };
+    try std.testing.expect(try jump.pending_recent_uses.insert(alloc, "C:\\used"));
+    current.result = {};
+    jump.completeRebuild(current);
+    try std.testing.expect(!jump.rebuild_dirty);
+    // Nothing waits to be persisted, so the use guards clear with it.
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_recent_uses.items.items.len);
+
+    // An abandoned commit landing after a newer one dirties the list again.
+    jump.rebuild_dirty = false;
+    current.id = 3;
+    jump.completeRebuild(current);
+    try std.testing.expect(jump.rebuild_dirty);
+}
+
+test "jump_list waits longer before replacing each commit it gave up on" {
+    try std.testing.expectEqual(@as(u64, 10_000), rebuildAbandonMs(0));
+    try std.testing.expectEqual(@as(u64, 20_000), rebuildAbandonMs(1));
+    try std.testing.expectEqual(@as(u64, 640_000), rebuildAbandonMs(6));
+    try std.testing.expectEqual(@as(u64, 640_000), rebuildAbandonMs(255));
+}
+
+test "jump_list keeps use guards while a rebuild built with them is in flight" {
+    const alloc = std.testing.allocator;
+    var jump = try testJumpListWithExe(alloc);
+    defer jump.deinit();
+    try std.testing.expect(try jump.pending_recent_uses.insert(alloc, "C:\\used"));
+    jump.use_guards_rebuild_committed = true;
+    jump.rebuild_outstanding = 1;
+    jump.finishUseGuards(true);
+    try std.testing.expectEqual(@as(usize, 1), jump.pending_recent_uses.items.items.len);
+    jump.rebuild_outstanding = 0;
+    jump.finishUseGuards(true);
+    try std.testing.expectEqual(@as(usize, 0), jump.pending_recent_uses.items.items.len);
+}
+
+test "jump_list a commit given up on cannot remove an item used since" {
+    const alloc = std.testing.allocator;
+    var jump = try testJumpListWithExe(alloc);
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    try std.testing.expect(try jump.recents.insert(alloc, "C:\\reopened"));
+
+    // Job A read the user's removal and stalled; B replaced it.
+    const stalled = try jump.snapshotRebuild();
+    defer stalled.deinit();
+    stalled.id = 1;
+    stalled.handed_off = true;
+    const stalled_alloc = stalled.arena.allocator();
+    try stalled.removed.items.append(stalled_alloc, try buildWorkingDirectoryArgumentsAlloc(stalled_alloc, "C:\\reopened"));
+    stalled.result = {};
+    const replacement = try jump.snapshotRebuild();
+    defer replacement.deinit();
+    replacement.id = 2;
+    replacement.handed_off = true;
+    replacement.result = {};
+    jump.rebuild_outstanding = 2;
+    jump.rebuild_in_flight = .{ .id = 2, .started_ms = 0 };
+
+    // The user opens the directory again; B lands first and is persisted.
+    jump.noteRecent("C:\\reopened");
+    replacement.seq = jump.rebuild_seq;
+    jump.completeRebuild(replacement);
+    jump.finishUseGuards(true);
+    try std.testing.expect(try jump.pending_recent_uses.contains(alloc, "C:\\reopened"));
+
+    // A lands late: the use still protects the directory.
+    jump.completeRebuild(stalled);
+    try std.testing.expect(try jump.recents.contains(alloc, "C:\\reopened"));
+    try std.testing.expect(!try jump.removed_recents.contains(alloc, "C:\\reopened"));
+    try std.testing.expectEqual(@as(u32, 0), jump.rebuild_outstanding);
+}
+
+test "jump_list a finished rebuild records the user's removals in the model" {
+    const alloc = std.testing.allocator;
+    var jump = try testJumpListWithExe(alloc);
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    try std.testing.expect(try jump.recents.insert(alloc, "C:\\removed"));
+    try std.testing.expect(try jump.recents.insert(alloc, "C:\\kept"));
+    try testAddProfile(&jump, "pwsh");
+
+    const job = try jump.snapshotRebuild();
+    defer job.deinit();
+    job.id = 7;
+    jump.rebuild_in_flight = .{ .id = 7, .started_ms = 0 };
+    const job_alloc = job.arena.allocator();
+    try job.removed.items.append(job_alloc, try buildWorkingDirectoryArgumentsAlloc(job_alloc, "C:\\removed"));
+    _ = try job.removed.profile_keys.insert(job_alloc, "pwsh");
+    // A failed commit still records what BeginList reported.
+    job.result = error.CommitListFailed;
+    jump.completeRebuild(job);
+
+    try std.testing.expectEqual(@as(usize, 1), jump.recents.items.items.len);
+    try std.testing.expectEqualStrings("C:\\kept", jump.recents.items.items[0]);
+    try std.testing.expect(try jump.removed_recents.contains(alloc, "C:\\removed"));
+    try std.testing.expect(jump.hidden_profiles.contains("pwsh"));
+    try std.testing.expect(jump.persist_dirty);
+    try std.testing.expectEqual(@as(u8, 1), jump.rebuild_retry_count);
+    try std.testing.expect(jump.timer_id != null);
 }
 
 test "jump_list slot budget reserves profiles before recents" {

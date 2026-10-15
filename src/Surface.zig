@@ -31,6 +31,9 @@ const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
 const configUrl = @import("config/url.zig");
+// The link opener's local-only lookup, used for the existence check of a link
+// so that a link into a share is never stat-ed (Windows only, see `existingPath`).
+const local_target = @import("apprt/win32/local_target.zig");
 const Duration = configpkg.Config.Duration;
 const input = @import("input.zig");
 const App = @import("App.zig");
@@ -1823,7 +1826,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             _ = try self.rt_app.performAction(
                 .{ .surface = self },
                 .search_total,
-                .{ .total = v.total },
+                .{ .total = v.total, .invalid = v.invalid },
             );
         },
 
@@ -2049,7 +2052,7 @@ fn childExitedAbnormally(
     // Output our error message
     try t.setAttribute(.{ .@"8_fg" = .bright_red });
     try t.setAttribute(.{ .bold = {} });
-    try t.printString("Ghostty failed to launch the requested command:");
+    try t.printString("noctty failed to launch the requested command:");
     try t.setAttribute(.{ .unset = {} });
 
     t.carriageReturn();
@@ -2222,6 +2225,14 @@ fn searchCallback_(
             self.pushSearchMessage(stopping, .{ .search_total = .{
                 .generation = generation,
                 .total = total,
+            } });
+        },
+
+        .invalid_query => {
+            self.pushSearchMessage(stopping, .{ .search_total = .{
+                .generation = generation,
+                .total = 0,
+                .invalid = true,
             } });
         },
 
@@ -2921,7 +2932,20 @@ pub fn pwd(
     return try alloc.dupe(u8, terminal_pwd);
 }
 
-/// Resolves a relative file path to an absolute path using the terminal's pwd.
+/// Opens the text of a link or a path the user picked. A file the text names
+/// is opened by its resolved path; anything else goes to the opener as
+/// written, which refuses what it must.
+///
+/// Must be called without the renderer state mutex held (see
+/// `resolvePathForOpening`).
+pub fn openLinkText(self: *Surface, text: []const u8) !void {
+    const resolved_path = try self.resolvePathForOpening(text);
+    defer if (resolved_path) |p| self.alloc.free(p);
+    try self.openUrl(.{ .kind = .unknown, .url = resolved_path orelse text });
+}
+
+/// The path to open for link text, when that is not the text itself: see
+/// `resolveOpenPath`. Takes the terminal's pwd for a relative path.
 ///
 /// Must be called without the renderer state mutex held: it takes the mutex
 /// to copy the pwd, then checks the filesystem without it.
@@ -2929,35 +2953,101 @@ fn resolvePathForOpening(
     self: *Surface,
     path: []const u8,
 ) Allocator.Error!?[]const u8 {
-    if (!std.fs.path.isAbsolute(path)) {
-        const terminal_pwd = try self.pwd(self.alloc) orelse {
-            return null;
-        };
-        defer self.alloc.free(terminal_pwd);
+    const terminal_pwd: ?[]const u8 = if (std.fs.path.isAbsolute(path))
+        null
+    else
+        try self.pwd(self.alloc) orelse return null;
+    defer if (terminal_pwd) |p| self.alloc.free(p);
+    return resolveOpenPath(self.alloc, terminal_pwd, path);
+}
 
-        const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
-
-        // Link text is arbitrary, so resolution can produce a string Windows
-        // cannot represent as a path: "https://example.com" becomes
-        // "C:\Users\me\https:\example.com". `accessAbsolute` does not merely
-        // fail on such a path -- NT returns STATUS_OBJECT_NAME_INVALID and
-        // `std.posix.faccessatW` maps that status to `unreachable`, so the
-        // process aborts and the `catch` below cannot recover. Screen the
-        // result before handing it to the filesystem.
-        if (builtin.os.tag == .windows and !windowsPathIsRepresentable(resolved)) {
-            self.alloc.free(resolved);
+/// What link text names on disk, as an owned path. Null leaves the text to
+/// the opener as written, which is right for a URL, for an absolute path with
+/// no location, and for text that names nothing (the opener refuses it).
+///
+/// A compiler's `file:12:5` or `file(12,5)` is not part of the name, but a
+/// name can end that way, so the whole text is tried first.
+///
+/// `dir` is null for an absolute path and the terminal's directory for a
+/// relative one.
+fn resolveOpenPath(
+    alloc: Allocator,
+    dir: ?[]const u8,
+    text: []const u8,
+) Allocator.Error!?[]const u8 {
+    const bare = configUrl.splitLocation(text);
+    if (dir == null) {
+        // The opener checks an absolute path itself; only a location needs us.
+        const stripped = bare orelse return null;
+        if (try existingPath(alloc, null, text)) |whole| {
+            alloc.free(whole);
             return null;
         }
+        return existingPath(alloc, null, stripped);
+    }
+    if (try existingPath(alloc, dir, text)) |whole| return whole;
+    return existingPath(alloc, dir, bare orelse return null);
+}
 
-        std.fs.accessAbsolute(resolved, .{}) catch {
-            self.alloc.free(resolved);
+/// `path` as an absolute path, if it exists. Relative to `dir` when that is
+/// set.
+fn existingPath(
+    alloc: Allocator,
+    dir: ?[]const u8,
+    path: []const u8,
+) Allocator.Error!?[]const u8 {
+    // Zig's `resolve` indexes an empty slice (a panic) when a drive-relative
+    // name such as `D:x` is joined onto a path (measured with `b:x`, `D:x`).
+    // No default pattern produces one, but a custom `link` regex can.
+    // Zig's parser takes any byte before the ':' as a drive (`1:x` panics too).
+    if (builtin.os.tag == .windows and path.len >= 2 and
+        path[1] == ':' and !std.fs.path.isAbsolute(path)) return null;
+
+    // A share or device path is never resolved either: `resolve` unwraps a null
+    // on a server whose share is a lone separator (`\\a\/`), and it is the
+    // opener's to refuse anyway.
+    if (builtin.os.tag == .windows and internal_os.path.isNetworkOrDevicePath(path)) return null;
+
+    // Always the output of `resolve`, which `windowsPathIsRepresentable`
+    // needs: it also folds `.`, `..` and mixed separators out of absolute text.
+    const resolved = if (dir) |base|
+        try std.fs.path.resolve(alloc, &.{ base, path })
+    else
+        try std.fs.path.resolve(alloc, &.{path});
+
+    // Link text is arbitrary, so resolution can produce a string Windows
+    // cannot represent as a path: "https://example.com" becomes
+    // "C:\Users\me\https:\example.com". `accessAbsolute` does not merely
+    // fail on such a path -- NT returns STATUS_OBJECT_NAME_INVALID and
+    // `std.posix.faccessatW` maps that status to `unreachable`, so the
+    // process aborts and the `catch` below cannot recover. Screen the
+    // result before handing it to the filesystem.
+    if (builtin.os.tag == .windows and !windowsPathIsRepresentable(resolved)) {
+        alloc.free(resolved);
+        return null;
+    }
+
+    // The opener's own bounded lookup answers whether it exists, not
+    // `accessAbsolute`. It refuses a path that is not on a local drive letter,
+    // a mapped network drive, and a symlink or junction that leads to a share
+    // (`C:\link\x.txt:12` into a share), all before anything touches the
+    // network; `accessAbsolute` follows such a link, and the UI thread would
+    // wait on the server first. It also answers with a status where
+    // `faccessatW` has an `unreachable`.
+    if (builtin.os.tag == .windows) {
+        const file = local_target.open(alloc, resolved, false) orelse {
+            alloc.free(resolved);
             return null;
         };
-
+        file.close();
         return resolved;
     }
 
-    return null;
+    std.fs.accessAbsolute(resolved, .{}) catch {
+        alloc.free(resolved);
+        return null;
+    };
+    return resolved;
 }
 
 /// Whether `path` is a local path Windows can address, which must be the output
@@ -3000,15 +3090,44 @@ fn windowsPathIsRepresentable(path: []const u8) bool {
     // *type* that NT validates against a fixed set ("$DATA" and friends).
     // Rather than model that set we admit a single separator only.
     const ads = std.mem.indexOfScalar(u8, leaf, ':') orelse
-        return windowsNameIsAddressable(leaf);
+        return !windowsNameIsDevice(leaf) and windowsNameIsAddressable(leaf);
     const name = leaf[0..ads];
+    if (windowsNameIsDevice(name)) return false;
+    // `resolve` does not fold `.` or `..` when a stream follows (`C:\x\.:12`),
+    // and NT answers STATUS_OBJECT_NAME_INVALID for the name (found by a sweep
+    // of short strings; `...:x` and `a.:x` are fine).
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
     const stream = leaf[ads + 1 ..];
     if (name.len == 0 or stream.len == 0) return false;
     if (std.mem.indexOfScalar(u8, stream, ':') != null) return false;
+    // Windows drops trailing dots and spaces from a component, so a stream made
+    // of nothing else (`b:.`, `b: `) is empty by the time NT sees it, and NT
+    // answers STATUS_OBJECT_NAME_INVALID, which `faccessatW` also turns into
+    // `unreachable`. `b:x.` and `b: x` are fine (measured: not found).
+    if (std.mem.trimRight(u8, stream, ". ").len == 0) return false;
     // A NUL would truncate in `faccessatW`, so the existence check would run
     // against a shorter path than the one we hand back to be opened.
     if (std.mem.indexOfScalar(u8, stream, 0) != null) return false;
     return windowsNameIsAddressable(name);
+}
+
+/// Whether a final path component names a DOS device (`NUL`, `con.txt`,
+/// `COM1`, `CONOUT$`), however it is spelled: case, trailing spaces, and an
+/// extension (older Windows maps `NUL.txt` to NUL too).
+///
+/// `RtlGetFullPathName_U` turns such a final component into `\\.\nul`, Zig puts
+/// its own prefix in front of that, and NT rejects the result; `faccessatW`
+/// maps the rejection to `unreachable`. Measured with `C:\x\nul:12`, `./nul`,
+/// `nul.` and `nul ` (a process abort), while `con`, `aux`, `prn`, `com9`,
+/// `lpt1` and `nul.txt` were not mapped on Windows 11 build 26200. They are
+/// refused too: this is the one place that has to hold on every build.
+fn windowsNameIsDevice(name: []const u8) bool {
+    const stem = std.mem.trimRight(u8, name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len], " ");
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$" }) |device| {
+        if (std.ascii.eqlIgnoreCase(stem, device)) return true;
+    }
+    return stem.len == 4 and std.ascii.isDigit(stem[3]) and
+        (std.ascii.eqlIgnoreCase(stem[0..3], "COM") or std.ascii.eqlIgnoreCase(stem[0..3], "LPT"));
 }
 
 /// Whether `name` uses only characters NT accepts in a file name. It may
@@ -3072,6 +3191,225 @@ test "windowsPathIsRepresentable" {
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\magnet:?xt=urn:btih:0000"));
     // A NUL would truncate the existence check to a shorter path.
     try testing.expect(!windowsPathIsRepresentable("C:\\Users\\me\\file.txt:str\x00eam"));
+
+    // A stream of only dots and spaces is empty once Windows trims it, and NT
+    // rejects the name (measured: `C:\Windows\b: ` is STATUS_OBJECT_NAME_INVALID,
+    // while `b:x `, `b:x.` and `b: x` are not found).
+    for ([_][]const u8{
+        "C:\\Users\\me\\b:.",
+        "C:\\Users\\me\\b: ",
+        "C:\\Users\\me\\b:..",
+        "C:\\Users\\me\\b:. .",
+    }) |p| try testing.expect(!windowsPathIsRepresentable(p));
+    for ([_][]const u8{
+        "C:\\Users\\me\\b:x.",
+        "C:\\Users\\me\\b: x",
+        "C:\\Users\\me\\b:x ",
+    }) |p| try testing.expect(windowsPathIsRepresentable(p));
+
+    // A final component that is a DOS device name aborts the same way
+    // (measured with `nul`, `nul:12`, `nul.` and `nul `).
+    for ([_][]const u8{
+        "C:\\x\\nul",
+        "C:\\x\\NUL",
+        "C:\\x\\nul.",
+        "C:\\x\\nul ",
+        "C:\\x\\nul:12",
+        "C:\\x\\nul.txt",
+        "C:\\x\\con",
+        "C:\\x\\Aux.log",
+        "C:\\x\\prn",
+        "C:\\x\\com1",
+        "C:\\x\\LPT9.txt",
+        "C:\\x\\conin$",
+        "C:\\x\\CONOUT$",
+    }) |p| try testing.expect(!windowsPathIsRepresentable(p));
+    // A stream on `.` or `..` is rejected by NT too (found by a sweep).
+    for ([_][]const u8{
+        "C:\\x\\.:12",
+        "C:\\.:12",
+        "C:\\x\\..:a",
+    }) |p| try testing.expect(!windowsPathIsRepresentable(p));
+    for ([_][]const u8{ "C:\\x\\...:x", "C:\\x\\a.:x", "C:\\x\\.a:x" }) |p| {
+        try testing.expect(windowsPathIsRepresentable(p));
+    }
+    // Near misses and device-like directory names are ordinary.
+    for ([_][]const u8{
+        "C:\\x\\nul1",
+        "C:\\x\\nulls.txt",
+        "C:\\x\\console",
+        "C:\\x\\com",
+        "C:\\x\\com10",
+        "C:\\x\\lpt",
+        "C:\\x\\aux1.txt",
+        "C:\\x\\nul\\a.txt",
+    }) |p| try testing.expect(windowsPathIsRepresentable(p));
+}
+
+test "link text resolves to the file it names, without its line and column" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "" });
+    try tmp.dir.writeFile(.{ .sub_path = "weird(1)", .data = "" });
+    try tmp.dir.makePath("sub dir");
+    try tmp.dir.writeFile(.{ .sub_path = "sub dir/b.zig", .data = "" });
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    const Case = struct { text: []const u8, expect: ?[]const u8 };
+    const relative = [_]Case{
+        .{ .text = "a.txt", .expect = "a.txt" },
+        .{ .text = ".\\a.txt", .expect = "a.txt" },
+        .{ .text = "a.txt:12:5", .expect = "a.txt" },
+        .{ .text = "a.txt:12", .expect = "a.txt" },
+        .{ .text = "sub dir\\b.zig(3,4)", .expect = "sub dir\\b.zig" },
+        .{ .text = "sub dir/b.zig:7", .expect = "sub dir\\b.zig" },
+        // A name that ends like a location is tried whole first.
+        .{ .text = "weird(1)", .expect = "weird(1)" },
+        .{ .text = "missing.txt:1", .expect = null },
+        .{ .text = "missing(3,4)", .expect = null },
+        // A URL has no such file, and must not reach the filesystem as a path.
+        .{ .text = "https://example.com/a:1", .expect = null },
+    };
+    for (relative) |case| {
+        const got = try resolveOpenPath(alloc, dir, case.text);
+        defer if (got) |p| alloc.free(p);
+        if (case.expect) |name| {
+            const want = try std.fs.path.join(alloc, &.{ dir, name });
+            defer alloc.free(want);
+            try std.testing.expect(got != null);
+            try std.testing.expectEqualStrings(want, got.?);
+        } else {
+            std.testing.expect(got == null) catch |err| {
+                std.debug.print("text {s} resolved to {s}\n", .{ case.text, got.? });
+                return err;
+            };
+        }
+    }
+
+    // An absolute path is left to the opener unless a location has to go.
+    for ([_][]const u8{ "a.txt", "weird(1)", "sub dir\\b.zig" }) |name| {
+        const absolute = try std.fs.path.join(alloc, &.{ dir, name });
+        defer alloc.free(absolute);
+        try std.testing.expect(try resolveOpenPath(alloc, null, absolute) == null);
+    }
+    {
+        const whole = try std.fmt.allocPrint(alloc, "{s}\\weird(1)", .{dir});
+        defer alloc.free(whole);
+        try std.testing.expect(try resolveOpenPath(alloc, null, whole) == null);
+    }
+    for ([_]struct { name: []const u8, suffix: []const u8, file: []const u8 }{
+        .{ .name = "a.txt", .suffix = ":12:5", .file = "a.txt" },
+        .{ .name = "sub dir\\b.zig", .suffix = "(3,4)", .file = "sub dir\\b.zig" },
+    }) |case| {
+        const text = try std.fmt.allocPrint(alloc, "{s}\\{s}{s}", .{ dir, case.name, case.suffix });
+        defer alloc.free(text);
+        const want = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ dir, case.file });
+        defer alloc.free(want);
+        const got = try resolveOpenPath(alloc, null, text);
+        defer if (got) |p| alloc.free(p);
+        try std.testing.expect(got != null);
+        try std.testing.expectEqualStrings(want, got.?);
+    }
+    {
+        const missing = try std.fmt.allocPrint(alloc, "{s}\\missing.txt:12", .{dir});
+        defer alloc.free(missing);
+        try std.testing.expect(try resolveOpenPath(alloc, null, missing) == null);
+    }
+
+    // Text a program can print must never abort the process: a location can
+    // leave a stream of only dots and spaces (`b:.`), which `accessAbsolute`
+    // turns into `unreachable`. None of these needs a file on disk.
+    for ([_][]const u8{
+        "/pkg42-nowhere/b:.:1",
+        "C:\\pkg42-nowhere\\b: :12",
+        "C:\\pkg42-nowhere\\b: (1,2)",
+        "C:/pkg42-nowhere/./b:..:3",
+        // A DOS device name as the final component, with or without a location.
+        "C:\\pkg42-nowhere\\nul:12",
+        "C:\\pkg42-nowhere\\nul(1,2)",
+        "/pkg42-nowhere/nul:1",
+        "C:\\pkg42-nowhere\\NUL.",
+        // A path with no drive letter is the opener's to refuse; it is never
+        // looked at here (it would be stat-ed on the current drive).
+        "/pkg42-nowhere/a.txt:1",
+        // `resolve` unwraps a null on a server whose share is a lone separator,
+        // so a share is screened before it (and a share is never opened).
+        "\\\\a\\/",
+        "\\\\a\\/:12",
+        "\\\\a\\/:12:5",
+        "\\\\a\\/(3,4)",
+        "//C/\\:12",
+        "//./\\(3,4)",
+    }) |text| try std.testing.expect(try resolveOpenPath(alloc, null, text) == null);
+    // A stream on `.` or `..` is invalid to NT (and `resolve` keeps it), so the
+    // whole text is never looked at; its location-less form is the folder it
+    // names, which exists. Nothing may abort, and nothing may leak.
+    for ([_][]const u8{ "C:\\.:12", "C:/.:12", "C:\\\\.:12", "C:\\..:12" }) |text| {
+        const got = try resolveOpenPath(alloc, null, text);
+        defer if (got) |p| alloc.free(p);
+        if (got) |p| try std.testing.expectEqualStrings("C:\\", p);
+    }
+    // A drive-relative name has no sensible meaning against the pane's directory
+    // and used to reach Zig's `resolve`, which panics on it.
+    for ([_][]const u8{
+        "./b:.:1",
+        "./b:.",
+        "b: :12",
+        ".\\b: (1,2)",
+        "D:x",
+        "b:x:12",
+        "1:x",
+        "_:x:12",
+        "./nul",
+        ".\\nul:3",
+        "nul",
+    }) |text| {
+        try std.testing.expect(try resolveOpenPath(alloc, dir, text) == null);
+    }
+    // Same for a stream on `.` or `..`: it must not abort, and the folder the
+    // location-less text names is a fine answer.
+    for ([_][]const u8{ "./.:12", ".\\.:12", "..\\.:12", ".\\..:12" }) |text| {
+        const got = try resolveOpenPath(alloc, dir, text);
+        if (got) |p| alloc.free(p);
+    }
+
+    // A share or device path is never looked at, with or without a location.
+    for ([_][]const u8{
+        "\\\\server\\share\\a.txt:1",
+        "//server/share/a.txt:1",
+        "\\\\?\\UNC\\server\\share\\a.txt(1,2)",
+        "\\\\.\\pipe\\x:3",
+    }) |text| try std.testing.expect(try resolveOpenPath(alloc, null, text) == null);
+}
+
+test "a link through a symlink to a share is never stat-ed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.symLink("\\\\pkg42-no-such-host\\share", "link", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest, // no symlink privilege
+        else => return err,
+    };
+    const dir = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(dir);
+
+    // `accessAbsolute` follows the link and waits on the (here nonexistent)
+    // server on the calling thread; the opener's bounded lookup refuses it
+    // first, which is also why this has a bound.
+    var timer = try std.time.Timer.start();
+    for ([_][]const u8{ "link\\report.txt:12", "link/report.txt", "link\\sub\\a.cs(3,4)" }) |text| {
+        try std.testing.expect(try resolveOpenPath(alloc, dir, text) == null);
+        const absolute = try std.fs.path.join(alloc, &.{ dir, text });
+        defer alloc.free(absolute);
+        try std.testing.expect(try resolveOpenPath(alloc, null, absolute) == null);
+    }
+    try std.testing.expect(timer.read() < 2 * std.time.ns_per_s);
 }
 
 test "a relative link never resolves onto a network or device pwd" {
@@ -6111,13 +6449,10 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
     };
     defer self.alloc.free(target);
 
-    const resolved_path = switch (action) {
-        .open => try self.resolvePathForOpening(target),
-        ._open_osc8 => null,
-    };
-    defer if (resolved_path) |p| self.alloc.free(p);
-
-    try self.openUrl(.{ .kind = .unknown, .url = resolved_path orelse target });
+    switch (action) {
+        .open => try self.openLinkText(target),
+        ._open_osc8 => try self.openUrl(.{ .kind = .unknown, .url = target }),
+    }
     return true;
 }
 

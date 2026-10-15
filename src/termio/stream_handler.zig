@@ -230,7 +230,7 @@ pub const StreamHandler = struct {
         switch (action) {
             .print => {
                 @branchHint(.likely);
-                const captured = self.terminal.status_display == .main;
+                const captured = self.capturesSemanticOutput();
                 self.terminal.print(value.cp) catch |err| {
                     if (captured) self.semantic_output.omitRemainder();
                     return err;
@@ -245,7 +245,7 @@ pub const StreamHandler = struct {
             .bell => self.bell(),
             .backspace => self.terminal.backspace(),
             .horizontal_tab => {
-                const captured = self.terminal.status_display == .main;
+                const captured = self.capturesSemanticOutput();
                 const committed = self.horizontalTab(value);
                 if (captured) {
                     for (0..committed) |_| self.semantic_output.recordTab();
@@ -254,7 +254,7 @@ pub const StreamHandler = struct {
             .horizontal_tab_back => self.horizontalTabBack(value),
             .linefeed => {
                 @branchHint(.likely);
-                const captured = self.terminal.status_display == .main;
+                const captured = self.capturesSemanticOutput();
                 self.linefeed() catch |err| {
                     if (captured) self.semantic_output.omitRemainder();
                     return err;
@@ -263,7 +263,7 @@ pub const StreamHandler = struct {
             },
             .carriage_return => {
                 @branchHint(.likely);
-                const captured = self.terminal.status_display == .main;
+                const captured = self.capturesSemanticOutput();
                 self.terminal.carriageReturn();
                 if (captured) self.semantic_output.recordCarriageReturn();
             },
@@ -651,8 +651,19 @@ pub const StreamHandler = struct {
         try self.terminal.index();
     }
 
+    /// Whether printed text goes to the spoken-output capture: the main display
+    /// of the primary screen only. A full-screen program on the alternate
+    /// screen repaints by cursor addressing, which the print stream cannot
+    /// carry, so its changed cells would be read out in write order without
+    /// their positions. The text pattern's change and caret events do not
+    /// come from this capture and keep firing for that screen.
+    inline fn capturesSemanticOutput(self: *const StreamHandler) bool {
+        return self.terminal.status_display == .main and
+            self.terminal.screens.active_key == .primary;
+    }
+
     inline fn printRepeat(self: *StreamHandler, count_req: usize) !void {
-        if (self.terminal.status_display != .main) {
+        if (!self.capturesSemanticOutput()) {
             try self.terminal.printRepeat(count_req);
             return;
         }
@@ -710,6 +721,19 @@ pub const StreamHandler = struct {
             .data = data,
             .len = @intCast(writer.buffered().len),
         } });
+    }
+
+    /// Switch screens for DEC modes 47, 1047 and 1049. A switch that changes
+    /// the active screen tells the spoken-output capture, which makes its
+    /// consumer forget typed input still waiting to be seen echoed.
+    fn switchScreenMode(
+        self: *StreamHandler,
+        mode: terminal.Terminal.SwitchScreenMode,
+        enabled: bool,
+    ) !void {
+        const before = self.terminal.screens.active_key;
+        try self.terminal.switchScreenMode(mode, enabled);
+        if (self.terminal.screens.active_key != before) self.semantic_output.noteScreenSwitch();
     }
 
     pub fn setMode(self: *StreamHandler, mode: terminal.Mode, enabled: bool) !void {
@@ -779,15 +803,15 @@ pub const StreamHandler = struct {
             },
 
             .alt_screen_legacy => {
-                try self.terminal.switchScreenMode(.@"47", enabled);
+                try self.switchScreenMode(.@"47", enabled);
             },
 
             .alt_screen => {
-                try self.terminal.switchScreenMode(.@"1047", enabled);
+                try self.switchScreenMode(.@"1047", enabled);
             },
 
             .alt_screen_save_cursor_clear_enter => {
-                try self.terminal.switchScreenMode(.@"1049", enabled);
+                try self.switchScreenMode(.@"1049", enabled);
             },
 
             // Mode 1048 is xterm's conditional save cursor depending
@@ -1866,7 +1890,7 @@ test "semantic output capture follows real stream handler parser" {
     stream.nextSlice("before\x1bcafter");
     const full_reset = stream.handler.semantic_output.finish();
     try std.testing.expectEqualStrings("after", full_reset.slice());
-    try std.testing.expect(full_reset.reset_before);
+    try std.testing.expectEqual(@as(?usize, 0), full_reset.reset_at);
     try std.testing.expect(!full_reset.omitted_after);
 
     term.fullReset();
@@ -1874,6 +1898,129 @@ test "semantic output capture follows real stream handler parser" {
     stream.nextSlice("\xcc\x81");
     const combining_noop = stream.handler.semantic_output.finish();
     try std.testing.expectEqual(@as(usize, 0), combining_noop.len);
+
+    // The alternate screen is a cursor-addressed display. What a program
+    // prints there is a stream of changed cells, not text to speak, so capture
+    // stops at the switch and resumes after it, also inside one batch, for
+    // each of the three modes that select the alternate screen.
+    inline for (.{ "47", "1047", "1049" }) |mode| {
+        stream.handler.semantic_output.begin(true);
+        stream.nextSlice(
+            "main\x1b[?" ++ mode ++ "h" ++
+                "\x1b[1;1H12:00:01\x1b[2;1H12:00:02\r\n\tX\x1b[3b" ++
+                "\x1b[?" ++ mode ++ "lback",
+        );
+        const alternate = stream.handler.semantic_output.finish();
+        try std.testing.expectEqualStrings("mainback", alternate.slice());
+        try std.testing.expect(!alternate.omitted_after);
+        try std.testing.expect(term.screens.active_key == .primary);
+    }
+
+    // A batch that ends inside the alternate screen, and the next one that
+    // starts there, record nothing until the program leaves it.
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("before\x1b[?1049hinside");
+    const entered = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("before", entered.slice());
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b[1;1Hstill inside\r\n");
+    const still_alternate = stream.handler.semantic_output.finish();
+    try std.testing.expectEqual(@as(usize, 0), still_alternate.len);
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b[?1049lafter");
+    const left = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("after", left.slice());
+}
+
+test "semantic output capture asks the consumer to forget typed input on a screen switch" {
+    var term = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(std.testing.allocator);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+    defer termio_mailbox.deinit(std.testing.allocator);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
+    defer app_queue.destroy(std.testing.allocator);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+        .alloc = std.testing.allocator,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    // Typed input that the print stream was still waiting to see echoed is
+    // stale once the screen changes: a full-screen program's own redraws no
+    // longer reach the stream to mismatch it, and a primary-screen line that
+    // starts with the same characters would be taken for the echo. Entering
+    // and leaving each alternate-screen mode tells the consumer to forget it
+    // at that point of the stream, so what was printed before the switch in
+    // the same batch (the echo of what was typed) is still matched against it.
+    inline for (.{ "47", "1047", "1049" }) |mode| {
+        stream.handler.semantic_output.begin(true);
+        stream.nextSlice("ls\x1b[?" ++ mode ++ "h");
+        const enter = stream.handler.semantic_output.finish();
+        try std.testing.expectEqual(@as(?usize, 2), enter.reset_at);
+        try std.testing.expectEqualStrings("ls", enter.slice());
+
+        stream.handler.semantic_output.begin(true);
+        stream.nextSlice("\x1b[2J\x1b[1;1Hredraw");
+        const redraw = stream.handler.semantic_output.finish();
+        try std.testing.expectEqual(@as(?usize, null), redraw.reset_at);
+
+        stream.handler.semantic_output.begin(true);
+        stream.nextSlice("\x1b[?" ++ mode ++ "lls foo");
+        const leave = stream.handler.semantic_output.finish();
+        try std.testing.expectEqual(@as(?usize, 0), leave.reset_at);
+        try std.testing.expectEqualStrings("ls foo", leave.slice());
+
+        // Leaving the screen the program is not on switches nothing.
+        stream.handler.semantic_output.begin(true);
+        stream.nextSlice("x\x1b[?" ++ mode ++ "ly");
+        const unchanged = stream.handler.semantic_output.finish();
+        try std.testing.expectEqual(@as(?usize, null), unchanged.reset_at);
+        try std.testing.expectEqualStrings("xy", unchanged.slice());
+    }
+
+    // Both switches of a batch, with output on each side of them.
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("a\x1b[?1049hhidden\x1b[?1049lb");
+    const round_trip = stream.handler.semantic_output.finish();
+    try std.testing.expectEqual(@as(?usize, 1), round_trip.reset_at);
+    try std.testing.expectEqualStrings("ab", round_trip.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b[?25h\x1b[?2004hplain\x1b[?25l");
+    const other_modes = stream.handler.semantic_output.finish();
+    try std.testing.expectEqual(@as(?usize, null), other_modes.reset_at);
+    try std.testing.expectEqualStrings("plain", other_modes.slice());
 }
 
 fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {

@@ -37,6 +37,10 @@ pub const SearchBar = struct {
     toggles: Toggles = .{},
     total: ?usize = null,
     selected: ?usize = null,
+    /// The core could not compile the query (an invalid regular expression).
+    /// Every edit or toggle clears it, because the answer belongs to the
+    /// query that was searched.
+    invalid: bool = false,
     last_edit_ms: i64 = 0,
     /// When true the debounce has already fired (or was bypassed via
     /// `forceSearch`) and no new edit has arrived since.  Prevents
@@ -81,6 +85,7 @@ pub const SearchBar = struct {
             self.query = &.{};
             self.total = null;
             self.selected = null;
+            self.invalid = false;
             self.last_edit_ms = 0;
             self.searched = true;
             return;
@@ -89,6 +94,7 @@ pub const SearchBar = struct {
         self.query = next_owned.?;
         self.total = null;
         self.selected = null;
+        self.invalid = false;
         self.last_edit_ms = now_ms;
         self.searched = false;
     }
@@ -124,6 +130,7 @@ pub const SearchBar = struct {
     fn invalidateResults(self: *SearchBar, now_ms: i64) void {
         self.total = null;
         self.selected = null;
+        self.invalid = false;
         if (self.query.len == 0) {
             self.searched = true;
             self.last_edit_ms = 0;
@@ -369,6 +376,35 @@ test "toggleWord invalidates stale results for non-empty query" {
     try std.testing.expect(!bar.searched);
     try std.testing.expectEqual(@as(i64, 2000), bar.last_edit_ms);
     try std.testing.expect(bar.shouldRunSearch(2041));
+}
+
+test "an edit or a toggle clears the invalid-query mark" {
+    var bar = SearchBar.init(std.testing.allocator);
+    defer bar.deinit();
+
+    try bar.setQuery("need(", 1000);
+    try std.testing.expect(bar.forceSearch());
+    bar.total = 0;
+    bar.invalid = true;
+
+    try bar.setQuery("need(e", 1100);
+    try std.testing.expect(!bar.invalid);
+
+    bar.invalid = true;
+    bar.toggleRegex(1200);
+    try std.testing.expect(!bar.invalid);
+
+    bar.invalid = true;
+    bar.toggleCase(1300);
+    try std.testing.expect(!bar.invalid);
+
+    bar.invalid = true;
+    bar.toggleWord(1400);
+    try std.testing.expect(!bar.invalid);
+
+    bar.invalid = true;
+    try bar.setQuery("", 1500);
+    try std.testing.expect(!bar.invalid);
 }
 
 test "toggles persist across open/close" {

@@ -1,8 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const util = @import("util.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.update_portable_apply);
+const portableRelativePathAlloc = util.portableRelativePathAlloc;
+const parseSha256Hex = util.parseSha256Hex;
+const sha256File = util.sha256File;
 
 pub const StagedKind = enum {
     installer,
@@ -133,6 +137,81 @@ pub const managed_entries = [_][]const u8{
     // a launchable old or new preflight entrypoint.
     "noctty.exe",
 };
+
+// Test-only drift guard for the literal foreach lists in both manifest scripts.
+// Parse their entries so ordering and PowerShell's two quote styles do not
+// affect the comparison; reject unrecognized syntax instead of skipping it.
+fn expectScriptManagedEntries(script: []const u8) !void {
+    const root_marker = "$managedRootFiles =";
+    const root_start = std.mem.indexOf(u8, script, root_marker) orelse
+        return error.ManagedRootListMissing;
+    const body = script[root_start + root_marker.len ..];
+    const list_marker = "foreach ($name in @(";
+    const list_start = std.mem.indexOf(u8, body, list_marker) orelse
+        return error.ManagedRootListMissing;
+    const remainder = body[list_start + list_marker.len ..];
+    const list_end = std.mem.indexOf(u8, remainder, ")) {") orelse
+        return error.InvalidManagedRootList;
+
+    var seen = [_]bool{false} ** managed_entries.len;
+    var lines = std.mem.splitScalar(u8, remainder[0..list_end], '\n');
+    while (lines.next()) |raw_line| {
+        var line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) continue;
+        if (line[line.len - 1] == ',') line = std.mem.trimEnd(u8, line[0 .. line.len - 1], " \t");
+        if (line.len < 2 or (line[0] != '\'' and line[0] != '"') or
+            line[line.len - 1] != line[0]) return error.InvalidManagedRootList;
+        const name = line[1 .. line.len - 1];
+        for (managed_entries, 0..) |entry, i| {
+            if (!std.mem.eql(u8, name, entry)) continue;
+            if (seen[i]) return error.DuplicateManagedRootEntry;
+            seen[i] = true;
+            break;
+        } else return error.UnexpectedManagedRootEntry;
+    }
+    for (seen) |present| if (!present) return error.MissingManagedRootEntry;
+}
+
+test "portable managed entries match both PowerShell manifest script sets" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{
+        "scripts/package-windows.ps1",
+        "scripts/portable-manifest-verification.ps1",
+    }) |path| {
+        const script = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 1024);
+        defer alloc.free(script);
+        try expectScriptManagedEntries(script);
+    }
+    try std.testing.expectEqualStrings("noctty.exe", managed_entries[managed_entries.len - 1]);
+}
+
+test "portable managed script list parser rejects missing extra and duplicate entries" {
+    const prefix = "$managedRootFiles = @{}\nforeach ($name in @(\n";
+    const suffix = ")) {\n    [void]$managedRootFiles.Add($name)\n}\n";
+    // The script order deliberately differs from replacement order, and both
+    // quote styles are accepted without evaluating any PowerShell.
+    const tail =
+        \\    "noctty.exe",
+        \\    'ghostty-vt.dll',
+        \\    'noctty-terminal-handoff-proxy.dll',
+        \\    'conpty.dll',
+        \\    'OpenConsole.exe',
+        \\    'LICENSE',
+        \\    'LICENSE-conpty.txt',
+        \\    'config-template.ghostty',
+        \\    'README.md',
+        \\    'noctty.ico',
+        \\    'share'
+        \\
+    ;
+    const entries = "    'noctty.com',\n" ++ tail;
+    try expectScriptManagedEntries(prefix ++ entries ++ suffix);
+    try std.testing.expectError(error.MissingManagedRootEntry, expectScriptManagedEntries(prefix ++ tail ++ suffix));
+    try std.testing.expectError(error.UnexpectedManagedRootEntry, expectScriptManagedEntries(prefix ++ "    'extra.txt',\n" ++ entries ++ suffix));
+    try std.testing.expectError(error.DuplicateManagedRootEntry, expectScriptManagedEntries(prefix ++ "    'noctty.com',\n" ++ entries ++ suffix));
+    try std.testing.expectError(error.ManagedRootListMissing, expectScriptManagedEntries(""));
+    try std.testing.expectError(error.InvalidManagedRootList, expectScriptManagedEntries(prefix ++ "    $dynamicName\n" ++ suffix));
+}
 
 const backup_complete_name = ".complete";
 const max_backup_manifest_bytes = 2 * 1024 * 1024;
@@ -535,14 +614,6 @@ fn verifyBackupManifest(
     }
 }
 
-fn portableRelativePathAlloc(alloc: Allocator, path: []const u8) ![]u8 {
-    const result = try alloc.dupe(u8, path);
-    for (result) |*byte| {
-        if (byte.* == '\\') byte.* = '/';
-    }
-    return result;
-}
-
 fn joinPortableRelativePath(alloc: Allocator, root: []const u8, relative: []const u8) ![]u8 {
     const native = try alloc.dupe(u8, relative);
     defer alloc.free(native);
@@ -562,39 +633,6 @@ pub fn isManagedRelativePath(path: []const u8) bool {
         if (std.mem.eql(u8, entry, "share") and std.mem.startsWith(u8, path, "share/")) return true;
     }
     return false;
-}
-
-fn sha256File(path: []const u8) ![std.crypto.hash.sha2.Sha256.digest_length]u8 {
-    var file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [64 * 1024]u8 = undefined;
-    while (true) {
-        const len = try file.read(&buf);
-        if (len == 0) break;
-        hasher.update(buf[0..len]);
-    }
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
-}
-
-fn parseSha256Hex(hex: []const u8) ![std.crypto.hash.sha2.Sha256.digest_length]u8 {
-    if (hex.len != std.crypto.hash.sha2.Sha256.digest_length * 2) return error.InvalidChecksum;
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    for (&digest, 0..) |*byte, i| {
-        byte.* = (try hexNibble(hex[i * 2]) << 4) | try hexNibble(hex[i * 2 + 1]);
-    }
-    return digest;
-}
-
-fn hexNibble(c: u8) !u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => error.InvalidChecksum,
-    };
 }
 
 fn removePathIfExists(path: []const u8) !void {

@@ -12,6 +12,8 @@ pub fn Channel(comptime Payload: type) type {
         hwnd: std.atomic.Value(usize) = .init(0),
         entries: std.ArrayList(Entry) = .empty,
         update_running: std.atomic.Value(bool) = .init(false),
+        /// A startup profile discovery runs or its result is queued.
+        profiles_running: std.atomic.Value(bool) = .init(false),
         toast_pending: std.atomic.Value(bool) = .init(false),
 
         pub fn create() !*Self {

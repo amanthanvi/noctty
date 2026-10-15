@@ -12,7 +12,7 @@
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "45630c3270cdd6bf2d8659471d796ed6e8733e5a2f10f2ef8461b3d12dac9f0b",
+      "sha256": "58ca692b407a1c107da2c819d5975a7aaf23395a176f779896e88fdf36a2256f",
       "scenario_id": null
     },
     {

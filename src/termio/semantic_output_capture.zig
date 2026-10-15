@@ -11,7 +11,10 @@ pub const SemanticOutputCapture = struct {
         bytes: [capacity]u8,
         len: usize,
         omitted_after: bool,
-        reset_before: bool,
+        /// The consumer forgets what it was holding from before (typed input
+        /// waiting to be seen echoed) ahead of the byte at this index: 0 for
+        /// a full reset, which also dropped everything captured before it.
+        reset_at: ?usize,
 
         pub fn slice(self: *const Batch) []const u8 {
             return self.bytes[0..self.len];
@@ -22,13 +25,13 @@ pub const SemanticOutputCapture = struct {
     len: usize = 0,
     active: bool = false,
     omitted_after: bool = false,
-    reset_before: bool = false,
+    reset_at: ?usize = null,
 
     pub fn begin(self: *SemanticOutputCapture, interested: bool) void {
         self.len = 0;
         self.active = interested;
         self.omitted_after = false;
-        self.reset_before = false;
+        self.reset_at = null;
     }
 
     pub fn recordPrint(self: *SemanticOutputCapture, cp: u21) void {
@@ -62,7 +65,17 @@ pub const SemanticOutputCapture = struct {
         if (!self.active) return;
         self.len = 0;
         self.omitted_after = false;
-        self.reset_before = true;
+        self.reset_at = 0;
+    }
+
+    /// The program switched between the main and the alternate screen. What
+    /// the consumer still holds from before (typed input waiting to be seen
+    /// echoed) can no longer be told apart from output of the other screen,
+    /// so it is dropped at this point of the stream: what was captured so
+    /// far stays ahead of the reset, and only the first switch of a batch
+    /// matters, as nothing is held again until the batch is delivered.
+    pub fn noteScreenSwitch(self: *SemanticOutputCapture) void {
+        if (self.active and self.reset_at == null) self.reset_at = self.len;
     }
 
     pub fn finish(self: *SemanticOutputCapture) Batch {
@@ -70,7 +83,7 @@ pub const SemanticOutputCapture = struct {
             .bytes = undefined,
             .len = self.len,
             .omitted_after = self.omitted_after,
-            .reset_before = self.reset_before,
+            .reset_at = self.reset_at,
         };
         @memcpy(result.bytes[0..self.len], self.bytes[0..self.len]);
         self.active = false;
@@ -140,7 +153,41 @@ test "semantic output full reset discards prior bytes and omission" {
     const batch = capture.finish();
     try std.testing.expectEqualStrings("B", batch.slice());
     try std.testing.expect(!batch.omitted_after);
-    try std.testing.expect(batch.reset_before);
+    try std.testing.expectEqual(@as(?usize, 0), batch.reset_at);
+}
+
+test "semantic output screen switch resets continuity where it happened" {
+    var capture: SemanticOutputCapture = .{};
+    capture.begin(true);
+    capture.recordPrint('A');
+    capture.noteScreenSwitch();
+    capture.recordPrint('B');
+    // Only the first switch counts: the consumer holds nothing new until the
+    // batch is delivered.
+    capture.noteScreenSwitch();
+    const batch = capture.finish();
+    try std.testing.expectEqualStrings("AB", batch.slice());
+    try std.testing.expectEqual(@as(?usize, 1), batch.reset_at);
+    try std.testing.expect(!batch.omitted_after);
+
+    // A full reset discards what came before, so it resets at the start
+    // whether or not a switch came first, and a switch after it adds nothing.
+    capture.begin(true);
+    capture.recordPrint('A');
+    capture.noteScreenSwitch();
+    capture.resetForFullReset();
+    capture.recordPrint('B');
+    capture.noteScreenSwitch();
+    const reset = capture.finish();
+    try std.testing.expectEqualStrings("B", reset.slice());
+    try std.testing.expectEqual(@as(?usize, 0), reset.reset_at);
+
+    // The reset belongs to one batch, and an uninterested one records nothing.
+    capture.begin(true);
+    try std.testing.expectEqual(@as(?usize, null), capture.finish().reset_at);
+    capture.begin(false);
+    capture.noteScreenSwitch();
+    try std.testing.expectEqual(@as(?usize, null), capture.finish().reset_at);
 }
 
 test "semantic output capture retains codepoint-aligned prefix before omission" {

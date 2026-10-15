@@ -92,11 +92,13 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
 
     if (comptime builtin.os.tag == .windows) {
         if (editor.len > 0) {
-            try launchWindowsEditor(alloc, editor, path);
-            return 0;
+            return launchWindowsEditor(alloc, editor, path, stderr, std.process.Child.spawnAndWait);
         }
 
-        try openPathWithShell(alloc, path);
+        openPathWithShell(alloc, path) catch |err| {
+            try stderr.print("Failed to open the configuration in the associated editor: {s}.\n", .{@errorName(err)});
+            return 1;
+        };
         return 0;
     }
 
@@ -175,22 +177,117 @@ fn launchWindowsEditor(
     alloc: Allocator,
     editor: []const u8,
     path: []const u8,
-) !void {
-    const command = try std.fmt.allocPrint(
-        alloc,
-        "start \"\" {s} \"{s}\"",
-        .{ editor, path },
-    );
-    defer alloc.free(command);
+    stderr: *std.Io.Writer,
+    comptime spawn_and_wait: fn (*std.process.Child) anyerror!std.process.Child.Term,
+) !u8 {
+    const argv = windowsEditorArgv(alloc, editor, path) catch |err| {
+        try stderr.print("Failed to parse the editor command: {s}. Check VISUAL or EDITOR.\n", .{@errorName(err)});
+        return 1;
+    };
+    defer freeEditorArgv(alloc, argv);
+    var child = std.process.Child.init(argv, alloc);
+    // Inherit the caller's terminal so console editors run inline. Waiting also
+    // honors explicit GUI wait flags such as `code --wait`. Zig's Child handles
+    // PATHEXT and .cmd shims, with the appropriate batch-file quoting.
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    const term = spawn_and_wait(&child) catch |err| {
+        try stderr.print("Failed to execute the editor: {s}. Check VISUAL or EDITOR.\n", .{@errorName(err)});
+        return 1;
+    };
+    switch (term) {
+        .Exited => |code| {
+            if (code == 0) return 0;
+            try stderr.print("The editor exited with code {d}.\n", .{code});
+        },
+        else => try stderr.writeAll("The editor terminated before completing successfully.\n"),
+    }
+    return 1;
+}
 
-    var child = std.process.Child.init(
-        &.{ "C:\\Windows\\System32\\cmd.exe", "/C", command },
-        alloc,
-    );
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    _ = try child.spawnAndWait();
+fn windowsEditorArgv(alloc: Allocator, editor: []const u8, path: []const u8) ![]const []const u8 {
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(alloc, std.mem.trim(u8, editor, " \t"));
+    defer alloc.free(wide);
+    var iter = try std.process.ArgIteratorWindows.init(alloc, wide);
+    defer iter.deinit();
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (argv.items) |arg| alloc.free(arg);
+        argv.deinit(alloc);
+    }
+    while (iter.next()) |arg| {
+        const copy = try alloc.dupe(u8, arg);
+        errdefer alloc.free(copy);
+        try argv.append(alloc, copy);
+    }
+    if (argv.items.len == 0 or argv.items[0].len == 0) return error.EmptyEditor;
+    {
+        const path_copy = try alloc.dupe(u8, path);
+        errdefer alloc.free(path_copy);
+        try argv.append(alloc, path_copy);
+    }
+    return argv.toOwnedSlice(alloc);
+}
+
+fn freeEditorArgv(alloc: Allocator, argv: []const []const u8) void {
+    for (argv) |arg| alloc.free(arg);
+    alloc.free(argv);
+}
+
+test "PKG61 editor argv preserves quoted Windows executable and arguments" {
+    const alloc = std.testing.allocator;
+    const path = "C:\\config folder\\config.ghostty";
+    const argv = try windowsEditorArgv(alloc, "\"C:\\Program Files\\Notepad++\\notepad++.exe\" -multiInst", path);
+    defer freeEditorArgv(alloc, argv);
+    try std.testing.expectEqual(@as(usize, 3), argv.len);
+    try std.testing.expectEqualStrings("C:\\Program Files\\Notepad++\\notepad++.exe", argv[0]);
+    try std.testing.expectEqualStrings("-multiInst", argv[1]);
+    try std.testing.expectEqualStrings(path, argv[2]);
+}
+
+test "PKG61 editor argv preserves backslashes empty args and literal metacharacters" {
+    const alloc = std.testing.allocator;
+    const argv = try windowsEditorArgv(alloc, "nvim \"\" \"C:\\a b\\\\\" \"a\\\"b\" %VALUE% & literal", "C:\\a & b\\config.ghostty");
+    defer freeEditorArgv(alloc, argv);
+    const expected: []const []const u8 = &.{ "nvim", "", "C:\\a b\\", "a\"b", "%VALUE%", "&", "literal", "C:\\a & b\\config.ghostty" };
+    try std.testing.expectEqual(expected.len, argv.len);
+    for (expected, argv) |want, actual| try std.testing.expectEqualStrings(want, actual);
+    try std.testing.expectError(error.EmptyEditor, windowsEditorArgv(alloc, " \t ", "config.ghostty"));
+    try std.testing.expectError(error.EmptyEditor, windowsEditorArgv(alloc, "\"\"", "config.ghostty"));
+}
+
+test "PKG61 editor launch inherits stdio and reports failures without environment values" {
+    const Fake = struct {
+        fn success(child: *std.process.Child) !std.process.Child.Term {
+            try std.testing.expectEqual(std.process.Child.StdIo.Inherit, child.stdin_behavior);
+            try std.testing.expectEqual(std.process.Child.StdIo.Inherit, child.stdout_behavior);
+            try std.testing.expectEqual(std.process.Child.StdIo.Inherit, child.stderr_behavior);
+            try std.testing.expectEqual(@as(usize, 3), child.argv.len);
+            try std.testing.expectEqualStrings("stand-in.exe", child.argv[0]);
+            try std.testing.expectEqualStrings("--wait", child.argv[1]);
+            try std.testing.expectEqualStrings("C:\\config folder\\config.ghostty", child.argv[2]);
+            return .{ .Exited = 0 };
+        }
+        fn failedExit(_: *std.process.Child) !std.process.Child.Term {
+            return .{ .Exited = 7 };
+        }
+        fn failedSpawn(_: *std.process.Child) !std.process.Child.Term {
+            return error.FileNotFound;
+        }
+    };
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const alloc = std.testing.allocator;
+    try std.testing.expectEqual(@as(u8, 0), try launchWindowsEditor(alloc, "stand-in.exe --wait", "C:\\config folder\\config.ghostty", &writer, Fake.success));
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    try std.testing.expectEqual(@as(u8, 1), try launchWindowsEditor(alloc, "stand-in.exe --secret=sentinel", "secret-path", &writer, Fake.failedExit));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "code 7") != null);
+    try std.testing.expectEqual(@as(u8, 1), try launchWindowsEditor(alloc, "stand-in.exe --secret=sentinel", "secret-path", &writer, Fake.failedSpawn));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "FileNotFound") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "sentinel") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "secret-path") == null);
 }
 
 fn openPathWithShell(

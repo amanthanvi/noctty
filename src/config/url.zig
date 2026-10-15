@@ -113,12 +113,186 @@ const bare_relative_path_branch =
     no_trailing_colon ++
     trailing_spaces_at_eol;
 
+// Windows paths: `C:\dir\file`, `C:/dir/file`, `\\server\share\file`, `.\x`,
+// `..\x` and `dir\file.ext`, with an optional `:line:col` or `(line,col)`.
+//
+// A path may hold spaces (`C:\Program Files\x`), but regex cannot tell
+// `C:\Program Files\x` from `C:\a.txt copied ok`. A space continues the path
+// after a word whose last segment has no dot (`Program`), and after one that
+// has a dot (`git.exe`, `Node.js`) only when the next word is directory-like
+// (`Tools\x.exe`, see `win_dotted_gap`). So `C:\a.txt copied` ends at `.txt`,
+// `C:\Program Files\Git\bin\git.exe failed` at `git.exe`, and
+// `C:\Program Files\Node.js Tools\x.exe` still holds. Prose after a path whose
+// last segment has no dot (`C:\Users\amant and then`) is still swallowed, as
+// in the POSIX branch; a quoted path ends at its closing quote.
+//
+// A parenthesis or bracket belongs to the path only as a closed pair
+// (`Program Files (x86)`, `(12,5)`), so an unbalanced one is a delimiter and
+// `(C:\a.txt)` does not take its `)`. `;` and `,` end a path (they separate
+// the entries of `PATH` and of compiler output, like the POSIX branch's `,`),
+// and so do `:`, `"` and the other characters Windows forbids in a name. A
+// trailing `.`, `!`, `'` or `}` is dropped.
+const win_path_char =
+    \\[^\x00-\x20<>:"|?*;,()\[\]]
+;
+
+const win_seg_char =
+    \\[^\x00-\x20<>:"|?*;,()\[\]\\/.]
+;
+
+const win_path_pair =
+    \\\([^\x00-\x1f<>:"|?*;()\[\]]*\)|\[[^\x00-\x1f<>:"|?*;()\[\]]*\]
+;
+
+const win_path_atom =
+    "(?:" ++ win_path_char ++ "|" ++ win_path_pair ++ ")";
+
+const win_seg_atom =
+    "(?:" ++ win_seg_char ++ "|" ++ win_path_pair ++ ")";
+
+const win_path_word = win_path_atom ++ "+";
+
+// A word whose last segment has no dot.
+const win_dotless_word =
+    "(?:" ++ win_path_atom ++ "*[\\\\/]" ++ win_seg_atom ++ "*|" ++ win_seg_atom ++ "+)";
+
+// A word whose last segment has a dot.
+const win_dotted_word =
+    "(?:" ++ win_path_atom ++ "*[\\\\/])?" ++ win_seg_atom ++ "*\\.(?:" ++ win_seg_atom ++ "|\\.)*";
+
+// The first character after the space must not start another path.
+const win_word_gap =
+    \\[ ](?![A-Za-z]:)(?!\\\\)
+;
+
+// After a dotted word the next one must be a directory-like word: it starts
+// with a word character and has a backslash before any `/` or `:`, so a URL,
+// `.\b.txt`, `src/c.txt` and `~/x` after a file name are other links.
+const win_dotted_gap =
+    win_word_gap ++ "(?=\\w[^\\x00-\\x20:\"/]*\\\\)";
+
+const win_location =
+    \\(?::[0-9]+){0,2}
+;
+
+const win_no_trailing_punctuation =
+    \\(?<![.!'}])
+;
+
+const win_path_tail =
+    "(?:" ++ win_dotless_word ++ win_word_gap ++ "|" ++ win_dotted_word ++ win_dotted_gap ++ ")*" ++
+    win_path_word ++ win_location ++ win_no_trailing_punctuation;
+
+const win_drive_root =
+    \\(?<![\w\\/])(?<!\w@)[A-Za-z]:[\\/]
+;
+
+// `\\.\pipe` and `\\?\C:` are device paths, not shares.
+const win_unc_root =
+    \\(?<![\w\\/])\\\\(?![.?]\\)[A-Za-z0-9._-]+\\
+;
+
+// The quotes tell where a path with spaces ends, whatever follows them.
+const win_quoted_root =
+    "(?:" ++ win_drive_root ++ "|" ++ win_unc_root ++ "|\\.\\.?\\\\)";
+
+const windows_quoted_path =
+    "(?<=\")" ++ win_quoted_root ++ "[^\"\\x00-\\x1f<>|?*]+(?=\")" ++
+    "|(?<=')" ++ win_quoted_root ++ "[^'\\x00-\\x1f<>|?*]+(?=')";
+
+const windows_drive_path =
+    win_drive_root ++ win_path_tail;
+
+const windows_unc_path =
+    win_unc_root ++ win_path_tail;
+
+// `dir\file.ext` needs a dot, like the bare POSIX branch, so that `a\b` in
+// prose is not a path.
+const win_relative_prefix =
+    \\(?<![\w.\\/])\.\.?\\|(?<![\w.~\\/:-])(?=[^\x00-\x20<>:"|?*;]*\.)\w[\w\-.]*\\
+;
+
+const windows_relative_path =
+    "(?:" ++ win_relative_prefix ++ ")" ++ win_path_tail;
+
 pub const regex =
     scheme_url_branch ++
     "|" ++
     rooted_or_relative_path_branch ++
     "|" ++
-    bare_relative_path_branch;
+    bare_relative_path_branch ++
+    "|" ++
+    windows_quoted_path ++
+    "|" ++
+    windows_drive_path ++
+    "|" ++
+    windows_unc_path ++
+    "|" ++
+    windows_relative_path;
+
+/// The path in `text` without the location a compiler or test runner appends:
+/// `:line`, `:line:col`, `(line)` or `(line,col)`. Null when there is none.
+///
+/// Nothing here says the rest is a path. A name can end in `(1)`, so a caller
+/// that opens something tries the whole text first.
+pub fn splitLocation(text: []const u8) ?[]const u8 {
+    var end = text.len;
+    if (end > 0 and text[end - 1] == ')') {
+        const open = std.mem.lastIndexOfScalar(u8, text, '(') orelse return null;
+        const inner = text[open + 1 .. end - 1];
+        const comma = std.mem.indexOfScalar(u8, inner, ',');
+        if (!allDigits(inner[0 .. comma orelse inner.len])) return null;
+        if (comma) |i| if (!allDigits(inner[i + 1 ..])) return null;
+        end = open;
+    } else {
+        for (0..2) |_| {
+            const colon = std.mem.lastIndexOfScalar(u8, text[0..end], ':') orelse break;
+            if (!allDigits(text[colon + 1 .. end])) break;
+            end = colon;
+        }
+    }
+    // A drive letter alone is not a path.
+    if (end == text.len or end < 2) return null;
+    return text[0..end];
+}
+
+fn allDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+test "splitLocation" {
+    const testing = std.testing;
+    const cases = [_]struct { input: []const u8, expect: ?[]const u8 }{
+        .{ .input = "C:\\a\\b.zig:12:5", .expect = "C:\\a\\b.zig" },
+        .{ .input = "C:\\a\\b.zig:12", .expect = "C:\\a\\b.zig" },
+        .{ .input = ".\\src\\main.zig:12:5", .expect = ".\\src\\main.zig" },
+        .{ .input = "src/main.zig:7", .expect = "src/main.zig" },
+        .{ .input = "src\\main.zig(12,5)", .expect = "src\\main.zig" },
+        .{ .input = "src\\main.cs(12)", .expect = "src\\main.cs" },
+        // Two groups at most.
+        .{ .input = "a.zig:1:2:3", .expect = "a.zig:1" },
+        // Not a location.
+        .{ .input = "C:\\a\\b.zig", .expect = null },
+        .{ .input = "C:\\a\\b.zig:", .expect = null },
+        .{ .input = "C:\\a\\b.zig:x", .expect = null },
+        .{ .input = "C:\\a\\x(foo)", .expect = null },
+        .{ .input = "C:\\a\\x(1,)", .expect = null },
+        .{ .input = "C:\\a\\x()", .expect = null },
+        .{ .input = "C:\\Program Files (x86)", .expect = null },
+        .{ .input = "C:5", .expect = null },
+        .{ .input = ":12", .expect = null },
+        .{ .input = "", .expect = null },
+    };
+    for (cases) |case| {
+        const got = splitLocation(case.input);
+        if (case.expect) |want| {
+            try testing.expect(got != null);
+            try testing.expectEqualStrings(want, got.?);
+        } else try testing.expect(got == null);
+    }
+}
 
 test "url regex" {
     const testing = std.testing;
@@ -519,5 +693,156 @@ test "url regex" {
             reg.deinit();
             return error.TestUnexpectedResult;
         } else |_| {}
+    }
+}
+
+/// Every match of `regex` in `input`, in order, as slices of `input`.
+fn allMatches(
+    alloc: std.mem.Allocator,
+    re: *oni.Regex,
+    input: []const u8,
+) !std.ArrayList([]const u8) {
+    var found: std.ArrayList([]const u8) = .empty;
+    errdefer found.deinit(alloc);
+    var offset: usize = 0;
+    while (offset < input.len) {
+        var reg: oni.Region = .{};
+        defer reg.deinit();
+        _ = re.searchAdvanced(input, offset, input.len, &reg, .{}) catch break;
+        const start: usize = @intCast(reg.starts()[0]);
+        const end: usize = @intCast(reg.ends()[0]);
+        if (end <= start) break;
+        try found.append(alloc, input[start..end]);
+        offset = end;
+    }
+    return found;
+}
+
+test "url regex Windows paths" {
+    const testing = std.testing;
+    try oni.testing.ensureInit();
+    var re = try oni.Regex.init(regex, .{}, oni.Encoding.utf8, oni.Syntax.default, null);
+    defer re.deinit();
+
+    const cases = [_]struct {
+        input: []const u8,
+        expect: []const []const u8,
+    }{
+        // The drive letter is part of the path, in either separator style.
+        .{ .input = "C:\\Users\\amant\\file.txt", .expect = &.{"C:\\Users\\amant\\file.txt"} },
+        .{ .input = "C:/Users/amant/file.txt", .expect = &.{"C:/Users/amant/file.txt"} },
+        .{ .input = "c:\\tmp\\a.log", .expect = &.{"c:\\tmp\\a.log"} },
+        // Prose after a file name is not part of it.
+        .{ .input = "see C:\\Users\\amant\\file.txt end", .expect = &.{"C:\\Users\\amant\\file.txt"} },
+        .{ .input = "wrote C:\\a.txt copied ok", .expect = &.{"C:\\a.txt"} },
+        // Spaces inside a path stay.
+        .{ .input = "C:\\Program Files\\x\\y.exe", .expect = &.{"C:\\Program Files\\x\\y.exe"} },
+        .{ .input = "C:\\Users\\john.doe\\My Documents\\x.txt", .expect = &.{"C:\\Users\\john.doe\\My Documents\\x.txt"} },
+        .{ .input = "C:\\a b\\c d\\e.txt", .expect = &.{"C:\\a b\\c d\\e.txt"} },
+        // A parenthesis or bracket closes only a pair opened inside the path.
+        .{ .input = "C:\\Program Files (x86)\\Tool\\a.exe", .expect = &.{"C:\\Program Files (x86)\\Tool\\a.exe"} },
+        .{ .input = "C:\\Program Files (x86)", .expect = &.{"C:\\Program Files (x86)"} },
+        .{ .input = "(C:\\foo\\bar.txt) and then", .expect = &.{"C:\\foo\\bar.txt"} },
+        .{ .input = "[C:\\a\\b.txt]", .expect = &.{"C:\\a\\b.txt"} },
+        .{ .input = "{C:\\a\\b.txt}", .expect = &.{"C:\\a\\b.txt"} },
+        // Trailing punctuation is not part of it.
+        .{ .input = "see C:\\a.txt, then", .expect = &.{"C:\\a.txt"} },
+        .{ .input = "saved to C:\\a\\b.txt.", .expect = &.{"C:\\a\\b.txt"} },
+        .{ .input = "is C:\\a\\b.txt?", .expect = &.{"C:\\a\\b.txt"} },
+        .{ .input = "PS C:\\Users\\amant>", .expect = &.{"C:\\Users\\amant"} },
+        // A list separated by `;` is several paths.
+        .{ .input = "C:\\a\\b.txt;C:\\c\\d.txt", .expect = &.{ "C:\\a\\b.txt", "C:\\c\\d.txt" } },
+        // Two paths stay two paths.
+        .{ .input = "C:\\one D:\\two", .expect = &.{ "C:\\one", "D:\\two" } },
+        .{ .input = "C:\\a.txt,C:\\b.txt", .expect = &.{ "C:\\a.txt", "C:\\b.txt" } },
+        .{ .input = "C:\\a,D:\\b", .expect = &.{ "C:\\a", "D:\\b" } },
+        .{ .input = "--include=C:\\a\\x.h,C:\\b\\y.h", .expect = &.{ "C:\\a\\x.h", "C:\\b\\y.h" } },
+        // A space continues a path only after a word with no dot in its last
+        // segment, so the words after a file name are not part of it.
+        .{
+            .input = "C:\\Program Files\\Git\\bin\\git.exe failed with exit code 1",
+            .expect = &.{"C:\\Program Files\\Git\\bin\\git.exe"},
+        },
+        .{ .input = "C:\\Users\\John Smith\\a.txt is here", .expect = &.{"C:\\Users\\John Smith\\a.txt"} },
+        .{ .input = "C:\\a b.txt trailing", .expect = &.{"C:\\a b.txt"} },
+        .{ .input = "PS C:\\Users\\John Smith>", .expect = &.{"C:\\Users\\John Smith"} },
+        // A folder whose name has a dot and a space in it stays whole, because
+        // the word after a dotted one continues the path when it has a separator.
+        .{ .input = "C:\\Program Files\\Node.js Tools\\x.exe", .expect = &.{"C:\\Program Files\\Node.js Tools\\x.exe"} },
+        .{ .input = "C:\\Users\\j.doe Backup\\x.txt", .expect = &.{"C:\\Users\\j.doe Backup\\x.txt"} },
+        .{ .input = "C:\\Users\\Jane Q. Public\\x.txt", .expect = &.{"C:\\Users\\Jane Q. Public\\x.txt"} },
+        .{ .input = "C:\\Users\\me\\v1.2 beta\\x.txt", .expect = &.{"C:\\Users\\me\\v1.2 beta\\x.txt"} },
+        .{ .input = "C:\\x.y z\\w e\\f", .expect = &.{"C:\\x.y z\\w e\\f"} },
+        // What follows a file name is another link, not part of the path.
+        .{ .input = "C:\\a.txt https://x/y", .expect = &.{ "C:\\a.txt", "https://x/y" } },
+        .{
+            .input = "Serving C:\\site\\index.html http://localhost:8080/",
+            .expect = &.{ "C:\\site\\index.html", "http://localhost:8080/" },
+        },
+        .{ .input = "copy C:\\a.txt .\\b.txt", .expect = &.{ "C:\\a.txt", ".\\b.txt" } },
+        .{ .input = "move C:\\a\\b.txt ..\\c\\d.txt", .expect = &.{ "C:\\a\\b.txt", "..\\c\\d.txt" } },
+        .{ .input = "git diff C:\\a.txt b/a.txt", .expect = &.{ "C:\\a.txt", "b/a.txt" } },
+        .{ .input = "C:\\a.txt /x/y", .expect = &.{ "C:\\a.txt", "/x/y" } },
+        .{ .input = "C:\\a.txt ~/x", .expect = &.{ "C:\\a.txt", "~/x" } },
+        // A response file argument is a path; a host before a colon is not a drive.
+        .{ .input = "cl @C:\\build\\args.rsp", .expect = &.{"C:\\build\\args.rsp"} },
+        .{ .input = "csc @C:/build/args.rsp", .expect = &.{"C:/build/args.rsp"} },
+        .{ .input = "user@h:/x/y", .expect = &.{"/x/y"} },
+        // Quotes delimit a path that has spaces, whatever follows them.
+        .{
+            .input = "'C:\\Program Files\\x\\y.exe' is not recognized as an internal or external command",
+            .expect = &.{"C:\\Program Files\\x\\y.exe"},
+        },
+        .{ .input = "open \"C:\\my docs\\a b.txt\" now", .expect = &.{"C:\\my docs\\a b.txt"} },
+        .{ .input = "'.\\folder' is here", .expect = &.{".\\folder"} },
+        .{ .input = "open \".\\my docs\\a b.txt\" now", .expect = &.{".\\my docs\\a b.txt"} },
+        .{ .input = "cd '..\\up dir' now", .expect = &.{"..\\up dir"} },
+        // A location after the path is part of the link text.
+        .{ .input = "C:\\a\\b.zig:12:5: error: x", .expect = &.{"C:\\a\\b.zig:12:5"} },
+        .{ .input = "C:\\a\\b.zig:12 failed", .expect = &.{"C:\\a\\b.zig:12"} },
+        .{ .input = "C:\\a\\b.cs(12,5): error CS0103", .expect = &.{"C:\\a\\b.cs(12,5)"} },
+        // Relative paths.
+        .{ .input = ".\\src\\main.zig:12:5", .expect = &.{".\\src\\main.zig:12:5"} },
+        .{ .input = "run ..\\x\\y.txt now", .expect = &.{"..\\x\\y.txt"} },
+        .{ .input = "src\\main.zig(12,5)", .expect = &.{"src\\main.zig(12,5)"} },
+        .{ .input = "error in src\\config\\url.zig here", .expect = &.{"src\\config\\url.zig"} },
+        // Network shares.
+        .{ .input = "\\\\server\\share\\dir\\f.txt end", .expect = &.{"\\\\server\\share\\dir\\f.txt"} },
+        // A drive path is never read as the rooted path after its colon.
+        .{ .input = "C:/x", .expect = &.{"C:/x"} },
+    };
+    for (cases) |case| {
+        var found = try allMatches(testing.allocator, &re, case.input);
+        defer found.deinit(testing.allocator);
+        testing.expectEqual(case.expect.len, found.items.len) catch |err| {
+            std.debug.print("input: {s}\n", .{case.input});
+            for (found.items) |item| std.debug.print("  matched: {s}\n", .{item});
+            return err;
+        };
+        for (case.expect, found.items) |want, got| {
+            testing.expectEqualStrings(want, got) catch |err| {
+                std.debug.print("input: {s}\n", .{case.input});
+                return err;
+            };
+        }
+    }
+
+    // Shapes that are not Windows paths.
+    for ([_][]const u8{
+        "foo\\bar",
+        "a\\b",
+        "C:",
+        "C:\\",
+        "\\\\?\\C:\\x",
+        "\\\\.\\pipe\\x",
+        "prompt>C:5",
+    }) |input| {
+        var found = try allMatches(testing.allocator, &re, input);
+        defer found.deinit(testing.allocator);
+        testing.expectEqual(@as(usize, 0), found.items.len) catch |err| {
+            std.debug.print("input: {s}\n", .{input});
+            for (found.items) |item| std.debug.print("  matched: {s}\n", .{item});
+            return err;
+        };
     }
 }

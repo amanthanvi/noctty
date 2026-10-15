@@ -4063,24 +4063,6 @@ pub fn returnPaletteListProvider(
     return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
-pub fn handleTerminalGetObject(
-    alloc: std.mem.Allocator,
-    hwnd: com.HWND,
-    wParam: com.WPARAM,
-    lParam: com.LPARAM,
-    state: TerminalState,
-) ?com.LRESULT {
-    if (lParam != com.UiaRootObjectId) return null;
-
-    const provider = TerminalProvider.create(alloc, hwnd, state) catch |err| {
-        std.log.warn("uia: TerminalProvider.create failed err={}", .{err});
-        return null;
-    };
-    defer _ = TerminalProvider.Release(&provider.base);
-
-    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
-}
-
 /// Return an already-owned terminal provider for `WM_GETOBJECT`. A stable
 /// provider identity lets focus and name-change events refer to the same COM
 /// object clients discover through the child HWND.
@@ -6949,6 +6931,36 @@ test "ChromeControlProvider keyboard focusability follows the role unless overri
         &value,
     ));
     try std.testing.expectEqual(com.VARIANT_FALSE, value.value.bool_val);
+}
+
+test "ChromeControlProvider reports the tooltip role as the SDK's ToolTip control type" {
+    const Context = struct {
+        fn name(_: *anyopaque, _: usize, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "full tab title", .{}) catch "";
+        }
+    };
+
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
+    }.GetDesktopWindow;
+    var context: u8 = 0;
+    const tooltip = try ChromeControlProvider.create(std.testing.allocator, GetDesktopWindow(), .{
+        .ctx = @ptrCast(&context),
+        .role = .tooltip,
+        .name = Context.name,
+    });
+    defer _ = ChromeControlProvider.Release(&tooltip.base);
+    defer tooltip.detach();
+
+    // UIA_ToolTipControlTypeId in UIAutomationClient.h. The literal is the
+    // point: asking the constant would agree with a wrong constant.
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, ChromeControlProvider.GetPropertyValue(
+        &tooltip.base,
+        constants.UIA_ControlTypePropertyId,
+        &value,
+    ));
+    try std.testing.expectEqual(@as(i32, 50022), value.value.i4);
 }
 
 test "ChromeControlProvider hidden chrome is not keyboard focusable" {

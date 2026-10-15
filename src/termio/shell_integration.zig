@@ -921,22 +921,6 @@ const cmd_prompt_prefix = "$E[<99u$E[>4;0m" ++ cmd_prompt_mark_prefix;
 // place rather than a second wrapping.
 const cmd_prompt_legacy_prefix = cmd_prompt_user_osc_a ++ cmd_prompt_cwd;
 const cmd_prompt_suffix = "$E]133;B$E\\";
-const cmd_clink_executables = [_][]const u8{
-    "clink.bat",
-    "clink_x64.exe",
-};
-const CmdClinkDetectionCache = struct {
-    mutex: std.Thread.Mutex = .{},
-    snapshot: ?Snapshot = null,
-
-    const Snapshot = struct {
-        path: []u8,
-        local_app_data: []u8,
-        installed: bool,
-    };
-};
-var cmd_clink_detection_cache: CmdClinkDetectionCache = .{};
-
 /// cmd's PROMPT parser consumes `$` plus the character that follows it as a
 /// single code, and `$$` is a literal `$`. A user prompt ending in an odd
 /// number of `$` therefore pairs its dangling `$` with the `$E` that opens our
@@ -1044,26 +1028,25 @@ fn setupCmd(
         return try command.clone(alloc);
     }
 
-    if (try clinkInstalled(alloc, env)) {
-        const script_path = try std.fs.path.join(alloc, &.{
+    const script_path = try std.fs.path.join(alloc, &.{
+        integration_dir,
+        "noctty-shell-integration.lua",
+    });
+    defer alloc.free(script_path);
+
+    // Clink can be activated by AutoRun or a launcher without being on PATH.
+    // Only active Clink reads CLINK_PATH; it is inert in a plain cmd session.
+    if (fileExistsAbsolute(script_path)) {
+        const clink_path = try composeCmdClinkPath(
+            alloc,
+            env.get("CLINK_PATH"),
             integration_dir,
-            "clink.lua",
-        });
-        defer alloc.free(script_path);
-
-        if (fileExistsAbsolute(script_path)) {
-            const clink_path = try composeCmdClinkPath(
-                alloc,
-                env.get("CLINK_PATH"),
-                integration_dir,
-            );
-            defer alloc.free(clink_path);
-            try env.put("CLINK_PATH", clink_path);
-        } else {
-            log.warn("cmd Clink integration script is unavailable path={s}", .{script_path});
-        }
+        );
+        defer alloc.free(clink_path);
+        try env.put("CLINK_PATH", clink_path);
+    } else {
+        log.warn("cmd Clink integration script is unavailable path={s}", .{script_path});
     }
-
     return try command.clone(alloc);
 }
 
@@ -1092,105 +1075,6 @@ fn cmdMode(arg: []const u8) ?bool {
     }
 
     return null;
-}
-
-fn clinkInstalled(alloc: Allocator, env: *const EnvMap) !bool {
-    if (builtin.os.tag != .windows) return false;
-
-    const path = env.get("PATH") orelse "";
-    const local_app_data = env.get("LOCALAPPDATA") orelse "";
-
-    cmd_clink_detection_cache.mutex.lock();
-    defer cmd_clink_detection_cache.mutex.unlock();
-
-    if (cmd_clink_detection_cache.snapshot) |snapshot| {
-        if (std.mem.eql(u8, snapshot.path, path) and
-            std.mem.eql(u8, snapshot.local_app_data, local_app_data))
-        {
-            return snapshot.installed;
-        }
-    }
-
-    const installed = try clinkInstalledUncached(alloc, path, local_app_data);
-    const cache_alloc = std.heap.page_allocator;
-    const path_copy = try cache_alloc.dupe(u8, path);
-    errdefer cache_alloc.free(path_copy);
-    const local_app_data_copy = try cache_alloc.dupe(u8, local_app_data);
-    errdefer cache_alloc.free(local_app_data_copy);
-
-    if (cmd_clink_detection_cache.snapshot) |snapshot| {
-        cache_alloc.free(snapshot.path);
-        cache_alloc.free(snapshot.local_app_data);
-    }
-    cmd_clink_detection_cache.snapshot = .{
-        .path = path_copy,
-        .local_app_data = local_app_data_copy,
-        .installed = installed,
-    };
-    return installed;
-}
-
-fn clinkInstalledUncached(
-    alloc: Allocator,
-    path: []const u8,
-    local_app_data: []const u8,
-) !bool {
-    if (local_app_data.len > 0) {
-        const local_clink_dir = try std.fs.path.resolve(
-            alloc,
-            &.{ local_app_data, "clink" },
-        );
-        defer alloc.free(local_clink_dir);
-        if (cmdDirProbeAllowed(local_clink_dir) and
-            try directoryContainsClink(alloc, local_clink_dir)) return true;
-    }
-
-    if (path.len > 0) {
-        var dirs = std.mem.splitScalar(u8, path, ';');
-        while (dirs.next()) |raw_dir| {
-            const dir = std.mem.trim(u8, raw_dir, " \t\"");
-            if (cmdDirProbeAllowed(dir) and
-                try directoryContainsClink(alloc, dir)) return true;
-        }
-    }
-
-    return false;
-}
-
-/// Whether we are willing to hit the filesystem for `dir` while starting a
-/// shell. This runs under the detection cache mutex, so any probe that blocks
-/// stalls every concurrently starting cmd session.
-fn cmdDirProbeAllowed(dir: []const u8) bool {
-    if (!cmdPathEntrySafeToProbe(dir)) return false;
-    return cmdDriveTypeSafeToProbe(
-        internal_os.windows.driveTypeForLetter(dir[0]),
-    );
-}
-
-fn cmdPathEntrySafeToProbe(dir: []const u8) bool {
-    return dir.len >= 3 and
-        std.ascii.isAlphabetic(dir[0]) and
-        dir[1] == ':' and
-        (dir[2] == '\\' or dir[2] == '/');
-}
-
-/// Drive-letter syntax alone does not prove a path is local: a mapped network
-/// drive such as `Z:\tools` looks identical to `C:\tools`, and probing one
-/// whose server is unreachable can block for the SMB timeout. Skip remote
-/// drives and drive letters with nothing mounted; anything else (including
-/// `DRIVE_UNKNOWN`, which some virtual disk stacks report) stays probeable.
-fn cmdDriveTypeSafeToProbe(drive_type: u32) bool {
-    return drive_type != internal_os.windows.DRIVE_REMOTE and
-        drive_type != internal_os.windows.DRIVE_NO_ROOT_DIR;
-}
-
-fn directoryContainsClink(alloc: Allocator, dir: []const u8) !bool {
-    for (cmd_clink_executables) |exe| {
-        const candidate = try std.fs.path.resolve(alloc, &.{ dir, exe });
-        defer alloc.free(candidate);
-        if (fileExistsAbsolute(candidate)) return true;
-    }
-    return false;
 }
 
 fn fileExistsAbsolute(path: []const u8) bool {
@@ -1496,70 +1380,6 @@ test "cmd Clink path composition prepends once and rejects semicolons" {
     try testing.expect(!cmdClinkIntegrationDirSafe("C:\\unsafe;path\\cmd"));
 }
 
-test "cmd Clink detection covers PATH and LocalAppData" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const testing = std.testing;
-    var arena = ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var tmp_dir = testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    try tmp_dir.dir.makePath("path-bat");
-    try tmp_dir.dir.makePath("path-x64");
-    try tmp_dir.dir.makePath("local/clink");
-    try tmp_dir.dir.writeFile(.{
-        .sub_path = "path-bat/clink.bat",
-        .data = "",
-    });
-    try tmp_dir.dir.writeFile(.{
-        .sub_path = "path-x64/clink_x64.exe",
-        .data = "",
-    });
-
-    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
-    const path_bat = try std.fs.path.join(alloc, &.{ root, "path-bat" });
-    const path_x64 = try std.fs.path.join(alloc, &.{ root, "path-x64" });
-    const local_app_data = try std.fs.path.join(alloc, &.{ root, "local" });
-
-    try testing.expect(try clinkInstalledUncached(alloc, path_bat, ""));
-    try testing.expect(try clinkInstalledUncached(alloc, path_x64, ""));
-    try testing.expect(!try clinkInstalledUncached(alloc, "", local_app_data));
-
-    try tmp_dir.dir.writeFile(.{
-        .sub_path = "local/clink/clink_x64.exe",
-        .data = "",
-    });
-    try testing.expect(try clinkInstalledUncached(alloc, path_bat, local_app_data));
-
-    try testing.expect(cmdPathEntrySafeToProbe(path_bat));
-    try testing.expect(!cmdPathEntrySafeToProbe("relative\\clink"));
-    try testing.expect(!cmdPathEntrySafeToProbe("C:relative\\clink"));
-    try testing.expect(!cmdPathEntrySafeToProbe("\\rooted\\clink"));
-    try testing.expect(!cmdPathEntrySafeToProbe("\\\\server\\share\\clink"));
-    try testing.expect(!cmdPathEntrySafeToProbe("//server/share/clink"));
-    try testing.expect(cmdPathEntrySafeToProbe("D:/absolute/clink"));
-}
-
-test "cmd Clink probe skips remote and unmounted drive letters" {
-    const testing = std.testing;
-
-    // Documented GetDriveTypeW results:
-    // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdrivetypew
-    try testing.expect(!cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_REMOTE));
-    try testing.expect(!cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_NO_ROOT_DIR));
-    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_FIXED));
-    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_REMOVABLE));
-    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_CDROM));
-    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_RAMDISK));
-    try testing.expect(cmdDriveTypeSafeToProbe(internal_os.windows.DRIVE_UNKNOWN));
-
-    // Syntax rejection still short-circuits before any drive query.
-    try testing.expect(!cmdDirProbeAllowed("\\\\server\\share\\clink"));
-    try testing.expect(!cmdDirProbeAllowed("relative\\clink"));
-}
-
 test "cmd Clink setup fails closed for semicolon integration path" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -1571,23 +1391,16 @@ test "cmd Clink setup fails closed for semicolon integration path" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     try tmp_dir.dir.makePath("resources;unsafe/shell-integration/cmd");
-    try tmp_dir.dir.makePath("local/clink");
     try tmp_dir.dir.writeFile(.{
-        .sub_path = "resources;unsafe/shell-integration/cmd/clink.lua",
-        .data = "",
-    });
-    try tmp_dir.dir.writeFile(.{
-        .sub_path = "local/clink/clink_x64.exe",
+        .sub_path = "resources;unsafe/shell-integration/cmd/noctty-shell-integration.lua",
         .data = "",
     });
 
     const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
     const resource_dir = try std.fs.path.join(alloc, &.{ root, "resources;unsafe" });
-    const local_app_data = try std.fs.path.join(alloc, &.{ root, "local" });
 
     var env = EnvMap.init(alloc);
     defer env.deinit();
-    try env.put("LOCALAPPDATA", local_app_data);
     try env.put("CLINK_PATH", "C:\\trusted\\clink");
 
     _ = (try setupCmd(
@@ -1599,38 +1412,31 @@ test "cmd Clink setup fails closed for semicolon integration path" {
     try testing.expectEqualStrings("C:\\trusted\\clink", env.get("CLINK_PATH").?);
 }
 
-test "cmd Clink detection caches one environment snapshot" {
+test "PKG48 cmd exposes Clink script without an installed executable" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-
-    var tmp_dir = testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    try tmp_dir.dir.makePath("path");
-    try tmp_dir.dir.makePath("local");
-
-    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
-    const path = try std.fs.path.join(alloc, &.{ root, "path" });
-    const local_app_data = try std.fs.path.join(alloc, &.{ root, "local" });
-
+    var resources = try TmpResourcesDir.init(alloc, .cmd);
+    defer resources.deinit();
     var env = EnvMap.init(alloc);
     defer env.deinit();
-    try env.put("PATH", path);
-    try env.put("LOCALAPPDATA", local_app_data);
+    // No PATH or LOCALAPPDATA: a Clink launched through AutoRun need not be
+    // discoverable there, and plain cmd must receive the same inert variable.
+    try env.put("CLINK_PATH", "C:\\user\\scripts");
+    const integration_dir = try std.fs.path.join(alloc, &.{ resources.path, "shell-integration", "cmd" });
+    const expected = try std.fmt.allocPrint(alloc, "{s};C:\\user\\scripts", .{integration_dir});
+    _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
+    try testing.expectEqualStrings(expected, env.get("CLINK_PATH").?);
+    _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
+    try testing.expectEqualStrings(expected, env.get("CLINK_PATH").?);
 
-    try testing.expect(!try clinkInstalled(alloc, &env));
-    try tmp_dir.dir.writeFile(.{
-        .sub_path = "path/clink.bat",
-        .data = "",
-    });
-    try testing.expect(!try clinkInstalled(alloc, &env));
-
-    const changed_path = try std.fmt.allocPrint(alloc, "{s};relative", .{path});
-    try env.put("PATH", changed_path);
-    try testing.expect(try clinkInstalled(alloc, &env));
+    try resources.tmp_dir.dir.deleteFile("shell-integration/cmd/noctty-shell-integration.lua");
+    try env.put("CLINK_PATH", "C:\\trusted\\scripts");
+    _ = (try setupCmd(alloc, .{ .direct = &.{"cmd.exe"} }, resources.path, &env)).?;
+    try testing.expectEqualStrings("C:\\trusted\\scripts", env.get("CLINK_PATH").?);
 }
 
 test "cmd integration follows cmd slash switch modes" {
@@ -2646,7 +2452,7 @@ test "the shell-integration scripts have LF line endings in every checkout" {
     // bash rejects the CR. The PowerShell script is pinned by `*.ps1`.
     const scripts = .{
         .{ "bash/ghostty.bash", @embedFile("../shell-integration/bash/ghostty.bash") },
-        .{ "cmd/clink.lua", @embedFile("../shell-integration/cmd/clink.lua") },
+        .{ "cmd/noctty-shell-integration.lua", @embedFile("../shell-integration/cmd/noctty-shell-integration.lua") },
         .{ "elvish/lib/ghostty-integration.elv", @embedFile("../shell-integration/elvish/lib/ghostty-integration.elv") },
         .{ "fish/vendor_conf.d/ghostty-shell-integration.fish", @embedFile("../shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish") },
         .{ "nushell/vendor/autoload/ghostty.nu", @embedFile("../shell-integration/nushell/vendor/autoload/ghostty.nu") },
@@ -2700,7 +2506,7 @@ const TmpResourcesDir = struct {
                 .data = "",
             }),
             .cmd => try tmp_dir.dir.writeFile(.{
-                .sub_path = "shell-integration/cmd/clink.lua",
+                .sub_path = "shell-integration/cmd/noctty-shell-integration.lua",
                 .data = "",
             }),
             .nushell => {

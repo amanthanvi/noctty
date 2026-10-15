@@ -22,6 +22,41 @@ pub const Id = size.HyperlinkCountInt;
 // the hyperlink ID in the cell itself.
 pub const Map = AutoOffsetHashMap(Offset(Cell), Id);
 
+/// Whether a hyperlink's URI may become a clickable anchor in text exported
+/// for other applications (the HTML copy). The URI is chosen by whatever
+/// program wrote the output, so only schemes that reach a web page, a mail
+/// client or an FTP site pass. Anything else (javascript:, file:, data:, UNC
+/// paths, custom protocols) is exported as plain text. The scheme is compared
+/// exactly from the first byte, so the blank-padded and tab-split spellings
+/// that a browser or Office strips back to `javascript:` do not pass.
+pub fn isExportableUri(uri: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, uri, ':') orelse return false;
+    for ([_][]const u8{ "http", "https", "mailto", "ftp" }) |scheme| {
+        if (std.ascii.eqlIgnoreCase(uri[0..colon], scheme)) return true;
+    }
+    return false;
+}
+
+test "isExportableUri allows web, mail and ftp only" {
+    const testing = std.testing;
+    try testing.expect(isExportableUri("http://example.com"));
+    try testing.expect(isExportableUri("HTTPS://example.com"));
+    try testing.expect(isExportableUri("mailto:someone@example.com"));
+    try testing.expect(isExportableUri("ftp://example.com/file"));
+
+    try testing.expect(!isExportableUri(""));
+    try testing.expect(!isExportableUri("example.com"));
+    try testing.expect(!isExportableUri("https"));
+    try testing.expect(!isExportableUri("javascript:alert(1)"));
+    try testing.expect(!isExportableUri(" https://example.com"));
+    try testing.expect(!isExportableUri("htt\tp://example.com"));
+    try testing.expect(!isExportableUri("httpx://example.com"));
+    try testing.expect(!isExportableUri("file://host/share"));
+    try testing.expect(!isExportableUri("\\\\host\\share"));
+    try testing.expect(!isExportableUri("//host/share"));
+    try testing.expect(!isExportableUri("ms-officecmd:x"));
+}
+
 /// A fully decoded hyperlink that may or may not have its
 /// memory within a page. The memory location of this is dependent
 /// on the context so users should check with the source of the

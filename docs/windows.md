@@ -99,6 +99,17 @@ instead; nothing is migrated.
 
 ## Shells
 
+For commands launched through `cmd.exe /C`, noctty sets
+`NoDefaultCurrentDirectoryInExePath` in that wrapper's environment when it is
+absent. This disables cmd's implicit executable search in the pane's current
+directory, so a planted `pwsh.cmd` cannot override a `pwsh` on PATH. The guard
+is inherited by descendants: clearing it before the target would restore the
+unsafe search. Existing values are preserved, and direct launches receive no
+new guard. Command text, `PATH`, `PATHEXT`, variable expansion, builtins and
+`||` fallback retain native cmd behavior, including PATH directories containing
+literal `%` or `!`. Explicit paths such as `.\tool`, and explicitly configured
+relative PATH entries such as `.`, still select programs relative to the pane.
+
 The profile picker detects:
 
 - PowerShell 7+ (`pwsh.exe`)
@@ -115,14 +126,17 @@ working-directory updates and OSC 133 prompt markers.
 For `cmd.exe`, noctty wraps the inherited `PROMPT` (or cmd's `$P$G` default)
 so the shell emits OSC 133 A/B prompt marks and an OSC 9;9 working-directory
 report; a `PROMPT` set through `env = PROMPT=...` is applied afterward and
-replaces the wrapper. If `clink.bat` or `clink_x64.exe` is found under
-`%LOCALAPPDATA%\clink` or on a local, mounted, drive-qualified `PATH` entry
-(remote, UNC, and relative entries are skipped so a dead network path cannot
-stall a new tab), noctty prepends its shipped Lua directory to `CLINK_PATH`.
+replaces the wrapper. When the shipped `noctty-shell-integration.lua` is present,
+noctty prepends its Lua directory to `CLINK_PATH`, preserving existing entries.
 That only makes the script discoverable once Clink is already active through
 autorun, `clink inject`, or an explicit Clink launch; noctty never injects or
 launches Clink. When loaded, the script adds OSC 133 C/D command marks and the
-exit code before the next prompt, truthful only while Clink's
+exit code before the next prompt. It also wraps the final normal prompt after
+Clink filters, so themes which replace the prompt and stop the filter chain keep
+prompt and cwd marks. Existing OSC 133 A marks are respected, and right and
+transient prompts are left alone. This final-prompt hook uses Clink's guarded
+`_internal._filter_prompt` seam (verified with Clink 1.9.34); versions without it
+retain the PROMPT fallback and C/D hooks. Exit codes are truthful only while Clink's
 `cmd.get_errorlevel` setting is enabled (its default). Without it, prompt
 navigation and cwd reporting still work, but there are no command-finish marks
 or exit codes.
@@ -254,7 +268,8 @@ as its only argument, in a new tab in your home directory. Set
   drive letter. The drive check uses `GetDriveTypeW`, which answers from the
   local mount table without contacting the server. It misses a directory
   junction or `subst` alias with a remote target, but the bounded worker
-  still keeps that open off the UI thread.
+  still keeps that open off the UI thread. Skipped glob Includes emit a warning
+  once, sharing the warning budget for unreadable SSH configuration files.
 - The root config and `Include` opens run off the UI thread under one shared
   50 ms refresh budget. A slow or blocked path is skipped; a later profile
   refresh can retry it.
@@ -817,9 +832,29 @@ If the session-state file is unreadable, noctty moves it aside to a sibling
 with a `.corrupt` suffix, logs the failure, and starts with a fresh window.
 When an earlier quarantine file already exists, a numeric suffix is added
 (`.corrupt.1`, `.corrupt.2`, and so on) so nothing is overwritten. If the
-move fails, the original file is left untouched. Older builds parse the
-schema strictly, so downgrading while a saved state contains `scrollback`
-can quarantine that file as `.corrupt`.
+move fails, the original file is left untouched.
+
+A field this build does not know is skipped, so a file from a build that added
+one within the same schema version still restores, whether it sits on a window,
+a tab, a pane or beside a node's `pane` or `split`; a window `state` name it
+does not know restores as a normal window. A new kind of node or a new `axis`
+name is not additive and needs a new `schema_version`. A file with a newer
+`schema_version` is not unreadable, only not understood: noctty leaves it
+exactly as it is, starts with a fresh window, and does not save a session over
+it for the rest of that run. The startup history (`startup-attempts.json`) is
+read the same way, and `integration.ps1` is not replaced by a build whose copy
+declares an older `noctty-integration-revision`. Builds that predate this
+still parse strictly, so downgrading to one while a saved state contains
+`scrollback` can quarantine that file as `.corrupt`.
+
+A restored window comes back at the rect it was saved with, in screen
+coordinates, and as maximized if it was or was minimized from maximized. If
+the title bar would no longer be reachable on any monitor (a monitor was
+unplugged or the layout changed, or Windows capped an extreme size or position),
+the window moves to the nearest monitor's
+work area, its size capped to it. A window with a caption's worth of title bar
+(48 px wide) on some monitor stays where it was, even if the rest
+of it hangs off the screen.
 
 A snapshot that merely exceeds the limits above (too many lines, a line over
 16 KiB, or the shared budget) is dropped on load and the window's layout still
@@ -911,6 +946,12 @@ no telemetry and no analytics. [PRIVACY.md](../PRIVACY.md) covers what its
 requests send and the connections you start yourself, such as links and SSH
 entries.
 
+Update requests allow 30 seconds for connection setup (including DNS and TLS),
+the response headers, and each body read. A stalled request is canceled before
+the worker finishes, so a later check can retry. A download that keeps making
+progress may take longer than 30 seconds. Requests use Windows' certificate
+trust with TLS 1.2 or later; checksum and publisher verification still apply.
+
 Upstream Ghostty is leaving GitHub, so the maintainer periodically checks
 that the `upstream` remote and the release-feed host are still live and
 re-points them if either moves.
@@ -993,14 +1034,38 @@ cancels and returns keyboard focus to the terminal. Quick select also closes
 on resize, on a click, and when the surface loses focus.
 
 Completing a label copies the matched text to the clipboard. Hold Ctrl while
-completing to open a target that begins with an allowed URL scheme; other
-targets are copied. Hold Alt to paste through the normal protected-paste
-path. Opening is narrower than matching: `file:` URLs are labeled and can be
-copied, but Ctrl will not open them, because the system handler would run
-`file:///C:/...exe` straight from terminal output. Alt-paste also runs the
-same classifier as the drag-and-drop path, so a match carrying shell
-metacharacters, environment-variable expansion, or control bytes raises the
-paste confirmation.
+completing to open a target that begins with an allowed URL scheme or names a
+file or folder on this machine (`C:\dir\file.txt`, `.\src\main.zig:12:5`,
+`src\a.cs(3,4)`); other targets, network shares included, are copied. A path
+opens through the same checks as a Ctrl+click on it, with a trailing
+`:line:col` or `(line,col)` left off: it must exist and must not be a program
+or script. When it is refused, a banner says it was not opened. Hold Alt to
+paste through the normal protected-paste path. Opening is narrower than
+matching: `file:` URLs are labeled and can be copied, but Ctrl will not open
+them, because the system handler would run `file:///C:/...exe` straight from
+terminal output. Alt-paste also runs the same classifier as the
+drag-and-drop path, so a match carrying shell metacharacters,
+environment-variable expansion, or control bytes raises the paste
+confirmation.
+
+The same matcher finds paths for Ctrl+click links and double-click selection:
+`C:\dir\file`, `C:/dir/file`, `\\server\share\file`, `.\file` and
+`dir\file.ext`, with an optional `:line:col` or `(line,col)`. A path ends at
+`;`, `,`, `"`, an unbalanced bracket, and a trailing `.`, `!`, `'` or `}`; a
+pair of brackets inside it, as in `Program Files (x86)`, stays. Spaces inside
+a path stay part of it: a space continues the path after a word whose last
+segment has no dot (`Program`), and after one that has a dot (`git.exe`,
+`Node.js`) only when the next word starts like a folder name and has a
+backslash in it (`Tools\x.exe`), so a URL or another path after a file name is
+its own link. So `C:\a.txt copied` ends at `.txt` and
+`C:\Program Files\Git\bin\git.exe failed` at `git.exe`, while
+`C:\Program Files\Node.js Tools\x.exe` stays whole. A path whose last segment
+has no dot still takes the words after it (`C:\Users\amant and then` is one
+match), because that cannot be told from a folder with a space in its name.
+A path inside single or double quotes ends at its closing quote.
+
+A quick select with nothing to label, or with too many targets to label
+without overlap, says so in the banner.
 
 Targets are re-checked against the live screen when you act. If the running
 program rewrote a labeled region while the overlay was up, that target is

@@ -19,19 +19,6 @@ const max_pattern_bytes = 4096;
 const max_searches_per_pattern = 4096;
 const max_candidate_count = 4096;
 
-// Windows paths may contain spaces (`C:\Program Files\...`), so the body class
-// has to allow them. The lookahead stops the run at whitespace that begins
-// *another* path, which is otherwise swallowed: `C:\one D:\two` matched as
-// `C:\one D` and then lost the second path entirely, because scanning resumed
-// past its drive letter. A space followed by ordinary prose is still consumed
-// — regex cannot tell `C:\Program Files\x` from `C:\a.txt copied ok` without
-// touching the filesystem, and truncating at the first space would break the
-// single most common Windows path shape.
-const path_body = "(?:(?!\\s+(?:[A-Za-z]:\\\\|\\\\\\\\))[^\\x00\\r\\n<>:\"|?*])+";
-const windows_drive_path =
-    "(?<![A-Za-z0-9_])[A-Za-z]:\\\\" ++ path_body;
-const windows_unc_path =
-    "(?<![\\\\A-Za-z0-9_])\\\\\\\\[A-Za-z0-9._-]+\\\\" ++ path_body;
 const git_sha =
     \\\b[0-9A-Fa-f]{7,40}\b
 ;
@@ -55,10 +42,13 @@ const uuid =
 ;
 
 /// Built-in patterns used when `quick-select-patterns` is empty.
+///
+/// The Windows path shapes come from `config_url.regex`, the same pattern
+/// that finds links, so a label and a Ctrl+click agree on where a path ends.
+/// A second path pattern here would match the same text with different
+/// bounds, and the longer match wins.
 pub const default_patterns = [_][]const u8{
     config_url.regex,
-    windows_drive_path,
-    windows_unc_path,
     git_sha,
     ipv4,
     ipv6,
@@ -125,15 +115,38 @@ pub const Match = struct {
 /// What firing a label does with the matched text.
 pub const Action = enum { copy, open, paste };
 
+/// Whether `text` has the shape of a file on this machine: a drive path
+/// (`C:\x`, `C:/x`) or a relative one (`.\x`, `src\main.zig:12`). It says
+/// nothing about whether the file exists or may be opened; the opener's own
+/// checks decide that. A share, a device path and a rooted `/x` are not local
+/// shapes, and neither is anything that is not only a path, such as a URL.
+pub fn isLocalPath(text: []const u8) bool {
+    const path = config_url.splitLocation(text) orelse text;
+    if (path.len == 0) return false;
+    const separators = "\\/";
+    if (path.len > 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and
+        std.mem.indexOfScalar(u8, separators, path[2]) != null)
+    {
+        return std.mem.indexOfScalar(u8, path[2..], ':') == null;
+    }
+    if (std.mem.indexOfScalar(u8, separators, path[0]) != null) return false;
+    if (std.mem.indexOfScalar(u8, path, ':') != null) return false;
+    return std.mem.indexOfAny(u8, path, separators) != null;
+}
+
 /// Resolve the action for a fired label. Ctrl asks to open and Alt asks to
 /// paste; anything not openable degrades to a copy rather than being refused,
 /// so a mistyped modifier never silently does nothing.
+///
+/// A local path counts as openable here: the opener refuses a missing file, a
+/// program or a script and says so, which is better than a copy nobody asked
+/// for.
 pub fn resolveAction(text: []const u8, ctrl: bool, alt: bool) Action {
     if (ctrl) {
-        const openable = beginsWithAllowedScheme(text) catch |err| blk: {
+        const openable = isLocalPath(text) or (beginsWithAllowedScheme(text) catch |err| blk: {
             std.log.warn("quick select scheme validation failed err={}", .{err});
             break :blk false;
-        };
+        });
         return if (openable) .open else .copy;
     }
     if (alt) return .paste;
@@ -144,13 +157,22 @@ test "hints: ctrl falls back to copy for targets that cannot be opened" {
     const testing = std.testing;
     try oni.testing.ensureInit();
 
-    // Ctrl opens only real, allowlisted URLs.
+    // Ctrl opens real, allowlisted URLs and files on this machine.
     try testing.expectEqual(Action.open, resolveAction("https://example.com", true, false));
+    try testing.expectEqual(Action.open, resolveAction("C:\\work\\notes.txt", true, false));
+    try testing.expectEqual(Action.open, resolveAction("C:/work/notes.txt:12:5", true, false));
+    try testing.expectEqual(Action.open, resolveAction(".\\src\\main.zig:12:5", true, false));
+    try testing.expectEqual(Action.open, resolveAction("src\\main.zig(12,5)", true, false));
 
     // Everything else Ctrl is pressed on degrades to copy, never to open.
-    try testing.expectEqual(Action.copy, resolveAction("C:\\work\\notes.txt", true, false));
     try testing.expectEqual(Action.copy, resolveAction("\\\\server\\share\\x", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("\\\\?\\C:\\x", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("/x/y", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("C:\\a\\b.txt:stream", true, false));
     try testing.expectEqual(Action.copy, resolveAction("deadbeef", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("192.168.1.10", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("2001:db8::1", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("550e8400-e29b-41d4-a716-446655440000", true, false));
     try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, false));
 
     // Alt pastes; Ctrl wins over Alt so a chord cannot both open and paste.
@@ -923,6 +945,83 @@ test "hints: adjacent paths on one row stay separate" {
     for (expected, 0..) |want, index| {
         try testing.expectEqualStrings(want, scan.matchText(index));
     }
+}
+
+// A path ends where the text around it says so: a quote, a closing bracket,
+// a comma, a `;` or a full stop is not part of it, and neither is the prose
+// after a file name. Each of these shapes copied the wrong text before.
+test "hints: a path ends at its quote, bracket, punctuation or semicolon" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var state = try renderFixture(
+        alloc,
+        100,
+        12,
+        "C:\\Users\\amant\\file.txt end\r\n" ++
+            "\\\\server\\share\\dir\\f.txt end\r\n" ++
+            "'C:\\Program Files\\x\\y.exe' is not recognized as an internal or external command\r\n" ++
+            "(C:\\foo\\bar.txt) and then\r\n" ++
+            "see C:\\a.txt, then\r\n" ++
+            "[C:\\a\\b.txt]\r\n" ++
+            "C:\\a\\b.txt;C:\\c\\d.txt\r\n" ++
+            "C:\\Program Files (x86)\\Tool\\a.exe\r\n" ++
+            "C:/Users/amant/file.txt\r\n" ++
+            ".\\src\\main.zig:12:5 and src\\main.zig(12,5)\r\n" ++
+            "END",
+    );
+    defer state.deinit(alloc);
+
+    var scan = try scanRenderState(alloc, &state, &default_patterns);
+    defer scan.deinit(alloc);
+
+    const expected = [_][]const u8{
+        "C:\\Users\\amant\\file.txt",
+        "\\\\server\\share\\dir\\f.txt",
+        "C:\\Program Files\\x\\y.exe",
+        "C:\\foo\\bar.txt",
+        "C:\\a.txt",
+        "C:\\a\\b.txt",
+        "C:\\a\\b.txt",
+        "C:\\c\\d.txt",
+        "C:\\Program Files (x86)\\Tool\\a.exe",
+        "C:/Users/amant/file.txt",
+        ".\\src\\main.zig:12:5",
+        "src\\main.zig(12,5)",
+    };
+    try testing.expectEqual(expected.len, scan.matches.len);
+    for (expected, 0..) |want, index| {
+        try testing.expectEqualStrings(want, scan.matchText(index));
+    }
+}
+
+test "hints: local path shapes are openable and everything else is not" {
+    try std.testing.expect(isLocalPath("C:\\work\\notes.txt"));
+    try std.testing.expect(isLocalPath("c:/work/notes.txt"));
+    try std.testing.expect(isLocalPath("C:\\work\\notes.txt:3:4"));
+    try std.testing.expect(isLocalPath(".\\a.txt"));
+    try std.testing.expect(isLocalPath("..\\a.txt"));
+    try std.testing.expect(isLocalPath("src/config/url.zig"));
+    try std.testing.expect(isLocalPath("src\\main.zig(12,5)"));
+
+    for ([_][]const u8{
+        "",
+        "C:",
+        "C:\\",
+        "C:5",
+        "\\\\server\\share\\x",
+        "//server/share/x",
+        "\\\\?\\C:\\x",
+        "/Users/x",
+        "C:\\a\\b.txt:stream",
+        "https://example.com/a",
+        "file:///C:/x",
+        "notes.txt",
+        "deadbeef",
+        "192.168.1.10",
+        "2001:db8::1",
+    }) |text| try std.testing.expect(!isLocalPath(text));
 }
 
 test "hints: scan negative fixture has no matches" {

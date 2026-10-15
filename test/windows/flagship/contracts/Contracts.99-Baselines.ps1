@@ -4,12 +4,14 @@ $reviewedArtifactDigests = @{
     # Reviewed in full for issue #133 named layouts, re-reviewed for issue
     # #131 scrollback-content restore, and again for the issue #123 paste-path
     # audit, which adds load-time pane-text rejection without changing the
-    # on-disk schema. PR branch commits are intentionally squashed and
+    # on-disk schema, and for PKG-44, which skips unknown fields within the
+    # schema version and reports a newer schema_version as NewerSchema instead
+    # of rejecting it. PR branch commits are intentionally squashed and
     # deleted, so pin this digest independently of the manifest's durable base
     # commit rather than disabling verification when an intermediate source
     # commit becomes unreachable.
     'src/apprt/win32_session_state.zig' =
-        '45630c3270cdd6bf2d8659471d796ed6e8733e5a2f10f2ef8461b3d12dac9f0b'
+        '58ca692b407a1c107da2c819d5975a7aaf23395a176f779896e88fdf36a2256f'
 
     # Reviewed in full after the Noctty rebrand and for PKG-35's packaged DLL
     # load/allocator smoke, retaining the staged portable CLI siblings.

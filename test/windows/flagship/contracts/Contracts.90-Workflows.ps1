@@ -152,6 +152,7 @@ foreach ($coverage in @(
                 'PowerShell shell integration tests (PowerShell 7)',
                 'PowerShell shell integration tests (Windows PowerShell 5.1)',
                 'Bash shell integration tests (Git Bash)',
+                'Cmd and Clink integration tests (portable)',
                 'Interactive hints contract checks'
             ) },
         @{ Job = $libVtJob; Steps = @('Run libghostty-vt and C API tests') }

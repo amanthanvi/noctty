@@ -82,7 +82,7 @@ pub fn runInner(
     stderr: *std.Io.Writer,
 ) !u8 {
     // Setup our disk cache to the standard location
-    const cache_path = try DiskCache.defaultPath(alloc, "ghostty");
+    const cache_path = try defaultCachePath(alloc);
     const cache: DiskCache = .{ .path = cache_path };
 
     if (opts.clear) {
@@ -177,6 +177,24 @@ pub fn runInner(
     defer DiskCache.deinitEntries(alloc, &entries);
     try listEntries(alloc, &entries, stdout);
     return 0;
+}
+
+fn defaultCachePath(alloc: Allocator) ![]const u8 {
+    // The full relative file name lets portable mode strip `noctty/`.
+    return @import("../os/xdg.zig").state(alloc, .{
+        .subdir = @import("../build_config.zig").data_dir_name ++ "/ssh_cache",
+    });
+}
+
+test "PKG61 SSH cache uses noctty state path including portable layout" {
+    const alloc = std.testing.allocator;
+    const expected = try @import("../os/xdg.zig").state(alloc, .{
+        .subdir = @import("../build_config.zig").data_dir_name ++ "/ssh_cache",
+    });
+    defer alloc.free(expected);
+    const actual = try defaultCachePath(alloc);
+    defer alloc.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
 }
 
 fn listEntries(
