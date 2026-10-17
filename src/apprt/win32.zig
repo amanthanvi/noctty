@@ -8252,7 +8252,13 @@ pub const App = struct {
         const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
         if (!changed) {
             const missing_resources = for (self.hosts.items) |host| {
-                if (host.hwnd != null and (host.chrome_brush == null or host.overlay_brush == null or host.edit_brush == null or host.chrome_font == null)) break true;
+                if (host.hwnd != null and (host.chrome_brush == null or
+                    host.overlay_brush == null or host.edit_brush == null or
+                    host.chrome_font == null or host.preview_font == null or
+                    host.titlebar_caption_icon_font == null or host.titlebar_action_icon_font == null or
+                    // The search font stays lazy. Only a failed attempt, not
+                    // its intentionally unused state, needs another chance.
+                    (host.search_icon_font_resolved and host.search_icon_font == null))) break true;
             } else false;
             if (!missing_resources) return;
         }
@@ -23001,6 +23007,55 @@ const Host = struct {
         _ = sys.ValidateRect(host.new_tab_hwnd.?, null);
         host.setWindowActive(true);
         try std.testing.expect(sys.GetUpdateRect(host.new_tab_hwnd.?, &update, 0) != 0);
+    }
+
+    test "CHROME57 unchanged theme messages retry each failed font but keep search lazy" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(themeFontRetryTestBody);
+    }
+
+    fn themeFontRetryTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var session: TestSession = .{};
+        try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &host, .register = true }} });
+        defer session.deinit();
+        defer {
+            inline for (.{ "chrome_font", "preview_font", "titlebar_caption_icon_font", "titlebar_action_icon_font", "search_icon_font", "chrome_brush", "overlay_brush", "edit_brush" }) |name| {
+                if (@field(host, name)) |object| _ = sys.DeleteObject(object);
+            }
+        }
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        app.reconfigureSystemTheme();
+        // An unused search font is intentionally absent, not a failed resource.
+        const applied = app.theme_rebuilds;
+        try std.testing.expect(host.search_icon_font == null);
+        try std.testing.expect(!host.search_icon_font_resolved);
+        app.reconfigureSystemTheme();
+        try std.testing.expectEqual(applied, app.theme_rebuilds);
+
+        inline for (.{ "preview_font", "titlebar_caption_icon_font", "titlebar_action_icon_font", "chrome_font" }) |name| {
+            const slot = &@field(host, name);
+            const font = slot.* orelse return error.FontCreateFailed;
+            _ = sys.DeleteObject(font);
+            slot.* = null;
+            const before = app.theme_rebuilds;
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(before + 1, app.theme_rebuilds);
+            try std.testing.expect(slot.* != null);
+            app.reconfigureSystemTheme();
+            try std.testing.expectEqual(before + 1, app.theme_rebuilds);
+        }
+        // A previous failed lazy search-font attempt must get another chance.
+        host.search_icon_font_resolved = true;
+        const before = app.theme_rebuilds;
+        app.reconfigureSystemTheme();
+        try std.testing.expectEqual(before + 1, app.theme_rebuilds);
+        try std.testing.expect(!host.search_icon_font_resolved);
+        app.reconfigureSystemTheme();
+        try std.testing.expectEqual(before + 1, app.theme_rebuilds);
     }
 
     fn setWindowActive(self: *Host, active: bool) void {
