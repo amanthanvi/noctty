@@ -102,6 +102,7 @@ pub const WM_POINTERWHEEL = 0x024E;
 pub const WM_NCCREATE = 0x0081;
 pub const WM_NCCALCSIZE = 0x0083;
 pub const WM_NCHITTEST = 0x0084;
+pub const WM_NCACTIVATE = 0x0086;
 pub const WM_NCMOUSEMOVE = 0x00A0;
 pub const WM_NCLBUTTONDOWN = 0x00A1;
 pub const WM_NCLBUTTONUP = 0x00A2;
