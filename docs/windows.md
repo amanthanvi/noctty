@@ -1392,6 +1392,18 @@ Legacy non-OLE file and text drop paths are ignored while copy mode owns
 input; OLE drops remain mouse gestures and continue through paste inspection
 and confirmation.
 
+The active pane shows a persistent `COPY MODE` banner while copy mode is
+active. Other key tables show `KEY TABLE: name`; if a table is nested inside
+copy mode, both are shown. A key sequence that waits at least 250 ms shows
+`KEY SEQUENCE: waiting for key`. Mode changes and a return to normal input
+send a UI Automation notification. The banner follows the active pane and
+tab, and clears when that mode ends. It overlays the top-right content area
+without changing terminal rows. Error or informational messages take
+precedence, and overlays temporarily hide the banner; an update notice
+reappears after the mode ends. The mode banner has no dismiss button: exit
+the mode using its bindings (the default copy-mode bindings include Esc
+and `q`).
+
 These bindings live in the `copy_mode` key table and can be replaced with
 normal `keybind = copy_mode/...` entries. `copy_mode` is one mode, not a
 re-enterable table: activating it again from a nested table does not stack a

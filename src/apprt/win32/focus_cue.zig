@@ -41,7 +41,7 @@ pub fn showRing(focused: bool, disabled: bool, mode: InputMode, high_contrast: b
 /// of revealing rings. Character keys do not: typing into the palette
 /// query must not light the Close button next to it. The tab strip's own
 /// verbs count too: Delete closes the focused tab and moves focus to its
-/// neighbour, F2 renames it, Apps opens the overview, and each leaves
+/// neighbour, F2 renames it, Apps opens its context menu, and each leaves
 /// keyboard focus on a control the user has to be able to find.
 pub fn keyRevealsRing(vk: u32) bool {
     return switch (vk) {

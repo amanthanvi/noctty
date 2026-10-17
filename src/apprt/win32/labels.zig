@@ -100,8 +100,31 @@ const TabButtonKeyAction = enum {
     move_last,
     rename,
     close,
-    overview,
+    /// Apps and Shift+F10: the menu a right click on the tab opens.
+    context_menu,
+    /// Tab and Shift+Tab walk the strip's stops without activating a tab.
+    focus_next,
+    focus_previous,
 };
+
+/// The modifier keys of one key press, read once by the caller. Decisions
+/// take this instead of asking the keyboard, so a test states it. AltGr
+/// reports as Ctrl and Alt together, and no rule here counts that as Alt.
+pub const KeyMods = struct {
+    shift: bool = false,
+    ctrl: bool = false,
+    alt: bool = false,
+};
+
+/// What Enter and Tab do on a tab-strip action button ([+], [v]) or a docked
+/// search button. Space is not here: the BUTTON class clicks on its key-up.
+pub const ChromeButtonKeyAction = enum {
+    click,
+    focus_next,
+    focus_previous,
+};
+
+pub const FocusStep = enum { next, previous };
 
 const SearchButtonKeyAction = enum {
     next,
@@ -167,20 +190,138 @@ pub const SearchBarButtonRole = enum {
     close,
 };
 
-pub fn tabButtonKeyAction(vk: WPARAM, ctrl_pressed: bool) ?TabButtonKeyAction {
+pub fn tabButtonKeyAction(vk: WPARAM, mods: KeyMods) ?TabButtonKeyAction {
+    // Alt chords belong to the window's menu, not to the tab.
+    if (mods.alt) return null;
     return switch (vk) {
         // Enter and Space activate the focused tab, matching every other
         // Win32 tab control. Ctrl is ignored here: Ctrl+Enter and
         // Ctrl+Space have no tab meaning and must not silently activate.
-        c.VK_RETURN, c.VK_SPACE => if (ctrl_pressed) null else .activate,
-        c.VK_LEFT => if (ctrl_pressed) .move_previous else .previous,
-        c.VK_RIGHT => if (ctrl_pressed) .move_next else .next,
-        c.VK_HOME => if (ctrl_pressed) .move_first else .first,
-        c.VK_END => if (ctrl_pressed) .move_last else .last,
+        c.VK_RETURN, c.VK_SPACE => if (mods.ctrl) null else .activate,
+        c.VK_LEFT => if (mods.ctrl) .move_previous else .previous,
+        c.VK_RIGHT => if (mods.ctrl) .move_next else .next,
+        c.VK_HOME => if (mods.ctrl) .move_first else .first,
+        c.VK_END => if (mods.ctrl) .move_last else .last,
         c.VK_F2 => .rename,
         c.VK_DELETE => .close,
-        c.VK_APPS => .overview,
+        // The overview is a palette action; the menu key opens the tab's
+        // context menu, as it does on every other Windows control.
+        c.VK_APPS => .context_menu,
+        // Shift+F10 is the same request. F10 is a system key, so it arrives
+        // as WM_SYSKEYDOWN, and plain F10 stays with the window.
+        c.VK_F10 => if (mods.shift and !mods.ctrl) .context_menu else null,
+        c.VK_TAB => switch (tabFocusStep(vk, mods) orelse return null) {
+            .next => .focus_next,
+            .previous => .focus_previous,
+        },
         else => null,
+    };
+}
+
+/// Tab and Shift+Tab, which move through a chrome region's stops. Ctrl+Tab
+/// and Alt+Tab are other chords.
+pub fn tabFocusStep(vk: WPARAM, mods: KeyMods) ?FocusStep {
+    if (vk != c.VK_TAB or mods.ctrl or mods.alt) return null;
+    return if (mods.shift) .previous else .next;
+}
+
+pub fn chromeButtonKeyAction(vk: WPARAM, mods: KeyMods) ?ChromeButtonKeyAction {
+    if (mods.ctrl or mods.alt) return null;
+    if (tabFocusStep(vk, mods)) |step| return switch (step) {
+        .next => .focus_next,
+        .previous => .focus_previous,
+    };
+    return if (vk == c.VK_RETURN) .click else null;
+}
+
+/// The key-ups that must not reach `DefWindowProc` on a tab button: it turns
+/// the menu key's release (and Shift+F10's) into a second WM_CONTEXTMENU after
+/// the key-down already opened the menu.
+pub fn tabButtonSwallowsKeyUp(vk: WPARAM, mods: KeyMods) bool {
+    return vk == c.VK_APPS or (vk == c.VK_F10 and mods.shift and !mods.ctrl and !mods.alt);
+}
+
+/// The first stop after `current` that `available` accepts, in the direction
+/// of `reverse` and wrapping, or null when no other stop is available. A stop
+/// is any focusable thing in one region; the caller owns what they are.
+pub fn nextFocusStop(
+    count: usize,
+    current: usize,
+    reverse: bool,
+    ctx: anytype,
+    comptime available: fn (@TypeOf(ctx), usize) bool,
+) ?usize {
+    if (count < 2 or current >= count) return null;
+    var step: usize = 1;
+    while (step < count) : (step += 1) {
+        const candidate = if (reverse) (current + count - step) % count else (current + step) % count;
+        if (available(ctx, candidate)) return candidate;
+    }
+    return null;
+}
+
+/// The docked search bar's keyboard stops in Tab order: the query, then each
+/// button in the order the bar lays them out.
+pub const search_focus_stop_count = 1 + std.meta.fields(SearchBarButtonRole).len;
+
+pub fn searchFocusStopOfRole(role: SearchBarButtonRole) usize {
+    return 1 + @intFromEnum(role);
+}
+
+/// The button at a search stop; null for the query (stop 0) or past the end.
+pub fn searchFocusStopRole(stop: usize) ?SearchBarButtonRole {
+    if (stop == 0 or stop >= search_focus_stop_count) return null;
+    return @enumFromInt(stop - 1);
+}
+
+/// Alt+R, Alt+C and Alt+W flip the regex, case and whole-word flags from the
+/// docked search bar. Alt has to be held without Ctrl, since AltGr reports as
+/// Ctrl+Alt and types characters on many layouts, and without Shift.
+pub fn searchToggleAccelerator(vk: WPARAM, mods: KeyMods) ?SearchBarButtonRole {
+    if (!mods.alt or mods.ctrl or mods.shift) return null;
+    return switch (vk) {
+        'R' => .regex,
+        'C' => .case_sensitive,
+        'W' => .whole_word,
+        else => null,
+    };
+}
+
+/// Pair a handled virtual-key shortcut with TranslateMessage's WM_SYSCHAR
+/// by scan code, not character: the character can be non-Latin on another
+/// layout. Only a handled press can consume a character; AltGr stays out.
+pub const SearchToggleKeys = struct {
+    pending_scan: ?u16 = null,
+
+    pub fn keyDown(self: *SearchToggleKeys, vk: WPARAM, mods: KeyMods, bits: usize) ?SearchBarButtonRole {
+        const role = searchToggleAccelerator(vk, mods);
+        self.pending_scan = if (role != null) @intCast((bits >> 16) & 0x1FF) else null;
+        return role;
+    }
+
+    pub fn consumeChar(self: *SearchToggleKeys, ch: WPARAM, bits: usize) bool {
+        _ = ch;
+        const pending = self.pending_scan;
+        self.pending_scan = null;
+        return if (pending) |scan| scan == ((bits >> 16) & 0x1FF) else false;
+    }
+};
+
+/// After a tab's context menu closes, keyboard focus goes back to the strip
+/// when the menu came from the keyboard, unless a command opened an overlay
+/// (rename, a close that asks first) that owns the keyboard now.
+pub fn tabContextMenuRestoresStripFocus(from_keyboard: bool, overlay_open: bool) bool {
+    return from_keyboard and !overlay_open;
+}
+
+/// What the tab strip's two action buttons are called to UIA and in their
+/// hover tooltips, so the two always agree.
+pub const TabStripAction = enum { new_tab, more_tabs };
+
+pub fn tabStripActionName(action: TabStripAction) []const u8 {
+    return switch (action) {
+        .new_tab => "New tab",
+        .more_tabs => "More tabs",
     };
 }
 
@@ -4000,23 +4141,156 @@ test "win32 searchBarDisplayStateChanged only trips on visible results changes" 
 test "win32 tabButtonKeyAction maps focused-tab keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_RETURN, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_SPACE, false).?);
-    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_RETURN, true));
-    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_SPACE, true));
-    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F6, false));
-    try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(c.VK_LEFT, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_previous, tabButtonKeyAction(c.VK_LEFT, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.next, tabButtonKeyAction(c.VK_RIGHT, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_next, tabButtonKeyAction(c.VK_RIGHT, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.first, tabButtonKeyAction(c.VK_HOME, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_first, tabButtonKeyAction(c.VK_HOME, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.last, tabButtonKeyAction(c.VK_END, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_last, tabButtonKeyAction(c.VK_END, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.rename, tabButtonKeyAction(c.VK_F2, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.close, tabButtonKeyAction(c.VK_DELETE, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.overview, tabButtonKeyAction(c.VK_APPS, false).?);
-    try std.testing.expect(tabButtonKeyAction(c.VK_TAB, false) == null);
+    const none: KeyMods = .{};
+    const ctrl: KeyMods = .{ .ctrl = true };
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_RETURN, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_SPACE, none).?);
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_RETURN, ctrl));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_SPACE, ctrl));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F6, none));
+    try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(c.VK_LEFT, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_previous, tabButtonKeyAction(c.VK_LEFT, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.next, tabButtonKeyAction(c.VK_RIGHT, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_next, tabButtonKeyAction(c.VK_RIGHT, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.first, tabButtonKeyAction(c.VK_HOME, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_first, tabButtonKeyAction(c.VK_HOME, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.last, tabButtonKeyAction(c.VK_END, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.move_last, tabButtonKeyAction(c.VK_END, ctrl).?);
+    try std.testing.expectEqual(TabButtonKeyAction.rename, tabButtonKeyAction(c.VK_F2, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.close, tabButtonKeyAction(c.VK_DELETE, none).?);
+}
+
+test "win32 tab button keys: the menu key and Shift+F10 open the context menu, Tab walks the strip" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const none: KeyMods = .{};
+    const shift: KeyMods = .{ .shift = true };
+    const ctrl: KeyMods = .{ .ctrl = true };
+    const alt: KeyMods = .{ .alt = true };
+    // Apps is the context menu now; the overview is only a palette action.
+    try std.testing.expectEqual(TabButtonKeyAction.context_menu, tabButtonKeyAction(c.VK_APPS, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.context_menu, tabButtonKeyAction(c.VK_APPS, shift).?);
+    try std.testing.expectEqual(TabButtonKeyAction.context_menu, tabButtonKeyAction(c.VK_F10, shift).?);
+    // Plain F10 and Ctrl+Shift+F10 are not the request.
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F10, none));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_F10, .{ .shift = true, .ctrl = true }));
+    try std.testing.expectEqual(TabButtonKeyAction.focus_next, tabButtonKeyAction(c.VK_TAB, none).?);
+    try std.testing.expectEqual(TabButtonKeyAction.focus_previous, tabButtonKeyAction(c.VK_TAB, shift).?);
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_TAB, ctrl));
+    // Alt keeps every tab key out: those chords are the window's.
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_TAB, alt));
+    try std.testing.expectEqual(@as(?TabButtonKeyAction, null), tabButtonKeyAction(c.VK_LEFT, alt));
+    // Left and Right still wrap through the tabs and Enter activates.
+    try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(c.VK_LEFT, shift).?);
+    try std.testing.expectEqual(TabButtonKeyAction.activate, tabButtonKeyAction(c.VK_RETURN, shift).?);
+
+    // DefWindowProc turns the release of the menu key and of F10 into a
+    // second WM_CONTEXTMENU once the key-down already opened the menu.
+    try std.testing.expect(tabButtonSwallowsKeyUp(c.VK_APPS, none));
+    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_F10, none));
+    try std.testing.expect(tabButtonSwallowsKeyUp(c.VK_F10, shift));
+    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_F10, .{ .shift = true, .ctrl = true }));
+    try std.testing.expect(!tabButtonSwallowsKeyUp(c.VK_RETURN, none));
+}
+
+test "win32 chrome button keys: Enter clicks and Tab moves, Ctrl and Alt do neither" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const none: KeyMods = .{};
+    try std.testing.expectEqual(ChromeButtonKeyAction.click, chromeButtonKeyAction(c.VK_RETURN, none).?);
+    try std.testing.expectEqual(ChromeButtonKeyAction.focus_next, chromeButtonKeyAction(c.VK_TAB, none).?);
+    try std.testing.expectEqual(ChromeButtonKeyAction.focus_previous, chromeButtonKeyAction(c.VK_TAB, .{ .shift = true }).?);
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_RETURN, .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_TAB, .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_TAB, .{ .alt = true }));
+    // Space is the BUTTON class's own (it clicks on the key-up).
+    try std.testing.expectEqual(@as(?ChromeButtonKeyAction, null), chromeButtonKeyAction(c.VK_SPACE, none));
+    try std.testing.expectEqual(@as(?FocusStep, FocusStep.previous), tabFocusStep(c.VK_TAB, .{ .shift = true }));
+    try std.testing.expectEqual(@as(?FocusStep, null), tabFocusStep(c.VK_RETURN, none));
+}
+
+test "win32 focus stops step in order, wrap, and skip hidden stops" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const Stops = struct {
+        visible: []const bool,
+        fn available(self: @This(), stop: usize) bool {
+            return self.visible[stop];
+        }
+    };
+    const all: Stops = .{ .visible = &.{ true, true, true, true } };
+    try std.testing.expectEqual(@as(?usize, 1), nextFocusStop(4, 0, false, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 0), nextFocusStop(4, 3, false, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 3), nextFocusStop(4, 0, true, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 1), nextFocusStop(4, 2, true, all, Stops.available));
+    const gaps: Stops = .{ .visible = &.{ true, false, false, true } };
+    try std.testing.expectEqual(@as(?usize, 3), nextFocusStop(4, 0, false, gaps, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 0), nextFocusStop(4, 3, false, gaps, Stops.available));
+    try std.testing.expectEqual(@as(?usize, 0), nextFocusStop(4, 3, true, gaps, Stops.available));
+    // Nothing else to land on: stay.
+    const alone: Stops = .{ .visible = &.{ true, false, false, false } };
+    try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 0, false, alone, Stops.available));
+    try std.testing.expectEqual(@as(?usize, null), nextFocusStop(1, 0, false, all, Stops.available));
+    try std.testing.expectEqual(@as(?usize, null), nextFocusStop(4, 9, false, all, Stops.available));
+}
+
+test "win32 docked search stops run query, prev, next, regex, case, word, close" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(usize, 7), search_focus_stop_count);
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchFocusStopRole(0));
+    const order = [_]SearchBarButtonRole{ .prev, .next, .regex, .case_sensitive, .whole_word, .close };
+    for (order, 1..) |role, stop| {
+        try std.testing.expectEqual(@as(?SearchBarButtonRole, role), searchFocusStopRole(stop));
+        try std.testing.expectEqual(stop, searchFocusStopOfRole(role));
+    }
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchFocusStopRole(search_focus_stop_count));
+}
+
+test "win32 search toggle accelerators need Alt without Ctrl, Shift or AltGr" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alt: KeyMods = .{ .alt = true };
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, .regex), searchToggleAccelerator('R', alt));
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, .case_sensitive), searchToggleAccelerator('C', alt));
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, .whole_word), searchToggleAccelerator('W', alt));
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('X', alt));
+    // No Alt, or Alt with Ctrl (AltGr reports as both), or Shift: not ours.
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{}));
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{ .ctrl = true }));
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{ .alt = true, .ctrl = true }));
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, null), searchToggleAccelerator('R', .{ .alt = true, .shift = true }));
+    var keys: SearchToggleKeys = .{};
+    const r_scan = 0x13 << 16;
+    const c_scan = 0x2E << 16;
+    try std.testing.expectEqual(@as(?SearchBarButtonRole, .regex), keys.keyDown('R', alt, r_scan));
+    // Cyrillic K on the R key is consumed just like Latin r.
+    try std.testing.expect(keys.consumeChar(0x041A, r_scan));
+    try std.testing.expect(!keys.consumeChar('r', r_scan));
+    _ = keys.keyDown('C', alt, c_scan);
+    try std.testing.expect(keys.consumeChar('C', c_scan));
+    _ = keys.keyDown('R', alt, r_scan);
+    try std.testing.expect(!keys.consumeChar('c', c_scan));
+    _ = keys.keyDown('R', .{ .alt = true, .ctrl = true }, r_scan);
+    try std.testing.expect(!keys.consumeChar(0x20AC, r_scan));
+    _ = keys.keyDown('R', alt, r_scan);
+    _ = keys.keyDown('X', alt, r_scan);
+    try std.testing.expect(!keys.consumeChar('x', r_scan));
+}
+
+test "win32 a tab context menu hands focus back to the strip only from the keyboard and without an overlay" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(tabContextMenuRestoresStripFocus(true, false));
+    try std.testing.expect(!tabContextMenuRestoresStripFocus(true, true));
+    try std.testing.expect(!tabContextMenuRestoresStripFocus(false, false));
+}
+
+test "win32 tab strip action names are the UIA names the tooltips show" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings("New tab", tabStripActionName(.new_tab));
+    try std.testing.expectEqualStrings("More tabs", tabStripActionName(.more_tabs));
 }
 
 test "win32 moveTabAmountToEdge computes direct host reorder delta" {

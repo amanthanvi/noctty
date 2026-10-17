@@ -695,6 +695,7 @@ pub extern "shell32" fn DragFinish(hDrop: *anyopaque) callconv(.winapi) void;
 pub extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi) BOOL;
 
 pub extern "user32" fn GetParent(hWnd: HWND) callconv(.winapi) ?HWND;
+pub extern "user32" fn GetDlgCtrlID(hWnd: HWND) callconv(.winapi) i32;
 pub extern "user32" fn GetWindow(hWnd: HWND, uCmd: UINT) callconv(.winapi) ?HWND;
 
 pub extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;

@@ -9338,6 +9338,7 @@ pub const App = struct {
                 surface.setVisible(true);
                 self.commitShellSurfaceActivation(surface);
                 self.syncTaskbarProgressForHost(surface.host_id);
+                runUiActionOrLog("input mode focus sync failed", found.host.refreshModeIndicator());
                 return;
             }
         }
@@ -9363,6 +9364,7 @@ pub const App = struct {
         found.host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         found.tab.focused = handle;
         self.commitShellSurfaceFocus(surface);
+        runUiActionOrLog("input mode focus sync failed", found.host.refreshModeIndicator());
         return changed;
     }
 
@@ -13345,6 +13347,10 @@ const Host = struct {
     tab_close_prev_hwnd: ?HWND = null,
     banner_kind: HostBannerKind = .none,
     banner_text: ?[:0]const u8 = null,
+    /// Persistent input mode, separate from transient/error notifications.
+    mode_indicator_text: ?[:0]const u8 = null,
+    mode_indicator_surface: ?*Surface = null,
+    mode_timer_active: bool = false,
     /// This host's config problems, behind an earlier error until it is
     /// dismissed. Owned separately from the ordinary single banner slot.
     config_problems_text: ?[:0]const u8 = null,
@@ -16041,6 +16047,10 @@ const Host = struct {
             if (self.hwnd) |h| _ = sys.KillTimer(h, c.BANNER_TIMER_ID);
             self.banner_expires_at = null;
         }
+        if (self.mode_timer_active) {
+            if (self.hwnd) |h| _ = sys.KillTimer(h, c.INPUT_MODE_TIMER_ID);
+            self.mode_timer_active = false;
+        }
         self.tween_sched.deinit();
 
         self.revertPaletteThemePreview();
@@ -16051,6 +16061,7 @@ const Host = struct {
         self.destroyChildControls();
 
         if (self.banner_text) |value| self.app.core_app.alloc.free(value);
+        if (self.mode_indicator_text) |value| self.app.core_app.alloc.free(value);
         if (self.config_problems_text) |value| self.app.core_app.alloc.free(value);
         // A prompt still open when its window goes, such as a window-close
         // prompt whose last terminal exited meanwhile.
@@ -16362,7 +16373,7 @@ const Host = struct {
         runUiActionOrLog("tab drag reorder layout failed", self.layout());
     }
 
-    /// Hide the tab title tooltip if one is up.
+    /// Hide the tooltip popup if one is up (a tab's title or a chrome button's name).
     fn hideTabTooltip(self: *Host) void {
         self.tab_tooltip_tab_id = null;
         self.button_tooltip.shown = null;
@@ -16374,13 +16385,22 @@ const Host = struct {
         _ = sys.ShowWindow(hwnd, c.SW_HIDE);
     }
 
-    /// Name an icon-only search bar button in a tooltip under it. The icons
+    /// The name an icon-only chrome button's hover tooltip spells out: the
+    /// search bar's six buttons and the tab strip's [+] and [v]. It is the
+    /// button's UIA name, from the same tables, so the two always agree.
+    fn chromeButtonTooltipName(self: *const Host, button: HWND) ?[]const u8 {
+        if (self.new_tab_hwnd == button) return labels.tabStripActionName(.new_tab);
+        if (self.overflow_hwnd == button) return labels.tabStripActionName(.more_tabs);
+        const role = self.searchBarButtonRole(button) orelse return null;
+        return labels.searchBarButtonName(role);
+    }
+
+    /// Name an icon-only chrome button in a tooltip under it. The icons
     /// are small drawn glyphs, so the name is otherwise only available to
     /// screen readers. `ButtonTooltip.apply` has already decided the tooltip
     /// should come up for `button`.
-    fn showSearchButtonTooltip(self: *Host, button: HWND) void {
-        const role = self.searchBarButtonRole(button) orelse return;
-        const text = labels.searchBarButtonName(role);
+    fn showChromeButtonTooltip(self: *Host, button: HWND) void {
+        const text = self.chromeButtonTooltipName(button) orelse return;
         const name_changed = !ownedStringEquals(self.tab_tooltip_text, text);
         self.presentTooltip(button, sys.IsWindowVisible(button) != 0, text, name_changed, .{ .button = button });
     }
@@ -17077,6 +17097,130 @@ const Host = struct {
         _ = try host.applyLatestStructuralRedo();
         try std.testing.expectEqual(@as(?*Surface, &surface_c), host.activeSurface());
         try std.testing.expectEqual(first_left, host.tabs.items[0].button_placement.rect.left);
+    }
+
+    test "Tab and Shift+Tab walk the tab strip's visible tabs, [+] and [v]; the menu key's release is swallowed" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(tabStripKeyboardTestBody);
+    }
+
+    fn tabStripKeyboardTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface_a: Surface = undefined;
+        var surface_b: Surface = undefined;
+        var surface_c: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true, .active_tab = 0 }},
+            .surfaces = &.{
+                .{ .storage = &surface_a, .host = &host, .register = true },
+                .{ .storage = &surface_b, .host = &host, .register = true },
+                .{ .storage = &surface_c, .host = &host, .register = true },
+            },
+            .tabs = &.{
+                .{ .host = &host, .surface = &surface_a, .id = 1 },
+                .{ .host = &host, .surface = &surface_b, .id = 2 },
+                .{ .host = &host, .surface = &surface_c, .id = 3 },
+            },
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        _ = sys.MoveWindow(window.parent, 0, 0, 1200, 300, 0);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        try host.refreshChrome();
+        try host.layout();
+        surface_a.hwnd = window.pane;
+        surface_b.hwnd = try createTestChromeChild(window.parent, prompt_label_class);
+        surface_c.hwnd = try createTestChromeChild(window.parent, prompt_label_class);
+        defer for ([_]*Surface{ &surface_a, &surface_b, &surface_c }) |surface| {
+            surface.hwnd = null;
+        };
+
+        // The stops the walk has to visit, read from live visibility.
+        var stops: [8]HWND = undefined;
+        var count: usize = 0;
+        for (0..host.tabs.items.len + 2) |stop| {
+            if (host.tabStripStopHwnd(stop)) |stop_hwnd| {
+                stops[count] = stop_hwnd;
+                count += 1;
+            }
+        }
+        // All three tabs are on screen, in order, and [+] / [v] follow.
+        try std.testing.expect(count >= 3);
+        for (host.tabs.items, 0..) |tab, i| {
+            try std.testing.expectEqual(tab.button_hwnd.?, stops[i]);
+        }
+
+        // Forward: each Tab lands on the next stop and wraps at the end.
+        const keyboard = win32_input.TestingKeyboard.pinNone();
+        defer keyboard.release();
+        _ = sys.SetFocus(stops[0]);
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(stops[i], c.WM_KEYDOWN, c.VK_TAB, 0));
+            try std.testing.expectEqual(@as(?HWND, stops[(i + 1) % count]), sys.GetFocus());
+        }
+        // Tab moved focus only: the active tab is still the first.
+        try std.testing.expectEqual(@as(usize, 0), host.active_tab);
+
+        // Backward with Shift held.
+        var held = [_]u8{0} ** 256;
+        held[c.VK_SHIFT] = 0x80;
+        keyboard.set(&held);
+        _ = sys.SetFocus(stops[0]);
+        i = 0;
+        while (i < count) : (i += 1) {
+            const from = stops[(count - i) % count];
+            try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(from, c.WM_KEYDOWN, c.VK_TAB, 0));
+            try std.testing.expectEqual(@as(?HWND, stops[(count - i - 1) % count]), sys.GetFocus());
+        }
+        keyboard.set(&([_]u8{0} ** 256));
+
+        // Enter is a keyboard activation, not a synthetic mouse press.
+        const Clicks = struct {
+            threadlocal var click_count: usize = 0;
+            threadlocal var previous: WNDPROC = undefined;
+            fn proc(h: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(.winapi) LRESULT {
+                if (msg == c.WM_COMMAND) {
+                    click_count += 1;
+                    return 0;
+                }
+                return sys.CallWindowProcW(previous, h, msg, wp, lp);
+            }
+        };
+        Clicks.click_count = 0;
+        Clicks.previous = @ptrFromInt(@as(usize, @intCast(sys.SetWindowLongPtrW(window.parent, c.GWLP_WNDPROC, @intCast(@intFromPtr(&Clicks.proc))))));
+        defer _ = sys.SetWindowLongPtrW(window.parent, c.GWLP_WNDPROC, @intCast(@intFromPtr(Clicks.previous)));
+        const new_tab = host.new_tab_hwnd.?;
+        _ = sys.SetFocus(new_tab);
+        host.focus_input_mode = .keyboard;
+        try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(new_tab, c.WM_KEYDOWN, c.VK_RETURN, 0));
+        try std.testing.expectEqual(focus_cue.InputMode.keyboard, host.focus_input_mode);
+        try std.testing.expect(host.button_tooltip.dismissed == null);
+        try std.testing.expectEqual(@as(usize, 1), Clicks.click_count);
+        _ = sys.SendMessageW(new_tab, c.WM_KEYDOWN, c.VK_RETURN, c.KF_REPEAT);
+        try std.testing.expectEqual(@as(usize, 1), Clicks.click_count);
+
+        // [+] and [v] name themselves for the tooltip as UIA does; a tab does not.
+        try std.testing.expectEqualStrings("New tab", host.chromeButtonTooltipName(host.new_tab_hwnd.?).?);
+        try std.testing.expectEqualStrings("More tabs", host.chromeButtonTooltipName(host.overflow_hwnd.?).?);
+        try std.testing.expect(host.chromeButtonTooltipName(host.tabs.items[0].button_hwnd.?) == null);
+
+        // The menu key opens the menu on its key-down; its release must not
+        // post a second WM_CONTEXTMENU (a sent one is swallowed by the proc).
+        const tab_button = host.tabs.items[0].button_hwnd.?;
+        var queued: sys.MSG = undefined;
+        try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(tab_button, c.WM_KEYUP, c.VK_APPS, 0));
+        try std.testing.expectEqual(@as(BOOL, 0), sys.PeekMessageW(&queued, tab_button, c.WM_CONTEXTMENU, c.WM_CONTEXTMENU, c.PM_REMOVE));
+        try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(tab_button, c.WM_SYSKEYUP, c.VK_F10, 0));
+        try std.testing.expectEqual(@as(BOOL, 0), sys.PeekMessageW(&queued, tab_button, c.WM_CONTEXTMENU, c.WM_CONTEXTMENU, c.PM_REMOVE));
+        try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(tab_button, c.WM_CONTEXTMENU, @intFromPtr(tab_button), -1));
     }
 
     test "bell glyph marks the alerted tab and the caption, and nothing stored" {
@@ -18320,18 +18464,174 @@ const Host = struct {
         self.placeBanner(true);
     }
 
-    /// Whether the banner child belongs on screen: there is a message or an
-    /// update notice to show, and no overlay is open (an overlay shows banner
-    /// text in its own feedback lane).
+    fn refreshModeIndicator(self: *Host) !void {
+        try self.refreshModeIndicatorAt(sys.GetTickCount64());
+    }
+
+    fn refreshModeIndicatorAt(self: *Host, now_ms: u64) !void {
+        const surface = self.activeSurface();
+        const since = if (surface) |s| s.key_sequence_since_ms else null;
+        const delay: ?u32 = if (since) |start|
+            if (now_ms -| start < 250) @intCast(250 - (now_ms -| start)) else null
+        else
+            null;
+        // Recompute from the active surface on every tick. A queued tick from
+        // a canceled sequence or another tab cannot resurrect its indicator.
+        if (self.hwnd) |hwnd| {
+            if (delay) |ms| {
+                _ = sys.SetTimer(hwnd, c.INPUT_MODE_TIMER_ID, ms, null);
+                self.mode_timer_active = true;
+            } else if (self.mode_timer_active) {
+                _ = sys.KillTimer(hwnd, c.INPUT_MODE_TIMER_ID);
+                self.mode_timer_active = false;
+            }
+        }
+        var buf: [512]u8 = undefined;
+        const text = if (surface) |s| inputModeText(
+            s.key_table_name,
+            s.key_table_copy_mode,
+            s.key_sequence_active and delay == null,
+            &buf,
+        ) else null;
+        const same_text = optionalOwnedStringEquals(self.mode_indicator_text, text);
+        if (same_text and self.mode_indicator_surface == surface) return;
+        const announce = self.mode_indicator_text != null or text != null;
+        try appendOwnedString(self.app.core_app.alloc, &self.mode_indicator_text, text);
+        self.mode_indicator_surface = surface;
+        // Never run layout or resize a ConPTY for an input-state change.
+        self.placeBanner(true);
+        if (announce) if (surface) |s| {
+            const message = self.mode_indicator_text orelse "Normal input";
+            const announced = if (s.terminal_accessibility) |session| session.announceInputMode(message) else false;
+            if (!announced) if (self.banner_uia_provider) |provider| {
+                win32_uia.events.raiseInputModeNotification(&provider.base, message);
+            };
+        };
+    }
+
+    fn inputModeText(table: ?[]const u8, copy_mode: bool, sequence: bool, buf: []u8) ?[]const u8 {
+        if (table) |name| {
+            const is_copy = copy_mode and std.mem.eql(u8, name, "copy_mode");
+            const prefix: []const u8 = if (is_copy) "COPY MODE" else if (copy_mode) "COPY MODE; KEY TABLE: " else "KEY TABLE: ";
+            return std.fmt.bufPrint(buf, "{s}{s}{s}", .{
+                prefix,
+                if (is_copy) "" else utf8BoundedPrefix(name, @min(name.len, 384)),
+                if (sequence) "; waiting for key" else "",
+            }) catch prefix;
+        }
+        if (copy_mode) return if (sequence) "COPY MODE; waiting for key" else "COPY MODE";
+        return if (sequence) "KEY SEQUENCE: waiting for key" else null;
+    }
+
+    test "chrome input mode text keeps nested copy mode and pending sequences" {
+        var buf: [512]u8 = undefined;
+        try std.testing.expectEqualStrings("COPY MODE; KEY TABLE: resize", inputModeText("resize", true, false, &buf).?);
+        try std.testing.expectEqualStrings("COPY MODE; waiting for key", inputModeText("copy_mode", true, true, &buf).?);
+        try std.testing.expectEqualStrings("KEY SEQUENCE: waiting for key", inputModeText(null, false, true, &buf).?);
+        try std.testing.expectEqual(@as(?[]const u8, null), inputModeText(null, false, false, &buf));
+    }
+
+    test "chrome input mode native banner follows active surface and delayed sequences" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(inputModeBannerTestBody);
+    }
+
+    fn inputModeBannerTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var first: Surface = undefined;
+        var second: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host }},
+            .surfaces = &.{ .{ .storage = &first, .host = &host }, .{ .storage = &second, .host = &host } },
+            .tabs = &.{ .{ .host = &host, .surface = &first, .id = 1 }, .{ .host = &host, .surface = &second, .id = 2 } },
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        host.layoutBanner(window.content, window.content.top);
+        const banner = host.banner_hwnd.?;
+        // TestSession deliberately has no COM apartment. Attach the same
+        // live-text provider contract without COM threading for this fixture.
+        const provider = try win32_uia.ChromeControlProvider.create(std.testing.allocator, banner, .{
+            .ctx = @ptrCast(&host),
+            .role = .live_text,
+            .name = &bannerUiaName,
+        });
+        host.banner_uia_provider = provider;
+        defer {
+            host.banner_uia_provider = null;
+            _ = provider.base.vtbl.Release(&provider.base);
+        }
+        try std.testing.expectEqual(.live_text, provider.state.role);
+        var name: [512]u8 = undefined;
+        const before = win32_uia.events.testing_input_modes;
+        try first.setKeyTable(.{ .activate = "copy_mode" });
+        try std.testing.expect(bannerTestVisible(banner));
+        try std.testing.expectEqual(.mode, host.bannerActions());
+        try std.testing.expect(host.banner_expires_at == null);
+        try std.testing.expectEqualStrings("COPY MODE", provider.state.name(provider.state.ctx, provider.state.tag, &name));
+        for (host.banner_buttons) |button| try std.testing.expect(!bannerTestVisible(button.?));
+        try std.testing.expectEqual(before + 1, win32_uia.events.testing_input_modes);
+        try first.setKeyTable(.{ .activate = "copy_mode" });
+        try std.testing.expectEqual(before + 1, win32_uia.events.testing_input_modes);
+        // A background pane's mode does not replace the active mode.
+        try second.setKeyTable(.{ .activate = "resize" });
+        try std.testing.expectEqualStrings("COPY MODE", bannerUiaName(@ptrCast(&host), 0, &name));
+        host.active_tab = 1;
+        try host.refreshModeIndicatorAt(1000);
+        try std.testing.expectEqualStrings("KEY TABLE: resize", bannerUiaName(@ptrCast(&host), 0, &name));
+        // Error feedback keeps precedence; clearing the mode leaves it intact.
+        try host.setBanner(.err, "Failure");
+        try second.setKeyTable(.deactivate_all);
+        try std.testing.expectEqualStrings("Failure", bannerUiaName(@ptrCast(&host), 0, &name));
+        try host.setBanner(.none, null);
+        try std.testing.expect(!bannerTestVisible(banner));
+        second.key_sequence_active = true;
+        second.key_sequence_since_ms = 1000;
+        try host.refreshModeIndicatorAt(1249);
+        try std.testing.expect(!bannerTestVisible(banner));
+        try host.refreshModeIndicatorAt(1250);
+        try std.testing.expect(bannerTestVisible(banner));
+        try std.testing.expectEqualStrings("KEY SEQUENCE: waiting for key", bannerUiaName(@ptrCast(&host), 0, &name));
+        try second.setKeySequenceActive(false);
+        try std.testing.expect(!bannerTestVisible(banner));
+        // A queued tick after cancellation must not revive the sequence.
+        try host.refreshModeIndicatorAt(1500);
+        try std.testing.expect(!bannerTestVisible(banner));
+        host.active_tab = 0;
+        try host.refreshModeIndicatorAt(1600);
+        try std.testing.expectEqualStrings("COPY MODE", bannerUiaName(@ptrCast(&host), 0, &name));
+        app.update_notice = try UpdateNotice.init(std.testing.allocator, "1.3.200", "https://example.invalid/release", false);
+        defer {
+            app.update_notice.?.deinit(std.testing.allocator);
+            app.update_notice = null;
+        }
+        host.updateNoticeChanged(true);
+        try std.testing.expect(host.banner_announce_pending);
+        try std.testing.expectEqual(.mode, host.bannerActions());
+        try first.setKeyTable(.deactivate_all);
+        try std.testing.expectEqual(.update, host.bannerActions());
+        try std.testing.expect(!host.banner_announce_pending);
+        try std.testing.expect(bannerTestVisible(banner));
+    }
+
+    /// Whether the banner child belongs on screen: message, mode or update
+    /// text exists and no overlay owns the feedback lane.
     fn bannerShown(self: *const Host) bool {
         if (self.overlay_mode != .none) return false;
-        return self.banner_text != null or self.app.update_notice != null;
+        return self.banner_text != null or self.mode_indicator_text != null or self.app.update_notice != null;
     }
 
     /// The buttons the banner offers: a message set with `setBanner` takes
     /// precedence over the update notice, and has a close button.
     fn bannerActions(self: *const Host) chrome_layout.BannerActions {
         if (self.banner_text == null) {
+            if (self.mode_indicator_text != null) return .mode;
             if (self.app.update_notice) |notice| return if (notice.staged) .update_staged else .update;
         }
         return .close;
@@ -18458,7 +18758,7 @@ const Host = struct {
             // would hold the next message's countdown.
             if (self.bannerButtonOf(self.hovered_button_hwnd) != null) self.setHoveredButton(null);
         }
-        if (shown and self.banner_announce_pending) {
+        if (shown and self.banner_announce_pending and self.mode_indicator_text == null) {
             self.banner_announce_pending = false;
             if (self.banner_uia_provider) |provider| provider.raiseLiveRegionChanged();
         }
@@ -18604,6 +18904,8 @@ const Host = struct {
         var fixed = std.heap.FixedBufferAllocator.init(&bytes);
         const text: []const u8 = if (self.banner_text) |message|
             buildHostBannerText(fixed.allocator(), self.banner_kind, message) catch message
+        else if (self.mode_indicator_text) |mode|
+            mode
         else if (self.app.update_notice) |notice|
             notice.message_text orelse ""
         else
@@ -19838,15 +20140,13 @@ const Host = struct {
     }
 
     fn hostActionUiaName(_: *anyopaque, tag: usize, _: []u8) []const u8 {
-        return switch (tag) {
-            0 => "New tab",
-            else => "More tabs",
-        };
+        return labels.tabStripActionName(if (tag == 0) .new_tab else .more_tabs);
     }
 
     fn bannerUiaName(ctx: *anyopaque, _: usize, buf: []u8) []const u8 {
         const self: *Host = @ptrCast(@alignCast(ctx));
         if (self.banner_text) |text| return std.fmt.bufPrint(buf, "{s}", .{text}) catch "Notification";
+        if (self.mode_indicator_text) |text| return std.fmt.bufPrint(buf, "{s}", .{text}) catch "Input mode";
         const notice = self.app.update_notice orelse return "";
         const message = notice.message_text orelse return "";
         return std.fmt.bufPrint(buf, "{s}", .{message}) catch "Update available";
@@ -21205,9 +21505,27 @@ const Host = struct {
         }
     }
 
-    fn showTabContextMenu(self: *Host, button_hwnd: HWND, tab_index: usize) void {
-        const hwnd = self.hwnd orelse return;
-        const menu = sys.CreatePopupMenu() orelse return;
+    const TabMenuOrigin = enum { pointer, keyboard };
+
+    /// Open the context menu of the tab at `tab_index`. The tab is activated
+    /// first, so every command acts on it and not on whichever tab was in
+    /// front. A menu opened from the keyboard hands focus back to the strip
+    /// when it closes (`labels.tabContextMenuRestoresStripFocus`), on the
+    /// tab the menu was for. Returns false, with the menu not shown, when the
+    /// tab could not be activated. `self` may be gone when it returns true:
+    /// closing a window's only tab closes the window.
+    fn showTabContextMenu(self: *Host, button_hwnd: HWND, tab_index: usize, origin: TabMenuOrigin) bool {
+        const app = self.app;
+        const host_id = self.id;
+        const hwnd = self.hwnd orelse return false;
+        if (tab_index >= self.tabs.items.len) return false;
+        const tab_id = self.tabs.items[tab_index].id;
+        if (origin != .keyboard or tab_index != self.active_tab) {
+            if (!self.activateTabIndex(tab_index)) return false;
+        }
+        // The menu answers the question a title tooltip was there for.
+        self.hideTabTooltip();
+        const menu = sys.CreatePopupMenu() orelse return true;
         defer _ = sys.DestroyMenu(menu);
 
         _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RENAME, std.unicode.utf8ToUtf16LeStringLiteral("Rename Tab"));
@@ -21223,40 +21541,157 @@ const Host = struct {
 
         // Position below the tab button
         var rect: RECT = undefined;
-        if (sys.GetWindowRect(button_hwnd, &rect) == 0) return;
+        if (sys.GetWindowRect(button_hwnd, &rect) == 0) return true;
 
         _ = sys.SetForegroundWindow(hwnd);
         const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
         _ = sys.PostMessageW(hwnd, c.WM_NULL, 0, 0);
 
-        if (cmd <= 0) return;
-        const surface = self.activeSurface() orelse return;
-        if (!surface.core_initialized) return;
-
-        switch (@as(usize, @intCast(cmd))) {
-            c.CTX_TAB_RENAME => {
-                runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
-            },
-            c.CTX_TAB_CLOSE => {
-                if (tabCloseAction(self.tabs.items.len) == .close_window) return self.close();
-                _ = self.app.closeTab(.{ .surface = surface.core() }, .this) catch |err| {
-                    log.warn("close_tab action failed err={}", .{err});
-                };
-            },
-            c.CTX_TAB_CLOSE_OTHERS => {
-                _ = self.app.closeTab(.{ .surface = surface.core() }, .other) catch |err| {
-                    log.warn("close_tab other action failed err={}", .{err});
-                };
-            },
-            c.CTX_TAB_MOVE_LEFT => {
-                runUiActionOrLog("tab context move left failed", self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }));
-            },
-            c.CTX_TAB_MOVE_RIGHT => {
-                runUiActionOrLog("tab context move right failed", self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }));
-            },
-            else => {},
+        // A modal menu pumps window messages. A close can free the Host,
+        // so resolve its identity through the still-live App before reading it.
+        var live = app.findHostById(host_id) orelse return true;
+        if (cmd > 0) {
+            // The tabs may have moved while the menu was up: find ours again.
+            const index = live.findTabIndexById(tab_id) orelse return true;
+            const surface = live.tabs.items[index].focusedSurface() orelse return true;
+            if (surface.core_initialized) switch (@as(usize, @intCast(cmd))) {
+                c.CTX_TAB_RENAME => {
+                    runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
+                },
+                c.CTX_TAB_CLOSE => {
+                    if (tabCloseAction(live.tabs.items.len) == .close_window) {
+                        live.close();
+                        return true;
+                    }
+                    _ = live.app.closeTab(.{ .surface = surface.core() }, .this) catch |err| {
+                        log.warn("close_tab action failed err={}", .{err});
+                    };
+                },
+                c.CTX_TAB_CLOSE_OTHERS => {
+                    _ = live.app.closeTab(.{ .surface = surface.core() }, .other) catch |err| {
+                        log.warn("close_tab other action failed err={}", .{err});
+                    };
+                },
+                c.CTX_TAB_MOVE_LEFT => {
+                    runUiActionOrLog("tab context move left failed", live.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }));
+                },
+                c.CTX_TAB_MOVE_RIGHT => {
+                    runUiActionOrLog("tab context move right failed", live.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }));
+                },
+                else => {},
+            };
         }
-        _ = tab_index;
+        // Escape, a move or a close leaves focus on the terminal the
+        // activation put it on, and the next arrow press would go to the
+        // PTY. Rename and a close that asks first opened an overlay, which
+        // owns the keyboard now.
+        live = app.findHostById(host_id) orelse return true;
+        if (live.hwnd != null and labels.tabContextMenuRestoresStripFocus(origin == .keyboard, live.overlay_mode != .none)) {
+            live.restoreTabStripFocus();
+        }
+        return true;
+    }
+
+    /// The stops of the tab strip in Tab order: each tab, then [+], then [v].
+    fn tabStripStopHwnd(self: *const Host, stop: usize) ?HWND {
+        if (stop < self.tabs.items.len) return focusableHwnd(self.tabs.items[stop].button_hwnd);
+        if (stop == self.tabs.items.len) return focusableHwnd(self.new_tab_hwnd);
+        if (stop == self.tabs.items.len + 1) return focusableHwnd(self.overflow_hwnd);
+        return null;
+    }
+
+    fn tabStripStopAvailable(self: *const Host, stop: usize) bool {
+        return self.tabStripStopHwnd(stop) != null;
+    }
+
+    fn tabStripStopOf(self: *const Host, button: HWND) ?usize {
+        for (self.tabs.items, 0..) |tab, i| {
+            if (tab.button_hwnd == button) return i;
+        }
+        if (self.new_tab_hwnd == button) return self.tabs.items.len;
+        if (self.overflow_hwnd == button) return self.tabs.items.len + 1;
+        return null;
+    }
+
+    fn isTabStripActionButton(self: *const Host, button: HWND) bool {
+        return self.new_tab_hwnd == button or self.overflow_hwnd == button;
+    }
+
+    /// Move keyboard focus one stop along the tab strip (each visible tab,
+    /// then [+] and [v], wrapping), from `from`. Focus only moves: Enter and
+    /// the arrow keys still activate. Each landing HWND raises its own UIA
+    /// focus event from `WM_SETFOCUS`.
+    fn stepTabStripFocus(self: *Host, from: HWND, reverse: bool) bool {
+        const current = self.tabStripStopOf(from) orelse return false;
+        const next = labels.nextFocusStop(
+            self.tabs.items.len + 2,
+            current,
+            reverse,
+            @as(*const Host, self),
+            tabStripStopAvailable,
+        ) orelse return false;
+        const target = self.tabStripStopHwnd(next) orelse return false;
+        _ = sys.SetFocus(target);
+        return sys.GetFocus() == target;
+    }
+
+    /// Move keyboard focus one stop along the docked search bar of `surface`
+    /// (query, previous, next, regex, case, word, close), skipping hidden
+    /// controls and wrapping, from `from`.
+    fn stepSearchFocus(self: *Host, surface: *Surface, from: HWND, reverse: bool) bool {
+        _ = self;
+        const current = if (surface.search_bar_edit_hwnd != null and surface.search_bar_edit_hwnd.? == from)
+            0
+        else if (surface.searchBarButtonRole(from)) |role|
+            labels.searchFocusStopOfRole(role)
+        else
+            return false;
+        const next = labels.nextFocusStop(
+            labels.search_focus_stop_count,
+            current,
+            reverse,
+            @as(*const Surface, surface),
+            searchFocusStopAvailable,
+        ) orelse return false;
+        const target = searchFocusStopHwnd(surface, next) orelse return false;
+        _ = sys.SetFocus(target);
+        return sys.GetFocus() == target;
+    }
+
+    /// Enter and Tab on a tab-strip action button or a docked search button;
+    /// the BUTTON class takes Space itself, on the key-up. Enter has to be
+    /// made a click here: it reaches a button only through a dialog manager,
+    /// and the host has none. Touch nothing after a click: it can open a
+    /// menu, or close the search bar.
+    fn handleChromeButtonKey(self: *Host, button: HWND, vk: WPARAM, mods: labels.KeyMods, lParam: LPARAM) bool {
+        const search_surface = if (self.searchControlSurface(button)) |surface|
+            if (surface.searchBarButtonRole(button) != null) surface else null
+        else
+            null;
+        const in_strip = self.isTabStripActionButton(button);
+        if (!in_strip and search_surface == null) return false;
+        const action = labels.chromeButtonKeyAction(vk, mods) orelse return false;
+        switch (action) {
+            .click => {
+                if ((lParamBits(lParam) & c.KF_REPEAT) != 0) return true;
+                const parent = sys.GetParent(button) orelse return false;
+                const id = sys.GetDlgCtrlID(button);
+                if (id <= 0) return false;
+                // BM_CLICK simulates mouse messages, which hide keyboard
+                // focus cues and dismiss tooltips. Send its notification
+                // directly, and touch nothing after the action runs.
+                _ = sys.SendMessageW(parent, c.WM_COMMAND, @as(WPARAM, @intCast(id)) | (@as(WPARAM, c.BN_CLICKED) << 16), @intCast(@intFromPtr(button)));
+            },
+            .focus_next, .focus_previous => {
+                const reverse = action == .focus_previous;
+                if (search_surface) |surface| {
+                    _ = self.stepSearchFocus(surface, button, reverse);
+                } else {
+                    _ = self.stepTabStripFocus(button, reverse);
+                }
+            },
+        }
+        return true;
     }
 
     fn showOverflowMenu(self: *Host) void {
@@ -22905,6 +23340,7 @@ const Host = struct {
     }
 
     fn refreshChrome(self: *Host) !void {
+        try self.refreshModeIndicator();
         var invalidate = self.chrome_repaint_dirty;
         _ = try self.syncWindowTitle();
         invalidate = (try self.syncTabButtons()) or invalidate;
@@ -30339,6 +30775,16 @@ fn scrollbarProc(
 
 const tabButtonKeyAction = labels.tabButtonKeyAction;
 
+/// The modifiers held for the key message being handled. A test pins them
+/// with `TestingKeyboard`; AltGr reads as Ctrl plus Alt.
+fn chromeKeyMods() labels.KeyMods {
+    return .{
+        .shift = keyPressed(c.VK_SHIFT),
+        .ctrl = keyPressed(c.VK_CONTROL),
+        .alt = keyPressed(c.VK_MENU),
+    };
+}
+
 const moveTabAmountToEdge = labels.moveTabAmountToEdge;
 
 const searchButtonKeyAction = labels.searchButtonKeyAction;
@@ -30704,6 +31150,32 @@ fn readWindowTextUtf8Alloc(alloc: Allocator, hwnd: HWND) ![:0]u8 {
 fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
     if (lParam == 0) return null;
     return @ptrFromInt(@as(usize, @intCast(lParam)));
+}
+
+/// The control at a docked search bar stop (`labels.search_focus_stop_count`),
+/// or null while it is hidden: the toggles and arrows hide when the bar is
+/// too narrow, and a closed bar hides them all.
+fn searchFocusStopHwnd(surface: *const Surface, stop: usize) ?HWND {
+    if (stop == 0) return focusableHwnd(surface.search_bar_edit_hwnd);
+    const role = labels.searchFocusStopRole(stop) orelse return null;
+    return focusableHwnd(surface.searchBarButtonHwnd(role));
+}
+
+fn searchFocusStopAvailable(surface: *const Surface, stop: usize) bool {
+    return searchFocusStopHwnd(surface, stop) != null;
+}
+
+/// Alt+R, Alt+C and Alt+W from the docked search bar's query or buttons.
+/// True when the key is one of those chords, so the caller swallows it; a
+/// held key does not toggle again.
+fn searchToggleKey(surface: *Surface, vk: WPARAM, lParam: LPARAM) bool {
+    const role = surface.search_toggle_keys.keyDown(vk, chromeKeyMods(), lParamBits(lParam)) orelse return false;
+    if ((lParamBits(lParam) & c.KF_REPEAT) == 0) {
+        _ = surface.handleSearchToggleClick(labels.searchBarButtonCommandId(role)) catch |err| {
+            logUiActionError("docked search accelerator toggle failed", err);
+        };
+    }
+    return true;
 }
 
 fn expectedButtonClick(notify: u16, child: ?HWND, expected: ?HWND) bool {
@@ -31704,8 +32176,9 @@ const ButtonTooltipAction = enum {
 };
 
 /// What a message to a `hostButtonProc` button does to the search buttons'
-/// hover tooltip. Only a search button arms the hover that shows one, and a
-/// hide is a no-op for a button whose tooltip is not up, so the proc's other
+/// hover tooltip. Only a button with a name to show (a search button, [+] or
+/// [v]; see `Host.chromeButtonTooltipName`) arms the hover that shows one, and
+/// a hide is a no-op for a button whose tooltip is not up, so the proc's other
 /// buttons need no case of their own.
 fn buttonTooltipAction(msg: UINT, wParam: WPARAM) ButtonTooltipAction {
     return switch (msg) {
@@ -31810,7 +32283,7 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         }
         switch (v.button_tooltip.apply(buttonTooltipAction(msg, wParam), hwnd)) {
             .none => {},
-            .present => v.showSearchButtonTooltip(hwnd),
+            .present => v.showChromeButtonTooltip(hwnd),
             .hide => v.hideTabTooltip(),
         }
         // Focus-region keys for the tab-strip action buttons and the
@@ -31863,6 +32336,25 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 else => {},
             }
         }
+        // Enter and Tab on [+], [v] and the docked search buttons. May
+        // click, so touch nothing after it.
+        if (msg == c.WM_KEYDOWN and !v.isOverlayButton(hwnd) and v.bannerButtonOf(hwnd) == null) {
+            if (v.handleChromeButtonKey(hwnd, wParam, chromeKeyMods(), lParam)) return 0;
+        }
+        // Alt+R / Alt+C / Alt+W flip the search flags from a focused search
+        // button too. Alt is a system key, so the press is a WM_SYSKEYDOWN,
+        // and its WM_SYSCHAR is swallowed or `DefWindowProc` turns it into a
+        // menu request.
+        if ((msg == c.WM_SYSKEYDOWN or msg == c.WM_SYSCHAR) and v.isSearchBarButton(hwnd)) {
+            if (v.searchControlSurface(hwnd)) |surface| {
+                if (msg == c.WM_SYSKEYDOWN) {
+                    v.noteChromeKeyInput(c.VK_TAB);
+                    if (searchToggleKey(surface, wParam, lParam)) return 0;
+                } else if (surface.search_toggle_keys.consumeChar(wParam, lParamBits(lParam))) {
+                    return 0;
+                }
+            }
+        }
         if (msg == c.WM_KEYDOWN and v.isSearchBarButton(hwnd)) {
             if (v.searchControlSurface(hwnd)) |surface| {
                 if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
@@ -31900,16 +32392,18 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     v.banner_focused = false;
                     v.syncBannerExpiry();
                 }
+                if (v.searchControlSurface(hwnd)) |surface| surface.search_toggle_keys = .{};
             },
             c.WM_MOUSEMOVE => {
-                // The search bar's icon buttons also arm TME_HOVER, as the tab
-                // buttons do for their title tooltip, so a dwell names them.
-                const search_button = v.isSearchBarButton(hwnd);
+                // The search bar's icon buttons and the tab strip's [+] and
+                // [v] also arm TME_HOVER, as the tab buttons do for their
+                // title tooltip, so a dwell names them.
+                const named_button = v.chromeButtonTooltipName(hwnd) != null;
                 var track: TRACKMOUSEEVENT = .{
                     .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                    .dwFlags = if (search_button) c.TME_LEAVE | c.TME_HOVER else c.TME_LEAVE,
+                    .dwFlags = if (named_button) c.TME_LEAVE | c.TME_HOVER else c.TME_LEAVE,
                     .hwndTrack = hwnd,
-                    .dwHoverTime = if (search_button) c.HOVER_DEFAULT else 0,
+                    .dwHoverTime = if (named_button) c.HOVER_DEFAULT else 0,
                 };
                 _ = sys.TrackMouseEvent(&track);
                 v.setHoveredButton(hwnd);
@@ -32099,8 +32593,21 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                 c.WM_KEYDOWN => {
                     v.noteChromeKeyInput(wParam);
                     if (v.handleFocusRegionKey(hwnd, wParam, true)) return 0;
-                    if (tabButtonKeyAction(wParam, keyPressed(c.VK_CONTROL))) |action| {
+                    if (tabButtonKeyAction(wParam, chromeKeyMods())) |action| {
                         switch (action) {
+                            // The menu key opens the same menu a right click
+                            // does, on this tab, and its release is swallowed
+                            // below. `v` may be gone when it returns.
+                            .context_menu => {
+                                if ((lParamBits(lParam) & c.KF_REPEAT) == 0 and
+                                    v.showTabContextMenu(hwnd, index, .keyboard)) return 0;
+                            },
+                            // Tab only moves focus along the strip; Enter,
+                            // Space and the arrows are what activate.
+                            .focus_next, .focus_previous => {
+                                _ = v.stepTabStripFocus(hwnd, action == .focus_previous);
+                                return 0;
+                            },
                             // Activating a tab moves focus into its
                             // terminal, which is what Enter on a tab
                             // should do. Arrow/Home/End navigation must
@@ -32180,16 +32687,28 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                             .close => {
                                 if (v.closeTabFromStrip(index)) return 0;
                             },
-                            .overview => {
-                                if (v.activateTabIndex(index)) {
-                                    if (v.activeSurface()) |surface| {
-                                        runUiActionOrLog("tab key overview failed", surface.toggleTabOverview());
-                                        return 0;
-                                    }
-                                }
-                            },
                         }
                     }
+                },
+                // Shift+F10 is a system key, so it arrives here and not as a
+                // WM_KEYDOWN. Plain F10 stays with the window.
+                c.WM_SYSKEYDOWN => {
+                    if (wParam == c.VK_F10 and tabButtonKeyAction(wParam, chromeKeyMods()) == .context_menu) {
+                        v.noteChromeKeyInput(c.VK_APPS);
+                        if ((lParamBits(lParam) & c.KF_REPEAT) == 0 and
+                            v.showTabContextMenu(hwnd, index, .keyboard)) return 0;
+                    }
+                },
+                // Without these, `DefWindowProc` posts a second
+                // WM_CONTEXTMENU when the key comes back up.
+                c.WM_KEYUP, c.WM_SYSKEYUP => {
+                    if (labels.tabButtonSwallowsKeyUp(wParam, chromeKeyMods())) return 0;
+                },
+                // The keyboard form (-1, -1) was served on the key-down. A
+                // right click opens the menu from WM_RBUTTONUP and never
+                // gets here.
+                c.WM_CONTEXTMENU => {
+                    if (signedLowWord(lParamBits(lParam)) == -1 and signedHighWord(lParamBits(lParam)) == -1) return 0;
                 },
                 c.WM_MBUTTONUP => {
                     if (v.closeTabFromStrip(index)) return 0;
@@ -32203,10 +32722,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     }
                 },
                 c.WM_RBUTTONUP => {
-                    if (v.activateTabIndex(index)) {
-                        v.showTabContextMenu(hwnd, index);
-                        return 0;
-                    }
+                    if (v.showTabContextMenu(hwnd, index, .pointer)) return 0;
                 },
                 else => {},
             }
@@ -32249,11 +32765,18 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 surface.invalidateSearchBarChildPaint();
             },
             c.WM_KILLFOCUS => {
+                surface.search_toggle_keys = .{};
                 surface.invalidateSearchBarChildPaint();
             },
             c.WM_LBUTTONDOWN => v.noteChromePointerInput(),
+            // A Tab character would be typed into the query: there is no
+            // dialog manager to take it.
             c.WM_CHAR => {
-                if (wParam == c.VK_RETURN or wParam == c.VK_ESCAPE) return 0;
+                if (wParam == c.VK_RETURN or wParam == c.VK_ESCAPE or wParam == c.VK_TAB) return 0;
+            },
+            // The WM_SYSCHAR of Alt+R / Alt+C / Alt+W; see below.
+            c.WM_SYSCHAR => {
+                if (surface.search_toggle_keys.consumeChar(wParam, lParamBits(lParam))) return 0;
             },
             c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
                 v.noteChromeKeyInput(wParam);
@@ -32261,6 +32784,16 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // itself and returns focus to the terminal; only Ctrl+F6
                 // is taken for the focus-region cycle.
                 if (v.handleFocusRegionKey(hwnd, wParam, false)) return 0;
+                // Tab walks the query and then the bar's visible buttons,
+                // wrapping; Escape and Ctrl+F6 still leave the bar.
+                if (labels.tabFocusStep(wParam, chromeKeyMods())) |step| {
+                    _ = v.stepSearchFocus(surface, hwnd, step == .previous);
+                    return 0;
+                }
+                // Alt+R / Alt+C / Alt+W flip regex, case and whole word. The
+                // press is a WM_SYSKEYDOWN, so it never types; the paired
+                // WM_SYSCHAR is swallowed above.
+                if (msg == c.WM_SYSKEYDOWN and searchToggleKey(surface, wParam, lParam)) return 0;
                 if (wParam == c.VK_RETURN) {
                     _ = surface.navigateDockedSearch(dockedSearchEnterDirection(keyPressed(c.VK_SHIFT))) catch |err| {
                         logUiActionError("docked search enter navigation failed", err);
@@ -32529,6 +33062,14 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             }
             if (wParam == c.BANNER_TIMER_ID) {
                 if (host) |v| v.bannerExpiryTick();
+                return 0;
+            }
+            if (wParam == c.INPUT_MODE_TIMER_ID) {
+                _ = sys.KillTimer(hwnd, c.INPUT_MODE_TIMER_ID);
+                if (host) |v| {
+                    v.mode_timer_active = false;
+                    runUiActionOrLog("input mode timer failed", v.refreshModeIndicator());
+                }
                 return 0;
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -34447,7 +34988,9 @@ pub const Surface = struct {
     secure_input: bool = false,
     secure_input_ever_engaged: bool = false,
     key_sequence_active: bool = false,
+    key_sequence_since_ms: ?u64 = null,
     key_table_name: ?[:0]const u8 = null,
+    key_table_copy_mode: bool = false,
     search_active: bool = false,
     search_needle: ?[:0]const u8 = null,
     search_total: ?usize = null,
@@ -34516,6 +35059,7 @@ pub const Surface = struct {
     search_bar_bg_uia_provider: ?*win32_uia.ChromeControlProvider = null,
     search_bar_bg_placement: ChildPlacement = .{},
     search_bar_edit_hwnd: ?HWND = null,
+    search_toggle_keys: labels.SearchToggleKeys = .{},
     search_bar_edit_prev_proc: ?*const anyopaque = null,
     search_bar_edit_uia_provider: ?*win32_uia.TerminalProvider = null,
     search_bar_edit_uia_selection: ?[2]u32 = null,
@@ -40082,19 +40626,47 @@ pub const Surface = struct {
     fn setKeySequenceActive(self: *Surface, active: bool) !void {
         if (self.key_sequence_active == active) return;
         self.key_sequence_active = active;
+        self.key_sequence_since_ms = if (active) sys.GetTickCount64() else null;
+        if (self.host) |host| try host.refreshModeIndicator();
     }
 
     fn setKeyTable(self: *Surface, value: apprt.action.KeyTable) !void {
         const next_name = switch (value) {
             .activate => |name| name,
-            .deactivate, .deactivate_all => null,
+            .deactivate => if (self.core_initialized) self.core_surface.activeKeyTableName() else null,
+            .deactivate_all => null,
         };
-        if (optionalOwnedStringEquals(self.key_table_name, next_name)) return;
         const alloc = self.app.core_app.alloc;
-        switch (value) {
-            .activate => |name| try appendOwnedString(alloc, &self.key_table_name, name),
-            .deactivate, .deactivate_all => try appendOwnedString(alloc, &self.key_table_name, null),
-        }
+        try appendOwnedString(alloc, &self.key_table_name, next_name);
+        self.key_table_copy_mode = if (self.core_initialized) self.core_surface.copy_mode_active else if (next_name) |name| std.mem.eql(u8, name, "copy_mode") else false;
+        if (self.host) |host| try host.refreshModeIndicator();
+    }
+
+    test "chrome input mode banner follows key table enter and exit" {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host }},
+            .surfaces = &.{.{ .storage = &surface, .host = &host }},
+            .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+        });
+        defer session.deinit();
+        try surface.setKeyTable(.{ .activate = "resize" });
+        try std.testing.expect(host.bannerShown());
+        var buf: [256]u8 = undefined;
+        try std.testing.expectEqualStrings("KEY TABLE: resize", Host.bannerUiaName(@ptrCast(&host), 0, &buf));
+        try surface.setKeyTable(.deactivate_all);
+        try std.testing.expect(!host.bannerShown());
+        try surface.setKeyTable(.{ .activate = "copy_mode" });
+        try std.testing.expect(host.bannerShown());
+        try std.testing.expectEqualStrings("COPY MODE", Host.bannerUiaName(@ptrCast(&host), 0, &buf));
+        try surface.setKeyTable(.deactivate);
+        try std.testing.expect(!host.bannerShown());
     }
 
     fn setSearchActive(self: *Surface, active: bool, needle: []const u8) !void {
@@ -40831,6 +41403,7 @@ const TestSession = struct {
         while (surface_index > 0) {
             surface_index -= 1;
             if (self.surfaces[surface_index]) |*record| {
+                appendOwnedString(self.allocator, &record.surface.key_table_name, null) catch unreachable;
                 if (record.free_launch_profile_key) {
                     if (record.surface.launch_profile_key) |value| self.allocator.free(value);
                     record.surface.launch_profile_key = null;
@@ -40846,6 +41419,7 @@ const TestSession = struct {
         while (host_index > 0) {
             host_index -= 1;
             const host = self.hosts[host_index] orelse continue;
+            appendOwnedString(self.allocator, &host.mode_indicator_text, null) catch unreachable;
             appendOwnedString(self.allocator, &host.config_problems_text, null) catch unreachable;
             host.setBanner(.none, null) catch {};
             host.clearStructuralHistory(.normal);
@@ -53911,6 +54485,27 @@ test "win32 a clicked search button's tooltip stays down until the button is lef
     try expectEqual(.none, send(&tooltip, find, c.WM_DESTROY, 0));
     try expectEqual(@as(?HWND, null), tooltip.dismissed);
     try expectEqual(.present, send(&tooltip, find, c.WM_MOUSEHOVER, 0));
+}
+
+test "win32 the [+] and [v] tooltips and UIA names are one table, and the hover tooltip routes cover them" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var buf: [32]u8 = undefined;
+    const ctx: *anyopaque = @ptrFromInt(0x10);
+    try std.testing.expectEqualStrings(labels.tabStripActionName(.new_tab), Host.hostActionUiaName(ctx, 0, &buf));
+    try std.testing.expectEqualStrings(labels.tabStripActionName(.more_tabs), Host.hostActionUiaName(ctx, 1, &buf));
+
+    // The same hover, click and leave rules govern [+] and [v]: a dwell
+    // presents, a click keeps it down, leaving ends the dismissal.
+    const new_tab: HWND = @ptrFromInt(0x30);
+    var tooltip: ButtonTooltip = .{};
+    try std.testing.expectEqual(ButtonTooltip.Effect.present, tooltip.apply(buttonTooltipAction(c.WM_MOUSEHOVER, 0), new_tab));
+    tooltip.shown = new_tab;
+    try std.testing.expectEqual(ButtonTooltip.Effect.hide, tooltip.apply(buttonTooltipAction(c.WM_LBUTTONDOWN, 0), new_tab));
+    tooltip.shown = null;
+    try std.testing.expectEqual(ButtonTooltip.Effect.none, tooltip.apply(buttonTooltipAction(c.WM_MOUSEHOVER, 0), new_tab));
+    try std.testing.expectEqual(ButtonTooltip.Effect.none, tooltip.apply(buttonTooltipAction(c.WM_MOUSELEAVE, 0), new_tab));
+    try std.testing.expectEqual(ButtonTooltip.Effect.present, tooltip.apply(buttonTooltipAction(c.WM_MOUSEHOVER, 0), new_tab));
 }
 
 test "win32 caption buttons are painted only while the window is on screen" {

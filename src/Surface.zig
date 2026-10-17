@@ -4906,6 +4906,37 @@ test "copy mode starts at a visible cursor or the viewport edge" {
     );
 }
 
+/// The innermost table after a push or pop. UI notifications for a pop do
+/// not carry the name of the table which remains active.
+pub fn activeKeyTableName(self: *const Surface) ?[]const u8 {
+    return keyTableNameForStack(&self.config.keybind, self.keyboard.table_stack.items);
+}
+
+fn keyTableNameForStack(keybinds: *const configpkg.Keybinds, stack: []const KeyTableEntry) ?[]const u8 {
+    if (stack.len == 0) return null;
+    const active = stack[stack.len - 1].set;
+    var it = keybinds.tables.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr == active) return entry.key_ptr.*;
+    }
+    return null;
+}
+
+test "chrome input mode table name follows nested pushes and pops" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var keybinds: configpkg.Keybinds = .{};
+    try keybinds.parseCLI(arena.allocator(), "outer/a=ignore");
+    try keybinds.parseCLI(arena.allocator(), "inner/b=ignore");
+    const stack = [_]KeyTableEntry{
+        .{ .set = keybinds.tables.getPtr("outer").?, .once = false },
+        .{ .set = keybinds.tables.getPtr("inner").?, .once = false },
+    };
+    try std.testing.expectEqualStrings("inner", keyTableNameForStack(&keybinds, &stack).?);
+    try std.testing.expectEqualStrings("outer", keyTableNameForStack(&keybinds, stack[0..1]).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), keyTableNameForStack(&keybinds, stack[0..0]));
+}
+
 fn copyModeTableIsActive(self: *const Surface) bool {
     if (!self.copy_mode_active) return false;
     const table = self.config.keybind.tables.getPtr(copy_mode_table_name) orelse return false;

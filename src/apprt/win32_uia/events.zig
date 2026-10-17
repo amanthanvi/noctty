@@ -134,6 +134,23 @@ pub fn raiseNotification(
 /// (counted, not raised).
 pub threadlocal var testing_bells: usize = 0;
 
+pub threadlocal var testing_input_modes: usize = 0;
+
+/// Input modes have their own MostRecent activity, apart from output,
+/// palette actions and bells, so a quick sequence cannot queue old speech.
+pub fn raiseInputModeNotification(provider: *com.IRawElementProviderSimple, message: []const u8) void {
+    if (builtin.is_test) {
+        testing_input_modes += 1;
+        return;
+    }
+    raiseNotificationAs(
+        provider,
+        .other,
+        std.unicode.utf8ToUtf16LeStringLiteral("noctty.input-mode"),
+        message,
+    );
+}
+
 /// The terminal's bell rang. Its own activity id lets a screen reader treat it
 /// apart from terminal text and palette messages; MostRecent keeps a burst of
 /// bells (a TUI that rings on every redraw) from queueing speech.

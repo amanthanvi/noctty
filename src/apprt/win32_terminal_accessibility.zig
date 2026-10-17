@@ -298,6 +298,12 @@ pub const TerminalAccessibilitySession = struct {
         win32_uia.events.raiseBellNotification(&provider.base);
     }
 
+    pub fn announceInputMode(self: *TerminalAccessibilitySession, message: []const u8) bool {
+        const provider = self.provider orelse return false;
+        win32_uia.events.raiseInputModeNotification(&provider.base, message);
+        return true;
+    }
+
     pub fn nameChanged(self: *TerminalAccessibilitySession) void {
         self.mutex.lock();
         self.cacheName();

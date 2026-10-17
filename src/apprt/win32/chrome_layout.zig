@@ -419,6 +419,8 @@ pub fn overlayEditChildRectFromFrame(frame: RECT, inset_x: i32, inset_y: i32) RE
 
 /// What the host banner offers besides its text, which fixes its buttons.
 pub const BannerActions = enum {
+    /// Persistent input mode text; leaving the mode clears it.
+    mode,
     /// A message set through `Host.setBanner`: a close button.
     close,
     /// The update notice: Open Release and Dismiss.
@@ -442,6 +444,7 @@ pub const banner_install_width_base: i32 = 86;
 pub fn hostBannerWidth(text_width: i32, actions: BannerActions, dpi: u32) i32 {
     const gap = scaledBy(banner_button_gap_base, dpi);
     const buttons = switch (actions) {
+        .mode => 0,
         .close => scaledBy(banner_close_width_base, dpi),
         .update => scaledBy(banner_open_release_width_base, dpi) + gap + scaledBy(banner_dismiss_width_base, dpi),
         .update_staged => scaledBy(banner_install_width_base, dpi) + gap + scaledBy(banner_dismiss_width_base, dpi),
@@ -485,12 +488,13 @@ pub fn hostBannerParts(width: i32, height: i32, actions: BannerActions, dpi: u32
 
     var right = w - gap;
     const dismiss_w = scaledBy(switch (actions) {
+        .mode => 0,
         .close => banner_close_width_base,
         .update, .update_staged => banner_dismiss_width_base,
     }, dpi);
-    const dismiss = bannerButtonRect(&right, dismiss_w, button_top, button_h, gap);
+    const dismiss = if (actions == .mode) null else bannerButtonRect(&right, dismiss_w, button_top, button_h, gap);
     const primary: ?RECT = switch (actions) {
-        .close => null,
+        .close, .mode => null,
         .update => bannerButtonRect(&right, scaledBy(banner_open_release_width_base, dpi), button_top, button_h, gap),
         .update_staged => bannerButtonRect(&right, scaledBy(banner_install_width_base, dpi), button_top, button_h, gap),
     };
