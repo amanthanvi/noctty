@@ -469,16 +469,7 @@ fn openPathNoRedirect(path: []const u8) ?windows.HANDLE {
     // Older Windows also treats the DOS drive-letter mapping as a reparse.
     // Resolve just that mapping without opening a filesystem target, and accept
     // only a direct local volume device. The rest keeps the kernel guard.
-    const drive_w: [2:0]u16 = .{ path[0], ':' };
-    var device_buf: [512]u16 = undefined;
-    const device = internal_os.windows.directVolumeDeviceName(&drive_w, &device_buf) orelse return null;
-    if (wide.len < 7 or wide.data[5] != ':' or wide.data[6] != '\\') return null;
-    const final_len = device.len + wide.len - 6;
-    if (final_len >= wide.data.len) return null;
-    std.mem.copyBackwards(u16, wide.data[device.len..final_len], wide.data[6..wide.len]);
-    @memcpy(wide.data[0..device.len], device);
-    wide.len = final_len;
-    wide.data[final_len] = 0;
+    if (!internal_os.windows.directVolumePath(&wide)) return null;
     var name: windows.UNICODE_STRING = .{
         .Length = @intCast(wide.span().len * 2),
         .MaximumLength = @intCast(wide.span().len * 2),
@@ -2368,6 +2359,28 @@ test "local executable data reparse tags exclude redirects and cloud files" {
     }
     for ([_]u32{ 0xa000000c, 0xa0000003, 0x9000001a, 0x8000001b }) |tag|
         try std.testing.expect(!isLocalExecutableInfo(.{ .FileAttributes = windows.FILE_ATTRIBUTE_REPARSE_POINT, .ReparseTag = tag }));
+}
+
+test "shell discovery uses the production DOS mapping before metadata opens" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const Reject = struct {
+        fn map(_: [*:0]const u16, _: []u16) ?[]const u16 {
+            return null;
+        }
+    };
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "pwsh.exe", .data = "not executed" });
+    const path = try tmp.dir.realpathAlloc(alloc, "pwsh.exe");
+    defer alloc.free(path);
+    win32.TestHooks.direct_volume_mapping = Reject.map;
+    defer win32.TestHooks.direct_volume_mapping = null;
+    try std.testing.expectEqual(null, pathInfo(path));
+    win32.TestHooks.direct_volume_mapping = win32.TestHooks.unavailableVolume;
+    try std.testing.expectEqual(null, pathInfo(path));
+    win32.TestHooks.direct_volume_mapping = null;
+    try std.testing.expect(pathInfo(path) != null);
 }
 
 test "shell discovery accepts a real installed Store execution alias" {

@@ -118,6 +118,112 @@ fn isDirectVolumeDeviceName(name: []const u16) bool {
         std.mem.indexOfAny(u16, name[prefix.len..], &.{ '\\', '/', ':', '?' }) == null;
 }
 
+/// Replace the DOS drive alias in a prefixed path before OBJ_DONT_REPARSE.
+/// Callers must screen the drive's media type before resolving this mapping.
+pub fn directVolumePath(path: *windows.PathSpace) bool {
+    if (builtin.is_test) {
+        if (TestHooks.direct_volume_mapping) |mapping|
+            return directVolumePathWithMapping(path, mapping);
+    }
+    return directVolumePathWithMapping(path, directVolumeDeviceName);
+}
+
+/// Inject at the OS boundary so tests enter through the real production callers.
+/// The override and its dispatch are absent from non-test builds. Thread-local
+/// state keeps a test's refusal from affecting unrelated worker threads.
+pub const TestHooks = if (builtin.is_test) struct {
+    pub threadlocal var direct_volume_mapping: ?*const fn ([*:0]const u16, []u16) ?[]const u16 = null;
+
+    pub fn unavailableVolume(_: [*:0]const u16, buf: []u16) ?[]const u16 {
+        const device = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\NocttyNoSuchVolume");
+        @memcpy(buf[0..device.len], device);
+        return buf[0..device.len];
+    }
+} else struct {};
+
+fn directVolumePathWithMapping(path: *windows.PathSpace, mapping: anytype) bool {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("\\??\\");
+    if (path.len < 7 or !std.mem.startsWith(u16, path.span(), prefix) or
+        !((path.data[4] >= 'A' and path.data[4] <= 'Z') or (path.data[4] >= 'a' and path.data[4] <= 'z')) or
+        path.data[5] != ':' or path.data[6] != '\\') return false;
+    const drive: [2:0]u16 = .{ path.data[4], ':' };
+    var device_buf: [512]u16 = undefined;
+    const device = mapping(&drive, &device_buf) orelse return false;
+    const final_len = device.len + path.len - 6;
+    if (final_len >= path.data.len) return false;
+    std.mem.copyBackwards(u16, path.data[device.len..final_len], path.data[6..path.len]);
+    @memcpy(path.data[0..device.len], device);
+    path.len = final_len;
+    path.data[final_len] = 0;
+    return true;
+}
+
+test "direct volume path maps DOS letter before guarded opens" {
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    const Mapping = struct {
+        fn map(alias: [*:0]const u16, buf: []u16) ?[]const u16 {
+            std.testing.expectEqualSlices(u16, w("C:"), std.mem.span(alias)) catch unreachable;
+            const device = w("\\Device\\HarddiskVolume3");
+            @memcpy(buf[0..device.len], device);
+            return buf[0..device.len];
+        }
+    };
+    inline for (.{ "C:\\", "C:\\folder\\café.txt", "C:/folder/café.txt" }) |input| {
+        var path = try windows.sliceToPrefixedFileW(null, input);
+        try std.testing.expect(directVolumePathWithMapping(&path, Mapping.map));
+        const expected = if (std.mem.eql(u8, input, "C:\\"))
+            w("\\Device\\HarddiskVolume3\\")
+        else
+            w("\\Device\\HarddiskVolume3\\folder\\café.txt");
+        try std.testing.expectEqualSlices(u16, expected, path.span());
+        try std.testing.expectEqual(@as(u16, 0), path.data[path.len]);
+    }
+}
+
+test "direct volume path fails closed on missing mappings and oversized names" {
+    const Mapping = struct {
+        fn missing(_: [*:0]const u16, _: []u16) ?[]const u16 {
+            return null;
+        }
+        fn map(_: [*:0]const u16, buf: []u16) ?[]const u16 {
+            const device = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\HarddiskVolume3");
+            @memcpy(buf[0..device.len], device);
+            return buf[0..device.len];
+        }
+    };
+    var path = try windows.sliceToPrefixedFileW(null, "C:\\safe.txt");
+    try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.missing));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("\\??\\C:\\safe.txt"), path.span());
+    @memset(path.data[7 .. path.data.len - 1], 'x');
+    path.len = path.data.len - 1;
+    path.data[path.len] = 0;
+    try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.map));
+    const device_len = std.unicode.utf8ToUtf16LeStringLiteral("\\Device\\HarddiskVolume3").len;
+    path.len = path.data.len - 1 - device_len + 6;
+    path.data[path.len] = 0;
+    try std.testing.expect(directVolumePathWithMapping(&path, Mapping.map));
+    try std.testing.expectEqual(path.data.len - 1, path.len);
+    try std.testing.expectEqual(@as(u16, 'x'), path.data[path.len - 1]);
+    try std.testing.expectEqual(@as(u16, 0), path.data[path.len]);
+}
+
+test "direct volume path refuses other native roots before mapping" {
+    const Mapping = struct {
+        fn unexpected(_: [*:0]const u16, _: []u16) ?[]const u16 {
+            unreachable;
+        }
+    };
+    inline for (.{ "", "\\??\\C:", "\\??\\C:x", "\\??\\1:\\x", "\\??\\UNC\\server\\share", "\\Device\\HarddiskVolume3\\x" }) |input| {
+        var path: windows.PathSpace = undefined;
+        const wide = std.unicode.utf8ToUtf16LeStringLiteral(input);
+        @memcpy(path.data[0..wide.len], wide);
+        path.len = wide.len;
+        path.data[path.len] = 0;
+        try std.testing.expect(!directVolumePathWithMapping(&path, Mapping.unexpected));
+        try std.testing.expectEqualSlices(u16, wide, path.span());
+    }
+}
+
 test "direct volume device mappings exclude redirects and filesystem paths" {
     const w = std.unicode.utf8ToUtf16LeStringLiteral;
     try std.testing.expect(isDirectVolumeDeviceName(w("\\Device\\HarddiskVolume3")));
