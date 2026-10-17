@@ -76,3 +76,4 @@ Write-Output "Ahead/behind: $($counts[0]) / $($counts[1])"
 Write-Output "Recorded upstreamBaseVersion: $($metadata.upstreamBaseVersion)"
 Write-Output "Live overlap ($($liveOverlap.Count)):"
 $liveOverlap
+# measurement
