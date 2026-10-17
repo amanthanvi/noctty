@@ -45,6 +45,12 @@ jobs:
             throw "windows-2022 is build $build; the Windows 10 gates in src/apprt/win32.zig take their Windows 11 branch at 22000. Pick another image or retire this workflow."
           }
 
+      # Exercise desktop window enumeration and driver self-receipts before long Zig builds.
+      - name: Default-desktop nested-job oracle positive control
+        shell: pwsh
+        timeout-minutes: 3
+        run: ./test/windows/hidden-win11-desktop-control.ps1 -Run ./hidden-evidence/desktop-control
+
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -86,6 +92,36 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "noctty.com +version failed with exit code $LASTEXITCODE." }
           if ($versionText -notmatch 'ConPTY') { throw 'noctty.com +version did not report the ConPTY source.' }
 
+      # Check the deterministic budget before any noctty/profile launch.
+      - name: Per-test results from the test executable
+        shell: pwsh
+        run: |
+          zig build -Demit-test-exe=true -Dcustom-shaders=true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./zig-out/bin/ghostty-test.exe *> ghostty-test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Skip budget
+        shell: pwsh
+        run: ./scripts/check-test-skips.ps1 -TestLog ghostty-test.log -Runner windows-2022
+
+      # Real launches of the portable build on a hidden desktop, below build 22000. A runner has no
+      # OpenGL 4.3 driver, so the profile matrix asks for WARP.
+      - name: Profile matrix on a hidden desktop
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./test/windows/hidden-win11-profile-matrix.ps1 -Bin ./zig-out/bin -Run ./hidden-evidence/profile-matrix -AllowProductAumid -RequireAll -Renderer d3d11-warp
+
+      - name: Embedding idle exit leaves state alone
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./test/windows/hidden-win11-embedding-idle.ps1 -Bin ./zig-out/bin -Run ./hidden-evidence/embedding -AllowProductAumid
+
+      - name: Embedding window oracle negative control
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./test/windows/hidden-win11-embedding-idle.ps1 -Bin ./zig-out/bin -Run ./hidden-evidence/embedding-control -AllowProductAumid -NegativeControl -Renderer d3d11-warp
+
       - name: Build D3D11 lifecycle smoke tools
         shell: pwsh
         timeout-minutes: 30
@@ -102,7 +138,7 @@ jobs:
       - name: Require the app to take the Windows 10 branch
         shell: pwsh
         run: |
-          $logs = @(Get-ChildItem -Path renderer-smoke/evidence -Recurse -Filter stderr.txt)
+          $logs = @(Get-ChildItem -Path renderer-smoke/evidence, hidden-evidence -Recurse -Filter stderr.txt)
           if ($logs.Count -eq 0) { throw 'The smoke left no stderr.txt to read.' }
           $lines = $logs | Select-String -Pattern 'os_build=(\d+) integrated_titlebar=(true|false)'
           if (-not $lines) { throw 'No stderr.txt holds the os_build line the app logs at startup.' }
@@ -124,4 +160,11 @@ jobs:
           retention-days: 14
           path: |
             zig-test.log
+            ghostty-test.log
+            hidden-evidence
+            !hidden-evidence/**/*.exe
+            !hidden-evidence/**/*.com
+            !hidden-evidence/**/*.dll
+            !hidden-evidence/**/*.pdb
+            !hidden-evidence/**/share/**
             renderer-smoke/evidence

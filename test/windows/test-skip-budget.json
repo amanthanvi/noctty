@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Budget for Zig tests that skip themselves, read by scripts/check-test-skips.ps1 (PKG-76, F207). allowedSkips lists the tests in the guarded family that may skip on that runner; a skip outside it fails, because a shaping or metrics test that stops running looks like green CI. maxTotalSkipped is the total across the whole suite. Lower a number when a skip goes away. Raise one only with the reason in the commit message.",
+  "familyPrefix": "font.",
+  "runners": {
+    "windows-2022": {
+      "comment": "2026-10-17: 77 measured in Server 2022 run 39076551334. The added skip is config.windows_shell.test.shell discovery accepts a real installed Store execution alias (#443): it requires a usable installed wt.exe or winget.exe Store alias. This optional installed-alias coverage is unavailable on this runner; it is not an explicit build-number gate. The nine font skips are unchanged.",
+      "maxTotalSkipped": 77,
+      "allowedSkips": [
+        "font.shaper.harfbuzz.test.shape Devanagari string",
+        "font.shaper.harfbuzz.test.shape Tai Tham vowels (position differs from advance)",
+        "font.shaper.harfbuzz.test.shape Tibetan characters",
+        "font.shaper.harfbuzz.test.shape Tai Tham letters (run_offset.y differs from zero)",
+        "font.shaper.harfbuzz.test.shape Javanese ligatures",
+        "font.shaper.harfbuzz.test.shape Chakma vowel sign with ligature (vowel sign renders first)",
+        "font.shaper.harfbuzz.test.shape Bengali ligatures with out of order vowels",
+        "font.Collection.test.hasCodepoint emoji default graphical",
+        "font.Collection.test.face metrics"
+      ]
+    },
+    "windows-2025": {
+      "maxTotalSkipped": 74,
+      "allowedSkips": [
+        "font.shaper.harfbuzz.test.shape Devanagari string",
+        "font.shaper.harfbuzz.test.shape Tai Tham vowels (position differs from advance)",
+        "font.shaper.harfbuzz.test.shape Tibetan characters",
+        "font.shaper.harfbuzz.test.shape Tai Tham letters (run_offset.y differs from zero)",
+        "font.shaper.harfbuzz.test.shape Javanese ligatures",
+        "font.shaper.harfbuzz.test.shape Chakma vowel sign with ligature (vowel sign renders first)",
+        "font.shaper.harfbuzz.test.shape Bengali ligatures with out of order vowels",
+        "font.Collection.test.hasCodepoint emoji default graphical",
+        "font.Collection.test.face metrics"
+      ]
+    }
+  }
+}

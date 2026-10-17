@@ -442,6 +442,110 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-session-restore.ps1 -ResetState
 ```
 
+## hidden-win11-profile-matrix.ps1
+
+Starts each shell profile noctty detects (`cmd.exe`, `powershell.exe`,
+`pwsh.exe`, Git Bash) through a restored session on a hidden desktop and checks
+what the profile really started: the process under noctty and a redacted shape of
+its command line (the PowerShell injection, Git Bash's `--login -i`), and the
+working directory the shell reports with OSC 7, read from the `session-state.json`
+noctty saves at close. cmd and Git Bash are sent a directory change as posted keys;
+PowerShell panes are never typed into. Their run-owned integration copy sets a
+new run-local PSReadLine history path and `SaveNothing` before the first read;
+a marker written after the actual integration prompt replaces a fixed delay.
+Original and instrumented script hashes are retained. This instruments the test
+copy for isolation/readiness and does not generate OSC 7 or alter cwd. Redirecting
+`APPDATA` alone is not sufficient history isolation. The harness proves the real
+history file, `startup-attempts.json` and the clipboard sequence number did not
+change. A control case runs cmd with `shell-integration = none` and expects the seed to
+survive. No interactive WSL or SSH profile is started; startup discovery may
+probe WSL. A profile that is not installed is skipped and reported; `-RequireAll`
+turns any such skip into a failure. The hosted workflow requires all four.
+
+```powershell
+pwsh -NoProfile -File .\hidden-win11-profile-matrix.ps1 -Bin <dir with noctty.exe> -Run <new dir>
+```
+
+The binary must carry the measurement AppUserModelID (the jump list is keyed by
+AUMID in the real `%APPDATA%`, which redirection does not move) unless
+`-AllowProductAumid` says the machine is an ephemeral runner. Results are in
+`profile-matrix-results.json`.
+
+## hidden-win11-embedding-idle.ps1
+
+Ephemeral-runner lifecycle of `noctty.exe -Embedding`, the process Windows starts to hand
+over a delegated console. It starts one with nothing to hand over, with
+`LOCALAPPDATA` and the portable folder holding seeded `session-state.json`,
+`palette-mru.txt`, `update-state.json`, `jump-list-recents.json`,
+`startup-attempts.json` and `config.ghostty`, and checks that it opens no window,
+exits by itself after its five-second idle timer with code 0, leaves every seeded
+file byte-identical, quarantines nothing and does not touch the console
+delegation values. `-NegativeControl` starts an ordinary instance instead and
+expects the window oracle to fire. It writes no delegation registry value and
+delivers no handoff; journeys that need one need a machine that can be restored.
+The workflow also runs that negative control with `-Renderer d3d11-warp` so
+an ordinary instance can open a window on the GPU-less runner.
+The harness refuses to start when the user's `DelegationTerminal` selects noctty:
+the measurement AUMID does not isolate the session's live COM handoff class.
+
+```powershell
+pwsh -NoProfile -File .\hidden-win11-embedding-idle.ps1 -Bin <dir with noctty.exe> -Run <new dir>
+```
+
+Both scripts currently require an ephemeral GitHub-hosted runner; local launches
+are blocked until the exact bundled and in-box ConPTY desktop placement has
+hosted evidence. The workflow supplies the runner environment and collects the
+desktop metadata receipts and binary fingerprints with its artifacts.
+`hidden-win11-desktop-control.ps1` is a hosted-only positive control: a harmless
+window in a nested owned job must be detected from the outer job on Default.
+It launches no noctty and stops its owned helpers after the check.
+
+Both scripts share `hidden-win11-lib.ps1` (private desktop, owned job, explicit
+desktop selection for harness launches, inherited desktop handles for direct
+children, and real-state receipts). The parent validates the driver's desktop
+self-report against its PID, job membership, window station and session, and
+requires its known PID's hidden control window on the named private desktop before
+approving app launch. The control window stays until app-job cleanup and the parent's final private-window
+check acknowledge a bounded release handshake; Default checks continue through exit.
+The outer process independently enumerates the named private
+desktop and rejects job-owned top-level windows on Default, including hidden
+windows. Profile readiness requires the known noctty PID's window on the private
+desktop before posted input.
+
+Server 2022 returned `GetThreadDesktop` error 5 (access denied) for live foreign
+pwsh/conhost threads, even with matching WinSta0/session IDs and a fresh observer
+thread attached to the private desktop. That is a hosted API observation, not
+proof of a desktop escape. The window oracle uses documented `OpenDesktopW` and
+`EnumDesktopWindows` instead of interpreting a denied query as safe.
+A fresh empty desktop returned false/error 0 from `EnumDesktopWindows`, both
+locally and on Server 2022. The known driver control window avoids relying on an
+empty enumeration; false/error 0 remains a failure. The parent checks Default
+while awaiting the driver's ready receipt and does not approve app launch until
+the private-window observation succeeds.
+Sampling does not establish desktop membership of windowless foreign threads or
+prove the absence of a window whose whole lifetime falls between samples.
+No external broker journey is exercised; keep bundled and in-box ConPTY
+desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
+
+## ..\..\scripts\check-test-skips.ps1
+
+Budget for the Zig tests that skip themselves. `zig build test` reports only a
+total, so a font-shaping test that starts skipping on a runner looks like one that
+always did. The script reads the per-test output of `ghostty-test.exe` run
+directly and fails when a test in the guarded family (`font.`) skips and is
+not on the runner's allowlist in `test-skip-budget.json`, when the total is above
+the runner's budget, or when the log is incomplete.
+The `windows-2022` ceiling of 76 and its nine font skip names were measured from
+run [39027272717](https://github.com/amanthanvi/noctty/actions/runs/39027272717).
+`-Report` drafts an allowlist for a new runner, but still rejects incomplete,
+inconsistent or failed output. CI runs without `-Report` to enforce the budget.
+
+```powershell
+zig build -Demit-test-exe=true -Dcustom-shaders=true
+.\zig-out\bin\ghostty-test.exe *> ghostty-test.log
+pwsh -NoProfile -File ..\..\scripts\check-test-skips.ps1 -TestLog ghostty-test.log -Runner windows-2022
+```
+
 ## ..\..\scripts\interactive-win11.ps1
 
 Generic repo-local Win11 launcher for ad hoc debugging. It uses the

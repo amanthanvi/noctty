@@ -111,7 +111,7 @@ $win10WorkflowSteps = [ordered]@{
         '\A\./test/windows/renderer/Invoke-RendererParity\.ps1 -Binary \./renderer-smoke/bin/noctty\.exe -OutputDirectory \./renderer-smoke/evidence -WarpOnly\s*\z'
     )
     'Require the app to take the Windows 10 branch' = @(
-        '(?m)^\$logs = @\(Get-ChildItem -Path renderer-smoke/evidence -Recurse -Filter stderr\.txt\)\s*$'
+        '(?m)^\$logs = @\(Get-ChildItem -Path renderer-smoke/evidence, hidden-evidence -Recurse -Filter stderr\.txt\)\s*$'
         '(?m)^if \(\$logs\.Count -eq 0\) \{ throw '
         '(?m)^\$lines = \$logs \| Select-String -Pattern ''os_build=\(\\d\+\) integrated_titlebar=\(true\|false\)''\s*$'
         '(?m)^if \(-not \$lines\) \{ throw '
