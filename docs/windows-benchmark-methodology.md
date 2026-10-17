@@ -450,3 +450,4 @@ For physical acceptance:
 Camera/photodiode results and same-machine competitor publication therefore
 remain external acceptance items; this repository supplies the software proxy,
 evidence contract, and adapter-required disclosures without fabricating them.
+
