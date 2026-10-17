@@ -91,3 +91,4 @@ opacity, and Kitty-to-GL presentation. It records individual pass/fail/skip rati
 and offers an optional cropped screen capture per step. `-PrepareOnly` performs
 staging without launching; agents must use that switch. A skipped visible step
 stays incomplete, and readback is never substituted for displayed content.
+
