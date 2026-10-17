@@ -83,6 +83,16 @@ pub const CloseState = struct {
         self.fade_started_ms = now_ms;
     }
 
+    /// Apply the host's effective motion policy to this fade.
+    pub fn setHoveredWithMotion(self: *CloseState, hovered: bool, now_ms: u64, animate: bool) void {
+        self.setHovered(hovered, now_ms);
+        if (!animate) {
+            self.alpha = self.target;
+            self.start_alpha = self.target;
+            self.fade_started_ms = 0;
+        }
+    }
+
     /// Compute the current alpha based on fade progress. Clamps to [0, 1].
     pub fn alphaAt(self: CloseState, now_ms: u64) f32 {
         if (self.fade_started_ms == 0) return self.alpha;
@@ -110,6 +120,8 @@ pub const CloseState = struct {
 
 /// Focused-tab underline slide state.
 pub const UnderlineState = struct {
+    positioned: bool = false,
+    tab_id: ?u32 = null,
     /// Pixel x where the slide started.
     start_left: f32 = 0.0,
     /// Width at slide start.
@@ -121,11 +133,30 @@ pub const UnderlineState = struct {
     /// Timestamp when the current slide began.
     slide_started_ms: u64 = 0,
 
+    /// Slide only on selection changes; layout/DPI changes track the tab exactly.
+    pub fn retarget(self: *UnderlineState, tab_id: u32, left: f32, width: f32, now_ms: u64, animate: bool) bool {
+        const selection_changed = self.tab_id != tab_id;
+        self.tab_id = tab_id;
+        if (animate and !selection_changed and self.positioned and self.target_left == left and self.target_width == width) return false;
+        if (!self.positioned or !animate or !selection_changed) {
+            self.positioned = true;
+            self.slide_started_ms = 0;
+            self.target_left = left;
+            self.start_left = left;
+            self.target_width = width;
+            self.start_width = width;
+            return false;
+        }
+        self.retargetTo(left, width, now_ms);
+        return true;
+    }
+
     /// Begin (or redirect) a slide toward `new_left` / `new_width`.
     /// If called mid-slide, captures the current interpolated position
     /// as the new start so the line never jumps.
     pub fn retargetTo(self: *UnderlineState, new_left: f32, new_width: f32, now_ms: u64) void {
         const cur = self.currentRect(now_ms);
+        self.positioned = true;
         self.start_left = cur.left;
         self.start_width = cur.width;
         self.target_left = new_left;
@@ -212,6 +243,45 @@ test "easeInOutCubic: f(0.75) > 0.75 — slow end" {
 // ---------------------------------------------------------------------------
 // CloseState tests
 // ---------------------------------------------------------------------------
+
+test "CHROME57 reduced-motion close reveal snaps both directions and mid-fade" {
+    var state: CloseState = .{};
+    state.setHoveredWithMotion(true, 1000, false);
+    try std.testing.expectEqual(@as(f32, 1), state.alphaAt(1000));
+    try std.testing.expect(!state.animating(1000));
+    state.setHoveredWithMotion(false, 1001, false);
+    try std.testing.expectEqual(@as(f32, 0), state.alphaAt(1001));
+    state.setHoveredWithMotion(true, 1100, true);
+    state.setHoveredWithMotion(true, 1140, false);
+    try std.testing.expectEqual(@as(f32, 1), state.alphaAt(1140));
+    try std.testing.expect(!state.animating(1140));
+}
+
+test "CHROME57 underline second retarget slides and reduced motion clears the slide" {
+    var state: UnderlineState = .{};
+    try std.testing.expect(!state.retarget(1, 10, 100, 1000, true));
+    try std.testing.expectEqual(@as(f32, 10), state.currentRect(1000).left);
+    try std.testing.expect(state.retarget(2, 110, 100, 1200, true));
+    try std.testing.expectApproxEqAbs(@as(f32, 60), state.currentRect(1280).left, 0.01);
+    const before = state.currentRect(1280);
+    try std.testing.expect(state.retarget(3, 210, 100, 1280, true));
+    try std.testing.expectEqual(before.left, state.currentRect(1280).left);
+    try std.testing.expect(!state.retarget(3, 210, 100, 1281, false));
+    try std.testing.expectEqual(@as(f32, 210), state.currentRect(1281).left);
+    try std.testing.expect(!state.animating(1281));
+}
+
+test "CHROME57 underline geometry changes snap without restarting selection animation" {
+    var state: UnderlineState = .{};
+    _ = state.retarget(1, 10, 100, 1000, true);
+    try std.testing.expect(state.retarget(2, 110, 100, 1200, true));
+    try std.testing.expect(!state.retarget(2, 110, 100, 1220, true));
+    try std.testing.expectEqual(@as(u64, 1200), state.slide_started_ms);
+    try std.testing.expect(!state.retarget(2, 90, 80, 1240, true));
+    try std.testing.expectEqual(@as(f32, 90), state.currentRect(1240).left);
+    try std.testing.expectEqual(@as(f32, 80), state.currentRect(1240).width);
+    try std.testing.expect(!state.animating(1240));
+}
 
 test "CloseState: default is hidden" {
     const cs: CloseState = .{};

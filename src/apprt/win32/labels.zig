@@ -831,8 +831,8 @@ fn codepointWidth(cp: u21) usize {
 ///
 /// The divisor is an average glyph advance, so the budget is an estimate; GDI
 /// still applies `DT_END_ELLIPSIS` when the estimate ran long.
-pub fn hostTabLabelMaxWidth(button_width: i32) usize {
-    const estimated = @as(usize, @intCast(@max(6, @divTrunc(button_width - 26, 8))));
+pub fn hostTabLabelMaxWidth(button_width: i32, dpi: u32) usize {
+    const estimated = @as(usize, @intCast(@max(6, @divTrunc(button_width - win32_chrome_state.scaled(26, dpi), @max(1, win32_chrome_state.scaled(8, dpi))))));
     return std.math.clamp(estimated, @as(usize, 6), @as(usize, host_tab_label_max_width));
 }
 
@@ -908,14 +908,14 @@ pub fn buildTabTooltipText(alloc: Allocator, value: []const u8) ![]u8 {
     return try compactHostLabel(alloc, value, tab_tooltip_max_width);
 }
 
-pub fn shouldShowPaneCount(button_width: i32, pane_count: usize) bool {
-    return pane_count > 1 and button_width >= 140;
+pub fn shouldShowPaneCount(button_width: i32, pane_count: usize, dpi: u32) bool {
+    return pane_count > 1 and button_width >= win32_chrome_state.scaled(140, dpi);
 }
 
-pub fn visibleTabRange(tab_count: usize, active_index: usize, tab_area_width: i32) VisibleTabRange {
+pub fn visibleTabRange(tab_count: usize, active_index: usize, tab_area_width: i32, dpi: u32) VisibleTabRange {
     if (tab_count == 0) return .{ .start = 0, .count = 0 };
     const max_visible = std.math.clamp(
-        @as(usize, @intCast(@max(1, @divTrunc(tab_area_width, host_tab_min_button_width)))),
+        @as(usize, @intCast(@max(1, @divTrunc(tab_area_width, @max(1, win32_chrome_state.scaled(host_tab_min_button_width, dpi)))))),
         @as(usize, 1),
         tab_count,
     );
@@ -2792,7 +2792,7 @@ test "win32 tabItemUiaNameChanged tracks a split the drawn label hides" {
     // Splitting a narrow tab: `shouldShowPaneCount` keeps the count out of the
     // label, so the drawn text is byte-identical and only this predicate can
     // tell the UIA name moved.
-    try std.testing.expect(!shouldShowPaneCount(120, 2));
+    try std.testing.expect(!shouldShowPaneCount(120, 2, 96));
     const before = try buildTabButtonLabel(std.testing.allocator, title, 0, false, 1, 24, false);
     defer std.testing.allocator.free(before);
     const after = try buildTabButtonLabel(std.testing.allocator, title, 0, false, 2, 24, false);
@@ -2829,23 +2829,35 @@ test "win32 buildTabTooltipText keeps a runaway title bounded" {
     try std.testing.expect(std.mem.endsWith(u8, text, "..."));
 }
 
+test "CHROME57 tab budgets and overflow use device-independent widths" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const scale = @import("../win32_chrome_state.zig").scaled;
+        try std.testing.expectEqualDeep(VisibleTabRange{ .start = 2, .count = 3 }, visibleTabRange(6, 3, scale(324, dpi), dpi));
+        try std.testing.expectEqual(@as(usize, 24), hostTabLabelMaxWidth(scale(260, dpi), dpi));
+        try std.testing.expectEqual(@as(usize, 9), hostTabLabelMaxWidth(scale(98, dpi), dpi));
+        try std.testing.expect(!shouldShowPaneCount(scale(139, dpi), 2, dpi));
+        try std.testing.expect(shouldShowPaneCount(scale(140, dpi), 2, dpi));
+        try std.testing.expectEqual(@as(usize, 1), visibleTabRange(6, 5, 1, dpi).count);
+    }
+}
+
 test "win32 hostTabLabelMaxWidth shrinks with narrow tab widths" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(usize, 24), hostTabLabelMaxWidth(260));
-    try std.testing.expectEqual(@as(usize, 9), hostTabLabelMaxWidth(98));
-    try std.testing.expectEqual(@as(usize, 6), hostTabLabelMaxWidth(40));
-    try std.testing.expect(shouldShowPaneCount(180, 3));
-    try std.testing.expect(!shouldShowPaneCount(120, 3));
+    try std.testing.expectEqual(@as(usize, 24), hostTabLabelMaxWidth(260, 96));
+    try std.testing.expectEqual(@as(usize, 9), hostTabLabelMaxWidth(98, 96));
+    try std.testing.expectEqual(@as(usize, 6), hostTabLabelMaxWidth(40, 96));
+    try std.testing.expect(shouldShowPaneCount(180, 3, 96));
+    try std.testing.expect(!shouldShowPaneCount(120, 3, 96));
 }
 
 test "win32 visibleTabRange windows tabs around the active tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 0, .count = 3 }, visibleTabRange(6, 0, 324));
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 2, .count = 3 }, visibleTabRange(6, 3, 324));
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 3, .count = 3 }, visibleTabRange(6, 5, 324));
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 0, .count = 2 }, visibleTabRange(2, 1, 500));
+    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 0, .count = 3 }, visibleTabRange(6, 0, 324, 96));
+    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 2, .count = 3 }, visibleTabRange(6, 3, 324, 96));
+    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 3, .count = 3 }, visibleTabRange(6, 5, 324, 96));
+    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 0, .count = 2 }, visibleTabRange(2, 1, 500, 96));
 }
 
 test "win32 profileShortcutIndexFromKey supports top row and numpad digits" {

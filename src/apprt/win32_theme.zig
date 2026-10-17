@@ -656,6 +656,19 @@ pub fn tabAccent(theme: *const ThemeColors) u32 {
 
 // ── Button color derivation ─────────────────────────────────────────────
 
+/// Dim inactive top chrome while preserving the system palette in high contrast.
+pub fn windowChromeTextColor(theme: *const ThemeColors, foreground: u32, window_active: bool, high_contrast: bool) u32 {
+    return if (window_active or high_contrast) foreground else theme.text_secondary;
+}
+
+test "CHROME57 inactive chrome dims without altering high contrast" {
+    for ([_]ThemeColors{ darkTheme(), lightTheme() }) |theme| {
+        try std.testing.expectEqual(theme.text_secondary, windowChromeTextColor(&theme, theme.text_primary, false, false));
+        try std.testing.expectEqual(theme.text_primary, windowChromeTextColor(&theme, theme.text_primary, true, false));
+        try std.testing.expectEqual(theme.text_primary, windowChromeTextColor(&theme, theme.text_primary, false, true));
+    }
+}
+
 pub fn buttonColorsFromTheme(
     theme: *const ThemeColors,
     active: bool,
@@ -664,6 +677,7 @@ pub fn buttonColorsFromTheme(
     pressed: bool,
     disabled: bool,
     accept: bool,
+    high_contrast: bool,
 ) ButtonColors {
     var colors: ButtonColors = .{
         .bg = if (overlay) theme.button_overlay_bg else theme.button_bg,
@@ -686,23 +700,23 @@ pub fn buttonColorsFromTheme(
         };
     }
     if (hovered and !pressed and !disabled) {
-        // Stronger hover deltas for responsive premium feel
+        // High Contrast palettes can have a dark background with is_dark=false.
+        // Choose hover direction from the actual button background.
+        const hover_lightens = ((colors.bg & 0xff) * 299 + ((colors.bg >> 8) & 0xff) * 587 + ((colors.bg >> 16) & 0xff) * 114) < 128000;
         colors.bg = if (accept)
             adjustColor(theme.button_accept_bg, 14, 16, 22)
         else if (active)
             adjustColor(theme.button_active_bg, 16, 18, 22)
         else if (overlay)
-            adjustColor(theme.button_overlay_bg, 14, 14, 16)
-        else
-            adjustColor(theme.button_bg, 16, 16, 18);
+            if (hover_lightens) adjustColor(theme.button_overlay_bg, 14, 14, 16) else adjustColor(theme.button_overlay_bg, -8, -8, -8)
+        else if (hover_lightens) adjustColor(theme.button_bg, 16, 16, 18) else adjustColor(theme.button_bg, -8, -8, -8);
         colors.border = if (accept)
             adjustColor(theme.button_accept_border, 24, 20, 10)
         else if (active)
             theme.accent_hover
         else if (overlay)
-            adjustColor(theme.button_overlay_border, 20, 20, 24)
-        else
-            adjustColor(theme.button_border, 28, 28, 30);
+            if (hover_lightens) adjustColor(theme.button_overlay_border, 20, 20, 24) else adjustColor(theme.button_overlay_border, -20, -20, -24)
+        else if (hover_lightens) adjustColor(theme.button_border, 28, 28, 30) else adjustColor(theme.button_border, -28, -28, -30);
     }
     if (pressed) {
         colors.bg = if (overlay) adjustColor(theme.overlay_bg, -4, -4, -4) else adjustColor(theme.chrome_bg, -8, -8, -8);
@@ -717,11 +731,48 @@ pub fn buttonColorsFromTheme(
         };
     }
 
+    if (high_contrast and hovered and !pressed and !disabled) {
+        colors = .{ .bg = theme.button_active_bg, .border = theme.button_active_border, .fg = theme.button_active_fg };
+    }
     return colors;
 }
 
+test "CHROME57 light button hover darkens without becoming pressed" {
+    const theme = lightTheme();
+    for ([_]bool{ false, true }) |overlay| {
+        const idle = buttonColorsFromTheme(&theme, false, overlay, false, false, false, false, false);
+        const hover = buttonColorsFromTheme(&theme, false, overlay, true, false, false, false, false);
+        const pressed = buttonColorsFromTheme(&theme, false, overlay, true, true, false, false, false);
+        try std.testing.expect((hover.bg & 0xff) + 6 <= (idle.bg & 0xff));
+        try std.testing.expect((hover.border & 0xff) < (idle.border & 0xff));
+        try std.testing.expect(hover.bg != pressed.bg);
+    }
+}
+
+test "CHROME57 High Contrast hover uses readable system highlight colours" {
+    const RGB = @import("../terminal/color.zig").RGB;
+    for ([_]bool{ false, true }) |black| {
+        var theme = lightTheme();
+        theme.button_bg = if (black) rgb(0, 0, 0) else rgb(255, 255, 255);
+        theme.button_overlay_bg = theme.button_bg;
+        theme.button_border = if (black) rgb(255, 255, 255) else rgb(0, 0, 0);
+        theme.button_overlay_border = theme.button_border;
+        theme.button_active_bg = if (black) rgb(255, 255, 0) else rgb(0, 0, 128);
+        theme.button_active_fg = if (black) rgb(0, 0, 0) else rgb(255, 255, 255);
+        theme.button_active_border = theme.button_active_fg;
+        for ([_]bool{ false, true }) |overlay| {
+            const hover = buttonColorsFromTheme(&theme, false, overlay, true, false, false, false, true);
+            try std.testing.expectEqualDeep(ButtonColors{ .bg = theme.button_active_bg, .border = theme.button_active_border, .fg = theme.button_active_fg }, hover);
+            const bg: RGB = .{ .r = @truncate(hover.bg), .g = @truncate(hover.bg >> 8), .b = @truncate(hover.bg >> 16) };
+            const fg: RGB = .{ .r = @truncate(hover.fg), .g = @truncate(hover.fg >> 8), .b = @truncate(hover.fg >> 16) };
+            try std.testing.expect(bg.contrast(fg) >= 4.5);
+            try std.testing.expect(hover.bg != theme.button_bg);
+        }
+    }
+}
+
 // Legacy buttonColors() and buttonFocusRingColor() removed.
-// Use buttonColorsFromTheme() and ThemeColors focus ring fields instead.
+// Use buttonColorsFromTheme(, false) and ThemeColors focus ring fields instead.
 
 // ── Overlay accent ──────────────────────────────────────────────────────
 

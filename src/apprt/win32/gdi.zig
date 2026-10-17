@@ -70,6 +70,19 @@ pub fn drawRoundedRect(hdc: HDC, rect: RECT, bg: u32, border: u32, radius: i32) 
     _ = sys.SelectObject(hdc, old_brush);
 }
 
+/// Stroke a focus ring without erasing content already painted inside it.
+pub fn drawRoundedOutline(hdc: HDC, rect: RECT, border: u32, radius: i32) void {
+    const brush = sys.GetStockObject(NULL_BRUSH) orelse return;
+    const pen = sys.GetStockObject(c.DC_PEN) orelse return;
+    const old_color = sys.SetDCPenColor(hdc, border);
+    defer _ = sys.SetDCPenColor(hdc, old_color);
+    const old_brush = sys.SelectObject(hdc, brush);
+    defer _ = sys.SelectObject(hdc, old_brush);
+    const old_pen = sys.SelectObject(hdc, pen);
+    defer _ = sys.SelectObject(hdc, old_pen);
+    _ = sys.RoundRect(hdc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1, radius, radius);
+}
+
 /// The small status badge a tab draws for its programs (OSC 7501). Every
 /// badge has its own shape, so the state still reads in high contrast,
 /// where all of them are drawn in the text color.
