@@ -246,6 +246,7 @@ fn display(
     };
     storage.addPlacement(
         alloc,
+        terminal.screens.active,
         img.id,
         result.placement_id,
         p,
@@ -357,7 +358,7 @@ fn loadAndAddImage(
     // Validate and store our image
     var img = try loading.complete(alloc);
     errdefer img.deinit(alloc);
-    try storage.addImage(alloc, img);
+    try storage.addImage(alloc, terminal.screens.active, img);
 
     // Get our display settings
     const display_ = loading.display;

@@ -97,7 +97,7 @@ pub const ImageStorage = struct {
         if (limit < self.total_bytes) {
             const req_bytes = self.total_bytes - limit;
             log.info("evicting images to lower limit, evicting={}", .{req_bytes});
-            if (!try self.evictImage(alloc, req_bytes)) {
+            if (!try self.evictImage(alloc, s, req_bytes)) {
                 log.warn("failed to evict enough images for required bytes", .{});
             }
         }
@@ -107,7 +107,7 @@ pub const ImageStorage = struct {
 
     /// Add an already-loaded image to the storage. This will automatically
     /// free any existing image with the same ID.
-    pub fn addImage(self: *ImageStorage, alloc: Allocator, img: Image) Allocator.Error!void {
+    pub fn addImage(self: *ImageStorage, alloc: Allocator, s: ?*terminal.Screen, img: Image) Allocator.Error!void {
         // If the image itself is over the limit, then error immediately
         if (img.data.len > self.total_limit) return error.OutOfMemory;
 
@@ -116,7 +116,7 @@ pub const ImageStorage = struct {
         if (total_bytes > self.total_limit) {
             const req_bytes = total_bytes - self.total_limit;
             log.info("evicting images to make space for {} bytes", .{req_bytes});
-            if (!try self.evictImage(alloc, req_bytes)) {
+            if (!try self.evictImage(alloc, s, req_bytes)) {
                 log.warn("failed to evict enough images for required bytes", .{});
                 return error.OutOfMemory;
             }
@@ -148,6 +148,7 @@ pub const ImageStorage = struct {
     pub fn addPlacement(
         self: *ImageStorage,
         alloc: Allocator,
+        s: ?*terminal.Screen,
         image_id: u32,
         placement_id: u32,
         p: Placement,
@@ -179,6 +180,9 @@ pub const ImageStorage = struct {
         };
 
         const gop = try self.placements.getOrPut(alloc, key);
+        if (gop.found_existing) {
+            if (s) |screen| gop.value_ptr.deinit(screen);
+        }
         gop.value_ptr.* = p;
 
         self.dirty = true;
@@ -514,7 +518,7 @@ pub const ImageStorage = struct {
     ///
     /// This will evict as many images as necessary to make space for
     /// req bytes.
-    fn evictImage(self: *ImageStorage, alloc: Allocator, req: usize) !bool {
+    fn evictImage(self: *ImageStorage, alloc: Allocator, s: ?*terminal.Screen, req: usize) !bool {
         assert(req <= self.total_limit);
 
         // Ironically we allocate to evict. We should probably redesign the
@@ -588,6 +592,7 @@ pub const ImageStorage = struct {
             var p_it = self.placements.iterator();
             while (p_it.next()) |entry| {
                 if (entry.key_ptr.image_id == c.id) {
+                    if (s) |screen| entry.value_ptr.deinit(screen);
                     self.placements.removeByPtr(entry.key_ptr);
                 }
             }
@@ -826,10 +831,10 @@ test "storage: add placement with zero placement id" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 50, .height = 50 });
-    try s.addImage(alloc, .{ .id = 2, .width = 25, .height = 25 });
-    try s.addPlacement(alloc, 1, 0, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
-    try s.addPlacement(alloc, 1, 0, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 50, .height = 50 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2, .width = 25, .height = 25 });
+    try s.addPlacement(alloc, t.screens.active, 1, 0, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 0, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
 
     try testing.expectEqual(@as(usize, 2), s.placements.count());
     try testing.expectEqual(@as(usize, 2), s.images.count());
@@ -854,11 +859,11 @@ test "storage: delete all placements and images" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .all = true });
@@ -878,11 +883,11 @@ test "storage: delete all placements and images preserves limit" {
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
     s.total_limit = 5000;
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .all = true });
@@ -902,11 +907,11 @@ test "storage: delete all placements" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .all = false });
@@ -925,11 +930,11 @@ test "storage: delete all placements by image id" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .id = .{ .image_id = 2 } });
@@ -948,11 +953,11 @@ test "storage: delete all placements by image id and unused images" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .id = .{ .delete = true, .image_id = 2 } });
@@ -971,12 +976,12 @@ test "storage: delete placement by specific id" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .id = .{
@@ -1001,10 +1006,10 @@ test "storage: delete intersecting cursor" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 50, .height = 50 });
-    try s.addImage(alloc, .{ .id = 2, .width = 25, .height = 25 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 50, .height = 50 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2, .width = 25, .height = 25 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
 
     t.screens.active.cursorAbsolute(12, 12);
 
@@ -1033,10 +1038,10 @@ test "storage: delete intersecting cursor plus unused" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 50, .height = 50 });
-    try s.addImage(alloc, .{ .id = 2, .width = 25, .height = 25 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 50, .height = 50 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2, .width = 25, .height = 25 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
 
     t.screens.active.cursorAbsolute(12, 12);
 
@@ -1065,10 +1070,10 @@ test "storage: delete intersecting cursor hits multiple" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 50, .height = 50 });
-    try s.addImage(alloc, .{ .id = 2, .width = 25, .height = 25 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 50, .height = 50 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2, .width = 25, .height = 25 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
 
     t.screens.active.cursorAbsolute(26, 26);
 
@@ -1091,10 +1096,10 @@ test "storage: delete by column" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 50, .height = 50 });
-    try s.addImage(alloc, .{ .id = 2, .width = 25, .height = 25 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 50, .height = 50 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2, .width = 25, .height = 25 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .column = .{
@@ -1123,10 +1128,10 @@ test "storage: delete by column 1x1" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 1, .height = 1 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 3, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 2, .y = 0 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 1, .height = 1 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 3, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 2, .y = 0 }) } });
 
     s.delete(alloc, &t, .{ .column = .{
         .delete = false,
@@ -1157,10 +1162,10 @@ test "storage: delete by row" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 50, .height = 50 });
-    try s.addImage(alloc, .{ .id = 2, .width = 25, .height = 25 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 50, .height = 50 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2, .width = 25, .height = 25 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 0, .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 25, .y = 25 }) } });
 
     s.dirty = false;
     s.delete(alloc, &t, .{ .row = .{
@@ -1189,10 +1194,10 @@ test "storage: delete by row 1x1" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1, .width = 1, .height = 1 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .y = 0 }) } });
-    try s.addPlacement(alloc, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .y = 1 }) } });
-    try s.addPlacement(alloc, 1, 3, .{ .location = .{ .pin = try trackPin(&t, .{ .y = 2 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 1, .height = 1 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .y = 0 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 2, .{ .location = .{ .pin = try trackPin(&t, .{ .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 1, 3, .{ .location = .{ .pin = try trackPin(&t, .{ .y = 2 }) } });
 
     s.delete(alloc, &t, .{ .row = .{
         .delete = false,
@@ -1221,11 +1226,11 @@ test "storage: delete images by range 1" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
     try testing.expectEqual(@as(usize, 3), s.images.count());
     try testing.expectEqual(@as(usize, 2), s.placements.count());
 
@@ -1246,11 +1251,11 @@ test "storage: delete images by range 2" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
     try testing.expectEqual(@as(usize, 3), s.images.count());
     try testing.expectEqual(@as(usize, 2), s.placements.count());
 
@@ -1271,11 +1276,11 @@ test "storage: delete images by range 3" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
     try testing.expectEqual(@as(usize, 3), s.images.count());
     try testing.expectEqual(@as(usize, 2), s.placements.count());
 
@@ -1296,11 +1301,11 @@ test "storage: delete images by range 4" {
 
     var s: ImageStorage = .{};
     defer s.deinit(alloc, t.screens.active);
-    try s.addImage(alloc, .{ .id = 1 });
-    try s.addImage(alloc, .{ .id = 2 });
-    try s.addImage(alloc, .{ .id = 3 });
-    try s.addPlacement(alloc, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
-    try s.addPlacement(alloc, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addImage(alloc, t.screens.active, .{ .id = 1 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 2 });
+    try s.addImage(alloc, t.screens.active, .{ .id = 3 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
+    try s.addPlacement(alloc, t.screens.active, 2, 1, .{ .location = .{ .pin = try trackPin(&t, .{ .x = 1, .y = 1 }) } });
     try testing.expectEqual(@as(usize, 3), s.images.count());
     try testing.expectEqual(@as(usize, 2), s.placements.count());
 
@@ -1357,3 +1362,28 @@ test "storage: aspect ratio calculation when only columns or rows specified" {
         try testing.expectEqual(@as(u32, 100), calc_size.height);
     }
 }
+
+test "storage: addPlacement overwriting existing placement untracks old pin" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try terminal.Terminal.init(alloc, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(alloc);
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+
+    try s.addImage(alloc, t.screens.active, .{ .id = 1, .width = 10, .height = 10 });
+
+    const pin1 = try trackPin(&t, .{ .x = 5, .y = 5 });
+    try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = pin1 } });
+
+    const initial_tracked = t.screens.active.pages.countTrackedPins();
+    try testing.expect(initial_tracked > 0);
+
+    // Overwrite the same (image_id, placement_id) repeatedly; tracked pins count must not leak!
+    for (0..100) |_| {
+        const pin2 = try trackPin(&t, .{ .x = 10, .y = 10 });
+        try s.addPlacement(alloc, t.screens.active, 1, 1, .{ .location = .{ .pin = pin2 } });
+        try testing.expectEqual(initial_tracked, t.screens.active.pages.countTrackedPins());
+    }
+}
+
