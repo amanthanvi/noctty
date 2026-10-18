@@ -355,9 +355,11 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 // The top-left and bottom-right corners of our viewport in screen
                 // points. This lets us determine offsets and containment of placements.
                 const top = t.screens.active.pages.getTopLeft(.viewport);
-                const bot = t.screens.active.pages.getBottomRight(.viewport).?;
-                const top_y = t.screens.active.pages.pointFromPin(.screen, top).?.screen.y;
-                const bot_y = t.screens.active.pages.pointFromPin(.screen, bot).?.screen.y;
+                const bot = t.screens.active.pages.getBottomRight(.viewport) orelse return;
+                const top_point = t.screens.active.pages.pointFromPin(.screen, top) orelse return;
+                const bot_point = t.screens.active.pages.pointFromPin(.screen, bot) orelse return;
+                const top_y = top_point.screen.y;
+                const bot_y = bot_point.screen.y;
 
                 // Go through the placements and ensure the image is
                 // on the GPU or else is ready to be sent to the GPU.
@@ -479,8 +481,10 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 const rect = p.rect(image.*, t) orelse return;
 
                 // This is expensive but necessary.
-                const img_top_y = t.screens.active.pages.pointFromPin(.screen, rect.top_left).?.screen.y;
-                const img_bot_y = t.screens.active.pages.pointFromPin(.screen, rect.bottom_right).?.screen.y;
+                const img_top_point = t.screens.active.pages.pointFromPin(.screen, rect.top_left) orelse return;
+                const img_bot_point = t.screens.active.pages.pointFromPin(.screen, rect.bottom_right) orelse return;
+                const img_top_y = img_top_point.screen.y;
+                const img_bot_y = img_bot_point.screen.y;
 
                 // If the selection isn't within our viewport then skip it.
                 if (img_top_y > bot_y) return;
@@ -916,6 +920,24 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 // Get our pending info
                 const p = self.getPending().?;
 
+                if (@hasDecl(Texture, "replaceRegion") and
+                    self.* == .replace and
+                    self.replace.texture.width == @as(usize, p.width) and
+                    self.replace.texture.height == @as(usize, p.height))
+                {
+                    self.replace.texture.replaceRegion(
+                        0,
+                        0,
+                        p.width,
+                        p.height,
+                        p.dataSlice(),
+                    ) catch return error.UploadFailed;
+                    const texture = self.replace.texture;
+                    alloc.free(self.replace.pending.dataSlice());
+                    self.* = .{ .ready = texture };
+                    return;
+                }
+
                 // Create our texture
                 const texture = Texture.init(
                     api.imageTextureOptions(.rgba, true),
@@ -926,10 +948,6 @@ pub fn ForAPI(comptime GraphicsAPI: type) type {
                 errdefer comptime unreachable;
 
                 // Uploaded. We can now clear our data and change our state.
-                //
-                // NOTE: For the `replace` state, this will free the old texture.
-                //       We don't currently actually replace the existing texture
-                //       in-place but that is an optimization we can do later.
                 self.deinit(alloc);
                 self.* = .{ .ready = texture };
             }
