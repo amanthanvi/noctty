@@ -66,8 +66,9 @@ reading step under [Self-Correction Log](#self-correction-log).
   read: PSReadLine finds its history through a known folder (setting it needs
   `-Command`, which turns off automatic injection: dot-source
   `integration.ps1` as `buildCommandValue` does). Separately, a `-e` fixture
-  sets only `initial-command`, so later tabs and splits start `command`,
-  pwsh by default: pin `--command=cmd.exe` unless the fixture tests a
+  sets only `initial-command`, so later tabs and splits start `command`, a
+  PowerShell by default (pwsh, else Windows PowerShell): pin
+  `--command=cmd.exe` unless the fixture tests a
   configured `command`, and guard the run with
   `scripts/windows-harness-history.ps1`, which only detects a change to the
   real history's size or mtime. (test-harnesses.md: 2026-10-11 PKG-13,
