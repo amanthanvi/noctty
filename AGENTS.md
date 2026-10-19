@@ -65,11 +65,13 @@ reading step under [Self-Correction Log](#self-correction-log).
   into a run-local PSReadLine history path or `SaveNothing` before its first
   read: PSReadLine finds its history through a known folder (setting it needs
   `-Command`, which turns off automatic injection: dot-source
-  `integration.ps1` as `buildCommandValue` does). A `-e` fixture sets only
-  `initial-command`, so later tabs and splits start `command`, pwsh by
-  default: pin `--command=cmd.exe` unless the run needs PowerShell, and
-  bracket it with `scripts/windows-harness-history.ps1`. (test-harnesses.md:
-  2026-10-11 PKG-13, 2026-10-17 PKG-76, 2026-10-19 HARNESS-PWSH-HISTORY-01.)
+  `integration.ps1` as `buildCommandValue` does). Separately, a `-e` fixture
+  sets only `initial-command`, so later tabs and splits start `command`,
+  pwsh by default: pin `--command=cmd.exe` unless the fixture tests a
+  configured `command`, and guard the run with
+  `scripts/windows-harness-history.ps1`, which only detects a change to the
+  real history's size or mtime. (test-harnesses.md: 2026-10-11 PKG-13,
+  2026-10-17 PKG-76, 2026-10-19 HARNESS-PWSH-HISTORY-01.)
   Before a portable-identity or baseline comparison, read app-lifecycle.md,
   2026-10-16 "A portable copy": portable mode does not give a copy its own
   AUMID or registry key.
