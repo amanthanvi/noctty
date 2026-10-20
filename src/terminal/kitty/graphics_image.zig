@@ -414,22 +414,23 @@ pub const LoadingImage = struct {
     }
 
     fn decompressZlib(self: *LoadingImage, alloc: Allocator) !void {
-        // Open our zlib stream
-        var buf: [std.compress.flate.max_window_len]u8 = undefined;
-        var reader: std.Io.Reader = .fixed(self.data.items);
-        var stream: std.compress.flate.Decompress = .init(&reader, .zlib, &buf);
-
-        // Write it to an array list
-        var list: std.ArrayList(u8) = .empty;
-        errdefer list.deinit(alloc);
-        stream.reader.appendRemaining(alloc, &list, .limited(max_size)) catch {
-            log.warn("failed to read decompressed data: {?}", .{stream.err});
+        // Use the WUFFS zlib decoder rather than std.compress.flate. Every
+        // crash dump from high-frequency `o=z` streaming (termway video)
+        // faulted on the io-reader thread inside the std flate bit reader
+        // with a wild decompressor pointer, before and after the placement
+        // pin fixes. WUFFS is already linked for PNG and is memory safe.
+        const result = wuffs.zlib.decompress(
+            alloc,
+            self.data.items,
+            max_size,
+        ) catch |err| {
+            log.warn("failed to decompress image data err={}", .{err});
             return error.DecompressionFailed;
         };
 
-        // Empty our current data list, take ownership over managed array list
+        // Replace our compressed data with the decompressed data
         self.data.deinit(alloc);
-        self.data = .{ .items = list.items, .capacity = list.capacity };
+        self.data = .{ .items = result, .capacity = result.len };
 
         // Make sure we note that our image is no longer compressed
         self.image.compression = .none;
