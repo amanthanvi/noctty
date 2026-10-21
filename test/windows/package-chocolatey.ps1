@@ -197,6 +197,7 @@ try {
         function Get-CimInstance {
             [CmdletBinding()]
             param([Parameter(Position = 0)] [string] $ClassName)
+            if ("$CpuArchitecture" -eq 'throw') { throw 'CPU query unavailable' }
             if ($null -ne $CpuArchitecture) { [pscustomobject] @{ Architecture = $CpuArchitecture } }
         }
         function Install-ChocolateyPackage {
@@ -212,7 +213,8 @@ try {
     $installerCases = @(
         @{ Name = 'CPU reports ARM64 (12) while the process reports x64'; Cpu = 12; Expected = 'arm64' },
         @{ Name = 'CPU reports x64 (9)'; Cpu = 9; Expected = $osInstaller },
-        @{ Name = 'CPU query returns nothing'; Cpu = $null; Expected = $osInstaller }
+        @{ Name = 'CPU query returns nothing'; Cpu = $null; Expected = $osInstaller },
+        @{ Name = 'CPU query raises an error'; Cpu = 'throw'; Expected = $osInstaller }
     )
     foreach ($case in $installerCases) {
         $choice = Get-GeneratedInstallerChoice -InstallScript $dualInstallScript -CpuArchitecture $case.Cpu

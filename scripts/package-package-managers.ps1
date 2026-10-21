@@ -300,8 +300,13 @@ $ErrorActionPreference = 'Stop'
 # Chocolatey runs as an emulated x64 process on ARM64 Windows, so OSArchitecture reports x64 there.
 # Ask the CPU itself (Win32_Processor.Architecture 12 = ARM64) so ARM64 machines get the ARM64 installer.
 $machineArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-if ((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
-    $machineArchitecture = 'arm64'
+try {
+    if ((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
+        $machineArchitecture = 'arm64'
+    }
+}
+catch {
+    # Keep the OSArchitecture result if the CPU cannot be queried.
 }
 $installers = @{
     x64 = @{
