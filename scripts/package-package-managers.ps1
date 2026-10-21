@@ -297,7 +297,12 @@ $arm64SetupSha256 = if ($artifacts.Contains("arm64")) { $artifacts["arm64"].setu
 $chocolateyInstall = @'
 $ErrorActionPreference = 'Stop'
 
+# Chocolatey runs as an emulated x64 process on ARM64 Windows, so OSArchitecture reports x64 there.
+# Ask the CPU itself (Win32_Processor.Architecture 12 = ARM64) so ARM64 machines get the ARM64 installer.
 $machineArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+if ((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
+    $machineArchitecture = 'arm64'
+}
 $installers = @{
     x64 = @{
         url = '__X64_SETUP_URL__'
