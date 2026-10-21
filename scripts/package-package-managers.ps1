@@ -84,7 +84,7 @@ noctty is a Windows terminal emulator that reuses Ghostty's terminal core under 
 * A shell picker for PowerShell, cmd, Git Bash, and WSL distributions
 * A command palette
 * Most Ghostty options and themes work as they are
-* No telemetry; crash dumps never leave the PC
+* No telemetry; noctty uploads no crash reports (Windows Error Reporting follows your Windows settings)
 
 ### Package Notes
 
