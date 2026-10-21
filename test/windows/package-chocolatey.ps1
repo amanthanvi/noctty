@@ -19,6 +19,8 @@ $artifactRoot = Join-Path $repoRoot $artifactRelative
 $outputRelative = Join-Path $scratchRelative 'output'
 $outputRoot = Join-Path $repoRoot $outputRelative
 $packRoot = Join-Path ([System.IO.Path]::GetTempPath()) $scratchName
+# Release version used only for the multi-architecture installer-choice check below.
+$dualVersion = '0.0.2'
 
 try {
     New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
@@ -157,7 +159,6 @@ try {
     # process on ARM64 Windows, so OSArchitecture alone says x64 there: run the generated script
     # against a stubbed CPU query and check which installer it picks.
     # More than one architecture reads each one's artifacts from the default dist/artifacts layout.
-    $dualVersion = '0.0.2'
     $dualArtifactDirs = @{}
     foreach ($dualArchitecture in @('x64', 'arm64')) {
         $dualArtifactDirs[$dualArchitecture] = Join-Path $repoRoot "dist\artifacts\noctty-$dualVersion-windows-$dualArchitecture"
@@ -299,7 +300,7 @@ finally {
         Remove-Item -LiteralPath $scratchRoot -Recurse -Force
     }
     foreach ($dualCleanupArchitecture in @('x64', 'arm64')) {
-        $dualCleanupDir = Join-Path $repoRoot "dist/artifacts/noctty-0.0.2-windows-$dualCleanupArchitecture"
+        $dualCleanupDir = Join-Path $repoRoot "dist/artifacts/noctty-$dualVersion-windows-$dualCleanupArchitecture"
         if (Test-Path -LiteralPath $dualCleanupDir) {
             Remove-Item -LiteralPath $dualCleanupDir -Recurse -Force
         }
