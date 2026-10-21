@@ -153,6 +153,75 @@ try {
         }
     }
 
+    # The installer is chosen at install time from the CPU. Chocolatey runs as an emulated x64
+    # process on ARM64 Windows, so OSArchitecture alone says x64 there: run the generated script
+    # against a stubbed CPU query and check which installer it picks.
+    # More than one architecture reads each one's artifacts from the default dist/artifacts layout.
+    $dualVersion = '0.0.2'
+    $dualArtifactDirs = @{}
+    foreach ($dualArchitecture in @('x64', 'arm64')) {
+        $dualArtifactDirs[$dualArchitecture] = Join-Path $repoRoot "dist\artifacts\noctty-$dualVersion-windows-$dualArchitecture"
+        New-Item -ItemType Directory -Path $dualArtifactDirs[$dualArchitecture] -Force | Out-Null
+    }
+    Set-Content -LiteralPath (Join-Path $dualArtifactDirs['x64'] 'noctty-icon.svg') -Value '<svg xmlns="http://www.w3.org/2000/svg" />' -NoNewline
+    $dualInstallers = @{}
+    foreach ($dualArchitecture in @('x64', 'arm64')) {
+        $dualSetupName = New-WindowsPackageArtifactName -Version $dualVersion -Architecture $dualArchitecture -Kind setup
+        $dualPortableName = New-WindowsPackageArtifactName -Version $dualVersion -Architecture $dualArchitecture -Kind portable
+        $dualSetupPath = Join-Path $dualArtifactDirs[$dualArchitecture] $dualSetupName
+        $dualPortablePath = Join-Path $dualArtifactDirs[$dualArchitecture] $dualPortableName
+        Set-Content -LiteralPath $dualSetupPath -Value "fake signed setup for $dualArchitecture" -NoNewline
+        Set-Content -LiteralPath $dualPortablePath -Value "fake portable archive for $dualArchitecture" -NoNewline
+        $dualSetupSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $dualSetupPath).Hash.ToLowerInvariant()
+        $dualPortableSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $dualPortablePath).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath (Join-Path $dualArtifactDirs[$dualArchitecture] (New-WindowsPackageArtifactName -Version $dualVersion -Architecture $dualArchitecture -Kind checksums)) -Value @(
+            "$dualSetupSha256 *$dualSetupName"
+            "$dualPortableSha256 *$dualPortableName"
+        )
+        $dualInstallers[$dualArchitecture] = @{
+            Url = "https://github.com/amanthanvi/noctty/releases/download/v$dualVersion/$dualSetupName"
+            Checksum = $dualSetupSha256
+        }
+    }
+    $dualOutputRelative = Join-Path $scratchRelative 'dual-output'
+    & $packageScript `
+        -Version $dualVersion `
+        -Architectures @('x64', 'arm64') `
+        -OutputRoot $dualOutputRelative | Out-Null
+    $dualInstallScript = Get-Content -LiteralPath (Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\tools\chocolateyInstall.ps1')) -Raw
+
+    function Get-GeneratedInstallerChoice {
+        param([string] $InstallScript, [AllowNull()] $CpuArchitecture)
+
+        $script:chosenInstaller = $null
+        function Get-CimInstance {
+            [CmdletBinding()]
+            param([Parameter(Position = 0)] [string] $ClassName)
+            if ($null -ne $CpuArchitecture) { [pscustomobject] @{ Architecture = $CpuArchitecture } }
+        }
+        function Install-ChocolateyPackage {
+            [CmdletBinding()]
+            param($packageName, $fileType, $url, $checksum, $checksumType, $silentArgs, $validExitCodes)
+            $script:chosenInstaller = @{ Url = $url; Checksum = $checksum }
+        }
+        & ([scriptblock]::Create($InstallScript))
+        return $script:chosenInstaller
+    }
+
+    $osInstaller = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    $installerCases = @(
+        @{ Name = 'CPU reports ARM64 (12) while the process reports x64'; Cpu = 12; Expected = 'arm64' },
+        @{ Name = 'CPU reports x64 (9)'; Cpu = 9; Expected = $osInstaller },
+        @{ Name = 'CPU query returns nothing'; Cpu = $null; Expected = $osInstaller }
+    )
+    foreach ($case in $installerCases) {
+        $choice = Get-GeneratedInstallerChoice -InstallScript $dualInstallScript -CpuArchitecture $case.Cpu
+        $want = $dualInstallers[$case.Expected]
+        if ($null -eq $choice -or $choice.Url -cne $want.Url -or $choice.Checksum -cne $want.Checksum) {
+            throw "Generated install script chose the wrong installer when the $($case.Name): expected $($case.Expected), got $($choice.Url)."
+        }
+    }
+
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
     if ($metadata.chocolatey.packageName -cne 'noctty' -or
         $metadata.chocolatey.nuspecPath -cne $nuspecPath -or
@@ -226,5 +295,11 @@ finally {
     }
     if (Test-Path -LiteralPath $scratchRoot) {
         Remove-Item -LiteralPath $scratchRoot -Recurse -Force
+    }
+    foreach ($dualCleanupArchitecture in @('x64', 'arm64')) {
+        $dualCleanupDir = Join-Path $repoRoot "dist/artifacts/noctty-0.0.2-windows-$dualCleanupArchitecture"
+        if (Test-Path -LiteralPath $dualCleanupDir) {
+            Remove-Item -LiteralPath $dualCleanupDir -Recurse -Force
+        }
     }
 }
