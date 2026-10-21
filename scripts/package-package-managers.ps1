@@ -73,6 +73,25 @@ $chocolateyIconUrl = "https://noctty.com/assets/favicon.svg"
 $packageDescription = @"
 noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end.
 "@.Trim()
+# The Chocolatey page shows the description as Markdown, so it carries the notes a
+# user needs before installing: the SmartScreen warning, PATH and updates.
+$chocolateyDescription = @'
+noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end. It runs on Windows 10 version 1809 or later and Windows 11, on x64 and ARM64.
+
+### Features
+
+* Tabs, splits, and session restore for windows, tabs, splits, and working directories
+* A shell picker for PowerShell, cmd, Git Bash, and WSL distributions
+* A command palette
+* Most Ghostty options and themes work as they are
+* No telemetry; crash dumps never leave the PC
+
+### Package Notes
+
+* The installer is signed with a self-signed certificate, so Windows SmartScreen warns on first run. This package checks the download against the SHA-256 published with each release.
+* The installer does not add noctty to PATH.
+* noctty checks GitHub Releases for updates and never installs one until you start it. Set `auto-update = off` in the config to disable the check.
+'@.Trim()
 
 function Reset-Directory {
     param([string]$Path)
@@ -260,6 +279,7 @@ foreach ($arch in $Architectures) {
 Set-Content -LiteralPath $scoopManifestPath -Value ($scoopManifest | ConvertTo-Json -Depth 5)
 
 $escapedDescription = [System.Security.SecurityElement]::Escape($packageDescription)
+$escapedChocolateyDescription = [System.Security.SecurityElement]::Escape($chocolateyDescription)
 $chocolateyNuspec = @"
 <?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
@@ -278,10 +298,10 @@ $chocolateyNuspec = @"
     <iconUrl>$chocolateyIconUrl</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>$escapedDescription</summary>
-    <description>$escapedDescription</description>
+    <description>$escapedChocolateyDescription</description>
     <releaseNotes>$releaseUrl</releaseNotes>
     <copyright>Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors</copyright>
-    <tags>noctty terminal emulator windows ghostty</tags>
+    <tags>noctty terminal terminal-emulator emulator console shell windows ghostty foss</tags>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
