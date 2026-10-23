@@ -5815,11 +5815,12 @@ pub fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Lo
 }
 
 /// Whether any argument on noctty's command line wrote `id` for `key`
-/// (`--profile-env=<id>: ...`), which a process that reads only the config
-/// files would not see.
+/// (`--profile-env=<id>: ...`), or cleared every id (`--profile-env=`), which
+/// a process that reads only the config files would not see.
 pub fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []const u8) bool {
     for (self._profile_places.items) |place| {
-        if (place.location == .cli and std.mem.eql(u8, place.key, key) and std.ascii.eqlIgnoreCase(place.id, id)) return true;
+        if (place.location != .cli or !std.mem.eql(u8, place.key, key)) continue;
+        if (place.id.len == 0 or std.ascii.eqlIgnoreCase(place.id, id)) return true;
     }
     return false;
 }
@@ -5833,7 +5834,19 @@ fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: an
     const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return;
     const key = arg[2..eq];
     const value = std.mem.trim(u8, arg[eq + 1 ..], &std.ascii.whitespace);
-    if (value.len == 0) return;
+    if (value.len == 0) {
+        // `profile-env =` clears every profile's variables: recorded under
+        // the empty id, which no profile has, so `profileWrittenOnCommandLine`
+        // sees a command-line reset (New Elevated Window would otherwise
+        // name a file's profile, whose variables the elevated process reads
+        // back from the files).
+        if (std.mem.eql(u8, key, "profile-env")) try self._profile_places.append(alloc, .{
+            .key = "profile-env",
+            .id = "",
+            .location = try cli.Location.fromIter(iter, alloc),
+        });
+        return;
+    }
     inline for (.{ "default-profile", "profile-order", "profile-hidden" }) |reference_key| {
         if (std.mem.eql(u8, key, reference_key)) {
             try self._profile_places.append(alloc, .{

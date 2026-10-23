@@ -1178,8 +1178,9 @@ fn elevatesBySelector(config: *const configpkg.Config, key: []const u8) bool {
     const id = key["user:".len..];
     if (config.@"profile-command".get(id) == null) return false;
     if (config.profilePlace("profile-command", id) != .file) return false;
-    // A variable given on the command line (`--profile-env=<id>: ...`) is not
-    // forwarded either, so such a profile is passed with its variables.
+    // A variable given on the command line (`--profile-env=<id>: ...`), or a
+    // `--profile-env=` that cleared them, is not forwarded either, so such a
+    // profile is passed with its variables.
     return !config.profileWrittenOnCommandLine("profile-env", id);
 }
 
@@ -55835,6 +55836,26 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     // A file's profile with a variable from the command line: the elevated
     // process would not get that variable, so the profile is passed.
     try std.testing.expect(!elevatesBySelector(&cfg, "user:envcli"));
+    // `--profile-env=` cleared every profile's variables, which the files
+    // would give the elevated process back: every profile is passed.
+    {
+        var cleared = try configpkg.Config.default(alloc);
+        defer cleared.deinit();
+        try cleared.loadFile(alloc, path);
+        var reset: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+            .iterator = cli_args.sliceIterator(&.{"--profile-env="}),
+        };
+        try cleared.loadIter(alloc, &reset);
+        try cleared.finalize();
+        try std.testing.expect(cleared.@"profile-env".count() == 0);
+        try std.testing.expect(!elevatesBySelector(&cleared, "user:filed"));
+        // Nothing reset: named.
+        var plain = try configpkg.Config.default(alloc);
+        defer plain.deinit();
+        try plain.loadFile(alloc, path);
+        try plain.finalize();
+        try std.testing.expect(elevatesBySelector(&plain, "user:filed"));
+    }
     // Nothing to name: a removed or unknown profile, a detected one.
     try std.testing.expect(!elevatesBySelector(&cfg, "user:gone"));
     try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch"));
