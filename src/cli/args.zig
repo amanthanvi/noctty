@@ -95,6 +95,11 @@ pub fn parse(
             )) return;
         }
 
+        // An argument the destination takes itself, which is not a field.
+        if (@hasDecl(T, "consumeManuallyHook")) {
+            if (try dst.consumeManuallyHook(arena_alloc, arg, iter)) continue;
+        }
+
         // If the destination supports help then we check for it, call
         // the help function and return.
         if (@hasDecl(T, "help")) {

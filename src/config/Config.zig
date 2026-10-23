@@ -1667,7 +1667,9 @@ class: ?[:0]const u8 = null,
 /// unless `split-inherit-working-directory` gives it the source pane's.
 /// `inherit` follows the usual rules instead (`working-directory` and the
 /// `*-inherit-working-directory` settings). A restored pane always returns
-/// to the directory it was in.
+/// to the directory it was in, and an elevated window
+/// (`new_window_elevated:user:<id>`) starts in the directory of the pane it
+/// was opened from.
 @"profile-working-directory": ProfileMap.Text = .{},
 
 /// Environment variables for a profile defined by `profile-command`, as
@@ -3584,6 +3586,13 @@ _command_defaulted: bool = false,
 /// layer; `clone` does not copy it.
 _profile_launch: ?windows_shell.UserLaunch = null,
 
+/// `--elevated-profile-env=KEY=VALUE` on the command line, which
+/// `new_window_elevated:user:<id>` passes for each of the profile's
+/// variables. `finalize` puts them over `env` once every config file has
+/// been read, so an `env` line in an included file cannot replace them, as it
+/// would replace an `--env` argument. Not a field: no config file sets it.
+_elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
+
 /// The last config file that was skipped whole because it is UTF-16 text that
 /// does not decode (see `loadReader`); everything it set is missing from this
 /// load. Lives in the arena of this load; `clone` and `loadTheme` (which
@@ -5183,6 +5192,9 @@ pub fn finalize(self: *Config) !void {
     self.@"faint-opacity" = std.math.clamp(self.@"faint-opacity", 0.0, 1.0);
 
     try self.finalizeProfiles();
+    if (self._elevated_profile_env.items.len > 0) {
+        try windows_shell.layerEnv(self._arena.?.allocator(), &self.env, self._elevated_profile_env.items);
+    }
 
     // Finalize key remapping set for efficient lookups
     self.@"key-remap".finalize();
@@ -5503,6 +5515,35 @@ fn setAutomaticCommand(self: *Config, comptime src: []const u8, cmd: Command) vo
     self._command_defaulted = true;
 }
 
+/// Callback for src/cli/args.zig: true when `arg` is a command-line argument
+/// that is not a field and was taken here. `parseManuallyHook` has already
+/// recorded it for replay, so a rebuilt config takes it again.
+pub fn consumeManuallyHook(
+    self: *Config,
+    alloc: Allocator,
+    arg: []const u8,
+    iter: anytype,
+) !bool {
+    if (builtin.os.tag != .windows) return false;
+    const prefix = "--elevated-profile-env=";
+    if (!std.mem.startsWith(u8, arg, prefix)) return false;
+    const value = arg[prefix.len..];
+    const eq = std.mem.indexOfScalar(u8, value, '=') orelse 0;
+    if (eq == 0) {
+        try self._diagnostics.append(alloc, .{
+            .key = try alloc.dupeZ(u8, "elevated-profile-env"),
+            .message = "value required",
+            .location = try cli.Location.fromIter(iter, alloc),
+        });
+        return true;
+    }
+    try self._elevated_profile_env.append(alloc, .{
+        .key = try alloc.dupeZ(u8, value[0..eq]),
+        .value = try alloc.dupeZ(u8, value[eq + 1 ..]),
+    });
+    return true;
+}
+
 /// Callback for src/cli/args.zig to allow us to handle special cases
 /// like `--help` or `-e`. Returns "false" if the CLI parsing should halt.
 pub fn parseManuallyHook(
@@ -5593,6 +5634,37 @@ test "handoff embedding switch is consumed by Windows config parsing" {
     try cli.args.parse(Config, std.testing.allocator, &cfg, &iter);
     try std.testing.expect(cfg._diagnostics.empty());
     try std.testing.expectEqual(@as(usize, 0), cfg._replay_steps.items.len);
+}
+
+test "elevated profile env is taken from the command line, over env, and kept on replay" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        alloc,
+        "--elevated-profile-env=PATH=p=1 --env=Path=global --env=KEEP=1 --elevated-profile-env=nothing --elevated-profile-env=KEEP=",
+    );
+    defer iter.deinit();
+    try cli.args.parse(Config, alloc, &cfg, &iter);
+    // A value with no `=` is a problem; it is not an unknown field.
+    try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
+    try testing.expectEqualStrings("elevated-profile-env", cfg._diagnostics.items()[0].key);
+    try cfg.finalize();
+    try testing.expectEqualStrings("p=1", cfg.env.map.get("PATH").?);
+    try testing.expect(cfg.env.map.get("Path") == null);
+    // An empty value removes the variable, as `env = KEY=` does.
+    try testing.expect(cfg.env.map.get("KEEP") == null);
+
+    // A config rebuilt by replay (a theme, `config-default-files`) takes it again.
+    var rebuilt = try cfg.cloneEmpty(alloc);
+    defer rebuilt.deinit();
+    var it = Replay.iterator(cfg._replay_steps.items, &rebuilt);
+    try rebuilt.loadIter(alloc, &it);
+    try rebuilt.finalize();
+    try testing.expectEqualStrings("p=1", rebuilt.env.map.get("PATH").?);
+    try testing.expect(rebuilt.env.map.get("Path") == null);
 }
 
 fn compatGtkTabsLocation(

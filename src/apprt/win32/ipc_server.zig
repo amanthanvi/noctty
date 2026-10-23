@@ -2076,6 +2076,7 @@ test "win32 new-window IPC refuses the user profile keys" {
         "--profile-name=x: Calculator",
         "--profile-working-directory=x: C:\\",
         "--profile-env=x: PATH=C:\\evil",
+        "--elevated-profile-env=PATH=C:\\evil",
     }) |arg| {
         try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{arg}));
     }

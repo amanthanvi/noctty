@@ -2401,15 +2401,40 @@ fn profileOpenTargetActionText(target: ProfileOpenTarget) []const u8 {
     };
 }
 
+/// A menu item's text: the label, then the shortcut after a tab. In a menu
+/// `&` marks the next character as the mnemonic and a tab starts the
+/// shortcut column, and a `profile-name` may contain either, so the label
+/// doubles `&` and turns a tab into a space.
 pub fn buildDropdownProfileLabel(
     alloc: Allocator,
     profile: *const windows_shell.Profile,
     index: usize,
 ) ![]u8 {
-    if (index < 9) {
-        return try std.fmt.allocPrint(alloc, "{s}\tCtrl+Shift+{d}", .{ profile.label, index + 1 });
-    }
-    return try alloc.dupe(u8, profile.label);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (profile.label) |byte| switch (byte) {
+        '&' => try out.appendSlice(alloc, "&&"),
+        '\t' => try out.append(alloc, ' '),
+        else => try out.append(alloc, byte),
+    };
+    if (index < 9) try out.print(alloc, "\tCtrl+Shift+{d}", .{index + 1});
+    return try out.toOwnedSlice(alloc);
+}
+
+test "win32 a profile's menu item keeps an ampersand and a tab in its label" {
+    const alloc = std.testing.allocator;
+    const profile: windows_shell.Profile = .{
+        .kind = .user,
+        .key = "user:qa",
+        .label = "Q&A\tshell",
+        .command = .{ .shell = "cmd.exe" },
+    };
+    const first = try buildDropdownProfileLabel(alloc, &profile, 0);
+    defer alloc.free(first);
+    try std.testing.expectEqualStrings("Q&&A shell\tCtrl+Shift+1", first);
+    const tenth = try buildDropdownProfileLabel(alloc, &profile, 9);
+    defer alloc.free(tenth);
+    try std.testing.expectEqualStrings("Q&&A shell", tenth);
 }
 
 fn targetButtonLabelRightInset(target: ?ProfileOpenTarget) i32 {

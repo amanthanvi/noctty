@@ -581,13 +581,19 @@ Limits:
 
 - `new_window_elevated:user:<id>` passes the profile's arguments and its
   `profile-env` variables to the elevated process on its command line
-  (`--command=direct:...`, `--env=...`), quoted again in the standard way
-  rather than as written, which differs only for cmd.exe's own quoting idioms.
-  The elevated process reads your config files again, and a file included with
-  `config-file` is read after its command line, so an `env` line there for the
-  same variable replaces the profile's value (as an included `command` line
-  replaces the command of every elevated window). The variables apply to the
-  whole elevated window, not only its first pane.
+  (`--command=direct:...`, `--elevated-profile-env=...`), quoted again in the
+  standard way rather than as written, which differs only for cmd.exe's own
+  quoting idioms. The elevated process puts the variables over `env` after it
+  has read every config file, so an `env` line in an included file does not
+  replace them. The command does not have that guarantee: a `command` line in
+  a file included with `config-file` is read after the command line and
+  replaces it, as it does for every elevated window. The variables and the
+  command apply to the whole elevated window, not only its first pane.
+- An elevated user profile starts in the directory of the pane it was opened
+  from, as every elevated window does, not in its `profile-working-directory`.
+- Profile lines take effect at a config reload. Previewing or choosing a theme
+  in the command palette reads the config files again but keeps the profiles
+  the running config has.
 - PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
   interactive PowerShell line. A line with `-Command` or `-File`, such as the
   Developer PowerShell above, runs as written without it, as in Windows

@@ -146,6 +146,23 @@ pub const UserLaunch = struct {
     }
 };
 
+/// Put `entries` over `env` (an `env` map), each replacing a variable of the
+/// same name in any case, as Windows compares names: a profile `PATH`
+/// replaces a global `Path`. An empty value only removes, as `env = KEY=`
+/// does. `alloc` is the arena `env` lives in.
+pub fn layerEnv(alloc: Allocator, env: anytype, entries: []const EnvEntry) Allocator.Error!void {
+    for (entries) |entry| {
+        var index: usize = 0;
+        while (index < env.map.count()) {
+            if (std.ascii.eqlIgnoreCase(env.map.keys()[index], entry.key)) {
+                env.map.orderedRemoveAt(index);
+            } else index += 1;
+        }
+        if (entry.value.len == 0) continue;
+        try env.map.put(alloc, try alloc.dupeZ(u8, entry.key), try alloc.dupeZ(u8, entry.value));
+    }
+}
+
 /// The user profiles a config defines, as written (nothing expanded or
 /// split yet), copied out of the config so a discovery on another thread
 /// owns what it reads. `Config.finalize` has already dropped every entry it
@@ -695,6 +712,62 @@ test "no profile keys leave the detected list exactly as it was" {
     try testing.expectEqual(shell.ptr, merged.ptr);
     try testing.expectEqual(@as(usize, 1), merged.len);
     try testing.expectEqualStrings("cmd.exe", merged[0].key);
+}
+
+test "pin: the whole detected list with no profile keys, through symbols main has" {
+    // Written against main's own entry points, so this exact text passes on
+    // main and on this branch: the detected shells and the SSH hosts, every
+    // kind, key, label, palette title and argv, in order.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const shell = try listProfilesWithLookupAndProbeAndWslList(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            const found = [_][2][]const u8{
+                .{ "wsl.exe", "C:\\W\\wsl.exe" },
+                .{ "pwsh.exe", "C:\\P\\pwsh.exe" },
+                .{ "powershell.exe", "C:\\W\\powershell.exe" },
+                .{ "bash.exe", "C:\\G\\bin\\bash.exe" },
+                .{ "cmd.exe", "C:\\W\\cmd.exe" },
+            };
+            for (found) |pair| if (std.mem.eql(u8, exe, pair[0])) return try a.dupe(u8, pair[1]);
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    }.probe, struct {
+        fn list(a: Allocator, _: []const u8) ![][]u8 {
+            const distros = try a.alloc([]u8, 2);
+            distros[0] = try a.dupe(u8, "Ubuntu");
+            distros[1] = try a.dupe(u8, "Debian");
+            return distros;
+        }
+    }.list);
+    const hosts = [_]windows_ssh_hosts.Host{.{ .alias = "prod" }};
+    const profiles = try appendSshProfiles(alloc, shell, &hosts, "C:\\S\\ssh.exe");
+    defer deinitProfiles(alloc, profiles);
+
+    const Want = struct { kind: ProfileKind, key: []const u8, label: []const u8, palette: ?[]const u8 = null, argv: []const []const u8 };
+    const want = [_]Want{
+        .{ .kind = .wsl_default, .key = "wsl-default", .label = "WSL (Default)", .argv = &.{"C:\\W\\wsl.exe"} },
+        .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "WSL: Ubuntu", .argv = &.{ "C:\\W\\wsl.exe", "-d", "Ubuntu" } },
+        .{ .kind = .wsl_distro, .key = "wsl:Debian", .label = "WSL: Debian", .argv = &.{ "C:\\W\\wsl.exe", "-d", "Debian" } },
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .argv = &.{"C:\\P\\pwsh.exe"} },
+        .{ .kind = .powershell, .key = "powershell.exe", .label = "Windows PowerShell", .argv = &.{"C:\\W\\powershell.exe"} },
+        .{ .kind = .git_bash, .key = "git-bash", .label = "Git Bash", .argv = &.{ "C:\\G\\bin\\bash.exe", "--login", "-i" } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .argv = &.{"C:\\W\\cmd.exe"} },
+        .{ .kind = .ssh, .key = "ssh:prod", .label = "SSH: prod", .palette = "Connect to prod", .argv = &.{ "C:\\S\\ssh.exe", "prod" } },
+    };
+    try testing.expectEqual(want.len, profiles.len);
+    for (want, profiles) |w, p| {
+        try testing.expectEqual(w.kind, p.kind);
+        try testing.expectEqualStrings(w.key, p.key);
+        try testing.expectEqualStrings(w.label, p.label);
+        if (w.palette) |title| try testing.expectEqualStrings(title, p.palette_title.?) else try testing.expect(p.palette_title == null);
+        try testing.expectEqual(w.argv.len, p.command.direct.len);
+        for (w.argv, p.command.direct) |a, b| try testing.expectEqualStrings(a, b);
+    }
 }
 
 test "a user profile whose line names no program is skipped" {

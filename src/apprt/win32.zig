@@ -1058,15 +1058,7 @@ fn applyUserLaunchConfig(
 ) !void {
     const alloc = config._arena.?.allocator();
     var env = try config.env.clone(alloc);
-    for (launch.env) |entry| {
-        var index: usize = 0;
-        while (index < env.map.count()) {
-            if (std.ascii.eqlIgnoreCase(env.map.keys()[index], entry.key)) {
-                env.map.orderedRemoveAt(index);
-            } else index += 1;
-        }
-        try env.map.put(alloc, try alloc.dupeZ(u8, entry.key), try alloc.dupeZ(u8, entry.value));
-    }
+    try windows_shell.layerEnv(alloc, &env, launch.env);
     config.env = env;
     config._profile_launch = try launch.clone(alloc);
 }
@@ -6307,6 +6299,7 @@ pub const App = struct {
         // The worker may outlive the App, so it gets its own copy of the
         // user profiles, from the allocator it frees them with.
         var user = windows_shell.UserProfiles.init(std.heap.page_allocator, &self.config) catch |err| {
+            delivery.profiles_running.store(false, .release);
             log.warn("profile discovery thread unavailable; discovering on the UI thread err={}", .{err});
             return self.discoverStartupProfilesNow();
         };
@@ -16920,7 +16913,7 @@ const Host = struct {
         try preview.loadDefaultFiles(alloc);
         try preview.loadCliArgs(alloc);
         try preview.loadRecursiveFiles(alloc);
-        try finishPaletteThemeConfig(&preview, self.app.config._conditional_state, name);
+        try finishPaletteThemeConfig(&preview, &self.app.config, name);
         return preview;
     }
 
@@ -16930,16 +16923,18 @@ const Host = struct {
     /// `swapRuntimeConfigFromPalette` installs it as the app config without
     /// the `.app` `config_change` that drops the request, so it is dropped
     /// here; left in, a `new_window` while the preview is live would open
-    /// the layout.
+    /// the layout. For the same reason it keeps the `running` config's
+    /// profile sources (`keepProfileSources`).
     fn finishPaletteThemeConfig(
         preview: *configpkg.Config,
-        state: configpkg.ConditionalState,
+        running: *const configpkg.Config,
         name: []const u8,
     ) !void {
-        preview._conditional_state = state;
+        preview._conditional_state = running._conditional_state;
         try setConfigTheme(preview, name);
         try preview.finalize();
         App.forgetLaunchLayout(preview);
+        try keepProfileSources(preview, running);
     }
 
     fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
@@ -33264,6 +33259,23 @@ const resolveProfileSelection = labels.resolveProfileSelection;
 const profileIndexByKey = labels.profileIndexByKey;
 const profileKeyEquals = labels.profileKeyEquals;
 const storedProfileKeyEquals = labels.storedProfileKeyEquals;
+
+/// Give `dst` the profile sources of `src`: the keys the profile lists are
+/// built from. A palette theme preview reads the config files again, and a
+/// profile line edited on disk since the last reload would otherwise reach
+/// the app config while the lists the hosts, the jump list and a running
+/// discovery hold stay as they were, so a picker launch and a split of the
+/// same profile could run different definitions. The lists are only dropped
+/// on a reload (`config_change`), which then sees the change. They are not
+/// dropped here: the open palette borrows its host's profile strings.
+fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !void {
+    const alloc = dst._arena.?.allocator();
+    dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
+    dst.@"profile-command" = try src.@"profile-command".clone(alloc);
+    dst.@"profile-name" = try src.@"profile-name".clone(alloc);
+    dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
+    dst.@"profile-env" = try src.@"profile-env".clone(alloc);
+}
 
 /// Whether a reload changed a key the profile lists are built from.
 fn userProfileKeysChanged(old: *const configpkg.Config, new: *const configpkg.Config) bool {
@@ -49791,12 +49803,56 @@ test "win32 a palette theme preview drops the startup launch-layout it parses ag
         .iterator = cli_args.sliceIterator(&.{"--launch-layout=shot"}),
     };
     try preview.loadIter(alloc, &args);
-    try Host.finishPaletteThemeConfig(&preview, .{}, theme);
+    var running = try configpkg.Config.default(alloc);
+    defer running.deinit();
+    try Host.finishPaletteThemeConfig(&preview, &running, theme);
     // The theme loaded, so `finalize` replayed the command line over it.
     try std.testing.expectEqual(@as(u8, 0x10), preview.background.r);
     // `swapRuntimeConfigFromPalette` installs this as the app config, which
     // a `new_window` clones while the preview is live.
     try testExpectNoLaunchLayout(&preview);
+}
+
+test "win32 a palette theme preview keeps the running profile definitions until a reload" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    defer alloc.free(theme);
+
+    // The running config, which the hosts' lists were built from.
+    var running = try configpkg.Config.default(alloc);
+    defer running.deinit();
+    var running_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{ "--profile-command=x: old.exe", "--profile-env=x: MODE=old", "--ssh-config-hosts=false" }),
+    };
+    try running.loadIter(alloc, &running_args);
+    try running.finalize();
+
+    // The files read again for the preview, edited since.
+    const edited = [_][]const u8{ "--profile-command=x: new.exe", "--profile-name=x: New", "--profile-env=x: MODE=new" };
+    var preview = try configpkg.Config.default(alloc);
+    defer preview.deinit();
+    var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(&edited) };
+    try preview.loadIter(alloc, &args);
+    try Host.finishPaletteThemeConfig(&preview, &running, theme);
+
+    // The theme changed; what the profile lists come from did not.
+    try std.testing.expectEqual(@as(u8, 0x10), preview.background.r);
+    try std.testing.expect(!preview.@"ssh-config-hosts");
+    try std.testing.expect(!userProfileKeysChanged(&running, &preview));
+    try std.testing.expectEqualStrings("old.exe", preview.@"profile-command".get("x").?);
+
+    // The next reload, which reads the edited files, sees the change and
+    // drops the lists (the `config_change` path).
+    var reloaded = try configpkg.Config.default(alloc);
+    defer reloaded.deinit();
+    var reload_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(&edited) };
+    try reloaded.loadIter(alloc, &reload_args);
+    try reloaded.finalize();
+    try std.testing.expect(userProfileKeysChanged(&preview, &reloaded));
 }
 
 test "win32 a reload after run took the startup launch-layout does not bring it back" {
