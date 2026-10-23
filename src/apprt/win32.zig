@@ -33114,11 +33114,20 @@ fn appLifecycleWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPA
             if (windowData(App, hwnd)) |app| app.onEndSession(wparam != 0, lparam);
             return 0;
         },
-        // DefWindowProc would destroy it, and the process would again have
-        // no window Restart Manager can ask (this is `taskkill` without /F,
-        // or Restart Manager's fallback once a close is committed, which
-        // quits from the message loop anyway). `run` destroys it last.
-        c.WM_CLOSE => return 0,
+        // Once a close is committed, Restart Manager's fallback WM_CLOSE
+        // closes nothing: the message loop is about to quit, as for a host.
+        // Any other WM_CLOSE (`taskkill` without /F) goes to DefWindowProc,
+        // which destroys the window; the process then has no window Restart
+        // Manager can ask, as on main.
+        c.WM_CLOSE => if (windowData(App, hwnd)) |app| {
+            if (app.end_session_quit_pending) return 0;
+        },
+        // Destroyed by anyone but `closeLifecycleWindow`, which clears the
+        // data first: forget it, so `run` does not destroy a stale handle.
+        c.WM_NCDESTROY => if (windowData(App, hwnd)) |app| {
+            if (app.lifecycle_hwnd == hwnd) app.lifecycle_hwnd = null;
+            setWindowData(hwnd, null);
+        },
         else => {},
     }
     return sys.DefWindowProcW(hwnd, message, wparam, lparam);
@@ -55830,11 +55839,6 @@ test "win32 the lifecycle window is a top-level window that never shows and answ
             try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
             _ = sys.SetWindowPos(hwnd, null, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_SHOWWINDOW);
             try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
-            // A WM_CLOSE (Restart Manager's fallback, `taskkill` without /F)
-            // does not destroy it.
-            try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(hwnd, c.WM_CLOSE, 0, 0));
-            try std.testing.expect(sys.IsWindow(hwnd) != 0);
-
             // A Restart Manager query reaches the app's controller: with
             // nothing running it agrees, and a terminal a quit would ask about
             // declines. `readonly` stands in for a busy terminal; the core is
@@ -55862,6 +55866,18 @@ test "win32 the lifecycle window is a top-level window that never shows and answ
             _ = sys.SendMessageW(hwnd, c.WM_ENDSESSION, 1, close_app);
             try std.testing.expect(app.end_session_quit_pending);
             try std.testing.expect(app.session_ending);
+
+            // Restart Manager's fallback WM_CLOSE after a committed close
+            // closes nothing: the loop is about to quit.
+            try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(hwnd, c.WM_CLOSE, 0, 0));
+            try std.testing.expect(sys.IsWindow(hwnd) != 0);
+            try std.testing.expectEqual(hwnd, app.lifecycle_hwnd.?);
+            // Any other WM_CLOSE (`taskkill` without /F) reaches
+            // DefWindowProc, and the app forgets the destroyed window.
+            app.end_session_quit_pending = false;
+            _ = sys.SendMessageW(hwnd, c.WM_CLOSE, 0, 0);
+            try std.testing.expect(sys.IsWindow(hwnd) == 0);
+            try std.testing.expect(app.lifecycle_hwnd == null);
         }
     }.body);
 }

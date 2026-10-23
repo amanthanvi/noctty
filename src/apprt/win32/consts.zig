@@ -70,6 +70,7 @@ pub const WM_COMMAND = 0x0111;
 pub const WM_CAPTURECHANGED = 0x0215;
 pub const WM_CLOSE = 0x0010;
 pub const WM_DESTROY = 0x0002;
+pub const WM_NCDESTROY = 0x0082;
 pub const WM_DRAWITEM = 0x002B;
 pub const WM_ERASEBKGND = 0x0014;
 pub const WM_GETMINMAXINFO = 0x0024;
