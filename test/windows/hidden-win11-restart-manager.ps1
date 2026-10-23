@@ -29,6 +29,24 @@ the first with two tabs, the second of them split, the second with one tab):
                     latches (a later checkpoint writes nothing) and does not
                     quit by itself (Windows ends the process).
 
+Cases with no terminal window (no seeded session is restored), which only the
+hidden lifecycle window (class noctty.win32.lifecycle) lets Restart Manager
+ask:
+  headless          initial-window = false and quit-after-last-window-closed =
+                    false: Restart Manager lists the process as RmOtherWindow
+                    (2), RmShutdown returns 0 and noctty exits 0. The lifecycle
+                    window is a top-level window that is never visible and is
+                    not among UI Automation's top-level elements.
+  settings-only-clean, settings-only-dirty
+                    Settings opened from a window that is then closed
+                    (quit-after-last-window-closed = false): clean, it closes
+                    and exits 0; with an unsaved font size, declined, and the
+                    edit is still there.
+  embedding-idle    an idle `-Embedding` default-terminal server, asked within
+                    its 5 s idle timeout: RmShutdown returns 0 and it exits.
+                    It registers its class object for that time but changes no
+                    registration; the default terminal is not touched.
+
 Safety. Only this run's portable copies are registered with Restart Manager:
 their noctty.exe and DLLs, never OpenConsole.exe (an RmUnknownApp that fails
 every non-forced shutdown). Leaving it out models the registration set the
@@ -90,7 +108,7 @@ public static class Rm {
     public static DateTime StartTime(ProcessInfo info) {
         return DateTime.FromFileTimeUtc(((long)info.Process.StartHigh<<32)|info.Process.StartLow);
     }
-    public class Sample { public long Ms; public int Hosts; public bool Alive, Prompt; public IntPtr Foreground; }
+    public class Sample { public long Ms; public int Hosts; public bool Alive, Prompt, LifecycleShown; public IntPtr Foreground; }
     // RmShutdown, without the force flag, on a thread of this process (so on
     // this desktop), sampling the copy's windows every 50 ms until it returns.
     public static int Shutdown(uint h, int pid, IntPtr process, List<Sample> timeline, out long elapsed) {
@@ -102,10 +120,25 @@ public static class Rm {
         return result;
     }
     public static Sample Take(long ms, int pid, IntPtr process) {
-        var hosts=Windows(pid,"noctty.win32.host"); bool prompt=false;
+        var hosts=Windows(pid,"noctty.win32.host"); bool prompt=false, shown=false;
         foreach(var host in hosts) if(PromptShown(host)) prompt=true;
-        return new Sample { Ms=ms, Hosts=hosts.Length, Alive=WaitForSingleObject(process,0)==258, Prompt=prompt, Foreground=GetForegroundWindow() };
+        foreach(var w in Windows(pid,"noctty.win32.lifecycle")) if(IsWindowVisible(w)) shown=true;
+        return new Sample { Ms=ms, Hosts=hosts.Length, Alive=WaitForSingleObject(process,0)==258, Prompt=prompt, LifecycleShown=shown, Foreground=GetForegroundWindow() };
     }
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr FindWindowExW(IntPtr parent,IntPtr after,string cls,string title);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h,uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetWindowLongPtrW(IntPtr h,int index);
+    // The app's message-only window (under HWND_MESSAGE), which EnumWindows
+    // does not list.
+    public static IntPtr MessageWindow(int pid) {
+        var h=IntPtr.Zero;
+        while((h=FindWindowExW(new IntPtr(-3),h,"noctty.win32.app",null))!=IntPtr.Zero) { int id; GetWindowThreadProcessId(h,out id); if(id==pid) return h; }
+        return IntPtr.Zero;
+    }
+    public static bool Visible(IntPtr h) { return IsWindowVisible(h); }
+    public static bool TopLevel(IntPtr h) { return GetAncestor(h,1)==GetDesktopWindow(); }
+    public static long ExStyle(IntPtr h) { return GetWindowLongPtrW(h,-20).ToInt64(); }
     [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h,uint ms);
     delegate bool EnumWindow(IntPtr h, IntPtr p);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindow cb, IntPtr p);
@@ -155,6 +188,9 @@ if (-not $Driver) {
 }
 
 # This branch executes only on the newly created desktop; children inherit it.
+# Its output is not shown, so an error that stops it is kept in the run.
+# (A trap covers the whole script, the outer half included.)
+trap { if($Driver) { Set-Content -LiteralPath (Join-Path $Run 'driver-error.txt') -Value ($_ | Out-String) }; break }
 $script:checks=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
 $results=[ordered]@{ Cases=[ordered]@{} }
@@ -186,33 +222,78 @@ function Session-Shape([string]$Path) {
 $seededShape='[1,2] [1]'
 function Mtime([string]$Path) { if(Test-Path -LiteralPath $Path) { return (Get-Item -LiteralPath $Path).LastWriteTimeUtc } return $null }
 
-function Start-Case([string]$Name,[string[]]$Config) {
+# -HostCount: the terminal windows the case opens with (the seeded session's 2
+# unless the config says otherwise). -Embedding starts the copy as a
+# default-terminal server, which writes no startup ledger and opens nothing.
+function Start-Case([string]$Name,[string[]]$Config,[int]$HostCount=2,[switch]$Embedding) {
     $dir=Join-Path $Run "$Name\bin"; Copy-Portable $Bin $dir
     Set-Content -LiteralPath (Join-Path $dir 'session-state.json') -Value (Session-Json $dir) -NoNewline -Encoding utf8NoBOM
     $cfg=Join-Path $dir 'case.ghostty'
     (@('command = cmd.exe /d /k','single-instance = false','window-save-state = always',
        'copy-on-select = false','clipboard-read = deny','clipboard-write = deny') + $Config) | Set-Content -LiteralPath $cfg
     $exe=Join-Path $dir 'noctty.exe'
-    $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,$cfg,$runClass),$dir,"WinSta0\$DesktopName")
+    $line='"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,$cfg,$runClass
+    if($Embedding) { $line+=' -Embedding' }
+    $pi=[HiddenLocal]::Spawn($exe,$line,$dir,"WinSta0\$DesktopName")
     try { $p=[Diagnostics.Process]::GetProcessById($pi.pid); [void]$p.Handle }
     finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
     $script:processes.Add(@{ Case=$Name; Pid=$p.Id; StartTime=$p.StartTime.ToUniversalTime().ToString('o') })
-    $case=@{ Name=$Name; Dir=$dir; Process=$p; State=(Join-Path $dir 'session-state.json') }
+    $case=@{ Name=$Name; Dir=$dir; Process=$p; State=(Join-Path $dir 'session-state.json'); Started=[Diagnostics.Stopwatch]::StartNew() }
     $ok=Wait-Until {
+        # The server is up once its message window exists (it registers its
+        # class object right after).
+        if($Embedding) { return [Rm]::MessageWindow($p.Id) -ne [IntPtr]::Zero }
         $ready=$false
         $ledger=Join-Path $dir 'startup-attempts.json'
         if(Test-Path -LiteralPath $ledger) {
             try { $a=(Get-Content -LiteralPath $ledger -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).attempts; $ready=$a.Count -gt 0 -and $a[-1].phase -eq 'ready' } catch { }
         }
-        $ready -and @([HiddenLocal]::Hosts($p.Id)).Count -ge 2
+        $ready -and @([HiddenLocal]::Hosts($p.Id)).Count -ge $HostCount
     } 30
     $hosts=@([HiddenLocal]::Hosts($p.Id))
-    if(-not $ok) { Stop-Case $case; throw "Case ${Name}: the restored session did not open (hosts $($hosts.Count))." }
-    foreach($h in $hosts) { if([HiddenLocal]::WindowDesktop($h) -ne $DesktopName) { Stop-Case $case; throw "Case ${Name}: a window is not on the private desktop." } }
+    if(-not $ok) { Stop-Case $case; throw "Case ${Name}: noctty did not start as expected (hosts $($hosts.Count))." }
+    $owned=@($hosts) + @([Rm]::Windows($p.Id,'noctty.win32.lifecycle')) + @([Rm]::MessageWindow($p.Id) | Where-Object { $_ -ne [IntPtr]::Zero })
+    foreach($h in $owned) { if([HiddenLocal]::WindowDesktop($h) -ne $DesktopName) { Stop-Case $case; throw "Case ${Name}: a window is not on the private desktop." } }
     $case.Hosts=$hosts
-    # The shells print their first prompts.
-    Start-Sleep -Seconds 5
+    if($Embedding) { Start-Sleep -Milliseconds 300 }
+    elseif($HostCount -gt 0) { Start-Sleep -Seconds 5 } # The shells print their first prompts.
+    else { Start-Sleep -Milliseconds 500 }
     return $case
+}
+# The lifecycle windows the copy has, and whether each is hidden, top-level
+# (a child of the desktop, not of HWND_MESSAGE) and a tool window.
+function Lifecycle-State($case) {
+    return @(@([Rm]::Windows($case.Process.Id,'noctty.win32.lifecycle')) | ForEach-Object {
+        @{ Visible=[Rm]::Visible($_); TopLevel=[Rm]::TopLevel($_); ToolWindow=(([Rm]::ExStyle($_) -band 0x80) -ne 0) }
+    })
+}
+# How many of UI Automation's top-level elements (the desktop root's
+# children) belong to the copy.
+function Uia-TopLevel([int]$ProcessId) {
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$ProcessId)
+    return @([Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$condition)).Count
+}
+# Opens Settings from the case's only window (F8 is bound to open_config),
+# optionally types an unsaved font size, then closes that window, leaving
+# Settings as the copy's only visible window.
+function Settings-Only($case,[bool]$Dirty) {
+    $out=[ordered]@{}
+    [Rm]::Key((Pane $case.Hosts[0]),0x77)
+    $ok=Wait-Until { @([Rm]::Windows($case.Process.Id,'noctty.win32.settings')).Count -gt 0 -and [Rm]::Child(@([Rm]::Windows($case.Process.Id,'noctty.win32.settings'))[0],402) -ne [IntPtr]::Zero } 15
+    if(-not $ok) { throw "$($case.Name): Settings did not open." }
+    $out.Settings=@([Rm]::Windows($case.Process.Id,'noctty.win32.settings'))[0]
+    $edit=[Rm]::Child($out.Settings,402)
+    if($Dirty) {
+        $original=[Rm]::Text($edit)
+        $out.Typed=if($original -eq '17') { '18' } else { '17' }
+        [Rm]::SetText($edit,$out.Typed)
+        Start-Sleep -Milliseconds 800
+    }
+    [void][Rm]::Send($case.Hosts[0],$Msg.Close,0,0)
+    if(-not (Wait-Until { @([HiddenLocal]::Hosts($case.Process.Id)).Count -eq 0 } 10)) { throw "$($case.Name): the terminal window did not close." }
+    Start-Sleep -Milliseconds 500
+    return $out
 }
 # Ends the case's own process if it is still running: the exact PID, with its
 # start time and image checked again first. The owned job is the backstop.
@@ -256,7 +337,7 @@ function Rm-Close($case) {
         $out.PromptSeen=@($timeline | Where-Object Prompt).Count -gt 0
         $out.ForegroundChanged=@($timeline | Where-Object { $_.Foreground.ToInt64() -ne $out.ForegroundBefore }).Count -gt 0
         $changes=@(); $last=$null
-        foreach($s in $timeline) { $k="$($s.Hosts)/$($s.Alive)/$($s.Prompt)"; if($k -ne $last) { $changes+=@{ Ms=$s.Ms; Hosts=$s.Hosts; Alive=$s.Alive; Prompt=$s.Prompt }; $last=$k } }
+        foreach($s in $timeline) { $k="$($s.Hosts)/$($s.Alive)/$($s.Prompt)/$($s.LifecycleShown)"; if($k -ne $last) { $changes+=@{ Ms=$s.Ms; Hosts=$s.Hosts; Alive=$s.Alive; Prompt=$s.Prompt; LifecycleShown=$s.LifecycleShown }; $last=$k } }
         $out.Timeline=$changes
     } finally { [void][Rm]::RmEndSession($h) }
     return $out
@@ -272,7 +353,7 @@ function Send-All($case,[uint32]$Message,[long]$W,[long]$L) {
     return @(@([HiddenLocal]::Hosts($case.Process.Id)) | ForEach-Object { [Rm]::Send($_,$Message,$W,$L) })
 }
 
-$all=@('idle-two-windows','busy-always','busy-ping','settings-dirty','cancel','signout')
+$all=@('idle-two-windows','busy-always','busy-ping','settings-dirty','cancel','signout','headless','settings-only-clean','settings-only-dirty','embedding-idle')
 $selected=if($Cases) { @($Cases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { $all }
 foreach($name in $selected) { if($all -notcontains $name) { throw "Unknown case $name." } }
 
@@ -386,6 +467,74 @@ foreach($name in $selected) {
                 Check "${name}: the session is saved as it ends" ($r.Saved -and $r.ShapeAfter -eq $seededShape) "saved, $seededShape" "$($r.Saved), $($r.ShapeAfter)"
                 Check "${name}: and latched: a later checkpoint writes nothing" $r.LatchedAfter $true $r.LatchedAfter
                 Check "${name}: noctty does not quit by itself" ($r.Alive -and $r.Hosts -eq 2) 'alive, 2 windows' "alive=$($r.Alive), $($r.Hosts) windows"
+            } finally { Stop-Case $case }
+        }
+        'headless' {
+            $case=Start-Case $name @('initial-window = false','quit-after-last-window-closed = false') 0
+            try {
+                $r.Lifecycle=Lifecycle-State $case
+                $r.UiaTopLevel=Uia-TopLevel $case.Process.Id
+                $r.Rm=Rm-Close $case
+                $exited=$case.Process.WaitForExit(10000)
+                $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
+                $type=@($r.Rm.Listed)[0].Type
+                $l=@($r.Lifecycle)
+                Check "${name}: one lifecycle window, top-level, hidden, a tool window" ($l.Count -eq 1 -and $l[0].TopLevel -and -not $l[0].Visible -and $l[0].ToolWindow) '1, top-level, hidden, tool' (($l | ForEach-Object { "top=$($_.TopLevel) visible=$($_.Visible) tool=$($_.ToolWindow)" }) -join '; ')
+                Check "${name}: not among UI Automation's top-level elements" ($r.UiaTopLevel -eq 0) 0 $r.UiaTopLevel
+                Check "${name}: listed as RmOtherWindow" ($type -eq 2) 2 $type
+                Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 $r.Rm.Result
+                Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                Check "${name}: the lifecycle window never shows" (@($r.Rm.Timeline | Where-Object { $_.LifecycleShown }).Count -eq 0) $false 'see Timeline'
+            } finally { Stop-Case $case }
+        }
+        { $_ -in 'settings-only-clean','settings-only-dirty' } {
+            $dirty=$name -eq 'settings-only-dirty'
+            $case=Start-Case $name @('window-save-state = never','quit-after-last-window-closed = false','keybind = f8=open_config') 1
+            try {
+                $s=Settings-Only $case $dirty
+                # A positive control for the headless case's UI Automation
+                # check: Settings is one of its top-level elements.
+                $r.UiaTopLevel=Uia-TopLevel $case.Process.Id
+                $r.Lifecycle=Lifecycle-State $case
+                $r.Rm=Rm-Close $case
+                if($dirty) {
+                    Start-Sleep -Milliseconds 800
+                    $r.Alive=-not $case.Process.HasExited
+                    $r.SettingsOpen=@([Rm]::Windows($case.Process.Id,'noctty.win32.settings')).Count -eq 1
+                    $r.EditKept=$r.SettingsOpen -and ([Rm]::Text([Rm]::Child($s.Settings,402)) -eq $s.Typed)
+                    Check "${name}: declined" ($r.Rm.Result -eq 351) 351 $r.Rm.Result
+                    Check "${name}: declined at once" ($r.Rm.Ms -lt 2000) '< 2000 ms' $r.Rm.Ms
+                    Check "${name}: noctty and Settings stay open" ($r.Alive -and $r.SettingsOpen) 'alive, Settings' "alive=$($r.Alive), Settings=$($r.SettingsOpen)"
+                    Check "${name}: the unsaved edit survives" $r.EditKept $s.Typed $r.EditKept
+                } else {
+                    $exited=$case.Process.WaitForExit(10000)
+                    $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
+                    Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 $r.Rm.Result
+                    Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                    Check "${name}: Settings is one of UI Automation's top-level elements" ($r.UiaTopLevel -ge 1) '>= 1' $r.UiaTopLevel
+                }
+                Check "${name}: the lifecycle window never shows" (@($r.Rm.Timeline | Where-Object { $_.LifecycleShown }).Count -eq 0 -and @($r.Lifecycle | Where-Object { $_.Visible }).Count -eq 0) $false 'see Timeline'
+            } finally { Stop-Case $case }
+        }
+        'embedding-idle' {
+            $case=Start-Case $name @() 0 -Embedding
+            try {
+                $r.Lifecycle=Lifecycle-State $case
+                $r.Rm=Rm-Close $case
+                # Asked, and gone, well inside the server's own 5 s idle
+                # timeout (which main's server exits on), so the exit is the
+                # close's doing.
+                $r.AskedAtMs=$case.Started.ElapsedMilliseconds
+                [void]$case.Process.WaitForExit(1500)
+                $r.ExitedByMs=if($case.Process.HasExited) { $case.Started.ElapsedMilliseconds } else { $null }
+                $exited=$case.Process.WaitForExit(10000)
+                $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
+                $type=@($r.Rm.Listed)[0].Type
+                Check "${name}: asked before its idle timeout" ($r.AskedAtMs -lt 3000) '< 3000 ms after start' $r.AskedAtMs
+                Check "${name}: listed as RmOtherWindow" ($type -eq 2) 2 $type
+                Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 $r.Rm.Result
+                Check "${name}: the server exits 0 on the request, before its idle timeout" ($null -ne $r.ExitedByMs -and $r.ExitedByMs -lt 4500 -and $r.ExitCode -eq 0) 'exit 0, < 4500 ms after start' "exited by $($r.ExitedByMs) ms, code $($r.ExitCode)"
+                Check "${name}: the lifecycle window never shows" (@($r.Rm.Timeline | Where-Object { $_.LifecycleShown }).Count -eq 0 -and @($r.Lifecycle | Where-Object { $_.Visible }).Count -eq 0) $false 'see Timeline'
             } finally { Stop-Case $case }
         }
     }

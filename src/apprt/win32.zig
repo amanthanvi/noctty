@@ -471,6 +471,7 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
 const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
 const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.palette_list");
 const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.scrollbar");
+const lifecycle_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.lifecycle");
 const tab_tooltip_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.tab_tooltip");
 const quick_select_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.quick_select");
 
@@ -2841,6 +2842,9 @@ pub const App = struct {
     /// running state and watchdog of the attempt that replaced it alone.
     profile_discovery_attempt: u64 = 0,
     message_hwnd: ?HWND = null,
+    /// The never-shown top-level window that answers end-session messages
+    /// (`createLifecycleWindow`); null if it could not be made.
+    lifecycle_hwnd: ?HWND = null,
     core_ticking: bool = false,
     quit_timer_id: ?UINT_PTR = null,
     terminal_handoff_idle_timer_id: ?UINT_PTR = null,
@@ -2910,6 +2914,10 @@ pub const App = struct {
     /// WM_CLOSE closes nothing, so Restart Manager's fallback cannot close the
     /// windows one at a time.
     end_session_quit_pending: bool = false,
+    /// A Restart Manager query revoked the `-Embedding` server's class object
+    /// to agree (`releaseHandoffForEndSession`); a decline, or a close called
+    /// off, registers it again (`retakeHandoffAfterEndSession`).
+    end_session_handoff_revoked: bool = false,
     /// Set as `run` enters its message loop: the startup restore and the
     /// first window are done.
     message_loop_started: bool = false,
@@ -3502,6 +3510,7 @@ pub const App = struct {
         const ui_thread_id = sys.GetCurrentThreadId();
         ensureMessageQueue();
         try self.createMessageWindow();
+        self.createLifecycleWindow();
         @atomicStore(DWORD, &self.ui_thread_id, ui_thread_id, .release);
         defer {
             self.stopUndoPruneTimer();
@@ -3514,6 +3523,7 @@ pub const App = struct {
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             if (self.pending_profile_discovery) |pending| pending.deinit();
             self.pending_profile_discovery = null;
+            self.closeLifecycleWindow();
             self.closeMessageWindow();
             self.running = false;
         }
@@ -3974,7 +3984,8 @@ pub const App = struct {
     }
 
     /// WM_QUERYENDSESSION, from any top-level window noctty owns (hosts, the
-    /// quick terminal among them, and Settings): true agrees to end. Without
+    /// quick terminal among them, Settings, and the lifecycle window that
+    /// stands in when there is no other): true agrees to end. Without
     /// `ENDSESSION_CLOSEAPP` it is a sign-out, shutdown or reboot, which noctty
     /// never declines. With it, an installer asks through Restart Manager to
     /// close noctty so it can replace its files. noctty agrees only when a
@@ -3993,17 +4004,46 @@ pub const App = struct {
         // session as it is now. Unthrottled, unlike `checkpointSessionState`;
         // only an earlier query of this round that agreed stands in for it.
         const saved = self.end_session_prepared or self.snapshotForEndSession();
+        // The handoff server is released last, only once everything else
+        // agrees, since releasing it has to be undone after a decline.
         const agree = self.message_loop_started and
             !(self.settings_window.hwnd != null and self.settings_window.hasPendingChanges()) and
             !self.anyTerminalNeedsCloseConfirmNoWait() and
-            saved;
+            saved and
+            self.releaseHandoffForEndSession();
         self.end_session_prepared = agree;
+        if (!agree) self.retakeHandoffAfterEndSession();
         return agree;
+    }
+
+    /// An `-Embedding` server agrees to close only once its class object is
+    /// revoked with no client part way through a handoff
+    /// (`exitEmbeddingServerIfIdle`, which takes it back itself when one
+    /// arrived in between). Until WM_ENDSESSION settles the close, a client
+    /// that asks for the class starts a new server.
+    fn releaseHandoffForEndSession(self: *App) bool {
+        if (self.terminal_handoff_server == null) return true;
+        if (!self.exitEmbeddingServerIfIdle()) return false;
+        self.end_session_handoff_revoked = true;
+        return true;
+    }
+
+    /// The close a query revoked the handoff class object for was declined or
+    /// called off: serve handoffs again.
+    fn retakeHandoffAfterEndSession(self: *App) void {
+        if (!self.end_session_handoff_revoked) return;
+        self.end_session_handoff_revoked = false;
+        const server = self.terminal_handoff_server orelse return;
+        if (server.cookie != null) return;
+        server.register() catch |err| {
+            log.err("failed to re-register terminal handoff class object err={}", .{err});
+        };
     }
 
     /// WM_ENDSESSION, from the same windows. `ending` false: the end was
     /// called off (this or another window declined), and since nothing
-    /// closed, nothing is undone. True without `ENDSESSION_CLOSEAPP`: a
+    /// closed, nothing is undone but the handoff class object an agreeing
+    /// query revoked. True without `ENDSESSION_CLOSEAPP`: a
     /// sign-out, shutdown or reboot (`saveForEndSession`). True with it:
     /// Restart Manager closes noctty. Every window is saved while it is whole,
     /// as a quit saves, and the snapshot is latched; the quit itself runs from
@@ -4013,7 +4053,7 @@ pub const App = struct {
     /// sizing loop) would run just the same. Once per process.
     fn onEndSession(self: *App, ending: bool, lParam: LPARAM) void {
         self.end_session_prepared = false;
-        if (!ending) return;
+        if (!ending) return self.retakeHandoffAfterEndSession();
         if (!endSessionClosesApp(lParam)) return self.saveForEndSession();
         // A quit under way has saved its windows and ends the process itself.
         if (self.session_ending or !self.running or self.quitting) return;
@@ -4564,6 +4604,65 @@ pub const App = struct {
             _ = sys.DestroyWindow(hwnd);
             self.message_hwnd = null;
         }
+    }
+
+    /// A top-level window that is never shown, made in every mode beside the
+    /// message window. Windows sends end-session messages only to top-level
+    /// windows, never to a message-only one, so without it a process whose
+    /// only window is the message window (`initial-window = false`, a
+    /// Settings window just closed, an idle `-Embedding` server) cannot be
+    /// asked to close: Restart Manager lists it as `RmUnknownApp` and a
+    /// non-forced `RmShutdown` fails at once. It answers through the same
+    /// controller as every other window (`onQueryEndSession`,
+    /// `onEndSession`). Windows Terminal's coordinator window is top-level
+    /// for the same reason. A tool window that refuses to show stays off the
+    /// taskbar, Alt+Tab and UI Automation's top-level children. Failing to
+    /// make it costs only that, so it is logged, not fatal.
+    fn createLifecycleWindow(self: *App) void {
+        var wc: WNDCLASSEXW = .{
+            .cbSize = @sizeOf(WNDCLASSEXW),
+            .style = 0,
+            .lpfnWndProc = &appLifecycleWindowProc,
+            .cbClsExtra = 0,
+            .cbWndExtra = 0,
+            .hInstance = self.hinstance,
+            .hIcon = null,
+            .hCursor = null,
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = lifecycle_class_name,
+            .hIconSm = null,
+        };
+        if (sys.RegisterClassExW(&wc) == 0 and windows.kernel32.GetLastError() != .CLASS_ALREADY_EXISTS) {
+            log.warn("failed to register the lifecycle window class err={}", .{windows.kernel32.GetLastError()});
+            return;
+        }
+        const hwnd = sys.CreateWindowExW(
+            c.WS_EX_TOOLWINDOW | c.WS_EX_NOACTIVATE,
+            lifecycle_class_name,
+            std.unicode.utf8ToUtf16LeStringLiteral("noctty"),
+            c.WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            null,
+            null,
+            self.hinstance,
+            null,
+        ) orelse {
+            log.warn("failed to create the lifecycle window err={}", .{windows.kernel32.GetLastError()});
+            return;
+        };
+        setWindowData(hwnd, self);
+        self.lifecycle_hwnd = hwnd;
+    }
+
+    fn closeLifecycleWindow(self: *App) void {
+        const hwnd = self.lifecycle_hwnd orelse return;
+        setWindowData(hwnd, null);
+        _ = sys.DestroyWindow(hwnd);
+        self.lifecycle_hwnd = null;
     }
 
     /// Called only by the outer pump, never while an owner WndProc is under
@@ -32985,6 +33084,32 @@ fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARA
     }
 }
 
+/// The lifecycle window's procedure (`App.createLifecycleWindow`): it answers
+/// end-session messages for the app and is never shown.
+fn appLifecycleWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callconv(.winapi) LRESULT {
+    switch (message) {
+        // Whoever asks to show it (`ShowWindow`, `SetWindowPos`), it stays
+        // hidden, as Windows Terminal's coordinator window does.
+        c.WM_WINDOWPOSCHANGING => {
+            const pos: *WINDOWPOS = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            pos.flags &= ~c.SWP_SHOWWINDOW;
+            return 0;
+        },
+        c.WM_QUERYENDSESSION => if (windowData(App, hwnd)) |app| {
+            return @intFromBool(app.onQueryEndSession(lparam));
+        },
+        c.WM_ENDSESSION => {
+            if (windowData(App, hwnd)) |app| app.onEndSession(wparam != 0, lparam);
+            return 0;
+        },
+        // DefWindowProc would destroy it. A committed Restart Manager close
+        // quits from the message loop, and `run` destroys it last.
+        c.WM_CLOSE => return 0,
+        else => {},
+    }
+    return sys.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
 /// Native modal delivery tests run on a private desktop without a shell,
 /// renderer, clipboard operation, or COM initialization.
 const Pkg19NativeDeliveryTest = struct {
@@ -55642,6 +55767,170 @@ test "win32 a committed Restart Manager close keeps every window through WM_CLOS
             try std.testing.expect(sys.PeekMessageW(&msg, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE) != 0);
         }
     }.body);
+}
+
+test "win32 the lifecycle window is a top-level window that never shows and answers end-session messages for the app" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // On a desktop of its own: if the window did show, nobody would see it.
+    try runOnHiddenDesktop(struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) HWND;
+        const ga_parent: u32 = 1;
+
+        fn body() !void {
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var host: Host = undefined;
+            var surface: Surface = undefined;
+            var session: TestSession = .{};
+            try session.init(.{
+                .core_app = &core_app,
+                .app = &app,
+                .hosts = &.{.{ .storage = &host, .register = true }},
+                .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+                .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+            });
+            defer session.deinit();
+            app.createLifecycleWindow();
+            defer app.closeLifecycleWindow();
+            const hwnd = app.lifecycle_hwnd orelse return error.TestUnexpectedResult;
+
+            // A child of the desktop, not of the message-only parent, so
+            // Windows sends it what it sends every top-level window; a tool
+            // window, kept off the taskbar and Alt+Tab.
+            try std.testing.expectEqual(GetDesktopWindow(), sys.GetAncestor(hwnd, ga_parent).?);
+            const ex_style: usize = @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE));
+            try std.testing.expect(ex_style & c.WS_EX_TOOLWINDOW != 0);
+            try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+            // Asked to show, whichever way, it stays hidden.
+            _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
+            try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+            _ = sys.SetWindowPos(hwnd, null, 0, 0, 0, 0, c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_SHOWWINDOW);
+            try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
+            // A WM_CLOSE (Restart Manager's fallback, `taskkill` without /F)
+            // does not destroy it.
+            try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(hwnd, c.WM_CLOSE, 0, 0));
+            try std.testing.expect(sys.IsWindow(hwnd) != 0);
+
+            // A Restart Manager query reaches the app's controller: with
+            // nothing running it agrees, and a terminal a quit would ask about
+            // declines. `readonly` stands in for a busy terminal; the core is
+            // cleared before anything else reads it.
+            app.running = true;
+            app.message_loop_started = true;
+            const close_app: LPARAM = @bitCast(c.ENDSESSION_CLOSEAPP);
+            try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(hwnd, c.WM_QUERYENDSESSION, 0, close_app));
+            try std.testing.expect(app.end_session_prepared);
+            surface.core_surface.readonly = true;
+            surface.core_initialized = true;
+            const busy = sys.SendMessageW(hwnd, c.WM_QUERYENDSESSION, 0, close_app);
+            const sign_out = sys.SendMessageW(hwnd, c.WM_QUERYENDSESSION, 0, 0);
+            surface.core_initialized = false;
+            surface.core_surface.readonly = false;
+            try std.testing.expectEqual(@as(LRESULT, 0), busy);
+            try std.testing.expectEqual(@as(LRESULT, 1), sign_out);
+            try std.testing.expect(!app.end_session_prepared);
+
+            // So does WM_ENDSESSION: called off, then committed.
+            try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(hwnd, c.WM_QUERYENDSESSION, 0, close_app));
+            _ = sys.SendMessageW(hwnd, c.WM_ENDSESSION, 0, close_app);
+            try std.testing.expect(!app.end_session_prepared);
+            try std.testing.expect(!app.end_session_quit_pending);
+            _ = sys.SendMessageW(hwnd, c.WM_ENDSESSION, 1, close_app);
+            try std.testing.expect(app.end_session_quit_pending);
+            try std.testing.expect(app.session_ending);
+        }
+    }.body);
+}
+
+test "win32 an -Embedding server agrees to a Restart Manager close only once its class object is revoked, and takes it back when the close does not happen" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    app.running = true;
+    app.message_loop_started = true;
+
+    // A stand-in for COM's class table: the real class object is never
+    // published, so no default-terminal handoff on this machine can reach
+    // the test.
+    var table: win32_terminal_handoff.TestClassTable = .{};
+    win32_terminal_handoff.test_class_table = &table;
+    defer win32_terminal_handoff.test_class_table = null;
+    const Queue = struct {
+        fn call(_: *anyopaque, _: *win32_terminal_handoff.PendingSession) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    var server = win32_terminal_handoff.Server.init(std.testing.allocator, &context, Queue.call);
+    try server.register();
+    app.terminal_handoff_server = &server;
+    defer app.terminal_handoff_server = null;
+    const close_app: LPARAM = @bitCast(c.ENDSESSION_CLOSEAPP);
+    const Busy = struct {
+        fn query(a: *App, s: *Surface) bool {
+            s.core_surface.readonly = true;
+            s.core_initialized = true;
+            defer {
+                s.core_initialized = false;
+                s.core_surface.readonly = false;
+            }
+            return a.onQueryEndSession(close_app);
+        }
+    };
+
+    // A client part way through a handoff (it holds LockServer) declines,
+    // and the class object stays registered.
+    server.lock_count.store(1, .release);
+    try std.testing.expect(!app.onQueryEndSession(close_app));
+    server.lock_count.store(0, .release);
+    try std.testing.expectEqual(@as(u32, 0), table.revoked);
+    try std.testing.expect(server.cookie != null);
+    // So does a terminal a quit would ask about, before the class object is
+    // touched.
+    try std.testing.expect(!Busy.query(&app, &surface));
+    try std.testing.expectEqual(@as(u32, 0), table.revoked);
+
+    // Idle: revoked, and the query agrees; another window's query of the
+    // same round agrees as well.
+    try std.testing.expect(app.onQueryEndSession(close_app));
+    try std.testing.expectEqual(@as(u32, 1), table.revoked);
+    try std.testing.expect(server.cookie == null);
+    try std.testing.expect(app.onQueryEndSession(close_app));
+    try std.testing.expectEqual(@as(u32, 1), table.revoked);
+
+    // The close is called off: the class object is registered again, once.
+    app.onEndSession(false, close_app);
+    try std.testing.expectEqual(@as(u32, 2), table.registered);
+    try std.testing.expect(server.cookie != null);
+    app.onEndSession(false, close_app);
+    try std.testing.expectEqual(@as(u32, 2), table.registered);
+
+    // A later query of the round declines after one agreed: registered again
+    // at once, whether or not WM_ENDSESSION(FALSE) follows.
+    try std.testing.expect(app.onQueryEndSession(close_app));
+    try std.testing.expectEqual(@as(u32, 2), table.revoked);
+    try std.testing.expect(!Busy.query(&app, &surface));
+    try std.testing.expectEqual(@as(u32, 3), table.registered);
+    try std.testing.expect(server.cookie != null);
+
+    // Committed: it stays revoked, and the quit ends the server.
+    try std.testing.expect(app.onQueryEndSession(close_app));
+    app.onEndSession(true, close_app);
+    try std.testing.expect(app.end_session_quit_pending);
+    try std.testing.expectEqual(@as(u32, 3), table.registered);
+    try std.testing.expect(server.cookie == null);
 }
 
 test "win32 a snapshot with no session window leaves the saved session alone" {

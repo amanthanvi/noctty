@@ -374,6 +374,16 @@ pub const PendingQueue = struct {
     }
 };
 
+/// Test seam: stands in for COM's class object table, so a test can register
+/// and revoke the server without publishing the real class object to other
+/// processes. A test build refuses to register or revoke while it is null; a
+/// production build never reads it.
+pub const TestClassTable = struct {
+    registered: u32 = 0,
+    revoked: u32 = 0,
+};
+pub var test_class_table: ?*TestClassTable = null;
+
 pub const Server = struct {
     alloc: Allocator,
     queue_ctx: *anyopaque,
@@ -400,6 +410,15 @@ pub const Server = struct {
             self.factory = ClassFactory.init(self);
             self.factory_initialized = true;
         }
+        if (builtin.is_test) {
+            // A test that forgot `test_class_table` would publish the real
+            // class object, which a default-terminal handoff on this machine
+            // could then reach.
+            const table = test_class_table orelse @panic("class object test without a stand-in table");
+            table.registered += 1;
+            self.cookie = table.registered;
+            return;
+        }
         const refs_before = self.factory.refcount.load(.acquire);
         var cookie: DWORD = 0;
         const hr = CoRegisterClassObject(
@@ -420,6 +439,11 @@ pub const Server = struct {
 
     pub fn revoke(self: *Server) bool {
         const cookie = self.cookie orelse return true;
+        if (builtin.is_test) {
+            const table = test_class_table orelse @panic("class object test without a stand-in table");
+            table.revoked += 1;
+            return self.finishRevoke(com.S_OK);
+        }
         const hr = CoRevokeClassObject(cookie);
         if (!self.finishRevoke(hr)) {
             log.warn("CoRevokeClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
