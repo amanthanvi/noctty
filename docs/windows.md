@@ -1574,14 +1574,21 @@ Drops, automation `send_text`, quick select and typed text never send an
 empty paste, and neither does a program's OSC 52 read of an empty clipboard,
 which still gets its empty reply.
 
-With bracketed paste off, or in a read-only pane, nothing is sent and the paste
-action counts as not performed. The default Ctrl+Shift+V binding is
-`performable`, so on a clipboard without text, in a writable pane with
-bracketed paste off, it still reaches the program as a key; a read-only pane
-discards the key, as it discards all input. With bracketed paste on, in a
-writable pane, the key no longer reaches the program: the empty paste consumes
-it, as in Windows Terminal. A program that exits without turning bracketed
-paste off leaves the shell receiving the empty paste on such a clipboard.
+With bracketed paste off, or in a read-only pane, a clipboard with neither
+text nor copied files sends nothing and the paste action counts as not
+performed. The default Ctrl+Shift+V binding is `performable`, so on such a
+clipboard, in a writable pane with bracketed paste off, it still reaches the
+program as a key; a read-only pane discards the key, as it discards all input.
+With bracketed paste on, in a writable pane, the key no longer reaches the
+program: the empty paste consumes it, as in Windows Terminal. A program that
+exits without turning bracketed paste off leaves the shell receiving the empty
+paste on such a clipboard.
+
+A clipboard of copied files is a paste like one of text, so Ctrl+Shift+V is
+consumed whether bracketed paste is on or off, and a paste prompt for a flagged
+path takes the key too. The files are read on the UI thread with the clipboard
+open, as text is, so a source that renders them late (Explorer on a large
+folder or a network share) can stall the window for a moment.
 
 ## Quick terminal and global hotkeys
 
