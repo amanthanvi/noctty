@@ -19,6 +19,9 @@ param(
 
     [string]$ArtifactRoot,
 
+    # Where the per-architecture artifact folders are read from when -ArtifactRoot is not given.
+    [string]$ArtifactBase = "dist/artifacts",
+
     [string]$OutputRoot,
 
     [string]$UpstreamBaseVersion,
@@ -51,7 +54,7 @@ $primaryArch = if ($Architectures -contains "x64") { "x64" } else { $Architectur
 $primaryArtifactRootPath = if ($ArtifactRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/noctty-$Version-windows-$primaryArch"))
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "$ArtifactBase/noctty-$Version-windows-$primaryArch"))
 }
 $outputRootPath = if ($OutputRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
@@ -143,7 +146,7 @@ foreach ($arch in $Architectures) {
     $artifactRootPath = if ($ArtifactRoot) {
         [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
     } else {
-        [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/noctty-$Version-windows-$arch"))
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot "$ArtifactBase/noctty-$Version-windows-$arch"))
     }
 
     $checksumsPath = Join-Path $artifactRootPath (New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind checksums)
@@ -301,7 +304,7 @@ $ErrorActionPreference = 'Stop'
 # Ask the CPU itself (Win32_Processor.Architecture 12 = ARM64) so ARM64 machines get the ARM64 installer.
 $machineArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 try {
-    if ((Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
+    if ((Get-CimInstance Win32_Processor -Property Architecture -OperationTimeoutSec 10 -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
         $machineArchitecture = 'arm64'
     }
 }

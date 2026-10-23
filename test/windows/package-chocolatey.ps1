@@ -158,10 +158,12 @@ try {
     # The installer is chosen at install time from the CPU. Chocolatey runs as an emulated x64
     # process on ARM64 Windows, so OSArchitecture alone says x64 there: run the generated script
     # against a stubbed CPU query and check which installer it picks.
-    # More than one architecture reads each one's artifacts from the default dist/artifacts layout.
+    # More than one architecture reads each one's artifacts from a per-architecture folder;
+    # keep them under this run's scratch root so nothing outside it is written or deleted.
+    $dualArtifactBaseRelative = Join-Path $scratchRelative 'dual-artifacts'
     $dualArtifactDirs = @{}
     foreach ($dualArchitecture in @('x64', 'arm64')) {
-        $dualArtifactDirs[$dualArchitecture] = Join-Path $repoRoot "dist\artifacts\noctty-$dualVersion-windows-$dualArchitecture"
+        $dualArtifactDirs[$dualArchitecture] = Join-Path $repoRoot (Join-Path $dualArtifactBaseRelative "noctty-$dualVersion-windows-$dualArchitecture")
         New-Item -ItemType Directory -Path $dualArtifactDirs[$dualArchitecture] -Force | Out-Null
     }
     Set-Content -LiteralPath (Join-Path $dualArtifactDirs['x64'] 'noctty-icon.svg') -Value '<svg xmlns="http://www.w3.org/2000/svg" />' -NoNewline
@@ -188,6 +190,7 @@ try {
     & $packageScript `
         -Version $dualVersion `
         -Architectures @('x64', 'arm64') `
+        -ArtifactBase $dualArtifactBaseRelative `
         -OutputRoot $dualOutputRelative | Out-Null
     $dualInstallScript = Get-Content -LiteralPath (Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\tools\chocolateyInstall.ps1')) -Raw
 
@@ -195,9 +198,13 @@ try {
         param([string] $InstallScript, [AllowNull()] $CpuArchitecture)
 
         $script:chosenInstaller = $null
+        # The generated script must never touch the host's processes.
+        function Get-Process { }
+        function Stop-Process { throw 'The generated install script must not call Stop-Process.' }
+        function Wait-Process { throw 'The generated install script must not call Wait-Process.' }
         function Get-CimInstance {
             [CmdletBinding()]
-            param([Parameter(Position = 0)] [string] $ClassName)
+            param([Parameter(Position = 0)] [string] $ClassName, [string[]] $Property, [int] $OperationTimeoutSec)
             if ("$CpuArchitecture" -eq 'throw') { throw 'CPU query unavailable' }
             if ($null -ne $CpuArchitecture) { [pscustomobject] @{ Architecture = $CpuArchitecture } }
         }
@@ -298,11 +305,5 @@ finally {
     }
     if (Test-Path -LiteralPath $scratchRoot) {
         Remove-Item -LiteralPath $scratchRoot -Recurse -Force
-    }
-    foreach ($dualCleanupArchitecture in @('x64', 'arm64')) {
-        $dualCleanupDir = Join-Path $repoRoot "dist/artifacts/noctty-$dualVersion-windows-$dualCleanupArchitecture"
-        if (Test-Path -LiteralPath $dualCleanupDir) {
-            Remove-Item -LiteralPath $dualCleanupDir -Recurse -Force
-        }
     }
 }
