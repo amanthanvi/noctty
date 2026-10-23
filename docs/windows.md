@@ -484,9 +484,106 @@ turns the file into a one-click surface.
 SSH entries run without shell integration, which is injected into a local
 shell and cannot apply to a remote session. Session restore does not reopen
 them: an SSH pane comes back as the default shell rather than dialing out
-unattended. SSH entries sort after the detected shells;
-`NOCTTY_WIN32_PROFILE_ORDER` covers shell profiles only. There is no bundled
-SSH client, secrets vault, or fleet/connection management.
+unattended. SSH entries sort after the detected shells and your own
+[user profiles](#user-profiles); `NOCTTY_WIN32_PROFILE_ORDER` covers the
+detected shell profiles only. There is no bundled SSH client, secrets vault,
+or fleet/connection management.
+
+## User profiles
+
+Besides the shells it detects, the profile picker and the command palette
+list profiles you define in the config. Each profile has an id and up to four
+settings, one key per line, each written `<id>: <value>`:
+
+```
+# Developer shells of Visual Studio 18 (the paths of a Community install).
+profile-name = vs18-cmd: Developer Command Prompt for VS 18
+profile-command = vs18-cmd: cmd.exe /k "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64
+
+profile-name = vs18-ps: Developer PowerShell for VS 18
+profile-command = vs18-ps: powershell.exe -NoExit -Command "&{Import-Module 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 1234abcd -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}"
+
+# A shell with its own directory and environment.
+profile-name = py312: Python 3.12
+profile-command = py312: cmd.exe
+profile-working-directory = py312: ~/src
+profile-env = py312: PATH=C:\Python312;C:\Python312\Scripts;%PATH%
+```
+
+`1234abcd` stands for your Visual Studio instance id: copy the whole line
+from the Developer PowerShell profile Windows Terminal generates, or from the
+Visual Studio Start menu shortcut.
+
+- `profile-command` defines the profile. Its value is a Windows command line,
+  as in a Windows Terminal profile's `commandline` or a shortcut's target, and
+  everything after the id's colon is used exactly as written: nothing is
+  unquoted or unescaped. noctty splits it into arguments with the Windows rules
+  to see which program it starts, and starts it with the line you wrote,
+  without a `cmd.exe /C` wrapper. So cmd.exe's own quoting (`/k ""C:\Tools
+  Dir\init.cmd" "some arg""`, a quoted `&`) reaches cmd.exe unchanged. When
+  noctty has to change the arguments (PowerShell shell integration, the WSL
+  directory option, the UTF-8 preamble of a plain `cmd.exe`), the changed
+  arguments are quoted again in the standard way. The `direct:` and `shell:`
+  forms of `command` are not accepted here.
+- `profile-name` is the label in the picker and the palette. Without it the
+  id is shown.
+- `profile-working-directory` takes the values `working-directory` takes:
+  `home`, `inherit`, or a path (`~/` is your home directory). Without it, a
+  profile opened from the picker or the palette starts in your home directory.
+  `inherit` follows the ordinary rules instead
+  (`working-directory` and the `*-inherit-working-directory` settings). A split
+  of the profile still takes its source pane's directory when
+  `split-inherit-working-directory` is on.
+- `profile-env` sets one environment variable, `<id>: KEY=VALUE`, and can be
+  repeated. `<id>: KEY=` removes one and `<id>:` removes them all. A profile's
+  variable replaces an `env` variable of the same name, whatever its case (a
+  profile `PATH` replaces a global `Path`).
+- `%NAME%` in the command line, the working directory and `profile-env`
+  values is replaced by that variable from noctty's own environment, as Windows
+  Terminal does; a variable that is not set stays as written. Global `env`
+  values are not expanded. Quote a path that holds a variable which can expand
+  to a value with spaces: `"%USERPROFILE%\tools\init.cmd"`.
+
+Ids are 1 to 64 letters, digits, `.`, `_` or `-`, compared without case.
+`pwsh.exe`, `powershell.exe`, `cmd.exe`, `git-bash` and `wsl-default` are
+taken by the detected profiles. A profile exists while it has a
+`profile-command`: `profile-command = <id>:` with nothing after the colon
+removes it, and `profile-command =` removes them all. The fields of one
+profile can sit in different files, and a later line replaces an earlier one.
+An invalid id, a reserved id, a field whose id has no `profile-command`, and a
+`direct:` or `shell:` value are each reported as a config problem, and the
+entry is ignored.
+
+To keep these lines out of a config file that other Ghostty builds read, put
+them in a file of their own next to it and include it from your config:
+
+```
+config-file = ?profiles.ghostty
+```
+
+User profiles are listed after the detected local shells and before the SSH
+hosts, in the order of their first `profile-command` line. A session or a
+named layout remembers a pane's profile by its id (`user:<id>`), so renaming
+the label keeps it; changing the id makes a new profile, and a saved pane that
+named the old id comes back as the default shell, as a pane whose shell was
+uninstalled does. A restored pane returns to the directory it was in. A tab or
+split that an automation command opens from a user profile pane keeps the
+command and environment that pane started with, even after a reload; an
+ordinary split reads the profile's current definition.
+
+Limits:
+
+- `new_window_elevated:user:<id>` passes the profile's arguments and its
+  `profile-env` variables to the elevated process, but quoted again in the
+  standard way rather than as written, which differs only for cmd.exe's own
+  quoting idioms.
+- PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
+  interactive PowerShell line. A line with `-Command` or `-File`, such as the
+  Developer PowerShell above, runs as written without it, as in Windows
+  Terminal. A cmd.exe line gets cmd's integration.
+- User profiles are not in the taskbar jump list yet.
+- The Settings window does not edit these lines; it leaves them as they are
+  when it saves.
 
 ## App identity
 
@@ -668,7 +765,9 @@ become a window.
   noctty, delete that file, and start noctty once so Windows receives the
   empty list.
 - Profiles: the detected shell profiles. Selecting one launches noctty with
-  that profile's command.
+  that profile's command. [User profiles](#user-profiles) are not listed: a
+  jump-list entry is stored on disk and would have to carry the profile's
+  environment.
 
 From 1.3.133 a portable copy builds no jump list and writes no
 `jump-list-recents.json`, so a machine with only a portable copy gets none;
@@ -1085,10 +1184,12 @@ the prompt leaves the current window unchanged. The relaunch call is
 synchronous, so the initiating window is unresponsive while the UAC prompt is
 open.
 
-The roadmap originally asked for a per-profile `run elevated` flag. Windows
-profiles in noctty are detected from installed shells rather than declared in
-a user-authored profile schema, so there is no profile property to set. The
-per-profile equivalent is a `new_window_elevated:<profile-key>` binding.
+The roadmap originally asked for a per-profile `run elevated` flag. There is no
+such profile property, for the detected shells or for
+[user profiles](#user-profiles); the per-profile equivalent is a
+`new_window_elevated:<profile-key>` binding, for example
+`new_window_elevated:user:vs18-cmd`. An elevated user profile gets its
+arguments and its `profile-env` variables, quoted again in the standard way.
 
 An elevated noctty is a separate process and a separate window. Its title is
 prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be

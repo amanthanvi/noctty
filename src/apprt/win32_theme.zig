@@ -861,7 +861,8 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
                 .active_border = rgb(140, 96, 8),
                 .focus = rgb(120, 80, 4),
             },
-            .cmd => .{
+            // A user profile can run anything; it takes the neutral Command Prompt palette.
+            .cmd, .user => .{
                 .idle_bg = rgb(240, 240, 240),
                 .idle_border = rgb(128, 128, 128),
                 .hover_bg = rgb(232, 232, 232),
@@ -915,7 +916,7 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
             .active_border = rgb(248, 202, 134),
             .focus = rgb(255, 224, 178),
         },
-        .cmd => .{
+        .cmd, .user => .{
             .idle_bg = rgb(31, 41, 35),
             .idle_border = rgb(104, 186, 126),
             .hover_bg = rgb(38, 50, 42),

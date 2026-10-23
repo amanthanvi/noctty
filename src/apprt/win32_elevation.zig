@@ -419,7 +419,9 @@ pub fn allocPrefixedTitle(
 ///
 /// `argv` is the complete current argv, including argv[0]. Only explicit
 /// config-file overrides are inherited; the effective class, invoking working
-/// directory, and selected profile command are appended after them.
+/// directory, and selected profile command are appended after them, then one
+/// `--env=KEY=VALUE` per variable a user profile sets (`profile_env`). The
+/// result can hold those values, so it is never logged.
 pub fn buildRelaunchParameters(
     alloc: Allocator,
     argv: []const []const u8,
@@ -427,6 +429,7 @@ pub fn buildRelaunchParameters(
     cwd: []const u8,
     config_base_cwd: []const u8,
     command: ?configpkg.Command,
+    profile_env: []const configpkg.windows_shell.EnvEntry,
 ) ![:0]u8 {
     var result: std.Io.Writer.Allocating = .init(alloc);
     errdefer result.deinit();
@@ -465,6 +468,12 @@ pub fn buildRelaunchParameters(
         defer argument.deinit();
         try argument.writer.writeAll("--command=");
         try writeCommand(&argument.writer, value);
+        try appendWindowsArgument(&result, argument.written());
+    }
+    for (profile_env) |entry| {
+        var argument: std.Io.Writer.Allocating = .init(alloc);
+        defer argument.deinit();
+        try argument.writer.print("--env={s}={s}", .{ entry.key, entry.value });
         try appendWindowsArgument(&result, argument.written());
     }
 
@@ -998,6 +1007,7 @@ test "elevation relaunch parameters forward config class and cwd exactly" {
         "C:\\Users\\Aman\\Source Dir",
         "C:\\startup",
         null,
+        &.{},
     );
     defer testing.allocator.free(parameters);
 
@@ -1031,12 +1041,58 @@ test "elevation relaunch parameters serialize and outer-quote direct command" {
         "C:\\work",
         "C:\\startup",
         command,
+        &.{},
     );
     defer testing.allocator.free(parameters);
 
     try testing.expectEqualStrings(
         \\--working-directory=C:\work "--command=direct:pwsh.exe -NoLogo \"C:\Program Files\profile.ps1\" \"say \\\"hello\\\"\""
     , parameters);
+}
+
+test "elevation relaunch parameters carry a user profile's argv and env" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const argv = [_][]const u8{"C:\\noctty.exe"};
+    // A user profile's argv as its Windows line splits (quotes kept inside
+    // arguments), and its environment entries.
+    const profile_argv = try configpkg.windows_shell.splitWindowsCommandLine(
+        alloc,
+        "pwsh.exe -NoExit -Command \"&{Import-Module \"\"\"C:\\Program Files\\x.dll\"\"\"; Enter-VsDevShell 1a}\"",
+    );
+    const env = [_]configpkg.windows_shell.EnvEntry{
+        .{ .key = "PATH", .value = "C:\\Python 3;C:\\Windows" },
+        .{ .key = "VSCMD_SKIP_SENDTELEMETRY", .value = "1" },
+    };
+
+    const parameters = try buildRelaunchParameters(
+        alloc,
+        &argv,
+        null,
+        "C:\\work",
+        "C:\\startup",
+        .{ .direct = profile_argv },
+        &env,
+    );
+
+    // What the elevated process sees: its argv, then the config parsed from it.
+    const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+    const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
+    try testing.expectEqual(@as(usize, 5), child_argv.len);
+    try testing.expectEqualStrings("--working-directory=C:\\work", child_argv[1]);
+    try testing.expect(std.mem.startsWith(u8, child_argv[2], "--command=direct:"));
+    var command: configpkg.Command = undefined;
+    try command.parseCLI(alloc, child_argv[2]["--command=".len..]);
+    try testing.expectEqual(profile_argv.len, command.direct.len);
+    for (profile_argv, command.direct) |want, got| try testing.expectEqualStrings(want, got);
+    try testing.expectEqualStrings("--env=PATH=C:\\Python 3;C:\\Windows", child_argv[3]);
+    try testing.expectEqualStrings("--env=VSCMD_SKIP_SENDTELEMETRY=1", child_argv[4]);
+
+    // A detected profile (no env) gets exactly what it got before.
+    const plain = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .direct = &.{"cmd.exe"} }, &.{});
+    try testing.expectEqualStrings("--working-directory=C:\\work --command=direct:cmd.exe", plain);
 }
 
 test "elevation relaunch parameters double a trailing backslash before closing quote" {
@@ -1052,6 +1108,7 @@ test "elevation relaunch parameters double a trailing backslash before closing q
         "C:\\work",
         "C:\\startup",
         command,
+        &.{},
     );
     defer testing.allocator.free(parameters);
 
@@ -1072,6 +1129,7 @@ test "elevation relaunch parameters preserve shell command text" {
         "C:\\work",
         "C:\\startup",
         command,
+        &.{},
     );
     defer testing.allocator.free(parameters);
 

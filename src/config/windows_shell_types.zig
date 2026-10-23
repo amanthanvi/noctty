@@ -11,6 +11,8 @@ pub const ProfileKind = enum {
     git_bash,
     cmd,
     ssh,
+    /// Defined by the user with `profile-command`.
+    user,
 };
 
 pub const Utf8Console = enum {

@@ -70,14 +70,688 @@ pub const Profile = struct {
     label: []const u8,
     palette_title: ?[]const u8 = null,
     command: Command,
+    /// Where a launch from the picker or the palette starts. Null is home,
+    /// as for every detected profile. Set only for `.user` profiles.
+    working_directory: ?WorkingDirectory = null,
+    /// The command line `command` was split from and the profile's own
+    /// environment entries. Set only for `.user` profiles.
+    user: ?UserLaunch = null,
 
     pub fn deinit(self: *Profile, alloc: Allocator) void {
         alloc.free(self.key);
         alloc.free(self.label);
         if (self.palette_title) |value| alloc.free(value);
         self.command.deinit(alloc);
+        if (self.working_directory) |dir| switch (dir) {
+            .path => |path| alloc.free(path),
+            .home, .inherit => {},
+        };
+        if (self.user) |*user| user.deinit(alloc);
     }
 };
+
+/// One environment variable a user profile sets (`profile-env`), its value
+/// with `%NAME%` already expanded.
+pub const EnvEntry = struct {
+    key: [:0]const u8,
+    value: [:0]const u8,
+};
+
+/// `profile-working-directory`, resolved: `inherit` keeps the ordinary
+/// new-tab rules, a path is used as given.
+pub const WorkingDirectory = union(enum) {
+    home,
+    inherit,
+    path: [:0]const u8,
+};
+
+/// What a user profile adds to a launch besides its argv. A surface keeps a
+/// copy, so the tabs and splits that inherit its launch get the same.
+pub const UserLaunch = struct {
+    /// The expanded command line. Exec passes it to CreateProcess unchanged
+    /// when the argv it is about to run is exactly this line's split
+    /// (`verbatimCommandLine`).
+    command_line: [:0]const u8,
+    env: []const EnvEntry = &.{},
+
+    pub fn clone(self: UserLaunch, alloc: Allocator) Allocator.Error!UserLaunch {
+        const line = try alloc.dupeZ(u8, self.command_line);
+        errdefer alloc.free(line);
+        const env = try alloc.alloc(EnvEntry, self.env.len);
+        var copied: usize = 0;
+        errdefer {
+            for (env[0..copied]) |entry| {
+                alloc.free(entry.key);
+                alloc.free(entry.value);
+            }
+            alloc.free(env);
+        }
+        for (self.env, env) |src, *dst| {
+            const key = try alloc.dupeZ(u8, src.key);
+            errdefer alloc.free(key);
+            dst.* = .{ .key = key, .value = try alloc.dupeZ(u8, src.value) };
+            copied += 1;
+        }
+        return .{ .command_line = line, .env = env };
+    }
+
+    pub fn deinit(self: *UserLaunch, alloc: Allocator) void {
+        alloc.free(self.command_line);
+        for (self.env) |entry| {
+            alloc.free(entry.key);
+            alloc.free(entry.value);
+        }
+        alloc.free(self.env);
+        self.* = undefined;
+    }
+};
+
+/// The user profiles a config defines, as written (nothing expanded or
+/// split yet), copied out of the config so a discovery on another thread
+/// owns what it reads. `Config.finalize` has already dropped every entry it
+/// refused, so each definition has a valid id and a command.
+pub const UserProfiles = struct {
+    arena: std.heap.ArenaAllocator,
+    definitions: []const Definition = &.{},
+
+    pub const Definition = struct {
+        id: []const u8,
+        name: ?[]const u8 = null,
+        command: []const u8,
+        working_directory: ?[]const u8 = null,
+        env: []const EnvEntry = &.{},
+    };
+
+    pub fn init(gpa: Allocator, config: anytype) Allocator.Error!UserProfiles {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+        const commands = config.@"profile-command".entries.items;
+        const definitions = try alloc.alloc(Definition, commands.len);
+        for (commands, definitions) |entry, *definition| {
+            const env: []EnvEntry = if (config.@"profile-env".get(entry.id)) |map| env: {
+                const out = try alloc.alloc(EnvEntry, map.count());
+                var it = map.iterator();
+                var i: usize = 0;
+                while (it.next()) |kv| : (i += 1) {
+                    out[i] = .{
+                        .key = try alloc.dupeZ(u8, kv.key_ptr.*),
+                        .value = try alloc.dupeZ(u8, kv.value_ptr.*),
+                    };
+                }
+                break :env out;
+            } else &.{};
+            definition.* = .{
+                .id = try alloc.dupe(u8, entry.id),
+                .name = if (config.@"profile-name".get(entry.id)) |name| try alloc.dupe(u8, name) else null,
+                .command = try alloc.dupe(u8, entry.value),
+                .working_directory = if (config.@"profile-working-directory".get(entry.id)) |dir|
+                    try alloc.dupe(u8, dir)
+                else
+                    null,
+                .env = env,
+            };
+        }
+        return .{ .arena = arena, .definitions = definitions };
+    }
+
+    pub fn deinit(self: *UserProfiles) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Expands `%NAME%` from noctty's own environment with
+/// `ExpandEnvironmentStringsW`, as Windows Terminal does for a profile's
+/// command line and starting directory: an undefined variable stays as
+/// written. The seam `appendUserProfiles` takes; tests pass their own.
+pub const ProcessEnvironment = struct {
+    pub fn expand(_: ProcessEnvironment, alloc: Allocator, text: []const u8) ![]u8 {
+        if (comptime builtin.os.tag != .windows) return try alloc.dupe(u8, text);
+        const source = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, text);
+        defer alloc.free(source);
+        var capacity: usize = source.len + 1;
+        while (true) {
+            const buffer = try alloc.alloc(u16, capacity);
+            defer alloc.free(buffer);
+            const needed = ExpandEnvironment.ExpandEnvironmentStringsW(
+                source.ptr,
+                buffer.ptr,
+                std.math.cast(windows.DWORD, capacity) orelse return error.NameTooLong,
+            );
+            if (needed == 0) return error.InvalidArgument;
+            if (needed <= capacity) {
+                // `needed` counts the terminator.
+                return try std.unicode.wtf16LeToWtf8Alloc(alloc, buffer[0 .. needed - 1]);
+            }
+            capacity = needed;
+        }
+    }
+};
+
+const ExpandEnvironment = struct {
+    extern "kernel32" fn ExpandEnvironmentStringsW(
+        lpSrc: [*:0]const u16,
+        lpDst: ?[*]u16,
+        nSize: windows.DWORD,
+    ) callconv(.winapi) windows.DWORD;
+};
+
+/// Split a Windows command line into argv with the rules CreateProcess's
+/// callee (the MSVC runtime, `CommandLineToArgvW`) applies, so the argv
+/// noctty inspects is the argv the program will see.
+pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const u8 {
+    const wide = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, line);
+    defer alloc.free(wide);
+    var it = try std.process.ArgIteratorWindows.init(alloc, wide);
+    defer it.deinit();
+    var argv: std.ArrayList([:0]const u8) = .empty;
+    errdefer {
+        for (argv.items) |arg| alloc.free(arg);
+        argv.deinit(alloc);
+    }
+    while (it.next()) |arg| {
+        const copy = try alloc.dupeZ(u8, arg);
+        argv.append(alloc, copy) catch |err| {
+            alloc.free(copy);
+            return err;
+        };
+    }
+    return try argv.toOwnedSlice(alloc);
+}
+
+/// The command line a launch hands CreateProcess unchanged: `line` when the
+/// argv about to run is exactly its split, else null and the argv is quoted
+/// as usual. Shell integration, the WSL directory rewrite, the cmd UTF-8
+/// preamble and `initial-command` all change the argv, so a line that no
+/// longer describes it is never used.
+pub fn verbatimCommandLine(
+    alloc: Allocator,
+    line: ?[]const u8,
+    argv: []const [:0]const u8,
+    windows_cmd_shell: bool,
+) Allocator.Error!?[]const u8 {
+    const value = line orelse return null;
+    if (windows_cmd_shell) return null;
+    const split = splitWindowsCommandLine(alloc, value) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer {
+        for (split) |arg| alloc.free(arg);
+        alloc.free(split);
+    }
+    if (split.len != argv.len) return null;
+    for (split, argv) |a, b| {
+        if (!std.mem.eql(u8, a, b)) return null;
+    }
+    return value;
+}
+
+/// Add the user profiles after the detected local shells (and before the SSH
+/// hosts, which the callers append next), in definition order. Takes
+/// ownership of `shell_profiles`, also on error. A definition whose line does
+/// not split into a program is skipped with a warning that names its id.
+/// With no definitions this returns `shell_profiles` itself.
+pub fn appendUserProfiles(
+    alloc: Allocator,
+    shell_profiles: []Profile,
+    definitions: []const UserProfiles.Definition,
+    expander: anytype,
+) ![]Profile {
+    if (definitions.len == 0) return shell_profiles;
+    var profiles: std.ArrayList(Profile) = .empty;
+    profiles.ensureTotalCapacity(alloc, shell_profiles.len + definitions.len) catch |err| {
+        deinitProfiles(alloc, shell_profiles);
+        return err;
+    };
+    profiles.appendSliceAssumeCapacity(shell_profiles);
+    alloc.free(shell_profiles);
+    errdefer deinitProfileList(alloc, &profiles);
+
+    for (definitions) |definition| {
+        const profile = userProfile(alloc, definition, expander) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                log.warn("user profile skipped id={s} err={}", .{ definition.id, err });
+                continue;
+            },
+        };
+        profiles.appendAssumeCapacity(profile);
+    }
+    return try profiles.toOwnedSlice(alloc);
+}
+
+fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: anytype) !Profile {
+    const expanded = try expander.expand(alloc, definition.command);
+    defer alloc.free(expanded);
+    const line = std.mem.trim(u8, expanded, &std.ascii.whitespace);
+    const argv = try splitWindowsCommandLine(alloc, line);
+    var command: Command = .{ .direct = argv };
+    errdefer command.deinit(alloc);
+    if (argv.len == 0 or argv[0].len == 0) return error.NoProgram;
+
+    const key = try std.ascii.allocLowerString(alloc, definition.id);
+    defer alloc.free(key);
+    const owned_key = try std.fmt.allocPrint(alloc, "user:{s}", .{key});
+    errdefer alloc.free(owned_key);
+    const label = try alloc.dupe(u8, definition.name orelse definition.id);
+    errdefer alloc.free(label);
+    const working_directory = if (definition.working_directory) |raw|
+        try userWorkingDirectory(alloc, raw, expander)
+    else
+        null;
+    errdefer if (working_directory) |dir| switch (dir) {
+        .path => |path| alloc.free(path),
+        .home, .inherit => {},
+    };
+
+    const env = try alloc.alloc(EnvEntry, definition.env.len);
+    var filled: usize = 0;
+    errdefer {
+        for (env[0..filled]) |entry| {
+            alloc.free(entry.key);
+            alloc.free(entry.value);
+        }
+        alloc.free(env);
+    }
+    for (definition.env, env) |src, *dst| {
+        const value = try expander.expand(alloc, src.value);
+        defer alloc.free(value);
+        const owned_value = try alloc.dupeZ(u8, value);
+        errdefer alloc.free(owned_value);
+        dst.* = .{ .key = try alloc.dupeZ(u8, src.key), .value = owned_value };
+        filled += 1;
+    }
+
+    return .{
+        .kind = .user,
+        .key = owned_key,
+        .label = label,
+        .command = command,
+        .working_directory = working_directory,
+        .user = .{ .command_line = try alloc.dupeZ(u8, line), .env = env },
+    };
+}
+
+/// `profile-working-directory` with the grammar of `working-directory`:
+/// `home`, `inherit`, or a path, optionally quoted, after `%NAME%` expansion;
+/// a leading `~/` or `~\` is the home directory.
+fn userWorkingDirectory(alloc: Allocator, raw: []const u8, expander: anytype) !WorkingDirectory {
+    const expanded = try expander.expand(alloc, raw);
+    defer alloc.free(expanded);
+    var value = std.mem.trim(u8, expanded, &std.ascii.whitespace);
+    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
+    if (std.mem.eql(u8, value, "home")) return .home;
+    if (std.mem.eql(u8, value, "inherit")) return .inherit;
+    if (value.len >= 2 and value[0] == '~' and (value[1] == '/' or value[1] == '\\')) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (internal_os.home(&buf) catch null) |home| {
+            return .{ .path = try std.fmt.allocPrintSentinel(alloc, "{s}\\{s}", .{
+                std.mem.trimRight(u8, home, "\\/"),
+                value[2..],
+            }, 0) };
+        }
+    }
+    return .{ .path = try alloc.dupeZ(u8, value) };
+}
+
+/// A `%NAME%` expander over a fixed table, for tests: the seam
+/// `appendUserProfiles` takes. Like `ExpandEnvironmentStringsW`, a name that
+/// is not in the table stays as written.
+const TestEnvironment = struct {
+    vars: []const [2][]const u8 = &.{},
+
+    pub fn expand(self: TestEnvironment, alloc: Allocator, text: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+        var i: usize = 0;
+        scan: while (i < text.len) {
+            if (text[i] == '%') {
+                if (std.mem.indexOfScalarPos(u8, text, i + 1, '%')) |end| {
+                    const name = text[i + 1 .. end];
+                    for (self.vars) |pair| {
+                        if (!std.ascii.eqlIgnoreCase(pair[0], name)) continue;
+                        try out.appendSlice(alloc, pair[1]);
+                        i = end + 1;
+                        continue :scan;
+                    }
+                }
+            }
+            try out.append(alloc, text[i]);
+            i += 1;
+        }
+        return try out.toOwnedSlice(alloc);
+    }
+};
+
+const test_vs18_cmd_line =
+    \\cmd.exe /k "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64
+;
+/// Windows Terminal's Developer PowerShell line (`VsDevShellGenerator`),
+/// with its `"""` quoting; the split below is the one measured for the
+/// design in `_scratch-profiles-judge/rt-judge.log`.
+const test_vs18_wt_devshell_line =
+    \\pwsh.exe -NoExit -Command "&{Import-Module """C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"""; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments """-arch=x64 -host_arch=x64"""}"
+;
+
+fn testFreeArgv(alloc: Allocator, argv: []const [:0]const u8) void {
+    for (argv) |arg| alloc.free(arg);
+    alloc.free(argv);
+}
+
+test "user profile command lines split with the Windows rules, unlike direct:" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const devcmd = try splitWindowsCommandLine(alloc, test_vs18_cmd_line);
+    defer testFreeArgv(alloc, devcmd);
+    const want_devcmd = [_][]const u8{
+        "cmd.exe",
+        "/k",
+        "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\VsDevCmd.bat",
+        "-startdir=none",
+        "-arch=x64",
+        "-host_arch=x64",
+    };
+    try testing.expectEqual(want_devcmd.len, devcmd.len);
+    for (want_devcmd, devcmd) |want, got| try testing.expectEqualStrings(want, got);
+
+    const devshell = try splitWindowsCommandLine(alloc, test_vs18_wt_devshell_line);
+    defer testFreeArgv(alloc, devshell);
+    const want_devshell = [_][]const u8{
+        "pwsh.exe",
+        "-NoExit",
+        "-Command",
+        "&{Import-Module \"C:\\Program",
+        "Files\\Microsoft",
+        "Visual",
+        "Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll\"; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments \"-arch=x64",
+        "-host_arch=x64\"}",
+    };
+    try testing.expectEqual(want_devshell.len, devshell.len);
+    for (want_devshell, devshell) |want, got| try testing.expectEqualStrings(want, got);
+
+    // `command = direct:` splits with the general rules, which drop the inner
+    // quotes PowerShell needs to see the module path as one string.
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    var direct: Command = undefined;
+    try direct.parseCLI(arena.allocator(), "direct:" ++ test_vs18_wt_devshell_line);
+    try testing.expectEqual(@as(usize, 8), direct.direct.len);
+    try testing.expectEqualStrings("&{Import-Module C:\\Program", direct.direct[3]);
+    try testing.expect(!std.mem.eql(u8, direct.direct[3], devshell[3]));
+}
+
+test "verbatimCommandLine keeps a line only while it still describes the argv" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // cmd.exe reads its raw command line, so these must reach it as written:
+    // quoted again from argv, the first loses cmd's outer-quote idiom and the
+    // second unquotes the `&` (measured for the design).
+    for ([_][]const u8{
+        "cmd.exe /k \"\"C:\\Tools Dir\\init.cmd\" \"some arg\"\"",
+        "cmd.exe /k echo \"a&b\"",
+        test_vs18_cmd_line,
+    }) |line| {
+        const argv = try splitWindowsCommandLine(alloc, line);
+        defer testFreeArgv(alloc, argv);
+        const chosen = (try verbatimCommandLine(alloc, line, argv, false)).?;
+        try testing.expectEqualStrings(line, chosen);
+        // The cmd /C trampoline writes its own tail; a line never replaces it.
+        try testing.expect((try verbatimCommandLine(alloc, line, argv, true)) == null);
+    }
+    try testing.expect((try verbatimCommandLine(alloc, null, &.{"cmd.exe"}, false)) == null);
+
+    // The WSL `--cd` rewrite changes the argv, so the line no longer applies
+    // and the launch quotes the rewritten argv.
+    const wsl_line = "wsl.exe -d Ubuntu";
+    const wsl_argv = try splitWindowsCommandLine(alloc, wsl_line);
+    defer testFreeArgv(alloc, wsl_argv);
+    const wsl = try prepareCommandWithLookup(alloc, .{ .direct = wsl_argv }, "D:\\work", false, false, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            return null;
+        }
+    }.lookup);
+    defer wsl.deinit(alloc);
+    try testing.expect(wsl.direct.len != wsl_argv.len);
+    try testing.expect((try verbatimCommandLine(alloc, wsl_line, wsl.direct, false)) == null);
+
+    // `initial-command` (or anything else) running another argv.
+    try testing.expect((try verbatimCommandLine(alloc, wsl_line, &.{ "wsl.exe", "-d", "Debian" }, false)) == null);
+}
+
+test "user profiles expand %NAME% in the command, the directory and env values" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const env = TestEnvironment{ .vars = &.{
+        .{ "TOOLS", "C:\\T dir" },
+        .{ "work", "D:\\w" },
+        .{ "PATH", "C:\\Windows" },
+    } };
+    const definitions = [_]UserProfiles.Definition{.{
+        .id = "Tool",
+        .command = "  \"%TOOLS%\\x.exe\" --flag %NOCTTY_UNDEFINED% 100%  ",
+        .working_directory = "\"%WORK%\\src\"",
+        .env = &.{
+            .{ .key = "PATH", .value = "%TOOLS%;%PATH%" },
+            .{ .key = "LITERAL", .value = "%nope%" },
+        },
+    }};
+    const profiles = try appendUserProfiles(alloc, try alloc.alloc(Profile, 0), &definitions, env);
+    defer deinitProfiles(alloc, profiles);
+    try testing.expectEqual(@as(usize, 1), profiles.len);
+    const profile = profiles[0];
+    try testing.expectEqual(ProfileKind.user, profile.kind);
+    try testing.expectEqualStrings("\"C:\\T dir\\x.exe\" --flag %NOCTTY_UNDEFINED% 100%", profile.user.?.command_line);
+    try testing.expectEqualStrings("C:\\T dir\\x.exe", profile.command.direct[0]);
+    try testing.expectEqualStrings("%NOCTTY_UNDEFINED%", profile.command.direct[2]);
+    try testing.expectEqualStrings("D:\\w\\src", profile.working_directory.?.path);
+    try testing.expectEqualStrings("PATH", profile.user.?.env[0].key);
+    try testing.expectEqualStrings("C:\\T dir;C:\\Windows", profile.user.?.env[0].value);
+    try testing.expectEqualStrings("%nope%", profile.user.?.env[1].value);
+
+    // The production expander is ExpandEnvironmentStringsW.
+    if (builtin.os.tag == .windows) {
+        const root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+        defer alloc.free(root);
+        const expanded = try (ProcessEnvironment{}).expand(alloc, "%SystemRoot%\\x %NOCTTY_TEST_SURELY_UNDEFINED_8C1F%");
+        defer alloc.free(expanded);
+        const want = try std.fmt.allocPrint(alloc, "{s}\\x %NOCTTY_TEST_SURELY_UNDEFINED_8C1F%", .{root});
+        defer alloc.free(want);
+        try testing.expectEqualStrings(want, expanded);
+    }
+}
+
+test "user profile working directories take the working-directory values" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    for ([_]struct { raw: []const u8, want: std.meta.Tag(WorkingDirectory) }{
+        .{ .raw = "home", .want = .home },
+        .{ .raw = " inherit ", .want = .inherit },
+        .{ .raw = "\"home\"", .want = .home },
+        .{ .raw = "C:\\src", .want = .path },
+    }) |case| {
+        const dir = try userWorkingDirectory(alloc, case.raw, TestEnvironment{});
+        defer if (dir == .path) alloc.free(dir.path);
+        try testing.expectEqual(case.want, std.meta.activeTag(dir));
+    }
+    if (builtin.os.tag == .windows) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (try internal_os.home(&buf)) |home| {
+            const dir = try userWorkingDirectory(alloc, "~/src", TestEnvironment{});
+            defer alloc.free(dir.path);
+            try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimRight(u8, home, "\\/")));
+            try testing.expect(std.mem.endsWith(u8, dir.path, "\\src"));
+        }
+    }
+}
+
+test "user profiles list after the local shells and before SSH, keyed by lowercased id" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Config = @import("Config.zig");
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    try cfg.@"profile-name".parseCLI(arena, "vs18-cmd: Developer Command Prompt for VS 18");
+    try cfg.@"profile-command".parseCLI(arena, "vs18-cmd: " ++ test_vs18_cmd_line);
+    try cfg.@"profile-name".parseCLI(arena, "vs18-ps: Developer PowerShell for VS 18");
+    try cfg.@"profile-command".parseCLI(arena, "vs18-ps: " ++ test_vs18_wt_devshell_line);
+    try cfg.@"profile-command".parseCLI(arena, "Py312: cmd.exe");
+    try cfg.@"profile-env".parseCLI(arena, "py312: A=1");
+    try cfg.finalize();
+    try testing.expect(cfg._diagnostics.empty());
+
+    var user = try UserProfiles.init(alloc, &cfg);
+    defer user.deinit();
+    try testing.expectEqual(@as(usize, 3), user.definitions.len);
+
+    const lookup = struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "pwsh.exe")) return try a.dupe(u8, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup;
+    const probe = struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    }.probe;
+    const list = struct {
+        fn list(a: Allocator, _: []const u8) ![][]u8 {
+            return try a.alloc([]u8, 0);
+        }
+    }.list;
+    const hosts = [_]windows_ssh_hosts.Host{.{ .alias = "prod" }};
+
+    // The same stages, in the same order, as `listProfiles`.
+    const shell = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, lookup, probe, list, null, null);
+    const local = try appendUserProfiles(alloc, shell, user.definitions, TestEnvironment{});
+    const profiles = try appendSshProfiles(alloc, local, &hosts, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    defer deinitProfiles(alloc, profiles);
+
+    const want = [_]struct { key: []const u8, label: []const u8, kind: ProfileKind }{
+        .{ .key = "pwsh.exe", .label = "PowerShell", .kind = .pwsh },
+        .{ .key = "cmd.exe", .label = "Command Prompt", .kind = .cmd },
+        .{ .key = "user:vs18-cmd", .label = "Developer Command Prompt for VS 18", .kind = .user },
+        .{ .key = "user:vs18-ps", .label = "Developer PowerShell for VS 18", .kind = .user },
+        .{ .key = "user:py312", .label = "Py312", .kind = .user },
+        .{ .key = "ssh:prod", .label = "SSH: prod", .kind = .ssh },
+    };
+    try testing.expectEqual(want.len, profiles.len);
+    for (want, profiles) |w, p| {
+        try testing.expectEqualStrings(w.key, p.key);
+        try testing.expectEqualStrings(w.label, p.label);
+        try testing.expectEqual(w.kind, p.kind);
+    }
+    try testing.expectEqualStrings(test_vs18_cmd_line, profiles[2].user.?.command_line);
+    try testing.expectEqual(@as(usize, 6), profiles[2].command.direct.len);
+    try testing.expectEqual(@as(usize, 8), profiles[3].command.direct.len);
+    try testing.expectEqualStrings("A", profiles[4].user.?.env[0].key);
+    // The detected ones carry nothing new.
+    try testing.expect(profiles[0].user == null and profiles[0].working_directory == null);
+
+    // Copies keep the new fields (a worker's list is cloned onto each host).
+    const copy = try cloneProfiles(alloc, profiles);
+    defer deinitProfiles(alloc, copy);
+    try testing.expectEqualStrings(test_vs18_cmd_line, copy[2].user.?.command_line);
+    try testing.expect(copy[2].user.?.command_line.ptr != profiles[2].user.?.command_line.ptr);
+    try testing.expectEqualStrings("1", copy[4].user.?.env[0].value);
+}
+
+test "no profile keys leave the detected list exactly as it was" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Config = @import("Config.zig");
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.finalize();
+    var user = try UserProfiles.init(alloc, &cfg);
+    defer user.deinit();
+    try testing.expectEqual(@as(usize, 0), user.definitions.len);
+
+    const shell = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    }.probe, struct {
+        fn list(a: Allocator, _: []const u8) ![][]u8 {
+            return try a.alloc([]u8, 0);
+        }
+    }.list, null, null);
+    const merged = try appendUserProfiles(alloc, shell, user.definitions, TestEnvironment{});
+    defer deinitProfiles(alloc, merged);
+    // The very same slice: nothing copied, nothing reordered.
+    try testing.expectEqual(shell.ptr, merged.ptr);
+    try testing.expectEqual(@as(usize, 1), merged.len);
+    try testing.expectEqualStrings("cmd.exe", merged[0].key);
+}
+
+test "a user profile whose line names no program is skipped" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const definitions = [_]UserProfiles.Definition{
+        .{ .id = "empty", .command = "\"\" arg" },
+        .{ .id = "ok", .command = "ok.exe" },
+    };
+    const profiles = try appendUserProfiles(alloc, try alloc.alloc(Profile, 0), &definitions, TestEnvironment{});
+    defer deinitProfiles(alloc, profiles);
+    try testing.expectEqual(@as(usize, 1), profiles.len);
+    try testing.expectEqualStrings("user:ok", profiles[0].key);
+}
+
+test "user profile listing frees what it built when an allocation fails" {
+    const definitions = [_]UserProfiles.Definition{.{
+        .id = "a",
+        .name = "A",
+        .command = "a.exe \"b c\"",
+        .working_directory = "C:\\a",
+        .env = &.{ .{ .key = "K", .value = "V" }, .{ .key = "L", .value = "W" } },
+    }};
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+        const start = alloc.alloc(Profile, 0) catch continue;
+        const profiles = appendUserProfiles(alloc, start, &definitions, TestEnvironment{}) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        deinitProfiles(alloc, profiles);
+        break;
+    }
+}
+
+test "profileShellIntegrationDiagnostic reads a user profile's program" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const Case = struct { argv: []const [:0]const u8, support: ShellIntegrationSupport };
+    for ([_]Case{
+        .{ .argv = &.{ "cmd.exe", "/k", "x.bat" }, .support = .automatic },
+        .{ .argv = &.{ "C:\\PowerShell\\pwsh.exe", "-NoLogo" }, .support = .automatic },
+        .{ .argv = &.{"python.exe"}, .support = .manual },
+    }) |case| {
+        const profile: Profile = .{ .kind = .user, .key = "user:x", .label = "x", .command = .{ .direct = case.argv } };
+        try testing.expectEqual(case.support, (try profileShellIntegrationDiagnostic(alloc, &profile)).support);
+    }
+    const cmd: Profile = .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"cmd.exe"} } };
+    try testing.expectEqualStrings(
+        shellIntegrationDiagnostic(.cmd).summary,
+        (try profileShellIntegrationDiagnostic(alloc, &cmd)).summary,
+    );
+}
 
 pub const ProfileDiscovery = struct {
     profiles: []Profile,
@@ -107,7 +781,13 @@ pub fn recoveryCommand(alloc: Allocator) !Command {
     return try commandPromptWithHost(alloc, DefaultShellHost, &.{"/D"});
 }
 
-pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
+/// Every profile the picker lists: the detected local shells, then the user's
+/// own (`user`, a snapshot of the `profile-*` keys), then the SSH hosts.
+pub fn listProfiles(
+    alloc: Allocator,
+    include_ssh_hosts: bool,
+    user: []const UserProfiles.Definition,
+) ![]Profile {
     const order_hint = detectProfileOrderHint(alloc);
     defer if (order_hint) |value| alloc.free(value);
 
@@ -119,10 +799,17 @@ pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
         order_hint,
         null,
     );
-    return try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts, null);
+    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user, ProcessEnvironment{});
+    return try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, null);
 }
 
-pub fn discoverProfiles(alloc: Allocator, include_ssh_hosts: bool) !ProfileDiscovery {
+/// `listProfiles` that also says whether the list is complete (a WSL probe
+/// timed out, the SSH config was busy).
+pub fn discoverProfiles(
+    alloc: Allocator,
+    include_ssh_hosts: bool,
+    user: []const UserProfiles.Definition,
+) !ProfileDiscovery {
     const order_hint = detectProfileOrderHint(alloc);
     defer if (order_hint) |value| alloc.free(value);
 
@@ -135,8 +822,9 @@ pub fn discoverProfiles(alloc: Allocator, include_ssh_hosts: bool) !ProfileDisco
         order_hint,
         &complete,
     );
+    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user, ProcessEnvironment{});
     return .{
-        .profiles = try appendConfiguredSshProfiles(alloc, shell_profiles, include_ssh_hosts, &complete),
+        .profiles = try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, &complete),
         .complete = complete,
     };
 }
@@ -217,12 +905,24 @@ pub fn cloneProfiles(alloc: Allocator, profiles: []const Profile) ![]Profile {
         errdefer alloc.free(label);
         const palette_title = if (src.palette_title) |value| try alloc.dupe(u8, value) else null;
         errdefer if (palette_title) |value| alloc.free(value);
+        var command = try src.command.clone(alloc);
+        errdefer command.deinit(alloc);
+        const working_directory: ?WorkingDirectory = if (src.working_directory) |dir| switch (dir) {
+            .path => |path| .{ .path = try alloc.dupeZ(u8, path) },
+            .home, .inherit => dir,
+        } else null;
+        errdefer if (working_directory) |dir| switch (dir) {
+            .path => |path| alloc.free(path),
+            .home, .inherit => {},
+        };
         dst.* = .{
             .kind = src.kind,
             .key = key,
             .label = label,
             .palette_title = palette_title,
-            .command = try src.command.clone(alloc),
+            .command = command,
+            .working_directory = working_directory,
+            .user = if (src.user) |user| try user.clone(alloc) else null,
         };
         copied += 1;
     }
@@ -306,6 +1006,32 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .support = .unavailable,
             .summary = "SSH profile; shell integration is disabled for remote sessions",
             .next_step = "Enable shell integration inside the remote shell's own startup files.",
+        },
+        .user => .{
+            .support = .manual,
+            .summary = "User profile; shell integration follows the program it runs",
+            .next_step = "Start a shell noctty integrates (PowerShell, cmd, Git Bash) or enable integration in the program's own startup.",
+        },
+    };
+}
+
+/// `shellIntegrationDiagnostic` for one profile. A user profile can run
+/// anything, so its diagnostic is the one of the shell its argv[0] names, as
+/// the launch's own shell detection (`detectShell`) sees it.
+pub fn profileShellIntegrationDiagnostic(alloc: Allocator, profile: *const Profile) Allocator.Error!ShellIntegrationDiagnostic {
+    if (profile.kind != .user) return shellIntegrationDiagnostic(profile.kind);
+    const shell = (try @import("../termio/shell_integration.zig").detectShell(alloc, profile.command)) orelse
+        return shellIntegrationDiagnostic(.user);
+    return switch (shell) {
+        .powershell => .{
+            .support = .automatic,
+            .summary = "User profile running PowerShell; automatic shell integration applies unless the line passes -Command or -File",
+            .next_step = "A -Command or -File line runs without OSC 133 and OSC 7 marks, as in Windows Terminal.",
+        },
+        .cmd => shellIntegrationDiagnostic(.cmd),
+        else => .{
+            .support = .automatic,
+            .summary = "User profile running a shell with automatic shell integration",
         },
     };
 }
@@ -1387,7 +2113,7 @@ fn profileOrderTokenMatches(token: []const u8, profile: Profile) bool {
         .cmd => std.ascii.eqlIgnoreCase(token, "cmd") or
             std.ascii.eqlIgnoreCase(token, "cmd.exe") or
             std.ascii.eqlIgnoreCase(token, "command-prompt"),
-        .ssh => false,
+        .ssh, .user => false,
     };
 }
 

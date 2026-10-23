@@ -64,6 +64,13 @@ windows_cmd_shell: bool = false,
 /// Start an auxiliary Windows command without allocating a console window.
 windows_create_no_window: bool = false,
 
+/// On Windows, the command line to pass to CreateProcess as it is, instead of
+/// one built by quoting `args`. A user profile's line goes here, because
+/// re-quoting its argv changes what cmd.exe runs (`/k ""a b" "c""`, a quoted
+/// `&`). The caller must have checked that the line splits to exactly `args`
+/// (`windows_shell.verbatimCommandLine`). Ignored with `windows_cmd_shell`.
+windows_command_line: ?[]const u8 = null,
+
 /// Environment variables for the child process. If this is null, inherits
 /// the environment variables from this process. These are the exact
 /// environment variables to set; these are /not/ merged.
@@ -296,7 +303,9 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         application_w.ptr;
     const cwd = try safeWindowsCurrentDirectory(arena, self.path, self.cwd);
     const cwd_w = if (cwd) |v| try std.unicode.utf8ToUtf16LeAllocZ(arena, v) else null;
-    const command_line_w = if (self.args.len > 0) b: {
+    const command_line_w = if (self.windows_command_line != null and !self.windows_cmd_shell)
+        try std.unicode.wtf8ToWtf16LeAllocZ(arena, self.windows_command_line.?)
+    else if (self.args.len > 0) b: {
         const command_line = try windowsCreateCommandLine(
             arena,
             self.args,
@@ -956,6 +965,51 @@ test "Command: windows-cmd-shell-command-line executes quoted command" {
     const contents = try stdout.readToEndAlloc(testing.allocator, 1024);
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("QUOTED_A \r\nQUOTED_B\r\n", contents);
+}
+
+test "Command windows_command_line reaches cmd.exe exactly as written" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const windir = try std.process.getEnvVarOwned(alloc, "WINDIR");
+    const cmd_path = try std.fs.path.joinZ(alloc, &.{ windir, "System32", "cmd.exe" });
+    var td = try TempDir.init();
+    defer td.deinit();
+
+    // The argv this line splits to. Quoted again from argv, the `&` loses its
+    // quotes and cmd runs `echo a`, then `b`; passed as written, cmd echoes
+    // the quoted text.
+    const line = try std.fmt.allocPrint(alloc, "\"{s}\" /d /c echo \"a&b\"", .{cmd_path});
+    const args = [_][:0]const u8{ cmd_path, "/d", "/c", "echo", "a&b" };
+    const cases = [_]struct { line: ?[]const u8, stdout: []const u8 }{
+        .{ .line = line, .stdout = "\"a&b\"\r\n" },
+        .{ .line = null, .stdout = "a\r\n" },
+    };
+    for (cases) |case| {
+        var stdout = try createTestStdout(td.dir);
+        defer stdout.close();
+        var stderr = try createTestStderr(td.dir);
+        defer stderr.close();
+        var cmd: Command = .{
+            .path = cmd_path,
+            .args = &args,
+            .windows_command_line = case.line,
+            .windows_create_no_window = true,
+            .stdout = stdout,
+            .stderr = stderr,
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        try cmd.testingStart();
+        _ = try cmd.wait(true);
+        try stdout.seekTo(0);
+        const output = try stdout.readToEndAlloc(alloc, 4096);
+        try testing.expectEqualStrings(case.stdout, output);
+    }
 }
 
 test "PKG48 shell wrapper ignores implicit cwd programs and retains native syntax" {

@@ -2367,6 +2367,7 @@ fn profileKindBadge(kind: windows_shell.ProfileKind) []const u8 {
         .git_bash => "GIT",
         .cmd => "CMD",
         .ssh => "SSH",
+        .user => "USER",
     };
 }
 
@@ -2380,6 +2381,8 @@ fn profileKindGlyph(kind: windows_shell.ProfileKind) []const u8 {
         // Distinct from WSL's "<>": this is the one kind that opens a network
         // session, so it should not share another kind's cue.
         .ssh => "->",
+        // A profile of the user's own: no shell is implied.
+        .user => "*>",
     };
 }
 

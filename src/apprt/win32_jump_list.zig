@@ -906,6 +906,11 @@ fn buildProfileArgumentsForProfileAlloc(
     alloc: Allocator,
     profile: *const windows_shell.Profile,
 ) ![]u8 {
+    // A user profile's link would have to carry its environment, and a
+    // jump-list link is stored on disk and can roam with the profile. Part 2
+    // of the user profiles adds them through a `--default-profile` selector,
+    // which names the profile and lets the new process read its definition.
+    if (profile.kind == .user) return error.UnsupportedProfileCommand;
     if (profile.kind != .ssh) return buildProfileArgumentsAlloc(alloc, profile.command);
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse
@@ -3035,6 +3040,37 @@ test "jump_list rebuild retry budget is bounded" {
         try std.testing.expectEqual(expected, retry_count);
     }
     try std.testing.expect(nextRebuildRetryCount(retry_count) == null);
+}
+
+test "jump_list leaves user profiles out of the profile tasks" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} } },
+        .{
+            .kind = .user,
+            .key = "user:py",
+            .label = "Python",
+            .command = .{ .direct = &.{"cmd.exe"} },
+            .user = .{ .command_line = "cmd.exe", .env = &.{.{ .key = "SECRET_TOKEN", .value = "do-not-persist" }} },
+        },
+    };
+    try jump.updateProfilesAlloc(&profiles);
+    try std.testing.expectEqual(@as(usize, 1), jump.profiles.items.len);
+    try std.testing.expectEqualStrings("cmd.exe", jump.profiles.items[0].key);
+    try std.testing.expect(std.mem.indexOf(u8, jump.profiles.items[0].arguments, "do-not-persist") == null);
+    try std.testing.expectError(error.UnsupportedProfileCommand, buildProfileArgumentsForProfileAlloc(alloc, &profiles[1]));
 }
 
 test "jump_list startup profile discovery stays pending until completion" {

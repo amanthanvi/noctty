@@ -2068,6 +2068,19 @@ test "win32 new-window IPC rejects policy failures before acknowledgement" {
     }));
 }
 
+test "win32 new-window IPC refuses the user profile keys" {
+    // A profile is a command, a directory and environment variables: a
+    // forwarded argv must not define or change one in the running instance.
+    for ([_][:0]const u8{
+        "--profile-command=x: calc.exe",
+        "--profile-name=x: Calculator",
+        "--profile-working-directory=x: C:\\",
+        "--profile-env=x: PATH=C:\\evil",
+    }) |arg| {
+        try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{arg}));
+    }
+}
+
 test "win32 timed out automation request stays owned and cannot be claimed" {
     const request = try CoreApp.Message.AutomationActionRequest.create(
         std.testing.allocator,

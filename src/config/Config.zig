@@ -41,6 +41,7 @@ const help_strings = @import("help_strings");
 pub const Command = @import("command.zig").Command;
 const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
 const RepeatableStringMap = @import("RepeatableStringMap.zig");
+const ProfileMap = @import("profile_map.zig");
 pub const Path = @import("path.zig").Path;
 pub const RepeatablePath = @import("path.zig").RepeatablePath;
 const windows_shell = @import("windows_shell.zig");
@@ -1615,6 +1616,64 @@ class: ?[:0]const u8 = null,
 /// configuration — including any `ProxyCommand` it specifies. Set this to
 /// `false` to remove the SSH entries.
 @"ssh-config-hosts": bool = true,
+
+/// Define a profile of your own: a named command the profile picker and the
+/// command palette list next to the shells noctty detects (after the local
+/// shells, before the SSH hosts), and that session restore brings back.
+///
+/// The value is `<id>: <command line>`. The id names the profile: 1 to 64
+/// letters, digits, `.`, `_` or `-`, compared without case. It is how a saved
+/// session or layout remembers the profile, so renaming the label
+/// (`profile-name`) keeps it, while changing the id makes a new profile.
+/// The ids `pwsh.exe`, `powershell.exe`, `cmd.exe`, `git-bash` and
+/// `wsl-default` are taken by the detected profiles.
+///
+/// The command line is a Windows command line, as in a Windows Terminal
+/// profile's `commandline` or a shortcut's target: everything after the first
+/// `:` is used exactly as written. `%NAME%` is replaced by the value of that
+/// environment variable when the profile is listed (an undefined variable
+/// stays as written), so quote a path that holds a variable which may expand
+/// to spaces. The line is split into arguments with the Windows rules, and
+/// the program starts with exactly the line you wrote whenever noctty runs
+/// those same arguments (shell integration for PowerShell, the WSL directory
+/// option and `initial-command` change them; then the arguments are quoted
+/// again in the standard way). The `direct:` and `shell:` prefixes of
+/// `command` are not accepted here.
+///
+///   * `profile-command = vs18-cmd: cmd.exe /k "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64`
+///
+/// A profile exists while it has a command. `profile-command = <id>:` with
+/// nothing after the colon removes that profile (an included file can drop
+/// one), and `profile-command =` removes them all. Profiles are listed in the
+/// order of their first `profile-command` line.
+///
+/// To keep these lines out of a config file that other Ghostty builds read,
+/// put them in their own file and include it with `config-file = ?profiles.ghostty`.
+@"profile-command": ProfileMap.Text = .{},
+
+/// The label of a profile defined by `profile-command`, as
+/// `<id>: <label>`. The id itself is shown when no label is set.
+///
+///   * `profile-name = vs18-cmd: Developer Command Prompt for VS 18`
+@"profile-name": ProfileMap.Text = .{},
+
+/// Where a profile defined by `profile-command` starts, as `<id>: <value>`,
+/// with the values `working-directory` takes: `home`, `inherit`, or a path
+/// (`~/` and `%NAME%` are expanded). Without it, a profile opened from the
+/// picker or the palette starts in the home directory.
+/// `inherit` follows the usual rules instead (`working-directory` and the
+/// `*-inherit-working-directory` settings). A restored pane always returns
+/// to the directory it was in.
+@"profile-working-directory": ProfileMap.Text = .{},
+
+/// Environment variables for a profile defined by `profile-command`, as
+/// `<id>: KEY=VALUE`, repeated for each variable, with the rules `env` has:
+/// `<id>: KEY=` removes that variable from the profile and `<id>:` removes
+/// all of them. `%NAME%` in a value is replaced by that variable's value in
+/// noctty's own environment, so `profile-env = py: PATH=C:\Python312;%PATH%`
+/// puts a directory in front of the path. A profile's variable replaces an
+/// `env` variable with the same name, whatever the case of the name.
+@"profile-env": ProfileMap.Env = .{},
 
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
 /// overwrite previously set values. The list of actions is available in
@@ -3514,6 +3573,13 @@ _arena: ?ArenaAllocator = null,
 /// supplied by a config layer. The executable stays available to runtime callers.
 _command_defaulted: bool = false,
 
+/// Set only on a surface's shallow clone, when the surface is launched from a
+/// user profile (`profile-command`): the command line `command` was split
+/// from and the profile's environment entries, so the surface can keep them
+/// for the tabs and splits that inherit its launch. Never set by a config
+/// layer; `clone` does not copy it.
+_profile_launch: ?windows_shell.UserLaunch = null,
+
 /// The last config file that was skipped whole because it is UTF-16 text that
 /// does not decode (see `loadReader`); everything it set is missing from this
 /// load. Lives in the arena of this load; `clone` and `loadTheme` (which
@@ -5112,8 +5178,268 @@ pub fn finalize(self: *Config) !void {
 
     self.@"faint-opacity" = std.math.clamp(self.@"faint-opacity", 0.0, 1.0);
 
+    try self.finalizeProfiles();
+
     // Finalize key remapping set for efficient lookups
     self.@"key-remap".finalize();
+}
+
+/// Check the user profiles once every layer has been read: a field may come
+/// before the `profile-command` line it belongs to, or from another file.
+/// Each refused entry becomes a config problem and is dropped, so nothing
+/// downstream sees a profile the user was told is wrong. Messages name the
+/// id only, never the command or a value.
+fn finalizeProfiles(self: *Config) Allocator.Error!void {
+    const commands = &self.@"profile-command";
+    var index: usize = 0;
+    while (index < commands.entries.items.len) {
+        const entry = commands.entries.items[index];
+        const problem: ?[]const u8 = if (!ProfileMap.isValidId(entry.id))
+            "is not a valid profile id (use 1 to 64 letters, digits, '.', '_' or '-')"
+        else if (ProfileMap.isReservedId(entry.id))
+            "is the key of a detected profile; choose another id"
+        else if (std.ascii.startsWithIgnoreCase(entry.value, "direct:") or
+            std.ascii.startsWithIgnoreCase(entry.value, "shell:"))
+            "starts with direct: or shell:, which only `command` takes; write the Windows command line itself"
+        else
+            null;
+        if (problem) |message| {
+            try self.addProfileProblem("profile-command", entry.id, message);
+            _ = commands.entries.orderedRemove(index);
+            continue;
+        }
+        index += 1;
+    }
+
+    try self.finalizeProfileField(ProfileMap.Text, &self.@"profile-name", "profile-name");
+    try self.finalizeProfileField(ProfileMap.Text, &self.@"profile-working-directory", "profile-working-directory");
+    try self.finalizeProfileField(ProfileMap.Env, &self.@"profile-env", "profile-env");
+}
+
+fn finalizeProfileField(
+    self: *Config,
+    comptime Map: type,
+    map: *Map,
+    comptime key: [:0]const u8,
+) Allocator.Error!void {
+    var index: usize = 0;
+    while (index < map.entries.items.len) {
+        const id = map.entries.items[index].id;
+        const problem: ?[]const u8 = if (!ProfileMap.isValidId(id))
+            "is not a valid profile id (use 1 to 64 letters, digits, '.', '_' or '-')"
+        else if (self.@"profile-command".indexOf(id) == null)
+            "has no profile-command line, so there is no such profile"
+        else
+            null;
+        if (problem) |message| {
+            try self.addProfileProblem(key, id, message);
+            _ = map.entries.orderedRemove(index);
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn addProfileProblem(
+    self: *Config,
+    comptime key: [:0]const u8,
+    id: []const u8,
+    message: []const u8,
+) Allocator.Error!void {
+    const alloc = self._arena.?.allocator();
+    // An invalid id can be any text; keep the message short.
+    const shown = id[0..@min(id.len, ProfileMap.max_id_len + 1)];
+    try self._diagnostics.append(alloc, .{
+        .key = key,
+        .message = try std.fmt.allocPrintSentinel(alloc, "\"{s}\" {s}", .{ shown, message }, 0),
+    });
+}
+
+/// Load `text` as one config file and finalize it, as a real load does.
+fn testLoadProfileText(alloc: Allocator, text: []const u8) !Config {
+    var cfg = try Config.default(alloc);
+    errdefer cfg.deinit();
+    var reader: std.Io.Reader = .fixed(text);
+    try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+    try cfg.finalize();
+    return cfg;
+}
+
+/// The config as `+show-config` writes it (only the changed keys).
+fn testFormatChanged(alloc: Allocator, cfg: *const Config) ![]u8 {
+    var buf: std.Io.Writer.Allocating = .init(alloc);
+    errdefer buf.deinit();
+    const FileFormatter = @import("formatter_file.zig").FileFormatter;
+    try buf.writer.print("{f}", .{FileFormatter{ .alloc = alloc, .config = cfg, .changed = true }});
+    return try buf.toOwnedSlice();
+}
+
+/// The user profile example of the design (discussion #529, VS 18), plus
+/// values that a Windows command line holds and a loader must not touch.
+const test_profile_text =
+    \\profile-name = vs18-cmd: Developer Command Prompt for VS 18
+    \\profile-command = vs18-cmd: cmd.exe /k "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64
+    \\
+    \\profile-name = vs18-ps: Developer PowerShell for VS 18
+    \\profile-command = vs18-ps: powershell.exe -NoExit -Command "&{Import-Module 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 1234abcd -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}"
+    \\
+    \\profile-name = py312: Python 3.12
+    \\profile-command = py312: cmd.exe
+    \\profile-working-directory = py312: ~/src
+    \\profile-env = py312: PATH=C:\Python312;C:\Python312\Scripts;%PATH%
+    \\profile-command = quoting: cmd.exe /k ""C:\Tools Dir\init.cmd" "some arg"" & echo "a&b" %USERPROFILE%\x\
+    \\profile-working-directory = quoting: "%USERPROFILE%\a b\"
+    \\profile-env = quoting: WEIRD="quoted" \back\slash\ 100%
+    \\
+;
+
+test "profile keys keep every value exactly as written and format back to the same lines" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const long_arg = "x" ** 320;
+    const long_line = "profile-command = long: tool.exe " ++ long_arg ++ "\n";
+    const text = test_profile_text ++ long_line;
+
+    var cfg = try testLoadProfileText(alloc, text);
+    defer cfg.deinit();
+    // On a build without these keys, each line is an unknown-field problem.
+    for (cfg._diagnostics.list.items) |diag| std.debug.print("unexpected diagnostic: {s}: {s}\n", .{ diag.key, diag.message });
+    try testing.expect(cfg._diagnostics.empty());
+
+    const formatted = try testFormatChanged(alloc, &cfg);
+    defer alloc.free(formatted);
+    // Every profile line comes back byte for byte, in first-seen order, with
+    // `name = id: value` spacing (the original lines already use it).
+    var last: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or !std.mem.startsWith(u8, line, "profile-command")) continue;
+        const found = std.mem.indexOf(u8, formatted, line) orelse {
+            std.debug.print("missing line: {s}\n", .{line});
+            return error.TestExpectedEqual;
+        };
+        try testing.expect(found >= last);
+        last = found;
+    }
+    lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.indexOf(u8, formatted, line) == null) {
+            std.debug.print("missing line: {s}\n", .{line});
+            return error.TestExpectedEqual;
+        }
+    }
+
+    // And the formatted text loads back into the same configuration.
+    var again = try testLoadProfileText(alloc, formatted);
+    defer again.deinit();
+    try testing.expect(again._diagnostics.empty());
+    const reformatted = try testFormatChanged(alloc, &again);
+    defer alloc.free(reformatted);
+    try testing.expectEqualStrings(formatted, reformatted);
+}
+
+test "profile keys: removing, clearing, includes and order" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const main_text =
+        \\profile-command = a: one.exe
+        \\profile-name = a: First
+        \\config-file = inc.ghostty
+        \\profile-command = b: two.exe
+        \\profile-command = gone: gone.exe
+        \\profile-command = gone:
+        \\
+    ;
+    // An include is read after the file that names it: it renames `a`,
+    // removes `b` and adds `c`.
+    const include_text =
+        \\profile-name = A: Renamed
+        \\profile-command = b:
+        \\profile-command = c: three.exe
+        \\profile-command = a: one.exe --again
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = main_text });
+    try tmp.dir.writeFile(.{ .sub_path = "inc.ghostty", .data = include_text });
+    const path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
+    defer alloc.free(path);
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    try cfg.loadRecursiveFiles(alloc);
+    try cfg.finalize();
+    try testing.expect(cfg._diagnostics.empty());
+    const formatted = try testFormatChanged(alloc, &cfg);
+    defer alloc.free(formatted);
+    // `a` keeps its place (first line) and takes the include's command;
+    // order follows each id's first `profile-command` line.
+    const pos_a = std.mem.indexOf(u8, formatted, "profile-command = a: one.exe --again\n").?;
+    const pos_c = std.mem.indexOf(u8, formatted, "profile-command = c: three.exe\n").?;
+    try testing.expect(pos_a < pos_c);
+    try testing.expect(std.mem.indexOf(u8, formatted, "two.exe") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "gone") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "profile-name = a: Renamed\n") != null);
+
+    // An empty value removes every profile; later lines add again.
+    var cleared = try testLoadProfileText(alloc,
+        \\profile-command = a: one.exe
+        \\profile-command =
+        \\profile-command = z: zed.exe
+        \\
+    );
+    defer cleared.deinit();
+    const cleared_text = try testFormatChanged(alloc, &cleared);
+    defer alloc.free(cleared_text);
+    try testing.expect(std.mem.indexOf(u8, cleared_text, "one.exe") == null);
+    try testing.expect(std.mem.indexOf(u8, cleared_text, "profile-command = z: zed.exe\n") != null);
+}
+
+test "profile keys report each refused entry as a config problem" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try testLoadProfileText(alloc,
+        \\profile-command = bad id: x.exe
+        \\profile-command = CMD.EXE: cmd.exe /k echo mine
+        \\profile-command = d1: direct:cmd.exe /k
+        \\profile-command = s1: SHELL:cmd.exe
+        \\profile-command = ok: ok.exe
+        \\profile-name = ghost: Ghost
+        \\profile-env = ghost: A=1
+        \\profile-working-directory = also/bad: home
+        \\profile-name = ok: Fine
+        \\
+    );
+    defer cfg.deinit();
+    const expected = [_]struct { key: []const u8, text: []const u8 }{
+        .{ .key = "profile-command", .text = "\"bad id\" is not a valid profile id" },
+        .{ .key = "profile-command", .text = "\"CMD.EXE\" is the key of a detected profile" },
+        .{ .key = "profile-command", .text = "\"d1\" starts with direct: or shell:" },
+        .{ .key = "profile-command", .text = "\"s1\" starts with direct: or shell:" },
+        .{ .key = "profile-name", .text = "\"ghost\" has no profile-command line" },
+        .{ .key = "profile-working-directory", .text = "\"also/bad\" is not a valid profile id" },
+        .{ .key = "profile-env", .text = "\"ghost\" has no profile-command line" },
+    };
+    const found = cfg._diagnostics.list.items;
+    for (found) |diag| std.debug.print("diagnostic: {s}: {s}\n", .{ diag.key, diag.message });
+    try testing.expectEqual(expected.len, found.len);
+    for (expected, found) |want, got| {
+        try testing.expectEqualStrings(want.key, got.key);
+        try testing.expect(std.mem.startsWith(u8, got.message, want.text));
+        // A refused command's text never reaches a problem message.
+        try testing.expect(std.mem.indexOf(u8, got.message, ".exe") == null);
+    }
+    // What was refused is gone; what was valid stays.
+    const formatted = try testFormatChanged(alloc, &cfg);
+    defer alloc.free(formatted);
+    try testing.expect(std.mem.indexOf(u8, formatted, "profile-command = ok: ok.exe\n") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "profile-name = ok: Fine\n") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "ghost") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "mine") == null);
 }
 
 /// Resolve the automatic Windows command without hiding whether it was explicit.

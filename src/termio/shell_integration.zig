@@ -274,7 +274,7 @@ fn shellNameMatches(expected: []const u8, actual: []const u8) bool {
         std.mem.eql(u8, expected, actual);
 }
 
-fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
+pub fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     var arg_iter = try command.argIterator(alloc);
     defer arg_iter.deinit();
 
@@ -626,6 +626,33 @@ test "setup powershell: interactive direct command auto injects" {
     try testing.expectEqualStrings("-NoExit", result.command.direct[2]);
     try testing.expectEqualStrings("-Command", result.command.direct[3]);
     try testing.expectEqualStrings(expected_command, result.command.direct[4]);
+}
+
+test "a user profile's PowerShell line is quoted again once integration rewrites its argv" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+
+    // An interactive line gets the integration's `-NoExit -Command` appended,
+    // so the line no longer describes the argv and is not used.
+    const interactive = "pwsh.exe -NoLogo";
+    const interactive_argv = try windows_shell.splitWindowsCommandLine(alloc, interactive);
+    const integrated = (try setup(alloc, res.path, .{ .direct = interactive_argv }, &env, null, false)).?;
+    try testing.expect(integrated.command.direct.len > interactive_argv.len);
+    try testing.expect((try windows_shell.verbatimCommandLine(alloc, interactive, integrated.command.direct, false)) == null);
+
+    // A `-Command` line is left alone (no integration, as in Windows
+    // Terminal), so it runs exactly as written.
+    const scripted = "pwsh.exe -NoExit -Command \"& { 'a b' }\"";
+    const scripted_argv = try windows_shell.splitWindowsCommandLine(alloc, scripted);
+    try testing.expect((try setup(alloc, res.path, .{ .direct = scripted_argv }, &env, null, false)) == null);
+    try testing.expectEqualStrings(scripted, (try windows_shell.verbatimCommandLine(alloc, scripted, scripted_argv, false)).?);
 }
 
 test "setup powershell: interactive shell command auto injects" {
