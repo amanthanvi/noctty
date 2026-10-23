@@ -364,7 +364,10 @@ pub const Action = union(enum) {
 
     /// Paste the contents of the default clipboard.
     ///
-    /// On Windows, when the clipboard holds no text (an image, say) and the
+    /// On Windows, files copied in Explorer paste as their paths, quoted and
+    /// space-separated, after the same paste protection as a drop.
+    ///
+    /// When the clipboard holds no text and no files (an image, say) and the
     /// program has turned bracketed paste on (mode 2004) in a writable
     /// (not read-only) pane, this sends an empty bracketed paste,
     /// `ESC[200~ESC[201~`, as Windows Terminal does, and counts as performed,
