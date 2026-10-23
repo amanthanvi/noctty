@@ -71,7 +71,7 @@ Last reviewed: 2026-10-16 (jump list, native settings and scrollbar rows; render
 | Windows default terminal                                                          | `+register-default-terminal` selects noctty per user through the Windows Terminal 1.24-or-newer OpenConsole handoff; see [windows.md](windows.md#default-terminal).                                                  |
 | Taskbar jump lists                                                                | Recent working directories and detected shell profiles launch from the pinned or running taskbar button; from 1.3.133 a portable copy builds none. See [taskbar jump list](windows.md#taskbar-jump-list).            |
 | Quick terminal and global hotkeys                                                 | Configurable edge/center terminal toggled by a bindable action; `global:` bindings use `RegisterHotKey`. See [quick terminal](#quick-terminal).                                                                      |
-| Desktop notifications                                                             | WinRT Action Center toasts with a local fallback; every terminal toast names its tab and focuses its pane when clicked. See [notifications and progress](#notifications-and-progress).                               |
+| Desktop notifications                                                             | WinRT Action Center toasts with a local fallback; every terminal toast names its tab and focuses its pane when its popup is clicked. See [notifications and progress](#notifications-and-progress).                  |
 | Taskbar progress                                                                  | OSC 9;4 reports, or the root OSC 7501 status once a program reports one, drive the active pane's taskbar indicator when `progress-style` is enabled.                                                                 |
 | Program status (OSC 7501)                                                         | Tab badges, taskbar state, rate-limited toasts, UIA `ItemStatus`, and `goto_attention`. See [program status](windows.md#program-status-osc-7501).                                                                    |
 | Docked search                                                                     | Each pane has a docked scrollback search with regex, case, whole-word, navigation, and scrollbar markers. See [search and scrollbars](#search-and-scrollbars).                                                       |
@@ -426,10 +426,10 @@ a terminal pane (OSC 9, OSC 777, command finished,
 [program status](windows.md#program-status-osc-7501) and the clipboard-copy
 notices) names its tab (and its window while several are open) in a final
 attribution line, carries a launch argument, and focuses the originating pane
-when its popup is clicked. A pane's newer toast replaces its older one, and
-noctty removes a pane's toast from Action Center when its tab is seen, when
-the pane or its tab closes, and every toast of its own at exit. Reliable
-cold-start
+when its popup is clicked. A pane's newer toast, once Windows takes it,
+replaces its older one, and noctty removes a pane's toast from Action Center
+when its tab is seen, when the pane or its tab closes, and every toast of its
+own at exit. Reliable cold-start
 activation depends on the installed Start menu shortcut.
 `notify-on-command-finish-after` and the focus policy are applied before the
 bell or toast; command marks come from shell integration or OSC 133, which
