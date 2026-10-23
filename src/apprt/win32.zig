@@ -3509,8 +3509,7 @@ pub const App = struct {
         self.running = true;
         const ui_thread_id = sys.GetCurrentThreadId();
         ensureMessageQueue();
-        try self.createMessageWindow();
-        self.createLifecycleWindow();
+        try self.openAppWindows();
         @atomicStore(DWORD, &self.ui_thread_id, ui_thread_id, .release);
         defer {
             self.stopUndoPruneTimer();
@@ -3523,8 +3522,7 @@ pub const App = struct {
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             if (self.pending_profile_discovery) |pending| pending.deinit();
             self.pending_profile_discovery = null;
-            self.closeLifecycleWindow();
-            self.closeMessageWindow();
+            self.closeAppWindows();
             self.running = false;
         }
 
@@ -4663,6 +4661,20 @@ pub const App = struct {
         setWindowData(hwnd, null);
         _ = sys.DestroyWindow(hwnd);
         self.lifecycle_hwnd = null;
+    }
+
+    /// The app's own windows, made by `run` in every mode (normal,
+    /// `-Embedding`, safe mode, `initial-window = false`) before anything
+    /// else: the message window that takes cross-thread deliveries, and the
+    /// lifecycle window that takes end-session messages.
+    fn openAppWindows(self: *App) !void {
+        try self.createMessageWindow();
+        self.createLifecycleWindow();
+    }
+
+    fn closeAppWindows(self: *App) void {
+        self.closeLifecycleWindow();
+        self.closeMessageWindow();
     }
 
     /// Called only by the outer pump, never while an owner WndProc is under
@@ -33102,8 +33114,10 @@ fn appLifecycleWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPA
             if (windowData(App, hwnd)) |app| app.onEndSession(wparam != 0, lparam);
             return 0;
         },
-        // DefWindowProc would destroy it. A committed Restart Manager close
-        // quits from the message loop, and `run` destroys it last.
+        // DefWindowProc would destroy it, and the process would again have
+        // no window Restart Manager can ask (this is `taskkill` without /F,
+        // or Restart Manager's fallback once a close is committed, which
+        // quits from the message loop anyway). `run` destroys it last.
         c.WM_CLOSE => return 0,
         else => {},
     }
@@ -55790,14 +55804,24 @@ test "win32 the lifecycle window is a top-level window that never shows and answ
                 .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
             });
             defer session.deinit();
-            app.createLifecycleWindow();
-            defer app.closeLifecycleWindow();
+            // The same call `run` makes in every mode, so the lifecycle
+            // window comes with the message window or not at all.
+            try app.openAppWindows();
+            defer {
+                const delivery = app.delivery;
+                app.closeAppWindows();
+                app.delivery = null;
+                if (delivery) |d| d.release();
+            }
             const hwnd = app.lifecycle_hwnd orelse return error.TestUnexpectedResult;
+            const message_hwnd = app.message_hwnd orelse return error.TestUnexpectedResult;
 
             // A child of the desktop, not of the message-only parent, so
             // Windows sends it what it sends every top-level window; a tool
-            // window, kept off the taskbar and Alt+Tab.
+            // window, kept off the taskbar and Alt+Tab. The message window
+            // stays message-only.
             try std.testing.expectEqual(GetDesktopWindow(), sys.GetAncestor(hwnd, ga_parent).?);
+            try std.testing.expect(sys.GetAncestor(message_hwnd, ga_parent) != GetDesktopWindow());
             const ex_style: usize = @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE));
             try std.testing.expect(ex_style & c.WS_EX_TOOLWINDOW != 0);
             try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);

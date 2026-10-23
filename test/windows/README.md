@@ -485,7 +485,9 @@ Ephemeral-runner lifecycle of `noctty.exe -Embedding`, the process Windows start
 over a delegated console. It starts one with nothing to hand over, with
 `LOCALAPPDATA` and the portable folder holding seeded `session-state.json`,
 `palette-mru.txt`, `update-state.json`, `jump-list-recents.json`,
-`startup-attempts.json` and `config.ghostty`, and checks that it opens no window,
+`startup-attempts.json` and `config.ghostty`, and checks that it opens no window
+(other than the never-shown `noctty.win32.lifecycle` window every noctty process
+makes so that Restart Manager can ask it to close, which must stay hidden),
 exits by itself after its five-second idle timer with code 0, leaves every seeded
 file byte-identical, quarantines nothing and does not touch the console
 delegation values. `-NegativeControl` starts an ordinary instance instead and

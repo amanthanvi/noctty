@@ -44,8 +44,13 @@ ask:
                     edit is still there.
   embedding-idle    an idle `-Embedding` default-terminal server, asked within
                     its 5 s idle timeout: RmShutdown returns 0 and it exits.
-                    It registers its class object for that time but changes no
-                    registration; the default terminal is not touched.
+                    It changes no registration and the default terminal is not
+                    touched, but for that second it publishes the real handoff
+                    class object in the session's live COM class table (the
+                    measurement AUMID does not isolate it). So the case is
+                    refused, before anything starts, while HKCU
+                    Console\%%Startup DelegationTerminal selects noctty: a
+                    console started then could be handed to this copy.
 
 Safety. Only this run's portable copies are registered with Restart Manager:
 their noctty.exe and DLLs, never OpenConsole.exe (an RmUnknownApp that fails
@@ -56,7 +61,8 @@ RmShutdown the script checks that Restart Manager lists exactly the copy it
 started (PID and start time, read fresh) and aborts otherwise. It never calls
 RmShutdown with the force flag, RmRestart (which starts on the visible
 desktop) or anything that copies, and never switches desktops or injects
-input: keys are posted messages to this run's own windows. Every process runs
+input: keys are messages sent to this run's own windows, with the modifier
+state of their own private input queue cleared first. Every process runs
 on a new private desktop inside an owned kill-on-close job, with LOCALAPPDATA
 and APPDATA redirected, single instance off and a class of its own. The real
 startup-attempts.json is fingerprinted, the PowerShell history guard runs and
@@ -78,6 +84,24 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
+
+# The -Embedding case publishes the real handoff class object (CLSID below) in
+# the session's class table, which neither the private desktop nor the
+# measurement AUMID isolates. While the user's console delegation selects
+# noctty, a console they start could be handed to this hidden copy, so the
+# case is refused (as hidden-win11-embedding-idle.ps1 refuses it). Only that
+# one value is read, and an unreadable key fails closed.
+function Assert-RmEmbeddingDelegationSafe {
+    try { $selection=Get-ItemProperty -LiteralPath 'HKCU:\Console\%%Startup' -ErrorAction Stop }
+    catch [Management.Automation.ItemNotFoundException] { return }
+    $terminal=[guid]::Empty
+    if([guid]::TryParse([string]$selection.DelegationTerminal,[ref]$terminal) -and
+        $terminal -eq [guid]'33368C6F-D328-410C-B225-26DC9F12C728') {
+        throw 'embedding-idle refused: noctty is the selected delegated terminal, and the measurement AUMID does not isolate the real COM handoff class. Run the other cases with -Cases, or use a machine whose console delegation does not select noctty.'
+    }
+}
+$requestedCases=if($Cases) { @($Cases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @('embedding-idle') }
+if($requestedCases -contains 'embedding-idle') { Assert-RmEmbeddingDelegationSafe }
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -171,9 +195,33 @@ public static class Rm {
         if(SendMessageTimeoutW(h,m,new IntPtr(w),new IntPtr(l),0x2,5000,out result)==IntPtr.Zero) return null;
         return result.ToInt64();
     }
+    [StructLayout(LayoutKind.Sequential)] struct Msg { public IntPtr h; public uint m; public IntPtr w,l; public uint t; public int x,y; }
+    [DllImport("user32.dll")] static extern bool PeekMessageW(out Msg m,IntPtr h,uint min,uint max,uint remove);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from,uint to,bool attach);
+    [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    static void SendKey(IntPtr h,uint m,int key,long l) {
+        IntPtr result;
+        if(SendMessageTimeoutW(h,m,new IntPtr(key),new IntPtr(l),0,20000,out result)==IntPtr.Zero && Marshal.GetLastWin32Error()==1460)
+            throw new Exception("Key not handled within 20 s");
+    }
+    // A key-down and key-up for a pane, which runs the in-app keybind for
+    // that key (as hidden-win11-session-restore.ps1 does). noctty reads the
+    // modifiers from its thread's keyboard state, which a posted key does not
+    // update and a private desktop can leave stale (a plain F9 arrived as
+    // Shift+F9 on 10-18), so they are cleared there: this thread joins that
+    // input queue and the key is sent, not posted, so noctty handles it
+    // before the queues part. The user's keyboard is another queue.
     public static void Key(IntPtr h,int key) {
-        if(!PostMessageW(h,0x100,new IntPtr(key),new IntPtr(1))) throw new Exception("Key-down post failed");
-        if(!PostMessageW(h,0x101,new IntPtr(key),new IntPtr(0xC0000001L))) throw new Exception("Key-up post failed");
+        int pid; uint target=(uint)GetWindowThreadProcessId(h,out pid); uint me=GetCurrentThreadId();
+        Msg queue; PeekMessageW(out queue,IntPtr.Zero,0,0,0); // Give this thread an input queue.
+        if(target==0 || !AttachThreadInput(me,target,true)) throw new Exception("AttachThreadInput failed");
+        try {
+            if(!SetKeyboardState(new byte[256])) throw new Exception("SetKeyboardState failed");
+            SendKey(h,0x100,key,1);
+            if(IsWindow(h)) SendKey(h,0x101,key,0xC0000001L);
+        } finally { AttachThreadInput(me,target,false); }
     }
     public static string Text(IntPtr h) { var sb=new StringBuilder(512); SendMessageW(h,0x0D,new IntPtr(512),sb); return sb.ToString(); }
     public static void SetText(IntPtr h,string text) { SendMessageW(h,0x0C,IntPtr.Zero,text); }
@@ -517,6 +565,7 @@ foreach($name in $selected) {
             } finally { Stop-Case $case }
         }
         'embedding-idle' {
+            Assert-RmEmbeddingDelegationSafe
             $case=Start-Case $name @() 0 -Embedding
             try {
                 $r.Lifecycle=Lifecycle-State $case

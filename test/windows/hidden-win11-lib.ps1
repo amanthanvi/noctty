@@ -279,6 +279,9 @@ public static class HiddenWin {
     public sealed class DesktopWindowObservation {
         public int ProcessId, ThreadId;
         public bool CompletedAttempt;
+        // Recorded on the private desktop only: the owned window's class and visibility.
+        public string ClassName;
+        public bool Visible;
     }
     // EnumWindows sees the calling thread's desktop. Call only from the outer Default driver.
     // No window titles or unrelated window metadata are retained.
@@ -323,7 +326,7 @@ public static class HiddenWin {
                 bool complete = EnumDesktopWindows(desktop, (h, p) => {
                     int id; int tid = GetWindowThreadProcessId(h, out id);
                     if (tid == 0) { ownerFailed = true; ownerError = Marshal.GetLastWin32Error(); return false; }
-                    if (ids.Contains(id)) rows.Add(new DesktopWindowObservation { ProcessId = id, ThreadId = tid });
+                    if (ids.Contains(id)) rows.Add(new DesktopWindowObservation { ProcessId = id, ThreadId = tid, ClassName = Class(h), Visible = IsWindowVisible(h) });
                     return true;
                 }, IntPtr.Zero);
                 int error = ownerFailed ? ownerError : Marshal.GetLastWin32Error();
@@ -408,7 +411,10 @@ function Assert-HiddenDesktop([IntPtr] $Job, [string] $DesktopName, [string] $Re
     if ($RequiredWindowPid -gt 0 -and ($ids -notcontains $RequiredWindowPid -or @($rows | Where-Object { $_.ProcessId -eq $RequiredWindowPid -and $_.CompletedAttempt -eq $true }).Count -eq 0)) {
         throw 'Window startup required process window is absent; further input is blocked.'
     }
-    if ($NoWindows -and $rows.Count) { throw 'Hidden desktop unexpected private job window; further launches are blocked.' }
+    # noctty's lifecycle window is top-level so that Restart Manager can ask a process with no other
+    # window to close, and it is never shown. -NoWindows tolerates exactly that class, and only hidden.
+    $unexpectedRows = @($rows | Where-Object { -not ($_.ClassName -ceq 'noctty.win32.lifecycle' -and $_.Visible -eq $false) })
+    if ($NoWindows -and $unexpectedRows.Count) { throw 'Hidden desktop unexpected private job window; further launches are blocked.' }
 }
 
 # The child cannot launch noctty until the Default observer validates this receipt.

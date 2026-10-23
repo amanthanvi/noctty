@@ -248,8 +248,10 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class TYPE_NAME {
     public delegate bool EnumWindow(IntPtr h, IntPtr p);
-    public class DesktopWindowObservation { public int ProcessId, ThreadId; public bool CompletedAttempt; }
+    public class DesktopWindowObservation { public int ProcessId, ThreadId; public bool CompletedAttempt; public string ClassName; public bool Visible; }
     public static bool OpenFails, EnumFails, OwnerFails, CloseFails;
+    static string Class(IntPtr h) { return "class-" + h.ToInt32(); }
+    static bool IsWindowVisible(IntPtr h) { return h.ToInt32() == 2; }
     public static int Opens, Enums, Closes;
     static int[] JobProcessIds(IntPtr job) { if (job != new IntPtr(7)) throw new Exception("wrong job"); return new[] { 41, 42 }; }
     static IntPtr OpenDesktopW(string name, uint flags, bool inherit, uint access) {
@@ -279,9 +281,11 @@ METHOD
         if ([bool]$failure -ne [bool]$fixture.Api -or ($failure -and ($failure.Message -cne $fixture.Api -or $failure.NativeErrorCode -ne $fixture.Code))) { throw 'Private desktop API failure changed or was accepted.' }
         if ($type::Opens -ne 1 -or $type::Closes -ne [int](-not $fixture.OpenFails)) { throw 'Private desktop read handle was leaked.' }
         if (-not $failure -and ($type::Enums -ne 1 -or $rows.Count -ne 2 -or @($rows | Where-Object { $_.ProcessId -ne 42 -or -not $_.CompletedAttempt }).Count)) { throw 'Private desktop oracle omitted actual windows or accepted wrong PID.' }
+        if (-not $failure -and ($rows[0].ClassName -cne 'class-1' -or $rows[0].Visible -or $rows[1].ClassName -cne 'class-2' -or -not $rows[1].Visible)) { throw 'Private desktop oracle lost the class or visibility of an owned window.' }
         if ($fixture.Cleanup -and ($failure.Data['CleanupApi'] -cne 'CloseDesktop' -or $failure.Data['CleanupCode'] -ne 6)) { throw 'Private desktop oracle lost secondary cleanup error.' }
     }
 }
+Assert-HiddenMutation 'private native visibility not recorded' $privateWindows ($privateWindows.Replace('Visible = IsWindowVisible(h)', 'Visible = false')) ${function:Test-PrivateWindowNative}
 Assert-HiddenMutation 'private native wrong PID included' $privateWindows ($privateWindows.Replace('if (ids.Contains(id))', 'if (true)')) ${function:Test-PrivateWindowNative}
 Assert-HiddenMutation 'private native read handle inheritable' $privateWindows ($privateWindows.Replace('OpenDesktopW(desktopName, 0, false, 0x0001)', 'OpenDesktopW(desktopName, 0, true, 0x0001)')) ${function:Test-PrivateWindowNative}
 Assert-HiddenMutation 'private native errors ignored' $privateWindows ($privateWindows.Replace('throw failure;', '')) ${function:Test-PrivateWindowNative}
@@ -319,6 +323,8 @@ public static class TYPE_NAME {
     }
     static bool EnumWindows(EnumWindow cb, IntPtr state) { return RunEnum(cb, state); }
     static bool EnumDesktopWindows(IntPtr h, EnumWindow cb, IntPtr state) { return RunEnum(cb, state); }
+    static string Class(IntPtr h) { return "fixture"; }
+    static bool IsWindowVisible(IntPtr h) { return false; }
 METHODS
 }
 '@
@@ -597,6 +603,8 @@ function Test-HiddenDesktopAssertion([string] $Code) {
         @{ WrongCurrent = $true; Blocked = $true }, @{ BadName = $true; Blocked = $true }
         @{ NoWindows = $true; Blocked = $true }, @{ Empty = $true; NoWindows = $true }
         @{ Stale = $true }, @{ Stale = $true; Required = 42; Blocked = $true }, @{ Stale = $true; NoWindows = $true; Blocked = $true }
+        @{ Class = 'noctty.win32.lifecycle'; NoWindows = $true }, @{ Class = 'noctty.win32.lifecycle'; Visible = $true; NoWindows = $true; Blocked = $true }
+        @{ Class = 'noctty.win32.host'; NoWindows = $true; Blocked = $true }
         @{ Native = 'OpenDesktopW'; Code = 5; Blocked = $true }
         @{ Native = 'EnumDesktopWindows'; Code = 170; Blocked = $true }
         @{ Native = 'GetWindowThreadProcessId'; Code = 1400; Blocked = $true }
@@ -621,7 +629,8 @@ function Test-HiddenDesktopAssertion([string] $Code) {
         }
         if ($fixture.Observed) { [HiddenDesktopContract]::Failure.Data['ObservedWindows'] = @(@{ ProcessId = 42; ThreadId = 123 }, @{ ProcessId = 'secret'; ThreadId = 'secret' }) }
         [HiddenDesktopContract]::Current = if ($fixture.WrongCurrent) { 'Default' } else { $name }
-        [HiddenDesktopContract]::Rows = @(if (-not $fixture.Empty) { @{ ProcessId = $(if ($fixture.WrongPid) { 99 } else { 42 }); ThreadId = $(if ($fixture.ZeroTid) { 0 } else { 123 }); CompletedAttempt = -not $fixture.Stale } })
+        [HiddenDesktopContract]::Rows = @(if (-not $fixture.Empty) { @{ ProcessId = $(if ($fixture.WrongPid) { 99 } else { 42 }); ThreadId = $(if ($fixture.ZeroTid) { 0 } else { 123 }); CompletedAttempt = -not $fixture.Stale
+            ClassName = $fixture.Class; Visible = [bool]$fixture.Visible } })
         $blocked = $false
         try { Assert-HiddenDesktop -Job ([IntPtr]7) -DesktopName $(if ($fixture.BadName) { 'Default' } else { $name }) -ReceiptPath 'unused.jsonl' -RequiredWindowPid ([int]$fixture.Required) -NoWindows:([bool]$fixture.NoWindows) } catch { $blocked = $true; if ($fixture.Required -and $_.Exception.Message.StartsWith('Hidden desktop')) { throw 'Missing readiness window must remain an ordinary startup failure.' } }
         if ($blocked -ne [bool]$fixture.Blocked -or $receipts.Count -ne 1 -or $receipts[0].Contains('secret')) { throw 'Private desktop oracle lost failure rejection or sanitized receipt.' }
@@ -647,7 +656,9 @@ Assert-HiddenMutation 'private wrong PID accepted' $desktopAssertion ($desktopAs
 Assert-HiddenMutation 'private wrong self desktop accepted' $desktopAssertion ($desktopAssertion.Replace('[HiddenDesktopContract]::CurrentDesktopName() -cne $DesktopName', '$false')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private missing ready window accepted' $desktopAssertion ($desktopAssertion.Replace('$RequiredWindowPid -gt 0 -and', '$false -and')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private stale ready window accepted' $desktopAssertion ($desktopAssertion.Replace(' -and $_.CompletedAttempt -eq $true', '')) ${function:Test-HiddenDesktopAssertion}
-Assert-HiddenMutation 'private idle window accepted' $desktopAssertion ($desktopAssertion.Replace('$NoWindows -and $rows.Count', '$false')) ${function:Test-HiddenDesktopAssertion}
+Assert-HiddenMutation 'private idle window accepted' $desktopAssertion ($desktopAssertion.Replace('$NoWindows -and $unexpectedRows.Count', '$false')) ${function:Test-HiddenDesktopAssertion}
+Assert-HiddenMutation 'private visible lifecycle window accepted' $desktopAssertion ($desktopAssertion.Replace(' -and $_.Visible -eq $false', '')) ${function:Test-HiddenDesktopAssertion}
+Assert-HiddenMutation 'private lifecycle exemption covers every class' $desktopAssertion ($desktopAssertion.Replace("`$_.ClassName -ceq 'noctty.win32.lifecycle'", '$true')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'desktop receipt removed' $desktopAssertion ($desktopAssertion.Replace('Add-Content -LiteralPath $ReceiptPath', 'Out-Null')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private native receipt code lost' $desktopAssertion ($desktopAssertion.Replace('$errorCode = $failure.NativeErrorCode', '$errorCode = $null')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private arbitrary native label disclosed' $desktopAssertion ($desktopAssertion.Replace('$nativeStages -ccontains $failure.Message', '$true')) ${function:Test-HiddenDesktopAssertion}
