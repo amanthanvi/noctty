@@ -8,10 +8,25 @@ the force flag, RmEndSession. Run with -Bin <source bin directory> -Run <new
 evidence directory>; -Cases picks cases (comma-separated, all by default). The
 run directory must not already exist.
 
+The files registered are the ones Setup would check: every file of the copy
+that the installer script's CloseApplicationsFilter matches (Inno's default
+*.exe,*.dll,*.chm when it sets none) and its CloseApplicationsFilterExcludes
+does not, by file name. The script is dist/windows/noctty.iss unless -Iss
+names another, such as an older revision to show what it did.
+
 Cases (each its own portable copy, restoring a seeded session of two windows:
 the first with two tabs, the second of them split, the second with one tab):
   idle-two-windows  nothing running: RmShutdown returns 0, noctty exits 0 and
                     the saved session still holds both windows, tabs and split.
+  inno-set-idle     the installer's view of the same idle session: Restart
+                    Manager lists only noctty, RmShutdown returns 0, noctty
+                    exits 0 with the session kept, and none of its
+                    OpenConsole.exe children (one ConPTY host per pane)
+                    outlives it, so the excluded file is free too. Against
+                    a script without the exclusion, OpenConsole.exe is
+                    registered, Restart Manager lists the hosts as
+                    RmUnknownApp, and RmShutdown fails with 351 at once,
+                    before noctty is asked anything.
   busy-always       confirm-close-surface = always, and
   busy-ping         `ping -t localhost` in every pane with the default
                     confirm-close-surface: RmShutdown returns
@@ -52,13 +67,11 @@ ask:
                     Console\%%Startup DelegationTerminal selects noctty: a
                     console started then could be handed to this copy.
 
-Safety. Only this run's portable copies are registered with Restart Manager:
-their noctty.exe and DLLs, never OpenConsole.exe (an RmUnknownApp that fails
-every non-forced shutdown). Leaving it out models the registration set the
-planned installer exclusion (RMCLOSE-4) produces; today Setup still registers
-it. Before
-RmShutdown the script checks that Restart Manager lists exactly the copy it
-started (PID and start time, read fresh) and aborts otherwise. It never calls
+Safety. Only this run's portable copies are registered with Restart Manager,
+and only the files named above. Before RmShutdown the script checks that
+Restart Manager lists the copy it started and nothing else but that copy's
+own ConPTY hosts (PIDs and start times, read fresh; the hosts are listed only
+when OpenConsole.exe is registered) and aborts otherwise. It never calls
 RmShutdown with the force flag, RmRestart (which starts on the visible
 desktop) or anything that copies, and never switches desktops or injects
 input: keys are messages sent to this run's own windows, with the modifier
@@ -78,6 +91,7 @@ param(
     [switch] $Driver,
     [string] $DesktopName,
     [string] $Cases = '',
+    [string] $Iss = (Join-Path $PSScriptRoot '..\..\dist\windows\noctty.iss'),
     [ValidateRange(1,1800)] [int] $DriverTimeoutSeconds = 900,
     [string] $ExpectedStartupHash,
     [string] $ExpectedStartupModified
@@ -223,7 +237,7 @@ if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
         -DesktopPrefix 'noctty-rm-' -Label 'Hidden Restart Manager close' -PassDesktopName -GuardClipboard `
-        -DriverArguments @("-Cases `"$Cases`"")
+        -DriverArguments @("-Cases `"$Cases`"","-Iss `"$((Resolve-Path -LiteralPath $Iss).Path)`"")
     exit
 }
 
@@ -350,6 +364,41 @@ function Pane($h) {
     if(-not $all.Count) { throw 'Host has no pane.' }
     return $all[0]
 }
+# What Setup checks for being in use, from the installer script's [Setup]
+# section: CloseApplicationsFilter (Inno's default when unset) minus
+# CloseApplicationsFilterExcludes, matched against file names.
+$setup=@{}; $inSetup=$false
+foreach($line in [IO.File]::ReadLines($Iss)) {
+    $t=$line.Trim()
+    if($t -match '^\[(.+)\]$') { $inSetup=$Matches[1] -eq 'Setup'; continue }
+    if($inSetup -and $t -match '^([A-Za-z]+)\s*=\s*(.*)$') { $setup[$Matches[1]]=$Matches[2].Trim() }
+}
+if(-not $setup.ContainsKey('AppId')) { throw "No [Setup] section in $Iss." }
+function Patterns($Value) { return @("$Value" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+$closeFilter=Patterns $(if($setup.ContainsKey('CloseApplicationsFilter')) { $setup.CloseApplicationsFilter } else { '*.exe,*.dll,*.chm' })
+$closeExcludes=Patterns $setup.CloseApplicationsFilterExcludes
+$results.Iss=@{ Path=$Iss; Filter=$closeFilter; Excludes=$closeExcludes }
+function Close-Set([string]$Dir) {
+    return @(Get-ChildItem -LiteralPath $Dir -File -Recurse | Where-Object {
+        $n=$_.Name
+        @($closeFilter | Where-Object { $n -like $_ }).Count -and -not @($closeExcludes | Where-Object { $n -like $_ }).Count
+    } | ForEach-Object FullName)
+}
+# The copy's ConPTY hosts: OpenConsole.exe processes from its folder that it
+# started (parent PID, created after it), each as PID and start time.
+function Console-Hosts($case) {
+    $p=$case.Process; $image=Join-Path $case.Dir 'OpenConsole.exe'; $since=$p.StartTime.ToUniversalTime()
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id) AND Name='OpenConsole.exe'" -Property ProcessId,ExecutablePath,CreationDate |
+        Where-Object { $_.ExecutablePath -eq $image -and $_.CreationDate.ToUniversalTime() -ge $since } |
+        ForEach-Object { @{ Pid=[int]$_.ProcessId; Start=$_.CreationDate.ToUniversalTime() } })
+}
+# Those of the hosts that are still running (same PID and start time).
+function Running-Hosts($hosts) {
+    return @($hosts | Where-Object {
+        $q=Get-Process -Id $_.Pid -ErrorAction SilentlyContinue
+        $null -ne $q -and [Math]::Abs(($q.StartTime.ToUniversalTime() - $_.Start).TotalMilliseconds) -lt 1000
+    })
+}
 # Asks Restart Manager to close the copy, as Setup does, and records what
 # happens until it returns.
 function Rm-Close($case) {
@@ -358,22 +407,33 @@ function Rm-Close($case) {
     $key=[Text.StringBuilder]::new(64); [uint32]$h=0
     $err=[Rm]::RmStartSession([ref]$h,0,$key); if($err) { throw "RmStartSession failed: $err" }
     try {
-        $files=@(Get-ChildItem -LiteralPath $case.Dir -File | Where-Object { $_.Extension -in '.exe','.dll' -and $_.Name -ne 'OpenConsole.exe' } | ForEach-Object FullName)
+        $files=@(Close-Set $case.Dir)
         $out.Registered=@($files | ForEach-Object { Split-Path -Leaf $_ })
         $err=[Rm]::RmRegisterResources($h,[uint32]$files.Count,[string[]]$files,0,[IntPtr]::Zero,0,$null); if($err) { throw "RmRegisterResources failed: $err" }
         [int]$listErr=0
         $listed=@([Rm]::List($h,[ref]$listErr))
         if($listErr) { throw "RmGetList failed: $listErr" }
         $out.Listed=@($listed | ForEach-Object { @{ Pid=$_.Process.Pid; Type=$_.ApplicationType; Restartable=$_.Restartable } })
-        # Only the copy this case started, read fresh, may be closed.
+        # Only the copy this case started, and the ConPTY hosts it started
+        # (listed when OpenConsole.exe is registered), all read fresh, may be
+        # closed.
         $fresh=Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-        $mine=$listed.Count -eq 1 -and $null -ne $fresh -and -not $p.HasExited -and $listed[0].Process.Pid -eq $p.Id -and
-            $fresh.Path -eq $p.Path -and [Math]::Abs(([Rm]::StartTime($listed[0]) - $fresh.StartTime.ToUniversalTime()).TotalMilliseconds) -lt 1000
-        if(-not $mine) { throw "Restart Manager lists something other than this case's copy ($(@($listed | ForEach-Object { $_.Process.Pid }) -join ',')); not shutting down." }
+        $out.ConsoleHosts=@(Console-Hosts $case)
+        $near={ param($a,$b) [Math]::Abs(($a - $b).TotalMilliseconds) -lt 1000 }
+        $strangers=@($listed | Where-Object {
+            $e=$_; $start=[Rm]::StartTime($e)
+            $copy=$e.Process.Pid -eq $p.Id -and $null -ne $fresh -and -not $p.HasExited -and $fresh.Path -eq $p.Path -and (& $near $start $fresh.StartTime.ToUniversalTime())
+            $hosted=@($out.ConsoleHosts | Where-Object { $_.Pid -eq $e.Process.Pid -and (& $near $start $_.Start) }).Count -eq 1
+            -not ($copy -or $hosted)
+        })
+        if($strangers.Count -or @($listed | Where-Object { $_.Process.Pid -eq $p.Id }).Count -ne 1) {
+            throw "Restart Manager lists something other than this case's copy and its console hosts ($(@($listed | ForEach-Object { $_.Process.Pid }) -join ',')); not shutting down."
+        }
         $timeline=[Collections.Generic.List[Rm+Sample]]::new(); [long]$elapsed=0
         $out.ForegroundBefore=[Rm]::GetForegroundWindow().ToInt64()
         $out.Result=[Rm]::Shutdown($h,$p.Id,$p.Handle,$timeline,[ref]$elapsed)
         $out.Ms=$elapsed
+        $out.HostsAtReturn=@(Running-Hosts $out.ConsoleHosts | ForEach-Object { $_.Pid })
         $out.PromptSeen=@($timeline | Where-Object Prompt).Count -gt 0
         $out.ForegroundChanged=@($timeline | Where-Object { $_.Foreground.ToInt64() -ne $out.ForegroundBefore }).Count -gt 0
         $changes=@(); $last=$null
@@ -393,7 +453,7 @@ function Send-All($case,[uint32]$Message,[long]$W,[long]$L) {
     return @(@([HiddenLocal]::Hosts($case.Process.Id)) | ForEach-Object { [Rm]::Send($_,$Message,$W,$L) })
 }
 
-$all=@('idle-two-windows','busy-always','busy-ping','settings-dirty','cancel','signout','headless','settings-only-clean','settings-only-dirty','embedding-idle')
+$all=@('idle-two-windows','inno-set-idle','busy-always','busy-ping','settings-dirty','cancel','signout','headless','settings-only-clean','settings-only-dirty','embedding-idle')
 $selected=if($Cases) { @($Cases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { $all }
 foreach($name in $selected) { if($all -notcontains $name) { throw "Unknown case $name." } }
 
@@ -414,6 +474,27 @@ foreach($name in $selected) {
                 Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
                 $r.LockFreeAfter=-not (Lock-Held $case.State)
                 Check "${name}: the session lock is free once it has exited" $r.LockFreeAfter $true $r.LockFreeAfter
+            } finally { Stop-Case $case }
+        }
+        'inno-set-idle' {
+            $case=Start-Case $name @()
+            try {
+                $before=Mtime $case.State
+                $r.Rm=Rm-Close $case
+                $exited=$case.Process.WaitForExit(10000)
+                $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
+                $r.SessionRewritten=(Mtime $case.State) -gt $before
+                $r.ShapeAfter=Session-Shape $case.State
+                [void](Wait-Until { -not @(Running-Hosts $r.Rm.ConsoleHosts).Count } 5)
+                $r.HostsLeft=@(Running-Hosts $r.Rm.ConsoleHosts | ForEach-Object { $_.Pid })
+                $registered=@($r.Rm.Registered)
+                Check "${name}: Setup's set includes noctty.exe" ($registered -contains 'noctty.exe') 'noctty.exe' ($registered -join ',')
+                Check "${name}: Restart Manager lists only noctty" (@($r.Rm.Listed).Count -eq 1) 1 (@($r.Rm.Listed | ForEach-Object { "$($_.Pid)/type $($_.Type)" }) -join ',')
+                Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 "$($r.Rm.Result) in $($r.Rm.Ms) ms"
+                Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
+                Check "${name}: the copy ran ConPTY hosts" (@($r.Rm.ConsoleHosts).Count -gt 0) '> 0' @($r.Rm.ConsoleHosts).Count
+                Check "${name}: no ConPTY host outlives noctty" (-not $r.HostsLeft.Count) 'none' ($r.HostsLeft -join ',')
             } finally { Stop-Case $case }
         }
         { $_ -in 'busy-always','busy-ping' } {

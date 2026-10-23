@@ -46,7 +46,18 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #endif
 ChangesAssociations=yes
+; Setup asks Restart Manager to close what holds the files it replaces. The
+; bundled OpenConsole.exe runs once per pane as a headless ConPTY host, and
+; Restart Manager classes it RmUnknownApp, which only a forced shutdown can
+; close: with it registered, every non-forced RmShutdown failed with 351 in
+; under 100 ms before noctty saw any message, and Setup aborted (exit 5 under
+; /SUPPRESSMSGBOXES). It exits with noctty (measured: no OpenConsole child
+; survived once Restart Manager had closed noctty), so leaving it out still
+; frees the file. noctty.exe, conpty.dll and the handoff proxy stay registered.
+; Needs Inno Setup 6.4.2 or later. Keep CloseApplications off "force": a
+; forced close kills the programs running in noctty's terminals.
 CloseApplications=yes
+CloseApplicationsFilterExcludes=OpenConsole.exe
 RestartApplications=yes
 UninstallDisplayIcon={app}\noctty.exe
 SetupIconFile={#SourceDir}\dist\windows\noctty.ico
