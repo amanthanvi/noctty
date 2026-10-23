@@ -76,6 +76,41 @@ pub const Profile = struct {
     /// The command line `command` was split from and the profile's own
     /// environment entries. Set only for `.user` profiles.
     user: ?UserLaunch = null,
+    /// Named by `profile-hidden`: left out of the picker, the palette, the
+    /// jump list and the quick slots, but still found by key (restore,
+    /// `default-profile`, `new_window_elevated:<key>`, a split's profile).
+    /// `arrangeProfiles` puts hidden profiles after every shown one.
+    hidden: bool = false,
+
+    /// Deep copy into `alloc`.
+    pub fn clone(self: Profile, alloc: Allocator) Allocator.Error!Profile {
+        const key = try alloc.dupe(u8, self.key);
+        errdefer alloc.free(key);
+        const label = try alloc.dupe(u8, self.label);
+        errdefer alloc.free(label);
+        const palette_title = if (self.palette_title) |value| try alloc.dupe(u8, value) else null;
+        errdefer if (palette_title) |value| alloc.free(value);
+        var command = try self.command.clone(alloc);
+        errdefer command.deinit(alloc);
+        const working_directory: ?WorkingDirectory = if (self.working_directory) |dir| switch (dir) {
+            .path => |path| .{ .path = try alloc.dupeZ(u8, path) },
+            .home, .inherit => dir,
+        } else null;
+        errdefer if (working_directory) |dir| switch (dir) {
+            .path => |path| alloc.free(path),
+            .home, .inherit => {},
+        };
+        return .{
+            .kind = self.kind,
+            .key = key,
+            .label = label,
+            .palette_title = palette_title,
+            .command = command,
+            .working_directory = working_directory,
+            .user = if (self.user) |user| try user.clone(alloc) else null,
+            .hidden = self.hidden,
+        };
+    }
 
     pub fn deinit(self: *Profile, alloc: Allocator) void {
         alloc.free(self.key);
@@ -171,6 +206,11 @@ pub fn layerEnv(alloc: Allocator, env: anytype, entries: []const EnvEntry) Alloc
 pub const UserProfiles = struct {
     arena: std.heap.ArenaAllocator,
     definitions: []const Definition = &.{},
+    /// `profile-order` and `profile-hidden`: references (a user profile id,
+    /// `user:<id>`, a detected key or a `NOCTTY_WIN32_PROFILE_ORDER` alias)
+    /// that `arrangeProfiles` applies to the whole list.
+    order: []const []const u8 = &.{},
+    hidden: []const []const u8 = &.{},
 
     pub const Definition = struct {
         id: []const u8,
@@ -205,7 +245,17 @@ pub const UserProfiles = struct {
                 .global_env = global_env,
             });
         }
-        return .{ .arena = arena, .definitions = definitions.items };
+        // Allocate everything before `arena` is copied into the result: a
+        // node the copy creates after that is known only to this local and
+        // would never be freed.
+        const order = try copyStrings(alloc, config.@"profile-order".list.items);
+        const hidden = try copyStrings(alloc, config.@"profile-hidden".list.items);
+        return .{
+            .arena = arena,
+            .definitions = definitions.items,
+            .order = order,
+            .hidden = hidden,
+        };
     }
 
     /// The entries of an `env`-style map, in order.
@@ -219,6 +269,12 @@ pub const UserProfiles = struct {
                 .value = try alloc.dupeZ(u8, kv.value_ptr.*),
             };
         }
+        return out;
+    }
+
+    fn copyStrings(alloc: Allocator, values: []const [:0]const u8) Allocator.Error![]const []const u8 {
+        const out = try alloc.alloc([]const u8, values.len);
+        for (values, out) |value, *dst| dst.* = try alloc.dupe(u8, value);
         return out;
     }
 
@@ -1004,9 +1060,10 @@ pub fn recoveryCommand(alloc: Allocator) !Command {
 pub fn listProfiles(
     alloc: Allocator,
     include_ssh_hosts: bool,
-    user: []const UserProfiles.Definition,
+    user: *const UserProfiles,
 ) ![]Profile {
-    const order_hint = detectProfileOrderHint(alloc);
+    // `profile-order` replaces the environment's order hint.
+    const order_hint: ?[]u8 = if (user.order.len > 0) null else detectProfileOrderHint(alloc);
     defer if (order_hint) |value| alloc.free(value);
 
     const shell_profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(
@@ -1017,8 +1074,10 @@ pub fn listProfiles(
         order_hint,
         null,
     );
-    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user, ProcessEnvironment{});
-    return try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, null);
+    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user.definitions, ProcessEnvironment{});
+    const profiles = try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, null);
+    arrangeProfiles(profiles, user.order, user.hidden);
+    return profiles;
 }
 
 /// `listProfiles` that also says whether the list is complete (a WSL probe
@@ -1026,9 +1085,9 @@ pub fn listProfiles(
 pub fn discoverProfiles(
     alloc: Allocator,
     include_ssh_hosts: bool,
-    user: []const UserProfiles.Definition,
+    user: *const UserProfiles,
 ) !ProfileDiscovery {
-    const order_hint = detectProfileOrderHint(alloc);
+    const order_hint: ?[]u8 = if (user.order.len > 0) null else detectProfileOrderHint(alloc);
     defer if (order_hint) |value| alloc.free(value);
 
     var complete = true;
@@ -1040,11 +1099,10 @@ pub fn discoverProfiles(
         order_hint,
         &complete,
     );
-    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user, ProcessEnvironment{});
-    return .{
-        .profiles = try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, &complete),
-        .complete = complete,
-    };
+    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user.definitions, ProcessEnvironment{});
+    const profiles = try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, &complete);
+    arrangeProfiles(profiles, user.order, user.hidden);
+    return .{ .profiles = profiles, .complete = complete };
 }
 
 fn appendConfiguredSshProfiles(
@@ -1117,31 +1175,7 @@ pub fn cloneProfiles(alloc: Allocator, profiles: []const Profile) ![]Profile {
         alloc.free(out);
     }
     for (profiles, out) |src, *dst| {
-        const key = try alloc.dupe(u8, src.key);
-        errdefer alloc.free(key);
-        const label = try alloc.dupe(u8, src.label);
-        errdefer alloc.free(label);
-        const palette_title = if (src.palette_title) |value| try alloc.dupe(u8, value) else null;
-        errdefer if (palette_title) |value| alloc.free(value);
-        var command = try src.command.clone(alloc);
-        errdefer command.deinit(alloc);
-        const working_directory: ?WorkingDirectory = if (src.working_directory) |dir| switch (dir) {
-            .path => |path| .{ .path = try alloc.dupeZ(u8, path) },
-            .home, .inherit => dir,
-        } else null;
-        errdefer if (working_directory) |dir| switch (dir) {
-            .path => |path| alloc.free(path),
-            .home, .inherit => {},
-        };
-        dst.* = .{
-            .kind = src.kind,
-            .key = key,
-            .label = label,
-            .palette_title = palette_title,
-            .command = command,
-            .working_directory = working_directory,
-            .user = if (src.user) |user| try user.clone(alloc) else null,
-        };
+        dst.* = try src.clone(alloc);
         copied += 1;
     }
     return out;
@@ -2170,12 +2204,28 @@ fn appendProfile(
     label: []const u8,
     argv: []const []const u8,
 ) !void {
-    try profiles.append(alloc, .{
+    var profile = try makeProfile(alloc, kind, key, label, argv);
+    errdefer profile.deinit(alloc);
+    try profiles.append(alloc, profile);
+}
+
+fn makeProfile(
+    alloc: Allocator,
+    kind: ProfileKind,
+    key: []const u8,
+    label: []const u8,
+    argv: []const []const u8,
+) !Profile {
+    const owned_key = try alloc.dupe(u8, key);
+    errdefer alloc.free(owned_key);
+    const owned_label = try alloc.dupe(u8, label);
+    errdefer alloc.free(owned_label);
+    return .{
         .kind = kind,
-        .key = try alloc.dupe(u8, key),
-        .label = try alloc.dupe(u8, label),
+        .key = owned_key,
+        .label = owned_label,
         .command = try directCommand(alloc, argv),
-    });
+    };
 }
 
 fn appendSshProfiles(
@@ -2303,14 +2353,19 @@ fn profileOrderRank(order_hint: []const u8, profile: Profile) usize {
 fn profileOrderTokenMatches(token: []const u8, profile: Profile) bool {
     if (std.ascii.eqlIgnoreCase(token, profile.key)) return true;
     if (std.ascii.eqlIgnoreCase(token, profile.label)) return true;
-    if (profile.kind == .wsl_distro) {
-        if (profile.key.len > 4 and std.ascii.eqlIgnoreCase(profile.key[0..4], "wsl:")) {
-            if (std.ascii.eqlIgnoreCase(token, profile.key[4..])) return true;
-        }
-        if (profile.label.len > 5 and std.ascii.eqlIgnoreCase(profile.label[0..5], "WSL: ")) {
-            if (std.ascii.eqlIgnoreCase(token, profile.label[5..])) return true;
-        }
-    }
+    if (profile.kind == .wsl_distro and profile.label.len > 5 and
+        std.ascii.eqlIgnoreCase(profile.label[0..5], "WSL: ") and
+        std.ascii.eqlIgnoreCase(token, profile.label[5..])) return true;
+    return profileAliasMatches(token, profile);
+}
+
+/// The `NOCTTY_WIN32_PROFILE_ORDER` names of a detected profile besides its
+/// key and label: a distribution's own name (`Ubuntu` for `wsl:Ubuntu`) and
+/// the aliases of its kind (`pwsh`, `git`, `cmd`, `wsl`, ...).
+fn profileAliasMatches(token: []const u8, profile: Profile) bool {
+    if (profile.kind == .wsl_distro and profile.key.len > 4 and
+        std.ascii.eqlIgnoreCase(profile.key[0..4], "wsl:") and
+        std.ascii.eqlIgnoreCase(token, profile.key[4..])) return true;
 
     for (profile_alias_words) |alias| {
         if (alias.kind == profile.kind and std.ascii.eqlIgnoreCase(token, alias.word)) return true;
@@ -2351,6 +2406,499 @@ test "every profile alias word is reserved as an id" {
             return err;
         };
     }
+}
+
+/// Whether `reference` (a `default-profile`, `profile-order` or
+/// `profile-hidden` value) names `profile`, one of `profiles`. A bare word
+/// names the user profile with that id when `profiles` has one; otherwise
+/// it is a key (`pwsh.exe`, `wsl:Ubuntu`, `user:<id>`; an `ssh:` key is
+/// matched exactly, as OpenSSH aliases are case-sensitive) or one of the
+/// `NOCTTY_WIN32_PROFILE_ORDER` aliases (`pwsh`, `git`, `wsl`, `Ubuntu`, ...),
+/// which can name several profiles. Labels are not references: they change.
+pub fn referenceNames(profiles: []const Profile, reference: []const u8, profile: Profile) bool {
+    const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    if (ref.len == 0) return false;
+    if (userProfileWithId(profiles, ref)) |named| return named == profile.key.ptr;
+    if (profile.kind == .ssh) return std.mem.eql(u8, ref, profile.key);
+    if (std.ascii.eqlIgnoreCase(ref, profile.key)) return true;
+    return profileAliasMatches(ref, profile);
+}
+
+/// The key of the user profile in `profiles` whose id is `id`, as a pointer
+/// that identifies it.
+fn userProfileWithId(profiles: []const Profile, id: []const u8) ?[*]const u8 {
+    for (profiles) |profile| {
+        if (profile.kind != .user or profile.key.len != "user:".len + id.len) continue;
+        if (std.ascii.eqlIgnoreCase(profile.key["user:".len..], id)) return profile.key.ptr;
+    }
+    return null;
+}
+
+/// Apply `profile-order` and `profile-hidden` to a finished list, in place.
+/// The profiles `order` names come first, in the order of the first
+/// reference that names each, the rest keep their order. Then every profile
+/// `hidden` names is marked hidden and moved after all the shown ones, so the
+/// shown profiles are always `profiles[0..visibleProfileCount(profiles)]`.
+pub fn arrangeProfiles(
+    profiles: []Profile,
+    order: []const []const u8,
+    hidden: []const []const u8,
+) void {
+    if (order.len > 0 and profiles.len > 1) {
+        // A stable insertion sort by rank: lists are short.
+        var i: usize = 1;
+        while (i < profiles.len) : (i += 1) {
+            var j = i;
+            while (j > 0 and referenceRank(profiles, order, profiles[j]) <
+                referenceRank(profiles, order, profiles[j - 1])) : (j -= 1)
+            {
+                std.mem.swap(Profile, &profiles[j], &profiles[j - 1]);
+            }
+        }
+    }
+    if (hidden.len == 0) return;
+    for (profiles) |*profile| {
+        for (hidden) |reference| {
+            if (referenceNames(profiles, reference, profile.*)) {
+                profile.hidden = true;
+                break;
+            }
+        }
+    }
+    // Stable partition: shown first.
+    var shown: usize = 0;
+    for (0..profiles.len) |index| {
+        if (profiles[index].hidden) continue;
+        const moved = profiles[index];
+        var k = index;
+        while (k > shown) : (k -= 1) profiles[k] = profiles[k - 1];
+        profiles[shown] = moved;
+        shown += 1;
+    }
+}
+
+fn referenceRank(profiles: []const Profile, order: []const []const u8, profile: Profile) usize {
+    for (order, 0..) |reference, index| {
+        if (referenceNames(profiles, reference, profile)) return index;
+    }
+    return std.math.maxInt(usize);
+}
+
+/// How many profiles at the start of an arranged list are shown.
+pub fn visibleProfileCount(profiles: []const Profile) usize {
+    for (profiles, 0..) |profile, index| {
+        if (profile.hidden) return index;
+    }
+    return profiles.len;
+}
+
+/// The profiles an arranged list shows (the picker, the palette, the jump
+/// list, the quick slots); the hidden ones follow them in the same slice.
+pub fn visibleProfiles(profiles: []Profile) []Profile {
+    return profiles[0..visibleProfileCount(profiles)];
+}
+
+/// What `resolveProfileReference` needs from the system: the lookups
+/// discovery uses, and `%NAME%` expansion for a user profile.
+pub const ReferenceHost = struct {
+    pub fn lookup(_: ReferenceHost, alloc: Allocator, exe: []const u8) !?[]u8 {
+        return try lookupExecutable(alloc, exe);
+    }
+
+    pub fn gitBash(_: ReferenceHost, alloc: Allocator) !?[]u8 {
+        return try lookupGitBash(alloc, lookupExecutable);
+    }
+
+    pub fn sshExecutable(_: ReferenceHost, alloc: Allocator) !?[]u8 {
+        return try resolveSshExecutable(alloc, lookupExecutable, accessAbsolute);
+    }
+
+    pub fn expand(_: ReferenceHost, alloc: Allocator, text: []const u8) ![]u8 {
+        return try ProcessEnvironment.expand(.{}, alloc, text);
+    }
+};
+
+/// The profile `reference` (`default-profile`) names, built without listing
+/// the profiles: a user profile from `user`, a fixed detected key or alias
+/// through the lookups discovery uses, `wsl:<distro>` as `wsl.exe -d
+/// <distro>` and `ssh:<alias>` as `ssh.exe <alias>`. WSL is never probed and
+/// its distributions are never listed, so a stopped or hung WSL costs
+/// nothing here. Null when nothing by that name can start: an unknown
+/// reference, a program that is not installed, an alias that names no single
+/// profile (`distro`).
+pub fn resolveProfileReference(
+    alloc: Allocator,
+    reference: []const u8,
+    user: []const UserProfiles.Definition,
+    host: anytype,
+) !?Profile {
+    const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    if (ref.len == 0) return null;
+
+    const user_id = if (std.ascii.startsWithIgnoreCase(ref, "user:")) ref["user:".len..] else ref;
+    for (user) |definition| {
+        if (!std.ascii.eqlIgnoreCase(definition.id, user_id)) continue;
+        return userProfile(alloc, definition, host) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        };
+    }
+    if (user_id.len != ref.len) return null;
+
+    if (std.ascii.startsWithIgnoreCase(ref, "wsl:")) {
+        const distro = ref["wsl:".len..];
+        if (!isPlainReferenceArgument(distro)) return null;
+        const wsl = (try host.lookup(alloc, "wsl.exe")) orelse return null;
+        defer alloc.free(wsl);
+        const key = try std.fmt.allocPrint(alloc, "wsl:{s}", .{distro});
+        defer alloc.free(key);
+        const label = try std.fmt.allocPrint(alloc, "WSL: {s}", .{distro});
+        defer alloc.free(label);
+        return try makeProfile(alloc, .wsl_distro, key, label, &.{ wsl, "-d", distro });
+    }
+    if (std.ascii.startsWithIgnoreCase(ref, "ssh:")) {
+        const alias = ref["ssh:".len..];
+        if (!isPlainReferenceArgument(alias)) return null;
+        const ssh = (try host.sshExecutable(alloc)) orelse return null;
+        defer alloc.free(ssh);
+        const key = try std.fmt.allocPrint(alloc, "ssh:{s}", .{alias});
+        defer alloc.free(key);
+        const label = try std.fmt.allocPrint(alloc, "SSH: {s}", .{alias});
+        defer alloc.free(label);
+        var profile = try makeProfile(alloc, .ssh, key, label, &.{ ssh, alias });
+        errdefer profile.deinit(alloc);
+        profile.palette_title = try std.fmt.allocPrint(alloc, "Connect to {s}", .{alias});
+        return profile;
+    }
+
+    // The fixed detected profiles, by key or alias. `wsl` names the default
+    // distribution here; the aliases of every distribution (`distro`) name
+    // no single profile.
+    const Fixed = struct { kind: ProfileKind, key: []const u8, label: []const u8 };
+    for ([_]Fixed{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .kind = .powershell, .key = "powershell.exe", .label = "Windows PowerShell" },
+        .{ .kind = .git_bash, .key = "git-bash", .label = "Git Bash" },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt" },
+        .{ .kind = .wsl_default, .key = "wsl-default", .label = "WSL (Default)" },
+    }) |fixed| {
+        const probe: Profile = .{ .kind = fixed.kind, .key = fixed.key, .label = fixed.label, .command = .{ .direct = &.{} } };
+        if (!std.ascii.eqlIgnoreCase(ref, fixed.key) and !profileAliasMatches(ref, probe)) continue;
+        const path = (try switch (fixed.kind) {
+            .git_bash => host.gitBash(alloc),
+            .wsl_default => host.lookup(alloc, "wsl.exe"),
+            else => host.lookup(alloc, fixed.key),
+        }) orelse return null;
+        defer alloc.free(path);
+        const argv: []const []const u8 = if (fixed.kind == .git_bash) &.{ path, "--login", "-i" } else &.{path};
+        return try makeProfile(alloc, fixed.kind, fixed.key, fixed.label, argv);
+    }
+    return null;
+}
+
+/// A distribution or SSH alias a reference may pass as one argument: not
+/// empty, not an option, no whitespace or control character.
+fn isPlainReferenceArgument(value: []const u8) bool {
+    if (value.len == 0 or value[0] == '-') return false;
+    for (value) |ch| {
+        if (ch <= ' ' or ch == 0x7f) return false;
+    }
+    return true;
+}
+
+/// The `resolveProfileReference` host for tests: fixed install paths, no
+/// `%NAME%` expansion, and counters for every lookup and for the WSL calls
+/// discovery makes (`probe`, `listWsl`), which resolution must never make.
+const TestReferenceHost = struct {
+    pwsh: bool = true,
+    lookups: *usize,
+    wsl_probes: *usize,
+    wsl_lists: *usize,
+
+    pub fn lookup(self: TestReferenceHost, alloc: Allocator, exe: []const u8) !?[]u8 {
+        self.lookups.* += 1;
+        if (std.mem.eql(u8, exe, "pwsh.exe") and !self.pwsh) return null;
+        for ([_][2][]const u8{
+            .{ "pwsh.exe", "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
+            .{ "powershell.exe", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" },
+            .{ "cmd.exe", "C:\\Windows\\System32\\cmd.exe" },
+            .{ "wsl.exe", "C:\\Windows\\System32\\wsl.exe" },
+        }) |entry| {
+            if (std.mem.eql(u8, exe, entry[0])) return try alloc.dupe(u8, entry[1]);
+        }
+        return null;
+    }
+
+    pub fn gitBash(self: TestReferenceHost, alloc: Allocator) !?[]u8 {
+        self.lookups.* += 1;
+        return try alloc.dupe(u8, "C:\\Program Files\\Git\\bin\\bash.exe");
+    }
+
+    pub fn sshExecutable(self: TestReferenceHost, alloc: Allocator) !?[]u8 {
+        self.lookups.* += 1;
+        return try alloc.dupe(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    }
+
+    pub fn expand(_: TestReferenceHost, alloc: Allocator, text: []const u8) ![]u8 {
+        return try alloc.dupe(u8, text);
+    }
+
+    // What discovery would call; resolution has no business with them.
+    pub fn probe(self: TestReferenceHost, _: Allocator, _: []const u8) !bool {
+        self.wsl_probes.* += 1;
+        return true;
+    }
+
+    pub fn listWsl(self: TestReferenceHost, alloc: Allocator, _: []const u8) ![][]u8 {
+        self.wsl_lists.* += 1;
+        return try alloc.alloc([]u8, 0);
+    }
+};
+
+test "default-profile references resolve without listing profiles or asking WSL" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var lookups: usize = 0;
+    var wsl_probes: usize = 0;
+    var wsl_lists: usize = 0;
+    const host: TestReferenceHost = .{ .lookups = &lookups, .wsl_probes = &wsl_probes, .wsl_lists = &wsl_lists };
+    const definitions = [_]UserProfiles.Definition{
+        .{ .id = "VS18-cmd", .name = "Developer Command Prompt for VS 18", .command = test_vs18_cmd_line, .env = &.{.{ .key = "VSCMD_SKIP_SENDTELEMETRY", .value = "1" }} },
+        .{ .id = "py", .command = "cmd.exe", .working_directory = "D:\\src" },
+    };
+
+    const Want = struct { ref: []const u8, kind: ProfileKind, key: []const u8, argv: []const []const u8 };
+    for ([_]Want{
+        // A user profile, by its id in any case or by its key.
+        .{ .ref = "vs18-CMD", .kind = .user, .key = "user:vs18-cmd", .argv = &.{ "cmd.exe", "/k" } },
+        .{ .ref = " user:VS18-cmd ", .kind = .user, .key = "user:vs18-cmd", .argv = &.{ "cmd.exe", "/k" } },
+        .{ .ref = "py", .kind = .user, .key = "user:py", .argv = &.{"cmd.exe"} },
+        // The fixed detected profiles, by key and by alias.
+        .{ .ref = "pwsh.exe", .kind = .pwsh, .key = "pwsh.exe", .argv = &.{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"} },
+        .{ .ref = "PWSH", .kind = .pwsh, .key = "pwsh.exe", .argv = &.{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"} },
+        .{ .ref = "powershell", .kind = .powershell, .key = "powershell.exe", .argv = &.{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"} },
+        .{ .ref = "cmd", .kind = .cmd, .key = "cmd.exe", .argv = &.{"C:\\Windows\\System32\\cmd.exe"} },
+        .{ .ref = "command-prompt", .kind = .cmd, .key = "cmd.exe", .argv = &.{"C:\\Windows\\System32\\cmd.exe"} },
+        .{ .ref = "git", .kind = .git_bash, .key = "git-bash", .argv = &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" } },
+        .{ .ref = "wsl", .kind = .wsl_default, .key = "wsl-default", .argv = &.{"C:\\Windows\\System32\\wsl.exe"} },
+        // A distribution and an SSH alias, without asking WSL or the SSH config.
+        .{ .ref = "wsl:Ubuntu", .kind = .wsl_distro, .key = "wsl:Ubuntu", .argv = &.{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu" } },
+        .{ .ref = "ssh:prod", .kind = .ssh, .key = "ssh:prod", .argv = &.{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" } },
+    }) |want| {
+        var profile = (try resolveProfileReference(alloc, want.ref, &definitions, host)) orelse {
+            std.debug.print("unresolved: {s}\n", .{want.ref});
+            return error.TestUnexpectedResult;
+        };
+        defer profile.deinit(alloc);
+        try testing.expectEqual(want.kind, profile.kind);
+        try testing.expectEqualStrings(want.key, profile.key);
+        for (want.argv, 0..) |arg, i| try testing.expectEqualStrings(arg, profile.command.direct[i]);
+        if (want.kind != .user) try testing.expectEqual(want.argv.len, profile.command.direct.len);
+    }
+
+    // A user profile comes with what discovery would give it.
+    {
+        var profile = (try resolveProfileReference(alloc, "vs18-cmd", &definitions, host)).?;
+        defer profile.deinit(alloc);
+        try testing.expectEqualStrings("Developer Command Prompt for VS 18", profile.label);
+        try testing.expectEqualStrings(test_vs18_cmd_line, profile.user.?.command_line);
+        try testing.expectEqualStrings("1", profile.user.?.env[0].value);
+        try testing.expectEqual(@as(usize, 6), profile.command.direct.len);
+        var py = (try resolveProfileReference(alloc, "py", &definitions, host)).?;
+        defer py.deinit(alloc);
+        try testing.expectEqualStrings("D:\\src", py.working_directory.?.path);
+        var ssh = (try resolveProfileReference(alloc, "ssh:prod", &definitions, host)).?;
+        defer ssh.deinit(alloc);
+        try testing.expectEqualStrings("Connect to prod", ssh.palette_title.?);
+    }
+
+    // Nothing that can start: an unknown name, `user:` of no profile, an
+    // alias of every distribution, an empty or option-shaped distribution
+    // or alias, a program that is not installed.
+    for ([_][]const u8{ "", "  ", "nosuch", "user:nosuch", "user:pwsh.exe", "distro", "wsl-distro", "wsl:", "wsl:-x", "wsl:a b", "ssh:", "ssh:-oProxyCommand=calc" }) |ref| {
+        try testing.expect((try resolveProfileReference(alloc, ref, &definitions, host)) == null);
+    }
+    const no_pwsh: TestReferenceHost = .{ .pwsh = false, .lookups = &lookups, .wsl_probes = &wsl_probes, .wsl_lists = &wsl_lists };
+    try testing.expect((try resolveProfileReference(alloc, "pwsh", &definitions, no_pwsh)) == null);
+
+    // A user id shadows the alias it spells.
+    const shadow = [_]UserProfiles.Definition{.{ .id = "pwsh", .command = "C:\\tools\\my-pwsh.exe -NoLogo" }};
+    {
+        var profile = (try resolveProfileReference(alloc, "pwsh", &shadow, host)).?;
+        defer profile.deinit(alloc);
+        try testing.expectEqualStrings("user:pwsh", profile.key);
+        var detected = (try resolveProfileReference(alloc, "pwsh.exe", &shadow, host)).?;
+        defer detected.deinit(alloc);
+        try testing.expectEqual(ProfileKind.pwsh, detected.kind);
+    }
+
+    try testing.expect(lookups > 0);
+    try testing.expectEqual(@as(usize, 0), wsl_probes);
+    try testing.expectEqual(@as(usize, 0), wsl_lists);
+}
+
+test "resolveProfileReference frees what it built when an allocation fails" {
+    var lookups: usize = 0;
+    var wsl_probes: usize = 0;
+    var wsl_lists: usize = 0;
+    const host: TestReferenceHost = .{ .lookups = &lookups, .wsl_probes = &wsl_probes, .wsl_lists = &wsl_lists };
+    const definitions = [_]UserProfiles.Definition{.{ .id = "py", .command = "cmd.exe /k py", .working_directory = "D:\\src", .env = &.{.{ .key = "A", .value = "1" }} }};
+    for ([_][]const u8{ "py", "wsl:Ubuntu", "ssh:prod", "git" }) |ref| {
+        var fail_index: usize = 0;
+        while (true) : (fail_index += 1) {
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+            var profile = (resolveProfileReference(failing.allocator(), ref, &definitions, host) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                continue;
+            }).?;
+            profile.deinit(failing.allocator());
+            break;
+        }
+    }
+}
+
+/// A profile for the arrangement tests; nothing to free.
+fn testArrangeProfile(kind: ProfileKind, key: []const u8, label: []const u8) Profile {
+    return .{ .kind = kind, .key = key, .label = label, .command = .{ .direct = &.{} } };
+}
+
+fn expectProfileKeys(profiles: []const Profile, keys: []const []const u8) !void {
+    try std.testing.expectEqual(keys.len, profiles.len);
+    for (keys, profiles) |key, profile| try std.testing.expectEqualStrings(key, profile.key);
+}
+
+test "profile-order puts the profiles it names first and profile-hidden moves the hidden ones last" {
+    const testing = std.testing;
+    const all = [_]Profile{
+        testArrangeProfile(.wsl_default, "wsl-default", "WSL (Default)"),
+        testArrangeProfile(.wsl_distro, "wsl:Ubuntu", "WSL: Ubuntu"),
+        testArrangeProfile(.wsl_distro, "wsl:docker-desktop", "WSL: docker-desktop"),
+        testArrangeProfile(.pwsh, "pwsh.exe", "PowerShell"),
+        testArrangeProfile(.git_bash, "git-bash", "Git Bash"),
+        testArrangeProfile(.cmd, "cmd.exe", "Command Prompt"),
+        testArrangeProfile(.user, "user:vs18-cmd", "Developer Command Prompt for VS 18"),
+        testArrangeProfile(.user, "user:py", "Python"),
+        testArrangeProfile(.ssh, "ssh:Prod", "SSH: Prod"),
+    };
+
+    // Nothing set: the list as discovery made it, nothing hidden.
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{}, &.{});
+        try expectProfileKeys(&profiles, &.{ "wsl-default", "wsl:Ubuntu", "wsl:docker-desktop", "pwsh.exe", "git-bash", "cmd.exe", "user:vs18-cmd", "user:py", "ssh:Prod" });
+        try testing.expectEqual(profiles.len, visibleProfileCount(&profiles));
+    }
+
+    // Order by a bare id, a key in another case and an alias; the rest keep
+    // their order after them.
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{ "VS18-CMD", "CMD.EXE", "pwsh" }, &.{});
+        try expectProfileKeys(&profiles, &.{ "user:vs18-cmd", "cmd.exe", "pwsh.exe", "wsl-default", "wsl:Ubuntu", "wsl:docker-desktop", "git-bash", "user:py", "ssh:Prod" });
+    }
+
+    // An alias can name several profiles: they keep their order among
+    // themselves. An SSH key is exact; a label is no reference.
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{ "ssh:prod", "Python", "ssh:Prod", "wsl" }, &.{});
+        try expectProfileKeys(&profiles, &.{ "ssh:Prod", "wsl-default", "wsl:Ubuntu", "wsl:docker-desktop", "pwsh.exe", "git-bash", "cmd.exe", "user:vs18-cmd", "user:py" });
+    }
+
+    // Hidden by key, by a distribution's own name and by alias: marked, and
+    // after every shown one, each side in its order.
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{"py"}, &.{ "wsl:docker-desktop", "ubuntu", "git", "nosuch" });
+        try expectProfileKeys(&profiles, &.{ "user:py", "wsl-default", "pwsh.exe", "cmd.exe", "user:vs18-cmd", "ssh:Prod", "wsl:Ubuntu", "wsl:docker-desktop", "git-bash" });
+        try testing.expectEqual(@as(usize, 6), visibleProfileCount(&profiles));
+        try testing.expectEqual(@as(usize, 6), visibleProfiles(&profiles).len);
+        for (profiles, 0..) |profile, index| try testing.expectEqual(index >= 6, profile.hidden);
+    }
+
+    // A user profile whose id spells an alias takes the bare word.
+    {
+        var profiles = all;
+        profiles[7] = testArrangeProfile(.user, "user:git", "My Git");
+        arrangeProfiles(&profiles, &.{}, &.{"git"});
+        try testing.expectEqualStrings("user:git", profiles[profiles.len - 1].key);
+        try testing.expect(profiles[profiles.len - 1].hidden);
+        try testing.expectEqual(profiles.len - 1, visibleProfileCount(&profiles));
+        arrangeProfiles(&profiles, &.{}, &.{"git-bash"});
+        try testing.expectEqual(profiles.len - 2, visibleProfileCount(&profiles));
+    }
+
+    // Hiding everything leaves nothing shown, and every profile in the list.
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{}, &.{ "wsl", "pwsh", "git", "cmd", "vs18-cmd", "py", "ssh:Prod" });
+        try testing.expectEqual(@as(usize, 0), visibleProfileCount(&profiles));
+        try testing.expectEqual(all.len, profiles.len);
+    }
+}
+
+test "listing applies profile-order and profile-hidden after SSH and the user profiles" {
+    // The stages `listProfiles` runs, with the definitions a config makes.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Config = @import("Config.zig");
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    try cfg.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
+    try cfg.@"profile-order".parseCLI(arena, "ssh:prod");
+    try cfg.@"profile-order".parseCLI(arena, "py");
+    try cfg.@"profile-hidden".parseCLI(arena, "pwsh.exe");
+    try cfg.finalize();
+    try testing.expect(cfg._diagnostics.empty());
+    var user = try UserProfiles.init(alloc, &cfg);
+    defer user.deinit();
+    try testing.expectEqual(@as(usize, 2), user.order.len);
+    try testing.expectEqualStrings("pwsh.exe", user.hidden[0]);
+
+    const shell = try listProfilesWithLookupAndProbeAndWslListAndOrder(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "pwsh.exe")) return try a.dupe(u8, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+    }.lookup, struct {
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+    }.probe, struct {
+        fn list(a: Allocator, _: []const u8) ![][]u8 {
+            return try a.alloc([]u8, 0);
+        }
+    }.list, null, null);
+    const local = try appendUserProfiles(alloc, shell, user.definitions, TestEnvironment{});
+    const hosts = [_]windows_ssh_hosts.Host{.{ .alias = "prod" }};
+    const profiles = try appendSshProfiles(alloc, local, &hosts, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    defer deinitProfiles(alloc, profiles);
+    arrangeProfiles(profiles, user.order, user.hidden);
+    try expectProfileKeys(profiles, &.{ "ssh:prod", "user:py", "cmd.exe", "pwsh.exe" });
+    try testing.expectEqual(@as(usize, 3), visibleProfileCount(profiles));
+    // Copies keep the mark (a worker's list is cloned onto each host).
+    const copy = try cloneProfiles(alloc, profiles);
+    defer deinitProfiles(alloc, copy);
+    try testing.expect(copy[3].hidden and !copy[2].hidden);
+}
+
+test "UserProfiles frees profile-order and profile-hidden when no profile is defined" {
+    // With no `profile-command` the definitions take no arena memory, so
+    // the first copy below creates the arena's first node.
+    const testing = std.testing;
+    const Config = @import("Config.zig");
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    try cfg.@"profile-hidden".parseCLI(arena, "wsl:docker-desktop");
+    try cfg.@"profile-order".parseCLI(arena, "cmd");
+    var user = try UserProfiles.init(testing.allocator, &cfg);
+    defer user.deinit();
+    try testing.expectEqual(@as(usize, 0), user.definitions.len);
+    try testing.expectEqualStrings("cmd", user.order[0]);
+    try testing.expectEqualStrings("wsl:docker-desktop", user.hidden[0]);
 }
 
 fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {
@@ -2505,7 +3053,15 @@ fn resolveExecutableForArgv0(
 
 fn directCommand(alloc: Allocator, argv: []const []const u8) !Command {
     const args = try alloc.alloc([:0]const u8, argv.len);
-    for (argv, 0..) |arg, i| args[i] = try alloc.dupeZ(u8, arg);
+    var filled: usize = 0;
+    errdefer {
+        for (args[0..filled]) |arg| alloc.free(arg);
+        alloc.free(args);
+    }
+    for (argv, args) |arg, *dst| {
+        dst.* = try alloc.dupeZ(u8, arg);
+        filled += 1;
+    }
     return .{ .direct = args };
 }
 

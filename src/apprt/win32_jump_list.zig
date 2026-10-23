@@ -906,16 +906,30 @@ fn buildProfileArgumentsForProfileAlloc(
     alloc: Allocator,
     profile: *const windows_shell.Profile,
 ) ![]u8 {
-    // A user profile's link would have to carry its environment, and a
-    // jump-list link is stored on disk and can roam with the profile. Part 2
-    // of the user profiles adds them through a `--default-profile` selector,
-    // which names the profile and lets the new process read its definition.
-    if (profile.kind == .user) return error.UnsupportedProfileCommand;
+    if (profile.kind == .user) return buildUserProfileArgumentsAlloc(alloc, profile);
     if (profile.kind != .ssh) return buildProfileArgumentsAlloc(alloc, profile.command);
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse
         return error.UnsupportedProfileCommand;
     return buildProfileArgumentsWithLaunchConfigAlloc(alloc, profile.command, home, true);
+}
+
+/// A user profile's link names the profile instead of carrying its launch:
+/// a jump-list link is stored on disk and can roam with the Windows profile,
+/// so it must not hold the profile's environment. The new process reads the
+/// same config files and runs the profile as its `default-profile`; the
+/// empty `command` and `initial-command` undo any the files set, which would
+/// win over it. A profile with no directory of its own starts at home, as
+/// it does from the picker.
+fn buildUserProfileArgumentsAlloc(alloc: Allocator, profile: *const windows_shell.Profile) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeAll("--single-instance=false --command= --initial-command= ");
+    const selector = try std.fmt.allocPrint(alloc, "--default-profile={s}", .{profile.key});
+    defer alloc.free(selector);
+    try Command.writeDirectArg(&out.writer, selector);
+    if (profile.working_directory == null) try out.writer.writeAll(" --working-directory=home");
+    return try out.toOwnedSlice();
 }
 
 fn buildProfileArgumentsWithLaunchConfigAlloc(
@@ -1165,6 +1179,9 @@ pub const JumpList = struct {
         }
 
         for (profiles) |profile| {
+            // `profile-hidden`: the caller passes the shown profiles, and a
+            // hidden one never gets a link either way.
+            if (profile.hidden) continue;
             const title = try buildTitleAlloc(self.alloc, profile.label);
             const key = self.alloc.dupe(u8, profile.key) catch |err| {
                 self.alloc.free(title);
@@ -3042,7 +3059,7 @@ test "jump_list rebuild retry budget is bounded" {
     try std.testing.expect(nextRebuildRetryCount(retry_count) == null);
 }
 
-test "jump_list leaves user profiles out of the profile tasks" {
+test "jump_list links a user profile by name, never by its environment" {
     const alloc = std.testing.allocator;
     var jump: JumpList = .{
         .alloc = alloc,
@@ -3067,10 +3084,69 @@ test "jump_list leaves user profiles out of the profile tasks" {
         },
     };
     try jump.updateProfilesAlloc(&profiles);
+    try std.testing.expectEqual(@as(usize, 2), jump.profiles.items.len);
+    try std.testing.expectEqualStrings("cmd.exe", jump.profiles.items[0].key);
+    try std.testing.expectEqualStrings("user:py", jump.profiles.items[1].key);
+    try std.testing.expectEqualStrings("Python", jump.profiles.items[1].title);
+    // Exactly the selector, and no directory of its own: home, as from the picker.
+    try std.testing.expectEqualStrings(
+        "--single-instance=false --command= --initial-command= --default-profile=user:py --working-directory=home",
+        jump.profiles.items[1].arguments,
+    );
+    for (jump.profiles.items) |item| {
+        try std.testing.expect(std.mem.indexOf(u8, item.arguments, "do-not-persist") == null);
+        try std.testing.expect(std.mem.indexOf(u8, item.arguments, "SECRET_TOKEN") == null);
+    }
+
+    // A pinned directory is the profile's to apply, so the link names none.
+    var pinned = profiles[1];
+    pinned.working_directory = .{ .path = "D:\\work dir" };
+    const pinned_args = try buildProfileArgumentsForProfileAlloc(alloc, &pinned);
+    defer alloc.free(pinned_args);
+    try std.testing.expectEqualStrings(
+        "--single-instance=false --command= --initial-command= --default-profile=user:py",
+        pinned_args,
+    );
+    pinned.working_directory = .inherit;
+    const inherit_args = try buildProfileArgumentsForProfileAlloc(alloc, &pinned);
+    defer alloc.free(inherit_args);
+    try std.testing.expectEqualStrings(pinned_args, inherit_args);
+
+    // The new process reads those arguments back as the selector they are.
+    var argv = try std.process.ArgIteratorGeneral(.{}).init(alloc, jump.profiles.items[1].arguments);
+    defer argv.deinit();
+    for ([_][]const u8{
+        "--single-instance=false",
+        "--command=",
+        "--initial-command=",
+        "--default-profile=user:py",
+        "--working-directory=home",
+    }) |want| try std.testing.expectEqualStrings(want, argv.next().?);
+    try std.testing.expect(argv.next() == null);
+}
+
+test "jump_list gives a hidden profile no link" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} } },
+        .{ .kind = .wsl_distro, .key = "wsl:docker-desktop", .label = "WSL: docker-desktop", .command = .{ .direct = &.{ "wsl.exe", "-d", "docker-desktop" } }, .hidden = true },
+        .{ .kind = .user, .key = "user:gone", .label = "Gone", .command = .{ .direct = &.{"cmd.exe"} }, .user = .{ .command_line = "cmd.exe" }, .hidden = true },
+    };
+    try jump.updateProfilesAlloc(&profiles);
     try std.testing.expectEqual(@as(usize, 1), jump.profiles.items.len);
     try std.testing.expectEqualStrings("cmd.exe", jump.profiles.items[0].key);
-    try std.testing.expect(std.mem.indexOf(u8, jump.profiles.items[0].arguments, "do-not-persist") == null);
-    try std.testing.expectError(error.UnsupportedProfileCommand, buildProfileArgumentsForProfileAlloc(alloc, &profiles[1]));
 }
 
 test "jump_list startup profile discovery stays pending until completion" {

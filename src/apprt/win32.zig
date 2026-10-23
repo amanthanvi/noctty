@@ -1103,6 +1103,68 @@ fn applyProfileCommandConfig(
     // command remain owned by the source config arena. Replacing command on
     // the clone must not deinit the inherited value.
     config.command = try profile.command.clone(alloc);
+    // A chosen profile: `default-profile` no longer applies to this launch.
+    config._command_defaulted = false;
+}
+
+/// `default-profile`'s launch, for a launch nothing else chose: the first
+/// window, a plain new tab or window, the quick terminal, a split of a pane
+/// that runs no profile, a restored pane whose profile is gone. `Config`
+/// has already made the profile's command the default `command`; this adds
+/// the rest of the profile, as a launch from the picker gets it, except that
+/// with no `profile-working-directory` the directory the ordinary rules gave
+/// stays, as for `command`. Nothing when `default-profile` is unset or a
+/// command was chosen already (`command`, a profile, an inherited launch).
+/// The profile is the config's own; the caller records its key on the
+/// surface (`App.noteProfileLaunch`).
+fn applyDefaultProfileConfig(config: *configpkg.Config) !?*const windows_shell.Profile {
+    if (!config._command_defaulted) return null;
+    if (config._default_profile == null) return null;
+    const profile = &config._default_profile.?;
+    try applyProfileLaunchConfig(config, profile);
+    return profile;
+}
+
+/// Put back `directory`, which the launch asked for explicitly (on the
+/// command line, or in a forwarded new window's arguments), over the
+/// directory `default-profile`'s profile pinned: the default replaces what
+/// runs, not where such a launch starts. An SSH profile keeps its hardening
+/// (`applySshLaunchHardening`), as a new tab from an SSH pane does: a local
+/// directory means nothing to the remote shell.
+fn keepExplicitWorkingDirectory(
+    config: *configpkg.Config,
+    profile: ?*const windows_shell.Profile,
+    directory: ?configpkg.Config.WorkingDirectory,
+) void {
+    const applied = profile orelse return;
+    if (applied.kind == .ssh) return;
+    config.@"working-directory" = directory;
+}
+
+/// `default-profile`'s profile when `key` names it. A pane it started
+/// carries its key, and the config holds the profile resolved, so a split,
+/// an elevated window or a restore of that pane needs no list (no WSL probe
+/// on the UI thread) and finds the profile though discovery may list none
+/// such: an alias outside the SSH config, a distribution WSL did not list.
+fn defaultProfileForKey(config: *const configpkg.Config, key: []const u8) ?*const windows_shell.Profile {
+    if (config._default_profile) |*profile| {
+        if (profileKeyEquals(profile.*, key)) return profile;
+    }
+    return null;
+}
+
+/// The profile `new_window_elevated` hands the elevated process: the
+/// action's own, else the pane's. None for a `default-profile` the config
+/// files alone give: the elevated process reads the same files and starts
+/// that profile itself, so its variables stay off the elevated command line
+/// (`buildRelaunchParameters`). It is given no command-line launch settings,
+/// so a profile that depends on one (a `--default-profile=`, a jump-list
+/// link's; a `--command=` reset of a file's `command`) is still passed.
+fn elevatedProfileKey(config: *const configpkg.Config, action_key: []const u8, pane_key: ?[]const u8) ?[]const u8 {
+    const key = if (action_key.len > 0) action_key else pane_key orelse return null;
+    const files_alone = config._default_profile_cli == null and config._command_cli == null;
+    if (files_alone and defaultProfileForKey(config, key) != null) return null;
+    return key;
 }
 
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
@@ -2688,13 +2750,24 @@ fn sessionRestorePolicyAllows(
     initial_window: bool,
     has_initial_command: bool,
     startup_profile_picker: bool,
-    explicit_startup_working_directory: bool,
+    /// A directory or a profile named on the command line.
+    explicit_startup: bool,
 ) bool {
     return sessionStatePolicyAllows(safe_mode, policy) and
         initial_window and
         !has_initial_command and
         !startup_profile_picker and
-        !explicit_startup_working_directory;
+        !explicit_startup;
+}
+
+/// A profile named on the command line (`--default-profile=<reference>`,
+/// which a jump-list link to a user profile carries) makes an explicit
+/// launch, as an explicit directory does: it neither restores nor saves the
+/// session, and its first window runs that profile. A link to a profile
+/// with a directory of its own has no `--working-directory=` to say so.
+fn startupNamesProfile(config: *const configpkg.Config) bool {
+    const reference = config._default_profile_cli orelse return false;
+    return reference.len > 0;
 }
 
 const SessionSaveKind = enum { final, checkpoint };
@@ -4283,7 +4356,7 @@ pub const App = struct {
             self.config.@"initial-window",
             self.config.@"initial-command" != null,
             self.startup_profile_picker,
-            self.explicit_startup_working_directory,
+            self.explicit_startup_working_directory or startupNamesProfile(&self.config),
         );
     }
 
@@ -5280,6 +5353,7 @@ pub const App = struct {
             try self.applyRestoredProfileConfig(&config, host, key)
         else
             false;
+        const default_profile = if (profile_applied) null else try self.applyRestoredDefaultLaunch(&config);
         if (pane.cwd) |cwd| {
             const alloc = config._arena.?.allocator();
             config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
@@ -5302,7 +5376,7 @@ pub const App = struct {
 
         if (profile_applied) {
             try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, pane.profile.?);
-        }
+        } else if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
         if (pane.title_override) |title| try surface.setTitleOverride(title);
         if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
         if (pane.cwd) |cwd| try surface.setPwd(cwd);
@@ -5327,6 +5401,15 @@ pub const App = struct {
         host: ?*Host,
         key: []const u8,
     ) !bool {
+        // SSH stays refused below; any other pane of `default-profile`
+        // restores without a list.
+        if (!startsWithIgnoreCase(key, "ssh:")) {
+            if (defaultProfileForKey(&self.config, key)) |profile| {
+                if (!isSessionRestorableProfile(profile)) return false;
+                try applyProfileSurfaceConfig(config, profile);
+                return true;
+            }
+        }
         if (host) |existing| {
             const profile = (try existing.profileForKey(key)) orelse return false;
             if (!isSessionRestorableProfile(profile)) return false;
@@ -6417,7 +6500,7 @@ pub const App = struct {
             break :discover windows_shell.discoverProfiles(
                 completion.arena.allocator(),
                 self.config.@"ssh-config-hosts",
-                user.definitions,
+                &user,
             );
         };
         self.handleProfileDiscovery(&completion);
@@ -7039,8 +7122,7 @@ pub const App = struct {
                         return true;
                     }
                 }
-                applyNewWindowArguments(
-                    self.core_app.alloc,
+                const default_profile = self.applyNewWindowLaunch(
                     &config,
                     forwarded_arguments,
                 ) catch |err| switch (err) {
@@ -7064,7 +7146,7 @@ pub const App = struct {
                     return true;
                 }
                 const source = self.newWindowSource(target);
-                _ = self.createWindowSurface(&config, default_title, .{
+                const window_surface = self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = source,
                     .forwarded_arguments = forwarded_arguments,
                 }) catch |err| {
@@ -7078,6 +7160,7 @@ pub const App = struct {
                     if (banner_host) |host| host.setBanner(.err, "New window could not be opened.") catch {};
                     return err;
                 };
+                if (default_profile) |profile| try self.noteProfileLaunch(window_surface, profile);
                 return true;
             },
 
@@ -7117,26 +7200,17 @@ pub const App = struct {
                 defer if (temporary_profiles) |profiles| {
                     windows_shell.deinitProfiles(alloc, profiles);
                 };
-                const profile_key: ?[]const u8 = if (value.profile_key.len > 0)
-                    value.profile_key
-                else if (source) |surface|
-                    surface.launch_profile_key
-                else
-                    null;
+                const profile_key = elevatedProfileKey(
+                    &self.config,
+                    value.profile_key,
+                    if (source) |surface| surface.launch_profile_key else null,
+                );
                 if (profile_key) |key| {
                     const source_host: ?*Host = if (source) |surface|
                         surface.host
                     else
                         null;
-                    const profile: ?*const windows_shell.Profile = if (source_host) |host|
-                        try host.profileForKey(key)
-                    else profile: {
-                        const profiles = try listProfilesForConfig(alloc, &self.config, windows_shell.listProfiles);
-                        temporary_profiles = profiles;
-                        const index = profileIndexByKey(profiles, key) orelse break :profile null;
-                        break :profile &profiles[index];
-                    };
-                    const found = profile orelse {
+                    const found = (try self.elevatedWindowProfile(source_host, key, &temporary_profiles)) orelse {
                         log.warn("elevated window profile not found key={s}", .{key});
                         return false;
                     };
@@ -8430,6 +8504,67 @@ pub const App = struct {
         return surface;
     }
 
+    /// `applyDefaultProfileConfig`, unless this is the surface that runs
+    /// `initial-command` (`-e`): the first one of the process, whichever path
+    /// creates it. A restore clears `initial-command` first.
+    fn applyDefaultProfileLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
+        if (!self.defaultProfileApplies(config)) return null;
+        return try applyDefaultProfileConfig(config);
+    }
+
+    /// A new window's forwarded arguments (`applyNewWindowArguments`), then
+    /// `applyDefaultProfileLaunch`. In that order: with a theme set, the
+    /// arguments' `finalize` builds the config again from its replay steps,
+    /// which would drop the profile's variables, line and directory. A
+    /// directory the arguments carry still wins over the profile's own,
+    /// except an SSH profile's (`keepExplicitWorkingDirectory`).
+    /// That rebuild replays the files as they were last read, which during a
+    /// palette theme preview is newer than the app config's profiles and
+    /// launch (`keepProfileSources`), so those are put back after it; the
+    /// arguments cannot set any of them (`forwardedKeyAllowed`).
+    fn applyNewWindowLaunch(
+        self: *const App,
+        config: *configpkg.Config,
+        arguments: ?[]const [:0]const u8,
+    ) !?*const windows_shell.Profile {
+        try applyNewWindowArguments(self.core_app.alloc, config, arguments);
+        if (arguments) |argv| if (argv.len > 0) try keepProfileSources(config, &self.config);
+        const forwarded_directory = if (arguments) |argv| forwardedArgvSetsKey(argv, "working-directory") else false;
+        const directory = config.@"working-directory";
+        const profile = try self.applyDefaultProfileLaunch(config);
+        if (forwarded_directory) keepExplicitWorkingDirectory(config, profile, directory);
+        return profile;
+    }
+
+    /// `applyDefaultProfileLaunch` for a restored pane whose own profile did
+    /// not apply, except that restore never connects over SSH by itself: with
+    /// an SSH `default-profile` the pane gets the automatic shell, in place
+    /// of the SSH command `Config` made the default.
+    fn applyRestoredDefaultLaunch(self: *const App, config: *configpkg.Config) !?*const windows_shell.Profile {
+        if (self.defaultProfileApplies(config) and config._default_profile.?.kind == .ssh) {
+            config.command = null;
+            try config.resolveWindowsDefaultCommand();
+            return null;
+        }
+        return try self.applyDefaultProfileLaunch(config);
+    }
+
+    fn defaultProfileApplies(self: *const App, config: *const configpkg.Config) bool {
+        if (!config._command_defaulted or config._default_profile == null) return false;
+        return !(config.@"initial-command" != null and self.core_app.first);
+    }
+
+    /// What a surface launched from `profile` keeps: the key that splits,
+    /// session restore and elevation look the profile up by, and for SSH
+    /// the alias as its tab title.
+    fn noteProfileLaunch(self: *App, surface: *Surface, profile: *const windows_shell.Profile) !void {
+        try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
+        surface.launched_ssh = profile.kind == .ssh;
+        if (sshProfileAlias(profile)) |alias| {
+            try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
+        }
+    }
+
     fn createNewTab(
         self: *App,
         source: ?*Surface,
@@ -8469,6 +8604,8 @@ pub const App = struct {
             }
         }
 
+        // A tab that inherits no launch runs the default profile, if any.
+        const default_profile = try self.applyDefaultProfileLaunch(&config);
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
             .host_id = if (source) |value| value.host_id else null,
@@ -8486,6 +8623,7 @@ pub const App = struct {
         if (inherit_launch_config) {
             if (source) |value| surface.launched_ssh = value.launched_ssh;
         }
+        if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
         if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
         self.activateSurface(surface);
         return surface;
@@ -8506,7 +8644,12 @@ pub const App = struct {
             try applyLaunchConfigFromSource(&config, source)
         else
             try applySplitProfileConfigFromSource(&config, source);
-        if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
+        // A split of a pane that runs no profile runs the default one.
+        const default_profile = try self.applyDefaultProfileLaunch(&config);
+        // An SSH default keeps its hardened directory, as an SSH source's
+        // split does: a local pane's directory means nothing to ssh.exe.
+        const default_ssh = if (default_profile) |profile| profile.kind == .ssh else false;
+        if (shouldInheritSplitWorkingDirectory(source.launched_ssh or default_ssh)) {
             _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
         }
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
@@ -8524,6 +8667,7 @@ pub const App = struct {
         if (inherit_launch_config or inherited_profile_key != null) {
             surface.launched_ssh = source.launched_ssh;
         }
+        if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
         tab_info.tab.clearRedoHistory();
         if (tab_info.host.pushStructuralUndo(.{
             .kind = .split_create,
@@ -8548,6 +8692,7 @@ pub const App = struct {
     ) !?[]const u8 {
         if (source.launch_command) |command| {
             config.command = try command.clone(config._arena.?.allocator());
+            config._command_defaulted = false;
             // The snapshot, not the current definition: a reload since the
             // source started does not change what an inherited launch runs.
             if (source.launch_user) |launch| try applyUserLaunchConfig(config, launch);
@@ -8569,10 +8714,30 @@ pub const App = struct {
         source: *Surface,
     ) !?[]const u8 {
         const key = source.launch_profile_key orelse return null;
-        const host = source.host orelse return null;
-        const profile = (try host.profileForKey(key)) orelse return null;
+        const profile = defaultProfileForKey(config, key) orelse profile: {
+            const host = source.host orelse return null;
+            break :profile (try host.profileForKey(key)) orelse return null;
+        };
         try applyProfileLaunchConfig(config, profile);
         return profile.key;
+    }
+
+    /// The profile `new_window_elevated` runs for `key`: `default-profile`'s
+    /// own when the key is its, else the one in the source window's list,
+    /// else in a list built for the purpose, stored in `temporary` for the
+    /// caller to free.
+    fn elevatedWindowProfile(
+        self: *App,
+        source_host: ?*Host,
+        key: []const u8,
+        temporary: *?[]windows_shell.Profile,
+    ) !?*const windows_shell.Profile {
+        if (defaultProfileForKey(&self.config, key)) |profile| return profile;
+        if (source_host) |host| return try host.profileForKey(key);
+        const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
+        temporary.* = profiles;
+        const index = profileIndexByKey(profiles, key) orelse return null;
+        return &profiles[index];
     }
 
     fn createProfileSurface(
@@ -8615,16 +8780,24 @@ pub const App = struct {
             .tab_id = tab_id,
             .clone_state_from = if (open_target == .window) self.newWindowSource(target) else source,
         });
-        try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
-        surface.launched_ssh = profile.kind == .ssh;
-        if (sshProfileAlias(profile)) |alias| {
-            try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
-        }
+        try self.noteProfileLaunch(surface, profile);
         return surface;
     }
 
     fn createWindow(self: *App, title: LPCWSTR) !void {
-        _ = try self.createWindowSurface(&self.config, title, .{});
+        if (!self.defaultProfileApplies(&self.config)) {
+            _ = try self.createWindowSurface(&self.config, title, .{});
+            return;
+        }
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .window);
+        defer config.deinit();
+        const directory = config.@"working-directory";
+        const profile = try self.applyDefaultProfileLaunch(&config);
+        // Explorer's "Open in noctty" and a jump-list folder start a first
+        // window with `--working-directory=` when no instance runs.
+        if (self.explicit_startup_working_directory) keepExplicitWorkingDirectory(&config, profile, directory);
+        const surface = try self.createWindowSurface(&config, title, .{});
+        if (profile) |value| try self.noteProfileLaunch(surface, value);
     }
 
     fn createAdoptedWindow(
@@ -8961,7 +9134,9 @@ pub const App = struct {
     /// that runs the shell the automatic default command picked. A `command`
     /// the user set leaves the choice to the caller.
     fn defaultShellProfileIndex(self: *const App, profiles: []const windows_shell.Profile) ?usize {
-        if (!self.config._command_defaulted) return null;
+        // A `default-profile` the picker does not show (hidden) leaves the
+        // choice to the caller rather than to its command's shell.
+        if (!self.config._command_defaulted or self.config._default_profile != null) return null;
         return windows_shell.profileIndexForDefaultCommand(profiles, self.config.command orelse return null);
     }
 
@@ -10658,9 +10833,11 @@ pub const App = struct {
                     .window,
                 );
                 defer config.deinit();
+                const fresh_profile = try self.applyDefaultProfileLaunch(&config);
                 const fresh = try self.createWindowSurface(&config, quick_terminal_title, .{
                     .host_id = host.id,
                 });
+                if (fresh_profile) |profile| try self.noteProfileLaunch(fresh, profile);
                 // Floating is the surface's state: the window follows the
                 // active tab's.
                 try fresh.setFloatWindow(.on);
@@ -10696,6 +10873,7 @@ pub const App = struct {
             .window,
         );
         defer config.deinit();
+        const default_profile = try self.applyDefaultProfileLaunch(&config);
         const surface = try self.createWindowSurface(&config, quick_terminal_title, .{
             .quick_terminal = true,
             // Passive first-show: `Surface.init` uses `SW_SHOWNOACTIVATE`
@@ -10705,6 +10883,7 @@ pub const App = struct {
             // window even though the later `present()` call is skipped.
             .show = if (want_focus) .activate else .no_activate,
         });
+        if (default_profile) |profile| try self.noteProfileLaunch(surface, profile);
         try surface.setFloatWindow(.on);
         if (surface.windowHwnd()) |top_level| {
             self.applyQuickTerminalGeometry(top_level, true) catch |err| {
@@ -13111,7 +13290,7 @@ fn profileDiscoveryThreadMain(
         return;
     };
     completion.* = .{ .arena = arena, .generation = generation, .attempt = attempt };
-    completion.result = windows_shell.discoverProfiles(completion.arena.allocator(), include_ssh_hosts, user.definitions);
+    completion.result = windows_shell.discoverProfiles(completion.arena.allocator(), include_ssh_hosts, &user);
     var payload: AppDeliveryPayload = .{ .profiles = completion };
     if (!delivery.post(c.WM_WINHOSTTY_PROFILES, payload)) {
         payload.deinit();
@@ -16364,7 +16543,7 @@ const Host = struct {
 
         const profiles_ready = self.profilesForChrome();
         if (profiles_ready) {
-            for (self.profiles.?) |profile| {
+            for (self.shownProfiles().?) |profile| {
                 _ = self.appendPaletteDescriptor(.{
                     .item = .{
                         .id = win32_palette.catalog.stableStringId(.profile, profile.key),
@@ -16705,7 +16884,7 @@ const Host = struct {
                 self.app.activateSurface(surface);
             },
             .profile => |key| {
-                const profiles = self.profiles orelse {
+                const profiles = self.shownProfiles() orelse {
                     self.abortPaletteAction("Profile is no longer available; reopen the palette.");
                     return;
                 };
@@ -19215,7 +19394,7 @@ const Host = struct {
         return try self.applyProfileDiscovery(try windows_shell.discoverProfiles(
             self.app.core_app.alloc,
             self.app.config.@"ssh-config-hosts",
-            user.definitions,
+            &user,
         ));
     }
 
@@ -19237,11 +19416,11 @@ const Host = struct {
             // A later user-initiated load recovers startup discovery after its
             // bounded transient-failure retry budget has been exhausted.
             if (discovery.complete) jump_list.completeStartupProfileDiscovery();
-            jump_list.updateProfiles(next_profiles);
+            jump_list.updateProfiles(windows_shell.visibleProfiles(next_profiles));
         }
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
-        self.app.applyLauncherQuickSlotPreferences(self.profiles.?);
-        const profiles = self.profiles.?;
+        self.app.applyLauncherQuickSlotPreferences(self.shownProfiles().?);
+        const profiles = self.shownProfiles().?;
         if (profiles.len == 0) {
             self.selected_profile = 0;
             try appendOwnedString(self.app.core_app.alloc, &self.selected_profile_key, null);
@@ -19261,7 +19440,7 @@ const Host = struct {
     }
 
     fn reapplyLauncherProfilePreferences(self: *Host) !void {
-        const profiles = self.profiles orelse return;
+        const profiles = self.shownProfiles() orelse return;
         if (profiles.len == 0) return;
         self.app.applyLauncherQuickSlotPreferences(profiles);
         try self.selectPreferredProfile(profiles);
@@ -19269,19 +19448,31 @@ const Host = struct {
 
     /// Select the profile `preferredProfileIndex` picks, else the default
     /// shell's, else the one at the current index (the first when that is
-    /// past the end). `profiles` is not empty.
+    /// past the end). `profiles` is not empty. Only a profile chosen in the
+    /// picker, the palette or a quick slot is stored as the selection: one
+    /// picked here is picked again for each new list, so after a reload that
+    /// changes `default-profile` the picker starts on the new one.
     fn selectPreferredProfile(self: *Host, profiles: []const windows_shell.Profile) !void {
-        const index = preferredProfileIndex(
+        if (preferredProfileIndex(
             profiles,
             self.selected_profile_key,
             self.app.launcher_profile_key,
+            null,
+            null,
+            self.selected_profile,
+        )) |chosen| {
+            _ = try self.setSelectedProfileIndex(chosen);
+            return;
+        }
+        self.selected_profile = preferredProfileIndex(
+            profiles,
+            null,
+            null,
+            if (self.app.config._default_profile) |profile| profile.key else null,
             self.app.launcher_profile_hint,
             self.selected_profile,
-        ) orelse self.app.defaultShellProfileIndex(profiles) orelse current: {
-            if (self.selected_profile >= profiles.len) self.selected_profile = 0;
-            break :current self.selected_profile;
-        };
-        _ = try self.setSelectedProfileIndex(index);
+        ) orelse self.app.defaultShellProfileIndex(profiles) orelse
+            if (self.selected_profile < profiles.len) self.selected_profile else 0;
     }
 
     /// For actions that need a list now (open a profile by key or index,
@@ -19312,7 +19503,7 @@ const Host = struct {
     /// Whether the loaded list has a profile to select, with the selection
     /// moved to the first one when it is past the end.
     fn clampSelectedProfile(self: *Host) bool {
-        const profiles = self.profiles.?;
+        const profiles = self.shownProfiles().?;
         if (profiles.len == 0) return false;
         if (self.selected_profile >= profiles.len) self.selected_profile = 0;
         return true;
@@ -19347,7 +19538,7 @@ const Host = struct {
     fn profilesArrived(self: *Host, had_profiles: bool) void {
         switch (self.overlay_mode) {
             .profile => {
-                const profiles = self.profiles orelse &.{};
+                const profiles = self.shownProfiles() orelse &.{};
                 if (profiles.len == 0) {
                     self.hideOverlay();
                     runUiActionOrLog("profile overlay dismiss layout failed", self.layout());
@@ -19366,26 +19557,35 @@ const Host = struct {
     }
 
     fn selectedProfileIndex(self: *Host) ?usize {
-        const profiles = self.profiles orelse return null;
+        const profiles = self.shownProfiles() orelse return null;
         if (profiles.len == 0) return null;
         return @min(self.selected_profile, profiles.len - 1);
     }
 
     fn selectedProfile(self: *Host) ?*windows_shell.Profile {
-        const profiles = self.profiles orelse return null;
+        const profiles = self.shownProfiles() orelse return null;
         const index = self.selectedProfileIndex() orelse return null;
         return &profiles[index];
     }
 
+    /// The profiles the picker, the palette, the dropdown, the quick slots
+    /// and the jump list show: the list without its hidden tail
+    /// (`profile-hidden`). Lookups by key use `profiles` itself.
+    fn shownProfiles(self: *const Host) ?[]windows_shell.Profile {
+        return windows_shell.visibleProfiles(self.profiles orelse return null);
+    }
+
+    /// The profile `key` names, hidden or not.
     fn profileForKey(self: *Host, key: []const u8) !?*windows_shell.Profile {
-        if (!(try self.ensureProfiles())) return null;
+        // False when no profile is shown; a hidden one can still match.
+        _ = try self.ensureProfiles();
         const profiles = self.profiles orelse return null;
         const index = profileIndexByKey(profiles, key) orelse return null;
         return &profiles[index];
     }
 
     fn setSelectedProfileIndex(self: *Host, index: usize) !bool {
-        const profiles = self.profiles orelse return false;
+        const profiles = self.shownProfiles() orelse return false;
         if (profiles.len == 0) return false;
         const next_index = @min(index, profiles.len - 1);
         const next_key = profiles[next_index].key;
@@ -19447,7 +19647,7 @@ const Host = struct {
     fn stepProfileSelection(self: *Host, reverse: bool) !bool {
         if (self.overlay_mode != .profile) return false;
         if (!self.profilesForChrome()) return false;
-        const profiles = self.profiles.?;
+        const profiles = self.shownProfiles().?;
         const edit_hwnd = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
         const fallback = self.selectedProfileIndex() orelse 0;
@@ -19487,7 +19687,7 @@ const Host = struct {
             return false;
         };
         if (!profiles_ready) return false;
-        const profiles = self.profiles.?;
+        const profiles = self.shownProfiles().?;
         if (index >= profiles.len) return false;
         if (self.setSelectedProfileIndex(index) catch return false) {
             self.refreshProfileChrome();
@@ -19514,7 +19714,7 @@ const Host = struct {
         }
         _ = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        const selection = resolveProfileSelection(self.profiles.?, text, self.selectedProfileIndex() orelse 0);
+        const selection = resolveProfileSelection(self.shownProfiles().?, text, self.selectedProfileIndex() orelse 0);
         switch (selection) {
             .exact => |index| {
                 _ = try self.setSelectedProfileIndex(index);
@@ -22429,7 +22629,7 @@ const Host = struct {
                 const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
                 const label = try buildProfileOverlayLabel(
                     alloc,
-                    self.profiles.?,
+                    self.shownProfiles().?,
                     text,
                     self.selectedProfileIndex() orelse 0,
                 );
@@ -22531,7 +22731,7 @@ const Host = struct {
         if (self.overlay_mode == .profile) {
             const accept = try buildProfileAcceptLabel(
                 alloc,
-                self.profiles,
+                self.shownProfiles(),
                 text,
                 self.selectedProfileIndex() orelse 0,
                 self.app.launcher_profile_target,
@@ -22675,7 +22875,7 @@ const Host = struct {
             }
             const hint = try buildProfileHintText(
                 alloc,
-                self.profiles,
+                self.shownProfiles(),
                 text,
                 self.selectedProfileIndex() orelse 0,
                 self.app.launcher_profile_target,
@@ -23237,7 +23437,7 @@ const Host = struct {
 
         // Profile list — each profile gets a numbered shortcut hint
         const selected_idx = self.selectedProfileIndex();
-        if (self.profiles) |profiles| {
+        if (self.shownProfiles()) |profiles| {
             for (profiles, 0..) |*profile, i| {
                 const label_utf8 = buildDropdownProfileLabel(alloc, profile, i) catch continue;
                 defer alloc.free(label_utf8);
@@ -23287,7 +23487,7 @@ const Host = struct {
         if (cmd_id >= c.CTX_PROFILE_BASE and cmd_id < c.CTX_PROFILE_BASE + 100) {
             const profile_index = cmd_id - c.CTX_PROFILE_BASE;
             // Validate index against current profiles (may have changed during modal menu)
-            if (self.profiles) |profiles| {
+            if (self.shownProfiles()) |profiles| {
                 if (profile_index < profiles.len) {
                     _ = self.quickOpenProfileIndex(profile_index, .tab);
                 }
@@ -26740,7 +26940,7 @@ const Host = struct {
                 const overlay_label = if (self.overlay_mode == .profile)
                     buildProfileOverlayLabel(
                         alloc,
-                        self.profiles orelse &.{},
+                        self.shownProfiles() orelse &.{},
                         overlay_text,
                         self.selectedProfileIndex() orelse 0,
                     ) catch return false
@@ -26768,7 +26968,7 @@ const Host = struct {
                     else
                         buildProfileHintText(
                             alloc,
-                            self.profiles,
+                            self.shownProfiles(),
                             overlay_text,
                             self.selectedProfileIndex() orelse 0,
                             self.app.launcher_profile_target,
@@ -30699,6 +30899,98 @@ test "win32 toggle_quick_terminal opens a fresh floating tab instead of showing 
     }.body);
 }
 
+/// What a quick terminal toggle hands `createWindowSurface`, for the
+/// `default-profile` test: the program and the profile's variable.
+const QuickTerminalDefaultProfile = struct {
+    /// Copies: the config is freed when the toggle returns.
+    var arena: std.heap.ArenaAllocator = undefined;
+    var program: ?[]const u8 = null;
+    var mode: ?[]const u8 = null;
+    var dir: ?[]const u8 = null;
+
+    fn see(config: *const configpkg.Config) !void {
+        const a = arena.allocator();
+        program = try a.dupe(u8, config.command.?.direct[0]);
+        mode = if (config.env.map.get("MODE")) |value| try a.dupe(u8, value) else null;
+        dir = if (config.@"working-directory") |wd| switch (wd) {
+            .path => |path| try a.dupe(u8, path),
+            else => null,
+        } else null;
+    }
+
+    fn fresh(app: *App, config: *const configpkg.Config, title: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
+        try see(config);
+        return try QuickTerminalFreshTab.createSurface(app, config, title, opts);
+    }
+
+    fn create(_: *App, config: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
+        try see(config);
+        try std.testing.expect(opts.host_id == null);
+        return error.TestWindowCreateFailed;
+    }
+};
+
+test "win32 toggle_quick_terminal runs default-profile in a new window and a fresh tab" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var fixture: QuickTerminalToggleFixture = .{};
+            try fixture.init();
+            defer fixture.deinit();
+            const alloc = fixture.app.core_app.alloc;
+            const arena = fixture.app.config._arena.?.allocator();
+            try fixture.app.config.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
+            try fixture.app.config.@"profile-env".parseCLI(arena, "py: MODE=profile");
+            try fixture.app.config.@"profile-working-directory".parseCLI(arena, "py: D:\\pinned");
+            fixture.app.config.@"default-profile" = "py";
+            try fixture.app.config.finalize();
+            try std.testing.expectEqualStrings("user:py", if (fixture.app.config._default_profile) |profile| profile.key else "");
+            QuickTerminalDefaultProfile.arena = .init(std.testing.allocator);
+            defer QuickTerminalDefaultProfile.arena.deinit();
+
+            // An empty quick terminal host, as the fresh-tab test makes it.
+            fixture.app.shell_runtime_initialized = true;
+            var window = try fixture.app.shell_runtime.prepare(.create_window);
+            defer window.deinit();
+            try window.commit(&fixture.app.shell_runtime);
+            fixture.host.shell_id = window.created.window;
+            var close = try fixture.app.shell_runtime.prepare(.{ .detach_tab = window.created.tab.? });
+            defer close.deinit();
+            try close.commit(&fixture.app.shell_runtime);
+            var detached = fixture.host.tabs.orderedRemove(0);
+            defer detached.deinit();
+            fixture.surface.window_visible = false;
+            try fixture.app.toggleQuickTerminal();
+            try std.testing.expect(!fixture.visible());
+
+            // The fresh tab it opens runs the profile and keeps its key.
+            QuickTerminalFreshTab.fixture = &fixture;
+            QuickTerminalFreshTab.calls = 0;
+            QuickTerminalDefaultProfile.program = null;
+            fixture.app.test_create_window_surface = &QuickTerminalDefaultProfile.fresh;
+            defer appendOwnedString(alloc, &fixture.host.cached_window_title, null) catch unreachable;
+            defer appendOwnedString(alloc, &fixture.fresh.launch_profile_key, null) catch unreachable;
+            try fixture.app.toggleQuickTerminal();
+            try std.testing.expectEqual(@as(usize, 1), QuickTerminalFreshTab.calls);
+            try std.testing.expectEqualStrings("cmd.exe", QuickTerminalDefaultProfile.program orelse "");
+            try std.testing.expectEqualStrings("profile", QuickTerminalDefaultProfile.mode orelse "");
+            try std.testing.expectEqualStrings("D:\\pinned", QuickTerminalDefaultProfile.dir orelse "");
+            try std.testing.expectEqualStrings("user:py", fixture.fresh.launch_profile_key orelse "");
+
+            // With no quick terminal yet, the window it creates runs it too.
+            fixture.host.quick_terminal = false;
+            defer fixture.host.quick_terminal = true;
+            QuickTerminalDefaultProfile.program = null;
+            fixture.app.test_create_window_surface = &QuickTerminalDefaultProfile.create;
+            try std.testing.expectError(error.TestWindowCreateFailed, fixture.app.toggleQuickTerminal());
+            try std.testing.expectEqualStrings("cmd.exe", QuickTerminalDefaultProfile.program orelse "");
+            try std.testing.expectEqualStrings("profile", QuickTerminalDefaultProfile.mode orelse "");
+            // The app config is left as it was.
+            try std.testing.expect(fixture.app.config.env.map.get("MODE") == null);
+        }
+    }.body);
+}
+
 test "win32 toggle_quick_terminal keeps a pane a zoom hides out of view" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -33270,28 +33562,44 @@ const storedProfileKeyEquals = labels.storedProfileKeyEquals;
 /// dropped here: the open palette borrows its host's profile strings.
 /// Choosing a theme (`commitPaletteTheme`) saves it and reloads through
 /// `settingsSaveAndReload`, so that reload applies any profile edits. `env`
-/// is a source too: a profile's `%NAME%` reads it.
+/// is a source too: a profile's `%NAME%` reads it. For the same reason `dst`
+/// keeps the launch `src` resolved: `command` and the `default-profile`
+/// profile, which `finalize` found from the files read again, so a new tab
+/// would run an edited default profile's definition. A forwarded new
+/// window's config, built again from those files when a theme is set, gets
+/// them back from the app config the same way (`App.applyNewWindowLaunch`).
 fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !void {
     const alloc = dst._arena.?.allocator();
+    dst.command = if (src.command) |command| try command.clone(alloc) else null;
+    dst._command_defaulted = src._command_defaulted;
+    dst._command_from_file = src._command_from_file;
+    dst.@"default-profile" = if (src.@"default-profile") |reference| try alloc.dupeZ(u8, reference) else null;
+    dst._default_profile = if (src._default_profile) |profile| try profile.clone(alloc) else null;
     dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
     dst.env = try src.env.clone(alloc);
     dst.@"profile-command" = try src.@"profile-command".clone(alloc);
     dst.@"profile-name" = try src.@"profile-name".clone(alloc);
     dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
     dst.@"profile-env" = try src.@"profile-env".clone(alloc);
+    dst.@"profile-order" = try src.@"profile-order".clone(alloc);
+    dst.@"profile-hidden" = try src.@"profile-hidden".clone(alloc);
     // Where those lines were read goes with them (New Elevated Window names
     // a profile whose line came from a file).
     dst._profile_places = try src.cloneProfilePlaces(alloc);
 }
 
 /// Whether a reload changed a key the profile lists are built from: a
-/// `profile-*` key (a removal included), or `env` while a profile is
-/// defined, since `%NAME%` in a profile reads the `env` lines.
+/// `profile-*` key (a removal included), `env` while a profile is defined
+/// (`%NAME%` in a profile reads the `env` lines), or `default-profile`,
+/// which the picker starts on.
 fn userProfileKeysChanged(old: *const configpkg.Config, new: *const configpkg.Config) bool {
     if (!old.@"profile-command".equal(new.@"profile-command") or
         !old.@"profile-name".equal(new.@"profile-name") or
         !old.@"profile-working-directory".equal(new.@"profile-working-directory") or
-        !old.@"profile-env".equal(new.@"profile-env")) return true;
+        !old.@"profile-env".equal(new.@"profile-env") or
+        !old.@"profile-order".equal(new.@"profile-order") or
+        !old.@"profile-hidden".equal(new.@"profile-hidden") or
+        old.changed(new, .@"default-profile")) return true;
     return new.@"profile-command".count() > 0 and !envEntriesEqual(old.env, new.env);
 }
 
@@ -33331,7 +33639,7 @@ fn listProfilesForConfig(
 ) ![]windows_shell.Profile {
     var user = try windows_shell.UserProfiles.init(alloc, config);
     defer user.deinit();
-    return try list(alloc, config.@"ssh-config-hosts", user.definitions);
+    return try list(alloc, config.@"ssh-config-hosts", &user);
 }
 
 /// Session restore relaunches a pane's profile unattended at startup. An SSH
@@ -35638,7 +35946,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
                     if (quickSlotPinOrdinalFromKey(wParam, keyPressed(c.VK_MENU), keyPressed(c.VK_SHIFT))) |slot_ordinal| {
                         if (v.assignSelectedProfileToQuickSlot(slot_ordinal)) return 0;
                     }
-                    if (quickSlotShortcutProfileIndex(v.profiles.?.len, v.selectedProfileIndex(), wParam, keyPressed(c.VK_MENU))) |index| {
+                    if (quickSlotShortcutProfileIndex(v.shownProfiles().?.len, v.selectedProfileIndex(), wParam, keyPressed(c.VK_MENU))) |index| {
                         if (v.quickOpenProfileIndex(index, v.app.launcher_profile_target)) return 0;
                     }
                 }
@@ -44353,7 +44661,7 @@ fn uninitializedInertStorage(comptime T: type) T {
 /// storage, not valid live instances.
 const TestSession = struct {
     const max_hosts = 4;
-    const max_surfaces = 8;
+    const max_surfaces = 12;
 
     const HostOptions = struct {
         storage: *Host,
@@ -49881,6 +50189,73 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     try std.testing.expect(userProfileKeysChanged(&preview, &reloaded));
 }
 
+test "win32 a palette theme preview keeps the default-profile launch until a reload" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "preview-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realpathAlloc(alloc, "preview-theme");
+    defer alloc.free(theme);
+
+    const Launch = struct {
+        fn expect(config: *const configpkg.Config, line: []const u8, mode: []const u8) !void {
+            var clone = config.shallowClone(std.testing.allocator);
+            defer clone.deinit();
+            _ = (try applyDefaultProfileConfig(&clone)).?;
+            try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
+            try std.testing.expectEqualStrings(mode, clone.env.map.get("MODE").?);
+        }
+    };
+
+    // The running config: `default-profile = py`, resolved.
+    var running = try configpkg.Config.default(alloc);
+    defer running.deinit();
+    var running_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{ "--profile-command=py: old.exe", "--profile-env=py: MODE=old", "--default-profile=py" }),
+    };
+    try running.loadIter(alloc, &running_args);
+    try running.finalize();
+    try Launch.expect(&running, "old.exe", "old");
+
+    // The files read again for the preview: the same `default-profile`
+    // with its profile edited since, and one that names another profile.
+    inline for (.{
+        &[_][]const u8{ "--profile-command=py: new.exe", "--profile-env=py: MODE=new", "--default-profile=py" },
+        &[_][]const u8{ "--profile-command=py: old.exe", "--profile-env=py: MODE=old", "--profile-command=other: other.exe", "--default-profile=other" },
+    }) |edited| {
+        var preview = try configpkg.Config.default(alloc);
+        defer preview.deinit();
+        var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(edited) };
+        try preview.loadIter(alloc, &args);
+        try Host.finishPaletteThemeConfig(&preview, &running, theme);
+        try std.testing.expectEqual(@as(u8, 0x10), preview.background.r);
+        // A new tab runs the definition the lists hold: the running one.
+        try std.testing.expectEqualStrings("old.exe", preview.@"profile-command".get("py").?);
+        try std.testing.expectEqualStrings("py", preview.@"default-profile".?);
+        try Launch.expect(&preview, "old.exe", "old");
+        try std.testing.expect(!userProfileKeysChanged(&running, &preview));
+    }
+
+    // With no `default-profile` running, files that add one start nothing
+    // new before the reload either.
+    var plain = try configpkg.Config.default(alloc);
+    defer plain.deinit();
+    try plain.finalize();
+    var added = try configpkg.Config.default(alloc);
+    defer added.deinit();
+    var added_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{ "--profile-command=py: new.exe", "--default-profile=py" }),
+    };
+    try added.loadIter(alloc, &added_args);
+    try Host.finishPaletteThemeConfig(&added, &plain, theme);
+    try std.testing.expect(added._default_profile == null);
+    try std.testing.expect(added.command == null);
+    var clone = added.shallowClone(alloc);
+    defer clone.deinit();
+    try std.testing.expect(try applyDefaultProfileConfig(&clone) == null);
+}
+
 test "win32 a reload after run took the startup launch-layout does not bring it back" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -55026,6 +55401,7 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
         host.profiles = profiles;
         host.selected_profile = 0;
         var app: App = undefined;
+        app.config._default_profile = null;
         var clone = base.shallowClone(alloc);
         defer clone.deinit();
         try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "User:Vs18-Cmd"));
@@ -55037,12 +55413,12 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
     // profiles reach the lister, after the local shells, before SSH.
     {
         const lister = struct {
-            fn list(a: Allocator, _: bool, user: []const windows_shell.UserProfiles.Definition) ![]windows_shell.Profile {
+            fn list(a: Allocator, _: bool, user: *const windows_shell.UserProfiles) ![]windows_shell.Profile {
                 const shell = try a.alloc(windows_shell.Profile, 1);
                 const cmd = try a.alloc([:0]const u8, 1);
                 cmd[0] = try a.dupeZ(u8, "C:\\Windows\\System32\\cmd.exe");
                 shell[0] = .{ .kind = .cmd, .key = try a.dupe(u8, "cmd.exe"), .label = try a.dupe(u8, "Command Prompt"), .command = .{ .direct = cmd } };
-                return try windows_shell.appendUserProfiles(a, shell, user, windows_shell.ProcessEnvironment{});
+                return try windows_shell.appendUserProfiles(a, shell, user.definitions, windows_shell.ProcessEnvironment{});
             }
         }.list;
         const hostless = try listProfilesForConfig(alloc, &renamed, lister);
@@ -55077,6 +55453,601 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
     }
 }
 
+test "win32 default-profile runs where nothing chose a launch, and only there" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var source: Surface = undefined;
+    var created: [11]Surface = undefined;
+    var session: TestSession = .{};
+    var surfaces: [1 + created.len]TestSession.SurfaceOptions = undefined;
+    surfaces[0] = .{ .storage = &source, .host = &host, .register = true, .free_launch_profile_key_on_deinit = true };
+    for (&created, 1..) |*storage, index| surfaces[index] = .{
+        .storage = storage,
+        .host = &host,
+        .window_visible = false,
+        .host_active = false,
+        .free_launch_profile_key_on_deinit = true,
+    };
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+        .surfaces = &surfaces,
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
+    const alloc = app.core_app.alloc;
+    defer for (&created) |*surface| appendOwnedString(alloc, &surface.pwd, null) catch unreachable;
+
+    // `default-profile = py`, which `Config.finalize` resolves.
+    const arena = app.config._arena.?.allocator();
+    try app.config.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
+    try app.config.@"profile-env".parseCLI(arena, "py: MODE=profile");
+    try app.config.@"profile-working-directory".parseCLI(arena, "py: D:\\pinned");
+    app.config.@"default-profile" = "py";
+    app.config.@"split-inherit-working-directory" = false;
+    try app.config.finalize();
+    try std.testing.expectEqualStrings("user:py", app.config._default_profile.?.key);
+
+    // A profile the picker shows, for the explicit choices below.
+    const pwsh_argv = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
+    var host_profiles = [_]windows_shell.Profile{.{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &pwsh_argv } }};
+    host.profiles = &host_profiles;
+    defer host.profiles = null;
+
+    const Seen = struct {
+        app_config: bool,
+        program: []const u8,
+        mode: ?[]const u8,
+        line: ?[]const u8,
+        dir: ?[]const u8,
+    };
+    const Hook = struct {
+        var seen_arena: std.heap.ArenaAllocator = undefined;
+        var seen: Seen = undefined;
+        var app_config: *const configpkg.Config = undefined;
+        var storage: []Surface = undefined;
+        var next: usize = 0;
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            const a = seen_arena.allocator();
+            const command = config.command.?;
+            seen = .{
+                .app_config = config == app_config,
+                .program = try a.dupe(u8, switch (command) {
+                    .direct => |argv| argv[0],
+                    .shell => |line| line,
+                }),
+                .mode = if (config.env.map.get("MODE")) |value| try a.dupe(u8, value) else null,
+                .line = if (config._profile_launch) |launch| try a.dupe(u8, launch.command_line) else null,
+                .dir = if (config.@"working-directory") |dir| switch (dir) {
+                    .path => |path| try a.dupe(u8, path),
+                    else => null,
+                } else null,
+            };
+            const surface = &storage[next];
+            next += 1;
+            const id = opts.host_id orelse return surface;
+            const tab_host = hook_app.findHostById(id) orelse return surface;
+            try hook_app.windows.append(hook_app.core_app.alloc, surface);
+            if (opts.tab_id != null) {
+                const found = hook_app.findTabForSurface(@constCast(opts.clone_state_from.?)).?;
+                var inserted = try SplitTreeSurface.init(hook_app.core_app.alloc, surface);
+                defer inserted.deinit();
+                const tree = try found.tab.tree.split(hook_app.core_app.alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
+                found.tab.tree.deinit();
+                found.tab.tree = tree;
+            } else {
+                try tab_host.tabs.insert(
+                    hook_app.core_app.alloc,
+                    opts.tab_insert_index orelse tab_host.tabs.items.len,
+                    try Tab.init(hook_app.core_app.alloc, tab_host.nextTabId(), surface),
+                );
+            }
+            return surface;
+        }
+    };
+    Hook.seen_arena = .init(std.testing.allocator);
+    defer Hook.seen_arena.deinit();
+    Hook.app_config = &app.config;
+    Hook.storage = &created;
+    Hook.next = 0;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    const Expect = struct {
+        fn profile(surface: *const Surface, dir: ?[]const u8) !void {
+            try std.testing.expect(!Hook.seen.app_config);
+            try std.testing.expectEqualStrings("cmd.exe", Hook.seen.program);
+            try std.testing.expectEqualStrings("profile", Hook.seen.mode orelse "");
+            try std.testing.expectEqualStrings("cmd.exe /k py", Hook.seen.line orelse "");
+            if (dir) |want| try std.testing.expectEqualStrings(want, Hook.seen.dir orelse "");
+            try std.testing.expectEqualStrings("user:py", surface.launch_profile_key orelse "");
+        }
+
+        fn chosen(surface: *const Surface, key: []const u8) !void {
+            try std.testing.expectEqualStrings("C:\\Program Files\\PowerShell\\7\\pwsh.exe", Hook.seen.program);
+            try std.testing.expect(Hook.seen.mode == null);
+            try std.testing.expect(Hook.seen.line == null);
+            try std.testing.expectEqualStrings(key, surface.launch_profile_key orelse "");
+        }
+    };
+
+    // The first window of a launch with `-e` runs that command, untouched.
+    const e_argv = [_][:0]const u8{"vim.exe"};
+    app.config.@"initial-command" = .{ .direct = &e_argv };
+    core_app.first = true;
+    try app.createWindow(default_title);
+    try std.testing.expect(Hook.seen.app_config);
+    try std.testing.expect(Hook.seen.mode == null and Hook.seen.line == null);
+    try std.testing.expect(created[0].launch_profile_key == null);
+
+    // Without it the first window runs the profile, in its own directory.
+    app.config.@"initial-command" = null;
+    try app.createWindow(default_title);
+    try Expect.profile(&created[1], "D:\\pinned");
+    // The app config is left as it was.
+    try std.testing.expect(app.config.env.map.get("MODE") == null);
+    try std.testing.expect(app.config._profile_launch == null);
+
+    // A plain new tab, a new window, a split of a pane that runs no profile.
+    try std.testing.expect(try app.performAction(.app, .new_tab, {}));
+    try Expect.profile(&created[2], "D:\\pinned");
+    try std.testing.expect(try app.performAction(.app, .new_window, .{}));
+    try Expect.profile(&created[3], "D:\\pinned");
+    try std.testing.expect(try app.performAction(.{ .surface = source.core() }, .new_split, .right));
+    try Expect.profile(&created[4], "D:\\pinned");
+
+    // A profile chosen in the picker runs that profile alone.
+    _ = try app.createProfileSurface(.app, &host_profiles[0], .tab);
+    try Expect.chosen(&created[5], "pwsh.exe");
+
+    // A restored pane runs its own profile; one whose profile is gone runs
+    // the default, in the directory the pane was saved in.
+    var transaction = SessionRestoreTransaction.init(&app);
+    _ = try app.restoreSessionPane(.{ .profile = "user:gone", .cwd = "C:\\saved" }, &host, null, host.tabs.items.len, .right, &transaction);
+    try Expect.profile(&created[6], "C:\\saved");
+    // So does an SSH pane, which restore never reopens.
+    _ = try app.restoreSessionPane(.{ .profile = "ssh:prod", .cwd = "C:\\saved" }, &host, null, host.tabs.items.len, .right, &transaction);
+    try Expect.profile(&created[7], "C:\\saved");
+    try std.testing.expect(!created[7].launched_ssh);
+
+    // Restore does not connect over SSH by itself, so with an SSH default a
+    // pane it would reach gets the automatic shell (a session saves an SSH
+    // pane without its profile).
+    const py_profile = app.config._default_profile.?;
+    const ssh_argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
+    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:prod", .label = "prod", .command = .{ .direct = &ssh_argv } };
+    app.config.command = app.config._default_profile.?.command;
+    _ = try app.restoreSessionPane(.{}, &host, null, host.tabs.items.len, .right, &transaction);
+    try std.testing.expect(std.mem.indexOf(u8, Hook.seen.program, "ssh") == null);
+    try std.testing.expect(Hook.seen.mode == null and Hook.seen.line == null);
+    try std.testing.expect(created[8].launch_profile_key == null);
+    try std.testing.expect(!created[8].launched_ssh);
+
+    // A first window started with `--working-directory=` (Explorer's "Open
+    // in noctty", a jump-list folder, with no instance running) starts
+    // there, not in the profile's pinned directory. An SSH default keeps
+    // its hardening and starts ssh.exe in the user's profile directory.
+    app.explicit_startup_working_directory = true;
+    defer app.explicit_startup_working_directory = false;
+    app.config.@"working-directory" = .{ .path = "C:\\cli" };
+    try app.createWindow(default_title);
+    try std.testing.expectEqualStrings("ssh:prod", created[9].launch_profile_key orelse "");
+    try appendOwnedString(alloc, &created[9].tab_title_override, null);
+    try std.testing.expect(!std.mem.eql(u8, "C:\\cli", Hook.seen.dir orelse ""));
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
+        try std.testing.expectEqualStrings(home, Hook.seen.dir orelse "");
+    }
+    app.config._default_profile = py_profile;
+    app.config.command = py_profile.command;
+    try app.createWindow(default_title);
+    try Expect.profile(&created[10], "C:\\cli");
+    try std.testing.expectEqual(created.len, Hook.next);
+}
+
+test "win32 a split of a local pane into an SSH default keeps the SSH directory" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var source: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &source, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
+
+    const Hook = struct {
+        var directory: [std.fs.max_path_bytes]u8 = undefined;
+        var directory_len: usize = 0;
+        fn pwd(alloc: Allocator, _: *Surface) anyerror!?[]const u8 {
+            return try alloc.dupe(u8, "C:\\local-project");
+        }
+        fn create(_: *App, config: *const configpkg.Config, _: LPCWSTR, _: SurfaceInitOptions) anyerror!*Surface {
+            const path = switch (config.@"working-directory".?) {
+                .path => |value| value,
+                else => "",
+            };
+            @memcpy(directory[0..path.len], path);
+            directory_len = path.len;
+            return error.LaunchCaptured;
+        }
+    };
+    app.test_create_window_surface = &Hook.create;
+    app.test_automation_pwd = &Hook.pwd;
+
+    // A local pane that runs no profile (the first window's `-e cmd.exe`).
+    const argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
+    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:prod", .label = "prod", .command = .{ .direct = &argv } };
+    app.config.command = app.config._default_profile.?.command;
+    app.config._command_defaulted = true;
+    app.config.@"split-inherit-working-directory" = true;
+    source.launched_ssh = false;
+    source.launch_profile_key = null;
+    try std.testing.expectError(error.LaunchCaptured, app.createNewSplit(&source, .right, null, false));
+    try std.testing.expectEqualStrings(home, Hook.directory[0..Hook.directory_len]);
+
+    // A local default still splits into the pane's own directory.
+    const local = [_][:0]const u8{"cmd.exe"};
+    app.config._default_profile = .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &local } };
+    app.config.command = app.config._default_profile.?.command;
+    try std.testing.expectError(error.LaunchCaptured, app.createNewSplit(&source, .right, null, false));
+    try std.testing.expectEqualStrings("C:\\local-project", Hook.directory[0..Hook.directory_len]);
+}
+
+test "win32 a split or an elevated window of a default-profile pane needs no profile list" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var listed: Host = undefined;
+    var unlisted: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &listed, .register = true, .id = 1 },
+            .{ .storage = &unlisted, .register = true, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{ &listed, &unlisted });
+    const alloc = app.core_app.alloc;
+
+    const arena = app.config._arena.?.allocator();
+    try app.config.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
+    app.config.@"default-profile" = "py";
+    try app.config.finalize();
+    try std.testing.expectEqualStrings("user:py", if (app.config._default_profile) |profile| profile.key else "");
+
+    // One window has a list without the default profile (as when discovery
+    // misses an SSH alias or a WSL distribution); the other has none.
+    listed.profiles = try testProfileList(alloc, &.{"pwsh.exe"});
+    listed.profiles_complete = true;
+
+    // A split from a window with no list borrows none (and discovers
+    // nothing): the config has the profile.
+    var source: Surface = undefined;
+    source.launch_profile_key = "USER:PY";
+    source.host = &unlisted;
+    var config = app.config.shallowClone(alloc);
+    defer config.deinit();
+    try std.testing.expectEqualStrings("user:py", (try App.applySplitProfileConfigFromSource(&config, &source)) orelse "");
+    try std.testing.expectEqualStrings("cmd.exe", config.command.?.direct[0]);
+    try std.testing.expect(unlisted.profiles == null);
+
+    // An elevated window finds it whether or not the list has it, and
+    // builds no list of its own.
+    var temporary: ?[]windows_shell.Profile = null;
+    for ([_]?*Host{ &listed, &unlisted, null }) |source_host| {
+        const found = (try app.elevatedWindowProfile(source_host, "user:py", &temporary)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("user:py", found.key);
+        try std.testing.expect(temporary == null);
+    }
+    try std.testing.expect(unlisted.profiles == null);
+    // Another key is still looked up in the window's list.
+    const listed_profile = (try app.elevatedWindowProfile(&listed, "PWSH.EXE", &temporary)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("pwsh.exe", listed_profile.key);
+    try std.testing.expect((try app.elevatedWindowProfile(&listed, "cmd.exe", &temporary)) == null);
+
+    // The elevated process starts the files' default itself, so neither its
+    // command nor its variables go on the elevated command line; another
+    // profile's do, and so does a command-line default's.
+    try std.testing.expect(elevatedProfileKey(&app.config, "", "USER:PY") == null);
+    try std.testing.expect(elevatedProfileKey(&app.config, "user:py", null) == null);
+    try std.testing.expect(elevatedProfileKey(&app.config, "", null) == null);
+    try std.testing.expectEqualStrings("pwsh.exe", elevatedProfileKey(&app.config, "", "pwsh.exe") orelse "");
+    try std.testing.expectEqualStrings("pwsh.exe", elevatedProfileKey(&app.config, "pwsh.exe", "USER:PY") orelse "");
+    app.config._default_profile_cli = "py";
+    try std.testing.expectEqualStrings("USER:PY", elevatedProfileKey(&app.config, "", "USER:PY") orelse "");
+    app.config._default_profile_cli = null;
+    // A `--command=` reset of a file's `command`: the elevated process would
+    // run the file's command.
+    app.config._command_cli = "";
+    defer app.config._command_cli = null;
+    try std.testing.expectEqualStrings("USER:PY", elevatedProfileKey(&app.config, "", "USER:PY") orelse "");
+}
+
+test "win32 a forwarded new window keeps the default-profile launch when a theme is set" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "window-theme", .data = "background = #102030\n" });
+    const theme = try tmp.dir.realpathAlloc(alloc, "window-theme");
+    defer alloc.free(theme);
+    const theme_arg = try std.fmt.allocPrint(alloc, "--theme={s}", .{theme});
+    defer alloc.free(theme_arg);
+
+    // The app config, with a theme: the forwarded arguments' `finalize`
+    // builds the window's config again from its replay steps.
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+    var base_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{
+            theme_arg,
+            "--profile-command=py: cmd.exe /k py",
+            "--profile-env=py: MODE=profile",
+            "--profile-working-directory=py: D:\\pinned",
+            "--default-profile=py",
+        }),
+    };
+    try base.loadIter(alloc, &base_args);
+    try base.finalize();
+    try std.testing.expectEqual(@as(u8, 0x10), base.background.r);
+
+    var core_app: CoreApp = undefined;
+    core_app.alloc = alloc;
+    var app: App = undefined;
+    app.core_app = &core_app;
+
+    // A palette theme preview of files that edited the profile since (and
+    // set a theme, so a window's config is built again): the app config
+    // keeps the running profile, but its replay steps are the new files'.
+    var preview = try configpkg.Config.default(alloc);
+    defer preview.deinit();
+    var preview_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{
+            theme_arg,
+            "--profile-command=py: cmd.exe /k new",
+            "--profile-env=py: MODE=new",
+            "--profile-working-directory=py: D:\\new",
+            "--default-profile=py",
+        }),
+    };
+    try preview.loadIter(alloc, &preview_args);
+    try Host.finishPaletteThemeConfig(&preview, &base, theme);
+
+    // A directory the arguments carry, which an SSH default does not take:
+    // ssh.exe starts in the user's profile directory on every path
+    // (`applySshLaunchHardening`).
+    var ssh_base = try configpkg.Config.default(alloc);
+    defer ssh_base.deinit();
+    try ssh_base.finalize();
+    app.config = ssh_base;
+    const ssh_argv = [_][:0]const u8{ "C:\\Windows\\System32\\OpenSSH\\ssh.exe", "prod" };
+    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:prod", .label = "prod", .command = .{ .direct = &ssh_argv } };
+    app.config.command = app.config._default_profile.?.command;
+    app.config._command_defaulted = true;
+    var ssh_window = app.config.shallowClone(alloc);
+    defer ssh_window.deinit();
+    const ssh_profile = (try app.applyNewWindowLaunch(&ssh_window, &.{ "--font-size=14", "--working-directory=C:\\fwd" })).?;
+    try std.testing.expectEqualStrings("ssh:prod", ssh_profile.key);
+    const ssh_directory = switch (ssh_window.@"working-directory".?) {
+        .path => |path| path,
+        else => "",
+    };
+    try std.testing.expect(!std.mem.eql(u8, "C:\\fwd", ssh_directory));
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
+        try std.testing.expectEqualStrings(home, ssh_directory);
+    }
+
+    for ([_]*const configpkg.Config{ &base, &preview }) |app_config| {
+        app.config = app_config.*;
+        // A launch that names no directory forwards none when its own
+        // default-profile pins one (`forwardsLauncherDirectory`), so a second
+        // Start-menu launch opens where the first one did.
+        {
+            var file_default = app.config;
+            file_default._default_profile_cli = null;
+            try std.testing.expect(!ipc_server.forwardsLauncherDirectory(&file_default));
+            var config = app.config.shallowClone(alloc);
+            defer config.deinit();
+            const profile = (try app.applyNewWindowLaunch(&config, null)).?;
+            try std.testing.expectEqualStrings("user:py", profile.key);
+            try std.testing.expectEqualStrings("profile", config.env.map.get("MODE") orelse "");
+            try std.testing.expectEqualStrings("D:\\pinned", switch (config.@"working-directory".?) {
+                .path => |path| path,
+                else => "",
+            });
+        }
+        inline for (.{
+            .{ &[_][:0]const u8{"--font-size=14"}, "D:\\pinned" },
+            // A directory the arguments carry wins over the profile's.
+            .{ &[_][:0]const u8{ "--font-size=14", "--working-directory=C:\\fwd" }, "C:\\fwd" },
+        }) |case| {
+            var config = app.config.shallowClone(alloc);
+            defer config.deinit();
+            const profile = (try app.applyNewWindowLaunch(&config, case[0])).?;
+            try std.testing.expectEqualStrings("user:py", profile.key);
+            try std.testing.expectEqual(@as(f32, 14), config.@"font-size");
+            try std.testing.expectEqual(@as(u8, 0x10), config.background.r);
+            try std.testing.expectEqualStrings("profile", config.env.map.get("MODE") orelse "");
+            try std.testing.expectEqualStrings("cmd.exe /k py", if (config._profile_launch) |launch| launch.command_line else "");
+            try std.testing.expectEqualStrings(case[1], switch (config.@"working-directory".?) {
+                .path => |path| path,
+                else => "",
+            });
+            try std.testing.expect(!userProfileKeysChanged(&base, &config));
+        }
+    }
+}
+
+test "win32 the picker follows a changed default-profile until a profile is chosen in it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var first: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &first, .register = true, .id = 1 }},
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{&first});
+    const keys = [_][]const u8{ "pwsh.exe", "cmd.exe", "git-bash" };
+
+    const Reload = struct {
+        const argv = [_][:0]const u8{"x.exe"};
+
+        fn run(host: *Host, default_key: []const u8, list_keys: []const []const u8) !void {
+            // `config_change`: a new `default-profile`, every list dropped.
+            host.app.config._default_profile = .{ .kind = .cmd, .key = default_key, .label = default_key, .command = .{ .direct = &argv } };
+            host.invalidateProfiles();
+            _ = try host.applyProfiles(.{ .profiles = try testProfileList(host.app.core_app.alloc, list_keys), .complete = true });
+        }
+        fn selected(host: *Host) []const u8 {
+            return host.selectedProfile().?.key;
+        }
+    };
+
+    try Reload.run(&first, "cmd.exe", &keys);
+    try std.testing.expectEqualStrings("cmd.exe", Reload.selected(&first));
+    // The choice is the default's, not the user's: nothing is stored for a
+    // new window to start on.
+    try std.testing.expect(first.selected_profile_key == null and app.launcher_profile_key == null);
+
+    try Reload.run(&first, "git-bash", &keys);
+    try std.testing.expectEqualStrings("git-bash", Reload.selected(&first));
+
+    // A profile chosen in the picker stays chosen across a reload.
+    _ = try first.setSelectedProfileIndex(0);
+    try Reload.run(&first, "cmd.exe", &keys);
+    try std.testing.expectEqualStrings("pwsh.exe", Reload.selected(&first));
+    try std.testing.expectEqualStrings("pwsh.exe", app.launcher_profile_key.?);
+
+    // Once that profile is gone from the list, the default is picked again.
+    try Reload.run(&first, "cmd.exe", &.{ "cmd.exe", "git-bash" });
+    try std.testing.expectEqualStrings("cmd.exe", Reload.selected(&first));
+}
+
+test "win32 a restored pane keeps its own profile over default-profile" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+    const arena = base._arena.?.allocator();
+    try base.@"profile-command".parseCLI(arena, "py: cmd.exe /k py");
+    try base.@"profile-env".parseCLI(arena, "py: MODE=profile");
+    base.@"default-profile" = "py";
+    try base.finalize();
+
+    const pwsh_argv = [_][:0]const u8{"pwsh.exe"};
+    var profiles = [_]windows_shell.Profile{.{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &pwsh_argv } }};
+    var host: Host = undefined;
+    host.profiles = &profiles;
+    host.selected_profile = 0;
+    var app: App = undefined;
+    // Only the field restore reads; `base` stays the owner.
+    app.config._default_profile = base._default_profile;
+    var clone = base.shallowClone(alloc);
+    defer clone.deinit();
+    try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "PWSH.EXE"));
+    try std.testing.expectEqualStrings("pwsh.exe", clone.command.?.direct[0]);
+    // Nothing of the default profile is left to apply.
+    try std.testing.expect((try applyDefaultProfileConfig(&clone)) == null);
+    try std.testing.expect(clone.env.map.get("MODE") == null);
+    try std.testing.expect(clone._profile_launch == null);
+
+    // A pane saved from the default profile restores from the profile the
+    // config resolved, though the window's list does not have it (and
+    // without a window, without listing the profiles at all).
+    var restored = base.shallowClone(alloc);
+    defer restored.deinit();
+    try std.testing.expect(try app.applyRestoredProfileConfig(&restored, &host, "USER:PY"));
+    try std.testing.expectEqualStrings("cmd.exe", restored.command.?.direct[0]);
+    try std.testing.expectEqualStrings("profile", restored.env.map.get("MODE") orelse "");
+    try std.testing.expectEqualStrings("cmd.exe /k py", if (restored._profile_launch) |launch| launch.command_line else "");
+    // SSH stays refused whatever the default profile is.
+    var ssh = base.shallowClone(alloc);
+    defer ssh.deinit();
+    try std.testing.expect(!(try app.applyRestoredProfileConfig(&ssh, &host, "ssh:py")));
+}
+
+test "win32 hidden profiles stay out of the picker and the quick slots and still resolve by key" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .id = 1 }},
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{&host});
+    const alloc = app.core_app.alloc;
+
+    // A quick slot pinned to a profile that is then hidden keeps its pin.
+    app.launcher_quick_slot_keys[0] = try alloc.dupeZ(u8, "wsl:docker-desktop");
+    defer {
+        alloc.free(app.launcher_quick_slot_keys[0].?);
+        app.launcher_quick_slot_keys[0] = null;
+    }
+
+    // As discovery leaves a list: arranged, the hidden ones last.
+    const list = try testProfileList(alloc, &.{ "pwsh.exe", "wsl:docker-desktop", "cmd.exe", "git-bash" });
+    windows_shell.arrangeProfiles(list, &.{}, &.{ "wsl:docker-desktop", "git-bash" });
+    _ = try host.applyProfiles(.{ .profiles = list, .complete = true });
+
+    // The picker, the dropdown and the quick slots see the shown ones; the
+    // pin did not pull the hidden profile in front of them.
+    const shown = host.shownProfiles().?;
+    try std.testing.expectEqual(@as(usize, 2), shown.len);
+    try std.testing.expectEqualStrings("pwsh.exe", shown[0].key);
+    try std.testing.expectEqualStrings("cmd.exe", shown[1].key);
+    try std.testing.expectEqual(@as(usize, 4), host.profiles.?.len);
+    try std.testing.expectEqualStrings("wsl:docker-desktop", app.launcher_quick_slot_keys[0].?);
+    try std.testing.expectEqual(@as(?usize, 1), labels.quickSlotProfileIndex(shown.len, host.selectedProfileIndex(), 0, 3));
+    try std.testing.expectEqual(@as(?usize, null), labels.quickSlotProfileIndex(shown.len, host.selectedProfileIndex(), 1, 3));
+    try std.testing.expectEqual(@as(?usize, null), quickSlotShortcutProfileIndex(shown.len, null, '3', true));
+    _ = try host.setSelectedProfileIndex(3);
+    try std.testing.expectEqual(@as(?usize, 1), host.selectedProfileIndex());
+    try std.testing.expect(resolveProfileSelection(shown, "git-bash", 0) == .invalid);
+    try std.testing.expect(resolveProfileSelection(shown, "3", 0) == .invalid);
+
+    // By key, a hidden profile is still there: for a restore, a split, an
+    // elevated window, `default-profile`.
+    const hidden = (try host.profileForKey("WSL:docker-desktop")).?;
+    try std.testing.expect(hidden.hidden);
+    var clone = app.config.shallowClone(alloc);
+    defer clone.deinit();
+    try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "git-bash"));
+    try std.testing.expectEqual(@as(?usize, 3), profileIndexByKey(host.profiles.?, "git-bash"));
+}
+
 test "win32 a reload that changes any profile key drops the profile lists" {
     const alloc = std.testing.allocator;
     var old = try configpkg.Config.default(alloc);
@@ -55093,6 +56064,8 @@ test "win32 a reload that changes any profile key drops the profile lists" {
         // A removal, and an `env` line, which `%NAME%` in a profile reads.
         .{ "profile-command", "a:" },
         .{ "env", "PATH=C:\\team" },
+        .{ "profile-order", "a" },
+        .{ "profile-hidden", "cmd.exe" },
     }) |case| {
         var changed = try old.clone(alloc);
         defer changed.deinit();
@@ -55132,6 +56105,17 @@ test "win32 a reload that changes any profile key drops the profile lists" {
     try removed_other.@"profile-command".parseCLI(removed_other._arena.?.allocator(), "a: other.exe");
     try removed_other.@"profile-command".parseCLI(removed_other._arena.?.allocator(), "a:");
     try std.testing.expect(!userProfileKeysChanged(&removed, &removed_other));
+    // `default-profile` set, changed and cleared.
+    var set = try old.clone(alloc);
+    defer set.deinit();
+    set.@"default-profile" = "a";
+    try std.testing.expect(userProfileKeysChanged(&old, &set));
+    try std.testing.expect(userProfileKeysChanged(&set, &old));
+    var other = try set.clone(alloc);
+    defer other.deinit();
+    try std.testing.expect(!userProfileKeysChanged(&set, &other));
+    other.@"default-profile" = "pwsh.exe";
+    try std.testing.expect(userProfileKeysChanged(&set, &other));
 }
 
 test "win32 ssh split and session state drop remote cwd" {
@@ -57007,6 +57991,7 @@ test "win32 session state is saved only by the process that owns it" {
     app.config.@"window-save-state" = .always;
     app.config.@"initial-window" = true;
     app.config.@"initial-command" = null;
+    app.config._default_profile_cli = null;
 
     // A launch that forwarded to the primary, lost the IPC race or failed
     // before its first window never took the session, and must not save
@@ -57029,6 +58014,29 @@ test "win32 session state is saved only by the process that owns it" {
     app.explicit_startup_working_directory = true;
     try std.testing.expect(!app.sessionStateEnabled());
     app.explicit_startup_working_directory = false;
+
+    // Nor a jump-list link to a user profile, which names it with
+    // `--default-profile=` and, when the profile has a directory of its
+    // own, carries no `--working-directory=`.
+    {
+        const running = app.config;
+        defer app.config = running;
+        inline for (.{
+            .{ &[_][:0]const u8{ "--single-instance=false", "--command=", "--initial-command=", "--default-profile=user:py" }, false },
+            .{ &[_][:0]const u8{ "--single-instance=false", "--command=", "--initial-command=" }, true },
+            .{ &[_][:0]const u8{ "--default-profile=user:py", "--default-profile=" }, true },
+        }) |case| {
+            var config = try configpkg.Config.default(std.testing.allocator);
+            defer config.deinit();
+            var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(case[0]) };
+            try config.loadIter(std.testing.allocator, &args);
+            try config.finalize();
+            config.@"window-save-state" = .always;
+            app.config = config;
+            try std.testing.expectEqual(case[1], app.sessionRestoreEligible());
+            try std.testing.expectEqual(case[1], app.sessionStateEnabled());
+        }
+    }
 
     // A reload to window-save-state = never still stops the owner.
     app.config.@"window-save-state" = .never;
@@ -57056,6 +58064,7 @@ test "win32 a structural change arms one session checkpoint, only in the session
     app.config.@"window-save-state" = .always;
     app.config.@"initial-window" = true;
     app.config.@"initial-command" = null;
+    app.config._default_profile_cli = null;
     app.session_state_excluded_for_elevation = false;
     app.session_ending = false;
     app.session_state_saved_before_last_host_close = false;
