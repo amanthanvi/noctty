@@ -33279,6 +33279,9 @@ fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !voi
     dst.@"profile-name" = try src.@"profile-name".clone(alloc);
     dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
     dst.@"profile-env" = try src.@"profile-env".clone(alloc);
+    // Where those lines were read goes with them (New Elevated Window names
+    // a profile whose line came from a file).
+    dst._profile_places = try src.cloneProfilePlaces(alloc);
 }
 
 /// Whether a reload changed a key the profile lists are built from: a
@@ -49863,6 +49866,10 @@ test "win32 a palette theme preview keeps the running profile definitions until 
     try std.testing.expect(!preview.@"ssh-config-hosts");
     try std.testing.expect(!userProfileKeysChanged(&running, &preview));
     try std.testing.expectEqualStrings("old.exe", preview.@"profile-command".get("x").?);
+    // And where they were read, which New Elevated Window decides by: the
+    // running config's places, not the edited files' (the env line is the
+    // second argument there, the third here).
+    try std.testing.expectEqual(running.profilePlace("profile-env", "x").cli, preview.profilePlace("profile-env", "x").cli);
 
     // The next reload, which reads the edited files, sees the change and
     // drops the lists (the `config_change` path).

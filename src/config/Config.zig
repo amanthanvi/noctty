@@ -5275,6 +5275,21 @@ pub const ProfilePlace = struct {
     location: cli.Location,
 };
 
+/// A copy of `_profile_places` in `alloc` (another config's arena): the ids
+/// and locations are copied, the keys are static.
+pub fn cloneProfilePlaces(self: *const Config, alloc: Allocator) Allocator.Error!std.ArrayListUnmanaged(ProfilePlace) {
+    var out: std.ArrayListUnmanaged(ProfilePlace) = .empty;
+    try out.ensureTotalCapacity(alloc, self._profile_places.items.len);
+    for (self._profile_places.items) |place| {
+        out.appendAssumeCapacity(.{
+            .key = place.key,
+            .id = try alloc.dupe(u8, place.id),
+            .location = try place.location.clone(alloc),
+        });
+    }
+    return out;
+}
+
 /// The place of the last line that wrote `id` for `key`, or none (a value
 /// set by code, not by a line).
 pub fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Location {
@@ -6109,14 +6124,7 @@ pub fn clone(
     if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);
     // An app config is installed as a clone: keep where each profile line
     // was read, which the problems and New Elevated Window read.
-    try result._profile_places.ensureTotalCapacity(alloc_arena, self._profile_places.items.len);
-    for (self._profile_places.items) |place| {
-        result._profile_places.appendAssumeCapacity(.{
-            .key = place.key,
-            .id = try alloc_arena.dupe(u8, place.id),
-            .location = try place.location.clone(alloc_arena),
-        });
-    }
+    result._profile_places = try self.cloneProfilePlaces(alloc_arena);
 
     // Preserve our replay steps. We copy them exactly to also preserve
     // the exact conditionals required for some steps.
