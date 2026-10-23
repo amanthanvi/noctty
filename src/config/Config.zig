@@ -5612,6 +5612,7 @@ test "profile keys: a line the loader refuses is reported at its line, without i
         .{ .line = "profile-command = user:py: cmd.exe", .key = "profile-command", .message = "write the id without \"user:\"", .hidden = "cmd.exe" },
         .{ .line = "profile-command = d1: direct:cmd.exe", .key = "profile-command", .message = "\"d1\": direct: and shell: belong to command", .hidden = "cmd.exe" },
         .{ .line = "profile-command = p: \"\"", .key = "profile-command", .message = "\"p\" has no program to run", .hidden = null },
+        .{ .line = "profile-env = e1: =s3cret", .key = "profile-env", .message = "\"e1\": a variable name is needed before the '='", .hidden = "s3cret" },
         .{ .line = "profile-command = tool.exe --token=abc", .key = "profile-command", .message = "needs a profile id and a ':' before the value (the value is not shown)", .hidden = "abc" },
     };
     const text = comptime text: {

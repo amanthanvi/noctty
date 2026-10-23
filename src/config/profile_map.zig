@@ -117,6 +117,9 @@ pub const Error = error{
     ProfileNoProgram,
     /// `profile-env` text without `=`.
     ValueRequired,
+    /// `profile-env` text with nothing before its `=` (`<id>: =x`), which
+    /// would reach the environment block as a variable with no name.
+    ProfileEnvNoName,
 };
 
 /// A value that passed the checks: its id and its text, both trimmed.
@@ -141,7 +144,10 @@ pub fn check(comptime kind: Kind, value: []const u8) Error!Parsed {
                 return error.ProfileCommandPrefix;
             if (firstArgumentIsEmpty(text)) return error.ProfileNoProgram;
         },
-        .env => if (std.mem.indexOfScalar(u8, text, '=') == null) return error.ValueRequired,
+        .env => {
+            const eq = std.mem.indexOfScalar(u8, text, '=') orelse return error.ValueRequired;
+            if (std.mem.trim(u8, text[0..eq], &std.ascii.whitespace).len == 0) return error.ProfileEnvNoName;
+        },
         .name, .text => {},
     };
     return .{ .id = id, .text = text };
@@ -561,6 +567,8 @@ test "profile map: lines the loader reports at once" {
         .{ .kind = .command, .value = "p: \"\"", .err = error.ProfileNoProgram },
         .{ .kind = .command, .value = "p: \"\" arg", .err = error.ProfileNoProgram },
         .{ .kind = .env, .value = "p: NOEQUALS", .err = error.ValueRequired },
+        .{ .kind = .env, .value = "p: =s3cret", .err = error.ProfileEnvNoName },
+        .{ .kind = .env, .value = "p: \t = x", .err = error.ProfileEnvNoName },
     }) |case| {
         const got = switch (case.kind) {
             inline else => |kind| check(kind, case.value),

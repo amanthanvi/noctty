@@ -35,6 +35,7 @@ pub const Error = error{
     ReservedProfileId,
     ProfileCommandPrefix,
     ProfileNoProgram,
+    ProfileEnvNoName,
 };
 
 /// Parse the command line arguments from iter into dst.
@@ -204,6 +205,7 @@ pub fn parse(
                 error.ReservedProfileId,
                 error.ProfileCommandPrefix,
                 error.ProfileNoProgram,
+                error.ProfileEnvNoName,
                 => |e| try formatProfileProblem(arena_alloc, key, value orelse "", e),
                 else => try std.fmt.allocPrintSentinel(
                     arena_alloc,
@@ -353,6 +355,12 @@ fn formatProfileProblem(
             0,
         ),
         error.ProfileNoProgram => try std.fmt.allocPrintSentinel(arena_alloc, "\"{s}\" has no program to run", .{id}, 0),
+        error.ProfileEnvNoName => try std.fmt.allocPrintSentinel(
+            arena_alloc,
+            "\"{s}\": a variable name is needed before the '='",
+            .{id},
+            0,
+        ),
         else => unreachable,
     };
 }
@@ -1522,7 +1530,8 @@ pub const LineIterator = struct {
     pub const MAX_LINE_SIZE = 4096;
 
     /// The longest line `next` reads, line ending excluded: the entry buffer
-    /// less the `--` it is returned with.
+    /// less the `--` it is returned with. (The buffer has one byte more, for
+    /// the CR of a CRLF line, which the trim below removes.)
     pub const max_line_len = MAX_LINE_SIZE - 2;
 
     /// What `next` returns for a line longer than `max_line_len`, which it
@@ -1548,7 +1557,7 @@ pub const LineIterator = struct {
 
     /// This is the buffer where we store the current entry that
     /// is formatted to be compatible with the parse function.
-    entry: [MAX_LINE_SIZE]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 2)),
+    entry: [MAX_LINE_SIZE + 1]u8 = [_]u8{ '-', '-' } ++ ([_]u8{0} ** (MAX_LINE_SIZE - 1)),
 
     pub fn init(reader: *std.Io.Reader) Self {
         return .{ .r = reader };
@@ -1592,6 +1601,9 @@ pub const LineIterator = struct {
 
             var entry = writer.buffered();
             self.line += 1;
+            // The byte past `max_line_len` is there only for a CRLF line's
+            // CR, so a CRLF file has the same limit as an LF one.
+            if (entry.len > max_line_len and entry[entry.len - 1] != '\r') return skipped_line;
 
             // Trim any whitespace (including CR) around it
             const trim = std.mem.trim(u8, entry, whitespace ++ "\r");
@@ -1804,12 +1816,14 @@ test "LineIterator refills after ignored line at buffer boundary" {
 test "LineIterator skips a line longer than its buffer and reads on" {
     const testing = std.testing;
     const max = LineIterator.max_line_len;
-    // 4094 bytes fits; 4095 does not; neither does a line whose last
-    // character, a three-byte one, crosses the limit.
+    // 4094 bytes fits, also with a CRLF line ending; 4095 does not, with
+    // either ending; neither does a line whose last character, a three-byte
+    // one, crosses the limit.
     const fits = "a=" ++ "x" ** (max - 2);
     const over = "b=" ++ "y" ** (max - 1);
     const utf8 = "c=" ++ "z" ** (max - 3) ++ "\xe2\x82\xac";
-    const text = fits ++ "\n" ++ over ++ "\n" ++ "d=1\n" ++ utf8 ++ "\n" ++ "e=2\n" ++ over;
+    const text = fits ++ "\n" ++ over ++ "\n" ++ "d=1\n" ++ utf8 ++ "\n" ++ "e=2\n" ++
+        fits ++ "\r\n" ++ over ++ "\r\n" ++ "f=3\r\n" ++ over;
     // Through a small read buffer, as a config file is read.
     var f: std.Io.Reader = .fixed(text);
     var buf: [2048]u8 = undefined;
@@ -1823,9 +1837,14 @@ test "LineIterator skips a line longer than its buffer and reads on" {
     try testing.expectEqual(LineIterator.skipped_line.ptr, iter.next().?.ptr);
     try testing.expectEqual(@as(usize, 4), iter.line);
     try testing.expectEqualStrings("--e=2", iter.next().?);
+    // CRLF: the CR does not count.
+    try testing.expectEqualStrings("--" ++ fits, iter.next().?);
+    try testing.expectEqual(LineIterator.skipped_line.ptr, iter.next().?.ptr);
+    try testing.expectEqual(@as(usize, 7), iter.line);
+    try testing.expectEqualStrings("--f=3", iter.next().?);
     // A long last line without a line ending.
     try testing.expectEqual(LineIterator.skipped_line.ptr, iter.next().?.ptr);
-    try testing.expectEqual(@as(usize, 6), iter.line);
+    try testing.expectEqual(@as(usize, 9), iter.line);
     try testing.expectEqual(@as(?[]const u8, null), iter.next());
 }
 
