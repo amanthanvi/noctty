@@ -134,6 +134,16 @@ try {
         throw "Generated nuspec copyright must match the LICENSE: $licenseCopyright"
     }
 
+    # The Chocolatey description is its own text, and it names only the packaged architectures.
+    $description = $metadataNode.SelectSingleNode('n:description', $namespaceManager).InnerText
+    if ($description -ceq $metadataNode.SelectSingleNode('n:summary', $namespaceManager).InnerText) {
+        throw 'Generated nuspec description must differ from the summary.'
+    }
+    $architectureText = if ($Architecture -eq 'arm64') { ', on ARM64.' } else { ', on x64.' }
+    if (-not $description.Contains($architectureText, [StringComparison]::Ordinal)) {
+        throw "Generated nuspec description must name only the packaged architecture ($Architecture)."
+    }
+
     $installScript = Get-Content -LiteralPath $installScriptPath -Raw
     $expectedSetupUrl = "https://github.com/amanthanvi/noctty/releases/download/v$Version/$setupName"
     foreach ($expectedText in @(

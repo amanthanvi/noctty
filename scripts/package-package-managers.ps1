@@ -76,7 +76,7 @@ noctty is a Windows terminal emulator that reuses Ghostty's terminal core under 
 # The Chocolatey page shows the description as Markdown, so it carries the notes a
 # user needs before installing: the signing certificate, PATH and updates.
 $chocolateyDescription = @'
-noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end. It requires Windows 10 version 1809 or later, or Windows 11, on x64 or ARM64.
+noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end. It requires Windows 10 version 1809 or later, or Windows 11, on __ARCHITECTURES__.
 
 ### Features
 
@@ -92,6 +92,8 @@ noctty is a Windows terminal emulator that reuses Ghostty's terminal core under 
 * The installer does not add noctty to PATH.
 * noctty checks GitHub Releases for updates and only installs one when you choose Install. Update with `choco upgrade noctty` to keep Chocolatey's version record right. Set `auto-update = off` in the config to turn the check off.
 '@.Trim()
+# Name only the architectures this package carries installers for.
+$chocolateyDescription = $chocolateyDescription.Replace('__ARCHITECTURES__', (($Architectures | ForEach-Object { if ($_ -eq 'arm64') { 'ARM64' } else { $_ } }) -join ' or '))
 
 function Reset-Directory {
     param([string]$Path)
