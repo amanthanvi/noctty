@@ -753,11 +753,13 @@ banner and leaves the older toast where it is). noctty takes a pane's toast
 out of Action Center when you look at its tab (its window comes forward with
 that tab active, or a pane in the tab gets focus), when the pane closes, and
 when its tab is closed, also while that close can still be undone; an undo
-does not bring the toast back. When noctty exits it removes every toast it
-showed. Toasts are grouped by process id, so a noctty never removes those of
-another noctty that is running. A noctty that ends without exiting (a crash,
-or Windows ending it at sign-out) leaves its toasts until you dismiss them, or
-until a later noctty that Windows happens to give the same process id exits.
+does not bring the toast back. A toast from a pane whose tab is in undo
+history is taken out right after Windows shows it. When noctty exits it removes
+every toast it showed for a pane. Toasts are grouped by process id, so a
+noctty never removes those of another noctty that is running. A noctty that
+ends without exiting (a crash, or Windows ending it at sign-out) leaves its
+toasts until you dismiss them, or until a later noctty that Windows happens to
+give the same process id shows a pane toast and then exits.
 noctty's own notices that come from no pane (configuration reloaded, Settings
 saved) are not removed.
 

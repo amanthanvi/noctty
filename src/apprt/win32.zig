@@ -12175,6 +12175,9 @@ pub const App = struct {
             return err;
         };
         if (shown) {
+            // One queued while the show pumped messages (the tab seen) was
+            // for the older toast too, which this one has replaced.
+            _ = self.cancelToastRemoval(surface_id);
             self.noteToastShown(surface_id);
         } else if (was_queued) {
             self.restoreToastRemoval(surface_id);
@@ -12182,11 +12185,12 @@ pub const App = struct {
     }
 
     /// A toast tagged `surface_id` is in Action Center now. The show may
-    /// have pumped messages that closed the pane, so it is found again by
-    /// id; a pane that is gone has its toast removed at once.
+    /// have pumped messages that closed the pane or put its tab in undo
+    /// history, so it is found again by id; a pane not in a live tab has
+    /// its toast removed at once.
     fn noteToastShown(self: *App, surface_id: u64) void {
         self.toast_group_used = true;
-        if (self.findSurfaceById(surface_id)) |surface| {
+        if (self.findLiveSurfaceById(surface_id)) |surface| {
             surface.toast_outstanding = surface_id;
         } else {
             // Failing that, exit's group removal takes it.
@@ -56802,6 +56806,9 @@ const TestToastRecorder = struct {
     /// notifications are turned off for noctty; the request is still
     /// recorded.
     refuse: ?anyerror = null,
+    /// Runs inside the show, after the request is recorded, as the
+    /// messages a show can pump would.
+    during_show: ?struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!void } = null,
     title: ?[]u8 = null,
     body: ?[]u8 = null,
     attribution: ?[]u8 = null,
@@ -56826,6 +56833,7 @@ const TestToastRecorder = struct {
         if (request.launch) |value| self.launch = try self.alloc.dupe(u8, value);
         if (request.tag) |value| self.tag = try self.alloc.dupe(u8, value);
         if (request.group) |value| self.group = try self.alloc.dupe(u8, value);
+        if (self.during_show) |hook| try hook.run(hook.ctx);
         if (self.refuse) |err| return err;
     }
 
@@ -57499,6 +57507,66 @@ test "win32 a refused toast keeps the queued removal of its pane's older toast" 
     var buf: [64]u8 = undefined;
     try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x1001)});
     try std.testing.expectEqual(@as(?u64, null), w.front.toast_outstanding);
+}
+
+test "win32 a toast shown while its tab is seen survives the flush" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    w.host.hwnd = hwnd;
+    defer w.host.hwnd = null;
+    try w.osc(&w.front, "", "older");
+
+    // The show pumps the activation of the pane's tab, which queues the
+    // older toast's removal; the newer toast replaces that one, so the
+    // removal must not take it away.
+    const Seen = struct {
+        w: *ToastTestWindow,
+        hwnd: HWND,
+        fn run(ctx: *anyopaque) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.w.app.acknowledgeTabWithForeground(&self.w.host, 0, self.hwnd);
+            try std.testing.expectEqual(@as(usize, 1), self.w.app.toast_removals.items.len);
+        }
+    };
+    var seen: Seen = .{ .w = &w, .hwnd = hwnd };
+    w.recorder.during_show = .{ .ctx = &seen, .run = Seen.run };
+    try w.osc(&w.front, "", "newer");
+    w.app.flushToastRemovals();
+    try w.recorder.expectRemovals(&.{});
+    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
+}
+
+test "win32 a toast shown while its tab is undo-closed is removed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+
+    // The show pumps the close of the pane's tab, which keeps the pane
+    // alive in undo history, where its toast must not stay.
+    const Close = struct {
+        w: *ToastTestWindow,
+        entry: ?Host.StructuralUndoEntry = null,
+        fn run(ctx: *anyopaque) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.entry = self.w.host.detachTabForUndo(1) orelse return error.TestExpectedTab;
+        }
+    };
+    var close: Close = .{ .w = &w };
+    defer if (close.entry) |*entry| {
+        entry.dispose(&w.host, .host_destroy) catch {}; // Best-effort test teardown.
+    };
+    w.recorder.during_show = .{ .ctx = &close, .run = Close.run };
+    try w.osc(&w.p, "", "newer");
+    try std.testing.expect(w.app.findTabForSurface(&w.p) == null);
+    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
+    w.app.flushToastRemovals();
+    var buf: [64]u8 = undefined;
+    try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x2002)});
 }
 
 test "win32 removal runs from the posted message, not inside acknowledgeTab" {
