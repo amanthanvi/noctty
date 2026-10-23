@@ -412,8 +412,11 @@ function Assert-HiddenDesktop([IntPtr] $Job, [string] $DesktopName, [string] $Re
         throw 'Window startup required process window is absent; further input is blocked.'
     }
     # noctty's lifecycle window is top-level so that Restart Manager can ask a process with no other
-    # window to close, and it is never shown. -NoWindows tolerates exactly that class, and only hidden.
-    $unexpectedRows = @($rows | Where-Object { -not ($_.ClassName -ceq 'noctty.win32.lifecycle' -and $_.Visible -eq $false) })
+    # window to close, and it is never shown. Windows gives the thread that owns a top-level window its
+    # default IME windows (class IME, and MSCTFIME UI under Text Services), also hidden; a message-only
+    # window gets none. -NoWindows tolerates exactly those classes, and only while hidden.
+    $toleratedHidden = @('noctty.win32.lifecycle', 'IME', 'MSCTFIME UI')
+    $unexpectedRows = @($rows | Where-Object { -not ($toleratedHidden -ccontains $_.ClassName -and $_.Visible -eq $false) })
     if ($NoWindows -and $unexpectedRows.Count) { throw 'Hidden desktop unexpected private job window; further launches are blocked.' }
 }
 

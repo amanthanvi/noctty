@@ -604,6 +604,7 @@ function Test-HiddenDesktopAssertion([string] $Code) {
         @{ NoWindows = $true; Blocked = $true }, @{ Empty = $true; NoWindows = $true }
         @{ Stale = $true }, @{ Stale = $true; Required = 42; Blocked = $true }, @{ Stale = $true; NoWindows = $true; Blocked = $true }
         @{ Class = 'noctty.win32.lifecycle'; NoWindows = $true }, @{ Class = 'noctty.win32.lifecycle'; Visible = $true; NoWindows = $true; Blocked = $true }
+        @{ Class = 'IME'; NoWindows = $true }, @{ Class = 'MSCTFIME UI'; NoWindows = $true }, @{ Class = 'IME'; Visible = $true; NoWindows = $true; Blocked = $true }
         @{ Class = 'noctty.win32.host'; NoWindows = $true; Blocked = $true }
         @{ Native = 'OpenDesktopW'; Code = 5; Blocked = $true }
         @{ Native = 'EnumDesktopWindows'; Code = 170; Blocked = $true }
@@ -658,7 +659,7 @@ Assert-HiddenMutation 'private missing ready window accepted' $desktopAssertion 
 Assert-HiddenMutation 'private stale ready window accepted' $desktopAssertion ($desktopAssertion.Replace(' -and $_.CompletedAttempt -eq $true', '')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private idle window accepted' $desktopAssertion ($desktopAssertion.Replace('$NoWindows -and $unexpectedRows.Count', '$false')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private visible lifecycle window accepted' $desktopAssertion ($desktopAssertion.Replace(' -and $_.Visible -eq $false', '')) ${function:Test-HiddenDesktopAssertion}
-Assert-HiddenMutation 'private lifecycle exemption covers every class' $desktopAssertion ($desktopAssertion.Replace("`$_.ClassName -ceq 'noctty.win32.lifecycle'", '$true')) ${function:Test-HiddenDesktopAssertion}
+Assert-HiddenMutation 'private lifecycle exemption covers every class' $desktopAssertion ($desktopAssertion.Replace("`$toleratedHidden -ccontains `$_.ClassName", '$true')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'desktop receipt removed' $desktopAssertion ($desktopAssertion.Replace('Add-Content -LiteralPath $ReceiptPath', 'Out-Null')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private native receipt code lost' $desktopAssertion ($desktopAssertion.Replace('$errorCode = $failure.NativeErrorCode', '$errorCode = $null')) ${function:Test-HiddenDesktopAssertion}
 Assert-HiddenMutation 'private arbitrary native label disclosed' $desktopAssertion ($desktopAssertion.Replace('$nativeStages -ccontains $failure.Message', '$true')) ${function:Test-HiddenDesktopAssertion}

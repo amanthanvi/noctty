@@ -6,8 +6,9 @@ hand it and checks what an idle handoff server does to a user's data:
 
   * it opens no window of its own and exits by itself once its five-second idle timer expires, with
     exit code 0 (the log line "terminal handoff server idle timeout" is the evidence of the path).
-    The one window allowed is the never-shown top-level lifecycle window (noctty.win32.lifecycle)
-    that every noctty process makes so that Restart Manager can ask it to close; it must stay hidden;
+    The windows allowed are the never-shown top-level lifecycle window (noctty.win32.lifecycle)
+    that every noctty process makes so that Restart Manager can ask it to close, and the default IME
+    windows Windows gives its thread for it; all must stay hidden;
   * every state file that already existed is byte-identical afterwards: session-state.json,
     palette-mru.txt, update-state.json, jump-list-recents.json, startup-attempts.json and
     config.ghostty, in the portable directory and in the redirected LOCALAPPDATA\noctty;
