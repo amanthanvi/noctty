@@ -57,6 +57,7 @@ $cases = @(
     @{ Name = 'the portable smoke harness'; Paths = @('test/windows/package-portable-cli.ps1', 'test/windows/cli-shell-command.ps1'); Expect = 'arm64_build,portable_smoke' }
     @{ Name = 'a packaging-only script'; Paths = @('scripts/build-package-windows.ps1'); Expect = 'arm64_build,portable_smoke' }
     @{ Name = 'docs plus a Zig source'; Paths = @('docs/status.md', 'src/config/Config.zig'); Expect = $allFlags }
+    @{ Name = 'the docs a unit test reads'; Paths = @('docs/windows.md'); Expect = $allFlags }
     @{ Name = 'docs plus the README'; Paths = @('docs/status.md', 'README.md'); Expect = 'arm64_build,portable_smoke' }
     @{ Name = 'a path the table does not know'; Paths = @('newdir/file.txt'); Expect = $allFlags }
     @{ Name = 'a quoted git path'; Paths = @('"docs/\303\251.md"'); Expect = $allFlags }
