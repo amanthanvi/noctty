@@ -168,6 +168,16 @@ fn unquote(text: []const u8) []const u8 {
     return text;
 }
 
+/// Whether a label would change if written as it is and loaded again: one
+/// that starts or ends with `"` or whitespace.
+fn nameNeedsQuotes(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for ([_]u8{ text[0], text[text.len - 1] }) |byte| {
+        if (byte == '"' or std.ascii.isWhitespace(byte)) return true;
+    }
+    return false;
+}
+
 /// Remove every variable of `map` whose name equals `name` in any case.
 fn removeEnvName(map: *RepeatableStringMap, name: []const u8) void {
     var index: usize = 0;
@@ -357,6 +367,10 @@ pub fn ProfileMap(comptime kind: Kind) type {
             for (self.entries.items) |entry| switch (kind) {
                 .command, .name, .text => if (entry.removed)
                     try formatter.writer.print("{s} = {s}:\n", .{ formatter.name, entry.id })
+                else if (kind == .name and nameNeedsQuotes(entry.value))
+                    // Loading removes one surrounding pair of quotes and
+                    // the outer whitespace, so give it a pair to remove.
+                    try formatter.writer.print("{s} = {s}: \"{s}\"\n", .{ formatter.name, entry.id, entry.value })
                 else
                     try formatter.writer.print("{s} = {s}: {s}\n", .{ formatter.name, entry.id, entry.value }),
                 .env => {
@@ -507,6 +521,23 @@ test "profile map: a label loses one surrounding pair of quotes" {
     try testing.expectEqualStrings("Build Box", map.get("x").?);
     try testing.expectEqualStrings("a \"b\" c", map.get("y").?);
     try testing.expectEqualStrings("\"Quoted\"", map.get("z").?);
+
+    // A label that loading would change again is written with a pair of
+    // quotes for the next load to remove.
+    try map.parseCLI(alloc, "w: \"  spaced  \"");
+    try testing.expectEqualStrings("  spaced  ", map.get("w").?);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try map.formatEntry(formatterpkg.entryFormatter("profile-name", &out.writer));
+    const written = out.written();
+    try testing.expect(std.mem.indexOf(u8, written, "profile-name = x: Build Box\n") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "profile-name = z: \"\"Quoted\"\"\n") != null);
+    var again: Name = .{};
+    var lines = std.mem.splitScalar(u8, written, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        try again.parseCLI(alloc, line["profile-name = ".len..]);
+    }
+    try testing.expect(again.equal(map));
 }
 
 test "profile map: lines the loader reports at once" {

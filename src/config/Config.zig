@@ -3614,7 +3614,8 @@ _elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
 
 /// Where each `profile-*` (key, id) was last written, for the problems
 /// `finalize` reports (`profilePlace`). Recorded by `parseManuallyHook`, so a
-/// config rebuilt by replay records them again; `clone` does not copy it.
+/// config rebuilt by replay records them again; `clone` copies it. `key` is
+/// a static field name; `id` and the location live in the arena.
 _profile_places: std.ArrayListUnmanaged(ProfilePlace) = .empty,
 
 /// The last config file that was skipped whole because it is UTF-16 text that
@@ -5568,6 +5569,15 @@ test "profile keys: a field with no profile-command is reported at its last line
     defer alloc.free(formatted);
     try testing.expect(std.mem.indexOf(u8, formatted, "ghost") == null);
     try testing.expect(std.mem.indexOf(u8, formatted, "profile-name = ok: Fine\n") != null);
+
+    // A clone (an app config is installed as one) keeps the places, as its
+    // own copies: the source may be freed first.
+    var copy = try cfg.clone(alloc);
+    defer copy.deinit();
+    const place = copy.profilePlace("profile-name", "GHOST");
+    try testing.expectEqual(@as(usize, 4), place.file.line);
+    try testing.expect(place.file.path.ptr != cfg.profilePlace("profile-name", "ghost").file.path.ptr);
+    try testing.expectEqual(@as(usize, 1), copy.profilePlace("profile-command", "ok").file.line);
 }
 
 test "profile keys: a line the loader refuses is reported at its line, without its value" {
@@ -6097,6 +6107,16 @@ pub fn clone(
     result._diagnostics = try self._diagnostics.clone(alloc_arena);
     result._command_defaulted = self._command_defaulted;
     if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);
+    // An app config is installed as a clone: keep where each profile line
+    // was read, which the problems and New Elevated Window read.
+    try result._profile_places.ensureTotalCapacity(alloc_arena, self._profile_places.items.len);
+    for (self._profile_places.items) |place| {
+        result._profile_places.appendAssumeCapacity(.{
+            .key = place.key,
+            .id = try alloc_arena.dupe(u8, place.id),
+            .location = try place.location.clone(alloc_arena),
+        });
+    }
 
     // Preserve our replay steps. We copy them exactly to also preserve
     // the exact conditionals required for some steps.

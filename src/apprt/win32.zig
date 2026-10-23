@@ -33289,7 +33289,19 @@ fn userProfileKeysChanged(old: *const configpkg.Config, new: *const configpkg.Co
         !old.@"profile-name".equal(new.@"profile-name") or
         !old.@"profile-working-directory".equal(new.@"profile-working-directory") or
         !old.@"profile-env".equal(new.@"profile-env")) return true;
-    return new.@"profile-command".count() > 0 and !old.env.equal(new.env);
+    return new.@"profile-command".count() > 0 and !envEntriesEqual(old.env, new.env);
+}
+
+/// Two `env` maps with the same entries in the same order. `%NAME%` in a
+/// profile reads the last entry of a name in any case, so swapping
+/// `MODE=one` and `mode=two` changes what it reads, which `equal`, blind to
+/// order, would miss.
+fn envEntriesEqual(a: anytype, b: anytype) bool {
+    if (a.map.count() != b.map.count()) return false;
+    for (a.map.keys(), a.map.values(), b.map.keys(), b.map.values()) |ak, av, bk, bv| {
+        if (!std.mem.eql(u8, ak, bk) or !std.mem.eql(u8, av, bv)) return false;
+    }
+    return true;
 }
 
 fn applyProfileConfigByKey(
@@ -55088,6 +55100,20 @@ test "win32 a reload that changes any profile key drops the profile lists" {
     defer bare_env.deinit();
     try bare_env.env.parseCLI(bare_env._arena.?.allocator(), "PATH=C:\\team");
     try std.testing.expect(!userProfileKeysChanged(&bare, &bare_env));
+
+    // The same `env` lines in another order: `%MODE%` reads the last one.
+    var one_two = try old.clone(alloc);
+    defer one_two.deinit();
+    try one_two.env.parseCLI(one_two._arena.?.allocator(), "MODE=one");
+    try one_two.env.parseCLI(one_two._arena.?.allocator(), "mode=two");
+    var two_one = try old.clone(alloc);
+    defer two_one.deinit();
+    try two_one.env.parseCLI(two_one._arena.?.allocator(), "mode=two");
+    try two_one.env.parseCLI(two_one._arena.?.allocator(), "MODE=one");
+    try std.testing.expect(userProfileKeysChanged(&one_two, &two_one));
+    var one_two_again = try one_two.clone(alloc);
+    defer one_two_again.deinit();
+    try std.testing.expect(!userProfileKeysChanged(&one_two, &one_two_again));
 
     // A removed profile defined again with the command it had is a change
     // back; two removals of different commands are no change.
