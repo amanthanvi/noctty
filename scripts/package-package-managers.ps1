@@ -90,7 +90,7 @@ noctty is a Windows terminal emulator that reuses Ghostty's terminal core under 
 
 * The installer is signed with a self-signed certificate rather than one from a public certificate authority. This package checks each download against the SHA-256 published with the release.
 * The installer does not add noctty to PATH.
-* noctty checks GitHub Releases for updates and only installs one when you choose Install. Update with `choco upgrade noctty` to keep Chocolatey's version record right. Set `auto-update = off` in the config to turn the check off.
+* noctty checks GitHub Releases for updates and never installs one on its own: by default its notice opens the release page. Update with `choco upgrade noctty`, run from a terminal other than noctty, so Chocolatey's version record stays right. Set `auto-update = off` in the config to turn the check off.
 '@.Trim()
 # Name only the architectures this package carries installers for.
 $chocolateyDescription = $chocolateyDescription.Replace('__ARCHITECTURES__', (($Architectures | ForEach-Object { if ($_ -eq 'arm64') { 'ARM64' } else { $_ } }) -join ' or '))
