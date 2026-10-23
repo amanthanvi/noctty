@@ -5413,6 +5413,53 @@ test "profile keys keep every value exactly as written and format back to the sa
     try testing.expectEqualStrings(formatted, reformatted);
 }
 
+test "profile keys: a line of the longest length the reader takes formats to a line it takes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const max = cli.args.LineIterator.max_line_len;
+    const fill = struct {
+        fn line(comptime head: []const u8, comptime byte: u8, comptime tail: []const u8) []const u8 {
+            return head ++ [_]u8{byte} ** (max - head.len - tail.len) ++ tail;
+        }
+    }.line;
+    // Each line is exactly `max` bytes as written, without the optional
+    // spaces; written back with them it would be 3 bytes too long.
+    const long_lines = comptime [_][]const u8{
+        fill("profile-command=long:tool.exe ", 'c', ""),
+        fill("profile-name=long:", 'n', ""),
+        fill("profile-name=quoted:\" ", 'q', "\""),
+        fill("profile-working-directory=long:C:\\", 'd', ""),
+        fill("profile-env=long:LONGVAR=", 'v', ""),
+    };
+    const text = comptime text: {
+        var text: []const u8 = "profile-command = quoted: q.exe\n";
+        for (long_lines) |line| text = text ++ line ++ "\n";
+        break :text text;
+    };
+    for (long_lines) |line| try testing.expectEqual(max, line.len);
+
+    var cfg = try testLoadProfileText(alloc, text);
+    defer cfg.deinit();
+    try testExpectNoProblems(&cfg);
+    try testing.expectEqual(@as(usize, max - "profile-name=quoted:\" ".len), cfg.@"profile-name".get("quoted").?.len);
+
+    const formatted = try testFormatChanged(alloc, &cfg);
+    defer alloc.free(formatted);
+    var lines = std.mem.splitScalar(u8, formatted, '\n');
+    while (lines.next()) |line| try testing.expect(line.len <= max);
+    // A short line keeps the usual spacing.
+    try testing.expect(std.mem.indexOf(u8, formatted, "profile-command = quoted: q.exe\n") != null);
+
+    var again = try testLoadProfileText(alloc, formatted);
+    defer again.deinit();
+    try testExpectNoProblems(&again);
+    try testing.expect(cfg.@"profile-command".equal(again.@"profile-command"));
+    try testing.expect(cfg.@"profile-name".equal(again.@"profile-name"));
+    try testing.expect(cfg.@"profile-working-directory".equal(again.@"profile-working-directory"));
+    try testing.expect(cfg.@"profile-env".equal(again.@"profile-env"));
+    try testing.expectEqual(@as(usize, 2), again.@"profile-command".count());
+}
+
 /// Load `files` (name, text), the first as the main config, through the real
 /// file reader and include order, and finalize, as a real load does.
 fn testLoadProfileFiles(alloc: Allocator, dir: std.fs.Dir, files: []const [2][]const u8) !Config {
@@ -5614,12 +5661,29 @@ test "profile keys: a line the loader refuses is reported at its line, without i
         .{ .line = "profile-command = p: \"\"", .key = "profile-command", .message = "\"p\" has no program to run", .hidden = null },
         .{ .line = "profile-env = e1: =s3cret", .key = "profile-env", .message = "\"e1\": a variable name is needed before the '='", .hidden = "s3cret" },
         .{ .line = "profile-command = tool.exe --token=abc", .key = "profile-command", .message = "needs a profile id and a ':' before the value (the value is not shown)", .hidden = "abc" },
+        // Text in an ANSI code page (Windows-1252 here), for each key.
+        .{ .line = "profile-command = jose: C:\\Users\\Jos\xe9\\tool.exe /k", .key = "profile-command", .message = "\"jose\": the line is not UTF-8; save the file as UTF-8 (the value is not shown)", .hidden = "tool.exe" },
+        .{ .line = "profile-name = n: Pyth\xf6n", .key = "profile-name", .message = "\"n\": the line is not UTF-8", .hidden = "Pyth" },
+        .{ .line = "profile-working-directory = w: C:\\Caf\xe9", .key = "profile-working-directory", .message = "\"w\": the line is not UTF-8", .hidden = "Caf" },
+        .{ .line = "profile-env = e2: NAME=Gr\xfc\xdfe", .key = "profile-env", .message = "\"e2\": the line is not UTF-8", .hidden = "NAME" },
     };
-    const text = comptime text: {
-        var text: []const u8 = "theme = light:missing-profiles-light,dark:missing-profiles-dark\n";
-        for (cases) |case| text = text ++ case.line ++ "\n";
-        break :text text ++ "profile-command = ok: ok.exe\n";
+    const body = comptime body: {
+        var body: []const u8 = "";
+        for (cases) |case| body = body ++ case.line ++ "\n";
+        break :body body ++ "profile-command = ok: ok.exe\n";
     };
+    // Theme files that exist, so `finalize` swaps in a config rebuilt by
+    // replay before the conditional replay below.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background = #000000\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark_theme);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n{s}", .{ light, dark_theme, body });
+    defer alloc.free(text);
 
     var cfg = try testLoadProfileText(alloc, text);
     defer cfg.deinit();
@@ -5664,28 +5728,51 @@ test "a config line longer than the reader takes is reported once and the next l
     // second; a three-byte character crosses the limit.
     const prefix = "env = LONG=";
     const long_env = prefix ++ "x" ** (max - prefix.len - 2) ++ "\xe2\x82\xac";
-    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = "theme = light:missing-long-light,dark:missing-long-dark\n" ++
+    // Theme files that exist: `finalize` then swaps in a config rebuilt by
+    // replay (`loadTheme`), which `changeConditionalState` replays again.
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background = #000000\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark_theme);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n" ++
         "env = BEFORE=1\n" ++
         long_env ++ "\n" ++
-        "title = after the long line\n" });
+        "title = after the long line\n" ++
+        "config-file = missing-include.ghostty\n", .{ light, dark_theme });
+    defer alloc.free(text);
+    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = text });
     const path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
     defer alloc.free(path);
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
     try cfg.loadFile(alloc, path);
+    try cfg.loadRecursiveFiles(alloc);
     try cfg.finalize();
     var dark = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
     defer dark.deinit();
-    for ([_]*const Config{ &cfg, &dark }) |config| {
+    var light_again = (try dark.changeConditionalState(.{ .theme = .light })).?;
+    defer light_again.deinit();
+    for ([_]*const Config{ &cfg, &dark, &light_again }, 0..) |config, i| {
         var found: usize = 0;
+        var include: usize = 0;
         for (config._diagnostics.list.items) |diag| {
+            // A missing include's problem is the same kind of replay step.
+            if (std.mem.startsWith(u8, diag.message, "error opening config-file")) include += 1;
             if (!std.mem.startsWith(u8, diag.message, "line is longer")) continue;
             try testing.expectEqualStrings("line is longer than 4094 bytes and was skipped", diag.message);
             try testing.expectEqualStrings(path, diag.location.file.path);
             try testing.expectEqual(@as(usize, 3), diag.location.file.line);
             found += 1;
         }
-        try testing.expectEqual(@as(usize, 1), found);
+        testing.expectEqual(@as(usize, 1), found) catch |err| {
+            std.debug.print("config {d}: {d} long-line problems\n", .{ i, found });
+            return err;
+        };
+        try testing.expectEqual(@as(usize, 1), include);
+        // The theme was applied, and the file's lines after it.
+        try testing.expectEqual(@as(u8, if (i == 1) 0 else 0xff), config.background.r);
         // No part of the long line is applied, and the line after it is.
         try testing.expect(config.env.map.get("LONG") == null);
         try testing.expectEqualStrings("1", config.env.map.get("BEFORE").?);
@@ -6386,6 +6473,12 @@ const Replay = struct {
                         self.config._diagnostics.append(arena_alloc, cloned) catch |err| {
                             log.warn("error appending diagnostic err={}", .{err});
                             break :diag;
+                        };
+                        // Keep it as a step too, as `.expand` does: a config
+                        // rebuilt by replay (the one `loadTheme` swaps in)
+                        // is replayed again by `changeConditionalState`.
+                        self.config._replay_steps.append(arena_alloc, .{ .diagnostic = cloned }) catch |err| {
+                            log.warn("error appending diagnostic replay step err={}", .{err});
                         };
                     },
 

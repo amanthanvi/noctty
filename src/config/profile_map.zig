@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 
 const RepeatableStringMap = @import("RepeatableStringMap.zig");
 const formatterpkg = @import("formatter.zig");
+const LineIterator = @import("../cli/args.zig").LineIterator;
 
 /// The longest id a profile can have.
 pub const max_id_len = 64;
@@ -120,6 +121,9 @@ pub const Error = error{
     /// `profile-env` text with nothing before its `=` (`<id>: =x`), which
     /// would reach the environment block as a variable with no name.
     ProfileEnvNoName,
+    /// Text that is not UTF-8 (a file saved in an ANSI code page): it could
+    /// not become a command line, a label or a variable.
+    ProfileNotUtf8,
 };
 
 /// A value that passed the checks: its id and its text, both trimmed.
@@ -138,6 +142,7 @@ pub fn check(comptime kind: Kind, value: []const u8) Error!Parsed {
     if (id.len == 1 and std.ascii.isAlphabetic(id[0]) and text.len > 0 and (text[0] == '\\' or text[0] == '/'))
         return error.ProfileIdLooksLikeDrive;
     if (isReservedId(id)) return error.ReservedProfileId;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.ProfileNotUtf8;
     if (text.len > 0) switch (kind) {
         .command => {
             if (std.ascii.startsWithIgnoreCase(text, "direct:") or std.ascii.startsWithIgnoreCase(text, "shell:"))
@@ -175,13 +180,28 @@ fn unquote(text: []const u8) []const u8 {
 }
 
 /// Whether a label would change if written as it is and loaded again: one
-/// that starts or ends with `"` or whitespace.
+/// that starts or ends with whitespace, or both starts and ends with `"`.
+/// (Only such a label was read from quotes, so quoting it never makes its
+/// line longer than the one it was read from.)
 fn nameNeedsQuotes(text: []const u8) bool {
     if (text.len == 0) return false;
-    for ([_]u8{ text[0], text[text.len - 1] }) |byte| {
-        if (byte == '"' or std.ascii.isWhitespace(byte)) return true;
-    }
-    return false;
+    if (std.ascii.isWhitespace(text[0]) or std.ascii.isWhitespace(text[text.len - 1])) return true;
+    return text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"';
+}
+
+/// Write `<key> = <id>: <parts...>`, or, when that is longer than the config
+/// reader takes, the same line without its optional spaces. That form is
+/// never longer than the line the value was read from, so a value of any
+/// length the reader accepts round-trips.
+fn writeLine(writer: *std.Io.Writer, key: []const u8, id: []const u8, parts: []const []const u8) !void {
+    var len = key.len + " = ".len + id.len + ": ".len;
+    for (parts) |part| len += part.len;
+    if (len <= LineIterator.max_line_len)
+        try writer.print("{s} = {s}: ", .{ key, id })
+    else
+        try writer.print("{s}={s}:", .{ key, id });
+    for (parts) |part| try writer.writeAll(part);
+    try writer.writeByte('\n');
 }
 
 /// Remove every variable of `map` whose name equals `name` in any case.
@@ -370,24 +390,20 @@ pub fn ProfileMap(comptime kind: Kind) type {
                 try formatter.formatEntry(void, {});
                 return;
             }
+            const w = formatter.writer;
             for (self.entries.items) |entry| switch (kind) {
                 .command, .name, .text => if (entry.removed)
-                    try formatter.writer.print("{s} = {s}:\n", .{ formatter.name, entry.id })
+                    try w.print("{s} = {s}:\n", .{ formatter.name, entry.id })
                 else if (kind == .name and nameNeedsQuotes(entry.value))
                     // Loading removes one surrounding pair of quotes and
                     // the outer whitespace, so give it a pair to remove.
-                    try formatter.writer.print("{s} = {s}: \"{s}\"\n", .{ formatter.name, entry.id, entry.value })
+                    try writeLine(w, formatter.name, entry.id, &.{ "\"", entry.value, "\"" })
                 else
-                    try formatter.writer.print("{s} = {s}: {s}\n", .{ formatter.name, entry.id, entry.value }),
+                    try writeLine(w, formatter.name, entry.id, &.{entry.value}),
                 .env => {
                     var it = entry.value.iterator();
                     while (it.next()) |kv| {
-                        try formatter.writer.print("{s} = {s}: {s}={s}\n", .{
-                            formatter.name,
-                            entry.id,
-                            kv.key_ptr.*,
-                            kv.value_ptr.*,
-                        });
+                        try writeLine(w, formatter.name, entry.id, &.{ kv.key_ptr.*, "=", kv.value_ptr.* });
                     }
                 },
             };
@@ -532,11 +548,16 @@ test "profile map: a label loses one surrounding pair of quotes" {
     // quotes for the next load to remove.
     try map.parseCLI(alloc, "w: \"  spaced  \"");
     try testing.expectEqualStrings("  spaced  ", map.get("w").?);
+    // A quote at one end only is not removed, so it needs no pair.
+    try map.parseCLI(alloc, "v: \"half");
+    try testing.expectEqualStrings("\"half", map.get("v").?);
     var out: std.Io.Writer.Allocating = .init(alloc);
     try map.formatEntry(formatterpkg.entryFormatter("profile-name", &out.writer));
     const written = out.written();
     try testing.expect(std.mem.indexOf(u8, written, "profile-name = x: Build Box\n") != null);
     try testing.expect(std.mem.indexOf(u8, written, "profile-name = z: \"\"Quoted\"\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "profile-name = v: \"half\n") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "profile-name = w: \"  spaced  \"\n") != null);
     var again: Name = .{};
     var lines = std.mem.splitScalar(u8, written, '\n');
     while (lines.next()) |line| {
@@ -569,6 +590,11 @@ test "profile map: lines the loader reports at once" {
         .{ .kind = .env, .value = "p: NOEQUALS", .err = error.ValueRequired },
         .{ .kind = .env, .value = "p: =s3cret", .err = error.ProfileEnvNoName },
         .{ .kind = .env, .value = "p: \t = x", .err = error.ProfileEnvNoName },
+        .{ .kind = .command, .value = "p: C:\\Jos\xe9\\x.exe", .err = error.ProfileNotUtf8 },
+        .{ .kind = .name, .value = "p: Pyth\xf6n", .err = error.ProfileNotUtf8 },
+        .{ .kind = .text, .value = "p: C:\\Caf\xe9", .err = error.ProfileNotUtf8 },
+        .{ .kind = .env, .value = "p: K=\xe9", .err = error.ProfileNotUtf8 },
+        .{ .kind = .command, .value = "p: x.exe \xc3", .err = error.ProfileNotUtf8 },
     }) |case| {
         const got = switch (case.kind) {
             inline else => |kind| check(kind, case.value),
@@ -586,6 +612,7 @@ test "profile map: lines the loader reports at once" {
     _ = try check(.command, "p: \"C:\\a b\\t.exe\" x");
     _ = try check(.text, "x: home");
     _ = try check(.command, "gone:");
+    _ = try check(.name, "p: Caf\xc3\xa9 \xe2\x82\xac");
     // A known false positive of the drive-letter check: a one-letter id
     // running a program from a share. The message says to use a longer id.
     try testing.expectError(error.ProfileIdLooksLikeDrive, check(.command, "x: \\\\server\\share\\tool.exe"));

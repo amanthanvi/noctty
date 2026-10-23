@@ -580,10 +580,12 @@ lines.
 A line that cannot be used is reported as a config problem with its file and
 line, and ignored: one without an id (a forgotten id often looks like a drive
 letter, `profile-command = C:\Tools\x.exe`), a taken id, a `direct:` or
-`shell:` command, or a command with no program. The message never shows the
-rest of the line, which may hold a token. A `profile-name`,
-`profile-working-directory` or `profile-env` line whose id no
-`profile-command` line names is reported too.
+`shell:` command, a command with no program, or text that is not UTF-8
+(save the file as UTF-8). The message never shows the rest of the line, which
+may hold a token. A `profile-name`, `profile-working-directory` or
+`profile-env` line whose id no `profile-command` line names is reported too.
+A command that is empty only once its `%NAME%` variables are expanded is left
+out of the picker and written to the log.
 
 ### cmd.exe quoting and copying from other terminals
 

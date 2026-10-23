@@ -36,6 +36,7 @@ pub const Error = error{
     ProfileCommandPrefix,
     ProfileNoProgram,
     ProfileEnvNoName,
+    ProfileNotUtf8,
 };
 
 /// Parse the command line arguments from iter into dst.
@@ -206,6 +207,7 @@ pub fn parse(
                 error.ProfileCommandPrefix,
                 error.ProfileNoProgram,
                 error.ProfileEnvNoName,
+                error.ProfileNotUtf8,
                 => |e| try formatProfileProblem(arena_alloc, key, value orelse "", e),
                 else => try std.fmt.allocPrintSentinel(
                     arena_alloc,
@@ -358,6 +360,12 @@ fn formatProfileProblem(
         error.ProfileEnvNoName => try std.fmt.allocPrintSentinel(
             arena_alloc,
             "\"{s}\": a variable name is needed before the '='",
+            .{id},
+            0,
+        ),
+        error.ProfileNotUtf8 => try std.fmt.allocPrintSentinel(
+            arena_alloc,
+            "\"{s}\": the line is not UTF-8; save the file as UTF-8 (the value is not shown)",
             .{id},
             0,
         ),
