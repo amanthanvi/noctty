@@ -498,6 +498,11 @@ The workflow also runs that negative control with `-Renderer d3d11-warp` so
 an ordinary instance can open a window on the GPU-less runner.
 The harness refuses to start when the user's `DelegationTerminal` selects noctty:
 the measurement AUMID does not isolate the session's live COM handoff class.
+That check, `Assert-EmbeddingDelegationSafe`, has one copy,
+`hidden-win11-embedding-guard.ps1`, which both `hidden-win11-lib.ps1` and
+`hidden-win11-local-lib.ps1` dot-source, so `hidden-win11-restart-manager.ps1`'s
+`embedding-idle` case refuses the same way. Contracts.96 pins the function and
+both harnesses' calls with mutation controls.
 
 ```powershell
 pwsh -NoProfile -File .\hidden-win11-embedding-idle.ps1 -Bin <dir with noctty.exe> -Run <new dir>
@@ -549,8 +554,9 @@ explicit-desktop launches (`Launch` for the driver, `Spawn` for a case),
 `Invoke-LocalHiddenDriver` (the outer half: run the harness again as its driver
 on a new private desktop with LOCALAPPDATA and APPDATA redirected into the run
 directory, then check the real `startup-attempts.json`, PowerShell history
-metadata, and, where the harness asks, the clipboard sequence number), and the
-small helpers those harnesses had copied.
+metadata, and, where the harness asks, the clipboard sequence number), the
+small helpers those harnesses had copied, and, from `hidden-win11-embedding-guard.ps1`,
+the `-Embedding` delegation guard.
 
 ## PowerShell history isolation
 

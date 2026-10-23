@@ -85,23 +85,13 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
 
-# The -Embedding case publishes the real handoff class object (CLSID below) in
-# the session's class table, which neither the private desktop nor the
-# measurement AUMID isolates. While the user's console delegation selects
-# noctty, a console they start could be handed to this hidden copy, so the
-# case is refused (as hidden-win11-embedding-idle.ps1 refuses it). Only that
-# one value is read, and an unreadable key fails closed.
-function Assert-RmEmbeddingDelegationSafe {
-    try { $selection=Get-ItemProperty -LiteralPath 'HKCU:\Console\%%Startup' -ErrorAction Stop }
-    catch [Management.Automation.ItemNotFoundException] { return }
-    $terminal=[guid]::Empty
-    if([guid]::TryParse([string]$selection.DelegationTerminal,[ref]$terminal) -and
-        $terminal -eq [guid]'33368C6F-D328-410C-B225-26DC9F12C728') {
-        throw 'embedding-idle refused: noctty is the selected delegated terminal, and the measurement AUMID does not isolate the real COM handoff class. Run the other cases with -Cases, or use a machine whose console delegation does not select noctty.'
-    }
-}
+# The -Embedding case publishes the real handoff class object in the session's
+# live class table, which neither the private desktop nor the measurement AUMID
+# isolates, so it is refused while the user's console delegation selects noctty
+# (Assert-EmbeddingDelegationSafe, hidden-win11-embedding-guard.ps1, through
+# hidden-win11-local-lib.ps1): before anything starts and again before the launch.
 $requestedCases=if($Cases) { @($Cases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @('embedding-idle') }
-if($requestedCases -contains 'embedding-idle') { Assert-RmEmbeddingDelegationSafe }
+if($requestedCases -contains 'embedding-idle') { Assert-EmbeddingDelegationSafe }
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -567,7 +557,7 @@ foreach($name in $selected) {
             } finally { Stop-Case $case }
         }
         'embedding-idle' {
-            Assert-RmEmbeddingDelegationSafe
+            Assert-EmbeddingDelegationSafe
             $case=Start-Case $name @() 0 -Embedding
             try {
                 $r.Lifecycle=Lifecycle-State $case

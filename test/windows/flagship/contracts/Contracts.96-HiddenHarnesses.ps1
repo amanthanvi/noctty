@@ -1289,7 +1289,9 @@ Assert-HiddenMutation 'PowerShell wrong readiness PID accepted' $promptWait ($pr
 Assert-HiddenMutation 'PowerShell readiness without forwarded OSC accepted' $promptWait ($promptWait.Replace('$ready.CwdOscForwarded -eq $true', '$true')) ${function:Test-PowerShellPromptWait}
 Assert-HiddenMutation 'PowerShell readiness without history isolation accepted' $promptWait ($promptWait.Replace("`$ready.HistorySaveStyle -ceq 'SaveNothing'", '$true')) ${function:Test-PowerShellPromptWait}
 
-$delegationGuard = Get-HiddenFunction $hiddenLibText 'Assert-EmbeddingDelegationSafe'
+# The -Embedding delegation guard has one copy, which both hidden libraries dot-source.
+$embeddingGuardText = Remove-PowerShellComments (Get-Content -LiteralPath (Join-Path $repoRoot 'test\windows\hidden-win11-embedding-guard.ps1') -Raw)
+$delegationGuard = Get-HiddenFunction $embeddingGuardText 'Assert-EmbeddingDelegationSafe'
 function Test-EmbeddingDelegationGuard([string] $Code) {
     . ([scriptblock]::Create($Code))
     foreach ($value in @($null, '', '{11111111-1111-1111-1111-111111111111}', '{33368c6f-d328-410c-b225-26dc9f12c728}', '33368C6F-D328-410C-B225-26DC9F12C728', 'missing-key', 'unreadable')) {
@@ -1313,6 +1315,36 @@ function Test-EmbeddingGuardCalls([string] $Code) {
         $Code -notmatch '(?m)^Assert-EmbeddingDelegationSafe\r?\n\$started = Start-HiddenNoctty') { throw 'Embedding launch lost the entry/prelaunch delegation guard.' }
 }
 Assert-HiddenMutation 'delegation guard call removed' $embeddingText ($embeddingText -replace '(?m)^Assert-EmbeddingDelegationSafe\r?\n', '') ${function:Test-EmbeddingGuardCalls}
+Assert-HiddenMutation 'unreadable delegation key accepted' $delegationGuard ($delegationGuard.Replace('catch [Management.Automation.ItemNotFoundException] { return }', 'catch { return }')) ${function:Test-EmbeddingDelegationGuard}
+
+# Every harness that starts -Embedding gets the guard from that one file: no private copy that
+# no fixture above exercises.
+$localLibText = Remove-PowerShellComments (Get-Content -LiteralPath (Join-Path $repoRoot 'test\windows\hidden-win11-local-lib.ps1') -Raw)
+$restartManagerText = Remove-PowerShellComments (Get-Content -LiteralPath (Join-Path $repoRoot 'test\windows\hidden-win11-restart-manager.ps1') -Raw)
+function Test-DelegationGuardSource([string] $Code) {
+    if ($Code -notmatch "(?m)^\. \(Join-Path \`$PSScriptRoot 'hidden-win11-embedding-guard\.ps1'\)\r?$" -or
+        $Code -match '(?im)^\s*function\s+[\w-]*Delegation') { throw 'A hidden library lost the shared delegation guard or carries a copy of its own.' }
+}
+foreach ($libText in @($hiddenLibText, $localLibText)) {
+    Assert-HiddenMutation 'shared delegation guard not dot-sourced' $libText ($libText -replace "(?m)^\. \(Join-Path \`$PSScriptRoot 'hidden-win11-embedding-guard\.ps1'\)\r?\n", '') ${function:Test-DelegationGuardSource}
+}
+# The Restart Manager harness's embedding-idle case runs by default: the guard runs before the
+# driver starts whenever that case is selected, right before the only -Embedding launch, and the
+# harness defines no guard of its own.
+function Test-RestartManagerGuardCalls([string] $Code) {
+    $entry = [regex]::Match($Code, "(?m)^if\(\`$requestedCases -contains 'embedding-idle'\) \{ Assert-EmbeddingDelegationSafe \}\r?$")
+    $driver = $Code.IndexOf('Invoke-LocalHiddenDriver')
+    $launches = @([regex]::Matches($Code, '(?m)^.*\bStart-Case\b[^\r\n]*\s-Embedding\b'))
+    $guarded = @([regex]::Matches($Code, '(?m)^\s*Assert-EmbeddingDelegationSafe\r?\n.*\bStart-Case\b[^\r\n]*\s-Embedding\b'))
+    if (-not $entry.Success -or $driver -lt 0 -or $entry.Index -gt $driver -or
+        $Code -notmatch "(?m)^\`$requestedCases=if\(\`$Cases\) \{[^\r\n]*\} else \{ @\('embedding-idle'\) \}\r?$" -or
+        $launches.Count -lt 1 -or $guarded.Count -ne $launches.Count -or
+        $Code -match '(?im)^\s*function\s+[\w-]*Delegation') { throw 'The Restart Manager harness lost its entry or prelaunch delegation guard, or carries a copy of its own.' }
+}
+Assert-HiddenMutation 'Restart Manager entry delegation guard removed' $restartManagerText ($restartManagerText -replace "(?m)^if\(\`$requestedCases -contains 'embedding-idle'\) \{ Assert-EmbeddingDelegationSafe \}\r?\n", '') ${function:Test-RestartManagerGuardCalls}
+Assert-HiddenMutation 'Restart Manager entry guard skipped by default' $restartManagerText ($restartManagerText.Replace("else { @('embedding-idle') }", 'else { @() }')) ${function:Test-RestartManagerGuardCalls}
+Assert-HiddenMutation 'Restart Manager prelaunch delegation guard removed' $restartManagerText ($restartManagerText -replace '(?m)^\s*Assert-EmbeddingDelegationSafe\r?\n(?=.*\bStart-Case\b[^\r\n]*\s-Embedding\b)', '') ${function:Test-RestartManagerGuardCalls}
+Assert-HiddenMutation 'Restart Manager private delegation guard' $restartManagerText ($restartManagerText -replace '(?m)^(\$requestedCases=)', "function Assert-RmEmbeddingDelegationSafe { }`n`$1") ${function:Test-RestartManagerGuardCalls}
 
 $requiredProfileLoop = [regex]::Match($profileText, '(?ms)^foreach \(\$key in \$Profile\).*?^}').Value
 $requiredProfileForwarding = [regex]::Match($profileText, '(?m)^    if \(\$RequireAll\)[^\r\n]*').Value

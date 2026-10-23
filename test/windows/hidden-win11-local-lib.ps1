@@ -17,8 +17,12 @@
 #     size and time (scripts/windows-harness-history.ps1) and, with
 #     -GuardClipboard, the clipboard sequence number did not change.
 #   * Small helpers the harnesses had each copied.
+#   * Assert-EmbeddingDelegationSafe, from hidden-win11-embedding-guard.ps1 (the
+#     one copy, shared with hidden-win11-lib.ps1), for a harness that starts
+#     `noctty.exe -Embedding`.
 
 . (Join-Path $PSScriptRoot '..\..\scripts\windows-harness-history.ps1')
+. (Join-Path $PSScriptRoot 'hidden-win11-embedding-guard.ps1')
 
 if (-not ('HiddenLocal' -as [type])) {
 Add-Type @'
