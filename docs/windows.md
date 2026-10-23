@@ -772,9 +772,7 @@ Limits:
   arguments (`--command=direct:...`, quoted again in the standard way, an empty `--initial-command=`, and
   `--elevated-profile-env=...`), which process tools and process-creation
   auditing can read, so do not keep a secret in such a profile's
-  `profile-env`. A `default-profile` the config files give on their own (no
-  `--command` or `--default-profile` on noctty's command line) gets nothing on
-  the command line at all: the elevated process starts it from the same files.
+  `profile-env`. A default profile is passed the same way as any other.
 - An elevated user profile starts in the directory of the pane it was opened
   from, as every elevated window does, not in its `profile-working-directory`.
 - Profile lines take effect at a config reload. Previewing a theme in the

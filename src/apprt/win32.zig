@@ -1154,17 +1154,16 @@ fn defaultProfileForKey(config: *const configpkg.Config, key: []const u8) ?*cons
 }
 
 /// The profile `new_window_elevated` hands the elevated process: the
-/// action's own, else the pane's. None for a `default-profile` the config
-/// files alone give: the elevated process reads the same files and starts
-/// that profile itself, so its variables stay off the elevated command line
-/// (`buildRelaunchParameters`). It is given no command-line launch settings,
-/// so a profile that depends on one (a `--default-profile=`, a jump-list
-/// link's; a `--command=` reset of a file's `command`) is still passed.
-fn elevatedProfileKey(config: *const configpkg.Config, action_key: []const u8, pane_key: ?[]const u8) ?[]const u8 {
-    const key = if (action_key.len > 0) action_key else pane_key orelse return null;
-    const files_alone = config._default_profile_cli == null and config._command_cli == null;
-    if (files_alone and defaultProfileForKey(config, key) != null) return null;
-    return key;
+/// action's own, else the pane's, a `default-profile` pane's included.
+/// `elevatesBySelector` decides whether it goes as its key or as its
+/// command; either way the elevated window clears a file's
+/// `initial-command`, so it runs the profile chosen. (A `default-profile`
+/// the files give used to be passed as nothing, for the elevated process to
+/// start itself; that let a file's `initial-command` run instead, and lost a
+/// profile defined only on noctty's command line. The key does the same
+/// privately.)
+fn elevatedProfileKey(action_key: []const u8, pane_key: ?[]const u8) ?[]const u8 {
+    return if (action_key.len > 0) action_key else pane_key;
 }
 
 /// Whether `new_window_elevated` names the profile `key` to the elevated
@@ -7214,7 +7213,6 @@ pub const App = struct {
                     windows_shell.deinitProfiles(alloc, profiles);
                 };
                 const profile_key = elevatedProfileKey(
-                    &self.config,
                     value.profile_key,
                     if (source) |surface| surface.launch_profile_key else null,
                 );
@@ -55788,22 +55786,14 @@ test "win32 a split or an elevated window of a default-profile pane needs no pro
     try std.testing.expectEqualStrings("pwsh.exe", listed_profile.key);
     try std.testing.expect((try app.elevatedWindowProfile(&listed, "cmd.exe", &temporary)) == null);
 
-    // The elevated process starts the files' default itself, so neither its
-    // command nor its variables go on the elevated command line; another
-    // profile's do, and so does a command-line default's.
-    try std.testing.expect(elevatedProfileKey(&app.config, "", "USER:PY") == null);
-    try std.testing.expect(elevatedProfileKey(&app.config, "user:py", null) == null);
-    try std.testing.expect(elevatedProfileKey(&app.config, "", null) == null);
-    try std.testing.expectEqualStrings("pwsh.exe", elevatedProfileKey(&app.config, "", "pwsh.exe") orelse "");
-    try std.testing.expectEqualStrings("pwsh.exe", elevatedProfileKey(&app.config, "pwsh.exe", "USER:PY") orelse "");
-    app.config._default_profile_cli = "py";
-    try std.testing.expectEqualStrings("USER:PY", elevatedProfileKey(&app.config, "", "USER:PY") orelse "");
-    app.config._default_profile_cli = null;
-    // A `--command=` reset of a file's `command`: the elevated process would
-    // run the file's command.
-    app.config._command_cli = "";
-    defer app.config._command_cli = null;
-    try std.testing.expectEqualStrings("USER:PY", elevatedProfileKey(&app.config, "", "USER:PY") orelse "");
+    // The elevated window is told the profile, the default one included
+    // (by key or command, `elevatesBySelector`), so a file's
+    // `initial-command` is cleared there: the action's key first, else the
+    // pane's.
+    try std.testing.expectEqualStrings("USER:PY", elevatedProfileKey("", "USER:PY") orelse "");
+    try std.testing.expectEqualStrings("user:py", elevatedProfileKey("user:py", null) orelse "");
+    try std.testing.expect(elevatedProfileKey("", null) == null);
+    try std.testing.expectEqualStrings("pwsh.exe", elevatedProfileKey("pwsh.exe", "USER:PY") orelse "");
 }
 
 test "win32 an elevated window names a file-defined user profile and passes a command-line one" {
