@@ -103,12 +103,19 @@ pub fn ProfileMap(comptime kind: Kind) type {
                     try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = copy });
                 },
                 .env => {
+                    // An id whose last variable was removed (`<id>: KEY=`)
+                    // goes, as `<id>:` would: an empty entry formats to no
+                    // line, so it could not round-trip and `equal` would
+                    // tell two identical configs apart.
                     if (self.indexOf(id)) |index| {
-                        try self.entries.items[index].value.parseCLI(alloc, text);
+                        const map = &self.entries.items[index].value;
+                        try map.parseCLI(alloc, text);
+                        if (map.count() == 0) _ = self.entries.orderedRemove(index);
                         return;
                     }
                     var map: RepeatableStringMap = .{};
                     try map.parseCLI(alloc, text);
+                    if (map.count() == 0) return;
                     try self.entries.append(alloc, .{ .id = try alloc.dupeZ(u8, id), .value = map });
                 },
             }
@@ -240,6 +247,14 @@ test "profile map: env values follow env semantics per id" {
     try map.parseCLI(alloc, "py:");
     try testing.expect(map.get("py") == null);
     try testing.expectEqual(@as(usize, 1), map.count());
+
+    // Removing an id's last variable removes the id, so the map equals one
+    // that never had it, and formats to the same (no) lines.
+    try map.parseCLI(alloc, "other: B=");
+    try testing.expectEqual(@as(usize, 0), map.count());
+    try map.parseCLI(alloc, "new: GONE=");
+    try testing.expectEqual(@as(usize, 0), map.count());
+    try testing.expect(map.equal(.{}));
 }
 
 test "profile map: ids" {

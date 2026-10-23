@@ -530,10 +530,12 @@ Visual Studio Start menu shortcut.
 - `profile-working-directory` takes the values `working-directory` takes:
   `home`, `inherit`, or a path (`~/` is your home directory). Without it, a
   profile opened from the picker or the palette starts in your home directory.
-  `inherit` follows the ordinary rules instead
-  (`working-directory` and the `*-inherit-working-directory` settings). A split
-  of the profile still takes its source pane's directory when
-  `split-inherit-working-directory` is on.
+  `home` and a path also hold for a split of the profile; `inherit` follows the
+  ordinary rules instead (`working-directory` and the
+  `*-inherit-working-directory` settings). A split still takes its source
+  pane's directory when `split-inherit-working-directory` is on. For a profile
+  that runs `wsl.exe`, home is the Linux home directory (`--cd ~`), as for a
+  detected WSL profile.
 - `profile-env` sets one environment variable, `<id>: KEY=VALUE`, and can be
   repeated. `<id>: KEY=` removes one and `<id>:` removes them all. A profile's
   variable replaces an `env` variable of the same name, whatever its case (a
@@ -548,7 +550,11 @@ Ids are 1 to 64 letters, digits, `.`, `_` or `-`, compared without case.
 `pwsh.exe`, `powershell.exe`, `cmd.exe`, `git-bash` and `wsl-default` are
 taken by the detected profiles. A profile exists while it has a
 `profile-command`: `profile-command = <id>:` with nothing after the colon
-removes it, and `profile-command =` removes them all. The fields of one
+removes it, and `profile-command =` removes them all. The profile's other
+fields are not removed with it: clear each one you set as well
+(`profile-name = <id>:`, `profile-working-directory = <id>:`,
+`profile-env = <id>:`), or each is reported as a field with no
+`profile-command`. The fields of one
 profile can sit in different files, and a later line replaces an earlier one.
 An invalid id, a reserved id, a field whose id has no `profile-command`, and a
 `direct:` or `shell:` value are each reported as a config problem, and the
@@ -574,9 +580,14 @@ ordinary split reads the profile's current definition.
 Limits:
 
 - `new_window_elevated:user:<id>` passes the profile's arguments and its
-  `profile-env` variables to the elevated process, but quoted again in the
-  standard way rather than as written, which differs only for cmd.exe's own
-  quoting idioms.
+  `profile-env` variables to the elevated process on its command line
+  (`--command=direct:...`, `--env=...`), quoted again in the standard way
+  rather than as written, which differs only for cmd.exe's own quoting idioms.
+  The elevated process reads your config files again, and a file included with
+  `config-file` is read after its command line, so an `env` line there for the
+  same variable replaces the profile's value (as an included `command` line
+  replaces the command of every elevated window). The variables apply to the
+  whole elevated window, not only its first pane.
 - PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
   interactive PowerShell line. A line with `-Command` or `-File`, such as the
   Developer PowerShell above, runs as written without it, as in Windows

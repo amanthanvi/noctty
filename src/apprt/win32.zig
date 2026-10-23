@@ -998,24 +998,25 @@ fn applyProfileSurfaceConfig(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
 ) !void {
-    const pinned = profile.working_directory orelse .home;
-    switch (pinned) {
-        .home => config.@"working-directory" = if (profile.kind == .user)
-            try homeWorkingDirectory(config)
-        else
-            .home,
-        // `applyProfileLaunchConfig` sets a pinned path.
-        .inherit, .path => {},
+    // A pinned `home`, `inherit` or path is `applyProfileLaunchConfig`'s.
+    if (profile.working_directory == null) {
+        config.@"working-directory" = try profileHomeWorkingDirectory(config, profile);
     }
     try applyProfileLaunchConfig(config, profile);
 }
 
-/// The home directory as an explicit path, as `Config.finalize` resolves
-/// `working-directory = home`. A bare `.home` set on a launch clone after
-/// finalize is not resolved again: Exec then starts the shell in noctty's own
-/// current directory (measured: the directory noctty was started in), so a
-/// user profile that asks for home gets the path itself.
-fn homeWorkingDirectory(config: *configpkg.Config) !configpkg.Config.WorkingDirectory {
+/// Home for a profile launch. A bare `.home` set on a launch clone after
+/// `Config.finalize` is not resolved again: Exec then starts the program in
+/// noctty's own current directory (measured: the directory noctty was
+/// started in), so a user profile gets the path itself. Two keep `.home`:
+/// detected profiles, as before, and a user profile that runs `wsl.exe`,
+/// which `.home` gives `--cd ~` (the Linux home, as a detected WSL profile
+/// gets) where a Windows path would give `--cd /mnt/c/Users/<name>`.
+fn profileHomeWorkingDirectory(
+    config: *configpkg.Config,
+    profile: *const windows_shell.Profile,
+) !configpkg.Config.WorkingDirectory {
+    if (profile.kind != .user or windows_shell.isWslCommand(profile.command)) return .home;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (internal_os.home(&buf) catch null) orelse return .home;
     return .{ .path = try config._arena.?.allocator().dupe(u8, home) };
@@ -1025,8 +1026,9 @@ fn homeWorkingDirectory(config: *configpkg.Config) !configpkg.Config.WorkingDire
 /// hold on EVERY launch path — new surface, split, and restore alike. Splits
 /// used to apply only the command, which silently dropped the SSH guarantees
 /// below, so both paths go through here. A user profile also brings its
-/// command line, its environment and a pinned directory (which a split's own
-/// directory inheritance, applied after this, still replaces).
+/// command line, its environment and a pinned directory, `home` or a path
+/// (which a split's own directory inheritance, applied after this, still
+/// replaces); `inherit` leaves the ordinary rules' directory.
 fn applyProfileLaunchConfig(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
@@ -1037,7 +1039,8 @@ fn applyProfileLaunchConfig(
         .path => |path| config.@"working-directory" = .{
             .path = try config._arena.?.allocator().dupe(u8, path),
         },
-        .home, .inherit => {},
+        .home => config.@"working-directory" = try profileHomeWorkingDirectory(config, profile),
+        .inherit => {},
     };
     if (profile.kind != .ssh) return;
 
@@ -1066,6 +1069,20 @@ fn applyUserLaunchConfig(
     }
     config.env = env;
     config._profile_launch = try launch.clone(alloc);
+}
+
+const SurfaceLaunch = struct {
+    command: ?configpkg.Command,
+    user: ?windows_shell.UserLaunch,
+};
+
+/// What a new surface records as the launch it runs, for the inheritance
+/// snapshot (`launch_command`, `launch_user`). The first surface of a
+/// process with `initial-command` (`-e`) runs that command, which is no
+/// profile's, so it records no profile line or env.
+fn surfaceLaunchSnapshot(first: bool, config: *const configpkg.Config) SurfaceLaunch {
+    if (first) if (config.@"initial-command") |command| return .{ .command = command, .user = null };
+    return .{ .command = config.command, .user = config._profile_launch };
 }
 
 fn applySshLaunchHardening(config: *configpkg.Config) !void {
@@ -5325,13 +5342,7 @@ pub const App = struct {
             return true;
         }
 
-        var user = try windows_shell.UserProfiles.init(self.core_app.alloc, &self.config);
-        defer user.deinit();
-        const profiles = try windows_shell.listProfiles(
-            self.core_app.alloc,
-            self.config.@"ssh-config-hosts",
-            user.definitions,
-        );
+        const profiles = try listProfilesForConfig(self.core_app.alloc, &self.config, windows_shell.listProfiles);
         defer windows_shell.deinitProfiles(self.core_app.alloc, profiles);
         return try applyProfileConfigByKey(config, profiles, key);
     }
@@ -7127,13 +7138,7 @@ pub const App = struct {
                     const profile: ?*const windows_shell.Profile = if (source_host) |host|
                         try host.profileForKey(key)
                     else profile: {
-                        var user = try windows_shell.UserProfiles.init(alloc, &self.config);
-                        defer user.deinit();
-                        const profiles = try windows_shell.listProfiles(
-                            alloc,
-                            self.config.@"ssh-config-hosts",
-                            user.definitions,
-                        );
+                        const profiles = try listProfilesForConfig(alloc, &self.config, windows_shell.listProfiles);
                         temporary_profiles = profiles;
                         const index = profileIndexByKey(profiles, key) orelse break :profile null;
                         break :profile &profiles[index];
@@ -33281,6 +33286,20 @@ fn applyProfileConfigByKey(
     return true;
 }
 
+/// The profile list where no Host has one: a restore before the first window,
+/// an elevated window from no surface. `list` is `windows_shell.listProfiles`
+/// (tests pass a fake), given the SSH setting and a snapshot of the app
+/// config's user profiles.
+fn listProfilesForConfig(
+    alloc: Allocator,
+    config: *const configpkg.Config,
+    list: anytype,
+) ![]windows_shell.Profile {
+    var user = try windows_shell.UserProfiles.init(alloc, config);
+    defer user.deinit();
+    return try list(alloc, config.@"ssh-config-hosts", user.definitions);
+}
+
 /// Session restore relaunches a pane's profile unattended at startup. An SSH
 /// profile would dial out with no interaction, so it is refused here.
 ///
@@ -38067,15 +38086,9 @@ pub const Surface = struct {
             _ = windows.CloseHandle(session.client_process);
             self.adopted_session = null;
         };
-        const launches_initial_command = app.core_app.first and config.@"initial-command" != null;
-        const launch_command = if (launches_initial_command)
-            config.@"initial-command"
-        else
-            config.command;
-        if (launch_command) |command| self.launch_command = try command.clone(app.core_app.alloc);
-        if (!launches_initial_command) if (config._profile_launch) |launch| {
-            self.launch_user = try launch.clone(app.core_app.alloc);
-        };
+        const launch = surfaceLaunchSnapshot(app.core_app.first, config);
+        if (launch.command) |command| self.launch_command = try command.clone(app.core_app.alloc);
+        if (launch.user) |user| self.launch_user = try user.clone(app.core_app.alloc);
         self.drop_target = try win32_surface_drop_target.DropTarget.create(
             app.core_app.alloc,
             @ptrCast(self),
@@ -54708,8 +54721,11 @@ test "win32 a user profile launch sets its directory and layers its env on a cop
         "home: tool.exe",
         "inh: tool.exe",
         "pin: tool.exe",
+        "wsl: wsl.exe -d Ubuntu",
+        "wslhome: C:\\Windows\\System32\\wsl.exe -d Ubuntu",
     }) |value| try base.@"profile-command".parseCLI(base_alloc, value);
     try base.@"profile-working-directory".parseCLI(base_alloc, "home: home");
+    try base.@"profile-working-directory".parseCLI(base_alloc, "wslhome: home");
     try base.@"profile-working-directory".parseCLI(base_alloc, "inh: inherit");
     try base.@"profile-working-directory".parseCLI(base_alloc, "pin: D:\\pinned dir");
     try base.@"profile-env".parseCLI(base_alloc, "plain: PATH=C:\\profile");
@@ -54722,7 +54738,7 @@ test "win32 a user profile launch sets its directory and layers its env on a cop
 
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (try internal_os.home(&home_buf)).?;
-    const Want = union(enum) { home, kept, path: []const u8 };
+    const Want = union(enum) { home, wsl_home, kept, path: []const u8 };
     for ([_]struct { key: []const u8, want: Want }{
         // No directory of its own: home, as every profile launch, given as
         // the path itself (a bare `.home` would start in noctty's cwd).
@@ -54731,6 +54747,10 @@ test "win32 a user profile launch sets its directory and layers its env on a cop
         // `inherit`: the directory the ordinary rules gave the clone stays.
         .{ .key = "user:inh", .want = .kept },
         .{ .key = "user:pin", .want = .{ .path = "D:\\pinned dir" } },
+        // A WSL launch keeps `.home`, which gives `--cd ~` (the Linux home,
+        // as a detected WSL profile gets), not `/mnt/c/Users/<name>`.
+        .{ .key = "user:wsl", .want = .wsl_home },
+        .{ .key = "user:wslhome", .want = .wsl_home },
     }) |case| {
         var clone = base.shallowClone(alloc);
         defer clone.deinit();
@@ -54738,6 +54758,18 @@ test "win32 a user profile launch sets its directory and layers its env on a cop
         try std.testing.expect(try applyProfileConfigByKey(&clone, profiles, case.key));
         switch (case.want) {
             .home => try std.testing.expectEqualStrings(home, clone.@"working-directory".?.path),
+            .wsl_home => {
+                const wd = clone.@"working-directory".?;
+                try std.testing.expect(wd == .home);
+                // What Exec then runs (`Surface` passes `wd == .home`).
+                const prepared = try windows_shell.prepareCommand(alloc, clone.command.?, wd.value(), true, false);
+                defer prepared.deinit(alloc);
+                const argv = prepared.direct;
+                const cd = for (argv, 0..) |arg, i| {
+                    if (std.mem.eql(u8, arg, "--cd")) break i;
+                } else return error.TestExpectedCd;
+                try std.testing.expectEqualStrings("~", argv[cd + 1]);
+            },
             .kept => try std.testing.expectEqualStrings("C:\\work", clone.@"working-directory".?.path),
             .path => |path| try std.testing.expectEqualStrings(path, clone.@"working-directory".?.path),
         }
@@ -54802,6 +54834,71 @@ test "win32 an automation tab keeps a user profile's snapshot while a split read
     try std.testing.expectEqualStrings("new", split_config.env.map.get("MODE").?);
 }
 
+test "win32 an ordinary split of a user profile takes its pinned home" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const argv = [_][:0]const u8{"tool.exe"};
+    const wsl_argv = [_][:0]const u8{ "wsl.exe", "-d", "Ubuntu" };
+    const launch: windows_shell.UserLaunch = .{ .command_line = "tool.exe" };
+    var profiles = [_]windows_shell.Profile{
+        .{ .kind = .user, .key = "user:home", .label = "home", .command = .{ .direct = &argv }, .working_directory = .home, .user = launch },
+        .{ .kind = .user, .key = "user:inh", .label = "inh", .command = .{ .direct = &argv }, .working_directory = .inherit, .user = launch },
+        .{ .kind = .user, .key = "user:unset", .label = "unset", .command = .{ .direct = &argv }, .user = launch },
+        .{ .kind = .user, .key = "user:wsl", .label = "wsl", .command = .{ .direct = &wsl_argv }, .working_directory = .home, .user = launch },
+    };
+    var host: Host = undefined;
+    host.profiles = &profiles;
+    host.selected_profile = 0;
+    var source: Surface = undefined;
+    source.host = &host;
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)).?;
+    // `createNewSplit` starts from the global directory, then applies the
+    // profile, then the split's own inheritance (off here).
+    for ([_]struct { key: [:0]const u8, want: ?[]const u8 }{
+        .{ .key = "user:home", .want = home },
+        .{ .key = "user:inh", .want = "C:\\global" },
+        .{ .key = "user:unset", .want = "C:\\global" },
+        .{ .key = "user:wsl", .want = null },
+    }) |case| {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        config.@"working-directory" = .{ .path = try config._arena.?.allocator().dupe(u8, "C:\\global") };
+        source.launch_profile_key = case.key;
+        try std.testing.expectEqualStrings(case.key, (try App.applySplitProfileConfigFromSource(&config, &source)).?);
+        if (case.want) |want| {
+            try std.testing.expectEqualStrings(want, config.@"working-directory".?.path);
+        } else try std.testing.expect(config.@"working-directory".? == .home);
+    }
+}
+
+test "win32 a surface records a user profile's launch unless it runs initial-command" {
+    const alloc = std.testing.allocator;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+    const cmd_argv = [_][:0]const u8{ "cmd.exe", "/k", "x" };
+    const e_argv = [_][:0]const u8{"vim.exe"};
+    config.command = .{ .direct = &cmd_argv };
+    config._profile_launch = .{ .command_line = "cmd.exe /k x" };
+
+    // A profile launch, first surface or not, keeps the line with the command.
+    for ([_]bool{ true, false }) |first| {
+        const launch = surfaceLaunchSnapshot(first, &config);
+        try std.testing.expectEqualStrings("cmd.exe", launch.command.?.direct[0]);
+        try std.testing.expectEqualStrings("cmd.exe /k x", launch.user.?.command_line);
+    }
+
+    // `-e` runs on the first surface only, and is no profile's launch.
+    config.@"initial-command" = .{ .direct = &e_argv };
+    const first = surfaceLaunchSnapshot(true, &config);
+    try std.testing.expectEqualStrings("vim.exe", first.command.?.direct[0]);
+    try std.testing.expect(first.user == null);
+    const later = surfaceLaunchSnapshot(false, &config);
+    try std.testing.expectEqualStrings("cmd.exe", later.command.?.direct[0]);
+    try std.testing.expect(later.user != null);
+}
+
 test "win32 user profiles restore by key, after a rename, with and without a host" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -54847,6 +54944,31 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
         var clone = base.shallowClone(alloc);
         defer clone.deinit();
         try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "User:Vs18-Cmd"));
+        try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
+    }
+
+    // With no host (a restore before the first window, an elevated window
+    // from no surface), the list is built from the app config: its user
+    // profiles reach the lister, after the local shells, before SSH.
+    {
+        const lister = struct {
+            fn list(a: Allocator, _: bool, user: []const windows_shell.UserProfiles.Definition) ![]windows_shell.Profile {
+                const shell = try a.alloc(windows_shell.Profile, 1);
+                const cmd = try a.alloc([:0]const u8, 1);
+                cmd[0] = try a.dupeZ(u8, "C:\\Windows\\System32\\cmd.exe");
+                shell[0] = .{ .kind = .cmd, .key = try a.dupe(u8, "cmd.exe"), .label = try a.dupe(u8, "Command Prompt"), .command = .{ .direct = cmd } };
+                return try windows_shell.appendUserProfiles(a, shell, user, windows_shell.ProcessEnvironment{});
+            }
+        }.list;
+        const hostless = try listProfilesForConfig(alloc, &renamed, lister);
+        defer windows_shell.deinitProfiles(alloc, hostless);
+        try std.testing.expectEqual(@as(usize, 2), hostless.len);
+        try std.testing.expectEqualStrings("cmd.exe", hostless[0].key);
+        try std.testing.expectEqualStrings("user:vs18-cmd", hostless[1].key);
+        try std.testing.expectEqualStrings("New label", hostless[1].label);
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, "USER:vs18-CMD"));
         try std.testing.expectEqualStrings(line, clone._profile_launch.?.command_line);
     }
 

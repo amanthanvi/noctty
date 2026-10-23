@@ -1644,8 +1644,10 @@ class: ?[:0]const u8 = null,
 ///
 /// A profile exists while it has a command. `profile-command = <id>:` with
 /// nothing after the colon removes that profile (an included file can drop
-/// one), and `profile-command =` removes them all. Profiles are listed in the
-/// order of their first `profile-command` line.
+/// one), and `profile-command =` removes them all. Its other `profile-*`
+/// lines are not removed with it: clear those too (`profile-name = <id>:`),
+/// or each is reported as a field with no `profile-command`. Profiles are
+/// listed in the order of their first `profile-command` line.
 ///
 /// To keep these lines out of a config file that other Ghostty builds read,
 /// put them in their own file and include it with `config-file = ?profiles.ghostty`.
@@ -1660,7 +1662,9 @@ class: ?[:0]const u8 = null,
 /// Where a profile defined by `profile-command` starts, as `<id>: <value>`,
 /// with the values `working-directory` takes: `home`, `inherit`, or a path
 /// (`~/` and `%NAME%` are expanded). Without it, a profile opened from the
-/// picker or the palette starts in the home directory.
+/// picker or the palette starts in the home directory (for `wsl.exe`, the
+/// Linux home). `home` and a path also hold for a split of the profile,
+/// unless `split-inherit-working-directory` gives it the source pane's.
 /// `inherit` follows the usual rules instead (`working-directory` and the
 /// `*-inherit-working-directory` settings). A restored pane always returns
 /// to the directory it was in.
@@ -5187,8 +5191,9 @@ pub fn finalize(self: *Config) !void {
 /// Check the user profiles once every layer has been read: a field may come
 /// before the `profile-command` line it belongs to, or from another file.
 /// Each refused entry becomes a config problem and is dropped, so nothing
-/// downstream sees a profile the user was told is wrong. Messages name the
-/// id only, never the command or a value.
+/// downstream sees a profile the user was told is wrong. Messages name a valid
+/// id only, never an invalid one (it may be the start of a command) or a
+/// value.
 fn finalizeProfiles(self: *Config) Allocator.Error!void {
     const commands = &self.@"profile-command";
     var index: usize = 0;
@@ -5247,12 +5252,19 @@ fn addProfileProblem(
     message: []const u8,
 ) Allocator.Error!void {
     const alloc = self._arena.?.allocator();
-    // An invalid id can be any text; keep the message short.
-    const shown = id[0..@min(id.len, ProfileMap.max_id_len + 1)];
-    try self._diagnostics.append(alloc, .{
-        .key = key,
-        .message = try std.fmt.allocPrintSentinel(alloc, "\"{s}\" {s}", .{ shown, message }, 0),
-    });
+    // An invalid id is whatever came before the first `:`, which for a line
+    // written without an id is the start of the command (a token, a path):
+    // name only its length.
+    const text = if (ProfileMap.isValidId(id))
+        try std.fmt.allocPrintSentinel(alloc, "\"{s}\" {s}", .{ id, message }, 0)
+    else
+        try std.fmt.allocPrintSentinel(
+            alloc,
+            "the id before the first ':' ({d} bytes) {s}",
+            .{ id.len, message },
+            0,
+        );
+    try self._diagnostics.append(alloc, .{ .key = key, .message = text });
 }
 
 /// Load `text` as one config file and finalize it, as a real load does.
@@ -5397,6 +5409,29 @@ test "profile keys: removing, clearing, includes and order" {
     defer alloc.free(cleared_text);
     try testing.expect(std.mem.indexOf(u8, cleared_text, "one.exe") == null);
     try testing.expect(std.mem.indexOf(u8, cleared_text, "profile-command = z: zed.exe\n") != null);
+
+    // Dropping a profile that has other fields: each field left behind is a
+    // problem, until the include clears it too (docs/windows.md says so).
+    const defined =
+        \\profile-command = x: x.exe
+        \\profile-name = x: X
+        \\profile-env = x: A=1
+        \\profile-command = x:
+        \\
+    ;
+    var orphaned = try testLoadProfileText(alloc, defined);
+    defer orphaned.deinit();
+    try testing.expectEqual(@as(usize, 2), orphaned._diagnostics.list.items.len);
+    var dropped = try testLoadProfileText(alloc, defined ++
+        \\profile-name = x:
+        \\profile-env = x:
+        \\
+    );
+    defer dropped.deinit();
+    try testing.expect(dropped._diagnostics.empty());
+    const dropped_text = try testFormatChanged(alloc, &dropped);
+    defer alloc.free(dropped_text);
+    try testing.expect(std.mem.indexOf(u8, dropped_text, "x.exe") == null);
 }
 
 test "profile keys report each refused entry as a config problem" {
@@ -5407,6 +5442,7 @@ test "profile keys report each refused entry as a config problem" {
         \\profile-command = CMD.EXE: cmd.exe /k echo mine
         \\profile-command = d1: direct:cmd.exe /k
         \\profile-command = s1: SHELL:cmd.exe
+        \\profile-command = tool.exe --token=abc C:\x
         \\profile-command = ok: ok.exe
         \\profile-name = ghost: Ghost
         \\profile-env = ghost: A=1
@@ -5416,22 +5452,25 @@ test "profile keys report each refused entry as a config problem" {
     );
     defer cfg.deinit();
     const expected = [_]struct { key: []const u8, text: []const u8 }{
-        .{ .key = "profile-command", .text = "\"bad id\" is not a valid profile id" },
+        .{ .key = "profile-command", .text = "the id before the first ':' (6 bytes) is not a valid profile id" },
         .{ .key = "profile-command", .text = "\"CMD.EXE\" is the key of a detected profile" },
         .{ .key = "profile-command", .text = "\"d1\" starts with direct: or shell:" },
         .{ .key = "profile-command", .text = "\"s1\" starts with direct: or shell:" },
+        // A line written without an id: the "id" is the start of the
+        // command, which is never shown.
+        .{ .key = "profile-command", .text = "the id before the first ':' (22 bytes) is not a valid profile id" },
         .{ .key = "profile-name", .text = "\"ghost\" has no profile-command line" },
-        .{ .key = "profile-working-directory", .text = "\"also/bad\" is not a valid profile id" },
+        .{ .key = "profile-working-directory", .text = "the id before the first ':' (8 bytes) is not a valid profile id" },
         .{ .key = "profile-env", .text = "\"ghost\" has no profile-command line" },
     };
     const found = cfg._diagnostics.list.items;
-    for (found) |diag| std.debug.print("diagnostic: {s}: {s}\n", .{ diag.key, diag.message });
     try testing.expectEqual(expected.len, found.len);
     for (expected, found) |want, got| {
         try testing.expectEqualStrings(want.key, got.key);
         try testing.expect(std.mem.startsWith(u8, got.message, want.text));
         // A refused command's text never reaches a problem message.
         try testing.expect(std.mem.indexOf(u8, got.message, ".exe") == null);
+        try testing.expect(std.mem.indexOf(u8, got.message, "token") == null);
     }
     // What was refused is gone; what was valid stays.
     const formatted = try testFormatChanged(alloc, &cfg);
