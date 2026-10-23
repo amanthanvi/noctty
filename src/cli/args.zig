@@ -346,7 +346,7 @@ fn formatProfileProblem(
             try std.fmt.allocPrintSentinel(
                 arena_alloc,
                 "\"{s}\" is not a profile you defined; a detected profile cannot be changed with " ++
-                    "profile-* lines (define your own with profile-command)",
+                    "profile-* lines (define your own with profile-command and hide the detected one with profile-hidden)",
                 .{id},
                 0,
             ),

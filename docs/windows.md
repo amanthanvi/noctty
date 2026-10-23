@@ -687,8 +687,8 @@ ordinary split reads the profile's current definition.
 ### Default profile, order and hidden profiles
 
 ```
-default-profile = vs18-cmd
-profile-order = vs18-cmd
+default-profile = py312
+profile-order = py312
 profile-order = pwsh
 profile-hidden = wsl:docker-desktop
 ```
@@ -717,17 +717,18 @@ profile still runs where something names it: `default-profile`, a restored
 session or layout, `new_window_elevated:<key>`, a split of a pane that runs
 it. A quick slot pinned to it keeps the pin but does not show it.
 
-All three take a profile by name: the id of a user profile (`vs18-cmd`, or
-`user:vs18-cmd`), a detected profile's key (`pwsh.exe`, `powershell.exe`,
+All three take a profile by its key: the id of one of your profiles (`py312`,
+or `user:py312`), a detected profile's key (`pwsh.exe`, `powershell.exe`,
 `cmd.exe`, `git-bash`, `wsl-default`, `wsl:<distribution>`, `ssh:<alias>`), or
-a name `NOCTTY_WIN32_PROFILE_ORDER` takes (`pwsh`, `git`, `cmd`, `wsl`; in
-`profile-order` and `profile-hidden` also a distribution's own name, which
-`default-profile` takes only as `wsl:<distribution>`). A bare word is a user
-profile's id first, so a user
-profile with the id `git` takes `git` from Git Bash. In `profile-order` and
-`profile-hidden` a name can stand for several profiles: `profile-hidden = wsl`
-hides every WSL profile. `default-profile` finds its profile without listing
-any: `wsl:Ubuntu` starts `wsl.exe -d Ubuntu` without asking WSL for its
+a short name (`pwsh`, `powershell`, `git`, `cmd`, `wsl`). In `profile-order`
+and `profile-hidden`, `wsl` names every WSL profile. A WSL distribution is
+always written `wsl:<distribution>`. Labels are not references, because they
+can change. A value that cannot name a profile (a typo, an id no
+`profile-command` line defines, a comment after the value) is reported as a
+config problem. One that names a shell this machine does not have
+(`wsl:docker-desktop`, an `ssh:` host) is not, so a shared config loads quietly
+everywhere. `default-profile` finds its profile without listing any:
+`wsl:Ubuntu` starts `wsl.exe -d Ubuntu` without asking WSL for its
 distributions, and `ssh:<alias>` starts `ssh.exe <alias>` without reading the
 SSH config. A `default-profile` that names no profile that can start here is
 reported as a config problem, and the automatic shell runs.
@@ -751,29 +752,29 @@ Safe mode reads none of your config, so it never runs a default profile.
 a second `noctty` that hands its arguments to a running one (single-instance
 forwarding). On the command line, `default-profile`, `command` and
 `initial-command` win over those lines in a file included with
-`config-file`, which is otherwise read after the command line. A launch that
-names a profile with `--default-profile` (a jump-list entry for a user
-profile) starts without the saved session, as `-e` does.
+`config-file`, which is otherwise read after the command line. The exception
+is `-e`: an `initial-command` line in a file included with `config-file`
+still replaces `-e` when the config is first loaded. A launch that names a
+profile with `--default-profile` (a jump-list entry for a user profile)
+starts without the saved session, as `-e` does.
 
 Limits:
 
-- `new_window_elevated:user:<id>` passes the profile's arguments and its
-  `profile-env` variables to the elevated process on its command line
-  (`--command=direct:...`, `--elevated-profile-env=...`), quoted again in the
-  standard way rather than as written, which differs only for cmd.exe's own
-  quoting idioms. The elevated process puts the variables over `env` after it
-  has read every config file, so an `env` line in an included file does not
-  replace them, and a `command` line there does not replace the command. The
-  variables and the command apply to the whole elevated window, not only its
-  first pane. New Elevated Window (`new_window_elevated:` with no key) does
-  the same for the profile of the pane it is opened from. The exception is
-  a `default-profile` the config files give on their own (no `--command` or
-  `--default-profile` on noctty's command line): the elevated process reads
-  the same files and starts that profile itself, so nothing of it goes on the
-  command line.
-  A command line is not private (process tools and process-creation auditing
-  can show it), so do not keep a secret in the `profile-env` of a profile you
-  open elevated.
+- New Elevated Window for one of your profiles (`new_window_elevated:user:<id>`,
+  or New Elevated Window from a pane that runs it) names the profile
+  (`--command= --initial-command= --default-profile=user:<id>`), as a taskbar
+  entry does. The elevated process reads the same config files and starts the
+  profile itself, so its command line and variables reach it as written, a
+  `command` or `initial-command` line in an included file does not replace
+  it, and none of them appear on the elevated command line. It applies to the
+  whole elevated window, not only its first pane. A profile defined only by a
+  `--profile-command` option on noctty's command line is still passed as
+  arguments (`--command=direct:...`, quoted again in the standard way, and
+  `--elevated-profile-env=...`), which process tools and process-creation
+  auditing can read, so do not keep a secret in such a profile's
+  `profile-env`. A `default-profile` the config files give on their own (no
+  `--command` or `--default-profile` on noctty's command line) gets nothing on
+  the command line at all: the elevated process starts it from the same files.
 - An elevated user profile starts in the directory of the pane it was opened
   from, as every elevated window does, not in its `profile-working-directory`.
 - Profile lines take effect at a config reload. Previewing a theme in the
@@ -791,6 +792,8 @@ Limits:
   from your config files; the empty values undo a `command` or
   `initial-command` line in any of them. A profile defined only in a file the
   running noctty was given with `--config-file` is not known to it.
+- A profile that runs `ssh.exe` is restored with the session like any other
+  profile; a detected `ssh:` profile is not.
 - The Settings window does not edit these lines; it leaves them as they are
   when it saves.
 
@@ -1399,8 +1402,9 @@ The roadmap originally asked for a per-profile `run elevated` flag. There is no
 such profile property, for the detected shells or for
 [user profiles](#user-profiles); the per-profile equivalent is a
 `new_window_elevated:<profile-key>` binding, for example
-`new_window_elevated:user:vs18-cmd`. An elevated user profile gets its
-arguments and its `profile-env` variables, quoted again in the standard way.
+`new_window_elevated:user:py312`. An elevated user profile from a config file
+is named to the elevated process, which builds it from the same files (see
+[User profiles](#user-profiles), Limits).
 
 An elevated noctty is a separate process and a separate window. Its title is
 prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be

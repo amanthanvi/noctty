@@ -2356,17 +2356,17 @@ fn profileOrderTokenMatches(token: []const u8, profile: Profile) bool {
     if (profile.kind == .wsl_distro and profile.label.len > 5 and
         std.ascii.eqlIgnoreCase(profile.label[0..5], "WSL: ") and
         std.ascii.eqlIgnoreCase(token, profile.label[5..])) return true;
-    return profileAliasMatches(token, profile);
-}
-
-/// The `NOCTTY_WIN32_PROFILE_ORDER` names of a detected profile besides its
-/// key and label: a distribution's own name (`Ubuntu` for `wsl:Ubuntu`) and
-/// the aliases of its kind (`pwsh`, `git`, `cmd`, `wsl`, ...).
-fn profileAliasMatches(token: []const u8, profile: Profile) bool {
+    // A distribution's own name (`Ubuntu` for `wsl:Ubuntu`), which only this
+    // variable takes; a reference in the config writes `wsl:<name>`.
     if (profile.kind == .wsl_distro and profile.key.len > 4 and
         std.ascii.eqlIgnoreCase(profile.key[0..4], "wsl:") and
         std.ascii.eqlIgnoreCase(token, profile.key[4..])) return true;
+    return profileAliasMatches(token, profile);
+}
 
+/// Whether `token` is one of the fixed words for `profile`'s kind (`pwsh`,
+/// `git`, `cmd`, `wsl`, ...; `profile_alias_words`).
+fn profileAliasMatches(token: []const u8, profile: Profile) bool {
     for (profile_alias_words) |alias| {
         if (alias.kind == profile.kind and std.ascii.eqlIgnoreCase(token, alias.word)) return true;
     }
@@ -2413,8 +2413,10 @@ test "every profile alias word is reserved as an id" {
 /// names the user profile with that id when `profiles` has one; otherwise
 /// it is a key (`pwsh.exe`, `wsl:Ubuntu`, `user:<id>`; an `ssh:` key is
 /// matched exactly, as OpenSSH aliases are case-sensitive) or one of the
-/// `NOCTTY_WIN32_PROFILE_ORDER` aliases (`pwsh`, `git`, `wsl`, `Ubuntu`, ...),
-/// which can name several profiles. Labels are not references: they change.
+/// fixed words (`pwsh`, `git`, `wsl`, ...; `profile_alias_words`), which can
+/// name several profiles. The ids reserve those words, so the classes never
+/// overlap. A distribution is always `wsl:<name>`, and labels are not
+/// references: they change.
 pub fn referenceNames(profiles: []const Profile, reference: []const u8, profile: Profile) bool {
     const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
     if (ref.len == 0) return false;
@@ -2499,7 +2501,7 @@ pub fn visibleProfiles(profiles: []Profile) []Profile {
 }
 
 /// What `resolveProfileReference` needs from the system: the lookups
-/// discovery uses, and `%NAME%` expansion for a user profile.
+/// discovery uses, and noctty's environment for `%NAME%` in a user profile.
 pub const ReferenceHost = struct {
     pub fn lookup(_: ReferenceHost, alloc: Allocator, exe: []const u8) !?[]u8 {
         return try lookupExecutable(alloc, exe);
@@ -2513,8 +2515,8 @@ pub const ReferenceHost = struct {
         return try resolveSshExecutable(alloc, lookupExecutable, accessAbsolute);
     }
 
-    pub fn expand(_: ReferenceHost, alloc: Allocator, text: []const u8) ![]u8 {
-        return try ProcessEnvironment.expand(.{}, alloc, text);
+    pub fn get(_: ReferenceHost, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
+        return try ProcessEnvironment.get(.{}, alloc, name);
     }
 };
 
@@ -2606,6 +2608,29 @@ fn isPlainReferenceArgument(value: []const u8) bool {
     return true;
 }
 
+/// Whether `reference` (a `profile-order` or `profile-hidden` value) can name
+/// a profile, decided without listing any: a fixed key or word; `wsl:<x>` or
+/// `ssh:<x>` with `<x>` one plain argument; an id, bare or as `user:<id>`,
+/// that `commands` (the `profile-command` map) holds, also a removed one.
+/// Whether such a profile exists depends on the machine, so a shared config
+/// that names a shell this one lacks loads quietly; anything else, a typo or
+/// a comment after the value, can name nothing anywhere.
+pub fn referenceCanName(reference: []const u8, commands: anytype) bool {
+    const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    if (ref.len == 0) return false;
+    for ([_][]const u8{ "pwsh.exe", "powershell.exe", "cmd.exe", "git-bash", "wsl-default" }) |key| {
+        if (std.ascii.eqlIgnoreCase(ref, key)) return true;
+    }
+    for (profile_alias_words) |alias| {
+        if (std.ascii.eqlIgnoreCase(ref, alias.word)) return true;
+    }
+    for ([_][]const u8{ "wsl:", "ssh:" }) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(ref, prefix)) return isPlainReferenceArgument(ref[prefix.len..]);
+    }
+    const id = if (std.ascii.startsWithIgnoreCase(ref, "user:")) ref["user:".len..] else ref;
+    return commands.contains(id);
+}
+
 /// The `resolveProfileReference` host for tests: fixed install paths, no
 /// `%NAME%` expansion, and counters for every lookup and for the WSL calls
 /// discovery makes (`probe`, `listWsl`), which resolution must never make.
@@ -2639,8 +2664,8 @@ const TestReferenceHost = struct {
         return try alloc.dupe(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
     }
 
-    pub fn expand(_: TestReferenceHost, alloc: Allocator, text: []const u8) ![]u8 {
-        return try alloc.dupe(u8, text);
+    pub fn get(_: TestReferenceHost, _: Allocator, _: []const u8) Allocator.Error!?[]u8 {
+        return null;
     }
 
     // What discovery would call; resolution has no business with them.
@@ -2805,27 +2830,32 @@ test "profile-order puts the profiles it names first and profile-hidden moves th
         try expectProfileKeys(&profiles, &.{ "ssh:Prod", "wsl-default", "wsl:Ubuntu", "wsl:docker-desktop", "pwsh.exe", "git-bash", "cmd.exe", "user:vs18-cmd", "user:py" });
     }
 
-    // Hidden by key, by a distribution's own name and by alias: marked, and
-    // after every shown one, each side in its order.
+    // Hidden by key and by a fixed word: marked, and after every shown one,
+    // each side in its order. A distribution's own name is no reference
+    // (`wsl:<name>` is), and a word that names nothing hides nothing.
     {
         var profiles = all;
         arrangeProfiles(&profiles, &.{"py"}, &.{ "wsl:docker-desktop", "ubuntu", "git", "nosuch" });
-        try expectProfileKeys(&profiles, &.{ "user:py", "wsl-default", "pwsh.exe", "cmd.exe", "user:vs18-cmd", "ssh:Prod", "wsl:Ubuntu", "wsl:docker-desktop", "git-bash" });
-        try testing.expectEqual(@as(usize, 6), visibleProfileCount(&profiles));
-        try testing.expectEqual(@as(usize, 6), visibleProfiles(&profiles).len);
-        for (profiles, 0..) |profile, index| try testing.expectEqual(index >= 6, profile.hidden);
+        try expectProfileKeys(&profiles, &.{ "user:py", "wsl-default", "wsl:Ubuntu", "pwsh.exe", "cmd.exe", "user:vs18-cmd", "ssh:Prod", "wsl:docker-desktop", "git-bash" });
+        try testing.expectEqual(@as(usize, 7), visibleProfileCount(&profiles));
+        try testing.expectEqual(@as(usize, 7), visibleProfiles(&profiles).len);
+        for (profiles, 0..) |profile, index| try testing.expectEqual(index >= 7, profile.hidden);
     }
-
-    // A user profile whose id spells an alias takes the bare word.
     {
         var profiles = all;
-        profiles[7] = testArrangeProfile(.user, "user:git", "My Git");
-        arrangeProfiles(&profiles, &.{}, &.{"git"});
-        try testing.expectEqualStrings("user:git", profiles[profiles.len - 1].key);
+        arrangeProfiles(&profiles, &.{"Ubuntu"}, &.{"WSL:ubuntu"});
+        try testing.expectEqualStrings("wsl:Ubuntu", profiles[profiles.len - 1].key);
         try testing.expect(profiles[profiles.len - 1].hidden);
+        try testing.expectEqualStrings("wsl-default", profiles[0].key);
+    }
+
+    // The fixed words name the detected profiles: `git` is Git Bash (no user
+    // id can be `git`; `profile_map.reserved_ids`).
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{}, &.{"git"});
+        try testing.expectEqualStrings("git-bash", profiles[profiles.len - 1].key);
         try testing.expectEqual(profiles.len - 1, visibleProfileCount(&profiles));
-        arrangeProfiles(&profiles, &.{}, &.{"git-bash"});
-        try testing.expectEqual(profiles.len - 2, visibleProfileCount(&profiles));
     }
 
     // Hiding everything leaves nothing shown, and every profile in the list.

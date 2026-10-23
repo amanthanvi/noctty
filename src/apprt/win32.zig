@@ -1167,6 +1167,20 @@ fn elevatedProfileKey(config: *const configpkg.Config, action_key: []const u8, p
     return key;
 }
 
+/// Whether `new_window_elevated` names the profile `key` to the elevated
+/// process (`RelaunchProfile.selector`) instead of passing its command and
+/// variables: a user profile whose live `profile-command` line was read from
+/// a config file, which the elevated process reads too, so the line and the
+/// variables reach it as written and stay off the elevated command line. A
+/// profile defined only by a `--profile-command` option is not forwarded, so
+/// it is still passed as arguments.
+fn elevatesBySelector(config: *const configpkg.Config, key: []const u8) bool {
+    if (!startsWithIgnoreCase(key, "user:")) return false;
+    const id = key["user:".len..];
+    if (config.@"profile-command".get(id) == null) return false;
+    return config.profilePlace("profile-command", id) == .file;
+}
+
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
     if (live_pwd) |pwd| {
         if (pwd.len > 0) return pwd;
@@ -7194,8 +7208,7 @@ pub const App = struct {
                 };
                 defer alloc.free(cwd);
 
-                var command: ?configpkg.Command = null;
-                var profile_env: []const windows_shell.EnvEntry = &.{};
+                var relaunch: win32_elevation.RelaunchProfile = .none;
                 var temporary_profiles: ?[]windows_shell.Profile = null;
                 defer if (temporary_profiles) |profiles| {
                     windows_shell.deinitProfiles(alloc, profiles);
@@ -7214,11 +7227,20 @@ pub const App = struct {
                         log.warn("elevated window profile not found key={s}", .{key});
                         return false;
                     };
-                    command = found.command;
-                    // The elevated process reads the same config files, so it
-                    // has the global `env` already; it gets the profile's own
-                    // variables on its command line. Never logged.
-                    if (found.user) |launch| profile_env = launch.env;
+                    relaunch = if (elevatesBySelector(&self.config, key))
+                        .{ .selector = key }
+                    else
+                        .{
+                            .command = .{
+                                .command = found.command,
+                                // The elevated process reads the same config
+                                // files, so it has the global `env` already; a
+                                // profile defined only on the command line gets
+                                // its own variables on the elevated command line.
+                                // Never logged.
+                                .env = if (found.user) |launch| launch.env else &.{},
+                            },
+                        };
                 }
 
                 const process_argv = try std.process.argsAlloc(alloc);
@@ -7233,8 +7255,7 @@ pub const App = struct {
                     self.config.class,
                     cwd,
                     self.startup_cwd orelse cwd,
-                    command,
-                    profile_env,
+                    relaunch,
                 );
                 errdefer alloc.free(parameters);
 
@@ -55785,6 +55806,64 @@ test "win32 a split or an elevated window of a default-profile pane needs no pro
     try std.testing.expectEqualStrings("USER:PY", elevatedProfileKey(&app.config, "", "USER:PY") orelse "");
 }
 
+test "win32 an elevated window names a file-defined user profile and passes a command-line one" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = 
+        \\profile-command = filed: cmd.exe /k "C:\a b\x.cmd"
+        \\profile-env = filed: TOKEN=secret
+        \\profile-command = both: one.exe
+        \\profile-command = gone: gone.exe
+        \\profile-command = gone:
+        \\
+    });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    var cfg = try configpkg.Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{ "--profile-command=clionly: two.exe", "--profile-command=both: three.exe" }),
+    };
+    try cfg.loadIter(alloc, &args);
+    try cfg.finalize();
+    try std.testing.expect(cfg._diagnostics.empty());
+
+    // The elevated process reads the files, so a profile they define is
+    // named; one the command line defines (or last changed) is passed.
+    try std.testing.expect(elevatesBySelector(&cfg, "user:filed"));
+    try std.testing.expect(elevatesBySelector(&cfg, "USER:FILED"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:clionly"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:both"));
+    // Nothing to name: a removed or unknown profile, a detected one.
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:gone"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "pwsh.exe"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "filed"));
+
+    // A config rebuilt for a conditional state (a theme) records the places
+    // again.
+    cfg._conditional_set.insert(.theme);
+    var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
+    defer replayed.deinit();
+    try std.testing.expect(elevatesBySelector(&replayed, "user:filed"));
+    try std.testing.expect(!elevatesBySelector(&replayed, "user:clionly"));
+
+    // What the elevated process is given for a detected profile and for a
+    // command-line one is as before: the argv, and the variables for the
+    // latter.
+    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const plain = try win32_elevation.buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"pwsh.exe"} } } });
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:pwsh.exe", plain);
+    const env = [_]windows_shell.EnvEntry{.{ .key = "MODE", .value = "cli" }};
+    const cli_only = try win32_elevation.buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"two.exe"} }, .env = &env } });
+    defer alloc.free(cli_only);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:two.exe --elevated-profile-env=MODE=cli", cli_only);
+}
+
 test "win32 a forwarded new window keeps the default-profile launch when a theme is set" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -55896,7 +55975,11 @@ test "win32 a forwarded new window keeps the default-profile launch when a theme
                 .path => |path| path,
                 else => "",
             });
-            try std.testing.expect(!userProfileKeysChanged(&base, &config));
+            // The same profile sources; the window's `env` holds the
+            // profile's variables, which a reload compares too.
+            var sources = config;
+            sources.env = base.env;
+            try std.testing.expect(!userProfileKeysChanged(&base, &sources));
         }
     }
 }

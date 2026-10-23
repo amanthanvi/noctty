@@ -1699,10 +1699,13 @@ class: ?[:0]const u8 = null,
 /// variable it sets itself. Like an `env` one, a profile `PATH` is the
 /// shell's whole `PATH`: noctty's own folder is no longer put first, and
 /// `%PATH%` holds it only if noctty's own `PATH` does (`GHOSTTY_BIN_DIR`
-/// still names it). An elevated window (`new_window_elevated:user:<id>`)
-/// receives these variables on its command line, which is not private
-/// (process tools and process-creation auditing can show it), so keep
-/// secrets out of a profile you open elevated.
+/// still names it). An elevated window of a profile defined in a config
+/// file (`new_window_elevated:user:<id>`, or New Elevated Window from a
+/// pane that runs it) names the profile and reads the same files, so these
+/// variables are not on its command line. For a profile defined only by a
+/// `--profile-command` option on noctty's command line they are, and a
+/// command line is not private (process tools and process-creation auditing
+/// can show it).
 @"profile-env": ProfileMap.Env = .{},
 
 /// The profile a terminal runs when nothing else chose one, in place of the
@@ -1712,8 +1715,9 @@ class: ?[:0]const u8 = null,
 /// longer exists. The value names a profile: the id of one defined with
 /// `profile-command` (or `user:<id>`), a detected profile's key (`pwsh.exe`,
 /// `powershell.exe`, `cmd.exe`, `git-bash`, `wsl-default`,
-/// `wsl:<distribution>`, `ssh:<alias>`), or a name `NOCTTY_WIN32_PROFILE_ORDER`
-/// takes (`pwsh`, `git`, `cmd`, `wsl`).
+/// `wsl:<distribution>`, `ssh:<alias>`), or a short name (`pwsh`,
+/// `powershell`, `git`, `cmd`, `wsl`). A distribution is always written
+/// `wsl:<distribution>`. Labels are not references, because they can change.
 ///
 /// The profile brings its command, its `profile-env` variables and its
 /// `profile-working-directory`. Without a directory of its own it starts
@@ -1742,7 +1746,11 @@ class: ?[:0]const u8 = null,
 /// repeat it to list several, in that order. A value names profiles as
 /// `default-profile` does, and a name such as `wsl` can name several. The
 /// other profiles keep their order after them. When this is set,
-/// `NOCTTY_WIN32_PROFILE_ORDER` is not used. `profile-order =` clears it.
+/// `NOCTTY_WIN32_PROFILE_ORDER` is not used. `profile-order =` clears it. A
+/// value that cannot name a profile (a typo, an id no `profile-command` line
+/// defines, a comment after the value) is reported as a config problem; one
+/// that names a shell this machine does not have (`wsl:docker-desktop`, an
+/// `ssh:` host) is not, so a shared config loads quietly everywhere.
 @"profile-order": RepeatableString = .{},
 
 /// A profile to leave out of the profile picker, the command palette, the
@@ -1752,7 +1760,8 @@ class: ?[:0]const u8 = null,
 /// where something names it: `default-profile`, a restored session or
 /// layout, `new_window_elevated:<key>`, a split of a pane that runs it. A
 /// quick slot pinned to it keeps the pin but does not show it.
-/// `profile-hidden =` clears it.
+/// `profile-hidden =` clears it. Values are reported as `profile-order`'s
+/// are.
 @"profile-hidden": RepeatableString = .{},
 
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will
@@ -5360,9 +5369,11 @@ fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
     }
     if (self.@"default-profile" == null or self._default_profile != null) return;
     if (self.command == null or self._command_defaulted or !self._command_from_file) return;
-    try self._diagnostics.append(self._arena.?.allocator(), .{
+    const alloc = self._arena.?.allocator();
+    try self._diagnostics.append(alloc, .{
         .key = "default-profile",
         .message = "is not used, because a config file sets command; remove the command line to start the profile",
+        .location = try self.profilePlace("default-profile", self.@"default-profile".?).clone(alloc),
     });
 }
 
@@ -5393,6 +5404,7 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
                 .{reference},
                 0,
             ),
+            .location = try self.profilePlace("default-profile", reference).clone(alloc),
         });
         return;
     };
@@ -5418,8 +5430,8 @@ const TestDefaultProfileHost = struct {
         return null;
     }
 
-    pub fn expand(_: TestDefaultProfileHost, alloc: Allocator, text: []const u8) ![]u8 {
-        return try alloc.dupe(u8, text);
+    pub fn get(_: TestDefaultProfileHost, _: Allocator, _: []const u8) Allocator.Error!?[]u8 {
+        return null;
     }
 };
 
@@ -5605,6 +5617,79 @@ test "default-profile gives way to a command from any layer, and says so only fo
     }
 }
 
+test "profile-order and profile-hidden report a value that can name no profile, at its line" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const text =
+        \\profile-command = py: cmd.exe
+        \\profile-command = gone: x.exe
+        \\profile-command = gone:
+        \\profile-order = pyy
+        \\profile-order = user:nope
+        \\profile-hidden = wsl:docker-desktop   # unused
+        \\profile-hidden = Ubuntu
+        \\profile-order = py
+        \\profile-order = user:PY
+        \\profile-order = gone
+        \\profile-hidden = wsl:docker-desktop
+        \\profile-hidden = ssh:build-host
+        \\profile-hidden = git
+        \\profile-hidden = WSL
+        \\profile-hidden = distro
+        \\profile-hidden = cmd.exe
+        \\
+    ;
+    var cfg = try testLoadProfileText(alloc, text);
+    defer cfg.deinit();
+    const Want = struct { key: []const u8, line: usize, message: []const u8 };
+    const want = [_]Want{
+        .{ .key = "profile-order", .line = 4, .message = "\"pyy\" names no profile: use a profile-command id, a key such as pwsh.exe, wsl:<distribution> or ssh:<alias>, or a name such as pwsh, git, cmd or wsl" },
+        .{ .key = "profile-order", .line = 5, .message = "\"user:nope\" names no profile" },
+        .{ .key = "profile-hidden", .line = 6, .message = "\"wsl:docker-desktop   # unused\" names no profile" },
+        .{ .key = "profile-hidden", .line = 7, .message = "\"Ubuntu\" names no profile" },
+    };
+    const found = cfg._diagnostics.items();
+    if (found.len != want.len) for (found) |diag| std.debug.print("{s}: {s}\n", .{ diag.key, diag.message });
+    try testing.expectEqual(want.len, found.len);
+    for (want, found) |w, got| {
+        try testing.expectEqualStrings(w.key, got.key);
+        try testing.expect(std.mem.startsWith(u8, got.message, w.message));
+        try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", got.location.file.path);
+        try testing.expectEqual(w.line, got.location.file.line);
+    }
+    // Only the value with a comment after it gets the hint.
+    try testing.expect(std.mem.endsWith(u8, found[2].message, " (comments go on a line of their own)"));
+    try testing.expect(!std.mem.endsWith(u8, found[3].message, ")"));
+}
+
+test "default-profile problems carry the line that set it" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    {
+        var cfg = try testLoadProfileText(alloc, "font-size = 12\ndefault-profile = nosuch\n");
+        defer cfg.deinit();
+        try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
+        const diag = cfg._diagnostics.items()[0];
+        try testing.expectEqualStrings("default-profile", diag.key);
+        try testing.expectEqual(@as(usize, 2), diag.location.file.line);
+    }
+    {
+        var cfg = try testLoadProfileText(alloc, "profile-command = py: cmd.exe\ndefault-profile = py\ncommand = vim.exe\n");
+        defer cfg.deinit();
+        try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
+        const diag = cfg._diagnostics.items()[0];
+        try testing.expect(std.mem.startsWith(u8, diag.message, "is not used, because a config file sets command"));
+        try testing.expectEqual(@as(usize, 2), diag.location.file.line);
+    }
+    // A command-line value that wins over the files is named at its argument.
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "default-profile = pwsh\n", &.{"--default-profile=nosuch"}, "");
+        defer cfg.deinit();
+        try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
+        try testing.expect(cfg._diagnostics.items()[0].location == .cli);
+    }
+}
+
 test "safe mode starts its recovery command over default-profile" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
@@ -5630,6 +5715,40 @@ fn finalizeProfiles(self: *Config) Allocator.Error!void {
     try self.finalizeProfileField(ProfileMap.Name, &self.@"profile-name", "profile-name");
     try self.finalizeProfileField(ProfileMap.Text, &self.@"profile-working-directory", "profile-working-directory");
     try self.finalizeProfileField(ProfileMap.Env, &self.@"profile-env", "profile-env");
+    try self.finalizeProfileReferences("profile-order");
+    try self.finalizeProfileReferences("profile-hidden");
+}
+
+/// Report each `profile-order` or `profile-hidden` value that can name no
+/// profile anywhere (`windows_shell.referenceCanName`): a typo, an id no
+/// `profile-command` line names, a comment after the value. One naming a
+/// shell this machine lacks (`wsl:docker-desktop`, an `ssh:` host) is not
+/// reported, so a shared config loads quietly everywhere. A reference is not
+/// a secret, so the message quotes it, as `default-profile`'s does.
+fn finalizeProfileReferences(self: *Config, comptime key: [:0]const u8) Allocator.Error!void {
+    const alloc = self._arena.?.allocator();
+    for (@field(self, key).list.items) |reference| {
+        if (windows_shell.referenceCanName(reference, &self.@"profile-command")) continue;
+        try self._diagnostics.append(alloc, .{
+            .key = key,
+            .message = try std.fmt.allocPrintSentinel(alloc, "\"{s}\" names no profile: use a profile-command id, " ++
+                "a key such as pwsh.exe, wsl:<distribution> or ssh:<alias>, or a name such as pwsh, git, cmd or wsl{s}", .{
+                reference,
+                if (hasInlineComment(reference)) " (comments go on a line of their own)" else "",
+            }, 0),
+            .location = try self.profilePlace(key, reference).clone(alloc),
+        });
+    }
+}
+
+/// Whether `value` holds whitespace followed by `#`: a comment written after
+/// a value, which the config format reads as part of it.
+fn hasInlineComment(value: []const u8) bool {
+    var index: usize = 1;
+    while (index < value.len) : (index += 1) {
+        if (value[index] == '#' and std.ascii.isWhitespace(value[index - 1])) return true;
+    }
+    return false;
 }
 
 fn finalizeProfileField(
@@ -5661,7 +5780,7 @@ fn finalizeProfileField(
 }
 
 /// Where a line that `finalize` may report was read: the last line that
-/// wrote a (key, id) of a `profile-*` key.
+/// wrote a (key, id) of a `profile-*` key, or a reference value.
 pub const ProfilePlace = struct {
     key: []const u8,
     id: []const u8,
@@ -5696,14 +5815,25 @@ pub fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Lo
 }
 
 /// Record where `arg` (`--<key>=<value>`) was read when it writes an id of a
-/// `profile-*` key. A line the parser will refuse writes nothing and is not
-/// recorded.
+/// `profile-*` key, or a value of `default-profile`, `profile-order` or
+/// `profile-hidden` (recorded under the value itself). A line the parser
+/// will refuse writes nothing and is not recorded.
 fn recordProfilePlace(self: *Config, alloc: Allocator, arg: []const u8, iter: anytype) Allocator.Error!void {
-    if (!std.mem.startsWith(u8, arg, "--profile-")) return;
+    if (!std.mem.startsWith(u8, arg, "--profile-") and !std.mem.startsWith(u8, arg, "--default-profile=")) return;
     const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return;
     const key = arg[2..eq];
     const value = std.mem.trim(u8, arg[eq + 1 ..], &std.ascii.whitespace);
     if (value.len == 0) return;
+    inline for (.{ "default-profile", "profile-order", "profile-hidden" }) |reference_key| {
+        if (std.mem.eql(u8, key, reference_key)) {
+            try self._profile_places.append(alloc, .{
+                .key = reference_key,
+                .id = try alloc.dupe(u8, value),
+                .location = try cli.Location.fromIter(iter, alloc),
+            });
+            return;
+        }
+    }
     inline for (.{
         .{ "profile-command", ProfileMap.Kind.command },
         .{ "profile-name", ProfileMap.Kind.name },

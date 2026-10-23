@@ -415,24 +415,43 @@ pub fn allocPrefixedTitle(
     return std.mem.concat(alloc, u8, &.{ title_prefix, base });
 }
 
+/// What an elevated window starts, as `buildRelaunchParameters` passes it.
+pub const RelaunchProfile = union(enum) {
+    /// Nothing: the elevated window starts what its config gives it.
+    none,
+    /// A profile's command, and for a user profile defined only on
+    /// noctty's command line its variables: `--command=` and one
+    /// `--elevated-profile-env=KEY=VALUE` per variable. The elevated process
+    /// puts those over `env` once it has read every config file
+    /// (`Config.consumeManuallyHook`), so an included file's `env` line
+    /// cannot replace them.
+    command: struct {
+        command: configpkg.Command,
+        env: []const configpkg.windows_shell.EnvEntry = &.{},
+    },
+    /// A profile's key, for a profile the elevated process can build from
+    /// the config files it reads too: `--command= --initial-command=
+    /// --default-profile=<key>`, as a jump-list entry names a profile. The
+    /// empty values undo a `command` or `initial-command` line in any file,
+    /// and `--default-profile` wins over the files' (`Config.finalize`), so
+    /// the profile's own line, its `cmdKeepOpenLine` and its variables apply
+    /// as written and none of them is on the elevated command line.
+    selector: []const u8,
+};
+
 /// Build the argument string for a new elevated process.
 ///
 /// `argv` is the complete current argv, including argv[0]. Only explicit
 /// config-file overrides are inherited; the effective class, invoking working
-/// directory, and selected profile command are appended after them, then one
-/// `--elevated-profile-env=KEY=VALUE` per variable a user profile sets
-/// (`profile_env`). The elevated process puts those over `env` once it has
-/// read every config file (`Config.consumeManuallyHook`), so an included
-/// file's `env` line cannot replace them. The result can hold those values,
-/// so it is never logged.
+/// directory, and the profile (`RelaunchProfile`) are appended after them.
+/// The result can hold a profile's variables, so it is never logged.
 pub fn buildRelaunchParameters(
     alloc: Allocator,
     argv: []const []const u8,
     effective_class: ?[]const u8,
     cwd: []const u8,
     config_base_cwd: []const u8,
-    command: ?configpkg.Command,
-    profile_env: []const configpkg.windows_shell.EnvEntry,
+    profile: RelaunchProfile,
 ) ![:0]u8 {
     var result: std.Io.Writer.Allocating = .init(alloc);
     errdefer result.deinit();
@@ -466,18 +485,26 @@ pub fn buildRelaunchParameters(
     }
     try appendKeyValueArgument(&result, "--working-directory=", cwd);
 
-    if (command) |value| {
-        var argument: std.Io.Writer.Allocating = .init(alloc);
-        defer argument.deinit();
-        try argument.writer.writeAll("--command=");
-        try writeCommand(&argument.writer, value);
-        try appendWindowsArgument(&result, argument.written());
-    }
-    for (profile_env) |entry| {
-        var argument: std.Io.Writer.Allocating = .init(alloc);
-        defer argument.deinit();
-        try argument.writer.print("--elevated-profile-env={s}={s}", .{ entry.key, entry.value });
-        try appendWindowsArgument(&result, argument.written());
+    switch (profile) {
+        .none => {},
+        .command => |launch| {
+            var argument: std.Io.Writer.Allocating = .init(alloc);
+            defer argument.deinit();
+            try argument.writer.writeAll("--command=");
+            try writeCommand(&argument.writer, launch.command);
+            try appendWindowsArgument(&result, argument.written());
+            for (launch.env) |entry| {
+                var env_argument: std.Io.Writer.Allocating = .init(alloc);
+                defer env_argument.deinit();
+                try env_argument.writer.print("--elevated-profile-env={s}={s}", .{ entry.key, entry.value });
+                try appendWindowsArgument(&result, env_argument.written());
+            }
+        },
+        .selector => |key| {
+            try appendWindowsArgument(&result, "--command=");
+            try appendWindowsArgument(&result, "--initial-command=");
+            try appendKeyValueArgument(&result, "--default-profile=", key);
+        },
     }
 
     return result.toOwnedSliceSentinel(0);
@@ -1009,8 +1036,7 @@ test "elevation relaunch parameters forward config class and cwd exactly" {
         "work class",
         "C:\\Users\\Aman\\Source Dir",
         "C:\\startup",
-        null,
-        &.{},
+        .none,
     );
     defer testing.allocator.free(parameters);
 
@@ -1043,8 +1069,7 @@ test "elevation relaunch parameters serialize and outer-quote direct command" {
         null,
         "C:\\work",
         "C:\\startup",
-        command,
-        &.{},
+        .{ .command = .{ .command = command } },
     );
     defer testing.allocator.free(parameters);
 
@@ -1076,8 +1101,7 @@ test "elevation relaunch parameters carry a user profile's argv and env" {
         null,
         "C:\\work",
         "C:\\startup",
-        .{ .direct = profile_argv },
-        &env,
+        .{ .command = .{ .command = .{ .direct = profile_argv }, .env = &env } },
     );
 
     // What the elevated process sees: its argv, then the config parsed from it.
@@ -1094,7 +1118,7 @@ test "elevation relaunch parameters carry a user profile's argv and env" {
     try testing.expectEqualStrings("--elevated-profile-env=VSCMD_SKIP_SENDTELEMETRY=1", child_argv[4]);
 
     // A detected profile (no env) gets exactly what it got before.
-    const plain = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .direct = &.{"cmd.exe"} }, &.{});
+    const plain = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"cmd.exe"} } } });
     try testing.expectEqualStrings("--working-directory=C:\\work --command=direct:cmd.exe", plain);
 }
 
@@ -1119,7 +1143,7 @@ test "elevated profile env wins over env in forwarded and included config files"
         .{ .key = "MODE", .value = "profile" },
         .{ .key = "PATH", .value = "C:\\profile" },
     };
-    const parameters = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .direct = &.{"cmd.exe"} }, &env);
+    const parameters = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"cmd.exe"} }, .env = &env } });
 
     // The elevated process: its argv parsed as Config.load parses it, with
     // an ordinary --env beside the profile's for contrast.
@@ -1147,6 +1171,69 @@ test "elevated profile env wins over env in forwarded and included config files"
     try testing.expectEqualStrings("include", cfg.env.map.get("OTHER").?);
 }
 
+test "an elevated window names a file-defined profile, which the elevated process builds as written" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const cli_args = @import("../cli/args.zig");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A forwarded --config-file defines the profile and includes a file that
+    // sets `command` and `initial-command`, which are read after the command
+    // line and would replace an argv passed there.
+    const line = "cmd.exe /k \"\"C:\\Tools Dir\\init.cmd\" \"y&z\"\"";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "outer.ghostty", .data = "profile-command = py: " ++ line ++ "\n" ++
+        "profile-env = py: TOKEN=s3cret-value\n" ++
+        "config-file = inner.ghostty\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "command = vim.exe\ninitial-command = other.exe\n" });
+    const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
+    const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
+    const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
+
+    const parameters = try buildRelaunchParameters(alloc, &argv, "work class", "C:\\work dir", "C:\\startup", .{ .selector = "user:py" });
+    // Nothing of the profile but its key is on the elevated command line.
+    for ([_][]const u8{ "s3cret", "TOKEN", "init.cmd", "elevated-profile-env", "direct:" }) |hidden| {
+        try testing.expect(std.mem.indexOf(u8, parameters, hidden) == null);
+    }
+    const child_line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+    const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, child_line);
+    const want = [_][]const u8{
+        "noctty.exe",
+        forwarded,
+        "--class=work class",
+        "--working-directory=C:\\work dir",
+        "--command=",
+        "--initial-command=",
+        "--default-profile=user:py",
+    };
+    try testing.expectEqual(want.len, child_argv.len);
+    for (want, child_argv) |w, got| try testing.expectEqualStrings(w, got);
+
+    // The elevated process: its argv parsed as Config.load parses it.
+    const args = try alloc.alloc([]const u8, child_argv.len - 1);
+    for (child_argv[1..], args) |arg, *out| out.* = arg;
+    var cfg = try configpkg.Config.default(testing.allocator);
+    defer cfg.deinit();
+    var iter: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(args) };
+    try cfg.loadIter(testing.allocator, &iter);
+    try cfg.loadRecursiveFiles(testing.allocator);
+    try cfg.finalize();
+    for (cfg._diagnostics.items()) |diag| std.debug.print("unexpected diagnostic: {s}: {s}\n", .{ diag.key, diag.message });
+    try testing.expect(cfg._diagnostics.empty());
+    const profile = cfg._default_profile.?;
+    try testing.expectEqualStrings("user:py", profile.key);
+    // The line as written (cmd's outer-quote idiom kept), its variables, and
+    // no included `command` or `initial-command` in the way.
+    try testing.expectEqualStrings(line, profile.user.?.command_line);
+    try testing.expectEqualStrings("TOKEN", profile.user.?.env[0].key);
+    try testing.expectEqualStrings("s3cret-value", profile.user.?.env[0].value);
+    try testing.expectEqualStrings("cmd.exe", cfg.command.?.direct[0]);
+    try testing.expect(cfg.@"initial-command" == null);
+}
+
 test "elevation relaunch parameters double a trailing backslash before closing quote" {
     const testing = std.testing;
     const argv = [_][]const u8{"C:\\noctty.exe"};
@@ -1159,8 +1246,7 @@ test "elevation relaunch parameters double a trailing backslash before closing q
         null,
         "C:\\work",
         "C:\\startup",
-        command,
-        &.{},
+        .{ .command = .{ .command = command } },
     );
     defer testing.allocator.free(parameters);
 
@@ -1180,8 +1266,7 @@ test "elevation relaunch parameters preserve shell command text" {
         null,
         "C:\\work",
         "C:\\startup",
-        command,
-        &.{},
+        .{ .command = .{ .command = command } },
     );
     defer testing.allocator.free(parameters);
 
