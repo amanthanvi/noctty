@@ -578,7 +578,7 @@ Some are taken because they already name a detected profile or a reference:
 
 Saved sessions and layouts remember a profile by its id, so change
 `profile-name` freely. A new id is a new profile: saved tabs of the old one
-open the default shell.
+open your `default-profile`, or the automatic shell when none is set.
 
 `profile-command = <id>:`, with nothing after the colon, removes a profile
 together with its other lines, including lines a file read later adds for it.
@@ -678,8 +678,8 @@ User profiles are listed after the detected local shells and before the SSH
 hosts, in the order of their first `profile-command` line, unless
 `profile-order` moves them (below). A session or a named layout remembers a
 pane's profile by its id (`user:<id>`); a saved pane that names an id that is
-gone, or removed, comes back as the default shell, as a pane whose shell was
-uninstalled does. A restored pane returns to the directory it was in. A tab or
+gone, or removed, comes back running your `default-profile` (or the automatic
+shell when none is set), as a pane whose shell was uninstalled does. A restored pane returns to the directory it was in. A tab or
 split that an automation command opens from a user profile pane keeps the
 command and environment that pane started with, even after a reload; an
 ordinary split reads the profile's current definition.
@@ -707,8 +707,9 @@ second `noctty` that hands its arguments to a running one), or the directory
 `profile-working-directory`. A second `noctty` that names no directory (from
 the Start menu, say) opens in the profile's directory, as the first one did.
 An SSH profile always starts in your user profile directory. The pane remembers the profile, so its splits
-and a restored session run it again, and the profile picker opens on it until
-you choose another there.
+and a restored session run it again (except a detected `ssh:` profile, which
+restore never reconnects; a user profile that runs `ssh.exe` is restored like
+any other), and the profile picker opens on it until you choose another there.
 
 `profile-order` lists profiles first in the picker and the palette, in the
 order of its lines, and `profile-hidden` takes profiles out of the picker, the
