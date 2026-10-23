@@ -420,7 +420,9 @@ pub const RelaunchProfile = union(enum) {
     /// Nothing: the elevated window starts what its config gives it.
     none,
     /// A profile's command, and for a user profile defined only on
-    /// noctty's command line its variables: `--command=` and one
+    /// noctty's command line its variables: `--command=`, an empty
+    /// `--initial-command=` (a config file's `initial-command` would run in
+    /// the first pane instead of the profile chosen), and one
     /// `--elevated-profile-env=KEY=VALUE` per variable. The elevated process
     /// puts those over `env` once it has read every config file
     /// (`Config.consumeManuallyHook`), so an included file's `env` line
@@ -493,6 +495,7 @@ pub fn buildRelaunchParameters(
             try argument.writer.writeAll("--command=");
             try writeCommand(&argument.writer, launch.command);
             try appendWindowsArgument(&result, argument.written());
+            try appendWindowsArgument(&result, "--initial-command=");
             for (launch.env) |entry| {
                 var env_argument: std.Io.Writer.Allocating = .init(alloc);
                 defer env_argument.deinit();
@@ -1074,7 +1077,7 @@ test "elevation relaunch parameters serialize and outer-quote direct command" {
     defer testing.allocator.free(parameters);
 
     try testing.expectEqualStrings(
-        \\--working-directory=C:\work "--command=direct:pwsh.exe -NoLogo \"C:\Program Files\profile.ps1\" \"say \\\"hello\\\"\""
+        \\--working-directory=C:\work "--command=direct:pwsh.exe -NoLogo \"C:\Program Files\profile.ps1\" \"say \\\"hello\\\"\"" --initial-command=
     , parameters);
 }
 
@@ -1107,19 +1110,21 @@ test "elevation relaunch parameters carry a user profile's argv and env" {
     // What the elevated process sees: its argv, then the config parsed from it.
     const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
     const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
-    try testing.expectEqual(@as(usize, 5), child_argv.len);
+    try testing.expectEqual(@as(usize, 6), child_argv.len);
     try testing.expectEqualStrings("--working-directory=C:\\work", child_argv[1]);
     try testing.expect(std.mem.startsWith(u8, child_argv[2], "--command=direct:"));
     var command: configpkg.Command = undefined;
     try command.parseCLI(alloc, child_argv[2]["--command=".len..]);
     try testing.expectEqual(profile_argv.len, command.direct.len);
     for (profile_argv, command.direct) |want, got| try testing.expectEqualStrings(want, got);
-    try testing.expectEqualStrings("--elevated-profile-env=PATH=C:\\Python 3;C:\\Windows", child_argv[3]);
-    try testing.expectEqualStrings("--elevated-profile-env=VSCMD_SKIP_SENDTELEMETRY=1", child_argv[4]);
+    // A config file's `initial-command` must not run in place of the profile.
+    try testing.expectEqualStrings("--initial-command=", child_argv[3]);
+    try testing.expectEqualStrings("--elevated-profile-env=PATH=C:\\Python 3;C:\\Windows", child_argv[4]);
+    try testing.expectEqualStrings("--elevated-profile-env=VSCMD_SKIP_SENDTELEMETRY=1", child_argv[5]);
 
     // A detected profile (no env) gets exactly what it got before.
     const plain = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"cmd.exe"} } } });
-    try testing.expectEqualStrings("--working-directory=C:\\work --command=direct:cmd.exe", plain);
+    try testing.expectEqualStrings("--working-directory=C:\\work --command=direct:cmd.exe --initial-command=", plain);
 }
 
 test "elevated profile env wins over env in forwarded and included config files" {
@@ -1251,7 +1256,7 @@ test "elevation relaunch parameters double a trailing backslash before closing q
     defer testing.allocator.free(parameters);
 
     try testing.expectEqualStrings(
-        \\--working-directory=C:\work "--command=direct:cmd.exe \"C:\path\\\\\""
+        \\--working-directory=C:\work "--command=direct:cmd.exe \"C:\path\\\\\"" --initial-command=
     , parameters);
 }
 
@@ -1271,6 +1276,6 @@ test "elevation relaunch parameters preserve shell command text" {
     defer testing.allocator.free(parameters);
 
     try testing.expectEqualStrings(
-        \\--working-directory=C:\work "--command=echo \"hello world\""
+        \\--working-directory=C:\work "--command=echo \"hello world\"" --initial-command=
     , parameters);
 }

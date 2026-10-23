@@ -769,7 +769,7 @@ Limits:
   it, and none of them appear on the elevated command line. It applies to the
   whole elevated window, not only its first pane. A profile defined only by a
   `--profile-command` option on noctty's command line is still passed as
-  arguments (`--command=direct:...`, quoted again in the standard way, and
+  arguments (`--command=direct:...`, quoted again in the standard way, an empty `--initial-command=`, and
   `--elevated-profile-env=...`), which process tools and process-creation
   auditing can read, so do not keep a secret in such a profile's
   `profile-env`. A `default-profile` the config files give on their own (no

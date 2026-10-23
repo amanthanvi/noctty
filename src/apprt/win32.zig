@@ -55857,11 +55857,17 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     const argv = [_][]const u8{"C:\\noctty.exe"};
     const plain = try win32_elevation.buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"pwsh.exe"} } } });
     defer alloc.free(plain);
-    try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:pwsh.exe", plain);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:pwsh.exe --initial-command=", plain);
     const env = [_]windows_shell.EnvEntry{.{ .key = "MODE", .value = "cli" }};
     const cli_only = try win32_elevation.buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &.{"two.exe"} }, .env = &env } });
     defer alloc.free(cli_only);
-    try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:two.exe --elevated-profile-env=MODE=cli", cli_only);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work --command=direct:two.exe --initial-command= --elevated-profile-env=MODE=cli", cli_only);
+
+    // A clone (a reload installs the app config as one) keeps the decision.
+    var reloaded = try cfg.clone(alloc);
+    defer reloaded.deinit();
+    try std.testing.expect(elevatesBySelector(&reloaded, "user:filed"));
+    try std.testing.expect(!elevatesBySelector(&reloaded, "user:clionly"));
 }
 
 test "win32 a forwarded new window keeps the default-profile launch when a theme is set" {
