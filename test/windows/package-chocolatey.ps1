@@ -204,23 +204,88 @@ try {
         -OutputRoot $dualOutputRelative | Out-Null
     $dualInstallScript = Get-Content -LiteralPath (Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\tools\chocolateyInstall.ps1')) -Raw
 
+    # The process tree the generated script sees: this process first, then each ancestor in turn,
+    # as executable paths. 'throw' makes the process query fail.
+    $shellChain = @('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', 'C:\Windows\explorer.exe')
+    $nocttyClsid = '{33368C6F-D328-410C-B225-26DC9F12C728}'
+    $baseTime = [datetime] '2026-10-23T12:00:00'
+
+    # What the generated script finds on the machine about noctty. By default noctty is not running,
+    # so the guard has nothing to do. Registry values are the install location under HKLM and HKCU
+    # and the default terminal; Embedding lists the running noctty.exe COM servers; WindowClass is the
+    # class of this process's console window ($null = no console window); Created gives the start
+    # time of each process in the chain (default: each ancestor an hour older than its child).
+    function New-NocttyScenario {
+        param([hashtable[]] $Override = @())
+        $scenario = @{
+            Running = $false; InstallLocation = $null; InstallLocationUser = $null; DelegationTerminal = $null
+            Embedding = @(); WindowClass = $null; AddTypeFails = $false; Created = $null
+        }
+        foreach ($layer in $Override) { foreach ($key in $layer.Keys) { $scenario[$key] = $layer[$key] } }
+        return $scenario
+    }
+
     function Get-GeneratedInstallerChoice {
-        param([string] $InstallScript, [AllowNull()] $CpuArchitecture)
+        param([string] $InstallScript, [AllowNull()] $CpuArchitecture, $ProcessChain = $shellChain, $Noctty = (New-NocttyScenario))
 
         $script:chosenInstaller = $null
-        # The generated script must never touch the host's processes.
-        function Get-Process { }
-        function Stop-Process { throw 'The generated install script must not call Stop-Process.' }
-        function Wait-Process { throw 'The generated install script must not call Wait-Process.' }
+        # Every call that installs or stops something, so a refusal can be shown to have done neither.
+        $script:ops = @()
+        # The generated script must never touch the host's processes or registry.
+        function Get-Process {
+            [CmdletBinding()]
+            param([string] $Name)
+            if ($Noctty.Running) { [pscustomobject] @{ Name = 'noctty' } }
+        }
+        function Stop-Process { $script:ops += 'Stop-Process'; throw 'The generated install script must not call Stop-Process.' }
+        function Wait-Process { $script:ops += 'Wait-Process'; throw 'The generated install script must not call Wait-Process.' }
+        function Get-ItemProperty {
+            [CmdletBinding()]
+            param([string] $Path, [string] $LiteralPath, [string[]] $Name)
+            if ($Path -like 'HKLM:*winghostty_is1') {
+                if ($Noctty.InstallLocation) { [pscustomobject] @{ InstallLocation = $Noctty.InstallLocation } }
+            }
+            elseif ($Path -like 'HKCU:*winghostty_is1') {
+                if ($Noctty.InstallLocationUser) { [pscustomobject] @{ InstallLocation = $Noctty.InstallLocationUser } }
+            }
+            elseif ($LiteralPath -eq 'HKCU:\Console\%%Startup') {
+                if ($Noctty.DelegationTerminal) { [pscustomobject] @{ DelegationTerminal = $Noctty.DelegationTerminal } }
+            }
+            else { throw "Unexpected registry read: $Path$LiteralPath" }
+        }
+        # Stands in for the console-window probe: the fake type is defined once per session and
+        # takes the window class of the current scenario ($null = no console window).
+        function Add-Type {
+            [CmdletBinding()]
+            param($Namespace, $Name, $MemberDefinition)
+            if ($Noctty.AddTypeFails) { throw 'Add-Type is unavailable' }
+            if (-not ('NocttyGuard.Native' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'namespace NocttyGuard { public static class Native { public static string WindowClass; public static System.IntPtr GetConsoleWindow() { return WindowClass == null ? System.IntPtr.Zero : new System.IntPtr(1); } public static int GetClassName(System.IntPtr window, System.Text.StringBuilder name, int maxCount) { name.Append(WindowClass); return name.Length; } } }'
+            }
+            [NocttyGuard.Native]::WindowClass = $Noctty.WindowClass
+        }
         function Get-CimInstance {
             [CmdletBinding()]
-            param([Parameter(Position = 0)] [string] $ClassName, [string[]] $Property, [int] $OperationTimeoutSec)
+            param([Parameter(Position = 0)] [string] $ClassName, [string] $Filter, [string[]] $Property, [int] $OperationTimeoutSec)
+            if ($ClassName -eq 'Win32_Process') {
+                # A hung WMI service must not hang the install, so every query needs a timeout.
+                if ($OperationTimeoutSec -le 0) { $script:ops += 'Win32_Process query without -OperationTimeoutSec' }
+                if ($Filter -like "Name = *") { return $Noctty.Embedding }
+                if ("$ProcessChain" -eq 'throw') { throw 'process list unavailable' }
+                $processId = [int] ($Filter -replace '\D', '')
+                $index = if ($processId -eq $PID) { 0 } else { $processId - 1000 }
+                if ($index -ge $ProcessChain.Count) { return }
+                $created = if ($Noctty.Created) { $Noctty.Created[$index] } else { $baseTime.AddHours(-$index) }
+                [pscustomobject] @{ ProcessId = $processId; ParentProcessId = 1001 + $index; ExecutablePath = $ProcessChain[$index]; CreationDate = $created }
+                return
+            }
             if ("$CpuArchitecture" -eq 'throw') { throw 'CPU query unavailable' }
             if ($null -ne $CpuArchitecture) { [pscustomobject] @{ Architecture = $CpuArchitecture } }
         }
         function Install-ChocolateyPackage {
             [CmdletBinding()]
             param($packageName, $fileType, $url, $checksum, $checksumType, $silentArgs, $validExitCodes)
+            $script:ops += 'Install-ChocolateyPackage'
             $script:chosenInstaller = @{ Url = $url; Checksum = $checksum }
         }
         & ([scriptblock]::Create($InstallScript))
@@ -248,6 +313,78 @@ try {
         $x64OnlyChoice = Get-GeneratedInstallerChoice -InstallScript $installScript -CpuArchitecture 12
         if ($null -eq $x64OnlyChoice -or $x64OnlyChoice.Url -cne $expectedSetupUrl -or $x64OnlyChoice.Checksum -cne $setupSha256) {
             throw "Generated x64-only install script did not keep the x64 installer on an ARM64 CPU: got $($x64OnlyChoice.Url)."
+        }
+    }
+
+    # Run from inside a noctty window the upgrade must refuse before anything happens; from any
+    # other terminal (including a sibling folder that merely shares the name prefix) it proceeds.
+    # A refusal has to be the guard's own message: any other error fails the case.
+    $nocttyDir = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) 'noctty'
+    $nocttyExe = Join-Path $nocttyDir 'noctty.exe'
+    $customDir = 'D:\Apps\noctty'
+    $customExe = Join-Path $customDir 'noctty.exe'
+    $insideMessage = '*cannot be upgraded from one of its own windows*'
+    $unreadableMessage = '*the process list could not be read*'
+    $comServer = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`" -Embedding" }
+    $strayServer = [pscustomobject] @{ ExecutablePath = Join-Path "$nocttyDir-portable" 'noctty.exe'; CommandLine = '"noctty.exe" -Embedding' }
+    # COM appends -Embedding to every server it starts, the toast activator included.
+    $toastServer = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`" -ToastActivated -Embedding" }
+    $plainInstance = [pscustomobject] @{ ExecutablePath = $nocttyExe; CommandLine = "`"$nocttyExe`"" }
+    $ownWindow = @($shellChain[0], $nocttyExe, $shellChain[1])
+    # The default-terminal handoff: noctty is the default terminal, its COM server runs, and this
+    # console is a pseudo console. Each case below removes one of those conditions.
+    $handoff = @{ Running = $true; DelegationTerminal = $nocttyClsid; Embedding = @($comServer); WindowClass = 'PseudoConsoleWindow' }
+    $guardCases = @(
+        @{ Name = 'noctty is not running (nothing to close, so no process query, even if it would fail)'; Chain = 'throw'; Noctty = @{}; Message = $null },
+        @{ Name = 'noctty.exe is an ancestor'; Chain = $ownWindow; Noctty = @{ Running = $true }; Message = $insideMessage },
+        @{ Name = 'the process list cannot be read while noctty runs'; Chain = 'throw'; Noctty = @{ Running = $true }; Message = $unreadableMessage },
+        @{ Name = 'a sibling folder shares the name prefix'; Chain = @($shellChain[0], (Join-Path "$nocttyDir-portable" 'noctty.exe')); Noctty = @{ Running = $true }; Message = $null },
+        @{ Name = 'an ordinary terminal runs it'; Chain = $shellChain; Noctty = @{ Running = $true }; Message = $null },
+        @{ Name = 'noctty is installed in a custom directory (machine-wide)'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Noctty = @{ Running = $true; InstallLocation = "$customDir\" }; Message = $insideMessage },
+        @{ Name = 'noctty is installed in a custom directory (this user only)'; Chain = @($shellChain[0], $customExe, $shellChain[1]); Noctty = @{ Running = $true; InstallLocationUser = $customDir }; Message = $insideMessage },
+        @{ Name = 'the registered install is elsewhere than the default directory'; Chain = $ownWindow; Noctty = @{ Running = $true; InstallLocation = $customDir }; Message = $null },
+        @{ Name = 'the machine-wide install location wins over the user one'; Chain = @($shellChain[0], 'E:\Other\noctty\noctty.exe', $shellChain[1]); Noctty = @{ Running = $true; InstallLocation = $customDir; InstallLocationUser = 'E:\Other\noctty' }; Message = $null },
+        @{ Name = 'a parent process ID has been reused by a newer process'; Chain = $ownWindow; Noctty = @{ Running = $true; Created = @($baseTime, $baseTime.AddHours(1), $baseTime.AddHours(-2)) }; Message = $null },
+        @{ Name = 'a parent started at the same moment as its child'; Chain = $ownWindow; Noctty = @{ Running = $true; Created = @($baseTime, $baseTime, $baseTime.AddHours(-2)) }; Message = $null },
+        @{ Name = 'noctty hosts the console as the default terminal'; Chain = $shellChain; Noctty = $handoff; Message = $insideMessage },
+        @{ Name = 'another application is the default terminal'; Chain = $shellChain; Noctty = @($handoff, @{ DelegationTerminal = '{00000000-0000-0000-0000-000000000000}' }); Message = $null },
+        @{ Name = 'no default terminal is set'; Chain = $shellChain; Noctty = @($handoff, @{ DelegationTerminal = $null }); Message = $null },
+        @{ Name = 'the noctty COM server is not running'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @() }); Message = $null },
+        @{ Name = 'the COM server running is a copy outside the install directory'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($strayServer) }); Message = $null },
+        @{ Name = 'the process in the install directory is the toast activator, not a handoff server'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($toastServer) }); Message = $null },
+        @{ Name = 'the process in the install directory was not started by COM'; Chain = $shellChain; Noctty = @($handoff, @{ Embedding = @($plainInstance) }); Message = $null },
+        @{ Name = 'this is an ordinary console window'; Chain = $shellChain; Noctty = @($handoff, @{ WindowClass = 'ConsoleWindowClass' }); Message = $null },
+        @{ Name = 'this process has no console window'; Chain = $shellChain; Noctty = @($handoff, @{ WindowClass = $null }); Message = $null },
+        @{ Name = 'the console-window probe cannot run'; Chain = $shellChain; Noctty = @($handoff, @{ AddTypeFails = $true }); Message = $null }
+    )
+    foreach ($case in $guardCases) {
+        $message = $null
+        $choice = $null
+        try {
+            $choice = Get-GeneratedInstallerChoice -InstallScript $dualInstallScript -CpuArchitecture 9 -ProcessChain $case.Chain -Noctty (New-NocttyScenario @($case.Noctty))
+        }
+        catch {
+            $message = $_.Exception.Message
+        }
+        if ($case.Message) {
+            if ($null -eq $message -or $message -notlike $case.Message) {
+                throw "Generated install script did not refuse as expected when $($case.Name): wanted '$($case.Message)', got '$message'."
+            }
+            if ($script:ops.Count -ne 0 -or $null -ne $script:chosenInstaller) {
+                throw "Generated install script did something before refusing when $($case.Name): $($script:ops -join ', ')."
+            }
+        }
+        else {
+            if ($null -ne $message) {
+                throw "Generated install script failed when $($case.Name): $message"
+            }
+            if ($null -eq $choice) {
+                throw "Generated install script did not reach the installer when $($case.Name)."
+            }
+            # Proceeding means installing and nothing else: no stopped process, no untimed query.
+            if (($script:ops -join ',') -cne 'Install-ChocolateyPackage') {
+                throw "Generated install script did more than install when $($case.Name): $($script:ops -join ', ')."
+            }
         }
     }
 
