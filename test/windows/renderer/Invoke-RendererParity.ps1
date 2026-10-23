@@ -574,6 +574,33 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             if ($p.targetMoveBox.y0 -ne [Math]::Min($p.targetBox.y0, $p.targetNextBox.y0) -or $p.targetMoveBox.y1 -ne [Math]::Max($p.targetBox.y1, $p.targetNextBox.y1)) { throw "Moving the target changed more than the underline: $($p.targetMoveBox | ConvertTo-Json -Compress)." }
             $p.targetMalformedBox = & $diffBox $p.kana $p.targetMalformed
             if ($p.targetMalformedBox.count -ne 0) { throw "Attributes one short of the string changed the composition: $($p.targetMalformedBox | ConvertTo-Json -Compress)." }
+            # The boxes say where the underline changed, not into what. Count
+            # the underline in each frame: the rows on which every pixel of a
+            # clause's four cells is lit. A clause is two glyphs, and no
+            # stroke crosses the gap between them, so only an underline
+            # lights a whole row. Each clause has one band, the target two.
+            $bands = {
+                param($Frame, [int]$Clause)
+                $x0 = $cell.x0 + 4 * $Clause * $cw
+                $lit = [RendererNative]::LitBands($Frame.path, $x0, $x0 + 4 * $cw - 1, $cell.y0, $cell.y1, 0x10, 0x10, 0x10, 48) | ConvertFrom-Json
+                return (@($lit.bands) | ForEach-Object { '{0}-{1}' -f $_.y0, $_.y1 }) -join ','
+            }
+            $p.underlines = [ordered]@{}
+            foreach ($name in @('kana', 'target', 'targetNext')) { $p.underlines[$name] = @(0, 1, 2 | ForEach-Object { & $bands $p[$name] $_ }) }
+            $single = $p.underlines.kana[0]
+            if ($single -eq '' -or $single.Contains(',') -or $p.underlines.kana[1] -ne $single -or $p.underlines.kana[2] -ne $single) { throw "Without attributes each clause should have the same single underline: $($p.underlines.kana -join ' | ')." }
+            foreach ($t in @(@('target', 1), @('targetNext', 2))) {
+                $u = $p.underlines[$t[0]]
+                for ($k = 0; $k -lt 3; $k++) {
+                    if ($k -ne $t[1]) {
+                        if ($u[$k] -ne $single) { throw "$($t[0]): clause $k should keep the single underline $single, found '$($u[$k])'." }
+                        continue
+                    }
+                    $double = @($u[$k].Split(',') | Where-Object { $_ -ne '' })
+                    if ($double.Count -ne 2) { throw "$($t[0]): the target clause should have two underline bands, found '$($u[$k])'." }
+                    foreach ($band in $double) { if ([int]$band.Split('-')[0] -lt $cell.y0 + [int]($ch / 2)) { throw "$($t[0]): an underline band above the middle of the row: '$($u[$k])'." } }
+                }
+            }
             # A caret before the target's first character keeps both: the
             # bar on the left edge of preedit cell 4, the double underline
             # under cells 4-7 except where the bar covers it.

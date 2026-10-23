@@ -3091,8 +3091,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // A caret in the cut head cuts the tail instead.
                     if (x + @as(usize, @intFromBool(cp.wide)) > range.x[1]) break;
                     // The clause being converted is double-underlined, as
-                    // Windows Terminal does; the input method's colours are
-                    // not used.
+                    // Windows Terminal draws a TSF bold line. IMM attributes
+                    // carry no colours, so the preedit keeps the text colour.
                     const in_target = if (range.target) |t| x >= t[0] and x <= t[1] else false;
                     self.addPreeditCell(
                         cp,

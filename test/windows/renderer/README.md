@@ -62,10 +62,13 @@ clears the composition. The same cases check the conversion target clause
 two-character clauses: no attributes (4), the target on the second clause (5)
 or the third (6), and attributes one short of the string (7). Every pixel that
 differs between 4 and 5 must lie under preedit cells 4-7, across their full
-width and below the middle of the row (the double underline), and between 4
-and 6 under cells 8-11; 5 and 6 differ only in those underline rows, 7 draws
-exactly what 4 does, and a caret before the target keeps both the bar and
-the double underline. Before the last step, captures that ask for no redraw
+width and below the middle of the row, and between 4 and 6 under cells 8-11;
+5 and 6 differ only in those underline rows, 7 draws exactly what 4 does, and
+a caret before the target keeps both the bar and the double underline. The
+shape is counted too: in each of 4, 5 and 6, the rows on which every pixel of
+a clause's four cells is lit (no glyph stroke crosses the gap between its two
+characters) form one band per clause, the same band in every clause, and two
+bands below the middle of the row under the target clause. Before the last step, captures that ask for no redraw
 check that the bar stays put through frames the composition did not cause.
 After the
 fixture turns cursor blinking on and writes nothing, at least two blink frames

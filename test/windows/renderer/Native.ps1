@@ -81,11 +81,16 @@ public static class RendererNative {
  // Shows IME composition fixture `fixture` (0 clears) with its caret at UTF-16
  // unit `cursor` (-1 for none) through the test-tools hook, past the IMM read.
  public static bool Preedit(IntPtr surf,int fixture,int cursor) { IntPtr result;return SendMessageTimeoutW(surf,0x8059,(IntPtr)fixture,(IntPtr)cursor,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
- // Counts the pixels within `tolerance` of one colour and their bounding box.
  // Counts the pixels of `a` and `b` that differ by more than `tolerance` in
  // any channel, and their bounding box.
  public static string DiffBox(string a,string b,int tolerance) {using(var x=new Bitmap(a))using(var y=new Bitmap(b)){if(x.Size!=y.Size)throw new Exception("Image dimensions differ");long count=0;int x0=-1,y0=-1,x1=-1,y1=-1;for(int j=0;j<x.Height;j++)for(int i=0;i<x.Width;i++){var p=x.GetPixel(i,j);var q=y.GetPixel(i,j);if(Math.Max(Math.Abs(p.R-q.R),Math.Max(Math.Abs(p.G-q.G),Math.Abs(p.B-q.B)))<=tolerance)continue;count++;if(x0<0||i<x0)x0=i;if(y0<0||j<y0)y0=j;if(i>x1)x1=i;if(j>y1)y1=j;}return string.Format(System.Globalization.CultureInfo.InvariantCulture,"{{\"count\":{0},\"x0\":{1},\"y0\":{2},\"x1\":{3},\"y1\":{4}}}",count,x0,y0,x1,y1);} }
+ // Counts the pixels within `tolerance` of one colour and their bounding box.
  public static string ColorBox(string path,int r,int g,int b,int tolerance) {using(var image=new Bitmap(path)){long count=0;int x0=-1,y0=-1,x1=-1,y1=-1;for(int y=0;y<image.Height;y++)for(int x=0;x<image.Width;x++){var p=image.GetPixel(x,y);if(Math.Abs(p.R-r)>tolerance||Math.Abs(p.G-g)>tolerance||Math.Abs(p.B-b)>tolerance)continue;count++;if(x0<0||x<x0)x0=x;if(y0<0||y<y0)y0=y;if(x>x1)x1=x;if(y>y1)y1=y;}return string.Format(System.Globalization.CultureInfo.InvariantCulture,"{{\"count\":{0},\"x0\":{1},\"y0\":{2},\"x1\":{3},\"y1\":{4},\"width\":{5}}}",count,x0,y0,x1,y1,image.Width);} }
+ // The runs of consecutive rows in `y0..y1` on which every pixel of columns
+ // `x0..x1` differs from the background (r,g,b) by more than `threshold` in
+ // some channel, as {y0,y1} bands. An underline spans the full width of
+ // its cells; a glyph stroke stops at the glyph's side bearings.
+ public static string LitBands(string path,int x0,int x1,int y0,int y1,int r,int g,int b,int threshold) {using(var image=new Bitmap(path)){if(x0<0||y0<0||x1>=image.Width||y1>=image.Height||x0>x1||y0>y1)throw new Exception("Band rect outside the image");var bands=new List<string>();int start=-1;for(int y=y0;y<=y1+1;y++){bool lit=y<=y1;for(int x=x0;lit&&x<=x1;x++){var p=image.GetPixel(x,y);if(Math.Max(Math.Abs(p.R-r),Math.Max(Math.Abs(p.G-g),Math.Abs(p.B-b)))<=threshold)lit=false;}if(lit&&start<0)start=y;else if(!lit&&start>=0){bands.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture,"{{\"y0\":{0},\"y1\":{1}}}",start,y-1));start=-1;}}return "{\"bands\":["+string.Join(",",bands)+"]}";} }
  public static int Left(IntPtr h) { RECT r; if(!GetWindowRect(h,out r))throw new Exception("Cannot read a pane rect"); return r.l; }
  // Checks `dimmed` against `undimmed` blended toward the fill in sRGB (gamma)
  // space, round((u*(255-a) + f*a)/255) per channel. Pixels off by more than
