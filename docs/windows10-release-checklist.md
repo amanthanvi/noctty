@@ -297,7 +297,10 @@ carries the AppUserModelID. Set `notify-on-command-finish = always` and
 `notify-on-command-finish-action = notify`, run `Start-Sleep 12` and switch to
 another window. Expected: a toast named "noctty" with the noctty
 icon whose last line reads `Tab 1: <tab title>`, in Action Center afterwards;
-clicking its popup focuses the pane. Turn Focus Assist to "Alarms only" and repeat.
+clicking its popup focuses the pane. Run it twice more without looking at the
+tab: Action Center holds one entry for the pane, the newest. Switch to the tab:
+the entry leaves Action Center. Show another toast, then close the pane: it
+leaves too. Show one more and quit noctty: it leaves. Turn Focus Assist to "Alarms only" and repeat.
 Expected: either the toast (record whether it pops up or only reaches Action
 Center) or an in-app banner ending in the same tab line; never nothing. Then revert to the clean snapshot and repeat with the portable copy only:
 it creates the AppUserModelID registration where none exists

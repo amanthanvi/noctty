@@ -164,6 +164,8 @@ Win32-validated VT protocol coverage is tracked in
   ([OSC 7501](windows.md#program-status-osc-7501)) and the "Copied ... to
   clipboard" notices) names its tab and focuses its pane when its popup is
   clicked; a click on an older entry in Action Center is not confirmed.
+  A pane keeps one toast in Action Center, removed when its tab is seen,
+  when the pane or tab closes, and at exit.
   Command-finish toasts depend on OSC 133 command marks, which plain
   `cmd.exe` does not supply (Clink with the shipped script does).
 - Taskbar progress for the active pane in each host window, driven by

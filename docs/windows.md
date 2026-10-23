@@ -747,6 +747,17 @@ minimized, switches to its tab and pane, and asks Windows to bring the window
 forward, which Windows may refuse. Whether clicking an older entry in Action
 Center does the same has not been confirmed.
 
+A pane keeps at most one toast in Action Center: a newer toast from the same
+pane replaces its older one. noctty takes a pane's toast out of Action Center
+when you look at its tab (its window comes forward with that tab active, or a
+pane in the tab gets focus), when the pane closes, and when its tab is closed,
+also while that close can still be undone; an undo does not bring the toast
+back. When noctty exits it removes every toast it showed, and only those:
+each noctty process removes its own, never another's. A noctty that ends
+without exiting (a crash, or Windows ending it at sign-out) leaves its toasts
+until you dismiss them. noctty's own notices that come from no pane
+(configuration reloaded, Settings saved) are not removed.
+
 Terminal progress reports map to Windows taskbar progress for the active
 surface in each host window when `progress-style` is enabled; with
 `progress-style = false` the sequences are silently ignored. Terminal apps

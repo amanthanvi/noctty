@@ -3011,6 +3011,17 @@ pub const App = struct {
     /// recorder in tests, so no test can reach Action Center. `null`
     /// sends every notification to the banner fallback.
     toast_sink: ?ToastSink = null,
+    /// Panes (core surface ids, never pointers) whose toast is to be taken
+    /// out of Action Center, oldest first. Flushed from the posted
+    /// `WM_WINHOSTTY_TOAST_REMOVALS`: a history call is a cross-process COM
+    /// call that can pump messages, so it never runs inside the window
+    /// activation, focus or close that queued it.
+    toast_removals: std.ArrayListUnmanaged(u64) = .empty,
+    /// `WM_WINHOSTTY_TOAST_REMOVALS` is posted and not yet handled.
+    toast_removals_posted: bool = false,
+    /// This process showed a tagged toast, so its group may hold toasts
+    /// to remove at exit.
+    toast_group_used: bool = false,
     /// Taskbar progress COM object. `null` when the taskbar API is
     /// unavailable, in which case progress continues to render only in
     /// the window title/status text.
@@ -3228,8 +3239,7 @@ pub const App = struct {
         // attributes toasts to our AUMID. A test build never creates one, so
         // no test can reach Action Center; tests install a recorder as
         // `toast_sink` instead.
-        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
-        self.winrt_toast = if (builtin.is_test) null else win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16) catch |err| blk: {
+        self.winrt_toast = if (builtin.is_test) null else win32_toast_winrt.WinrtToast.init(core_app.alloc, toast_aumid) catch |err| blk: {
             std.log.warn("winrt toast init failed err={}; falling back to host notifications", .{err});
             break :blk null;
         };
@@ -3830,6 +3840,9 @@ pub const App = struct {
         if (uia_disconnect_hr != 0) {
             log.warn("win32 UIA disconnect-all failed hr=0x{x}", .{@as(u32, @bitCast(uia_disconnect_hr))});
         }
+        // After `destroyAllWindows`, whose closes queued their panes' toasts:
+        // one call removes them all, while the notifier is still alive.
+        self.removeOwnToasts();
         self.toast_sink = null;
         if (self.winrt_toast) |*toast| {
             toast.deinit();
@@ -9787,6 +9800,8 @@ pub const App = struct {
 
     fn windowDestroyed(self: *App, surface: *Surface) void {
         self.removeWindow(surface);
+        // A closed pane's toast can no longer focus anything.
+        self.forgetSurfaceToast(surface);
         if (surface.host) |host| {
             if (self.session_restore_rollback_host == host) return;
             const previous_tab_id = if (host.active_tab < host.tabs.items.len)
@@ -12017,13 +12032,14 @@ pub const App = struct {
     /// Show a toast; when none can be shown, a banner in the target's
     /// window; failing that, a log line. `sender_title` is the title the
     /// notification arrived with, which the banner uses: a toast titled by
-    /// its tab names that tab in its attribution line already.
+    /// its tab names that tab in its attribution line already. Returns
+    /// whether Windows took the toast.
     fn showToast(
         self: *App,
         target: apprt.Target,
         request: ToastRequest,
         sender_title: []const u8,
-    ) !void {
+    ) !bool {
         var shown = request;
         if (shown.title.len == 0) shown.title = "noctty";
 
@@ -12038,7 +12054,7 @@ pub const App = struct {
         // which of the two it does has not been measured for noctty.
         if (self.toast_sink) |sink| {
             if (sink.show(sink.ctx, shown)) |_| {
-                return;
+                return true;
             } else |err| {
                 // test/windows/interactive-win11-command-finish.ps1 matches
                 // this line's opening words; keep them.
@@ -12050,13 +12066,14 @@ pub const App = struct {
         defer message.deinit();
         composeToastFallback(&message.writer, sender_title, request.body, request.attribution) catch
             return error.OutOfMemory;
-        if (try self.showHostBanner(target, .info, message.written())) return;
+        if (try self.showHostBanner(target, .info, message.written())) return false;
         // Final local fallback: pass the composed message as the body so
         // notifications with an empty `body` (e.g. settings-save success,
         // where title alone carries the signal) still render something
         // readable.
         const caption = if (toastFallbackTitled(sender_title)) sender_title else "noctty";
         try showInfoMessage(target, caption, message.written());
+        return false;
     }
 
     fn toastFallbackTitled(title: []const u8) bool {
@@ -12100,7 +12117,7 @@ pub const App = struct {
                 return self.showSurfaceToast(surface, title, body);
             },
         }
-        try self.showToast(target, .{ .title = title, .body = body }, title);
+        _ = try self.showToast(target, .{ .title = title, .body = body }, title);
     }
 
     /// The most of a tab's title a toast shows, in bytes, before the
@@ -12133,12 +12150,112 @@ pub const App = struct {
 
         const launch = try buildToastLaunchForSurface(self.core_app.alloc, surface);
         defer self.core_app.alloc.free(launch);
-        try self.showToast(.{ .surface = surface.core() }, .{
+
+        // Tagged by pane and grouped by process: a newer toast from this
+        // pane replaces its older one in Action Center, and seeing the tab,
+        // closing the pane or exiting takes it out (`queueToastRemoval`).
+        const surface_id = surface.core().id;
+        var tag_buf: [16]u8 = undefined;
+        var group_buf: [toast_group_max]u8 = undefined;
+        // A removal still queued for the pane's older toast would take this
+        // one, which replaces it, away too.
+        self.cancelToastRemoval(surface_id);
+        const shown = try self.showToast(.{ .surface = surface.core() }, .{
             .title = if (title.len > 0) title else tab_title.buffered(),
             .body = body,
             .attribution = attribution,
             .launch = launch,
+            .tag = toastTag(&tag_buf, surface_id),
+            .group = toastGroup(&group_buf),
         }, title);
+        if (shown) self.noteToastShown(surface_id);
+    }
+
+    /// A toast tagged `surface_id` is in Action Center now. The show may
+    /// have pumped messages that closed the pane, so it is found again by
+    /// id; a pane that is gone has its toast removed at once.
+    fn noteToastShown(self: *App, surface_id: u64) void {
+        self.toast_group_used = true;
+        if (self.findSurfaceById(surface_id)) |surface| {
+            surface.toast_outstanding = surface_id;
+        } else {
+            // Failing that, exit's group removal takes it.
+            _ = self.queueToastRemoval(surface_id);
+        }
+    }
+
+    /// The pane's toast, if it may still be in Action Center, is to be
+    /// removed: its tab was seen, the pane closed, or the tab went into
+    /// undo history. Queued by id and done from a posted message
+    /// (`flushToastRemovals`), so nothing here calls into Windows.
+    fn forgetSurfaceToast(self: *App, surface: *Surface) void {
+        const surface_id = surface.toast_outstanding orelse return;
+        if (self.queueToastRemoval(surface_id)) surface.toast_outstanding = null;
+    }
+
+    fn forgetTabToasts(self: *App, tab: *const Tab) void {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| self.forgetSurfaceToast(entry.view);
+    }
+
+    /// Returns false when the id could not be queued; the caller then keeps
+    /// it outstanding, so a later chance retries.
+    fn queueToastRemoval(self: *App, surface_id: u64) bool {
+        if (std.mem.indexOfScalar(u64, self.toast_removals.items, surface_id) == null) {
+            self.toast_removals.append(self.core_app.alloc, surface_id) catch {
+                log.warn("toast removal not queued: out of memory", .{});
+                return false;
+            };
+        }
+        if (!self.toast_removals_posted) {
+            // No message window (before `run` creates it, after it closes
+            // at exit): exit's `removeOwnToasts` takes the whole group.
+            if (self.message_hwnd) |hwnd| {
+                self.toast_removals_posted = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, 0, 0) != 0;
+            }
+        }
+        return true;
+    }
+
+    fn cancelToastRemoval(self: *App, surface_id: u64) void {
+        if (std.mem.indexOfScalar(u64, self.toast_removals.items, surface_id)) |i| {
+            _ = self.toast_removals.orderedRemove(i);
+        }
+    }
+
+    /// Remove the queued panes' toasts from Action Center. Each id is taken
+    /// off the live queue before its call: a history call can pump
+    /// messages, and a toast shown meanwhile for a pane still queued takes
+    /// that pane off the queue (`cancelToastRemoval`), so it survives.
+    fn flushToastRemovals(self: *App) void {
+        self.toast_removals_posted = false;
+        const sink = self.toast_sink orelse {
+            self.toast_removals.clearRetainingCapacity();
+            return;
+        };
+        var group_buf: [toast_group_max]u8 = undefined;
+        const group = toastGroup(&group_buf);
+        while (self.toast_removals.items.len > 0) {
+            const surface_id = self.toast_removals.orderedRemove(0);
+            var tag_buf: [16]u8 = undefined;
+            sink.remove_tag(sink.ctx, toastTag(&tag_buf, surface_id), group) catch |err| {
+                log.warn("toast removal failed err={}", .{err});
+            };
+        }
+    }
+
+    /// At exit: take this process's toasts out of Action Center, all at
+    /// once by its group, and never the other noctty processes'.
+    fn removeOwnToasts(self: *App) void {
+        self.toast_removals.clearAndFree(self.core_app.alloc);
+        self.toast_removals_posted = false;
+        if (!self.toast_group_used) return;
+        self.toast_group_used = false;
+        const sink = self.toast_sink orelse return;
+        var group_buf: [toast_group_max]u8 = undefined;
+        sink.remove_group(sink.ctx, toastGroup(&group_buf)) catch |err| {
+            log.warn("toast group removal at exit failed err={}", .{err});
+        };
     }
 
     /// What the user knows a tab by: the title of its focused pane.
@@ -12310,13 +12427,21 @@ pub const App = struct {
     /// The user is looking at tab `index` of `host`: stop showing what its
     /// programs finished or failed, and let its next news notify at once.
     fn acknowledgeTab(self: *App, host: *Host, index: usize) void {
-        if (index >= host.tabs.items.len or !tabSeenByUser(host, index)) return;
+        self.acknowledgeTabWithForeground(host, index, sys.GetForegroundWindow());
+    }
+
+    /// `acknowledgeTab` with the foreground window passed in, for tests.
+    fn acknowledgeTabWithForeground(self: *App, host: *Host, index: usize, foreground: ?HWND) void {
+        if (index >= host.tabs.items.len or !tabSeenWithForeground(host, index, foreground)) return;
         var changed = false;
         var it = host.tabs.items[index].tree.iterator();
         while (it.next()) |entry| {
             entry.view.program_status_notified_ms = null;
             entry.view.program_status_notify_pending = false;
             if (entry.view.program_status.acknowledge()) changed = true;
+            // Its toasts have been seen too. Only queued here: this runs
+            // inside WM_ACTIVATE and focus handling.
+            self.forgetSurfaceToast(entry.view);
         }
         if (!changed) return;
         host.refreshTabStatus(index);
@@ -14707,6 +14832,9 @@ const Host = struct {
             entry.view.host_active = false;
             entry.view.setVisible(false);
         }
+        // Its panes live on in undo history, where a click on their toasts
+        // has nothing to show, and an undo does not bring the toasts back.
+        self.app.forgetTabToasts(&removed);
 
         self.active_tab = activeTabAfterRemoval(self.active_tab, index, self.tabs.items.len);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
@@ -14833,6 +14961,8 @@ const Host = struct {
             return err;
         };
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
+        // As the close it redoes (`detachTabForUndo`).
+        if (value.tab) |*tab| self.app.forgetTabToasts(tab);
         self.notifyActiveTabUiaSelectionChanged(previous_tab_id);
         self.notifyTabListUiaChanged();
         return true;
@@ -14872,6 +15002,8 @@ const Host = struct {
         // Focus after the undo follows the close rule: the user's pane stays
         // focused unless it was the one removed.
         if (shell_prepared) |*prepared| self.app.applyShellEffects(prepared.effects(), .{});
+        // The pane waits in redo history now, like a closed tab's panes.
+        self.app.forgetSurfaceToast(value.created_surface);
         // The neighbours take the removed pane's space now: activating a pane
         // that is already focused and shown takes a fast path with no layout.
         self.layout() catch |err| log.warn("split-create undo layout failed err={}", .{err});
@@ -29288,16 +29420,49 @@ const ToastRequest = win32_toast_winrt.ToastRequest;
 const ToastSink = struct {
     ctx: *anyopaque,
     show: *const fn (ctx: *anyopaque, request: ToastRequest) anyerror!void,
+    /// Take the toast tagged `tag` in `group` out of Action Center.
+    remove_tag: *const fn (ctx: *anyopaque, tag: []const u8, group: []const u8) anyerror!void,
+    /// Take every toast in `group` out of Action Center.
+    remove_group: *const fn (ctx: *anyopaque, group: []const u8) anyerror!void,
 
     fn winrt(toast: *win32_toast_winrt.WinrtToast) ToastSink {
-        return .{ .ctx = toast, .show = showWinrt };
+        return .{ .ctx = toast, .show = showWinrt, .remove_tag = removeTagWinrt, .remove_group = removeGroupWinrt };
     }
 
     fn showWinrt(ctx: *anyopaque, request: ToastRequest) anyerror!void {
         const toast: *win32_toast_winrt.WinrtToast = @ptrCast(@alignCast(ctx));
         try toast.show(request, .info);
     }
+
+    fn removeTagWinrt(ctx: *anyopaque, tag: []const u8, group: []const u8) anyerror!void {
+        const toast: *win32_toast_winrt.WinrtToast = @ptrCast(@alignCast(ctx));
+        try toast.removeGroupedTag(tag, group);
+    }
+
+    fn removeGroupWinrt(ctx: *anyopaque, group: []const u8) anyerror!void {
+        const toast: *win32_toast_winrt.WinrtToast = @ptrCast(@alignCast(ctx));
+        try toast.removeGroup(group);
+    }
 };
+
+/// The AUMID toasts are shown and removed under. It is the process's own
+/// (`win32_aumid.aumid_utf8`), so a build that renames that (the
+/// measure-AUMID patch) creates its notifier under the new name too.
+const toast_aumid = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
+
+/// A pane's toast tag: its core surface id, 16 hex digits. One tag per pane,
+/// so a newer toast from the pane replaces its older one in Action Center.
+fn toastTag(buf: *[16]u8, surface_id: u64) []const u8 {
+    return std.fmt.bufPrint(buf, "{x:0>16}", .{surface_id}) catch unreachable;
+}
+
+/// This process's toast group, `noctty-<pid>`: other noctty processes share
+/// the AUMID, so everything this process removes at once is named by it.
+fn toastGroup(buf: *[toast_group_max]u8) []const u8 {
+    return std.fmt.bufPrint(buf, "noctty-{d}", .{sys.GetCurrentProcessId()}) catch unreachable;
+}
+
+const toast_group_max = "noctty-".len + std.fmt.count("{d}", .{std.math.maxInt(DWORD)});
 
 fn buildToastLaunchForSurface(
     alloc: Allocator,
@@ -32974,6 +33139,12 @@ fn appMessageWindowProc(hwnd: HWND, message: UINT, wparam: WPARAM, lparam: LPARA
                 .uia_disconnect => |pending| processDeferredUiaDisconnect(delivery, pending),
             }
             app.tickCoreAppModal();
+            return 0;
+        },
+        c.WM_WINHOSTTY_TOAST_REMOVALS => {
+            // Posted by `queueToastRemoval`. Only ids are queued, so a pane
+            // freed meanwhile is never touched.
+            app.flushToastRemovals();
             return 0;
         },
         c.WM_WINHOSTTY_TERMINAL_HANDOFF => {
@@ -36766,6 +36937,11 @@ pub const Surface = struct {
     /// A notification the rate limit held back is waiting; see
     /// `App.flushProgramStatusNotifications`.
     program_status_notify_pending: bool = false,
+    /// The tag (this pane's core surface id) of a toast this pane showed
+    /// that may still be in Action Center; `null` once its removal is
+    /// queued. Kept as the id itself because `windowDestroyed` runs after
+    /// the core is gone. See `App.queueToastRemoval`.
+    toast_outstanding: ?u64 = null,
     inspector_visible: bool = false,
     paint_pending: bool = false,
     live_resize_repaint_deferred: bool = false,
@@ -43445,6 +43621,7 @@ const TestSession = struct {
             app.config.deinit();
             app.hosts.deinit(self.allocator);
             app.windows.deinit(self.allocator);
+            app.toast_removals.deinit(self.allocator);
             app.discardDeferredOpens();
         }
         if (self.core_app_initialized) self.core_app.?.deinit();
@@ -56611,9 +56788,14 @@ const TestToastRecorder = struct {
     body: ?[]u8 = null,
     attribution: ?[]u8 = null,
     launch: ?[]u8 = null,
+    tag: ?[]u8 = null,
+    group: ?[]u8 = null,
+    /// Every history call, in order: `tag <tag> <group>` for one pane's
+    /// toast, `group <group>` for a whole group.
+    removals: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn sink(self: *TestToastRecorder) ToastSink {
-        return .{ .ctx = self, .show = record };
+        return .{ .ctx = self, .show = record, .remove_tag = recordRemoveTag, .remove_group = recordRemoveGroup };
     }
 
     fn record(ctx: *anyopaque, request: ToastRequest) anyerror!void {
@@ -56624,21 +56806,50 @@ const TestToastRecorder = struct {
         self.body = try self.alloc.dupe(u8, request.body);
         if (request.attribution) |value| self.attribution = try self.alloc.dupe(u8, value);
         if (request.launch) |value| self.launch = try self.alloc.dupe(u8, value);
+        if (request.tag) |value| self.tag = try self.alloc.dupe(u8, value);
+        if (request.group) |value| self.group = try self.alloc.dupe(u8, value);
         if (self.refuse) |err| return err;
     }
 
+    fn recordRemoveTag(ctx: *anyopaque, tag: []const u8, group: []const u8) anyerror!void {
+        const self: *TestToastRecorder = @ptrCast(@alignCast(ctx));
+        const line = try std.fmt.allocPrint(self.alloc, "tag {s} {s}", .{ tag, group });
+        errdefer self.alloc.free(line);
+        try self.removals.append(self.alloc, line);
+    }
+
+    fn recordRemoveGroup(ctx: *anyopaque, group: []const u8) anyerror!void {
+        const self: *TestToastRecorder = @ptrCast(@alignCast(ctx));
+        const line = try std.fmt.allocPrint(self.alloc, "group {s}", .{group});
+        errdefer self.alloc.free(line);
+        try self.removals.append(self.alloc, line);
+    }
+
+    /// Forget the last toast's fields.
     fn clear(self: *TestToastRecorder) void {
-        inline for (.{ "title", "body", "attribution", "launch" }) |name| {
+        inline for (.{ "title", "body", "attribution", "launch", "tag", "group" }) |name| {
             if (@field(self, name)) |value| self.alloc.free(value);
             @field(self, name) = null;
         }
+    }
+
+    fn deinit(self: *TestToastRecorder) void {
+        self.clear();
+        for (self.removals.items) |line| self.alloc.free(line);
+        self.removals.deinit(self.alloc);
+    }
+
+    /// The history calls so far are exactly `expected`, in order.
+    fn expectRemovals(self: *const TestToastRecorder, expected: []const []const u8) !void {
+        try std.testing.expectEqual(expected.len, self.removals.items.len);
+        for (expected, self.removals.items) |want, got| try std.testing.expectEqualStrings(want, got);
     }
 
     /// Fails with an error, never a panic, when the field is missing: a
     /// panic would end the test process and hide every later failure.
     fn expect(
         self: *const TestToastRecorder,
-        comptime field: enum { title, body, attribution },
+        comptime field: enum { title, body, attribution, tag, group },
         expected: []const u8,
     ) !void {
         const actual = @field(self, @tagName(field)) orelse return error.TestExpectedText;
@@ -56700,7 +56911,7 @@ const ToastTestWindow = struct {
     }
 
     fn deinit(self: *ToastTestWindow) void {
-        self.recorder.clear();
+        self.recorder.deinit();
         self.p.program_status.deinit(std.testing.allocator);
         self.session.deinit();
     }
@@ -56943,6 +57154,345 @@ test "win32 a refused toast becomes a banner that names its tab once" {
     defer line.deinit();
     try App.composeToastFallback(&line.writer, "claude is done", "", "Tab 2: cargo build");
     try std.testing.expectEqualStrings("claude is done \u{2014} Tab 2: cargo build", line.written());
+}
+
+/// What a removal of `surface_id`'s toast reads in the recorder.
+fn expectedToastRemoval(buf: []u8, surface_id: u64) ![]const u8 {
+    var group_buf: [toast_group_max]u8 = undefined;
+    return std.fmt.bufPrint(buf, "tag {x:0>16} {s}", .{ surface_id, toastGroup(&group_buf) });
+}
+
+/// Put `q` beside `p` in the second tab, the tab's focused pane staying
+/// `p`. The returned tree is freed by the caller.
+fn toastTestSplit(w: *ToastTestWindow) !SplitTreeSurface {
+    const inserted = try SplitTreeSurface.init(std.testing.allocator, &w.q);
+    errdefer {
+        var cleanup = inserted;
+        cleanup.deinit();
+    }
+    const tab = &w.host.tabs.items[1];
+    var prev_tree = tab.tree;
+    tab.tree = try prev_tree.split(std.testing.allocator, tab.focused, .right, 0.5, &inserted);
+    prev_tree.deinit();
+    tab.focused = @enumFromInt(2);
+    return inserted;
+}
+
+test "win32 toasts are tagged by pane and grouped by process" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+
+    var group_buf: [toast_group_max]u8 = undefined;
+    var expected_group_buf: [32]u8 = undefined;
+    const group = toastGroup(&group_buf);
+    try std.testing.expectEqualStrings(
+        try std.fmt.bufPrint(&expected_group_buf, "noctty-{d}", .{sys.GetCurrentProcessId()}),
+        group,
+    );
+
+    try w.osc(&w.p, "", "tests passed");
+    try w.recorder.expect(.tag, "0000000000002002");
+    try w.recorder.expect(.group, group);
+    try std.testing.expectEqual(@as(?u64, 0x2002), w.p.toast_outstanding);
+    try std.testing.expect(w.app.toast_group_used);
+
+    // Every later toast from the pane, of any kind, has the same tag and
+    // group, so Windows replaces the older one.
+    try w.osc(&w.p, "deploy", "rolled out");
+    try w.recorder.expect(.tag, "0000000000002002");
+    try w.recorder.expect(.group, group);
+    const config = &w.p.core().config;
+    config.desktop_notifications = true;
+    config.notify_on_command_finish = .always;
+    config.notify_on_command_finish_action = .{ .bell = false, .notify = true };
+    config.notify_on_command_finish_after = .{ .duration = 0 };
+    try std.testing.expect(try w.app.performAction(.{ .surface = w.p.core() }, .command_finished, .{
+        .exit_code = 0,
+        .duration = .{ .duration = 2 * std.time.ns_per_s },
+    }));
+    try w.recorder.expect(.tag, "0000000000002002");
+    try std.testing.expectEqual(@as(usize, 3), w.recorder.shown);
+
+    // Another pane has its own tag.
+    try w.osc(&w.front, "", "x");
+    try w.recorder.expect(.tag, "0000000000001001");
+    try w.recorder.expect(.group, group);
+
+    // An app notification belongs to no pane.
+    try std.testing.expect(try w.app.performAction(.app, .desktop_notification, .{
+        .title = "",
+        .body = "Configuration reloaded",
+    }));
+    try std.testing.expect(w.recorder.tag == null);
+    try std.testing.expect(w.recorder.group == null);
+
+    // A toast Windows refused is not outstanding.
+    w.recorder.refuse = error.NotifierDisabled;
+    try w.osc(&w.q, "", "x");
+    try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);
+    try std.testing.expectEqual(@as(usize, 0), w.recorder.removals.items.len);
+}
+
+test "win32 seeing a tab removes its panes' toasts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(true);
+    defer w.deinit();
+    const inserted = try toastTestSplit(&w);
+    defer {
+        var cleanup = inserted;
+        cleanup.deinit();
+    }
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    w.host.hwnd = hwnd;
+    defer w.host.hwnd = null;
+
+    for ([_]*Surface{ &w.p, &w.q, &w.front, &w.other }) |surface| try w.osc(surface, "", "x");
+
+    // The window is in front with the first tab active: the second tab is
+    // not seen yet.
+    w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
+    try std.testing.expectEqual(@as(usize, 0), w.app.toast_removals.items.len);
+
+    w.host.active_tab = 1;
+    // A window that is not in front is not seen either.
+    w.app.acknowledgeTabWithForeground(&w.host, 1, null);
+    try std.testing.expectEqual(@as(usize, 0), w.app.toast_removals.items.len);
+
+    w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
+    w.app.flushToastRemovals();
+    var p_buf: [64]u8 = undefined;
+    var q_buf: [64]u8 = undefined;
+    // In the split tree's order.
+    try w.recorder.expectRemovals(&.{
+        try expectedToastRemoval(&q_buf, 0x2003),
+        try expectedToastRemoval(&p_buf, 0x2002),
+    });
+    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
+    try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);
+    // The other tab's pane and the other window's keep theirs.
+    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
+    try std.testing.expectEqual(@as(?u64, 0x3003), w.other.toast_outstanding);
+}
+
+test "win32 focus without an outstanding toast makes no history call" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    w.host.hwnd = hwnd;
+    defer w.host.hwnd = null;
+    w.app.message_hwnd = hwnd;
+    defer w.app.message_hwnd = null;
+
+    // No toast at all.
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    try std.testing.expectEqual(@as(usize, 0), w.app.toast_removals.items.len);
+    try std.testing.expect(!w.app.toast_removals_posted);
+
+    // A toast whose removal has already been made.
+    try w.osc(&w.front, "", "x");
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    w.app.flushToastRemovals();
+    try std.testing.expectEqual(@as(usize, 1), w.recorder.removals.items.len);
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    try std.testing.expect(!w.app.toast_removals_posted);
+    w.app.flushToastRemovals();
+    try std.testing.expectEqual(@as(usize, 1), w.recorder.removals.items.len);
+    var msg: sys.MSG = undefined;
+    while (sys.PeekMessageW(&msg, hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE) != 0) {}
+}
+
+test "win32 closing a pane removes its toast" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+
+    // Undoing the split that made a pane puts that pane in redo history,
+    // which is a close as far as its toast goes.
+    const inserted = try toastTestSplit(&w);
+    defer {
+        var cleanup = inserted;
+        cleanup.deinit();
+    }
+    try w.osc(&w.q, "", "x");
+    var split_create: Host.SplitCreateUndo = .{
+        .source_surface = &w.p,
+        .created_surface = &w.q,
+        .direction = .right,
+    };
+    try std.testing.expect(try w.host.undoSplitCreateEntry(&split_create));
+    w.app.flushToastRemovals();
+    var q_buf: [64]u8 = undefined;
+    const q_removal = try expectedToastRemoval(&q_buf, 0x2003);
+    try w.recorder.expectRemovals(&.{q_removal});
+
+    try w.osc(&w.p, "", "x");
+    try w.osc(&w.front, "", "x");
+    w.app.windowDestroyed(&w.p);
+    w.app.flushToastRemovals();
+    var buf: [64]u8 = undefined;
+    try w.recorder.expectRemovals(&.{ q_removal, try expectedToastRemoval(&buf, 0x2002) });
+    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
+}
+
+test "win32 undo-closing a tab removes its toasts and undo does not restore them" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+    const inserted = try toastTestSplit(&w);
+    defer {
+        var cleanup = inserted;
+        cleanup.deinit();
+    }
+
+    try w.osc(&w.p, "", "x");
+    try w.osc(&w.q, "", "x");
+    try w.osc(&w.front, "", "x");
+    const shown = w.recorder.shown;
+
+    // The tab goes into undo history with its panes alive.
+    var entry = w.host.detachTabForUndo(1).?;
+    defer entry.dispose(&w.host, .host_destroy) catch {}; // Best-effort test teardown.
+    w.app.flushToastRemovals();
+    var p_buf: [64]u8 = undefined;
+    var q_buf: [64]u8 = undefined;
+    const p_removal = try expectedToastRemoval(&p_buf, 0x2002);
+    const q_removal = try expectedToastRemoval(&q_buf, 0x2003);
+    try w.recorder.expectRemovals(&.{ q_removal, p_removal });
+    try std.testing.expectEqual(@as(?u64, 0x1001), w.front.toast_outstanding);
+
+    // Undo brings the tab back without its toasts: nothing is shown again,
+    // and seeing the tab or closing its panes has nothing left to remove.
+    try std.testing.expect(try w.host.restoreClosedTabEntry(&entry.payload.close_tab));
+    try std.testing.expectEqual(shown, w.recorder.shown);
+    try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
+    try std.testing.expectEqual(@as(?u64, null), w.q.toast_outstanding);
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    w.host.hwnd = hwnd;
+    defer w.host.hwnd = null;
+    w.host.active_tab = 1;
+    w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
+    w.app.flushToastRemovals();
+    try w.recorder.expectRemovals(&.{ q_removal, p_removal });
+}
+
+test "win32 exit removes this process's group only" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var group_buf: [toast_group_max]u8 = undefined;
+    var line_buf: [64]u8 = undefined;
+    const own_group = try std.fmt.bufPrint(&line_buf, "group {s}", .{toastGroup(&group_buf)});
+
+    var recorder: TestToastRecorder = .{};
+    defer recorder.deinit();
+
+    // A process that showed no toast makes no history call at exit.
+    {
+        var core = try CoreApp.create(std.testing.allocator);
+        defer core.destroy();
+        var app: App = undefined;
+        try app.init(core, .{});
+        app.toast_sink = recorder.sink();
+        app.terminate();
+        try recorder.expectRemovals(&.{});
+    }
+
+    // One that did removes its own group, in one call, and nothing else:
+    // not one removal per pane, and never the AUMID-wide `Clear`, which
+    // would take other noctty processes' toasts too.
+    {
+        var core = try CoreApp.create(std.testing.allocator);
+        defer core.destroy();
+        var app: App = undefined;
+        try app.init(core, .{});
+        app.toast_sink = recorder.sink();
+        // As after a toast from a pane that has closed since: its removal
+        // is queued, and exit makes it part of the group's.
+        app.noteToastShown(0x2002);
+        try std.testing.expectEqual(@as(usize, 1), app.toast_removals.items.len);
+        app.terminate();
+        try recorder.expectRemovals(&.{own_group});
+    }
+}
+
+test "win32 a new toast cancels a queued removal for its pane" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    w.host.hwnd = hwnd;
+    defer w.host.hwnd = null;
+
+    try w.osc(&w.p, "", "x");
+    try w.osc(&w.front, "", "x");
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    w.host.active_tab = 1;
+    w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
+    try std.testing.expectEqual(@as(usize, 2), w.app.toast_removals.items.len);
+
+    // The pane's newer toast replaces the one whose removal is queued, so
+    // the flush must not take it away; the other pane's removal stands.
+    try w.osc(&w.p, "", "again");
+    w.app.flushToastRemovals();
+    var buf: [64]u8 = undefined;
+    try w.recorder.expectRemovals(&.{try expectedToastRemoval(&buf, 0x1001)});
+    try std.testing.expectEqual(@as(?u64, 0x2002), w.p.toast_outstanding);
+}
+
+test "win32 removal runs from the posted message, not inside acknowledgeTab" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: ToastTestWindow = .{};
+    try w.init(false);
+    defer w.deinit();
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    w.host.hwnd = hwnd;
+    defer w.host.hwnd = null;
+    // Stands in for the App's message window; its procedure does not
+    // dispatch the removal message, so the test takes it off the queue.
+    w.app.message_hwnd = hwnd;
+    defer w.app.message_hwnd = null;
+
+    try w.osc(&w.p, "", "x");
+    try w.osc(&w.front, "", "x");
+    w.host.active_tab = 1;
+    w.app.acknowledgeTabWithForeground(&w.host, 1, hwnd);
+    // Nothing reached Windows inside the acknowledgement; one message is
+    // posted for it.
+    try std.testing.expectEqual(@as(usize, 0), w.recorder.removals.items.len);
+    try std.testing.expect(w.app.toast_removals_posted);
+
+    // The pane closes before the message is handled: its toast is not
+    // removed twice, and nothing reads the freed pane, since only its id
+    // is queued. A second removal does not post a second message.
+    w.app.windowDestroyed(&w.p);
+    w.host.active_tab = 0;
+    w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
+    try std.testing.expectEqual(@as(usize, 0), w.recorder.removals.items.len);
+
+    var msg: sys.MSG = undefined;
+    try std.testing.expect(sys.PeekMessageW(&msg, hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE) != 0);
+    try std.testing.expectEqual(@as(BOOL, 0), sys.PeekMessageW(&msg, hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, c.WM_WINHOSTTY_TOAST_REMOVALS, c.PM_REMOVE));
+    // What the App's message window does with it.
+    w.app.flushToastRemovals();
+    var p_buf: [64]u8 = undefined;
+    var front_buf: [64]u8 = undefined;
+    try w.recorder.expectRemovals(&.{
+        try expectedToastRemoval(&p_buf, 0x2002),
+        try expectedToastRemoval(&front_buf, 0x1001),
+    });
+    try std.testing.expect(!w.app.toast_removals_posted);
 }
 
 test "win32 commandFinishPlan enforces threshold and focus policy" {

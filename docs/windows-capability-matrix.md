@@ -426,7 +426,10 @@ a terminal pane (OSC 9, OSC 777, command finished,
 [program status](windows.md#program-status-osc-7501) and the clipboard-copy
 notices) names its tab (and its window while several are open) in a final
 attribution line, carries a launch argument, and focuses the originating pane
-when its popup is clicked. Reliable cold-start
+when its popup is clicked. A pane's newer toast replaces its older one, and
+noctty removes a pane's toast from Action Center when its tab is seen, when
+the pane or its tab closes, and every toast of its own at exit. Reliable
+cold-start
 activation depends on the installed Start menu shortcut.
 `notify-on-command-finish-after` and the focus policy are applied before the
 bell or toast; command marks come from shell integration or OSC 133, which
