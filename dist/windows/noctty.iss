@@ -80,9 +80,12 @@ Type: files; Name: "{group}\Uninstall winghostty.lnk"
 Type: files; Name: "{autodesktop}\winghostty.lnk"
 
 [Icons]
-Name: "{group}\noctty"; Filename: "{app}\noctty.exe"; AppUserModelID: "{#AppUserModelId}"
+; AppUserModelToastActivatorCLSID is the toast activator registered under
+; [Registry] below (src/apprt/win32_toast_activator.zig, clsid_text): Action
+; Center hands a click on a noctty toast to that class.
+Name: "{group}\noctty"; Filename: "{app}\noctty.exe"; AppUserModelID: "{#AppUserModelId}"; AppUserModelToastActivatorCLSID: "3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E"
 Name: "{group}\Uninstall noctty"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\noctty"; Filename: "{app}\noctty.exe"; Tasks: desktopicon; AppUserModelID: "{#AppUserModelId}"
+Name: "{autodesktop}\noctty"; Filename: "{app}\noctty.exe"; Tasks: desktopicon; AppUserModelID: "{#AppUserModelId}"; AppUserModelToastActivatorCLSID: "3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E"
 
 [Registry]
 Root: HKLM; Subkey: "Software\Classes\CLSID\{{33368C6F-D328-410C-B225-26DC9F12C728}"; ValueType: string; ValueName: ""; ValueData: "noctty Terminal Handoff"; Flags: uninsdeletekey
@@ -92,6 +95,14 @@ Root: HKLM; Subkey: "Software\Classes\CLSID\{{1D349824-21FB-46C7-ACF3-746EDC991D
 Root: HKLM; Subkey: "Software\Classes\CLSID\{{1D349824-21FB-46C7-ACF3-746EDC991D52}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Both"
 ; Shared Interface\{IID}\ProxyStubClsid32 values are registered per-user by
 ; +register-default-terminal so their prior values can be restored safely.
+
+; The toast activator. COM starts this command (and appends -Embedding) when
+; a toast is clicked in Action Center and no running noctty registered the
+; class; a running installed copy registers it itself. The per-user
+; CustomActivator value that points the AUMID here is written by the app
+; (win32_aumid.zig) and removed at uninstall (CurUninstallStepChanged).
+Root: HKA; Subkey: "Software\Classes\CLSID\{{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}"; ValueType: string; ValueName: ""; ValueData: "noctty Toast Activator"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\CLSID\{{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}\LocalServer32"; ValueType: string; ValueName: ""; ValueData: """{app}\noctty.exe"" -ToastActivated"
 
 Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty"; ValueType: string; ValueName: ""; ValueData: "Open noctty here"; Flags: uninsdeletevalue uninsdeletekeyifempty
 Root: HKA; Subkey: "Software\Classes\Directory\shell\noctty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\noctty.exe"; Flags: uninsdeletevalue uninsdeletekeyifempty
@@ -163,6 +174,20 @@ begin
   Result := AddQuotes(ExePath) + ' --single-instance=false --working-directory="%V\."';
 end;
 
+{ The uninstalling user's AUMID registration names the toast activator whose
+  class key this uninstall removes. Without the class, a click on a toast
+  from a portable copy left behind would ask COM for a server that is gone.
+  Only a value naming this activator is removed: the rest of the key is
+  shared with portable copies. Other users' values are theirs. }
+procedure RemoveToastActivatorValue();
+var
+  Registered: String;
+begin
+  if RegQueryStringValue(HKCU, 'Software\Classes\AppUserModelId\{#AppUserModelId}', 'CustomActivator', Registered) and
+    (CompareText(Registered, '{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}') = 0) then
+    RegDeleteValue(HKCU, 'Software\Classes\AppUserModelId\{#AppUserModelId}', 'CustomActivator');
+end;
+
 { Drop the uninstalling user's default-terminal selection before the files go
   away. Without this, HKCU keeps pointing DelegationTerminal at noctty's CLSID
   and the shared Interface proxy mappings at the deleted DLL, so every console
@@ -184,6 +209,7 @@ var
 begin
   if CurUninstallStep <> usUninstall then
     Exit;
+  RemoveToastActivatorValue();
   ExePath := ExpandConstant('{app}\noctty.exe');
   if not (FileExists(ExePath) and OwnsDefaultTerminalRegistration()) then
     Exit;

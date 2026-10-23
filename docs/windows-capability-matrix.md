@@ -426,11 +426,13 @@ a terminal pane (OSC 9, OSC 777, command finished,
 [program status](windows.md#program-status-osc-7501) and the clipboard-copy
 notices) names its tab (and its window while several are open) in a final
 attribution line, carries a launch argument, and focuses the originating pane
-when its popup is clicked. A pane's newer toast, once Windows takes it,
+when its popup is clicked, and in an installed copy also when its Action
+Center entry is clicked (a COM toast activator; portable copies have none).
+A pane's newer toast, once Windows takes it,
 replaces its older one, and noctty removes a pane's toast from Action Center
 when its tab is seen, when the pane or its tab closes, and every toast it
-showed for a pane at exit. Reliable cold-start
-activation depends on the installed Start menu shortcut.
+showed for a pane at exit. A click with noctty not running starts the
+installed copy through the activator's registration.
 `notify-on-command-finish-after` and the focus policy are applied before the
 bell or toast; command marks come from shell integration or OSC 133, which
 plain `cmd.exe` does not supply (Clink with the shipped script does).
@@ -528,7 +530,7 @@ best-effort failures continue without limits unless hard-fail is set.
   `src/apprt/win32_search_bar.zig`, and
   `src/apprt/win32_scrollbar_geometry.zig` — Win32 runtime and interactive UI.
 - `src/apprt/win32_toast_winrt.zig`, `src/apprt/win32_toast_activation.zig`,
-  `src/apprt/win32_aumid.zig`, and `src/apprt/win32_taskbar_progress.zig` —
+  `src/apprt/win32_toast_activator.zig`, `src/apprt/win32_aumid.zig`, and `src/apprt/win32_taskbar_progress.zig` —
   notifications and shell progress.
 - `src/apprt/win32_clipboard_html.zig`, `src/apprt/win32_paste_protection.zig`,
   `src/apprt/win32_surface_drop_target.zig`, and

@@ -4,7 +4,13 @@
 //! registered AUMID process with a launch string pulled from the
 //! toast XML's `<toast launch="...">` attribute.
 //!
-//! Format: `wgh://activate?surface={id}&tab={id}&window={id}&action={action}`
+//! Format: `wgh://activate?surface={id}&tab={id}&window={id}&pid={pid}&action={action}`
+//!
+//! `pid` names the process that showed the toast. Window, tab and surface
+//! ids mean something only inside that process, so a launch that reaches
+//! another one (a COM activation routed to whichever noctty registered the
+//! activator, or a cold start after the first process ended) must not be
+//! resolved against them.
 //!
 //! This module is pure parsing with no Win32 API dependency. `win32.zig`
 //! owns argv scanning and App dispatch.
@@ -33,13 +39,40 @@ pub const ActivationTarget = struct {
     surface_id: ?u64 = null,
     tab_id: ?u32 = null,
     window_id: ?u32 = null,
+    pid: ?u32 = null,
     action: ?Action = null,
 
     pub fn eql(self: ActivationTarget, other: ActivationTarget) bool {
         return self.surface_id == other.surface_id and
             self.tab_id == other.tab_id and
             self.window_id == other.window_id and
+            self.pid == other.pid and
             self.action == other.action;
+    }
+};
+
+/// Drops a click that arrives a second time. A toast click can reach noctty
+/// twice: through the toast's in-process `Activated` handler and through the
+/// COM activator (`win32_toast_activator.zig`), or through a second noctty's
+/// activator that forwards it over IPC. Both carry the same launch string,
+/// so the same target inside `window_ms` of the first is the same click. Two
+/// real clicks on one pane's toast that close together would do the same
+/// thing twice anyway.
+pub const RepeatFilter = struct {
+    pub const window_ms: i64 = 2000;
+
+    last: ?ActivationTarget = null,
+    at_ms: i64 = 0,
+
+    /// Whether `target`, arriving at `now_ms`, is a new click.
+    pub fn admit(self: *RepeatFilter, target: ActivationTarget, now_ms: i64) bool {
+        if (self.last) |last| {
+            const age = now_ms - self.at_ms;
+            if (last.eql(target) and age >= 0 and age < window_ms) return false;
+        }
+        self.last = target;
+        self.at_ms = now_ms;
+        return true;
     }
 };
 
@@ -82,6 +115,8 @@ pub fn parseLaunchArg(launch: []const u8) ParseError!ActivationTarget {
             target.tab_id = std.fmt.parseInt(u32, val, 10) catch return error.InvalidNumber;
         } else if (std.mem.eql(u8, key, "window")) {
             target.window_id = std.fmt.parseInt(u32, val, 10) catch return error.InvalidNumber;
+        } else if (std.mem.eql(u8, key, "pid")) {
+            target.pid = std.fmt.parseInt(u32, val, 10) catch return error.InvalidNumber;
         } else if (std.mem.eql(u8, key, "action")) {
             target.action = Action.fromString(val);
             // Unknown action tokens are ignored for forward compatibility.
@@ -139,6 +174,11 @@ pub fn buildLaunchArg(alloc: Allocator, target: ActivationTarget) Allocator.Erro
         try appendSep(&buf, alloc, &first);
         try buf.appendSlice(alloc, "window=");
         try appendInt(u32, &buf, alloc, id);
+    }
+    if (target.pid) |pid| {
+        try appendSep(&buf, alloc, &first);
+        try buf.appendSlice(alloc, "pid=");
+        try appendInt(u32, &buf, alloc, pid);
     }
     if (target.action) |a| {
         try appendSep(&buf, alloc, &first);
@@ -201,6 +241,7 @@ test "round-trip build then parse" {
         .surface_id = 999,
         .tab_id = 7,
         .window_id = 3,
+        .pid = 4242,
         .action = .focus,
     };
 
@@ -209,6 +250,31 @@ test "round-trip build then parse" {
 
     const parsed = try parseLaunchArg(built);
     try std.testing.expect(original.eql(parsed));
+}
+
+test "launch string round-trips pid; a launch from an older build has none" {
+    const built = try buildLaunchArg(std.testing.allocator, .{ .surface_id = 5, .pid = 4_000_000_000, .action = .focus });
+    defer std.testing.allocator.free(built);
+    try std.testing.expectEqualStrings("wgh://activate?surface=5&pid=4000000000&action=focus", built);
+    try std.testing.expectEqual(@as(?u32, 4_000_000_000), (try parseLaunchArg(built)).pid);
+    try std.testing.expectEqual(@as(?u32, null), (try parseLaunchArg("wgh://activate?surface=5&action=focus")).pid);
+    try std.testing.expectError(error.InvalidNumber, parseLaunchArg("wgh://activate?pid=-1"));
+    // The same ids from two processes are two targets.
+    try std.testing.expect(!(ActivationTarget{ .surface_id = 5, .pid = 1 }).eql(.{ .surface_id = 5, .pid = 2 }));
+}
+
+test "a repeated toast click inside the window is dropped" {
+    var filter: RepeatFilter = .{};
+    const a: ActivationTarget = .{ .surface_id = 1, .pid = 9, .action = .focus };
+    const b: ActivationTarget = .{ .surface_id = 2, .pid = 9, .action = .focus };
+    try std.testing.expect(filter.admit(a, 1000));
+    try std.testing.expect(!filter.admit(a, 1000 + RepeatFilter.window_ms - 1));
+    // Another target is another click, and the one later clicks compare with.
+    try std.testing.expect(filter.admit(b, 1500));
+    try std.testing.expect(filter.admit(a, 1600));
+    // Once the window has passed, or the clock went back, it counts again.
+    try std.testing.expect(filter.admit(a, 1600 + RepeatFilter.window_ms));
+    try std.testing.expect(filter.admit(a, 100));
 }
 
 test "build omits null fields" {

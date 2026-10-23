@@ -47,9 +47,13 @@
 //! attribution (still works for warm-start, fails for cold-start).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const windows = std.os.windows;
 const win32_types = @import("win32_types.zig");
 const sys = @import("win32/sys.zig");
+const win32_elevation = @import("win32_elevation.zig");
+const win32_toast_activator = @import("win32_toast_activator.zig");
+const os_windows = @import("../os/windows.zig");
 
 const HRESULT = windows.HRESULT;
 const LPCWSTR = win32_types.LPCWSTR;
@@ -83,31 +87,52 @@ pub fn setProcessAumid() void {
 /// Write `HKCU\Software\Classes\AppUserModelId\<aumid>` with DisplayName +
 /// IconUri + ShowInSettings. An installed copy always writes; a portable
 /// copy only creates the key when it does not exist yet
-/// (`App.claimSharedIdentity`).
+/// (`App.claimSharedIdentity`). A copy the installer put in place, unless
+/// elevated, also writes `CustomActivator`, the CLSID Action Center
+/// activates for a click on one of its toasts (`win32_toast_activator.zig`);
+/// the measurement build's early return skips that too.
 pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
     const exe_path = std.fs.selfExePathAlloc(alloc) catch return;
     defer alloc.free(exe_path);
     const parent = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Classes\\AppUserModelId");
     const name = std.unicode.utf8ToUtf16LeStringLiteral(aumid_utf8);
-    _ = register(alloc, parent, name, exe_path, portable) catch |err| {
+    const elevated = win32_elevation.isProcessElevated() catch true;
+    const installer_managed = if (std.fs.path.dirname(exe_path)) |dir|
+        os_windows.isInstallerManagedInstallDir(dir)
+    else
+        false;
+    // A test that starts a real App reaches this; it must never name an
+    // activator in the developer's real registration.
+    const activator = if (builtin.is_test) null else activatorFor(installer_managed, portable, elevated);
+    _ = register(alloc, parent, name, exe_path, portable, activator) catch |err| {
         std.log.warn("AUMID: registration failed err={}", .{err});
     };
 }
 
-/// Returns whether this call wrote the registration.
+/// The `CustomActivator` this copy writes, if any: the same rule as the
+/// class object it points at (`win32_toast_activator.shouldRegister`).
+fn activatorFor(installer_managed: bool, portable: bool, elevated: bool) ?[:0]const u16 {
+    if (!win32_toast_activator.shouldRegister(installer_managed, portable, elevated)) return null;
+    return std.unicode.utf8ToUtf16LeStringLiteral(win32_toast_activator.clsid_text);
+}
+
+/// Returns whether this call wrote the registration. `activator` is the
+/// `CustomActivator` CLSID an installed copy writes; it is never written for
+/// a portable copy.
 fn register(
     alloc: std.mem.Allocator,
     parent: [:0]const u16,
     name: [:0]const u16,
     exe_path: []const u8,
     portable: bool,
+    activator: ?[:0]const u16,
 ) !bool {
     var parent_key: HKEY = undefined;
     if (sys.RegCreateKeyExW(HKEY_CURRENT_USER, parent, 0, null, REG_OPTION_NON_VOLATILE, KEY_WRITE, null, &parent_key, null) != ERROR_SUCCESS)
         return error.RegistryOpenFailed;
     defer _ = sys.RegCloseKey(parent_key);
     if (!portable) {
-        _ = try registerForExe(alloc, parent_key, name, exe_path);
+        _ = try registerForExe(alloc, parent_key, name, exe_path, activator);
         return true;
     }
 
@@ -131,7 +156,7 @@ fn register(
     defer alloc.free(pending_w);
     @memcpy(pending_w[0..name.len], name);
     for (suffix, pending_w[name.len..]) |c, *w| w.* = c;
-    const published = if (registerForExe(alloc, parent_key, pending_w, exe_path)) |wrote_icon|
+    const published = if (registerForExe(alloc, parent_key, pending_w, exe_path, null)) |wrote_icon|
         wrote_icon and RegRenameKey(parent_key, pending_w, name) == ERROR_SUCCESS
     else |_|
         false;
@@ -143,7 +168,7 @@ extern "advapi32" fn RegRenameKey(key: HKEY, sub_key: ?LPCWSTR, new_name: LPCWST
 extern "advapi32" fn RegDeleteKeyW(key: HKEY, sub_key: LPCWSTR) callconv(.winapi) i32;
 
 /// Returns whether `IconUri` was written (there was an icon beside the exe).
-fn registerForExe(alloc: std.mem.Allocator, root: HKEY, subkey: LPCWSTR, exe_path: []const u8) !bool {
+fn registerForExe(alloc: std.mem.Allocator, root: HKEY, subkey: LPCWSTR, exe_path: []const u8, activator: ?[:0]const u16) !bool {
     var hkey: HKEY = undefined;
     const open_rc = sys.RegCreateKeyExW(
         root,
@@ -201,6 +226,16 @@ fn registerForExe(alloc: std.mem.Allocator, root: HKEY, subkey: LPCWSTR, exe_pat
                 std.log.warn("AUMID: IconUri utf16 conversion failed err={}", .{err});
                 complete = false;
             }
+        }
+    }
+
+    // Never removed here: a copy that does not write it (portable, elevated,
+    // not set up by the installer) leaves an installed copy's value alone.
+    if (activator) |clsid| {
+        const activator_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("CustomActivator"), clsid);
+        if (activator_rc != ERROR_SUCCESS) {
+            std.log.warn("AUMID: write CustomActivator failed rc={d}", .{activator_rc});
+            complete = false;
         }
     }
 
@@ -386,6 +421,53 @@ const TestRegistry = struct {
     }
 };
 
+test "portable and elevated copies register no toast activator" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = icon_file_name, .data = "ico" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const exe = try std.fs.path.join(alloc, &.{ root, "noctty.exe" });
+    defer alloc.free(exe);
+    const custom_activator = std.unicode.utf8ToUtf16LeStringLiteral("CustomActivator");
+
+    const Case = struct { installer_managed: bool, portable: bool, elevated: bool, writes: bool };
+    for ([_]Case{
+        .{ .installer_managed = true, .portable = false, .elevated = false, .writes = true },
+        .{ .installer_managed = true, .portable = false, .elevated = true, .writes = false },
+        .{ .installer_managed = true, .portable = true, .elevated = false, .writes = false },
+        .{ .installer_managed = false, .portable = true, .elevated = false, .writes = false },
+        // Scoop, a ZIP without its marker, a dev build: no class is registered
+        // for it, so it must not name one.
+        .{ .installer_managed = false, .portable = false, .elevated = false, .writes = false },
+    }) |case| {
+        const reg = try TestRegistry.init(alloc);
+        defer reg.deinit(alloc);
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, exe, case.portable, activatorFor(case.installer_managed, case.portable, case.elevated)));
+        const key = try reg.open(TestRegistry.name);
+        defer _ = sys.RegCloseKey(key);
+        try TestRegistry.expectSz(key, "DisplayName", "noctty");
+        if (case.writes) {
+            try TestRegistry.expectSz(key, "CustomActivator", win32_toast_activator.clsid_text);
+        } else {
+            try std.testing.expect(sys.RegQueryValueExW(key, custom_activator, null, null, null, null) != ERROR_SUCCESS);
+        }
+    }
+
+    // A copy that does not write it leaves an installed copy's value alone.
+    {
+        const reg = try TestRegistry.init(alloc);
+        defer reg.deinit(alloc);
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, exe, false, activatorFor(true, false, false)));
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, exe, false, activatorFor(true, false, true)));
+        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, exe, true, activatorFor(true, true, false)));
+        const key = try reg.open(TestRegistry.name);
+        defer _ = sys.RegCloseKey(key);
+        try TestRegistry.expectSz(key, "CustomActivator", win32_toast_activator.clsid_text);
+    }
+}
+
 test "aumid registration: installed copies always write, portable copies only create" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -416,9 +498,9 @@ test "aumid registration: installed copies always write, portable copies only cr
         defer reg.deinit(alloc);
         // A portable copy with no icon beside it creates nothing, so the next
         // one can still register with its icon.
-        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, bare, true));
+        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, bare, true, null));
         try std.testing.expectEqual(@as(DWORD, 0), try reg.subkeyCount());
-        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, p1, true));
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         const key = try reg.open(TestRegistry.name);
         defer _ = sys.RegCloseKey(key);
         try TestRegistry.expectSz(key, "DisplayName", "noctty");
@@ -433,7 +515,7 @@ test "aumid registration: installed copies always write, portable copies only cr
         // Present: another portable copy changes no value and not even the
         // key's last-write time, including values it would not have written.
         std.Thread.sleep(20 * std.time.ns_per_ms);
-        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p2, true));
+        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p2, true, null));
         const kept = try reg.snapshot();
         try std.testing.expectEqualSlices(u16, created.icon[0 .. created.icon_bytes / 2], kept.icon[0 .. kept.icon_bytes / 2]);
         try std.testing.expectEqual(created.written, kept.written);
@@ -441,17 +523,17 @@ test "aumid registration: installed copies always write, portable copies only cr
 
         // An installed copy always writes: its own icon replaces the portable
         // one, and an exe with no icon beside it leaves IconUri alone.
-        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, installed, false));
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, installed, false, null));
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
-        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, bare, false));
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, bare, false, null));
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
-        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p1, true));
+        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
 
         // Not even a registration whose icon has gone is repaired.
         try tmp.dir.deleteFile("installed/" ++ icon_file_name);
         const broken = try reg.snapshot();
-        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p1, true));
+        try std.testing.expect(!try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         try TestRegistry.expectSz(key, "IconUri", icons[0]);
         try std.testing.expectEqual(broken.written, (try reg.snapshot()).written);
         try tmp.dir.writeFile(.{ .sub_path = "installed/" ++ icon_file_name, .data = "installed" });
@@ -468,7 +550,7 @@ test "aumid registration: installed copies always write, portable copies only cr
             const Run = struct {
                 fn run(gate: *std.Thread.ResetEvent, a: std.mem.Allocator, parent: [:0]const u16, exe: []const u8, portable: bool, out: *?bool) void {
                     gate.wait();
-                    out.* = register(a, parent, TestRegistry.name, exe, portable) catch null;
+                    out.* = register(a, parent, TestRegistry.name, exe, portable, null) catch null;
                 }
             };
             var gate: std.Thread.ResetEvent = .{};
@@ -513,7 +595,7 @@ test "aumid registration: installed copies always write, portable copies only cr
         const reg = try TestRegistry.init(alloc);
         defer reg.deinit(alloc);
         var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = fail_index });
-        const published = register(failing.allocator(), reg.parent, TestRegistry.name, p1, true) catch false;
+        const published = register(failing.allocator(), reg.parent, TestRegistry.name, p1, true, null) catch false;
         if (published) {
             try std.testing.expect(!failing.has_induced_failure);
             const key = try reg.open(TestRegistry.name);
@@ -529,7 +611,7 @@ test "aumid registration: installed copies always write, portable copies only cr
     {
         const reg = try TestRegistry.init(alloc);
         defer reg.deinit(alloc);
-        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, p1, true));
+        try std.testing.expect(try register(alloc, reg.parent, TestRegistry.name, p1, true, null));
         var parent: HKEY = undefined;
         try std.testing.expectEqual(ERROR_SUCCESS, sys.RegCreateKeyExW(HKEY_CURRENT_USER, reg.parent, 0, null, 0, KEY_WRITE, null, &parent, null));
         defer _ = sys.RegCloseKey(parent);

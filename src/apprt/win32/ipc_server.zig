@@ -1756,6 +1756,35 @@ fn serverAutomationDeadline(client_deadline_ms: u64) u64 {
     );
 }
 
+/// The one argument a cold toast activation start forwards: the click's
+/// launch string, rebuilt from what `Activate` delivered (the empty target
+/// when nothing readable came, which the receiver presents as its primary
+/// window). Caller owns the result.
+fn coldToastForwardArgument(alloc: Allocator, activation: ?win32_toast_activation.ActivationTarget) ![:0]u8 {
+    const launch = try win32_toast_activation.buildLaunchArg(alloc, activation orelse .{});
+    defer alloc.free(launch);
+    return alloc.dupeZ(u8, launch);
+}
+
+test "a cold toast activation start forwards the click, not its argv" {
+    const alloc = std.testing.allocator;
+    const target: win32_toast_activation.ActivationTarget = .{ .surface_id = 9, .tab_id = 2, .window_id = 1, .pid = 77, .action = .focus };
+    for ([_]?win32_toast_activation.ActivationTarget{ target, .{}, null }) |sent| {
+        const arg = try coldToastForwardArgument(alloc, sent);
+        defer alloc.free(arg);
+        // The receiver's new_window arm reads exactly this target, with
+        // nothing else to drop or apply.
+        const forwarded = [_][:0]const u8{arg};
+        const received = win32.scanForwardedToastActivation(&forwarded);
+        try std.testing.expect(received == .activation);
+        try std.testing.expect((sent orelse win32_toast_activation.ActivationTarget{}).eql(received.activation));
+        // It survives the sender's own normalization too.
+        const normalized = (try normalizeForwardedStartupArg(alloc, arg)).?;
+        defer alloc.free(normalized);
+        try std.testing.expectEqualStrings(arg, normalized);
+    }
+}
+
 pub fn tryForwardStartupToExistingInstance(self: *App) !bool {
     if (self.config.@"single-instance" != .true) return false;
 
@@ -1768,6 +1797,20 @@ pub fn tryForwardStartupToExistingInstance(self: *App) !bool {
         self.is_elevated,
         self.startup_launch_layout,
     )) |forwarded| return forwarded;
+
+    // A cold start by the toast activator forwards the click, never its own
+    // argv (`-ToastActivated -Embedding`), which would open a window there.
+    if (self.toast_activated) {
+        const launch_z = try coldToastForwardArgument(self.core_app.alloc, self.cold_toast_activation);
+        defer self.core_app.alloc.free(launch_z);
+        return try sendNewWindowIpc(
+            self.core_app.alloc,
+            pipe_name,
+            self.is_elevated,
+            &.{launch_z},
+            win32_ipc.automation_response_timeout_ms,
+        );
+    }
 
     const arguments = try collectStartupForwardArguments(self.core_app.alloc);
     defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);

@@ -314,11 +314,25 @@ no confirmation appears; if one does, the check does not count, so run it
 again. Open Action Center: the entry is gone. Start noctty again, turn Focus
 Assist to "Alarms only" and repeat the first toast.
 Expected: either the toast (record whether it pops up or only reaches Action
-Center) or an in-app banner ending in the same tab line; never nothing. Then revert to the clean snapshot and repeat with the portable copy only:
+Center) or an in-app banner ending in the same tab line; never nothing. Turn
+Focus Assist off again. Action Center clicks: open a second tab, run
+`Start-Sleep 12` in the first, switch to the second tab, minimize noctty and
+wait until the popup is gone. Click the entry in Action Center. Expected:
+noctty restores, shows the first tab with its pane focused, and comes to the
+foreground (record whether it did or only flashed its taskbar button). Click
+a fresh toast's popup once: the pane is focused once. Then end noctty's
+process in Task Manager while one of its toasts is in Action Center, and click
+that entry: one noctty window opens (with the session restored if that is
+on) and comes forward. Uninstall, then check that
+`HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty` has no
+`CustomActivator` value and `Software\Classes\CLSID\{3E21F05E-C82D-4E45-AA7D-2EC361AD6C3E}`
+exists under neither HKLM nor HKCU. Then revert to the clean snapshot and repeat with the portable copy only:
 it creates the AppUserModelID registration where none exists
 ([App identity](windows.md#app-identity)). Portable toast delivery has not been
 confirmed: record whether the toast appears, its icon and Action Center entry,
 and any banner, rather than treating registration alone as proof of delivery.
+A portable copy registers no toast activator: its popup click focuses the
+pane, and a click on its Action Center entry does nothing.
 
 **W10-24 Jump list (installed).** After `cd` in a few folders, right-click the taskbar
 button. Expected: "Recent" lists the folders, "Profiles" lists the detected shells;

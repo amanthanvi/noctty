@@ -491,7 +491,9 @@ SSH client, secrets vault, or fleet/connection management.
 ## App identity
 
 Installed builds create Start menu shortcuts with noctty's AppUserModelID,
-which Windows uses for taskbar grouping and Action Center toast activation.
+which Windows uses for taskbar grouping, and with its toast activator, which
+Action Center uses for a click on a toast (see
+[notifications and progress](#notifications-and-progress)).
 Portable builds have no installer-created shortcuts, so taskbar and
 notification identity may be less stable. If Windows shows a stale icon
 after upgrading or switching between installed and portable builds, restart
@@ -744,8 +746,27 @@ notification, which has no title, is titled by its tab. When the toast falls
 back to a banner, the banner ends with the same tab line. Clicking the toast's
 popup focuses the pane that sent it: noctty restores its window if it is
 minimized, switches to its tab and pane, and asks Windows to bring the window
-forward, which Windows may refuse. Whether clicking an older entry in Action
-Center does the same has not been confirmed.
+forward, which Windows may refuse.
+
+A click on a toast's entry in Action Center (or on a toast Focus Assist sent
+there without a popup) reaches noctty through a COM activator that only a
+copy installed with the installer has: the installer registers it and sets it
+on the Start menu and desktop shortcuts, and the installed copy names it in
+its AppUserModelID registration (`CustomActivator`) and listens for it while
+it runs, unless it runs as administrator. Such a click focuses the pane the
+same way. When the toast came from another noctty process (the toast's
+process has ended, or a second instance showed it), noctty brings its own
+window forward instead of guessing at that process's tabs. When no installed
+noctty is running, Windows starts one, which hands the click to a running
+single-instance noctty, or else opens as an ordinary launch would and brings
+its window forward. A portable copy registers nothing, so without an
+installed copy only its popup clicks focus a pane. Where one is installed, a
+click on a portable copy's entry in Action Center goes to the installed
+copy's activator, which hands it to the portable copy when that is the
+running single-instance noctty. Uninstalling removes the activator and its
+`CustomActivator` value. None of this has been exercised against Windows'
+notification platform yet; the release checklist (W10-23) carries the
+checks.
 
 A pane keeps at most one toast in Action Center: a newer toast from the same
 pane that Windows takes replaces its older one (one Windows refuses, or one

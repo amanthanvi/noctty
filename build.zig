@@ -262,6 +262,11 @@ pub fn build(b: *std.Build) !void {
         });
         if (config.emit_test_exe) b.installArtifact(test_exe);
         _ = try deps.add(test_exe);
+        // The installer script, for the test that holds its toast activator
+        // CLSID to the runtime's (`@embedFile` cannot leave src/).
+        test_exe.root_module.addAnonymousImport("noctty_iss", .{
+            .root_source_file = b.path("dist/windows/noctty.iss"),
+        });
 
         // An empty exe carrying the app's PE resource, built with the same
         // flags as noctty.exe, so the updater's downgrade guard is tested

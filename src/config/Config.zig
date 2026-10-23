@@ -5149,9 +5149,12 @@ pub fn parseManuallyHook(
     if (std.mem.eql(u8, arg, "--command") or std.mem.startsWith(u8, arg, "--command=")) {
         self._command_defaulted = false;
     }
-    if (builtin.os.tag == .windows and std.ascii.eqlIgnoreCase(arg, "-Embedding")) {
-        // COM's SCM appends this switch for local-server activation. It is a
-        // process-mode marker, not a user configuration field.
+    if (builtin.os.tag == .windows and
+        (std.ascii.eqlIgnoreCase(arg, "-Embedding") or std.ascii.eqlIgnoreCase(arg, "-ToastActivated")))
+    {
+        // COM's SCM appends -Embedding for local-server activation, after the
+        // toast activator's -ToastActivated (src/apprt/win32_toast_activator.zig).
+        // Both are process-mode markers, not user configuration fields.
         return false;
     }
 

@@ -163,7 +163,8 @@ Win32-validated VT protocol coverage is tracked in
   terminal pane (OSC 9, OSC 777, command finished, program status
   ([OSC 7501](windows.md#program-status-osc-7501)) and the "Copied ... to
   clipboard" notices) names its tab and focuses its pane when its popup is
-  clicked; a click on an older entry in Action Center is not confirmed.
+  clicked, and in an installed copy when its Action Center entry is
+  clicked (COM toast activator; not yet exercised on a real desktop).
   A pane keeps one toast in Action Center, removed when its tab is seen,
   when the pane or tab closes, and at exit.
   Command-finish toasts depend on OSC 133 command marks, which plain
