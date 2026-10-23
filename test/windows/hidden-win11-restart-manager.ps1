@@ -203,8 +203,10 @@ public static class Rm {
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     static void SendKey(IntPtr h,uint m,int key,long l) {
         IntPtr result;
-        if(SendMessageTimeoutW(h,m,new IntPtr(key),new IntPtr(l),0,20000,out result)==IntPtr.Zero && Marshal.GetLastWin32Error()==1460)
-            throw new Exception("Key not handled within 20 s");
+        if(SendMessageTimeoutW(h,m,new IntPtr(key),new IntPtr(l),0,20000,out result)==IntPtr.Zero) {
+            int error=Marshal.GetLastWin32Error();
+            throw new Exception(error==1460 ? "Key not handled within 20 s" : "Key send failed, Win32 error " + error);
+        }
     }
     // A key-down and key-up for a pane, which runs the in-app keybind for
     // that key (as hidden-win11-session-restore.ps1 does). noctty reads the
