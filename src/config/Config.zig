@@ -1703,9 +1703,9 @@ class: ?[:0]const u8 = null,
 /// file (`new_window_elevated:user:<id>`, or New Elevated Window from a
 /// pane that runs it) names the profile and reads the same files, so these
 /// variables are not on its command line. For a profile defined only by a
-/// `--profile-command` option on noctty's command line they are, and a
-/// command line is not private (process tools and process-creation auditing
-/// can show it).
+/// `--profile-command` option on noctty's command line, or given a variable
+/// by a `--profile-env` option there, they are, and a command line is not
+/// private (process tools and process-creation auditing can show it).
 @"profile-env": ProfileMap.Env = .{},
 
 /// The profile a terminal runs when nothing else chose one, in place of the
@@ -5812,6 +5812,16 @@ pub fn profilePlace(self: *const Config, key: []const u8, id: []const u8) cli.Lo
         if (std.mem.eql(u8, place.key, key) and std.ascii.eqlIgnoreCase(place.id, id)) return place.location;
     }
     return .none;
+}
+
+/// Whether any argument on noctty's command line wrote `id` for `key`
+/// (`--profile-env=<id>: ...`), which a process that reads only the config
+/// files would not see.
+pub fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []const u8) bool {
+    for (self._profile_places.items) |place| {
+        if (place.location == .cli and std.mem.eql(u8, place.key, key) and std.ascii.eqlIgnoreCase(place.id, id)) return true;
+    }
+    return false;
 }
 
 /// Record where `arg` (`--<key>=<value>`) was read when it writes an id of a

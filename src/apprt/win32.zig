@@ -1177,7 +1177,10 @@ fn elevatesBySelector(config: *const configpkg.Config, key: []const u8) bool {
     if (!startsWithIgnoreCase(key, "user:")) return false;
     const id = key["user:".len..];
     if (config.@"profile-command".get(id) == null) return false;
-    return config.profilePlace("profile-command", id) == .file;
+    if (config.profilePlace("profile-command", id) != .file) return false;
+    // A variable given on the command line (`--profile-env=<id>: ...`) is not
+    // forwarded either, so such a profile is passed with its variables.
+    return !config.profileWrittenOnCommandLine("profile-env", id);
 }
 
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
@@ -55807,6 +55810,8 @@ test "win32 an elevated window names a file-defined user profile and passes a co
         \\profile-command = both: one.exe
         \\profile-command = gone: gone.exe
         \\profile-command = gone:
+        \\profile-command = envcli: four.exe
+        \\profile-env = envcli: MODE=file
         \\
     });
     const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
@@ -55815,7 +55820,7 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     defer cfg.deinit();
     try cfg.loadFile(alloc, path);
     var args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
-        .iterator = cli_args.sliceIterator(&.{ "--profile-command=clionly: two.exe", "--profile-command=both: three.exe" }),
+        .iterator = cli_args.sliceIterator(&.{ "--profile-command=clionly: two.exe", "--profile-command=both: three.exe", "--profile-env=envcli: OTHER=cli" }),
     };
     try cfg.loadIter(alloc, &args);
     try cfg.finalize();
@@ -55827,6 +55832,9 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     try std.testing.expect(elevatesBySelector(&cfg, "USER:FILED"));
     try std.testing.expect(!elevatesBySelector(&cfg, "user:clionly"));
     try std.testing.expect(!elevatesBySelector(&cfg, "user:both"));
+    // A file's profile with a variable from the command line: the elevated
+    // process would not get that variable, so the profile is passed.
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:envcli"));
     // Nothing to name: a removed or unknown profile, a detected one.
     try std.testing.expect(!elevatesBySelector(&cfg, "user:gone"));
     try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch"));
