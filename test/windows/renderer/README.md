@@ -68,10 +68,10 @@ a caret before the target keeps both the bar and the double underline. The
 shape is counted too: in each of 4, 5 and 6, the rows on which every pixel of
 a clause's four cells is lit (no glyph stroke crosses the gap between its two
 characters) form one band per clause, the same band in every clause, and two
-bands below the middle of the row under the target clause. Before the last step, captures that ask for no redraw
-check that the bar stays put through frames the composition did not cause.
-After the
-fixture turns cursor blinking on and writes nothing, at least two blink frames
+bands below the middle of the row under the target clause. Before the last
+step, captures that ask for no redraw check that the bar stays put through
+frames the composition did not cause. After the fixture turns cursor blinking
+on and writes nothing, at least two blink frames
 in 2.5 s must rebuild with the preedit row clean (the renderer counts them in
 its status as `preedit_caret_clean_rebuilds`), the frames a caret drawn only
 with the preedit's cells would vanish from. Then the fixture writes to another
