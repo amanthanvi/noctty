@@ -8,8 +8,8 @@ param()
 # and scripts/ci-bench-trend.ps1. Besides fixed cases, the filter guards read the
 # repository itself: the filter is an allowlist of files the compiled jobs never
 # read, and these checks re-derive "never read" from the Zig sources and from the
-# scripts the compiled jobs run. One more check reads the installer script,
-# which no pull request job compiles: what Setup asks Restart Manager to close.
+# scripts the compiled jobs run. One more check reads the installer script for
+# what Setup asks Restart Manager to close, which compiling it does not check.
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
