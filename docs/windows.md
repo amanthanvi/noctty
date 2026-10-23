@@ -753,7 +753,8 @@ there without a popup) reaches noctty through a COM activator that only a
 copy installed with the installer has: the installer registers it and sets it
 on the Start menu and desktop shortcuts, and the installed copy names it in
 its AppUserModelID registration (`CustomActivator`) and listens for it while
-it runs, unless it runs as administrator. Such a click focuses the pane the
+it runs, unless it runs as administrator, in safe mode, or as the process
+Windows starts to host a console while noctty is the default terminal. Such a click focuses the pane the
 same way, and a running noctty with no window open opens one for it. When the toast came from another noctty process (the toast's
 process has ended, or a second instance showed it), noctty brings its own
 window forward instead of guessing at that process's tabs. When no installed
