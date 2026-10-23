@@ -165,8 +165,9 @@ pub fn layerEnv(alloc: Allocator, env: anytype, entries: []const EnvEntry) Alloc
 
 /// The user profiles a config defines, as written (nothing expanded or
 /// split yet), copied out of the config so a discovery on another thread
-/// owns what it reads. `Config.finalize` has already dropped every entry it
-/// refused, so each definition has a valid id and a command.
+/// owns what it reads. The loader has already refused every line it
+/// reports, so each definition has a valid id and a command; removed
+/// profiles (`profile-command = <id>:`) are left out with their fields.
 pub const UserProfiles = struct {
     arena: std.heap.ArenaAllocator,
     definitions: []const Definition = &.{},
@@ -177,28 +178,22 @@ pub const UserProfiles = struct {
         command: []const u8,
         working_directory: ?[]const u8 = null,
         env: []const EnvEntry = &.{},
+        /// The config's `env` entries, in order: `%NAME%` reads them before
+        /// noctty's own environment (`expandProfileText`), so a value sees
+        /// the environment the shell would get without this profile.
+        global_env: []const EnvEntry = &.{},
     };
 
     pub fn init(gpa: Allocator, config: anytype) Allocator.Error!UserProfiles {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const alloc = arena.allocator();
+        const global_env = try copyEnvEntries(alloc, config.env);
         const commands = config.@"profile-command".entries.items;
-        const definitions = try alloc.alloc(Definition, commands.len);
-        for (commands, definitions) |entry, *definition| {
-            const env: []EnvEntry = if (config.@"profile-env".get(entry.id)) |map| env: {
-                const out = try alloc.alloc(EnvEntry, map.count());
-                var it = map.iterator();
-                var i: usize = 0;
-                while (it.next()) |kv| : (i += 1) {
-                    out[i] = .{
-                        .key = try alloc.dupeZ(u8, kv.key_ptr.*),
-                        .value = try alloc.dupeZ(u8, kv.value_ptr.*),
-                    };
-                }
-                break :env out;
-            } else &.{};
-            definition.* = .{
+        var definitions: std.ArrayList(Definition) = try .initCapacity(alloc, commands.len);
+        for (commands) |entry| {
+            if (entry.removed) continue;
+            definitions.appendAssumeCapacity(.{
                 .id = try alloc.dupe(u8, entry.id),
                 .name = if (config.@"profile-name".get(entry.id)) |name| try alloc.dupe(u8, name) else null,
                 .command = try alloc.dupe(u8, entry.value),
@@ -206,10 +201,25 @@ pub const UserProfiles = struct {
                     try alloc.dupe(u8, dir)
                 else
                     null,
-                .env = env,
+                .env = if (config.@"profile-env".get(entry.id)) |map| try copyEnvEntries(alloc, map) else &.{},
+                .global_env = global_env,
+            });
+        }
+        return .{ .arena = arena, .definitions = definitions.items };
+    }
+
+    /// The entries of an `env`-style map, in order.
+    fn copyEnvEntries(alloc: Allocator, map: anytype) Allocator.Error![]const EnvEntry {
+        const out = try alloc.alloc(EnvEntry, map.count());
+        var it = map.iterator();
+        var i: usize = 0;
+        while (it.next()) |kv| : (i += 1) {
+            out[i] = .{
+                .key = try alloc.dupeZ(u8, kv.key_ptr.*),
+                .value = try alloc.dupeZ(u8, kv.value_ptr.*),
             };
         }
-        return .{ .arena = arena, .definitions = definitions };
+        return out;
     }
 
     pub fn deinit(self: *UserProfiles) void {
@@ -218,33 +228,95 @@ pub const UserProfiles = struct {
     }
 };
 
-/// Expands `%NAME%` from noctty's own environment with
-/// `ExpandEnvironmentStringsW`, as Windows Terminal does for a profile's
-/// command line and starting directory: an undefined variable stays as
-/// written. The seam `appendUserProfiles` takes; tests pass their own.
+/// noctty's own environment, read by name for `%NAME%` in a user profile
+/// (`expandProfileText`). The seam `appendUserProfiles` takes; tests pass a
+/// table of their own.
 pub const ProcessEnvironment = struct {
-    pub fn expand(_: ProcessEnvironment, alloc: Allocator, text: []const u8) ![]u8 {
-        if (comptime builtin.os.tag != .windows) return try alloc.dupe(u8, text);
-        const source = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, text);
-        defer alloc.free(source);
-        var capacity: usize = source.len + 1;
-        while (true) {
-            const buffer = try alloc.alloc(u16, capacity);
-            defer alloc.free(buffer);
-            const needed = ExpandEnvironment.ExpandEnvironmentStringsW(
-                source.ptr,
-                buffer.ptr,
-                std.math.cast(windows.DWORD, capacity) orelse return error.NameTooLong,
-            );
-            if (needed == 0) return error.InvalidArgument;
-            if (needed <= capacity) {
-                // `needed` counts the terminator.
-                return try std.unicode.wtf16LeToWtf8Alloc(alloc, buffer[0 .. needed - 1]);
-            }
-            capacity = needed;
-        }
+    /// The value of `name` (compared without case, as Windows does), or null
+    /// when it is not set.
+    pub fn get(_: ProcessEnvironment, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
+        return std.process.getEnvVarOwned(alloc, name) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.EnvironmentVariableNotFound, error.InvalidWtf8 => null,
+        };
     }
 };
+
+/// `%NAME%` in `text` replaced by the value the shell would get without the
+/// profile: the last `global_env` entry of that name (compared without case;
+/// its value as written, since `env` values are not expanded), else
+/// `process`'s, else nothing, in which case the text stays as written. One
+/// pass, as `ExpandEnvironmentStringsW` scans (the test "user profile
+/// expansion matches ExpandEnvironmentStringsW" holds it to that): text from a
+/// `%` to the next `%` is a name, and an unset name stays as written, its
+/// closing `%` free to open the next name. An empty name (`%%`) is never set.
+pub fn expandProfileText(
+    alloc: Allocator,
+    text: []const u8,
+    global_env: []const EnvEntry,
+    process: anytype,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < text.len) {
+        const start = std.mem.indexOfScalarPos(u8, text, i, '%') orelse {
+            try out.appendSlice(alloc, text[i..]);
+            break;
+        };
+        try out.appendSlice(alloc, text[i..start]);
+        const end = std.mem.indexOfScalarPos(u8, text, start + 1, '%') orelse {
+            try out.appendSlice(alloc, text[start..]);
+            break;
+        };
+        const name = text[start + 1 .. end];
+        if (try profileVariable(alloc, name, global_env, process)) |value| {
+            defer alloc.free(value);
+            try out.appendSlice(alloc, value);
+            i = end + 1;
+        } else {
+            // The closing `%` of a name that is not set may open the next
+            // one: `%UNSET%PATH%` keeps `%UNSET` and expands `%PATH%`.
+            try out.appendSlice(alloc, text[start..end]);
+            i = end;
+        }
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn profileVariable(alloc: Allocator, name: []const u8, global_env: []const EnvEntry, process: anytype) !?[]u8 {
+    if (name.len == 0) return null;
+    var index = global_env.len;
+    while (index > 0) {
+        index -= 1;
+        const entry = global_env[index];
+        if (std.ascii.eqlIgnoreCase(entry.key, name)) return try alloc.dupe(u8, entry.value);
+    }
+    return try process.get(alloc, name);
+}
+
+/// `ExpandEnvironmentStringsW` on noctty's own environment, which
+/// `expandProfileText` must match when no `env` entry is involved.
+fn expandEnvironmentStrings(alloc: Allocator, text: []const u8) ![]u8 {
+    const source = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, text);
+    defer alloc.free(source);
+    var capacity: usize = source.len + 1;
+    while (true) {
+        const buffer = try alloc.alloc(u16, capacity);
+        defer alloc.free(buffer);
+        const needed = ExpandEnvironment.ExpandEnvironmentStringsW(
+            source.ptr,
+            buffer.ptr,
+            std.math.cast(windows.DWORD, capacity) orelse return error.NameTooLong,
+        );
+        if (needed == 0) return error.InvalidArgument;
+        if (needed <= capacity) {
+            // `needed` counts the terminator.
+            return try std.unicode.wtf16LeToWtf8Alloc(alloc, buffer[0 .. needed - 1]);
+        }
+        capacity = needed;
+    }
+}
 
 const ExpandEnvironment = struct {
     extern "kernel32" fn ExpandEnvironmentStringsW(
@@ -253,7 +325,6 @@ const ExpandEnvironment = struct {
         nSize: windows.DWORD,
     ) callconv(.winapi) windows.DWORD;
 };
-
 /// Split a Windows command line into argv with the rules CreateProcess's
 /// callee (the MSVC runtime, `CommandLineToArgvW`) applies, so the argv
 /// noctty inspects is the argv the program will see.
@@ -340,7 +411,7 @@ pub fn appendUserProfiles(
 }
 
 fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: anytype) !Profile {
-    const expanded = try expander.expand(alloc, definition.command);
+    const expanded = try expandProfileText(alloc, definition.command, definition.global_env, expander);
     defer alloc.free(expanded);
     const line = std.mem.trim(u8, expanded, &std.ascii.whitespace);
     const argv = try splitWindowsCommandLine(alloc, line);
@@ -355,7 +426,7 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
     const label = try alloc.dupe(u8, definition.name orelse definition.id);
     errdefer alloc.free(label);
     const working_directory = if (definition.working_directory) |raw|
-        try userWorkingDirectory(alloc, raw, expander)
+        try userWorkingDirectory(alloc, raw, definition.global_env, expander)
     else
         null;
     errdefer if (working_directory) |dir| switch (dir) {
@@ -373,7 +444,7 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
         alloc.free(env);
     }
     for (definition.env, env) |src, *dst| {
-        const value = try expander.expand(alloc, src.value);
+        const value = try expandProfileText(alloc, src.value, definition.global_env, expander);
         defer alloc.free(value);
         const owned_value = try alloc.dupeZ(u8, value);
         errdefer alloc.free(owned_value);
@@ -394,8 +465,13 @@ fn userProfile(alloc: Allocator, definition: UserProfiles.Definition, expander: 
 /// `profile-working-directory` with the grammar of `working-directory`:
 /// `home`, `inherit`, or a path, optionally quoted, after `%NAME%` expansion;
 /// a leading `~/` or `~\` is the home directory.
-fn userWorkingDirectory(alloc: Allocator, raw: []const u8, expander: anytype) !WorkingDirectory {
-    const expanded = try expander.expand(alloc, raw);
+fn userWorkingDirectory(
+    alloc: Allocator,
+    raw: []const u8,
+    global_env: []const EnvEntry,
+    expander: anytype,
+) !WorkingDirectory {
+    const expanded = try expandProfileText(alloc, raw, global_env, expander);
     defer alloc.free(expanded);
     var value = std.mem.trim(u8, expanded, &std.ascii.whitespace);
     if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') value = value[1 .. value.len - 1];
@@ -413,32 +489,17 @@ fn userWorkingDirectory(alloc: Allocator, raw: []const u8, expander: anytype) !W
     return .{ .path = try alloc.dupeZ(u8, value) };
 }
 
-/// A `%NAME%` expander over a fixed table, for tests: the seam
-/// `appendUserProfiles` takes. Like `ExpandEnvironmentStringsW`, a name that
-/// is not in the table stays as written.
+/// noctty's environment for tests, a fixed table: the seam
+/// `appendUserProfiles` takes. Names compare without case, as Windows
+/// compares them.
 const TestEnvironment = struct {
     vars: []const [2][]const u8 = &.{},
 
-    pub fn expand(self: TestEnvironment, alloc: Allocator, text: []const u8) ![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(alloc);
-        var i: usize = 0;
-        scan: while (i < text.len) {
-            if (text[i] == '%') {
-                if (std.mem.indexOfScalarPos(u8, text, i + 1, '%')) |end| {
-                    const name = text[i + 1 .. end];
-                    for (self.vars) |pair| {
-                        if (!std.ascii.eqlIgnoreCase(pair[0], name)) continue;
-                        try out.appendSlice(alloc, pair[1]);
-                        i = end + 1;
-                        continue :scan;
-                    }
-                }
-            }
-            try out.append(alloc, text[i]);
-            i += 1;
+    pub fn get(self: TestEnvironment, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
+        for (self.vars) |pair| {
+            if (std.ascii.eqlIgnoreCase(pair[0], name)) return try alloc.dupe(u8, pair[1]);
         }
-        return try out.toOwnedSlice(alloc);
+        return null;
     }
 };
 
@@ -569,16 +630,100 @@ test "user profiles expand %NAME% in the command, the directory and env values" 
     try testing.expectEqualStrings("PATH", profile.user.?.env[0].key);
     try testing.expectEqualStrings("C:\\T dir;C:\\Windows", profile.user.?.env[0].value);
     try testing.expectEqualStrings("%nope%", profile.user.?.env[1].value);
+}
 
-    // The production expander is ExpandEnvironmentStringsW.
-    if (builtin.os.tag == .windows) {
-        const root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
-        defer alloc.free(root);
-        const expanded = try (ProcessEnvironment{}).expand(alloc, "%SystemRoot%\\x %NOCTTY_TEST_SURELY_UNDEFINED_8C1F%");
-        defer alloc.free(expanded);
-        const want = try std.fmt.allocPrint(alloc, "{s}\\x %NOCTTY_TEST_SURELY_UNDEFINED_8C1F%", .{root});
+test "user profile %NAME% reads env lines before noctty's environment" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const process = TestEnvironment{ .vars = &.{
+        .{ "PATH", "C:\\Windows" },
+        .{ "USERPROFILE", "C:\\Users\\me" },
+        .{ "MODE", "process" },
+    } };
+    // `env = Path=C:\team` and `env = PATH=C:\later` (Windows sees the
+    // later one), plus a variable only noctty's environment has.
+    const global = [_]EnvEntry{
+        .{ .key = "Path", .value = "C:\\team" },
+        .{ .key = "OTHER", .value = "%USERPROFILE%" },
+        .{ .key = "PATH", .value = "C:\\later" },
+    };
+    const definitions = [_]UserProfiles.Definition{.{
+        .id = "py",
+        .command = "%USERPROFILE%\\py.exe %OTHER% %UNSET% %MODE%",
+        .working_directory = "%path%\\src",
+        .env = &.{
+            .{ .key = "PATH", .value = "C:\\py;%PATH%" },
+            .{ .key = "MODE", .value = "profile" },
+            // The profile's own variable is not visible to its values.
+            .{ .key = "SEEN", .value = "%MODE%" },
+        },
+        .global_env = &global,
+    }};
+    const profiles = try appendUserProfiles(alloc, try alloc.alloc(Profile, 0), &definitions, process);
+    defer deinitProfiles(alloc, profiles);
+    const user = profiles[0].user.?;
+    // `env` values are literal: `%USERPROFILE%` in one stays as written.
+    try testing.expectEqualStrings("C:\\Users\\me\\py.exe %USERPROFILE% %UNSET% process", user.command_line);
+    try testing.expectEqualStrings("C:\\later\\src", profiles[0].working_directory.?.path);
+    try testing.expectEqualStrings("C:\\py;C:\\later", user.env[0].value);
+    try testing.expectEqualStrings("process", user.env[2].value);
+
+    // From a config: the global `env` lines reach every definition.
+    const Config = @import("Config.zig");
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena = cfg._arena.?.allocator();
+    try cfg.env.parseCLI(arena, "Path=C:\\team");
+    try cfg.@"profile-command".parseCLI(arena, "a: a.exe %PATH%");
+    try cfg.@"profile-command".parseCLI(arena, "b: b.exe");
+    try cfg.@"profile-env".parseCLI(arena, "b: PATH=C:\\py;%PATH%");
+    try cfg.finalize();
+    var from_config = try UserProfiles.init(alloc, &cfg);
+    defer from_config.deinit();
+    const listed = try appendUserProfiles(alloc, try alloc.alloc(Profile, 0), from_config.definitions, process);
+    defer deinitProfiles(alloc, listed);
+    try testing.expectEqualStrings("a.exe C:\\team", listed[0].user.?.command_line);
+    try testing.expectEqualStrings("C:\\py;C:\\team", listed[1].user.?.env[0].value);
+}
+
+test "user profile expansion matches ExpandEnvironmentStringsW" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    // Names this process has (`SystemRoot`, `windir`) and does not have, in
+    // every arrangement of `%` the scanner has to agree on.
+    const unset = "NOCTTY_TEST_SURELY_UNDEFINED_8C1F";
+    const cases = [_][]const u8{
+        "",
+        "plain",
+        "%SystemRoot%\\x",
+        "%systemroot%",
+        "%SYSTEMROOT%%windir%",
+        "%%",
+        "%%%",
+        "100%",
+        "%",
+        "a%b",
+        "%" ++ unset ++ "%",
+        "%" ++ unset ++ "%SystemRoot%",
+        "%" ++ unset ++ "%SystemRoot%x%",
+        "%A%SystemRoot%",
+        "x%" ++ unset ++ "%%windir%%",
+        "%SystemRoot",
+        "%SystemRoot%%",
+        "%%SystemRoot%%",
+        "% SystemRoot%",
+        "\"%SystemRoot%\\a b\\\" %%x",
+    };
+    for (cases) |text| {
+        const want = try expandEnvironmentStrings(alloc, text);
         defer alloc.free(want);
-        try testing.expectEqualStrings(want, expanded);
+        const got = try expandProfileText(alloc, text, &.{}, ProcessEnvironment{});
+        defer alloc.free(got);
+        testing.expectEqualStrings(want, got) catch |err| {
+            std.debug.print("text: {s}\n", .{text});
+            return err;
+        };
     }
 }
 
@@ -591,14 +736,14 @@ test "user profile working directories take the working-directory values" {
         .{ .raw = "\"home\"", .want = .home },
         .{ .raw = "C:\\src", .want = .path },
     }) |case| {
-        const dir = try userWorkingDirectory(alloc, case.raw, TestEnvironment{});
+        const dir = try userWorkingDirectory(alloc, case.raw, &.{}, TestEnvironment{});
         defer if (dir == .path) alloc.free(dir.path);
         try testing.expectEqual(case.want, std.meta.activeTag(dir));
     }
     if (builtin.os.tag == .windows) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (try internal_os.home(&buf)) |home| {
-            const dir = try userWorkingDirectory(alloc, "~/src", TestEnvironment{});
+            const dir = try userWorkingDirectory(alloc, "~/src", &.{}, TestEnvironment{});
             defer alloc.free(dir.path);
             try testing.expect(std.mem.startsWith(u8, dir.path, std.mem.trimRight(u8, home, "\\/")));
             try testing.expect(std.mem.endsWith(u8, dir.path, "\\src"));
@@ -2167,27 +2312,45 @@ fn profileOrderTokenMatches(token: []const u8, profile: Profile) bool {
         }
     }
 
-    return switch (profile.kind) {
-        .wsl_default => std.ascii.eqlIgnoreCase(token, "wsl") or
-            std.ascii.eqlIgnoreCase(token, "wsl-default") or
-            std.ascii.eqlIgnoreCase(token, "default-wsl"),
-        .wsl_distro => std.ascii.eqlIgnoreCase(token, "wsl-distro") or
-            std.ascii.eqlIgnoreCase(token, "distro") or
-            std.ascii.eqlIgnoreCase(token, "wsl"),
-        .pwsh => std.ascii.eqlIgnoreCase(token, "pwsh") or
-            std.ascii.eqlIgnoreCase(token, "powershell-7") or
-            std.ascii.eqlIgnoreCase(token, "powershell-core"),
-        .powershell => std.ascii.eqlIgnoreCase(token, "powershell") or
-            std.ascii.eqlIgnoreCase(token, "windows-powershell") or
-            std.ascii.eqlIgnoreCase(token, "ps"),
-        .git_bash => std.ascii.eqlIgnoreCase(token, "git-bash") or
-            std.ascii.eqlIgnoreCase(token, "gitbash") or
-            std.ascii.eqlIgnoreCase(token, "git"),
-        .cmd => std.ascii.eqlIgnoreCase(token, "cmd") or
-            std.ascii.eqlIgnoreCase(token, "cmd.exe") or
-            std.ascii.eqlIgnoreCase(token, "command-prompt"),
-        .ssh, .user => false,
-    };
+    for (profile_alias_words) |alias| {
+        if (alias.kind == profile.kind and std.ascii.eqlIgnoreCase(token, alias.word)) return true;
+    }
+    return false;
+}
+
+/// The fixed words that name a detected profile besides its key. Each is
+/// reserved as a user profile id (`profile_map.reserved_ids`; the test
+/// "every profile alias word is reserved as an id" holds that), so a bare
+/// word names one thing.
+pub const profile_alias_words = [_]struct { kind: ProfileKind, word: []const u8 }{
+    .{ .kind = .wsl_default, .word = "wsl" },
+    .{ .kind = .wsl_default, .word = "wsl-default" },
+    .{ .kind = .wsl_default, .word = "default-wsl" },
+    .{ .kind = .wsl_distro, .word = "wsl-distro" },
+    .{ .kind = .wsl_distro, .word = "distro" },
+    .{ .kind = .wsl_distro, .word = "wsl" },
+    .{ .kind = .pwsh, .word = "pwsh" },
+    .{ .kind = .pwsh, .word = "powershell-7" },
+    .{ .kind = .pwsh, .word = "powershell-core" },
+    .{ .kind = .powershell, .word = "powershell" },
+    .{ .kind = .powershell, .word = "windows-powershell" },
+    .{ .kind = .powershell, .word = "ps" },
+    .{ .kind = .git_bash, .word = "git-bash" },
+    .{ .kind = .git_bash, .word = "gitbash" },
+    .{ .kind = .git_bash, .word = "git" },
+    .{ .kind = .cmd, .word = "cmd" },
+    .{ .kind = .cmd, .word = "cmd.exe" },
+    .{ .kind = .cmd, .word = "command-prompt" },
+};
+
+test "every profile alias word is reserved as an id" {
+    const profile_map = @import("profile_map.zig");
+    for (profile_alias_words) |alias| {
+        std.testing.expect(profile_map.isReservedId(alias.word)) catch |err| {
+            std.debug.print("not reserved: {s}\n", .{alias.word});
+            return err;
+        };
+    }
 }
 
 fn probeWslExecutableCached(alloc: Allocator, exe_path: []const u8) !bool {

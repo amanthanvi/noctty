@@ -33269,22 +33269,27 @@ const storedProfileKeyEquals = labels.storedProfileKeyEquals;
 /// on a reload (`config_change`), which then sees the change. They are not
 /// dropped here: the open palette borrows its host's profile strings.
 /// Choosing a theme (`commitPaletteTheme`) saves it and reloads through
-/// `settingsSaveAndReload`, so that reload applies any profile edits.
+/// `settingsSaveAndReload`, so that reload applies any profile edits. `env`
+/// is a source too: a profile's `%NAME%` reads it.
 fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !void {
     const alloc = dst._arena.?.allocator();
     dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
+    dst.env = try src.env.clone(alloc);
     dst.@"profile-command" = try src.@"profile-command".clone(alloc);
     dst.@"profile-name" = try src.@"profile-name".clone(alloc);
     dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
     dst.@"profile-env" = try src.@"profile-env".clone(alloc);
 }
 
-/// Whether a reload changed a key the profile lists are built from.
+/// Whether a reload changed a key the profile lists are built from: a
+/// `profile-*` key (a removal included), or `env` while a profile is
+/// defined, since `%NAME%` in a profile reads the `env` lines.
 fn userProfileKeysChanged(old: *const configpkg.Config, new: *const configpkg.Config) bool {
-    return !old.@"profile-command".equal(new.@"profile-command") or
+    if (!old.@"profile-command".equal(new.@"profile-command") or
         !old.@"profile-name".equal(new.@"profile-name") or
         !old.@"profile-working-directory".equal(new.@"profile-working-directory") or
-        !old.@"profile-env".equal(new.@"profile-env");
+        !old.@"profile-env".equal(new.@"profile-env")) return true;
+    return new.@"profile-command".count() > 0 and !old.env.equal(new.env);
 }
 
 fn applyProfileConfigByKey(
@@ -54779,7 +54784,7 @@ test "win32 a user profile launch sets its directory and layers its env on a cop
         "home: tool.exe",
         "inh: tool.exe",
         "pin: tool.exe",
-        "wsl: wsl.exe -d Ubuntu",
+        "ubuntu: wsl.exe -d Ubuntu",
         "wslhome: C:\\Windows\\System32\\wsl.exe -d Ubuntu",
     }) |value| try base.@"profile-command".parseCLI(base_alloc, value);
     try base.@"profile-working-directory".parseCLI(base_alloc, "home: home");
@@ -54807,7 +54812,7 @@ test "win32 a user profile launch sets its directory and layers its env on a cop
         .{ .key = "user:pin", .want = .{ .path = "D:\\pinned dir" } },
         // A WSL launch keeps `.home`, which gives `--cd ~` (the Linux home,
         // as a detected WSL profile gets), not `/mnt/c/Users/<name>`.
-        .{ .key = "user:wsl", .want = .wsl_home },
+        .{ .key = "user:ubuntu", .want = .wsl_home },
         .{ .key = "user:wslhome", .want = .wsl_home },
     }) |case| {
         var clone = base.shallowClone(alloc);
@@ -54902,7 +54907,7 @@ test "win32 an ordinary split of a user profile takes its pinned home" {
         .{ .kind = .user, .key = "user:home", .label = "home", .command = .{ .direct = &argv }, .working_directory = .home, .user = launch },
         .{ .kind = .user, .key = "user:inh", .label = "inh", .command = .{ .direct = &argv }, .working_directory = .inherit, .user = launch },
         .{ .kind = .user, .key = "user:unset", .label = "unset", .command = .{ .direct = &argv }, .user = launch },
-        .{ .kind = .user, .key = "user:wsl", .label = "wsl", .command = .{ .direct = &wsl_argv }, .working_directory = .home, .user = launch },
+        .{ .kind = .user, .key = "user:ubuntu", .label = "ubuntu", .command = .{ .direct = &wsl_argv }, .working_directory = .home, .user = launch },
     };
     var host: Host = undefined;
     host.profiles = &profiles;
@@ -54918,7 +54923,7 @@ test "win32 an ordinary split of a user profile takes its pinned home" {
         .{ .key = "user:home", .want = home },
         .{ .key = "user:inh", .want = "C:\\global" },
         .{ .key = "user:unset", .want = "C:\\global" },
-        .{ .key = "user:wsl", .want = null },
+        .{ .key = "user:ubuntu", .want = null },
     }) |case| {
         var config = try configpkg.Config.default(alloc);
         defer config.deinit();
@@ -54984,6 +54989,9 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
     var renamed = try base.clone(alloc);
     defer renamed.deinit();
     try renamed.@"profile-name".parseCLI(renamed._arena.?.allocator(), "vs18-cmd: New label");
+    // `%NAME%` reads the `env` lines first, on every path that builds a list.
+    try renamed.env.parseCLI(renamed._arena.?.allocator(), "NOCTTY_TEST_TEAM_DIR=C:\\team");
+    try renamed.@"profile-env".parseCLI(renamed._arena.?.allocator(), "vs18-cmd: SEEN=%noctty_test_team_dir%\\bin");
     const renamed_profiles = try testUserProfileList(alloc, &renamed);
     defer windows_shell.deinitProfiles(alloc, renamed_profiles);
     try std.testing.expectEqualStrings("New label", renamed_profiles[0].label);
@@ -55024,6 +55032,9 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
         try std.testing.expectEqualStrings("cmd.exe", hostless[0].key);
         try std.testing.expectEqualStrings("user:vs18-cmd", hostless[1].key);
         try std.testing.expectEqualStrings("New label", hostless[1].label);
+        const seen = hostless[1].user.?.env;
+        try std.testing.expectEqualStrings("SEEN", seen[seen.len - 1].key);
+        try std.testing.expectEqualStrings("C:\\team\\bin", seen[seen.len - 1].value);
         var clone = base.shallowClone(alloc);
         defer clone.deinit();
         try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, "USER:vs18-CMD"));
@@ -55060,12 +55071,34 @@ test "win32 a reload that changes any profile key drops the profile lists" {
         .{ "profile-name", "a: A" },
         .{ "profile-working-directory", "a: home" },
         .{ "profile-env", "a: K=V" },
+        // A removal, and an `env` line, which `%NAME%` in a profile reads.
+        .{ "profile-command", "a:" },
+        .{ "env", "PATH=C:\\team" },
     }) |case| {
         var changed = try old.clone(alloc);
         defer changed.deinit();
         try @field(changed, case[0]).parseCLI(changed._arena.?.allocator(), case[1]);
         try std.testing.expect(userProfileKeysChanged(&old, &changed));
     }
+
+    // Without profiles, `env` builds no profile list.
+    var bare = try configpkg.Config.default(alloc);
+    defer bare.deinit();
+    var bare_env = try bare.clone(alloc);
+    defer bare_env.deinit();
+    try bare_env.env.parseCLI(bare_env._arena.?.allocator(), "PATH=C:\\team");
+    try std.testing.expect(!userProfileKeysChanged(&bare, &bare_env));
+
+    // A removed profile defined again with the command it had is a change
+    // back; two removals of different commands are no change.
+    var removed = try old.clone(alloc);
+    defer removed.deinit();
+    try removed.@"profile-command".parseCLI(removed._arena.?.allocator(), "a:");
+    var removed_other = try configpkg.Config.default(alloc);
+    defer removed_other.deinit();
+    try removed_other.@"profile-command".parseCLI(removed_other._arena.?.allocator(), "a: other.exe");
+    try removed_other.@"profile-command".parseCLI(removed_other._arena.?.allocator(), "a:");
+    try std.testing.expect(!userProfileKeysChanged(&removed, &removed_other));
 }
 
 test "win32 ssh split and session state drop remote cwd" {
