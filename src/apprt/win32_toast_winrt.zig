@@ -46,6 +46,9 @@ pub const ShowError = error{
     NotifierDisabled,
     OutOfMemory,
     InvalidUtf8,
+    /// The toast's Tag or Group could not be set. It is not shown: a
+    /// toast without them could never be removed.
+    IdentitySetupFailed,
 };
 
 pub const HistoryError = error{
@@ -721,22 +724,23 @@ pub const WinrtToast = struct {
             }
         }
 
-        if (request.tag != null or request.group != null) self.applyTagAndGroup(notification, request);
+        if (request.tag != null or request.group != null) try self.applyTagAndGroup(notification, request);
 
         const show_hr = self.notifier.vtbl.Show(self.notifier.asRaw(), notification.asRaw());
         if (show_hr < 0) return ShowError.NotifierShowFailed;
     }
 
-    /// Set the toast's Tag and Group (`IToastNotification2`). A failure is
-    /// logged and the toast is shown untagged: it then neither replaces an
-    /// older toast nor is removed by tag, which is how every toast behaved
-    /// before.
-    fn applyTagAndGroup(self: *WinrtToast, notification: *IToastNotification, request: ToastRequest) void {
+    /// Set the toast's Tag and Group (`IToastNotification2`). Any failure
+    /// fails the show before `Show` is called, so the caller falls back to
+    /// its banner: a toast missing either property is one noctty would
+    /// count as shown but could neither replace nor remove, since every
+    /// removal names both the tag and the process group.
+    fn applyTagAndGroup(self: *WinrtToast, notification: *IToastNotification, request: ToastRequest) ShowError!void {
         var raw: ?*anyopaque = null;
         const qi_hr = notification.queryInterface(&IID_IToastNotification2, &raw);
         if (qi_hr < 0 or raw == null) {
-            std.log.warn("winrt toast: IToastNotification2 unavailable hr=0x{x:0>8}; shown untagged", .{hresultToU32(qi_hr)});
-            return;
+            std.log.warn("winrt toast: IToastNotification2 unavailable hr=0x{x:0>8}", .{hresultToU32(qi_hr)});
+            return ShowError.IdentitySetupFailed;
         }
         const toast2 = IToastNotification2.fromRaw(raw.?);
         defer _ = toast2.release();
@@ -744,13 +748,16 @@ pub const WinrtToast = struct {
             if (@field(request, pair[0])) |value| {
                 const hs = createHStringFromUtf8(self.alloc, &self.fns, value) catch |err| {
                     std.log.warn("winrt toast: " ++ pair[0] ++ " not set err={}", .{err});
-                    return;
+                    return switch (err) {
+                        error.OutOfMemory => ShowError.OutOfMemory,
+                        else => ShowError.IdentitySetupFailed,
+                    };
                 };
                 defer _ = self.fns.delete_string(hs);
                 const hr = @field(toast2.vtbl, pair[1])(toast2.asRaw(), hs);
                 if (hr < 0) {
                     std.log.warn("winrt toast: " ++ pair[1] ++ " failed hr=0x{x:0>8}", .{hresultToU32(hr)});
-                    return;
+                    return ShowError.IdentitySetupFailed;
                 }
             }
         }
@@ -1201,4 +1208,156 @@ test "WinrtToast ComInterface wrapper size equals pointer size" {
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IInspectable));
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IToastNotifier));
     try std.testing.expectEqual(@sizeOf(*anyopaque), @sizeOf(IXmlDocumentIO));
+}
+
+test "WinrtToast a toast whose Tag or Group cannot be set is not shown" {
+    // Every COM object and combase function here is an in-memory fake, so
+    // no toast reaches Windows.
+    const Fake = struct {
+        var xml: IInspectable = undefined;
+        var io: IXmlDocumentIO = undefined;
+        var factory: IToastNotificationFactory = undefined;
+        var notification: IToastNotification = undefined;
+        var identity: IToastNotification2 = undefined;
+        var identity_missing: bool = false;
+        var fail_tag: bool = false;
+        var fail_group: bool = false;
+        var tag_set: bool = false;
+        var group_set: bool = false;
+        var show_calls: usize = 0;
+        var shown_with_tag: bool = false;
+        var shown_with_group: bool = false;
+
+        fn release(_: *anyopaque) callconv(.winapi) u32 {
+            return 1;
+        }
+        fn query(_: *anyopaque, iid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+            if (iidEqual(iid, &IID_IXmlDocumentIO)) {
+                out.* = io.asRaw();
+            } else if (iidEqual(iid, &IID_IToastNotification2) and !identity_missing) {
+                out.* = identity.asRaw();
+            } else if (iidEqual(iid, &IID_IXmlDocument)) {
+                out.* = xml.asRaw();
+            } else {
+                out.* = null;
+                return E_NOINTERFACE;
+            }
+            return S_OK;
+        }
+        fn createString(_: ?[*]const u16, _: u32, out: *?HSTRING) callconv(.winapi) HRESULT {
+            out.* = @ptrFromInt(1);
+            return S_OK;
+        }
+        fn deleteString(_: ?HSTRING) callconv(.winapi) HRESULT {
+            return S_OK;
+        }
+        fn activate(_: HSTRING, out: *?*anyopaque) callconv(.winapi) HRESULT {
+            out.* = xml.asRaw();
+            return S_OK;
+        }
+        fn getFactory(_: HSTRING, _: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+            out.* = factory.asRaw();
+            return S_OK;
+        }
+        fn load(_: *anyopaque, _: HSTRING) callconv(.winapi) HRESULT {
+            return S_OK;
+        }
+        fn createNotification(_: *anyopaque, _: *anyopaque, out: *?*anyopaque) callconv(.winapi) HRESULT {
+            tag_set = false;
+            group_set = false;
+            out.* = notification.asRaw();
+            return S_OK;
+        }
+        fn setting(_: *anyopaque, out: *i32) callconv(.winapi) HRESULT {
+            out.* = 0;
+            return S_OK;
+        }
+        fn putTag(_: *anyopaque, _: HSTRING) callconv(.winapi) HRESULT {
+            if (fail_tag) return hresultFromU32(0x8007000E);
+            tag_set = true;
+            return S_OK;
+        }
+        fn putGroup(_: *anyopaque, _: HSTRING) callconv(.winapi) HRESULT {
+            if (fail_group) return hresultFromU32(0x8007000E);
+            group_set = true;
+            return S_OK;
+        }
+        fn show(_: *anyopaque, _: *anyopaque) callconv(.winapi) HRESULT {
+            show_calls += 1;
+            shown_with_tag = tag_set;
+            shown_with_group = group_set;
+            return S_OK;
+        }
+        fn reset(missing: bool, tag: bool, group: bool) void {
+            identity_missing = missing;
+            fail_tag = tag;
+            fail_group = group;
+            show_calls = 0;
+        }
+    };
+    var xml_v: IInspectableVtbl = undefined;
+    xml_v.QueryInterface = Fake.query;
+    xml_v.Release = Fake.release;
+    var io_v: IXmlDocumentIOVtbl = undefined;
+    io_v.LoadXml = Fake.load;
+    io_v.Release = Fake.release;
+    var factory_v: IToastNotificationFactoryVtbl = undefined;
+    factory_v.CreateToastNotification = Fake.createNotification;
+    factory_v.Release = Fake.release;
+    var notification_v: IToastNotificationVtbl = undefined;
+    notification_v.QueryInterface = Fake.query;
+    notification_v.Release = Fake.release;
+    var identity_v: IToastNotification2Vtbl = undefined;
+    identity_v.put_Tag = Fake.putTag;
+    identity_v.put_Group = Fake.putGroup;
+    identity_v.Release = Fake.release;
+    var notifier_v: IToastNotifierVtbl = undefined;
+    notifier_v.Show = Fake.show;
+    notifier_v.get_Setting = Fake.setting;
+    var notifier: IToastNotifier = .{ .vtbl = &notifier_v };
+    Fake.xml = .{ .vtbl = &xml_v };
+    Fake.io = .{ .vtbl = &io_v };
+    Fake.factory = .{ .vtbl = &factory_v };
+    Fake.notification = .{ .vtbl = &notification_v };
+    Fake.identity = .{ .vtbl = &identity_v };
+    var fns: CombaseFns = undefined;
+    fns.ro_activate = Fake.activate;
+    fns.ro_get_factory = Fake.getFactory;
+    fns.create_string = Fake.createString;
+    fns.delete_string = Fake.deleteString;
+    var toast: WinrtToast = .{
+        .alloc = std.testing.allocator,
+        .fns = fns,
+        .notifier = &notifier,
+        .aumid_hs = @ptrFromInt(1),
+        .ro_initialized = false,
+    };
+    const request: ToastRequest = .{ .title = "test", .body = "", .tag = "0000000000001001", .group = "noctty-1234" };
+
+    // Positive control: both properties set, the toast is shown with them.
+    Fake.reset(false, false, false);
+    try toast.show(request, .info);
+    try std.testing.expectEqual(@as(usize, 1), Fake.show_calls);
+    try std.testing.expect(Fake.shown_with_tag and Fake.shown_with_group);
+
+    // The Group setter fails after the Tag setter succeeded: no Show.
+    Fake.reset(false, false, true);
+    try std.testing.expectError(ShowError.IdentitySetupFailed, toast.show(request, .info));
+    try std.testing.expect(Fake.tag_set and !Fake.group_set);
+    try std.testing.expectEqual(@as(usize, 0), Fake.show_calls);
+
+    // The Tag setter fails: no Show.
+    Fake.reset(false, true, false);
+    try std.testing.expectError(ShowError.IdentitySetupFailed, toast.show(request, .info));
+    try std.testing.expectEqual(@as(usize, 0), Fake.show_calls);
+
+    // IToastNotification2 is unavailable: no Show.
+    Fake.reset(true, false, false);
+    try std.testing.expectError(ShowError.IdentitySetupFailed, toast.show(request, .info));
+    try std.testing.expectEqual(@as(usize, 0), Fake.show_calls);
+
+    // A toast with neither property never asks for them and is shown.
+    Fake.reset(true, false, false);
+    try toast.show(.{ .title = "test", .body = "" }, .info);
+    try std.testing.expectEqual(@as(usize, 1), Fake.show_calls);
 }

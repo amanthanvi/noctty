@@ -748,8 +748,9 @@ forward, which Windows may refuse. Whether clicking an older entry in Action
 Center does the same has not been confirmed.
 
 A pane keeps at most one toast in Action Center: a newer toast from the same
-pane that Windows takes replaces its older one (one Windows refuses becomes a
-banner and leaves the older toast where it is). noctty takes a pane's toast
+pane that Windows takes replaces its older one (one Windows refuses, or one
+whose tag and group noctty cannot set, becomes a banner and leaves the older
+toast where it is). noctty takes a pane's toast
 out of Action Center when you look at its tab (its window comes forward with
 that tab active, or a pane in the tab gets focus), when the pane closes, and
 when its tab is closed, also while that close can still be undone; an undo
