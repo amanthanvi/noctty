@@ -1704,8 +1704,9 @@ class: ?[:0]const u8 = null,
 /// pane that runs it) names the profile and reads the same files, so these
 /// variables are not on its command line. For a profile defined only by a
 /// `--profile-command` option on noctty's command line, or given a variable
-/// by a `--profile-env` option there, they are, and a command line is not
-/// private (process tools and process-creation auditing can show it).
+/// by a `--profile-env` option there, or when that command line has an
+/// `--env` option, they are, and a command line is not private (process
+/// tools and process-creation auditing can show it).
 @"profile-env": ProfileMap.Env = .{},
 
 /// The profile a terminal runs when nothing else chose one, in place of the
@@ -5822,6 +5823,17 @@ pub fn profileWrittenOnCommandLine(self: *const Config, key: []const u8, id: []c
         if (place.location != .cli or !std.mem.eql(u8, place.key, key)) continue;
         if (place.id.len == 0 or std.ascii.eqlIgnoreCase(place.id, id)) return true;
     }
+    return false;
+}
+
+/// Whether noctty's command line has an `--env=` argument. A process that
+/// reads only the config files (an elevated window) would not get it, and a
+/// user profile's `%NAME%` reads `env` entries first.
+pub fn commandLineSetsEnv(self: *const Config) bool {
+    for (self._replay_steps.items) |step| switch (step) {
+        .arg => |arg| if (arg.location == .cli and std.mem.startsWith(u8, arg.value, "--env=")) return true,
+        else => {},
+    };
     return false;
 }
 

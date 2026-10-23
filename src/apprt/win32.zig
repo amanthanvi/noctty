@@ -1180,8 +1180,10 @@ fn elevatesBySelector(config: *const configpkg.Config, key: []const u8) bool {
     if (config.profilePlace("profile-command", id) != .file) return false;
     // A variable given on the command line (`--profile-env=<id>: ...`), or a
     // `--profile-env=` that cleared them, is not forwarded either, so such a
-    // profile is passed with its variables.
-    return !config.profileWrittenOnCommandLine("profile-env", id);
+    // profile is passed with its variables. Nor is an `--env=` argument,
+    // which `%NAME%` in the profile's lines may have read.
+    if (config.profileWrittenOnCommandLine("profile-env", id)) return false;
+    return !config.commandLineSetsEnv();
 }
 
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
@@ -55849,6 +55851,22 @@ test "win32 an elevated window names a file-defined user profile and passes a co
         try cleared.finalize();
         try std.testing.expect(cleared.@"profile-env".count() == 0);
         try std.testing.expect(!elevatesBySelector(&cleared, "user:filed"));
+        // An `--env=` argument, which `%NAME%` may read, is not forwarded
+        // either.
+        var with_env = try configpkg.Config.default(alloc);
+        defer with_env.deinit();
+        try with_env.loadFile(alloc, path);
+        var env_arg: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+            .iterator = cli_args.sliceIterator(&.{"--env=TOOLS=C:\\Tools"}),
+        };
+        try with_env.loadIter(alloc, &env_arg);
+        try with_env.finalize();
+        try std.testing.expect(!elevatesBySelector(&with_env, "user:filed"));
+        // Kept for a conditional rebuild, which replays the argument.
+        with_env._conditional_set.insert(.theme);
+        var with_env_dark = (try with_env.changeConditionalState(.{ .theme = .dark })).?;
+        defer with_env_dark.deinit();
+        try std.testing.expect(!elevatesBySelector(&with_env_dark, "user:filed"));
         // Nothing reset: named.
         var plain = try configpkg.Config.default(alloc);
         defer plain.deinit();

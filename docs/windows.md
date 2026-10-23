@@ -769,7 +769,8 @@ Limits:
   it, and none of them appear on the elevated command line. It applies to the
   whole elevated window, not only its first pane. A profile defined only by a
   `--profile-command` option on noctty's command line, or given a variable by
-  a `--profile-env` option there, is still passed as
+  a `--profile-env` option there, or any profile when that command line has
+  an `--env` option (which `%NAME%` may read), is still passed as
   arguments (`--command=direct:...`, quoted again in the standard way, an empty `--initial-command=`, and
   `--elevated-profile-env=...`), which process tools and process-creation
   auditing can read, so do not keep a secret in such a profile's
