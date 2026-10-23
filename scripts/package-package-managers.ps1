@@ -74,13 +74,13 @@ $packageDescription = @"
 noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end.
 "@.Trim()
 # The Chocolatey page shows the description as Markdown, so it carries the notes a
-# user needs before installing: the SmartScreen warning, PATH and updates.
+# user needs before installing: the signing certificate, PATH and updates.
 $chocolateyDescription = @'
-noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end. It runs on Windows 10 version 1809 or later and Windows 11, on x64 and ARM64.
+noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end. It requires Windows 10 version 1809 or later, or Windows 11, on x64 or ARM64.
 
 ### Features
 
-* Tabs, splits, and session restore for windows, tabs, splits, and working directories
+* Tabs and splits, with session restore of windows, tabs, splits and working directories (running programs are not restored)
 * A shell picker for PowerShell, cmd, Git Bash, and WSL distributions
 * A command palette
 * Most Ghostty options and themes work as they are
@@ -88,9 +88,9 @@ noctty is a Windows terminal emulator that reuses Ghostty's terminal core under 
 
 ### Package Notes
 
-* The installer is signed with a self-signed certificate, so Windows SmartScreen warns on first run. This package checks the download against the SHA-256 published with each release.
+* The installer is signed with a self-signed certificate rather than one from a public certificate authority. This package checks each download against the SHA-256 published with the release.
 * The installer does not add noctty to PATH.
-* noctty checks GitHub Releases for updates and never installs one until you start it. Set `auto-update = off` in the config to disable the check.
+* noctty checks GitHub Releases for updates and only installs one when you choose Install. Update with `choco upgrade noctty` to keep Chocolatey's version record right. Set `auto-update = off` in the config to turn the check off.
 '@.Trim()
 
 function Reset-Directory {
@@ -301,7 +301,7 @@ $chocolateyNuspec = @"
     <description>$escapedChocolateyDescription</description>
     <releaseNotes>$releaseUrl</releaseNotes>
     <copyright>Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors</copyright>
-    <tags>noctty terminal terminal-emulator emulator console shell windows ghostty foss</tags>
+    <tags>noctty terminal terminal-emulator emulator console windows ghostty foss</tags>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
