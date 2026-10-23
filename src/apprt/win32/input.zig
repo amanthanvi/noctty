@@ -1715,22 +1715,55 @@ pub fn imeCaretCodepointIndex(units: []const u16, cursor: i32) ?usize {
     return count;
 }
 
-/// Show a composition string with its caret: `cursor` is the
-/// `GCS_CURSORPOS` value read with `units`. An empty string, or one that is
+/// The clause the IME is converting, as a codepoint range of `units`, from
+/// the `GCS_COMPATTR` attributes read with them: one byte per UTF-16 unit.
+/// It is the first run of units marked `ATTR_TARGET_CONVERTED` or
+/// `ATTR_TARGET_NOTCONVERTED`; a surrogate pair takes its first unit's
+/// attribute. No attributes, a count that is not one per unit, or no target
+/// unit gives none.
+pub fn imeTargetCodepointRange(units: []const u16, attrs: ?[]const u8) ?CoreSurface.PreeditTarget {
+    const bytes = attrs orelse return null;
+    if (bytes.len != units.len) return null;
+    var start: ?usize = null;
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < units.len) : (count += 1) {
+        const pair = std.unicode.utf16IsHighSurrogate(units[i]) and
+            i + 1 < units.len and std.unicode.utf16IsLowSurrogate(units[i + 1]);
+        const targeted = bytes[i] == c.ATTR_TARGET_CONVERTED or
+            bytes[i] == c.ATTR_TARGET_NOTCONVERTED;
+        if (targeted) {
+            if (start == null) start = count;
+        } else if (start) |s| {
+            return .{ .start = s, .end = count };
+        }
+        i += if (pair) 2 else 1;
+    }
+    return .{ .start = start orelse return null, .end = count };
+}
+
+/// Show a composition string with its caret and target clause: `cursor` is
+/// the `GCS_CURSORPOS` value and `attrs` the `GCS_COMPATTR` bytes read with
+/// `units`, or null when there are none. An empty string, or one that is
 /// not valid UTF-16, clears the preedit; a negative `cursor` shows the text
 /// without a caret. `target` supplies
-/// `preeditCaretCallback(?[]const u8, ?usize)`.
+/// `preeditCaretCallback(?[]const u8, ?usize, ?CoreSurface.PreeditTarget)`.
 pub fn applyImeComposition(
     target: anytype,
     alloc: std.mem.Allocator,
     units: []const u16,
     cursor: i32,
+    attrs: ?[]const u8,
     stack: []u8,
 ) void {
-    if (units.len == 0) return target.preeditCaretCallback(null, null);
-    const text = imeTextUtf8(alloc, units, stack) catch return target.preeditCaretCallback(null, null);
+    if (units.len == 0) return target.preeditCaretCallback(null, null, null);
+    const text = imeTextUtf8(alloc, units, stack) catch return target.preeditCaretCallback(null, null, null);
     defer text.deinit(alloc);
-    target.preeditCaretCallback(text.bytes, imeCaretCodepointIndex(units, cursor));
+    target.preeditCaretCallback(
+        text.bytes,
+        imeCaretCodepointIndex(units, cursor),
+        imeTargetCodepointRange(units, attrs),
+    );
 }
 
 /// Commit one typed character as a key event with no physical key.
@@ -2643,11 +2676,13 @@ test "win32 IME composition reaches the surface with its caret" {
         calls: usize = 0,
         text: ?[]const u8 = null,
         caret: ?usize = null,
+        target: ?CoreSurface.PreeditTarget = null,
         buf: [64]u8 = undefined,
 
-        fn preeditCaretCallback(self: *@This(), text: ?[]const u8, caret: ?usize) void {
+        fn preeditCaretCallback(self: *@This(), text: ?[]const u8, caret: ?usize, target: ?CoreSurface.PreeditTarget) void {
             self.calls += 1;
             self.caret = caret;
+            self.target = target;
             self.text = if (text) |t| blk: {
                 @memcpy(self.buf[0..t.len], t);
                 break :blk self.buf[0..t.len];
@@ -2658,30 +2693,80 @@ test "win32 IME composition reaches the surface with its caret" {
 
     var target: Target = .{};
     const zhongguo = [_]u16{ 'z', 'h', 'o', 'n', 'g', 'g', 'u', 'o' };
-    applyImeComposition(&target, testing.allocator, &zhongguo, 5, &stack);
+    applyImeComposition(&target, testing.allocator, &zhongguo, 5, null, &stack);
     try testing.expectEqualStrings("zhongguo", target.text.?);
     try testing.expectEqual(@as(?usize, 5), target.caret);
 
     // A caret after a surrogate pair is an index into the UTF-8 text's
     // codepoints.
     const pair = [_]u16{ 0x4E2D, 0xD83D, 0xDE42, 'x' };
-    applyImeComposition(&target, testing.allocator, &pair, 3, &stack);
+    applyImeComposition(&target, testing.allocator, &pair, 3, null, &stack);
     try testing.expectEqualStrings("\u{4E2D}\u{1F642}x", target.text.?);
     try testing.expectEqual(@as(?usize, 2), target.caret);
 
     // No caret keeps the text.
-    applyImeComposition(&target, testing.allocator, &zhongguo, -1, &stack);
+    applyImeComposition(&target, testing.allocator, &zhongguo, -1, null, &stack);
     try testing.expectEqualStrings("zhongguo", target.text.?);
     try testing.expectEqual(@as(?usize, null), target.caret);
 
     // An empty composition clears, and so does one that cannot convert.
-    applyImeComposition(&target, testing.allocator, &.{}, 0, &stack);
+    applyImeComposition(&target, testing.allocator, &.{}, 0, null, &stack);
     try testing.expectEqual(@as(?[]const u8, null), target.text);
-    applyImeComposition(&target, testing.allocator, &zhongguo, 2, &stack);
-    applyImeComposition(&target, testing.allocator, &.{0xD83D}, 1, &stack);
+    applyImeComposition(&target, testing.allocator, &zhongguo, 2, null, &stack);
+    applyImeComposition(&target, testing.allocator, &.{0xD83D}, 1, null, &stack);
     try testing.expectEqual(@as(?[]const u8, null), target.text);
     try testing.expectEqual(@as(?usize, null), target.caret);
     try testing.expectEqual(@as(usize, 6), target.calls);
+
+    // The target clause comes with them, and a clear drops it.
+    const kana = [_]u16{ 0x304B, 0x306A, 0x6F22, 0x5B57, 0x5909, 0x63DB };
+    const attrs = [_]u8{ c.ATTR_INPUT, c.ATTR_INPUT, c.ATTR_TARGET_CONVERTED, c.ATTR_TARGET_CONVERTED, c.ATTR_CONVERTED, c.ATTR_CONVERTED };
+    applyImeComposition(&target, testing.allocator, &kana, 2, &attrs, &stack);
+    try testing.expectEqual(@as(?usize, 2), target.caret);
+    try testing.expectEqual(@as(?CoreSurface.PreeditTarget, .{ .start = 2, .end = 4 }), target.target);
+    applyImeComposition(&target, testing.allocator, &kana, 2, null, &stack);
+    try testing.expectEqual(@as(?CoreSurface.PreeditTarget, null), target.target);
+    applyImeComposition(&target, testing.allocator, &kana, 2, &attrs, &stack);
+    applyImeComposition(&target, testing.allocator, &.{}, 0, &.{}, &stack);
+    try testing.expectEqual(@as(?CoreSurface.PreeditTarget, null), target.target);
+}
+
+test "win32 IME target clause is the first run the IME is converting" {
+    const testing = std.testing;
+    const T = CoreSurface.PreeditTarget;
+    const I = c.ATTR_INPUT;
+    const TC = c.ATTR_TARGET_CONVERTED;
+    const CV = c.ATTR_CONVERTED;
+    const TN = c.ATTR_TARGET_NOTCONVERTED;
+    const units = [_]u16{ 'a', 'b', 'c', 'd', 'e', 'f' };
+
+    // Japanese-shaped clauses: input, the target, converted.
+    try testing.expectEqual(@as(?T, .{ .start = 2, .end = 4 }), imeTargetCodepointRange(&units, &.{ I, I, TC, TC, CV, CV }));
+    // The target moved to the next clause.
+    try testing.expectEqual(@as(?T, .{ .start = 4, .end = 6 }), imeTargetCodepointRange(&units, &.{ I, I, CV, CV, TC, TC }));
+    // A target not yet converted counts too.
+    try testing.expectEqual(@as(?T, .{ .start = 0, .end = 3 }), imeTargetCodepointRange(&units, &.{ TN, TN, TN, I, I, I }));
+    // Two target runs: the first wins.
+    try testing.expectEqual(@as(?T, .{ .start = 1, .end = 2 }), imeTargetCodepointRange(&units, &.{ I, TC, CV, TN, TN, I }));
+    // No target: all input, or the other attributes.
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(&units, &.{ I, I, I, I, I, I }));
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(&units, &.{ CV, c.ATTR_INPUT_ERROR, c.ATTR_FIXEDCONVERTED, 9, 0xff, I }));
+    // No attributes, or not one per unit: never read past either.
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(&units, null));
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(&units, &.{ I, I, TC, TC, CV }));
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(&units, &.{ TC, TC, TC, TC, TC, TC, TC }));
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(&.{}, &.{}));
+    try testing.expectEqual(@as(?T, null), imeTargetCodepointRange(units[0..1], &.{}));
+
+    // U+1F642 is two units and one codepoint, with its first unit's
+    // attribute.
+    const pair = [_]u16{ 'a', 0xD83D, 0xDE42, 'b', 'c' };
+    try testing.expectEqual(@as(?T, .{ .start = 1, .end = 2 }), imeTargetCodepointRange(&pair, &.{ I, TC, I, CV, CV }));
+    try testing.expectEqual(@as(?T, .{ .start = 1, .end = 3 }), imeTargetCodepointRange(&pair, &.{ I, TC, TC, TC, CV }));
+    try testing.expectEqual(@as(?T, .{ .start = 2, .end = 4 }), imeTargetCodepointRange(&pair, &.{ I, I, TC, TC, TC }));
+    // A lone surrogate is a codepoint of its own, as the caret counts it.
+    const lone = [_]u16{ 0xD83D, 'x' };
+    try testing.expectEqual(@as(?T, .{ .start = 1, .end = 2 }), imeTargetCodepointRange(&lone, &.{ I, TC }));
 }
 
 test "win32 IME commit reports the effect that closed the surface" {

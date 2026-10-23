@@ -548,6 +548,40 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $limit = $p.longEnd.caret.width - $cell.x0
             if ($p.longEnd.caret.count -ne $bar.count -or $cells -ne [Math]::Floor($cells) -or $right -gt $limit -or $right + $cw -le $limit) { throw "Caret at the end of an overlong composition is not on the last column: $($p.longEnd.caret | ConvertTo-Json -Compress)." }
             $p.longEndColumn = $cells
+            # The conversion target clause (GCS_COMPATTR). Fixtures 4-7 are
+            # six wide characters in three two-character clauses: no
+            # attributes (4), the target on the second clause, preedit
+            # cells 4-7 (5), on the third, cells 8-11 (6), and attributes
+            # one short (7). With no caret, a target only changes the
+            # underline: every pixel that differs from fixture 4 lies in the
+            # target's cells, across their full width, below the middle of
+            # the row.
+            $ch = $cell.y1 - $cell.y0 + 1
+            $diffBox = { param($A, $B) [RendererNative]::DiffBox($A.path, $B.path, 0) | ConvertFrom-Json }
+            $expectUnderline = {
+                param($Box, [int]$FirstCell, [int]$LastCell, [string]$What)
+                if ($Box.count -lt $cw -or $Box.x0 -ne $cell.x0 + $FirstCell * $cw -or $Box.x1 -ne $cell.x0 + ($LastCell + 1) * $cw - 1 -or $Box.y0 -lt $cell.y0 + [int]($ch / 2) -or $Box.y1 -gt $cell.y1) { throw "${What}: expected an underline change across preedit cells $FirstCell-$LastCell, found $($Box | ConvertTo-Json -Compress)." }
+            }
+            $p.kana = & $compose 4 -1 'preedit-target-none'
+            if ($p.kana.caret.count -ne 0) { throw 'A composition without a caret drew one.' }
+            $p.target = & $compose 5 -1 'preedit-target-second-clause'
+            $p.targetNext = & $compose 6 -1 'preedit-target-third-clause'
+            $p.targetMalformed = & $compose 7 -1 'preedit-target-malformed'
+            $p.targetBox = & $diffBox $p.kana $p.target; & $expectUnderline $p.targetBox 4 7 'Target on the second clause'
+            $p.targetNextBox = & $diffBox $p.kana $p.targetNext; & $expectUnderline $p.targetNextBox 8 11 'Target on the third clause'
+            # Moving the target moves only the underline.
+            $p.targetMoveBox = & $diffBox $p.target $p.targetNext; & $expectUnderline $p.targetMoveBox 4 11 'Target moved to the next clause'
+            if ($p.targetMoveBox.y0 -ne [Math]::Min($p.targetBox.y0, $p.targetNextBox.y0) -or $p.targetMoveBox.y1 -ne [Math]::Max($p.targetBox.y1, $p.targetNextBox.y1)) { throw "Moving the target changed more than the underline: $($p.targetMoveBox | ConvertTo-Json -Compress)." }
+            $p.targetMalformedBox = & $diffBox $p.kana $p.targetMalformed
+            if ($p.targetMalformedBox.count -ne 0) { throw "Attributes one short of the string changed the composition: $($p.targetMalformedBox | ConvertTo-Json -Compress)." }
+            # A caret before the target's first character keeps both: the
+            # bar on the left edge of preedit cell 4, the double underline
+            # under cells 4-7 except where the bar covers it.
+            $p.kanaCaret = & $compose 4 2 'preedit-target-none-caret'; & $expectBar $p.kanaCaret -1 'Caret before the third character'
+            $p.targetCaret = & $compose 5 2 'preedit-target-caret'; & $expectBar $p.targetCaret -1 'Caret with the target clause'
+            $p.targetCaretBox = & $diffBox $p.kanaCaret $p.targetCaret
+            $edge4 = $cell.x0 + 4 * $cw
+            if ($p.targetCaretBox.count -lt $cw -or $p.targetCaretBox.x0 -lt $edge4 -or $p.targetCaretBox.x0 -gt [Math]::Max($edge4, $p.targetCaret.caret.x1 + 1) -or $p.targetCaretBox.x1 -ne $cell.x0 + 8 * $cw - 1 -or $p.targetCaretBox.y0 -ne $p.targetBox.y0 -or $p.targetCaretBox.y1 -ne $p.targetBox.y1) { throw "The target's underline changed with a caret in front of it: $($p.targetCaretBox | ConvertTo-Json -Compress)." }
             # Blink ticks with no output rebuild frames in which no row is
             # dirty, so the preedit's cells are kept from an earlier frame
             # and only a caret set on every rebuild is still drawn. The
@@ -656,8 +690,9 @@ function Invoke-SplitDimCases {
         if ($candidate.initial.status.warp -and ($diff.maxChannelDelta -gt 4 -or $diff.different -gt $diff.pixels * 0.01 -or $diff.over2 -gt $diff.pixels * 0.001)) { throw 'WARP dim exceeds documented edge quantization tolerance.' }
     }
 }
-# The IME composition caret on every backend: hardware matches OpenGL
-# exactly, WARP within its edge tolerance; a hidden terminal cursor keeps it.
+# The IME composition caret and target clause on every backend: hardware
+# matches OpenGL exactly, WARP within its edge tolerance; a hidden terminal
+# cursor keeps the caret.
 function Invoke-PreeditCaretCases {
     $preeditGL = Invoke-Case 'preedit-caret-opengl' 'opengl' -PreeditCaret; $result.runs += $preeditGL
     $preeditHardware = Invoke-Case 'preedit-caret-hardware' 'd3d11' -PreeditCaret; $result.runs += $preeditHardware
@@ -666,7 +701,7 @@ function Invoke-PreeditCaretCases {
     $a = $hidden.preedit.caret5.caret; $b = $preeditGL.preedit.caret5.caret
     if ($a.count -ne $b.count -or $a.x0 -ne $b.x0 -or $a.y0 -ne $b.y0) { throw 'The caret moved or vanished with the terminal cursor hidden.' }
     foreach ($candidate in @($preeditHardware, $preeditWarp)) {
-        foreach ($frame in @('caret5', 'longEnd')) {
+        foreach ($frame in @('caret5', 'longEnd', 'target', 'targetCaret')) {
             $diff = [RendererNative]::Diff($preeditGL.preedit[$frame].path, $candidate.preedit[$frame].path, (Join-Path $OutputDirectory ($candidate.label + '-' + $frame + '-diff.png'))) | ConvertFrom-Json
             $result.comparisons += @{ label = $candidate.label + '-' + $frame; diff = $diff }
             if (!$candidate.initial.status.warp -and $diff.different -ne 0) { throw 'Hardware draws the composition differently from OpenGL.' }

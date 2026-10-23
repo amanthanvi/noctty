@@ -2745,6 +2745,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             y: terminal.size.CellCountInt,
             x: [2]terminal.size.CellCountInt,
             cp_offset: usize,
+            /// The cells of the target clause, drawn with a double underline.
+            target: ?[2]terminal.size.CellCountInt,
         };
 
         /// Convert the terminal state to GPU cells stored in CPU memory. These
@@ -2854,6 +2856,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .y = @intCast(cursor_vp.y),
                     .x = .{ range.start, range.end },
                     .cp_offset = range.cp_offset,
+                    .target = range.target_x,
                 };
             } else null;
 
@@ -3087,10 +3090,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 for (preedit_v.codepoints[range.cp_offset..]) |cp| {
                     // A caret in the cut head cuts the tail instead.
                     if (x + @as(usize, @intFromBool(cp.wide)) > range.x[1]) break;
+                    // The clause being converted is double-underlined, as
+                    // Windows Terminal does; the input method's colours are
+                    // not used.
+                    const in_target = if (range.target) |t| x >= t[0] and x <= t[1] else false;
                     self.addPreeditCell(
                         cp,
                         .{ .x = x, .y = range.y },
                         state.colors.foreground,
+                        if (in_target) .double else .single,
                     ) catch |err| {
                         log.warn("error building preedit cell, will be invalid x={} y={}, err={}", .{
                             x,
@@ -3847,6 +3855,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             cp: renderer.State.Preedit.Codepoint,
             coord: terminal.Coordinate,
             screen_fg: terminal.color.RGB,
+            underline: terminal.Attribute.Underline,
         ) !void {
             // Render the glyph for our preedit text
             const render_ = self.font_grid.renderCodepoint(
@@ -3878,9 +3887,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             });
 
             // Add underline
-            try self.addUnderline(@intCast(coord.x), @intCast(coord.y), .single, screen_fg, 255);
+            try self.addUnderline(@intCast(coord.x), @intCast(coord.y), underline, screen_fg, 255);
             if (cp.wide and coord.x < self.cells.size.columns - 1) {
-                try self.addUnderline(@intCast(coord.x + 1), @intCast(coord.y), .single, screen_fg, 255);
+                try self.addUnderline(@intCast(coord.x + 1), @intCast(coord.y), underline, screen_fg, 255);
             }
         }
 

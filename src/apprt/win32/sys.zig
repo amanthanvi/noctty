@@ -676,7 +676,7 @@ pub extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
 
 pub extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: ?*anyopaque) callconv(.winapi) BOOL;
 
-pub extern "imm32" fn ImmGetCompositionStringW(hIMC: *anyopaque, dwIndex: u32, lpBuf: ?[*]u16, dwBufLen: u32) callconv(.winapi) i32;
+pub extern "imm32" fn ImmGetCompositionStringW(hIMC: *anyopaque, dwIndex: u32, lpBuf: ?*anyopaque, dwBufLen: u32) callconv(.winapi) i32;
 
 pub extern "imm32" fn ImmSetCompositionWindow(hIMC: *anyopaque, lpCompForm: *const COMPOSITIONFORM) callconv(.winapi) BOOL;
 

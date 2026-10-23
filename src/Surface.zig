@@ -3752,23 +3752,49 @@ test "a relative resolution result is never handed to accessAbsolute" {
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
 /// keyboard should be rendered.
 pub fn imePoint(self: *const Surface) apprt.IMEPos {
-    self.renderer_state.mutex.lock();
-    const cursor = self.renderer_state.terminal.screens.active.cursor;
-    const preedit_width: usize = if (self.renderer_state.preedit) |preedit| preedit.width() else 0;
-    self.renderer_state.mutex.unlock();
-
-    // TODO: need to handle when scrolling and the cursor is not
-    // in the visible portion of the screen.
-
     // Our sizes are all scaled so we need to send the unscaled values back.
     const content_scale = self.rt_surface.getContentScale() catch .{ .x = 1, .y = 1 };
 
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    // TODO: need to handle when scrolling and the cursor is not
+    // in the visible portion of the screen.
+    const cursor = self.renderer_state.terminal.screens.active.cursor;
+    return imePosAt(
+        self.size,
+        content_scale,
+        cursor.x,
+        cursor.y,
+        self.renderer_state.terminal.cols,
+        if (self.renderer_state.preedit) |*preedit| preedit else null,
+    );
+}
+
+/// Where the IME's windows go for the terminal cursor at cell (`cursor_x`,
+/// `cursor_y`) on a grid `cols` wide: the bottom middle of the first cell
+/// the preedit is drawn on, which is the cursor's cell unless the preedit
+/// had to move left of it to fit.
+pub fn imePosAt(
+    size: rendererpkg.Size,
+    content_scale: apprt.ContentScale,
+    cursor_x: terminal.size.CellCountInt,
+    cursor_y: terminal.size.CellCountInt,
+    cols: terminal.size.CellCountInt,
+    preedit: ?*const rendererpkg.State.Preedit,
+) apprt.IMEPos {
+    // The cells the preedit is drawn on.
+    const start: usize, const cells: usize = if (preedit) |p| cells: {
+        if (p.codepoints.len == 0 or cols == 0) break :cells .{ cursor_x, 0 };
+        const placed = p.layout(cursor_x, cols - 1);
+        break :cells .{ placed.start, @as(usize, placed.end - placed.start) + 1 };
+    } else .{ cursor_x, 0 };
+
     const x: f64 = x: {
         // Simple x * cell width gives the top-left corner, then add padding offset
-        var x: f64 = @floatFromInt(cursor.x * self.size.cell.width + self.size.padding.left);
+        var x: f64 = @floatFromInt(start * size.cell.width + size.padding.left);
 
         // We want the midpoint
-        x += @as(f64, @floatFromInt(self.size.cell.width)) / 2;
+        x += @as(f64, @floatFromInt(size.cell.width)) / 2;
 
         // And scale it
         x /= content_scale.x;
@@ -3778,10 +3804,10 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
 
     const y: f64 = y: {
         // Simple y * cell height gives the top-left corner, then add padding offset
-        var y: f64 = @floatFromInt(cursor.y * self.size.cell.height + self.size.padding.top);
+        var y: f64 = @floatFromInt(@as(usize, cursor_y) * size.cell.height + size.padding.top);
 
         // We want the bottom
-        y += @floatFromInt(self.size.cell.height);
+        y += @floatFromInt(size.cell.height);
 
         // And scale it
         y /= content_scale.y;
@@ -3792,28 +3818,19 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
     // Our height for now is always just the cell height because our preedit
     // rendering only renders in a single line.
     const height: f64 = height: {
-        var height: f64 = @floatFromInt(self.size.cell.height);
+        var height: f64 = @floatFromInt(size.cell.height);
         height /= content_scale.y;
         break :height height;
     };
-    const width: f64 = width: {
-        var width: f64 = @floatFromInt(preedit_width * self.size.cell.width);
 
-        // Our max width is the remaining screen width after the cursor.
-        // We don't have to deal with wrapping because the preedit doesn't
-        // wrap right now.
-        const screen_width: f64 = @floatFromInt(self.size.terminal().width);
-        const x_offset: f64 = @floatFromInt((cursor.x + 1) * self.size.cell.width);
-        const max = screen_width - x_offset;
-        width = @min(width, max);
-
-        // Note: we don't apply content scale here because it looks like
-        // for some reason in macOS its already scaled. I'm not sure why
-        // that is so I'm going to just leave this comment here so its known
-        // that I left this out on purpose pending more investigation.
-
-        break :width width;
-    };
+    // The width the preedit is drawn with; it never wraps and never goes
+    // past the last column.
+    //
+    // Note: we don't apply content scale here because it looks like
+    // for some reason in macOS its already scaled. I'm not sure why
+    // that is so I'm going to just leave this comment here so its known
+    // that I left this out on purpose pending more investigation.
+    const width: f64 = @floatFromInt(cells * size.cell.width);
 
     return .{
         .x = x,
@@ -3821,6 +3838,51 @@ pub fn imePoint(self: *const Surface) apprt.IMEPos {
         .width = width,
         .height = height,
     };
+}
+
+test "IME windows go to the first cell the preedit is drawn on" {
+    const testing = std.testing;
+    const Preedit = rendererpkg.State.Preedit;
+    // 96 DPI: 10 x 20 cells, 4 px padding, 10 columns.
+    const size: rendererpkg.Size = .{
+        .screen = .{ .width = 108, .height = 248 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{ .top = 4, .bottom = 4, .left = 4, .right = 4 },
+    };
+    const one: apprt.ContentScale = .{ .x = 1, .y = 1 };
+
+    // No preedit: the cursor's cell.
+    try testing.expectEqual(apprt.IMEPos{ .x = 79, .y = 64, .width = 0, .height = 20 }, imePosAt(size, one, 7, 2, 10, null));
+
+    // A preedit that fits starts at the cursor.
+    const narrow: Preedit = .{ .codepoints = &.{ .{ .codepoint = 'a' }, .{ .codepoint = 'b' } } };
+    try testing.expectEqual(apprt.IMEPos{ .x = 79, .y = 64, .width = 20, .height = 20 }, imePosAt(size, one, 7, 2, 10, &narrow));
+
+    // A wide codepoint in the last column moves one cell left, and so do
+    // the windows.
+    const wide: Preedit = .{ .codepoints = &.{.{ .codepoint = 0xAC00, .wide = true }} };
+    try testing.expectEqual(apprt.IMEPos{ .x = 89, .y = 64, .width = 20, .height = 20 }, imePosAt(size, one, 9, 2, 10, &wide));
+
+    // From the last column, a caret after the text keeps a cell of its
+    // own: "b" is drawn one cell left, and "a" is cut.
+    const end_caret: Preedit = .{ .codepoints = &.{ .{ .codepoint = 'a' }, .{ .codepoint = 'b' } }, .caret = 2 };
+    try testing.expectEqual(apprt.IMEPos{ .x = 89, .y = 64, .width = 10, .height = 20 }, imePosAt(size, one, 9, 2, 10, &end_caret));
+
+    // A preedit too long for the row is cut, never moved: the cursor's
+    // cell, and the width of the cells left.
+    const long_cps: [15]Preedit.Codepoint = @splat(.{ .codepoint = 'a' });
+    const long: Preedit = .{ .codepoints = &long_cps };
+    try testing.expectEqual(apprt.IMEPos{ .x = 59, .y = 64, .width = 50, .height = 20 }, imePosAt(size, one, 5, 2, 10, &long));
+
+    // 144 DPI: device pixels scaled by 1.5 come back unscaled.
+    const scaled: rendererpkg.Size = .{
+        .screen = .{ .width = 162, .height = 372 },
+        .cell = .{ .width = 15, .height = 30 },
+        .padding = .{ .top = 6, .bottom = 6, .left = 6, .right = 6 },
+    };
+    const pos = imePosAt(scaled, .{ .x = 1.5, .y = 1.5 }, 9, 2, 10, &wide);
+    try testing.expectApproxEqAbs(@as(f64, (8 * 15 + 6 + 7.5) / 1.5), pos.x, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, (2 * 30 + 6 + 30) / 1.5), pos.y, 1e-9);
 }
 
 fn clipboardWrite(self: *const Surface, data: []const u8, loc: apprt.Clipboard) !void {
@@ -4429,14 +4491,24 @@ fn balancePaddingIfNeeded(self: *Surface) void {
 ///
 /// The preedit input must be UTF-8 encoded.
 pub fn preeditCallback(self: *Surface, preedit_: ?[]const u8) !void {
-    try self.preeditCaretCallback(preedit_, null);
+    try self.preeditCaretCallback(preedit_, null, null);
 }
+
+/// A clause of a preedit as a codepoint range, `start` up to, not including,
+/// `end`.
+pub const PreeditTarget = rendererpkg.State.Preedit.Target;
 
 /// `preeditCallback` with the input method's composition caret: `caret` is
 /// a codepoint index into `preedit_` (0 is before the first codepoint), or
-/// null when the input method reports none. Any change, the caret alone
-/// included, redraws the preedit.
-pub fn preeditCaretCallback(self: *Surface, preedit_: ?[]const u8, caret: ?usize) !void {
+/// null when the input method reports none. `target` is the clause the
+/// input method is converting, as a codepoint range of `preedit_`, or null.
+/// Any change, the caret or the target alone included, redraws the preedit.
+pub fn preeditCaretCallback(
+    self: *Surface,
+    preedit_: ?[]const u8,
+    caret: ?usize,
+    target: ?PreeditTarget,
+) !void {
     // log.debug("text preeditCallback value={any}", .{preedit_});
 
     // Crash metadata in case we crash in here
@@ -4469,7 +4541,7 @@ pub fn preeditCaretCallback(self: *Surface, preedit_: ?[]const u8, caret: ?usize
     // With no text, or none that takes a cell, we're done. We queue a
     // render in case we cleared a prior preedit (likely).
     if (preedit_) |text| {
-        self.renderer_state.preedit = try preeditFromText(self.alloc, text, caret);
+        self.renderer_state.preedit = try preeditFromText(self.alloc, text, caret, target);
     }
     try self.queueRender();
 }
@@ -4479,11 +4551,13 @@ pub fn preeditCaretCallback(self: *Surface, preedit_: ?[]const u8, caret: ?usize
 /// never seen a preedit text with a zero-width character; in theory it's
 /// possible but we can't really handle it right now), so `caret`, a
 /// codepoint index into `text`, becomes the number of kept codepoints
-/// before it.
+/// before it, and so does each end of `target`. A target with no kept
+/// codepoint is dropped.
 fn preeditFromText(
     alloc: Allocator,
     text: []const u8,
     caret: ?usize,
+    target: ?PreeditTarget,
 ) !?rendererpkg.State.Preedit {
     const view = try std.unicode.Utf8View.init(text);
     var it = view.iterator();
@@ -4491,13 +4565,20 @@ fn preeditFromText(
     const Codepoint = rendererpkg.State.Preedit.Codepoint;
     var codepoints: std.ArrayListUnmanaged(Codepoint) = .{};
     defer codepoints.deinit(alloc);
+    // Kept codepoints before the caret and before each end of the target.
     var kept_before_caret: usize = 0;
+    var kept_before_start: usize = 0;
+    var kept_before_end: usize = 0;
     var source: usize = 0;
     while (it.nextCodepoint()) |cp| : (source += 1) {
         const width: usize = @intCast(unicode.table.get(cp).width);
         if (width <= 0) continue;
         if (caret) |c| {
             if (source < c) kept_before_caret += 1;
+        }
+        if (target) |t| {
+            if (source < t.start) kept_before_start += 1;
+            if (source < t.end) kept_before_end += 1;
         }
         try codepoints.append(alloc, .{ .codepoint = cp, .wide = width >= 2 });
     }
@@ -4506,6 +4587,10 @@ fn preeditFromText(
     return .{
         .codepoints = try codepoints.toOwnedSlice(alloc),
         .caret = if (caret != null) kept_before_caret else null,
+        .target = if (kept_before_start < kept_before_end)
+            .{ .start = kept_before_start, .end = kept_before_end }
+        else
+            null,
     };
 }
 
@@ -4516,36 +4601,75 @@ test "preedit caret maps onto the codepoints that take a cell" {
     {
         // U+0301 has no width and is dropped, so a caret after it counts
         // only the codepoints that are drawn.
-        const p = (try preeditFromText(alloc, "e\u{0301}x", 2)).?;
+        const p = (try preeditFromText(alloc, "e\u{0301}x", 2, null)).?;
         defer p.deinit(alloc);
         try testing.expectEqual(@as(usize, 2), p.codepoints.len);
         try testing.expectEqual(@as(?usize, 1), p.caret);
     }
     {
-        const p = (try preeditFromText(alloc, "e\u{0301}x", 3)).?;
+        const p = (try preeditFromText(alloc, "e\u{0301}x", 3, null)).?;
         defer p.deinit(alloc);
         try testing.expectEqual(@as(?usize, 2), p.caret);
     }
     {
         // Past the end clamps to the end.
-        const p = (try preeditFromText(alloc, "\u{4E2D}\u{56FD}", 9)).?;
+        const p = (try preeditFromText(alloc, "\u{4E2D}\u{56FD}", 9, null)).?;
         defer p.deinit(alloc);
         try testing.expectEqual(@as(?usize, 2), p.caret);
         try testing.expect(p.codepoints[0].wide);
     }
     {
-        const p = (try preeditFromText(alloc, "ab", 0)).?;
+        const p = (try preeditFromText(alloc, "ab", 0, null)).?;
         defer p.deinit(alloc);
         try testing.expectEqual(@as(?usize, 0), p.caret);
     }
     {
         // No caret stays none.
-        const p = (try preeditFromText(alloc, "ab", null)).?;
+        const p = (try preeditFromText(alloc, "ab", null, null)).?;
         defer p.deinit(alloc);
         try testing.expectEqual(@as(?usize, null), p.caret);
     }
-    try testing.expect((try preeditFromText(alloc, "", 0)) == null);
-    try testing.expect((try preeditFromText(alloc, "\u{0301}", 1)) == null);
+    try testing.expect((try preeditFromText(alloc, "", 0, null)) == null);
+    try testing.expect((try preeditFromText(alloc, "\u{0301}", 1, null)) == null);
+}
+
+test "preedit target maps onto the codepoints that take a cell" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const Target = rendererpkg.State.Preedit.Target;
+
+    {
+        // Codepoint 1 (U+0301) is dropped, so the target 2..4 of the text
+        // is 1..3 of what is drawn.
+        const p = (try preeditFromText(alloc, "e\u{0301}xyz", 4, .{ .start = 2, .end = 4 })).?;
+        defer p.deinit(alloc);
+        try testing.expectEqual(@as(usize, 4), p.codepoints.len);
+        try testing.expectEqual(@as(?Target, .{ .start = 1, .end = 3 }), p.target);
+        try testing.expectEqual(@as(?usize, 3), p.caret);
+    }
+    {
+        // A target that starts on the dropped codepoint keeps the rest.
+        const p = (try preeditFromText(alloc, "e\u{0301}xyz", null, .{ .start = 1, .end = 3 })).?;
+        defer p.deinit(alloc);
+        try testing.expectEqual(@as(?Target, .{ .start = 1, .end = 2 }), p.target);
+    }
+    {
+        // A target past the end is cut at the end.
+        const p = (try preeditFromText(alloc, "\u{304B}\u{306A}\u{6F22}\u{5B57}", null, .{ .start = 2, .end = 9 })).?;
+        defer p.deinit(alloc);
+        try testing.expectEqual(@as(?Target, .{ .start = 2, .end = 4 }), p.target);
+    }
+    {
+        // Nothing of it is drawn: no target.
+        const p = (try preeditFromText(alloc, "e\u{0301}x", null, .{ .start = 1, .end = 2 })).?;
+        defer p.deinit(alloc);
+        try testing.expectEqual(@as(?Target, null), p.target);
+    }
+    {
+        const p = (try preeditFromText(alloc, "ab", 1, null)).?;
+        defer p.deinit(alloc);
+        try testing.expectEqual(@as(?Target, null), p.target);
+    }
 }
 
 fn applyKeyRemaps(

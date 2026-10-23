@@ -204,6 +204,17 @@ pub const Preedit = struct {
     /// the input method reports none (dead keys, an IME without one).
     caret: ?usize = null,
 
+    /// The clause the input method is converting (its target clause), as a
+    /// range of `codepoints`, or null when it reports none. It is drawn with
+    /// a double underline and the rest of the preedit with a single one.
+    target: ?Target = null,
+
+    /// Codepoints `start` up to, not including, `end`; never empty.
+    pub const Target = struct {
+        start: usize,
+        end: usize,
+    };
+
     /// A single codepoint to render as preedit text.
     pub const Codepoint = struct {
         codepoint: u21,
@@ -224,6 +235,7 @@ pub const Preedit = struct {
         return .{
             .codepoints = try alloc.dupe(Codepoint, self.codepoints),
             .caret = self.caret,
+            .target = self.target,
         };
     }
 
@@ -245,6 +257,9 @@ pub const Preedit = struct {
         cp_offset: usize,
         /// The cell whose left edge the caret is drawn on, or null.
         caret_x: ?terminalpkg.size.CellCountInt,
+        /// The first and last cell of the target clause's drawn part, or
+        /// null when none of it is drawn.
+        target_x: ?[2]terminalpkg.size.CellCountInt = null,
     };
 
     /// Lay the preedit out from the terminal cursor at `start` on a row
@@ -258,14 +273,25 @@ pub const Preedit = struct {
         start: terminalpkg.size.CellCountInt,
         max: terminalpkg.size.CellCountInt,
     ) Layout {
-        const CellCountInt = terminalpkg.size.CellCountInt;
-        const cps = self.codepoints;
-        if (cps.len == 0 or start > max) return .{
+        if (self.codepoints.len == 0 or start > max) return .{
             .start = start,
             .end = start,
             .cp_offset = 0,
             .caret_x = null,
         };
+        var result = self.place(start, max);
+        result.target_x = self.targetCells(result);
+        return result;
+    }
+
+    /// `layout` for a preedit with codepoints, without the target clause.
+    fn place(
+        self: *const Preedit,
+        start: terminalpkg.size.CellCountInt,
+        max: terminalpkg.size.CellCountInt,
+    ) Layout {
+        const CellCountInt = terminalpkg.size.CellCountInt;
+        const cps = self.codepoints;
         const caret: ?usize = if (self.caret) |c| @min(c, cps.len) else null;
         // Cells from the cursor through the last column.
         const avail: usize = @as(usize, max - start) + 1;
@@ -321,6 +347,24 @@ pub const Preedit = struct {
             .cp_offset = first,
             .caret_x = caret_x,
         };
+    }
+
+    /// The cells of the target clause that `placed` draws, walking the
+    /// codepoints the way `rebuildCells` does.
+    fn targetCells(self: *const Preedit, placed: Layout) ?[2]terminalpkg.size.CellCountInt {
+        const target = self.target orelse return null;
+        var first: ?usize = null;
+        var last: usize = 0;
+        var x: usize = placed.start;
+        for (self.codepoints[placed.cp_offset..], placed.cp_offset..) |cp, i| {
+            if (x + cp.cells() - 1 > placed.end) break;
+            if (i >= target.start and i < target.end) {
+                if (first == null) first = x;
+                last = x + cp.cells() - 1;
+            }
+            x += cp.cells();
+        }
+        return .{ @intCast(first orelse return null), @intCast(last) };
     }
 };
 
@@ -424,12 +468,46 @@ test "preedit layout places the caret between wide codepoints" {
     try expectLayout(.{ .codepoints = &wide, .caret = 4 }, 0, 7, .{ .start = 0, .end = 5, .cp_offset = 1, .caret_x = 6 });
 }
 
+test "preedit layout marks the drawn cells of the target clause" {
+    // A Japanese-shaped composition: kana, then the clause being
+    // converted, then a converted one, all wide.
+    const wide: [6]Preedit.Codepoint = @splat(.{ .codepoint = test_hangul_ga, .wide = true });
+    try expectLayout(.{ .codepoints = &wide, .target = .{ .start = 2, .end = 4 } }, 0, 79, .{ .start = 0, .end = 11, .cp_offset = 0, .caret_x = null, .target_x = .{ 4, 7 } });
+    // The target on the next clause moves only the target cells.
+    try expectLayout(.{ .codepoints = &wide, .target = .{ .start = 4, .end = 6 } }, 0, 79, .{ .start = 0, .end = 11, .cp_offset = 0, .caret_x = null, .target_x = .{ 8, 11 } });
+    const narrow: [8]Preedit.Codepoint = @splat(.{ .codepoint = 'a' });
+    try expectLayout(.{ .codepoints = &narrow, .target = .{ .start = 3, .end = 5 } }, 2, 79, .{ .start = 2, .end = 9, .cp_offset = 0, .caret_x = null, .target_x = .{ 5, 6 } });
+    try expectLayout(.{ .codepoints = &narrow, .target = .{ .start = 0, .end = 8 } }, 2, 79, .{ .start = 2, .end = 9, .cp_offset = 0, .caret_x = null, .target_x = .{ 2, 9 } });
+}
+
+test "preedit layout keeps the visible part of a truncated target" {
+    const narrow: [15]Preedit.Codepoint = @splat(.{ .codepoint = 'a' });
+    // Codepoints 5..15 are drawn at x = 0..9: of the target 3..8, the
+    // drawn 5..8 sit at x = 0..2.
+    try expectLayout(.{ .codepoints = &narrow, .target = .{ .start = 3, .end = 8 } }, 0, 9, .{ .start = 0, .end = 9, .cp_offset = 5, .caret_x = null, .target_x = .{ 0, 2 } });
+    // All of it in the cut head: none drawn.
+    try expectLayout(.{ .codepoints = &narrow, .target = .{ .start = 0, .end = 3 } }, 0, 9, .{ .start = 0, .end = 9, .cp_offset = 5, .caret_x = null, .target_x = null });
+    // A caret in the cut head cuts the tail: codepoints 0..5 at x = 5..9,
+    // so of the target 3..8 only 3 and 4 are drawn.
+    try expectLayout(.{ .codepoints = &narrow, .caret = 0, .target = .{ .start = 3, .end = 8 } }, 5, 9, .{ .start = 5, .end = 9, .cp_offset = 0, .caret_x = 5, .target_x = .{ 8, 9 } });
+    // A wide codepoint cut whole takes its target cells with it.
+    const wide: [4]Preedit.Codepoint = @splat(.{ .codepoint = test_hangul_ga, .wide = true });
+    try expectLayout(.{ .codepoints = &wide, .caret = 4, .target = .{ .start = 0, .end = 2 } }, 0, 7, .{ .start = 0, .end = 5, .cp_offset = 1, .caret_x = 6, .target_x = .{ 0, 1 } });
+}
+
+test "preedit layout draws the caret and the target together" {
+    const wide: [6]Preedit.Codepoint = @splat(.{ .codepoint = test_hangul_ga, .wide = true });
+    try expectLayout(.{ .codepoints = &wide, .caret = 2, .target = .{ .start = 2, .end = 4 } }, 0, 79, .{ .start = 0, .end = 11, .cp_offset = 0, .caret_x = 4, .target_x = .{ 4, 7 } });
+    try expectLayout(.{ .codepoints = &wide, .caret = 6, .target = .{ .start = 4, .end = 6 } }, 3, 79, .{ .start = 3, .end = 14, .cp_offset = 0, .caret_x = 15, .target_x = .{ 11, 14 } });
+}
+
 test "preedit clone keeps the caret" {
     const testing = std.testing;
-    const p: Preedit = .{ .codepoints = &.{ .{ .codepoint = 'a' }, .{ .codepoint = 'b' } }, .caret = 1 };
+    const p: Preedit = .{ .codepoints = &.{ .{ .codepoint = 'a' }, .{ .codepoint = 'b' } }, .caret = 1, .target = .{ .start = 0, .end = 1 } };
     const copy = try p.clone(testing.allocator);
     defer copy.deinit(testing.allocator);
     try testing.expectEqual(@as(?usize, 1), copy.caret);
+    try testing.expectEqual(@as(?Preedit.Target, .{ .start = 0, .end = 1 }), copy.target);
     try testing.expectEqualSlices(Preedit.Codepoint, p.codepoints, copy.codepoints);
 }
 

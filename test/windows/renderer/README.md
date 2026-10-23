@@ -57,8 +57,17 @@ preedit cell at cursor 5, moved one cell left at 4, at the first cell at 0,
 one cell past the text at 8, between wide characters, at the first column for
 a caret in the cut head of an overlong composition and on the last column for
 one at its end, no bar for -1, and the block cursor back when the last step
-clears the composition. Before that, captures that ask for no redraw check
-that the bar stays put through frames the composition did not cause. After the
+clears the composition. The same cases check the conversion target clause
+(`GCS_COMPATTR`) with fixtures 4-7, six wide characters in three
+two-character clauses: no attributes (4), the target on the second clause (5)
+or the third (6), and attributes one short of the string (7). Every pixel that
+differs between 4 and 5 must lie under preedit cells 4-7, across their full
+width and below the middle of the row (the double underline), and between 4
+and 6 under cells 8-11; 5 and 6 differ only in those underline rows, 7 draws
+exactly what 4 does, and a caret before the target keeps both the bar and
+the double underline. Before the last step, captures that ask for no redraw
+check that the bar stays put through frames the composition did not cause.
+After the
 fixture turns cursor blinking on and writes nothing, at least two blink frames
 in 2.5 s must rebuild with the preedit row clean (the renderer counts them in
 its status as `preedit_caret_clean_rebuilds`), the frames a caret drawn only

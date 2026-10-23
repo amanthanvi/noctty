@@ -36249,11 +36249,23 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                     // 3 is wider than any test window: a-z repeated.
                     var long: [208]u16 = undefined;
                     for (&long, 0..) |*unit, i| unit.* = 'a' + @as(u16, @intCast(i % 26));
-                    const units: []const u16 = switch (wParam) {
-                        0 => &.{},
-                        1 => std.unicode.utf8ToUtf16LeStringLiteral("zhongguo"),
-                        2 => std.unicode.utf8ToUtf16LeStringLiteral("\u{4E2D}\u{56FD}\u{4EBA}"),
-                        3 => &long,
+                    // 4-7 are Japanese-shaped: kana, a kanji clause, another
+                    // kanji clause, with no attributes (4), the target on
+                    // the first kanji clause (5) or the second (6), and
+                    // attributes one short of the string (7).
+                    const kana = std.unicode.utf8ToUtf16LeStringLiteral("\u{304B}\u{306A}\u{6F22}\u{5B57}\u{5909}\u{63DB}");
+                    const I = c.ATTR_INPUT;
+                    const T = c.ATTR_TARGET_CONVERTED;
+                    const C = c.ATTR_CONVERTED;
+                    const units: []const u16, const attrs: ?[]const u8 = switch (wParam) {
+                        0 => .{ &.{}, null },
+                        1 => .{ std.unicode.utf8ToUtf16LeStringLiteral("zhongguo"), null },
+                        2 => .{ std.unicode.utf8ToUtf16LeStringLiteral("\u{4E2D}\u{56FD}\u{4EBA}"), null },
+                        3 => .{ &long, null },
+                        4 => .{ kana, null },
+                        5 => .{ kana, &.{ I, I, T, T, C, C } },
+                        6 => .{ kana, &.{ I, I, C, C, T, T } },
+                        7 => .{ kana, &.{ I, I, T, T, C } },
                         else => return 0,
                     };
                     var utf8_stack: [512]u8 = undefined;
@@ -36262,6 +36274,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                         v.app.core_app.alloc,
                         units,
                         @truncate(@as(isize, lParam)),
+                        attrs,
                         &utf8_stack,
                     );
                     return 1;
@@ -42030,8 +42043,13 @@ pub const Surface = struct {
             self.surface.core_surface.preeditCallback(preedit) catch {};
         }
 
-        pub fn preeditCaretCallback(self: KeyTarget, preedit: ?[]const u8, caret: ?usize) void {
-            self.surface.core_surface.preeditCaretCallback(preedit, caret) catch {};
+        pub fn preeditCaretCallback(
+            self: KeyTarget,
+            preedit: ?[]const u8,
+            caret: ?usize,
+            target: ?CoreSurface.PreeditTarget,
+        ) void {
+            self.surface.core_surface.preeditCaretCallback(preedit, caret, target) catch {};
         }
     };
 
@@ -42063,56 +42081,61 @@ pub const Surface = struct {
         const surface_hwnd = self.hwnd orelse return null;
         const himc = sys.ImmGetContext(surface_hwnd) orelse return null;
         var units_stack: [128]u16 = undefined;
-        const units = readImeUnits(himc, alloc, which, &units_stack);
+        const units = readImeBuffer(u16, himc, alloc, which, &units_stack);
         _ = sys.ImmReleaseContext(surface_hwnd, himc);
         const read = units orelse return null;
         defer read.deinit(alloc);
-        return win32_input.imeTextUtf8(alloc, read.units(), utf8_stack) catch null;
+        return win32_input.imeTextUtf8(alloc, read.items(), utf8_stack) catch null;
     }
 
-    /// One IME string's UTF-16 units, in the caller's `stack` when they fit
-    /// there and on the heap otherwise.
-    const ImeUnits = struct {
-        buf: []u16,
-        len: usize,
-        heap: bool,
+    /// One part of the composition as `T` items (UTF-16 units for a string,
+    /// bytes for its attributes), in the caller's `stack` when they fit there
+    /// and on the heap otherwise.
+    fn ImeBuffer(comptime T: type) type {
+        return struct {
+            buf: []T,
+            len: usize,
+            heap: bool,
 
-        fn units(self: ImeUnits) []const u16 {
-            return self.buf[0..self.len];
-        }
+            fn items(self: @This()) []const T {
+                return self.buf[0..self.len];
+            }
 
-        fn deinit(self: ImeUnits, alloc: std.mem.Allocator) void {
-            if (self.heap) alloc.free(self.buf);
-        }
-    };
+            fn deinit(self: @This(), alloc: std.mem.Allocator) void {
+                if (self.heap) alloc.free(self.buf);
+            }
+        };
+    }
 
-    /// Read IME string `which` from `himc`, or null when there is none or it
-    /// cannot be read.
-    fn readImeUnits(
+    /// Read composition part `which` from `himc` as `T` items, or null when
+    /// there is none or it cannot be read.
+    fn readImeBuffer(
+        comptime T: type,
         himc: *anyopaque,
         alloc: std.mem.Allocator,
         which: u32,
-        stack: []u16,
-    ) ?ImeUnits {
+        stack: []T,
+    ) ?ImeBuffer(T) {
         const byte_len = sys.ImmGetCompositionStringW(himc, which, null, 0);
         if (byte_len <= 0) return null;
-        const len: u32 = @intCast(byte_len);
-        const wchar_count = len / 2;
+        const count = @as(u32, @intCast(byte_len)) / @sizeOf(T);
+        if (count == 0) return null;
 
         // Most IME strings are short; longer ones go to the heap.
-        const heap = wchar_count > stack.len;
-        const buf: []u16 = if (!heap)
-            stack[0..wchar_count]
+        const heap = count > stack.len;
+        const buf: []T = if (!heap)
+            stack[0..count]
         else
-            alloc.alloc(u16, wchar_count) catch return null;
+            alloc.alloc(T, count) catch return null;
 
-        const read = sys.ImmGetCompositionStringW(himc, which, buf.ptr, len);
+        // Never offer IMM more bytes than `buf` holds.
+        const read = sys.ImmGetCompositionStringW(himc, which, buf.ptr, count * @sizeOf(T));
         if (read <= 0) {
             if (heap) alloc.free(buf);
             return null;
         }
         const actual_bytes: usize = @intCast(read);
-        return .{ .buf = buf, .len = @min(actual_bytes / 2, buf.len), .heap = heap };
+        return .{ .buf = buf, .len = @min(actual_bytes / @sizeOf(T), buf.len), .heap = heap };
     }
 
     /// Commit the IME's result string. Returns the core's effect: committing
@@ -42140,19 +42163,27 @@ pub const Surface = struct {
         if (!self.core_initialized) return;
         const alloc = self.app.core_app.alloc;
 
-        // The string and its caret come from one input context, released
-        // before the core sees them.
+        // The string, its caret and its clause attributes come from one
+        // input context, released before the core sees them.
         var units_stack: [128]u16 = undefined;
-        const read: ?ImeUnits, const cursor: i32 = read: {
-            const surface_hwnd = self.hwnd orelse break :read .{ null, -1 };
-            const himc = sys.ImmGetContext(surface_hwnd) orelse break :read .{ null, -1 };
+        var attrs_stack: [128]u8 = undefined;
+        const read: ?ImeBuffer(u16), const cursor: i32, const attrs: ?ImeBuffer(u8) = read: {
+            const surface_hwnd = self.hwnd orelse break :read .{ null, -1, null };
+            const himc = sys.ImmGetContext(surface_hwnd) orelse break :read .{ null, -1, null };
             defer _ = sys.ImmReleaseContext(surface_hwnd, himc);
-            const units = readImeUnits(himc, alloc, c.GCS_COMPSTR, &units_stack) orelse
-                break :read .{ null, -1 };
-            // GCS_CURSORPOS comes back as the return value: UTF-16 units
-            // before the caret, or negative when there is none.
-            break :read .{ units, sys.ImmGetCompositionStringW(himc, c.GCS_CURSORPOS, null, 0) };
+            const units = readImeBuffer(u16, himc, alloc, c.GCS_COMPSTR, &units_stack) orelse
+                break :read .{ null, -1, null };
+            break :read .{
+                units,
+                // GCS_CURSORPOS comes back as the return value: UTF-16 units
+                // before the caret, or negative when there is none.
+                sys.ImmGetCompositionStringW(himc, c.GCS_CURSORPOS, null, 0),
+                // One byte per unit; none (or a short read) only loses the
+                // target clause.
+                readImeBuffer(u8, himc, alloc, c.GCS_COMPATTR, &attrs_stack),
+            };
         };
+        defer if (attrs) |a| a.deinit(alloc);
         const units = read orelse {
             self.core_surface.preeditCallback(null) catch {};
             return;
@@ -42161,7 +42192,14 @@ pub const Surface = struct {
 
         // Update preedit display and reposition IME window
         var utf8_stack: [512]u8 = undefined;
-        win32_input.applyImeComposition(KeyTarget{ .surface = self }, alloc, units.units(), cursor, &utf8_stack);
+        win32_input.applyImeComposition(
+            KeyTarget{ .surface = self },
+            alloc,
+            units.items(),
+            cursor,
+            if (attrs) |a| a.items() else null,
+            &utf8_stack,
+        );
         self.positionImeWindow();
     }
 
@@ -49078,6 +49116,36 @@ test "win32 IME windows use scaled terminal caret geometry" {
     try std.testing.expectEqual(@as(i32, 36), forms.candidate.rcArea.top);
     try std.testing.expectEqual(@as(i32, 19), forms.candidate.rcArea.right);
     try std.testing.expectEqual(@as(i32, 68), forms.candidate.rcArea.bottom);
+}
+
+test "win32 IME windows sit at the first visible preedit cell" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // A wide preedit with the cursor in the last of 10 columns is drawn one
+    // cell left, from column 8, and the windows go there, at 96 and 144 DPI.
+    const preedit: rendererpkg.State.Preedit = .{ .codepoints = &.{.{ .codepoint = 0xAC00, .wide = true }} };
+    const cases = [_]struct { scale: f32, cell: u32, padding: u32, x: i32, y: i32 }{
+        .{ .scale = 1, .cell = 10, .padding = 4, .x = 8 * 10 + 4 + 5, .y = 2 * 20 + 4 + 20 },
+        .{ .scale = 1.5, .cell = 15, .padding = 6, .x = 8 * 15 + 6 + 7, .y = 2 * 30 + 6 + 30 },
+    };
+    for (cases) |case| {
+        const scale: apprt.ContentScale = .{ .x = case.scale, .y = case.scale };
+        const size: rendererpkg.Size = .{
+            .screen = .{ .width = 10 * case.cell + 2 * case.padding, .height = 12 * 2 * case.cell + 2 * case.padding },
+            .cell = .{ .width = case.cell, .height = 2 * case.cell },
+            .padding = .{ .top = case.padding, .bottom = case.padding, .left = case.padding, .right = case.padding },
+        };
+        const forms = imeWindowForms(CoreSurface.imePosAt(size, scale, 9, 2, 10, &preedit), scale);
+        try std.testing.expectEqual(case.x, forms.composition.ptCurrentPos.x);
+        try std.testing.expectEqual(case.y, forms.composition.ptCurrentPos.y);
+        try std.testing.expectEqual(case.x, forms.candidate.ptCurrentPos.x);
+        try std.testing.expectEqual(case.x, forms.candidate.rcArea.left);
+        try std.testing.expectEqual(case.y, forms.candidate.rcArea.bottom);
+
+        // With no preedit yet, the cursor's own cell.
+        const start = imeWindowForms(CoreSurface.imePosAt(size, scale, 9, 2, 10, null), scale);
+        try std.testing.expectEqual(case.x + @as(i32, @intCast(case.cell)), start.composition.ptCurrentPos.x);
+    }
 }
 
 test "win32 mouseButtonFromMessage maps standard buttons" {

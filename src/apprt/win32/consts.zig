@@ -84,6 +84,13 @@ pub const GCS_COMPSTR: u32 = 0x0008;
 pub const GCS_COMPATTR: u32 = 0x0010;
 pub const GCS_CURSORPOS: u32 = 0x0080;
 pub const GCS_RESULTSTR: u32 = 0x0800;
+// GCS_COMPATTR values, one per UTF-16 unit of the composition string.
+pub const ATTR_INPUT: u8 = 0x00;
+pub const ATTR_TARGET_CONVERTED: u8 = 0x01;
+pub const ATTR_CONVERTED: u8 = 0x02;
+pub const ATTR_TARGET_NOTCONVERTED: u8 = 0x03;
+pub const ATTR_INPUT_ERROR: u8 = 0x04;
+pub const ATTR_FIXEDCONVERTED: u8 = 0x05;
 pub const CFS_POINT: u32 = 0x0002;
 pub const CFS_EXCLUDE: u32 = 0x0080;
 pub const ISC_SHOWUICOMPOSITIONWINDOW: LPARAM = 0x80000000;
