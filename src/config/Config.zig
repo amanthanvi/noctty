@@ -3590,7 +3590,8 @@ _profile_launch: ?windows_shell.UserLaunch = null,
 /// `new_window_elevated:user:<id>` passes for each of the profile's
 /// variables. `finalize` puts them over `env` once every config file has
 /// been read, so an `env` line in an included file cannot replace them, as it
-/// would replace an `--env` argument. Not a field: no config file sets it.
+/// would replace an `--env` argument. Not a field: a config file line that
+/// names it is reported as an unknown field and ignored.
 _elevated_profile_env: std.ArrayListUnmanaged(windows_shell.EnvEntry) = .{},
 
 /// The last config file that was skipped whole because it is UTF-16 text that
@@ -5527,13 +5528,18 @@ pub fn consumeManuallyHook(
     if (builtin.os.tag != .windows) return false;
     const prefix = "--elevated-profile-env=";
     if (!std.mem.startsWith(u8, arg, prefix)) return false;
+    const location = try cli.Location.fromIter(iter, alloc);
     const value = arg[prefix.len..];
     const eq = std.mem.indexOfScalar(u8, value, '=') orelse 0;
-    if (eq == 0) {
+    // A config file line reaches here as the same argument. Only the
+    // command line may set it, or an included file could replace a value
+    // that exists to win over every file.
+    const refused: ?[:0]const u8 = if (location == .file) "unknown field" else if (eq == 0) "value required" else null;
+    if (refused) |message| {
         try self._diagnostics.append(alloc, .{
             .key = try alloc.dupeZ(u8, "elevated-profile-env"),
-            .message = "value required",
-            .location = try cli.Location.fromIter(iter, alloc),
+            .message = message,
+            .location = location,
         });
         return true;
     }

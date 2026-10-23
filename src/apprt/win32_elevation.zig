@@ -1110,7 +1110,8 @@ test "elevated profile env wins over env in forwarded and included config files"
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(.{ .sub_path = "outer.ghostty", .data = "env = MODE=outer\nconfig-file = inner.ghostty\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\n" });
+    // A file cannot use the relaunch argument to win either.
+    try tmp.dir.writeFile(.{ .sub_path = "inner.ghostty", .data = "env = MODE=global\nenv = path=C:\\global\nenv = OTHER=include\nelevated-profile-env = MODE=file\n" });
     const outer = try tmp.dir.realpathAlloc(alloc, "outer.ghostty");
     const forwarded = try std.fmt.allocPrint(alloc, "--config-file={s}", .{outer});
     const argv = [_][]const u8{ "C:\\noctty.exe", forwarded };
@@ -1133,7 +1134,11 @@ test "elevated profile env wins over env in forwarded and included config files"
     try cfg.loadRecursiveFiles(testing.allocator);
     try cfg.finalize();
 
-    try testing.expect(cfg._diagnostics.empty());
+    try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
+    const problem = cfg._diagnostics.items()[0];
+    try testing.expectEqualStrings("elevated-profile-env", problem.key);
+    try testing.expectEqualStrings("unknown field", problem.message);
+    try testing.expect(problem.location == .file);
     try testing.expectEqualStrings("profile", cfg.env.map.get("MODE").?);
     // The profile PATH replaced the included `path`.
     try testing.expectEqualStrings("C:\\profile", cfg.env.map.get("PATH").?);
