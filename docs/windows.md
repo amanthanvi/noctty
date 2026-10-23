@@ -539,7 +539,12 @@ Visual Studio Start menu shortcut.
 - `profile-env` sets one environment variable, `<id>: KEY=VALUE`, and can be
   repeated. `<id>: KEY=` removes one and `<id>:` removes them all. A profile's
   variable replaces an `env` variable of the same name, whatever its case (a
-  profile `PATH` replaces a global `Path`).
+  profile `PATH` replaces a global `Path`). A profile `PATH`, like an `env`
+  one, is the whole `PATH` the shell gets: noctty no longer puts its own
+  folder first, and `%PATH%` is noctty's own `PATH`, which holds that folder
+  only where your `PATH` already does. If you run `noctty` from such a
+  profile's shell, put the folder in the value yourself; `GHOSTTY_BIN_DIR`
+  still names it.
 - `%NAME%` in the command line, the working directory and `profile-env`
   values is replaced by that variable from noctty's own environment, as Windows
   Terminal does; a variable that is not set stays as written. Global `env`
@@ -589,11 +594,16 @@ Limits:
   a file included with `config-file` is read after the command line and
   replaces it, as it does for every elevated window. The variables and the
   command apply to the whole elevated window, not only its first pane.
+  A command line is not private (process tools and process-creation auditing
+  can show it), so do not keep a secret in the `profile-env` of a profile you
+  open elevated.
 - An elevated user profile starts in the directory of the pane it was opened
   from, as every elevated window does, not in its `profile-working-directory`.
-- Profile lines take effect at a config reload. Previewing or choosing a theme
-  in the command palette reads the config files again but keeps the profiles
-  the running config has.
+- Profile lines take effect at a config reload. Previewing a theme in the
+  command palette reads the config files again but keeps the profiles the
+  running config has. Choosing a theme other than the saved one saves it and
+  reloads the config, which applies profile lines edited since, as any reload
+  does.
 - PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
   interactive PowerShell line. A line with `-Command` or `-File`, such as the
   Developer PowerShell above, runs as written without it, as in Windows

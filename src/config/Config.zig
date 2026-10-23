@@ -1678,7 +1678,14 @@ class: ?[:0]const u8 = null,
 /// all of them. `%NAME%` in a value is replaced by that variable's value in
 /// noctty's own environment, so `profile-env = py: PATH=C:\Python312;%PATH%`
 /// puts a directory in front of the path. A profile's variable replaces an
-/// `env` variable with the same name, whatever the case of the name.
+/// `env` variable with the same name, whatever the case of the name. Like
+/// an `env` one, a profile `PATH` is the shell's whole `PATH`: noctty's own
+/// folder is no longer put first, and `%PATH%` holds it only if noctty's
+/// own `PATH` does (`GHOSTTY_BIN_DIR` still names it). An elevated window
+/// (`new_window_elevated:user:<id>`) receives these variables on its
+/// command line, which is not private (process tools and process-creation
+/// auditing can show it), so keep secrets out of a profile you open
+/// elevated.
 @"profile-env": ProfileMap.Env = .{},
 
 /// Key bindings. The format is `trigger=action`. Duplicate triggers will

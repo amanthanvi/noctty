@@ -33268,6 +33268,8 @@ const storedProfileKeyEquals = labels.storedProfileKeyEquals;
 /// same profile could run different definitions. The lists are only dropped
 /// on a reload (`config_change`), which then sees the change. They are not
 /// dropped here: the open palette borrows its host's profile strings.
+/// Choosing a theme (`commitPaletteTheme`) saves it and reloads through
+/// `settingsSaveAndReload`, so that reload applies any profile edits.
 fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !void {
     const alloc = dst._arena.?.allocator();
     dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
