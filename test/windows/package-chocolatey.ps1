@@ -232,6 +232,15 @@ try {
         }
     }
 
+    # A package without an ARM64 installer must keep the x64 installer on an ARM64 CPU (Windows 11
+    # on ARM runs it under emulation) instead of failing for the missing ARM64 one.
+    if ($Architecture -eq 'x64' -and $osInstaller -eq 'x64') {
+        $x64OnlyChoice = Get-GeneratedInstallerChoice -InstallScript $installScript -CpuArchitecture 12
+        if ($null -eq $x64OnlyChoice -or $x64OnlyChoice.Url -cne $expectedSetupUrl -or $x64OnlyChoice.Checksum -cne $setupSha256) {
+            throw "Generated x64-only install script did not keep the x64 installer on an ARM64 CPU: got $($x64OnlyChoice.Url)."
+        }
+    }
+
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
     if ($metadata.chocolatey.packageName -cne 'noctty' -or
         $metadata.chocolatey.nuspecPath -cne $nuspecPath -or

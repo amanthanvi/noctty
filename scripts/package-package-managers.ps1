@@ -300,17 +300,6 @@ $arm64SetupSha256 = if ($artifacts.Contains("arm64")) { $artifacts["arm64"].setu
 $chocolateyInstall = @'
 $ErrorActionPreference = 'Stop'
 
-# Chocolatey runs as an emulated x64 process on ARM64 Windows, so OSArchitecture reports x64 there.
-# Ask the CPU itself (Win32_Processor.Architecture 12 = ARM64) so ARM64 machines get the ARM64 installer.
-$machineArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-try {
-    if ((Get-CimInstance Win32_Processor -Property Architecture -OperationTimeoutSec 10 -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
-        $machineArchitecture = 'arm64'
-    }
-}
-catch {
-    # Keep the OSArchitecture result if the CPU cannot be queried.
-}
 $installers = @{
     x64 = @{
         url = '__X64_SETUP_URL__'
@@ -319,6 +308,21 @@ $installers = @{
     arm64 = @{
         url = '__ARM64_SETUP_URL__'
         checksum = '__ARM64_SETUP_SHA256__'
+    }
+}
+
+# Chocolatey runs as an emulated x64 process on ARM64 Windows, so OSArchitecture reports x64 there.
+# Ask the CPU itself (Win32_Processor.Architecture 12 = ARM64) so ARM64 machines get the ARM64 installer
+# when this package carries one. Without one, the x64 choice stands: emulated x64 runs there.
+$machineArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+if (-not [string]::IsNullOrWhiteSpace($installers.arm64.url)) {
+    try {
+        if ((Get-CimInstance Win32_Processor -Property Architecture -OperationTimeoutSec 10 -ErrorAction SilentlyContinue | Select-Object -First 1).Architecture -eq 12) {
+            $machineArchitecture = 'arm64'
+        }
+    }
+    catch {
+        # Keep the OSArchitecture result if the CPU cannot be queried.
     }
 }
 
