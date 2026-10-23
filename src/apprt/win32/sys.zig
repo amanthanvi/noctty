@@ -353,6 +353,10 @@ pub extern "user32" fn PostThreadMessageW(idThread: DWORD, Msg: UINT, wParam: WP
 
 pub extern "user32" fn PostQuitMessage(nExitCode: i32) callconv(.winapi) void;
 
+pub extern "user32" fn MsgWaitForMultipleObjectsEx(nCount: DWORD, pHandles: ?[*]const HANDLE, dwMilliseconds: DWORD, dwWakeMask: DWORD, dwFlags: DWORD) callconv(.winapi) DWORD;
+
+pub extern "user32" fn AllowSetForegroundWindow(dwProcessId: DWORD) callconv(.winapi) BOOL;
+
 pub extern "user32" fn ReleaseDC(hWnd: HWND, hDC: HDC) callconv(.winapi) i32;
 
 pub extern "user32" fn RegisterHotKey(hWnd: ?HWND, id: i32, fsModifiers: UINT, vk: UINT) callconv(.winapi) BOOL;
@@ -509,6 +513,8 @@ pub extern "kernel32" fn SetNamedPipeHandleState(
     lpMaxCollectionCount: ?*DWORD,
     lpCollectDataTimeout: ?*DWORD,
 ) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn GetNamedPipeServerProcessId(Pipe: windows.HANDLE, ServerProcessId: *DWORD) callconv(.winapi) BOOL;
 
 pub extern "kernel32" fn PeekNamedPipe(
     hNamedPipe: windows.HANDLE,

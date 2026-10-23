@@ -754,11 +754,12 @@ copy installed with the installer has: the installer registers it and sets it
 on the Start menu and desktop shortcuts, and the installed copy names it in
 its AppUserModelID registration (`CustomActivator`) and listens for it while
 it runs, unless it runs as administrator. Such a click focuses the pane the
-same way. When the toast came from another noctty process (the toast's
+same way, and a running noctty with no window open opens one for it. When the toast came from another noctty process (the toast's
 process has ended, or a second instance showed it), noctty brings its own
 window forward instead of guessing at that process's tabs. When no installed
 noctty is running, Windows starts one, which hands the click to a running
-single-instance noctty, or else opens as an ordinary launch would and brings
+single-instance noctty together with its right to come to the foreground,
+or else opens as an ordinary launch would and brings
 its window forward. A portable copy registers nothing, so without an
 installed copy only its popup clicks focus a pane. Where one is installed, a
 click on a portable copy's entry in Action Center goes to the installed

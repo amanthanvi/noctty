@@ -392,6 +392,42 @@ pub fn sendNewWindowIpc(
     arguments: ?[]const [:0]const u8,
     response_timeout_ms: u64,
 ) !bool {
+    return sendNewWindowIpcGranting(alloc, pipe_name, elevated, arguments, response_timeout_ms, null);
+}
+
+/// Lets a process take the foreground (`AllowSetForegroundWindow`); false
+/// when Windows refused.
+const ForegroundGrant = *const fn (process_id: windows.DWORD) bool;
+
+fn allowSetForegroundWindow(process_id: windows.DWORD) bool {
+    return sys.AllowSetForegroundWindow(process_id) != 0;
+}
+
+/// Pass this process's foreground right to the server at the far end of
+/// `pipe`, which `connectToIpcPipe` has authenticated (same user, at least
+/// this integrity level). Best effort: without it the receiver still selects
+/// the tab, and Windows only flashes its taskbar button.
+fn grantForegroundToPipeServer(pipe: windows.HANDLE, grant: ForegroundGrant) void {
+    var server_process_id: windows.DWORD = 0;
+    if (sys.GetNamedPipeServerProcessId(pipe, &server_process_id) == 0 or server_process_id == 0) {
+        log.info("forwarded toast click: could not read the receiving process id", .{});
+        return;
+    }
+    if (!grant(server_process_id))
+        log.info("forwarded toast click: Windows did not let pid={d} take the foreground", .{server_process_id});
+}
+
+/// `sendNewWindowIpc`, first granting the receiver the foreground when
+/// `grant` is set (a forwarded toast click: COM gave the foreground right to
+/// this process, which is about to exit, not to the one that shows the tab).
+fn sendNewWindowIpcGranting(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    elevated: bool,
+    arguments: ?[]const [:0]const u8,
+    response_timeout_ms: u64,
+    grant: ?ForegroundGrant,
+) !bool {
     const pipe = connectToIpcPipe(alloc, pipe_name, elevated) catch |err| switch (err) {
         error.FileNotFound, error.UntrustedIpcServer => return false,
         // No instance we are allowed to talk to. Report "not forwarded" so
@@ -407,6 +443,10 @@ pub fn sendNewWindowIpc(
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
+
+    // Before the request: the receiver presents the window as soon as it
+    // reads it.
+    if (grant) |allow| grantForegroundToPipeServer(pipe, allow);
 
     const request = try win32_ipc.encodeNewWindowRequest(alloc, arguments);
     defer alloc.free(request);
@@ -1803,12 +1843,13 @@ pub fn tryForwardStartupToExistingInstance(self: *App) !bool {
     if (self.toast_activated) {
         const launch_z = try coldToastForwardArgument(self.core_app.alloc, self.cold_toast_activation);
         defer self.core_app.alloc.free(launch_z);
-        return try sendNewWindowIpc(
+        return try sendNewWindowIpcGranting(
             self.core_app.alloc,
             pipe_name,
             self.is_elevated,
             &.{launch_z},
             win32_ipc.automation_response_timeout_ms,
+            allowSetForegroundWindow,
         );
     }
 
@@ -2684,6 +2725,48 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     // creatable from a test. Both are argued from the fail-closed structure
     // of `ipcPipeServerIsTrusted` (every error path returns false, and the
     // final comparison is `server_rid >= own_rid`), not observed.
+}
+
+test "a forwarded toast click passes the foreground to the authenticated receiver before it is sent" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const pipe_name = try testUniquePipeName(alloc, "toastfg");
+    defer alloc.free(pipe_name);
+    const descriptor = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(descriptor);
+    const server = testCreateSecuredPipe(pipe_name, descriptor);
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
+
+    const Grant = struct {
+        var server_pipe: windows.HANDLE = undefined;
+        var granted: ?windows.DWORD = null;
+        var queued_at_grant: windows.DWORD = 0;
+
+        fn allow(process_id: windows.DWORD) bool {
+            granted = process_id;
+            _ = sys.PeekNamedPipe(server_pipe, null, 0, null, &queued_at_grant, null);
+            return true;
+        }
+    };
+    Grant.server_pipe = server;
+    Grant.granted = null;
+    Grant.queued_at_grant = 0;
+
+    const launch: [:0]const u8 = "wgh://activate?surface=9&pid=77&action=focus";
+    // The test server never answers, so the send ends at its ack timeout.
+    _ = sendNewWindowIpcGranting(alloc, pipe_name, false, &.{launch}, 50, Grant.allow) catch |err| {
+        try std.testing.expectEqual(error.IpcTimeout, err);
+    };
+    // The grant went to the process at the far end of the authenticated
+    // pipe (this one, which owns the server end), and nothing had been
+    // sent yet.
+    try std.testing.expectEqual(@as(?windows.DWORD, sys.GetCurrentProcessId()), Grant.granted);
+    try std.testing.expectEqual(@as(windows.DWORD, 0), Grant.queued_at_grant);
+    var queued_after: windows.DWORD = 0;
+    try std.testing.expect(sys.PeekNamedPipe(server, null, 0, null, &queued_after, null) != 0);
+    try std.testing.expect(queued_after > 0);
 }
 
 test "automation working directory receiver policy mirrors forwarded syntax" {

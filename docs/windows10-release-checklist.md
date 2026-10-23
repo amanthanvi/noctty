@@ -320,7 +320,14 @@ Focus Assist off again. Action Center clicks: open a second tab, run
 wait until the popup is gone. Click the entry in Action Center. Expected:
 noctty restores, shows the first tab with its pane focused, and comes to the
 foreground (record whether it did or only flashed its taskbar button). Click
-a fresh toast's popup once: the pane is focused once. Then end noctty's
+a fresh toast's popup once: the pane is focused once. With
+`quit-after-last-window-closed = false`, close every window while a toast is
+in Action Center and click it: one window opens and comes forward. Start a
+portable copy while no installed noctty runs, so that it is the
+single-instance noctty, minimize it, and click one of its entries in Action
+Center: the installed activator hands the click over and the portable window
+restores and comes to the foreground (record whether it only flashed its
+taskbar button); close it. Then end noctty's
 process in Task Manager while one of its toasts is in Action Center, and click
 that entry: one noctty window opens (with the session restored if that is
 on) and comes forward. Uninstall, then check that

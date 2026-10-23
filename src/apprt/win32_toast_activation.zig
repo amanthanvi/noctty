@@ -55,23 +55,30 @@ pub const ActivationTarget = struct {
 /// twice: through the toast's in-process `Activated` handler and through the
 /// COM activator (`win32_toast_activator.zig`), or through a second noctty's
 /// activator that forwards it over IPC. Both carry the same launch string,
-/// so the same target inside `window_ms` of the first is the same click. Two
-/// real clicks on one pane's toast that close together would do the same
-/// thing twice anyway.
+/// so the same target inside `window_ms` of the first is the same click,
+/// even when another toast's click arrived in between. Two real clicks on
+/// one pane's toast that close together would do the same thing twice
+/// anyway.
 pub const RepeatFilter = struct {
     pub const window_ms: i64 = 2000;
+    /// Distinct clicks remembered at once; more different toasts than this
+    /// clicked inside one window is not a person clicking.
+    pub const capacity = 8;
 
-    last: ?ActivationTarget = null,
-    at_ms: i64 = 0,
+    const Seen = struct { target: ActivationTarget, at_ms: i64 };
+
+    seen: [capacity]?Seen = @splat(null),
+    next: usize = 0,
 
     /// Whether `target`, arriving at `now_ms`, is a new click.
     pub fn admit(self: *RepeatFilter, target: ActivationTarget, now_ms: i64) bool {
-        if (self.last) |last| {
-            const age = now_ms - self.at_ms;
-            if (last.eql(target) and age >= 0 and age < window_ms) return false;
+        for (self.seen) |entry| {
+            const seen = entry orelse continue;
+            const age = now_ms - seen.at_ms;
+            if (seen.target.eql(target) and age >= 0 and age < window_ms) return false;
         }
-        self.last = target;
-        self.at_ms = now_ms;
+        self.seen[self.next] = .{ .target = target, .at_ms = now_ms };
+        self.next = (self.next + 1) % capacity;
         return true;
     }
 };
@@ -269,12 +276,30 @@ test "a repeated toast click inside the window is dropped" {
     const b: ActivationTarget = .{ .surface_id = 2, .pid = 9, .action = .focus };
     try std.testing.expect(filter.admit(a, 1000));
     try std.testing.expect(!filter.admit(a, 1000 + RepeatFilter.window_ms - 1));
-    // Another target is another click, and the one later clicks compare with.
+    // Another target is another click, and does not hide the first: A's
+    // second delivery after B's click is still A's.
     try std.testing.expect(filter.admit(b, 1500));
-    try std.testing.expect(filter.admit(a, 1600));
+    try std.testing.expect(!filter.admit(a, 1600));
+    try std.testing.expect(!filter.admit(b, 1700));
     // Once the window has passed, or the clock went back, it counts again.
-    try std.testing.expect(filter.admit(a, 1600 + RepeatFilter.window_ms));
+    try std.testing.expect(filter.admit(a, 1000 + RepeatFilter.window_ms));
     try std.testing.expect(filter.admit(a, 100));
+    // B's own window is measured from B.
+    try std.testing.expect(!filter.admit(b, 1500 + RepeatFilter.window_ms - 1));
+    try std.testing.expect(filter.admit(b, 1500 + RepeatFilter.window_ms));
+}
+
+test "a toast click is remembered across as many other clicks as the filter holds" {
+    var filter: RepeatFilter = .{};
+    const first: ActivationTarget = .{ .surface_id = 100, .pid = 9 };
+    try std.testing.expect(filter.admit(first, 0));
+    for (1..RepeatFilter.capacity) |i| {
+        try std.testing.expect(filter.admit(.{ .surface_id = i, .pid = 9 }, @intCast(i)));
+    }
+    try std.testing.expect(!filter.admit(first, 50));
+    // One more distinct click takes the oldest slot.
+    try std.testing.expect(filter.admit(.{ .surface_id = 999, .pid = 9 }, 60));
+    try std.testing.expect(filter.admit(first, 70));
 }
 
 test "build omits null fields" {

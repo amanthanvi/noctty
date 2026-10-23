@@ -190,6 +190,11 @@ pub const WM_WINHOSTTY_TOAST_REMOVALS = WM_APP + 16;
 
 pub const PM_NOREMOVE: UINT = 0x0000;
 pub const PM_REMOVE: UINT = 0x0001;
+/// `MsgWaitForMultipleObjectsEx`: wake for any queued input, and for input
+/// already in the queue when the wait starts.
+pub const QS_ALLINPUT: DWORD = 0x04FF;
+pub const MWMO_INPUTAVAILABLE: DWORD = 0x0004;
+pub const WAIT_FAILED: DWORD = 0xFFFFFFFF;
 pub const WS_OVERLAPPED = 0x00000000;
 pub const WS_CHILD = 0x40000000;
 pub const WS_CLIPCHILDREN = 0x02000000;
