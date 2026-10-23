@@ -325,11 +325,14 @@ Assert-True ($trendCalls[0] -like '*per_page=100*') 'The run listing must cover 
 Assert-True ($null -eq (Get-PreviousTrendArtifact -Repository 'owner/repo' -CurrentRunId '300' -Api { param($Path) '{"workflow_runs":[],"artifacts":[]}' | ConvertFrom-Json })) 'With no earlier nightly there is no baseline.'
 
 # --- Installer: what Setup asks Restart Manager to close --------------------
-# dist/windows/noctty.iss is compiled only by the release workflow, so this is
-# where a pull request learns that it broke the close. OpenConsole.exe (the
-# bundled ConPTY host, one per pane) is an RmUnknownApp: registered, it fails
-# every non-forced RmShutdown before noctty is asked, and Setup aborts. A
-# forced close would kill the programs running in noctty's terminals.
+# The native ARM64 build job compiles dist/windows/noctty.iss on a pull request
+# that touches it, with the runner image's Inno Setup (6.7.1 when measured; the
+# job skips the installer if the image has none), but a clean compile says
+# nothing about what Setup asks Restart Manager to close. This check pins that.
+# OpenConsole.exe (the bundled ConPTY host, one per pane) is an RmUnknownApp:
+# registered, it fails every non-forced RmShutdown before noctty is asked, and
+# Setup aborts. A forced close would kill the programs running in noctty's
+# terminals.
 $setup = @{}
 $inSetup = $false
 foreach ($line in [System.IO.File]::ReadLines((Join-Path $repoRoot 'dist\windows\noctty.iss'))) {

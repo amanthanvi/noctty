@@ -21,8 +21,9 @@ the first with two tabs, the second of them split, the second with one tab):
   inno-set-idle     the installer's view of the same idle session: Restart
                     Manager lists only noctty, RmShutdown returns 0, noctty
                     exits 0 with the session kept, and none of its
-                    OpenConsole.exe children (one ConPTY host per pane)
-                    outlives it, so the excluded file is free too. Against
+                    OpenConsole.exe children (one ConPTY host per pane) is
+                    still running when RmShutdown returns, so the excluded
+                    file is free by the time Setup replaces it. Against
                     a script without the exclusion, OpenConsole.exe is
                     registered, Restart Manager lists the hosts as
                     RmUnknownApp, and RmShutdown fails with 351 at once,
@@ -494,6 +495,10 @@ foreach($name in $selected) {
                 Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
                 Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
                 Check "${name}: the copy ran ConPTY hosts" (@($r.Rm.ConsoleHosts).Count -gt 0) '> 0' @($r.Rm.ConsoleHosts).Count
+                # Setup goes straight from the close step to [InstallDelete]
+                # OpenConsole.exe and the [Files] copy, so a host still
+                # running when RmShutdown returns holds the excluded file.
+                Check "${name}: no ConPTY host is running when RmShutdown returns" (-not @($r.Rm.HostsAtReturn).Count) 'none' (@($r.Rm.HostsAtReturn) -join ',')
                 Check "${name}: no ConPTY host outlives noctty" (-not $r.HostsLeft.Count) 'none' ($r.HostsLeft -join ',')
             } finally { Stop-Case $case }
         }
