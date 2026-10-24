@@ -77,12 +77,15 @@ reading step under [Self-Correction Log](#self-correction-log).
   2026-10-16 "A portable copy": portable mode does not give a copy its own
   AUMID or registry key.
 - Test copy, paste and OSC 52 through a unit seam. A private desktop shares
-  the user's clipboard (it belongs to the window station), and this account
-  cannot create a private window station (`CreateWindowStationW` returns
-  `ERROR_ACCESS_DENIED`). So a run on WinSta0 starts nothing that can copy
-  or fall back to a copy, reads nothing from the clipboard, and logs
-  `GetClipboardSequenceNumber()` before and after. (launch-and-paths.md:
-  2026-10-15 PKG-42; clipboard.md: 2026-10-15 OSC 52 request, trap 5.)
+  the user's clipboard (it belongs to the window station). A named
+  `CreateWindowStationW` returns `ERROR_ACCESS_DENIED` for this account, but
+  a NULL-name call succeeds and gives a noninteractive service station, so a
+  private station is possible: check `UOI_NAME` is not `WinSta0`, set every
+  child's `lpDesktop` to it, and never assume it starts empty. A run on
+  WinSta0 starts nothing that can copy or fall back to a copy, reads nothing
+  from the clipboard, and logs `GetClipboardSequenceNumber()` before and
+  after. (launch-and-paths.md: 2026-10-15 PKG-42; clipboard.md: 2026-10-15
+  OSC 52 request, trap 5, and 2026-10-22 RDPCLIP-1 station trap.)
 - A null result needs a positive control before it becomes a causal claim.
   (window-frame.md: 2026-09-14 `background-blur`.)
 
@@ -175,8 +178,9 @@ that govern each symbol you change, or that none does.
 - [renderer.md](docs/agents/log/renderer.md): `src/renderer/` (OpenGL/WGL,
   the D3D11 beta and GL-to-D3D11 fallback, `Thread.zig` pacing and follow-up
   timers, synchronized output, vsync, `RenderPass` viewport, cursor sprites,
-  search highlights after a resize), the unfocused-split dim (`split_dim`,
-  `Host.syncSplitDim`), `win32/pixel_format.zig`, font fallback
+  search highlights after a resize, the IME preedit and composition caret in
+  `rebuildCells` and `State.Preedit.layout`), the unfocused-split dim
+  (`split_dim`, `Host.syncSplitDim`), `win32/pixel_format.zig`, font fallback
   and `font-thicken`, renderer wakeups from `termio` and typing latency,
   repaint during live resize, and which DLLs a CLI action or the D3D11
   backend loads (the OpenGL32 static import).
@@ -216,11 +220,17 @@ that govern each symbol you change, or that none does.
   `win32_structural_history.zig`, `undo-timeout`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
-  layouts), default Windows keybindings, Win32 input mode (DEC 9001), IME,
-  mouse buttons, wheel and context-menu input.
+  layouts), default Windows keybindings, Win32 input mode (DEC 9001), IME
+  (the composition string, its caret and target clause:
+  `win32_input.imeTargetCodepointRange`, `Surface.imePosAt`), mouse buttons,
+  wheel and context-menu input.
 - [launch-and-paths.md](docs/agents/log/launch-and-paths.md): which process a
-  terminal starts and with what environment: the default `command` and
-  profile discovery (`src/config/windows_shell.zig`), safe mode's
+  terminal starts and with what environment: the default `command`, profile
+  discovery and user-defined profiles (`src/config/windows_shell.zig`: the
+  `profile-*` keys, `default-profile`, `profile-order`, `profile-hidden`,
+  `verbatimCommandLine`, `arrangeProfiles`; Visual Studio developer shells in
+  `src/config/windows_visual_studio.zig`; `win32_elevation.RelaunchProfile`),
+  safe mode's
   `cmd.exe /D`, `CreateProcessW` name resolution, Git Bash discovery, WSL
   (`wsl_env.zig`, terminfo probe, `TERM`), the terminfo install
   (`win32_terminfo.zig`); path safety (`os.path.isNetworkOrDevicePath`,
@@ -229,7 +239,11 @@ that govern each symbol you change, or that none does.
   `terminal/kitty/graphics_image.zig`); link and quick-select path detection
   and opening.
 - [clipboard.md](docs/agents/log/clipboard.md): clipboard reads and writes,
-  CF_HTML (`win32_clipboard_html.zig`), open retries, OSC 52 prompts and
+  CF_HTML (`win32_clipboard_html.zig`), open retries, what a copy puts on the
+  clipboard (formats and owner, as Remote Desktop's redirection sees them),
+  the empty bracketed paste and the paste of copied files
+  (`Surface.completeClipboardPasteWithoutText`, `selectClipboardContents`,
+  `win32_ole.extractHdrop`), OSC 52 prompts and
   replies, paste protection (`win32_paste_protection.zig`), drag-and-drop
   (`win32_surface_drop*.zig`), pending clipboard confirmations.
 - [settings.md](docs/agents/log/settings.md): the Settings window
@@ -238,8 +252,10 @@ that govern each symbol you change, or that none does.
   manager, viewport, live preview, theming (`SettingsThemeAdapter`,
   `themeChanged`), its own UIA patterns, combo and open traces
   (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
-  `win32/bench_trace.zig`), and the save path (`settingsSaveAndReload`,
-  `patchOrAppendEdits`, save target, masked values).
+  `win32/bench_trace.zig`), the Default profile row
+  (`field_model.Kind.profile`, `AppHandle.profileChoices`), and the save path
+  (`settingsSaveAndReload`, `patchOrAppendEdits`, save target, masked
+  values).
 - [accessibility.md](docs/agents/log/accessibility.md): new widgets and UI
   events (adding a native widget, or changing its focus, children or
   notifiable properties); UIA providers under `src/apprt/win32_uia/` (COM
@@ -249,7 +265,9 @@ that govern each symbol you change, or that none does.
 - [config.md](docs/agents/log/config.md): config loading and reload outside
   the Settings window: the config file reader (`cli/args.zig` `LineIterator`,
   `Config.file_read_buffer_len`), `--config-file` and `startup_cwd` on reload,
-  diagnostics shown in the GUI, conditional replay, `newConfig` shallow
+  diagnostics shown in the GUI, conditional replay, command-line values put
+  back over `config-file` includes (`Config.parseManuallyHook`,
+  `finalizeCliLaunch`), `newConfig` shallow
   clones, what `Surface.DerivedConfig` must own, `RepeatableCommand.clone`
   and its C mirror (`value_c`, `Command.cval`), `+edit-config` and opening
   the config file, adding config keys.
@@ -257,14 +275,21 @@ that govern each symbol you change, or that none does.
   startup stalls, a cold `--launch-layout` (`App.startup_launch_layout`,
   `forgetLaunchLayout`), startup attempts and safe mode, session state and
   state-file schemas, IPC and single instance (`win32/ipc_server.zig`), AUMID
-  and portable identity, the jump list, toasts and desktop notifications, the
-  bell, taskbar progress and icon, crash minidumps and Sentry, the COM
-  apartment, default-terminal handoff, the CLI and the `noctty.com` wrapper.
+  and portable identity, the jump list, toasts and desktop notifications
+  (their tab attribution, tags and history removal, `App.showToast`, the COM
+  activator in `win32_toast_activator.zig`), an installer's Restart Manager
+  close and a session end (`App.onQueryEndSession`, `App.onEndSession`, the
+  lifecycle window), the bell, taskbar progress and icon, crash minidumps and
+  Sentry, the COM apartment, default-terminal handoff, the CLI and the
+  `noctty.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   and resources, the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
-  (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`), signing, the
-  updater, release workflows and package managers (WinGet, Scoop,
+  (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
+  `CloseApplications` closes), signing, the updater (including
+  `RegisterApplicationRestart` while an installer closes noctty:
+  `registerInstallerRestart`, `stagedInstallerRunning`), release workflows
+  and package managers (WinGet, Scoop,
   Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and
   `.gitattributes` in shipped files.
 - [docs-and-site.md](docs/agents/log/docs-and-site.md): site edits (`site/`,

@@ -118,7 +118,8 @@
         "src/apprt/win32/input.zig",
         "src/apprt/win32.zig",
         "src/input/**",
-        "src/config/Config.zig"
+        "src/config/Config.zig",
+        "src/Surface.zig"
       ]
     },
     {
@@ -136,7 +137,10 @@
         "src/config/url.zig",
         "src/apprt/win32/local_target.zig",
         "src/apprt/win32.zig",
-        "src/terminal/kitty/graphics_image.zig"
+        "src/terminal/kitty/graphics_image.zig",
+        "src/config/Config.zig",
+        "src/config/windows_visual_studio.zig",
+        "src/apprt/win32_elevation.zig"
       ]
     },
     {
@@ -146,7 +150,9 @@
         "src/apprt/win32.zig",
         "src/apprt/win32_clipboard_html.zig",
         "src/apprt/win32_paste_protection.zig",
-        "src/apprt/win32_surface_drop*.zig"
+        "src/apprt/win32_surface_drop*.zig",
+        "src/Surface.zig",
+        "src/apprt/win32_ole.zig"
       ]
     },
     {
