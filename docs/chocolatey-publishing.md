@@ -83,15 +83,19 @@ release's SHA-256, and runs it silently. The install script asks the CPU for the
 architecture (`Win32_Processor.Architecture` 12 is ARM64), because Chocolatey
 runs as an emulated x64 process on ARM64 Windows and the process reports x64
 there; a package without an ARM64 installer keeps the x64 one. Chocolatey's own
-uninstaller removes it through the installer's entry in Apps. An upgrade run
-from inside a noctty window stops before it downloads anything and asks for
-another terminal, because Setup has to close noctty and noctty cannot close
-while Chocolatey is running in it. The package contains no binaries, so it needs
-no `VERIFICATION.txt`. The id is `noctty`, the title `Noctty`, the license is
-the repository's MIT `LICENSE` at the release tag, and the icon is the website's
-`https://noctty.com/assets/favicon.svg`, because the validator rejects an icon
-served from GitHub. The package has its own description for its Chocolatey
-page, which names the packaged architectures ("on x64 or ARM64").
+uninstaller removes it through the installer's entry in Apps. Setup has to
+close noctty, and noctty cannot close while Chocolatey is running in it, so the
+install script stops before it downloads the installer when it runs inside a
+noctty window (it asks for another terminal) or while noctty is the default
+terminal and hosts console windows (it asks to close those and run the upgrade
+from a terminal app such as Windows Terminal). When noctty is running but the
+process list cannot be read, it stops too and asks to close noctty. The package
+contains no binaries, so it needs no `VERIFICATION.txt`. The id is `noctty`,
+the title `Noctty`, the license is the repository's MIT `LICENSE` at the release
+tag, and the icon is the website's `https://noctty.com/assets/favicon.svg`,
+because the validator rejects an icon served from GitHub. The package has its
+own description for its Chocolatey page, which names the packaged architectures
+("on x64 or ARM64").
 
 The CPU question and the description came with
 [#526](https://github.com/amanthanvi/noctty/pull/526) and
@@ -100,9 +104,9 @@ The CPU question and the description came with
 after them. The 1.3.134 package asks the process only: #526's author measured
 it installing the x64 build on a Windows 11 ARM64 machine, where it runs under
 emulation. An upgrade over such an install is expected to switch to the ARM64
-build; that was not tested. The refusal came later, with
-[#524](https://github.com/amanthanvi/noctty/pull/524), and ships with the first
-release built after it; the 1.3.134 and 1.3.135 packages do not have it.
+build; that was not tested. The refusals came later, with
+[#524](https://github.com/amanthanvi/noctty/pull/524), and ship with the first
+release built after it; the 1.3.134 and 1.3.135 packages do not have them.
 
 ## The account and the key
 
