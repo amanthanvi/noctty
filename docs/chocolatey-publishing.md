@@ -36,8 +36,9 @@ the machine that checked.
 
 The release push runs again. The repository variable `CHOCOLATEY_PUBLISH` was
 deleted on 2026-10-23, after 1.3.134 was approved, so each release's
-**Publish Chocolatey package** step pushes the new version once the releases on
-GitHub, Scoop and WinGet are out. It had been `off` while
+**Publish Chocolatey package** step pushes the new version once the GitHub
+Release and the Scoop update are published and the WinGet manifest update is
+submitted. It had been `off` while
 chocolatey.org could not accept a push: it refuses every new version while a
 version is in moderation and none is approved, and that refusal ended the
 release run red.
@@ -256,11 +257,12 @@ new version with `403`: one of the causes it documents is "Package has a
 version in moderation and no approved versions"
 ([common errors](https://docs.chocolatey.org/en-us/community-repository/maintainers/common-errors/)).
 That was the state of `noctty` from 2026-10-21 to 2026-10-23. A release in such
-a window still publishes everywhere else. The Chocolatey step runs last so that
-it cannot hold back WinGet; it fails, the run turns red, and its message names
-the possible causes of a `403`, unless `CHOCOLATEY_PUBLISH` is `off` and the
-step is skipped. Such a version never reaches Chocolatey from the release, and
-the next release pushes again once Chocolatey accepts pushes.
+a window still publishes to GitHub and Scoop and submits the WinGet manifest
+update. The Chocolatey step runs last so that it cannot hold back WinGet; it
+fails, the run turns red, and its message names the possible causes of a `403`,
+unless `CHOCOLATEY_PUBLISH` is `off` and the step is skipped. Such a version
+never reaches Chocolatey from the release, and the next release pushes again
+once Chocolatey accepts pushes.
 
 A `403` can also mean an invalid or revoked API key, or that another account
 owns the id. A `409 Conflict` is treated as success only when the feed then

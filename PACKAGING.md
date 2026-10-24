@@ -396,7 +396,8 @@ emulated x64 process on ARM64 Windows. chocolatey.org reviews each version
 before listing it, so a release can reach Chocolatey after the other channels,
 and it refuses the push with `403` while another account owns the id, or while
 a version is in moderation and none is approved; the step then fails after
-everything else has published.
+the GitHub Release and the Scoop update are published and the WinGet manifest
+update is submitted; the release does not wait for WinGet to accept it.
 [docs/chocolatey-publishing.md](docs/chocolatey-publishing.md) has the id's
 state, how to turn the push off and back on, and the steps for resubmitting a
 version during moderation; do not rerun a published Release for that. To push a
