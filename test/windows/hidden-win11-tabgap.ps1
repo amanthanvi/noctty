@@ -1,0 +1,233 @@
+#requires -Version 7.0
+<#
+TABGAP geometry, procedure-hit and offscreen GDI paint measurements. Uses an
+isolated measurement-AUMID ReleaseFast bin, never switches desktops or injects
+input. A hidden desktop cannot prove real pointer routing or composed output.
+Keep every run, including failures. -ExpectFlush checks the changed behavior;
+without it the same checks characterize the baseline geometry.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$Bin,
+    [Parameter(Mandatory)][string]$Run,
+    [switch]$Driver,
+    [string]$DesktopName,
+    [switch]$ExpectFlush,
+    [int]$DriverTimeoutSeconds=300
+)
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
+Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.IO;
+
+public static class TabGap {
+ [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left,Top,Right,Bottom; }
+ [StructLayout(LayoutKind.Sequential)] public struct Point { public int X,Y; public Point(int x,int y){X=x;Y=y;} }
+ [StructLayout(LayoutKind.Sequential)] public struct Placement { public int length,flags,show; public Point min,max; public Rect normal; }
+ [StructLayout(LayoutKind.Sequential)] struct GUI { public int size,flags; public IntPtr active,focus,capture,menuOwner,moveSize,caret; public Rect caretRect; }
+ [StructLayout(LayoutKind.Sequential)] struct MI { public int size; public Rect full,work; public uint flags; }
+ public class Monitor { public Rect Full,Work; public uint Dpi; }
+ public class Child { public long Hwnd; public int Id; public string Class; public Rect Rect; }
+ public class State { public Rect Window,Client; public Point Origin; public Placement Placement; public uint Dpi; public bool Zoomed; public Child[] Children; }
+ public class Hit { public int Y,Code,HostCode; public long Target,WindowFromPoint; public string Chain; }
+ public delegate bool EnumWindow(IntPtr h,IntPtr p);
+ delegate bool EnumMonitor(IntPtr h,IntPtr dc,ref Rect r,IntPtr p);
+ [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
+ [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc,IntPtr clip,EnumMonitor cb,IntPtr p);
+ [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr h,ref MI i);
+ [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr h,int kind,out uint x,out uint y);
+ [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h,out Rect r);
+ [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h,out Rect r);
+ [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h,ref Point p);
+ [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h,ref Placement p);
+ [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
+ [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+ [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+ [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+ [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h,EnumWindow cb,IntPtr p);
+ [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h,StringBuilder s,int n);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h,StringBuilder s,int n);
+ public static bool MarkedActive(IntPtr h){var s=new StringBuilder(1024);GetWindowTextW(h,s,1024);return s.ToString().StartsWith("* ",StringComparison.Ordinal);}
+ [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h,uint kind);
+ [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point p);
+ [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr h,uint m,IntPtr w,IntPtr l,uint flags,uint ms,out IntPtr result);
+ [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
+ [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int show);
+ [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int ht,uint flags);
+ [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h,IntPtr dc,uint flags);
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
+ [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GUI info);
+ public static int MenuFlags(IntPtr host){uint pid;var tid=GetWindowThreadProcessId(host,out pid);var i=new GUI{size=Marshal.SizeOf<GUI>()};if(!GetGUIThreadInfo(tid,ref i))throw new Exception("Menu state unavailable");return i.flags;}
+ static string ClassOf(IntPtr h){var s=new StringBuilder(128);GetClassNameW(h,s,128);return s.ToString();}
+ public static Monitor[] Monitors(){var list=new List<Monitor>();EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,(IntPtr h,IntPtr dc,ref Rect r,IntPtr p)=>{var i=new MI{size=Marshal.SizeOf<MI>()};uint x,y;if(!GetMonitorInfoW(h,ref i)||GetDpiForMonitor(h,0,out x,out y)!=0)throw new Exception("Monitor read failed");list.Add(new Monitor{Full=i.full,Work=i.work,Dpi=x});return true;},IntPtr.Zero);return list.ToArray();}
+ public static State Read(IntPtr h){Rect w,c;var o=new Point();var p=new Placement{length=Marshal.SizeOf<Placement>()};if(!GetWindowRect(h,out w)||!GetClientRect(h,out c)||!ClientToScreen(h,ref o)||!GetWindowPlacement(h,ref p))throw new Exception("Geometry read failed");var list=new List<Child>();EnumChildWindows(h,(a,b)=>{if(IsWindowVisible(a)){Rect r;GetWindowRect(a,out r);r.Left-=o.X;r.Right-=o.X;r.Top-=o.Y;r.Bottom-=o.Y;list.Add(new Child{Hwnd=a.ToInt64(),Id=GetDlgCtrlID(a),Class=ClassOf(a),Rect=r});}return true;},IntPtr.Zero);return new State{Window=w,Client=c,Origin=o,Placement=p,Dpi=GetDpiForWindow(h),Zoomed=IsZoomed(h),Children=list.ToArray()};}
+ public static void Move(IntPtr h,int x,int y){if(!SetWindowPos(h,IntPtr.Zero,x,y,900,600,0x14))throw new Exception("Move failed");}
+ public static IntPtr Pos(int x,int y){return new IntPtr(unchecked((int)(((uint)(y&65535)<<16)|(uint)(x&65535))));}
+ public static int HitCode(IntPtr h,int x,int y){IntPtr r;if(SendMessageTimeoutW(h,0x84,IntPtr.Zero,Pos(x,y),2,1000,out r)==IntPtr.Zero)throw new Exception("Hit test timeout");return r.ToInt32();}
+ // Enumerate immediate children in z order. A transparent STATIC must permit
+ // siblings below it, rather than skipping straight to the parent caption.
+ static IntPtr Resolve(IntPtr h,int x,int y,List<string> chain,out int code){for(var c=GetWindow(h,5);c!=IntPtr.Zero;c=GetWindow(c,2)){Rect r;if(!IsWindowVisible(c)||!GetWindowRect(c,out r)||x<r.Left||x>=r.Right||y<r.Top||y>=r.Bottom)continue;int childCode;var target=Resolve(c,x,y,chain,out childCode);if(childCode!=-1){code=childCode;return target;}}code=HitCode(h,x,y);chain.Add(h.ToInt64()+":"+GetDlgCtrlID(h)+":"+code);return h;}
+ public static Hit[] Scan(IntPtr h,int localX,int height){var s=Read(h);var list=new List<Hit>();for(int y=0;y<=height;y++){var chain=new List<string>();int code;int x=s.Origin.X+localX,sy=s.Origin.Y+y;var target=Resolve(h,x,sy,chain,out code);list.Add(new Hit{Y=y,Code=code,HostCode=HitCode(h,x,sy),Target=target.ToInt64(),WindowFromPoint=WindowFromPoint(new Point(x,sy)).ToInt64(),Chain=string.Join(",",chain)});}return list.ToArray();}
+ [StructLayout(LayoutKind.Sequential)] struct BitmapInfo { public uint size; public int width,height; public ushort planes,bpp; public uint compression,imageSize; public int xppm,yppm; public uint used,important; }
+ [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+ [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc,ref BitmapInfo info,uint usage,out IntPtr bits,IntPtr section,uint offset);
+ [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc,IntPtr obj);
+ [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+ [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+ public static string[] Paint(IntPtr h,string path,int localX,int rows){var s=Read(h);int w=s.Window.Right-s.Window.Left,ht=s.Window.Bottom-s.Window.Top;var info=new BitmapInfo{size=40,width=w,height=-ht,planes=1,bpp=32};var dc=CreateCompatibleDC(IntPtr.Zero);IntPtr bits;var bitmap=CreateDIBSection(dc,ref info,0,out bits,IntPtr.Zero,0);if(dc==IntPtr.Zero||bitmap==IntPtr.Zero)throw new Exception("Capture allocation failed");var old=SelectObject(dc,bitmap);try{var data=new byte[w*ht*4];for(int i=0;i<data.Length;i+=4){data[i]=255;data[i+2]=255;}Marshal.Copy(data,0,bits,data.Length);bool ok=PrintWindow(h,dc,2);Marshal.Copy(bits,data,0,data.Length);using(var f=new BinaryWriter(File.Create(path))){f.Write((ushort)0x4D42);f.Write(54+data.Length);f.Write(0);f.Write(54);f.Write(40);f.Write(w);f.Write(-ht);f.Write((ushort)1);f.Write((ushort)32);f.Write(0);f.Write(data.Length);f.Write(0);f.Write(0);f.Write(0);f.Write(0);f.Write(data);}if(!ok)throw new Exception("PrintWindow failed");var colors=new string[rows];for(int y=0;y<rows;y++){int i=((s.Origin.Y-s.Window.Top+y)*w+s.Origin.X-s.Window.Left+localX)*4;colors[y]=data[i+2].ToString("X2")+data[i+1].ToString("X2")+data[i].ToString("X2");}return colors;}finally{SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);}}
+ public static void Fullscreen(IntPtr host){var s=Read(host);foreach(var c in s.Children)if(c.Class=="noctty.win32"){var h=new IntPtr(c.Hwnd);PostMessageW(h,0x100,new IntPtr(122),new IntPtr(1));PostMessageW(h,0x101,new IntPtr(122),new IntPtr(0xC0000001L));return;}throw new Exception("Surface absent");}
+}
+'@
+if(-not $Driver){
+    $attestation=Join-Path $Bin 'measurement-aumid.txt'
+    if(-not (Test-Path -LiteralPath $attestation) -or (Get-Content -LiteralPath $attestation -Raw) -notmatch 'io.github.amanthanvi.noctty.measure') {throw 'Measurement AUMID attestation required.'}
+    . (Join-Path $PSScriptRoot '..\..\scripts\interactive-win11-state-guard.ps1')
+    $guardDir=[IO.Path]::GetFullPath("$Run-guard")
+    if(Test-Path -LiteralPath $guardDir){throw 'State guard evidence directory must be new.'}
+    [void](New-Item -ItemType Directory -Path $guardDir)
+    $guard=Start-InteractiveWin11StateGuard -Harness TABGAP -ReceiptDirectory $guardDir
+    try{Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds -DesktopPrefix 'noctty-tabgap-' -Label 'TABGAP measurement' -PassDesktopName -GuardClipboard -DriverArguments $(if($ExpectFlush){@('-ExpectFlush')}else{@()})}
+    finally{Assert-InteractiveWin11StateGuard -Guard $guard}
+    exit
+}
+[void][TabGap]::SetThreadDpiAwarenessContext([IntPtr](-4))
+$script:checks=[Collections.Generic.List[object]]::new()
+$script:samples=[Collections.Generic.List[object]]::new()
+$script:processes=[Collections.Generic.List[object]]::new()
+function Launch-Case([string]$Name,[string]$Decoration,$Monitor){
+    $root=Join-Path $Run $Name; $dir=Join-Path $root 'bin'; Copy-Portable $Bin $dir
+    foreach($n in @('localappdata','appdata')){[void](New-Item -ItemType Directory -Path (Join-Path $root $n))}
+    $config=Join-Path $dir 'tabgap.ghostty'
+    @('command = cmd.exe /d /k','shell-integration = none','single-instance = false',"class = noctty-test-tabgap-$([guid]::NewGuid().ToString('N'))",'window-save-state = never','confirm-close-surface = false','window-show-tab-bar = always',"window-decoration = $Decoration",'clipboard-read = deny','clipboard-write = deny','copy-on-select = false','keybind = f11=toggle_fullscreen') | Set-Content -LiteralPath $config
+    $exe=Join-Path $dir 'noctty.exe'; $oldLocal=$env:LOCALAPPDATA;$oldRoaming=$env:APPDATA
+    try{
+        $env:LOCALAPPDATA=Join-Path $root 'localappdata';$env:APPDATA=Join-Path $root 'appdata'
+        $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}" --single-instance=false' -f $exe,$config),$dir,"WinSta0\$DesktopName")
+        try{$p=[Diagnostics.Process]::GetProcessById($pi.pid);[void]$p.Handle}finally{[void][HiddenLocal]::CloseHandle($pi.thread);[void][HiddenLocal]::CloseHandle($pi.process)}
+    }finally{$env:LOCALAPPDATA=$oldLocal;$env:APPDATA=$oldRoaming}
+    $script:processes.Add(@{Pid=$p.Id;StartTime=$p.StartTime.ToUniversalTime().ToString('o');Executable=$p.ProcessName})
+    $deadline=[datetime]::UtcNow.AddSeconds(20)
+    do{$hosts=@([HiddenLocal]::Hosts($p.Id));if($hosts.Count){$h=$hosts[0];if([HiddenLocal]::WindowDesktop($h) -ne $DesktopName){throw 'App escaped private desktop'};[void][TabGap]::ShowWindow($h,4);$s=[TabGap]::Read($h);if(@($s.Children|Where-Object Id -eq 1000).Count){break}};Start-Sleep -Milliseconds 100}while([datetime]::UtcNow -lt $deadline -and -not $p.HasExited)
+    if(-not $h){throw 'Host did not start'}
+    [void][TabGap]::ShowWindow($h,4);Start-Sleep -Milliseconds 1200
+    [TabGap]::Move($h,($Monitor.Work.Left+100),($Monitor.Work.Top+100));Start-Sleep -Milliseconds 600
+    [TabGap]::Move($h,($Monitor.Work.Left+100),($Monitor.Work.Top+100));Start-Sleep -Milliseconds 600
+    [void][TabGap]::PostMessageW($h,0x111,[IntPtr]1904,[IntPtr]::Zero);Start-Sleep -Milliseconds 1500
+    return @{Process=$p;Host=$h;Root=$root}
+}
+function Close-Case($Case){
+    if(-not $Case){return};$p=$Case.Process
+    if(-not $p.HasExited){foreach($h in [HiddenLocal]::Hosts($p.Id)){[void][TabGap]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero)}
+        if(-not $p.WaitForExit(5000)){$fresh=Get-Process -Id $p.Id;if($fresh.StartTime -ne $p.StartTime -or $fresh.Path -ne $p.Path){throw 'Cleanup identity mismatch'};Stop-Process -Id $p.Id -Force;$p.WaitForExit()}}
+}
+function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
+    $h=$Case.Host;$s=[TabGap]::Read($h);$tabs=@($s.Children|Where-Object {$_.Id -ge 1000 -and $_.Id -lt 1100 -and $_.Class -eq 'Button'}|Sort-Object Id)
+    if($tabs.Count -lt 2){throw "Expected two visible tabs, found $($tabs.Count)"}
+    $height=[int][Math]::Floor($(if($Decoration -eq 'auto'){40}else{32})*$s.Dpi/96)
+    $columns=[ordered]@{first=10;tab0=[int](($tabs[0].Rect.Left+$tabs[0].Rect.Right)/2);tab1=[int](($tabs[1].Rect.Left+$tabs[1].Rect.Right)/2);empty=[int](($tabs[-1].Rect.Right+$s.Client.Right-$(if($Decoration -eq 'auto'){[int](138*$s.Dpi/96)}else{0}))/2)}
+    foreach($action in @($s.Children|Where-Object {$_.Id -in @(1904,1911)})){$columns["action-$($action.Id)"]=[int](($action.Rect.Left+$action.Rect.Right)/2)}
+    $scans=[ordered]@{};foreach($c in $columns.GetEnumerator()){$scans[$c.Key]=[TabGap]::Scan($h,$c.Value,$height)}
+    $pixels=[TabGap]::Paint($h,(Join-Path $Case.Root "$StateName.bmp"),$columns.tab1,($height+1))
+    $sample=@{Name=$Name;StateName=$StateName;Geometry=$s;Columns=$columns;Scans=$scans;PixelsTab1=$pixels};$script:samples.Add($sample)
+    $script:samples|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $Run 'samples.json')
+    $expected=if($ExpectFlush -and $StateName -in @('maximized','fullscreen')){0}else{[int][Math]::Floor(3*$s.Dpi/96)}
+    Check "$Name tab top" ($tabs[0].Rect.Top -eq $expected -and $tabs[1].Rect.Top -eq $expected) $expected @($tabs|ForEach-Object {$_.Rect.Top})
+    $expectedBottom=[int][Math]::Floor(3*$s.Dpi/96)+$height-[int][Math]::Floor(6*$s.Dpi/96)
+    Check "$Name tab bottom" ($tabs[0].Rect.Bottom -eq $expectedBottom -and $tabs[1].Rect.Bottom -eq $expectedBottom) $expectedBottom @($tabs|ForEach-Object {$_.Rect.Bottom})
+    $panes=@($s.Children|Where-Object Class -eq 'noctty.win32')
+    Check "$Name pane band" (@($panes|Where-Object {$_.Rect.Top -ne $height}).Count -eq 0 -and $panes.Count -gt 0) $height @($panes|ForEach-Object {$_.Rect.Top})
+    if($ExpectFlush){Check "$Name first-tab strip has no sysmenu target" (@($scans.first|Where-Object Code -eq 3).Count -eq 0) 0 @($scans.first|Where-Object Code -eq 3).Count}
+    if($StateName -eq 'maximized'){
+        $top=$scans.tab1[0]
+        Check "$Name tab top procedure" ($top.Code -eq $(if($ExpectFlush){1}else{2}) -and $top.Target -eq $(if($ExpectFlush){$tabs[1].Hwnd}else{$h.ToInt64()})) $(if($ExpectFlush){'tab HTCLIENT'}else{'host HTCAPTION'}) @($top.Code,$top.Target)
+        Check "$Name empty caption" ($scans.empty[0].Code -eq 2 -and $scans.empty[0].Target -eq $h.ToInt64()) 'host HTCAPTION' @($scans.empty[0].Code,$scans.empty[0].Target)
+        Check "$Name no top resize" (@($scans.Values|ForEach-Object {$_}|Where-Object {$_.Code -in @(12,13,14)}).Count -eq 0) 0 @($scans.Values|ForEach-Object {$_}|Where-Object {$_.Code -in @(12,13,14)}).Count
+    }elseif($StateName -in @('restored','restored-again')){Check "$Name restored top resize" ($scans.tab1[0].Code -eq 12) 12 $scans.tab1[0].Code}
+    if($ExpectFlush -and $StateName -in @('maximized','fullscreen')){
+        Check "$Name painted top differs from restored background" ($pixels[0] -ne $script:restoredBackground) 'tab border rather than parent background' @($pixels[0],$script:restoredBackground)
+        Check "$Name paint positive control" ($pixels[0] -ne 'FF00FF' -and $pixels[0] -ne $pixels[2]) 'top border differs from fill' @($pixels[0],$pixels[2])
+    }elseif($StateName -eq 'restored'){$script:restoredBackground=$pixels[0]}
+    return $sample
+}
+try{
+    $monitors=@([TabGap]::Monitors());$monitors|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $Run 'monitors.json')
+    foreach($dpi in @(96,144)){if(-not @($monitors|Where-Object Dpi -eq $dpi).Count){$script:samples.Add(@{SkippedDpi=$dpi;Reason='No physical monitor offers this DPI'})}}
+    foreach($m in @($monitors|Group-Object Dpi|ForEach-Object {$_.Group[0]})){foreach($decoration in @('auto','none')){
+        $name="$($m.Dpi)-$decoration";$case=$null
+        try{
+            $case=Launch-Case $name $decoration $m
+            $before=Sample "$name-restored" $case 'restored' $decoration
+            [void][TabGap]::ShowWindow($case.Host,3);Start-Sleep -Milliseconds 650
+            $max=Sample "$name-maximized" $case 'maximized' $decoration
+            Check "$name maximized readback" $max.Geometry.Zoomed $true $max.Geometry.Zoomed
+            if($ExpectFlush){
+                $tab1=@($max.Geometry.Children|Where-Object Id -eq 1001)[0]
+                $bottom=$tab1.Rect.Bottom
+                $lastChrome=$max.PixelsTab1.Count-2
+                $restoredTail=($before.PixelsTab1[$bottom..$lastChrome]) -join ','
+                $maximizedTail=($max.PixelsTab1[$bottom..$lastChrome]) -join ','
+                Check "$name underline and separator pixels preserved" ($restoredTail -eq $maximizedTail) $restoredTail $maximizedTail
+                # A routed post proves the actual tab procedure accepts the new
+                # top row. No mouse state or real input is changed. The midpoint
+                # is outside the tab's rightmost 22 DIP close zone.
+                $tab0=@($max.Geometry.Children|Where-Object Id -eq 1000)[0]
+                $x=[int](($tab0.Rect.Left+$tab0.Rect.Right)/2)
+                $routed=[TabGap]::Scan($case.Host,$x,0)[0]
+                $target=[IntPtr]$tab0.Hwnd
+                $beforeMarker=[TabGap]::MarkedActive($target)
+                Check "$name actual WindowFromPoint top target" ($routed.WindowFromPoint -eq $tab0.Hwnd -and $routed.Target -eq $tab0.Hwnd -and $routed.Code -eq 1) 'first tab HTCLIENT' @($routed.WindowFromPoint,$routed.Target,$routed.Code)
+                if($routed.WindowFromPoint -eq $tab0.Hwnd -and $routed.Target -eq $tab0.Hwnd -and $routed.Code -eq 1){
+                    $pos=[TabGap]::Pos(($x-$tab0.Rect.Left),0)
+                    [void][TabGap]::PostMessageW($target,0x201,[IntPtr]1,$pos)
+                    [void][TabGap]::PostMessageW($target,0x202,[IntPtr]::Zero,$pos)
+                    $selected=Wait-Until {[TabGap]::MarkedActive($target)} 3
+                    Check "$name routed top post selects inactive tab" (-not $beforeMarker -and $selected) @($false,$true) @($beforeMarker,$selected)
+                }
+                $empty=$max.Scans.empty[0]
+                if($empty.Code -eq 2 -and $empty.Target -eq $case.Host.ToInt64()){
+                    [void][TabGap]::PostMessageW($case.Host,0xA3,[IntPtr]2,[TabGap]::Pos(($max.Geometry.Origin.X+$max.Columns.empty),$max.Geometry.Origin.Y))
+                    $restored=Wait-Until {-not ([TabGap]::Read($case.Host)).Zoomed} 3
+                    Check "$name empty-caption doubleclick restores" $restored $true $restored
+                    [void][TabGap]::ShowWindow($case.Host,3);Start-Sleep -Milliseconds 650
+                    $remax=Sample "$name-remmaximized" $case 'maximized' $decoration
+                    Check "$name remaximize after doubleclick" $remax.Geometry.Zoomed $true $remax.Geometry.Zoomed
+                }
+            }
+            [void][TabGap]::ShowWindow($case.Host,9);Start-Sleep -Milliseconds 650
+            $after=Sample "$name-restored-again" $case 'restored-again' $decoration
+            Check "$name restored geometry cycle" (((Rect-Array $before.Geometry.Window) -join ',') -eq ((Rect-Array $after.Geometry.Window) -join ',')) (Rect-Array $before.Geometry.Window) (Rect-Array $after.Geometry.Window)
+            [TabGap]::Fullscreen($case.Host);Start-Sleep -Milliseconds 650
+            $full=Sample "$name-fullscreen" $case 'fullscreen' $decoration
+            Check "$name fullscreen readback" (((Rect-Array $full.Geometry.Window) -join ',') -eq ((Rect-Array $m.Full) -join ',')) (Rect-Array $m.Full) (Rect-Array $full.Geometry.Window)
+            [TabGap]::Fullscreen($case.Host);Start-Sleep -Milliseconds 650
+            [void][TabGap]::PostMessageW($case.Host,0x112,[IntPtr]0xF100,[IntPtr]0x20)
+            $opened=Wait-Until {([TabGap]::MenuFlags($case.Host) -band 4) -ne 0} 3
+            Check "$name system menu opens" $opened $true $opened
+            [void][TabGap]::PostMessageW($case.Host,0x1F,[IntPtr]::Zero,[IntPtr]::Zero)
+            $dismissed=Wait-Until {([TabGap]::MenuFlags($case.Host) -band 4) -eq 0} 3
+            Check "$name system menu dismisses" $dismissed $true $dismissed
+            # Positive control: post the host's own measured sysmenu hit code,
+            # only when the effective target really is the host and HTSYSMENU.
+            $probe=@($before.Scans.first|Where-Object {$_.Code -eq 3 -and $_.Target -eq $case.Host.ToInt64()})|Select-Object -First 1
+            if($probe){$origin=([TabGap]::Read($case.Host)).Origin;[void][TabGap]::PostMessageW($case.Host,0xA3,[IntPtr]3,[TabGap]::Pos(($origin.X+10),($origin.Y+$probe.Y)));Start-Sleep -Milliseconds 800;$script:samples.Add(@{Name="$name-sysmenu-doubleclick";Row=$probe.Y;HostAlive=[TabGap]::IsWindow($case.Host);ProcessExited=$case.Process.HasExited})}
+        }finally{Close-Case $case}
+        if($decoration -eq 'auto'){
+            $probeCase=$null
+            try{
+                $probeCase=Launch-Case "$name-max-sysmenu" $decoration $m
+                [void][TabGap]::ShowWindow($probeCase.Host,3);Start-Sleep -Milliseconds 650
+                $s=[TabGap]::Read($probeCase.Host);$rows=[TabGap]::Scan($probeCase.Host,10,[int](40*$s.Dpi/96))
+                $probe=@($rows|Where-Object {$_.Code -eq 3 -and $_.Target -eq $probeCase.Host.ToInt64()})|Select-Object -First 1
+                if($probe){[void][TabGap]::PostMessageW($probeCase.Host,0xA3,[IntPtr]3,[TabGap]::Pos(($s.Origin.X+10),($s.Origin.Y+$probe.Y)));Start-Sleep -Milliseconds 800}
+                $script:samples.Add(@{Name="$name-maximized-sysmenu-doubleclick";Rows=$rows;Posted=($null -ne $probe);PostedRow=$probe.Y;HostAlive=[TabGap]::IsWindow($probeCase.Host);ProcessExited=$probeCase.Process.HasExited})
+            }finally{Close-Case $probeCase}
+        }
+    }}
+}catch{$script:checks.Add(@{Name='Harness execution';Passed=$false;Error=$_.Exception.Message;Location=$_.InvocationInfo.ScriptLineNumber})}
+finally{@{Checks=$script:checks;Samples=$script:samples;Processes=$script:processes;Limit='Never-switched WinSta0 private desktop; no real input, clipboard operations or composed-pixel acceptance. WindowFromPoint recorded separately from modeled recursive procedure chain. PrintWindow re-renders children and cannot prove displayed occlusion or stale pixels.'}|ConvertTo-Json -Depth 16|Set-Content -LiteralPath (Join-Path $Run 'tabgap-results.json')}
+if(@($script:checks|Where-Object {-not $_.Passed}).Count){exit 1}

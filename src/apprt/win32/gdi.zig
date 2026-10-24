@@ -70,6 +70,21 @@ pub fn drawRoundedRect(hdc: HDC, rect: RECT, bg: u32, border: u32, radius: i32) 
     _ = sys.SelectObject(hdc, old_brush);
 }
 
+/// Tabs at a maximized/fullscreen client edge have square upper corners.
+/// Other buttons keep the shared rounded rectangle's physical-pixel inset.
+pub fn drawTabButton(hdc: HDC, rect: RECT, bg: u32, border: u32, radius: i32, flush_top: bool) void {
+    drawRoundedRect(hdc, rect, bg, border, radius);
+    if (!flush_top or rect.right - rect.left <= 2 or rect.bottom - rect.top <= 2) return;
+    // Keep the original lower corners and side inset. Replace only the
+    // rounded upper cap, whose usual one-pixel inset leaves a visible gap
+    // even when the tab HWND starts at the maximized client edge.
+    const cap_bottom = @min(rect.bottom - 1, rect.top + @max(2, radius));
+    fillSolidRect(hdc, .{ .left = rect.left + 1, .top = rect.top, .right = rect.right - 1, .bottom = cap_bottom }, bg);
+    drawRectBorder(hdc, .{ .left = rect.left + 1, .top = rect.top, .right = rect.right - 1, .bottom = cap_bottom + 1 }, border, 1);
+    // The cap is open below: the rounded rectangle already painted there.
+    fillSolidRect(hdc, .{ .left = rect.left + 2, .top = cap_bottom, .right = rect.right - 2, .bottom = cap_bottom + 1 }, bg);
+}
+
 /// Stroke a focus ring without erasing content already painted inside it.
 pub fn drawRoundedOutline(hdc: HDC, rect: RECT, border: u32, radius: i32) void {
     const brush = sys.GetStockObject(c.NULL_BRUSH) orelse return;
