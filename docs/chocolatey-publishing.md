@@ -89,7 +89,8 @@ install script stops before it downloads the installer when it runs inside a
 noctty window (it asks for another terminal) or while noctty is the default
 terminal and hosts console windows (it asks to close those and run the upgrade
 from a terminal app such as Windows Terminal). When noctty is running but the
-process list cannot be read, it stops too and asks to close noctty. The package
+script cannot read which processes started it, it stops too and asks to close
+noctty. The package
 contains no binaries, so it needs no `VERIFICATION.txt`. The id is `noctty`,
 the title `Noctty`, the license is the repository's MIT `LICENSE` at the release
 tag, and the icon is the website's `https://noctty.com/assets/favicon.svg`,
