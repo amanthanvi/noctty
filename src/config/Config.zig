@@ -4954,6 +4954,18 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     var iter: ConfigFileIterator = .{ .inner = &line_iter };
     try new_config.loadIter(alloc_gpa, &iter);
 
+    // The theme file's own problems (an over-long line) stay in
+    // `_diagnostics` but not in the replay log: every `finalize` reads the
+    // current theme again, so a replayed copy would only carry one theme's
+    // problem into the other theme's config.
+    var kept: usize = 0;
+    for (new_config._replay_steps.items) |step| {
+        if (step == .diagnostic) continue;
+        new_config._replay_steps.items[kept] = step;
+        kept += 1;
+    }
+    new_config._replay_steps.shrinkRetainingCapacity(kept);
+
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
         switch (item.*) {
@@ -4999,8 +5011,10 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     }
 
     // Replay our previous inputs so that we can override values
-    // from the theme.
+    // from the theme. The theme lines an earlier `loadTheme` left in the
+    // log (a config finalized again) are not: the theme was just read.
     var slice_it = Replay.iterator(self._replay_steps.items, &new_config);
+    slice_it.skip_theme_lines = true;
     try new_config.loadIter(alloc_gpa, &slice_it);
 
     // The replay re-applies values, not the loader's record of a file it
@@ -5790,58 +5804,94 @@ test "a config line longer than the reader takes is reported once and the next l
     try testing.expectEqual(max - prefix.len, ok.env.map.get("LONG").?.len);
 }
 
-test "a theme file's over-long line is reported once however often the theme is switched" {
+test "a theme file's problems are its own and are reported once, however the config is rebuilt" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
     const alloc = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
+    // Three problems of the light theme: an over-long line (a problem that
+    // is only a replay step), an unknown key and a refused profile line
+    // (both parse problems of a line that is replayed).
     const long = "background = #" ++ "1" ** (cli.args.LineIterator.max_line_len - "background = #".len + 1);
-    try tmp.dir.writeFile(.{ .sub_path = "light", .data = long ++ "\nforeground = #111111\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = long ++ "\nforeground = #111111\n" ++
+        "foo-bogus = 1\nprofile-command = C:\\Tools\\x.exe\n" });
     try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "foreground = #eeeeee\n" });
     const light = try tmp.dir.realpathAlloc(alloc, "light");
     defer alloc.free(light);
     const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
     defer alloc.free(dark_theme);
-    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark_theme });
+    // And one of the main file, which every config keeps.
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n" ++
+        "config-file = missing-include.ghostty\n", .{ light, dark_theme });
     defer alloc.free(text);
-    var reader: std.Io.Reader = .fixed(text);
-    var cfg = try Config.default(alloc);
-    defer cfg.deinit();
-    try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
-    try cfg.finalize();
+    try tmp.dir.writeFile(.{ .sub_path = "main.ghostty", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "main.ghostty");
+    defer alloc.free(path);
 
-    // Light, then dark, light, dark, light: the light theme's problem stays,
-    // once (problems are not conditional), and the replay log does not grow.
-    var configs: [5]Config = undefined;
-    var made: usize = 0;
-    defer for (configs[0..made]) |*config| config.deinit();
-    const states = [_]conditional.State{ .{ .theme = .dark }, .{ .theme = .light }, .{ .theme = .dark }, .{ .theme = .light } };
-    configs[0] = try cfg.clone(alloc);
-    made = 1;
-    for (states) |state| {
-        configs[made] = (try configs[made - 1].changeConditionalState(state)).?;
-        made += 1;
-    }
-    for (configs[0..made], 0..) |*config, i| {
-        var found: usize = 0;
-        for (config._diagnostics.list.items) |diag| {
-            if (!std.mem.startsWith(u8, diag.message, "line is longer")) continue;
-            try testing.expectEqualStrings(light, diag.location.file.path);
-            try testing.expectEqual(@as(usize, 1), diag.location.file.line);
-            found += 1;
+    // Start light and start dark (a cold start in that mode), finalize twice
+    // as `+validate-config` does, then switch back and forth, finalizing each
+    // config again: each config has its own theme's problems once, whatever
+    // came before it, and the replay log keeps only the main file's problem.
+    for ([_]conditional.State{ .{ .theme = .light }, .{ .theme = .dark } }) |start| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        cfg._conditional_state = start;
+        try cfg.loadFile(alloc, path);
+        try cfg.loadRecursiveFiles(alloc);
+        try cfg.finalize();
+        try cfg.finalize();
+
+        var configs: [5]Config = undefined;
+        var made: usize = 0;
+        defer for (configs[0..made]) |*config| config.deinit();
+        configs[0] = try cfg.clone(alloc);
+        made = 1;
+        while (made < configs.len) : (made += 1) {
+            const next: conditional.State = .{ .theme = switch (configs[made - 1]._conditional_state.theme) {
+                .light => .dark,
+                .dark => .light,
+            } };
+            configs[made] = (try configs[made - 1].changeConditionalState(next)).?;
+            try configs[made].finalize();
         }
-        var steps: usize = 0;
-        for (config._replay_steps.items) |step| {
-            if (step == .diagnostic) steps += 1;
+        for (configs[0..made], 0..) |*config, i| {
+            const is_light = config._conditional_state.theme == .light;
+            var long_line: usize = 0;
+            var bogus: usize = 0;
+            var profile: usize = 0;
+            var include: usize = 0;
+            for (config._diagnostics.list.items) |diag| {
+                if (std.mem.startsWith(u8, diag.message, "error opening config-file")) {
+                    include += 1;
+                    continue;
+                }
+                try testing.expectEqualStrings(light, diag.location.file.path);
+                if (std.mem.startsWith(u8, diag.message, "line is longer")) {
+                    try testing.expectEqual(@as(usize, 1), diag.location.file.line);
+                    long_line += 1;
+                } else if (std.mem.eql(u8, diag.key, "foo-bogus")) {
+                    try testing.expectEqual(@as(usize, 3), diag.location.file.line);
+                    bogus += 1;
+                } else if (std.mem.eql(u8, diag.key, "profile-command")) {
+                    try testing.expectEqual(@as(usize, 4), diag.location.file.line);
+                    profile += 1;
+                } else return error.TestUnexpectedResult;
+            }
+            var steps: usize = 0;
+            for (config._replay_steps.items) |step| {
+                if (step == .diagnostic) steps += 1;
+            }
+            const want: usize = if (is_light) 1 else 0;
+            testing.expect(long_line == want and bogus == want and profile == want and include == 1 and steps == 1) catch |err| {
+                std.debug.print("start {s}, config {d} ({s}): long {d}, unknown {d}, profile {d}, include {d}, steps {d}\n", .{
+                    @tagName(start.theme), i, @tagName(config._conditional_state.theme), long_line, bogus, profile, include, steps,
+                });
+                return err;
+            };
+            // The long line was skipped, the line after it read.
+            try testing.expectEqual(@as(u8, if (is_light) 0x11 else 0xee), config.foreground.r);
         }
-        testing.expectEqual(@as(usize, 1), found) catch |err| {
-            std.debug.print("config {d}: {d} problems, {d} steps\n", .{ i, found, steps });
-            return err;
-        };
-        try testing.expectEqual(@as(usize, 1), steps);
-        // The long line was skipped, the line after it read.
-        if (i % 2 == 0) try testing.expectEqual(@as(u8, 0x11), config.foreground.r);
     }
 }
 
@@ -6497,6 +6547,10 @@ const Replay = struct {
         slice: []const Replay.Step,
         idx: usize = 0,
         current_location: cli.Location = .none,
+        /// Skip the steps conditional on the theme. Only `loadTheme` makes
+        /// those, from the theme file's lines, so they are a theme read by
+        /// an earlier `loadTheme`; set when the theme has just been read.
+        skip_theme_lines: bool = false,
 
         pub fn location(self: *const Self, alloc: Allocator) Allocator.Error!?cli.Location {
             // The replay source may be freed as soon as this load completes.
@@ -6518,14 +6572,6 @@ const Replay = struct {
                     },
 
                     .diagnostic => |diag| diag: {
-                        // A problem the rebuild already has (`loadTheme`
-                        // reads the theme file again before this replay)
-                        // is not added twice, so switching themes back and
-                        // forth does not grow the list.
-                        for (self.config._diagnostics.list.items) |have| {
-                            if (sameDiagnostic(have, diag)) break :diag;
-                        }
-
                         // Best effort to clone and append the diagnostic.
                         // If it fails we log a warning and continue.
                         const arena_alloc = self.config._arena.?.allocator();
@@ -6548,6 +6594,7 @@ const Replay = struct {
                     .conditional_arg => |v| conditional: {
                         // All conditions must match.
                         for (v.conditions) |cond| {
+                            if (self.skip_theme_lines and cond.key == .theme) break :conditional;
                             if (!self.config._conditional_state.match(cond)) {
                                 break :conditional;
                             }
@@ -6569,16 +6616,6 @@ const Replay = struct {
             }
         }
     };
-
-    fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
-        if (!std.mem.eql(u8, a.key, b.key) or !std.mem.eql(u8, a.message, b.message)) return false;
-        return switch (a.location) {
-            .none => b.location == .none,
-            .cli => |index| b.location == .cli and b.location.cli == index,
-            .file => |place| b.location == .file and b.location.file.line == place.line and
-                std.mem.eql(u8, b.location.file.path, place.path),
-        };
-    }
 
     /// Construct a Replay iterator from a slice of replay elements.
     /// This can be used with args.parse and handles intermediate
