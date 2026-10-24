@@ -5790,6 +5790,61 @@ test "a config line longer than the reader takes is reported once and the next l
     try testing.expectEqual(max - prefix.len, ok.env.map.get("LONG").?.len);
 }
 
+test "a theme file's over-long line is reported once however often the theme is switched" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const long = "background = #" ++ "1" ** (cli.args.LineIterator.max_line_len - "background = #".len + 1);
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = long ++ "\nforeground = #111111\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "foreground = #eeeeee\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark_theme);
+    const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n", .{ light, dark_theme });
+    defer alloc.free(text);
+    var reader: std.Io.Reader = .fixed(text);
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+    try cfg.finalize();
+
+    // Light, then dark, light, dark, light: the light theme's problem stays,
+    // once (problems are not conditional), and the replay log does not grow.
+    var configs: [5]Config = undefined;
+    var made: usize = 0;
+    defer for (configs[0..made]) |*config| config.deinit();
+    const states = [_]conditional.State{ .{ .theme = .dark }, .{ .theme = .light }, .{ .theme = .dark }, .{ .theme = .light } };
+    configs[0] = try cfg.clone(alloc);
+    made = 1;
+    for (states) |state| {
+        configs[made] = (try configs[made - 1].changeConditionalState(state)).?;
+        made += 1;
+    }
+    for (configs[0..made], 0..) |*config, i| {
+        var found: usize = 0;
+        for (config._diagnostics.list.items) |diag| {
+            if (!std.mem.startsWith(u8, diag.message, "line is longer")) continue;
+            try testing.expectEqualStrings(light, diag.location.file.path);
+            try testing.expectEqual(@as(usize, 1), diag.location.file.line);
+            found += 1;
+        }
+        var steps: usize = 0;
+        for (config._replay_steps.items) |step| {
+            if (step == .diagnostic) steps += 1;
+        }
+        testing.expectEqual(@as(usize, 1), found) catch |err| {
+            std.debug.print("config {d}: {d} problems, {d} steps\n", .{ i, found, steps });
+            return err;
+        };
+        try testing.expectEqual(@as(usize, 1), steps);
+        // The long line was skipped, the line after it read.
+        if (i % 2 == 0) try testing.expectEqual(@as(u8, 0x11), config.foreground.r);
+    }
+}
+
 /// The text of every unlabelled code block in the `## <heading>` section of
 /// `docs/windows.md` (and its subsections), read from the checkout at test
 /// time (`zig build test` runs from its root), joined in order.
@@ -6463,6 +6518,14 @@ const Replay = struct {
                     },
 
                     .diagnostic => |diag| diag: {
+                        // A problem the rebuild already has (`loadTheme`
+                        // reads the theme file again before this replay)
+                        // is not added twice, so switching themes back and
+                        // forth does not grow the list.
+                        for (self.config._diagnostics.list.items) |have| {
+                            if (sameDiagnostic(have, diag)) break :diag;
+                        }
+
                         // Best effort to clone and append the diagnostic.
                         // If it fails we log a warning and continue.
                         const arena_alloc = self.config._arena.?.allocator();
@@ -6506,6 +6569,16 @@ const Replay = struct {
             }
         }
     };
+
+    fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
+        if (!std.mem.eql(u8, a.key, b.key) or !std.mem.eql(u8, a.message, b.message)) return false;
+        return switch (a.location) {
+            .none => b.location == .none,
+            .cli => |index| b.location == .cli and b.location.cli == index,
+            .file => |place| b.location == .file and b.location.file.line == place.line and
+                std.mem.eql(u8, b.location.file.path, place.path),
+        };
+    }
 
     /// Construct a Replay iterator from a slice of replay elements.
     /// This can be used with args.parse and handles intermediate
