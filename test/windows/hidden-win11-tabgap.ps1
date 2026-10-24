@@ -48,6 +48,7 @@ public static class TabGap {
  public class Child { public long Hwnd; public int Id; public string Class; public Rect Rect; }
  public class State { public Rect Window,Client; public Point Origin; public Placement Placement; public uint Dpi; public bool Zoomed; public Child[] Children; }
  public class Hit { public int Y,Code,HostCode; public long Target,WindowFromPoint; public string Chain; }
+ public class CaptionRun { public int Left,Right,Y; public int X { get { return Left+(Right-Left)/2; } } }
  public delegate bool EnumWindow(IntPtr h,IntPtr p);
  delegate bool EnumMonitor(IntPtr h,IntPtr dc,ref Rect r,IntPtr p);
  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
@@ -95,6 +96,21 @@ public static class TabGap {
  // siblings below it, rather than skipping straight to the parent caption.
  static IntPtr Resolve(IntPtr h,int x,int y,List<string> chain,out int code){for(var c=GetWindow(h,5);c!=IntPtr.Zero;c=GetWindow(c,2)){Rect r;if(!IsWindowVisible(c)||!GetWindowRect(c,out r)||x<r.Left||x>=r.Right||y<r.Top||y>=r.Bottom)continue;int childCode;var target=Resolve(c,x,y,chain,out childCode);if(childCode!=-1){code=childCode;return target;}}code=HitCode(h,x,y);chain.Add(h.ToInt64()+":"+GetDlgCtrlID(h)+":"+code);return h;}
  public static Hit[] Scan(IntPtr h,int localX,int height){var s=Read(h);var list=new List<Hit>();for(int y=0;y<=height;y++){var chain=new List<string>();int code;int x=s.Origin.X+localX,sy=s.Origin.Y+y;var target=Resolve(h,x,sy,chain,out code);list.Add(new Hit{Y=y,Code=code,HostCode=HitCode(h,x,sy),Target=target.ToInt64(),WindowFromPoint=WindowFromPoint(new Point(x,sy)).ToInt64(),Chain=string.Join(",",chain)});}return list.ToArray();}
+ // Find actual empty caption space instead of guessing from tab widths:
+ // an action button may immediately follow the tabs on a narrow window.
+ // Both independent target oracles must identify the host for every pixel
+ // in the run. Right is exclusive; X is its interior midpoint.
+ public static CaptionRun WidestCaptionRun(IntPtr h,int localY){
+  var s=Read(h);if(localY<0||localY>=s.Client.Bottom)throw new Exception("Caption scan row outside client");
+  CaptionRun best=null;int start=-1,sy=s.Origin.Y+localY;
+  for(int x=s.Client.Left;x<=s.Client.Right;x++){
+   bool caption=false;
+   if(x<s.Client.Right){int code;var chain=new List<string>();int sx=s.Origin.X+x;var target=Resolve(h,sx,sy,chain,out code);caption=code==2&&target==h&&WindowFromPoint(new Point(sx,sy))==h;}
+   if(caption){if(start<0)start=x;}
+   else if(start>=0){if(best==null||x-start>best.Right-best.Left)best=new CaptionRun{Left=start,Right=x,Y=localY};start=-1;}
+  }
+  return best;
+ }
  [StructLayout(LayoutKind.Sequential)] struct BitmapInfo { public uint size; public int width,height; public ushort planes,bpp; public uint compression,imageSize; public int xppm,yppm; public uint used,important; }
  [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
  [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc,ref BitmapInfo info,uint usage,out IntPtr bits,IntPtr section,uint offset);
@@ -214,11 +230,17 @@ function Test-WindowMenus([string]$Name,$Case){
     $h=$Case.Host;$s=[TabGap]::Read($h)
     $pane=@($s.Children|Where-Object Class -eq 'noctty.win32')[0]
     if(-not $pane){throw 'Menu probe needs a visible pane.'}
-    $tabs=@($s.Children|Where-Object {$_.Id -ge 1000 -and $_.Id -lt 1100 -and $_.Class -eq 'Button'})
-    $lastRight=($tabs.Rect.Right|Measure-Object -Maximum).Maximum
-    $x=[int]$lastRight+8;$row=[int][Math]::Floor(20*$s.Dpi/96)
+    $row=[int][Math]::Floor(20*$s.Dpi/96)
+    $captionRun=[TabGap]::WidestCaptionRun($h,$row)
+    if(-not $captionRun){
+        Check "$Name caption menu point" $false 'measured host HTCAPTION run with host WindowFromPoint' 'no matching run'
+        return
+    }
+    $x=$captionRun.X
     $caption=[TabGap]::Scan($h,$x,$row)[$row]
-    Check "$Name caption menu point" ($caption.Code -eq 2 -and $caption.Target -eq $h.ToInt64()) 'host HTCAPTION' @($caption.Code,$caption.Target)
+    $captionMatches=$caption.Code -eq 2 -and $caption.Target -eq $h.ToInt64() -and $caption.WindowFromPoint -eq $h.ToInt64()
+    $script:samples.Add(@{Name="$Name-caption-menu-point";Run=$captionRun;Hit=$caption})
+    Check "$Name caption menu point" $captionMatches 'host HTCAPTION and host WindowFromPoint' @($caption.Code,$caption.Target,$caption.WindowFromPoint)
     foreach($route in @('AltSpaceSysChar','SC_KEYMENU','captionRightClick')){
         # WM_SYSCHAR is the native Alt+Space character path. This exercises
         # DefWindowProc and Surface.hasWindowMenu, without physical Alt input.
@@ -227,7 +249,7 @@ function Test-WindowMenus([string]$Name,$Case){
         }elseif($route -eq 'SC_KEYMENU'){
             [void][TabGap]::PostMessageW($h,0x112,[IntPtr]0xF100,[IntPtr]0x20)
         }else{
-            if($caption.Code -ne 2 -or $caption.Target -ne $h.ToInt64()){continue}
+            if(-not $captionMatches){continue}
             $pos=[TabGap]::Pos(($s.Origin.X+$x),($s.Origin.Y+$row))
             [void][TabGap]::PostMessageW($h,0xA4,[IntPtr]2,$pos)
             [void][TabGap]::PostMessageW($h,0xA5,[IntPtr]2,$pos)
