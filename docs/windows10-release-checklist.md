@@ -79,6 +79,8 @@ gate function named in the source is missing from this page.
 | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------- |
 | `probeWindowsBuild`, `App.os_build` (`win32.zig`)                          | `RtlGetVersion` build, cached; a failed probe reads 0 and takes the Windows 10 path | W10-01                 |
 | `shouldUseIntegratedTitlebar`, `App.use_integrated_titlebar` (`win32.zig`) | Build 22000 (`OS_BUILD_WIN11_21H2`) and `window-show-tab-bar` not `never`           | W10-03, W10-04, W10-05 |
+| `tabsFlushWithTop` (`win32.zig`)                                         | Build 22000, ordinary host and visible strip: maximized app-owned top edge or fullscreen tabs extend upward; Windows 10 and quick terminals retain the inset | W10-03, W10-06, W10-07, W10-09, W10-10 |
+| `handleNcHitTest` (`win32.zig`)                                          | Build 22000 and not the quick terminal: remove the integrated caption's invisible system-menu icon target, retaining resize/caption priority and the window menu | W10-03, W10-06, W10-08 |
 | `undecoratedKeepsFrame` (`win32.zig`)                                      | Build 22000 and not the quick terminal: `window-decoration = none` keeps the frame  | W10-06 to W10-10       |
 | `supportsDwmSystemBackdropAttribute` (`win32.zig`)                         | Build 22621 (`OS_BUILD_WIN11_22H2`) for `DWMWA_SYSTEMBACKDROP_TYPE`                 | W10-12                 |
 | `OS_BUILD_WIN10_22H2` (`win32/consts.zig`)                                 | 19045, used only by tests that stand in for this machine                            | W10-01                 |
@@ -130,7 +132,8 @@ bar and its minimise, maximise and close buttons; the tab strip is a separate ro
 below it (32 DIP tall at 100%, not the 40 DIP integrated row); noctty draws no
 caption buttons of its own. Open two tabs, maximise, restore, double-click the
 caption. Repeat at 150% scaling (Settings > Display, then start a fresh noctty):
-the row scales and nothing clips.
+the row scales and nothing clips. The separate tab row keeps its 3 DIP top
+inset when maximized and fullscreen; the flush top edge is a Windows 11 change.
 
 **W10-04 `window-show-tab-bar = never`.** Expected: no strip and no one-pixel
 remnants of tab buttons across the top of the client area (#244, #245), with two
