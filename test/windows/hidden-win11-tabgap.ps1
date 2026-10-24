@@ -91,7 +91,7 @@ if(-not $Driver){
     if(Test-Path -LiteralPath $guardDir){throw 'State guard evidence directory must be new.'}
     [void](New-Item -ItemType Directory -Path $guardDir)
     $guard=Start-InteractiveWin11StateGuard -Harness TABGAP -ReceiptDirectory $guardDir
-    try{Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds -DesktopPrefix 'noctty-tabgap-' -Label 'TABGAP measurement' -PassDesktopName -GuardClipboard -DriverArguments $(if($ExpectFlush){@('-ExpectFlush')}else{@()})}
+    try{Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds -DesktopPrefix 'noctty-tabgap-' -Label 'TABGAP measurement' -PassDesktopName -GuardClipboard -RunFiles @{'harness-used.ps1'=[IO.File]::ReadAllText($PSCommandPath)} -DriverArguments $(if($ExpectFlush){@('-ExpectFlush')}else{@()})}
     finally{Assert-InteractiveWin11StateGuard -Guard $guard}
     exit
 }
@@ -124,6 +124,18 @@ function Close-Case($Case){
     if(-not $Case){return};$p=$Case.Process
     if(-not $p.HasExited){foreach($h in [HiddenLocal]::Hosts($p.Id)){[void][TabGap]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero)}
         if(-not $p.WaitForExit(5000)){$fresh=Get-Process -Id $p.Id;if($fresh.StartTime -ne $p.StartTime -or $fresh.Path -ne $p.Path){throw 'Cleanup identity mismatch'};Stop-Process -Id $p.Id -Force;$p.WaitForExit()}}
+}
+function Wait-Restored($Case,$Expected,[string]$Name){
+    $watch=[Diagnostics.Stopwatch]::StartNew();$frames=[Collections.Generic.List[object]]::new();$stable=0
+    do{
+        $state=[TabGap]::Read($Case.Host)
+        $matches=-not $state.Zoomed -and (Rect-Same $state.Window $Expected.Window 0) -and (Rect-Same $state.Client $Expected.Client 0) -and $state.Origin.X -eq $Expected.Origin.X -and $state.Origin.Y -eq $Expected.Origin.Y
+        $stable=if($matches){$stable+1}else{0}
+        $frames.Add(@{ElapsedMs=$watch.ElapsedMilliseconds;Zoomed=$state.Zoomed;Window=$state.Window;Client=$state.Client;Origin=$state.Origin;Normal=$state.Placement.normal;Matches=$matches})
+        if($stable -ge 3){break};Start-Sleep -Milliseconds 50
+    }while($watch.ElapsedMilliseconds -lt 5000)
+    $script:samples.Add(@{Name=$Name;Frames=$frames;Completed=($stable -ge 3)})
+    return $stable -ge 3
 }
 function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
     $h=$Case.Host;$s=[TabGap]::Read($h);$tabs=@($s.Children|Where-Object {$_.Id -ge 1000 -and $_.Id -lt 1100 -and $_.Class -eq 'Button'}|Sort-Object Id)
@@ -191,14 +203,21 @@ try{
                 $empty=$max.Scans.empty[0]
                 if($empty.Code -eq 2 -and $empty.Target -eq $case.Host.ToInt64()){
                     [void][TabGap]::PostMessageW($case.Host,0xA3,[IntPtr]2,[TabGap]::Pos(($max.Geometry.Origin.X+$max.Columns.empty),$max.Geometry.Origin.Y))
-                    $restored=Wait-Until {-not ([TabGap]::Read($case.Host)).Zoomed} 3
+                    # The zoom bit clears before the asynchronous NC restore
+                    # finishes moving the window. Wait for its original physical
+                    # rectangle too before issuing a second state transition.
+                    $restored=Wait-Restored $case $before.Geometry "$name-caption-restore-timeline"
                     Check "$name empty-caption doubleclick restores" $restored $true $restored
+                    if(-not $restored){throw 'Caption doubleclick did not finish restoring its original rectangle.'}
                     [void][TabGap]::ShowWindow($case.Host,3);Start-Sleep -Milliseconds 650
                     $remax=Sample "$name-remmaximized" $case 'maximized' $decoration
                     Check "$name remaximize after doubleclick" $remax.Geometry.Zoomed $true $remax.Geometry.Zoomed
                 }
             }
-            [void][TabGap]::ShowWindow($case.Host,9);Start-Sleep -Milliseconds 650
+            [void][TabGap]::ShowWindow($case.Host,9)
+            $cycleRestored=Wait-Restored $case $before.Geometry "$name-showwindow-restore-timeline"
+            Check "$name ShowWindow restore finishes" $cycleRestored $true $cycleRestored
+            if(-not $cycleRestored){throw 'ShowWindow did not finish restoring its original outer/client geometry.'}
             $after=Sample "$name-restored-again" $case 'restored-again' $decoration
             Check "$name restored geometry cycle" (((Rect-Array $before.Geometry.Window) -join ',') -eq ((Rect-Array $after.Geometry.Window) -join ',')) (Rect-Array $before.Geometry.Window) (Rect-Array $after.Geometry.Window)
             [TabGap]::Fullscreen($case.Host);Start-Sleep -Milliseconds 650

@@ -54249,10 +54249,8 @@ fn testTabGapHost(decorated: bool) !void {
     defer _ = sys.DestroyWindow(container);
     const action = try createTestChromeChild(hwnd, prompt_button_class);
     host.new_tab_hwnd = action;
-    defer host.new_tab_hwnd = null;
-    defer _ = sys.DestroyWindow(action);
+    defer destroySubclassedWindow(&host.new_tab_hwnd, &host.chrome_button_prev_proc);
     host.subclassButton(action, &hostButtonProc, &host.chrome_button_prev_proc);
-    defer host.chrome_button_prev_proc = null;
 
     var restored_rect: ?RECT = null;
     for ([_]bool{ false, true, false }) |maximized| {
