@@ -31,7 +31,7 @@ Then skip to [First launch](#first-launch).
 
 ## Install by hand
 
-The current stable release is `1.3.134`. Every release ships these files for
+The current stable release is `1.3.135`. Every release ships these files for
 `<arch>` = `x64` and `arm64`:
 
 | File                                                    | What it is                        |

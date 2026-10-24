@@ -81,8 +81,8 @@ supports OpenGL 4.3 or later.
   or use the Direct3D 11 renderer (beta). The ARM64 build includes it.
 
 The latest release is
-[noctty 1.3.134](https://github.com/amanthanvi/noctty/releases/tag/v1.3.134),
-published 2026-10-20.
+[noctty 1.3.135](https://github.com/amanthanvi/noctty/releases/tag/v1.3.135),
+published 2026-10-24.
 
 ### With WinGet
 
@@ -114,8 +114,8 @@ any folder without installing.
 
 | Your PC                        | Installer                                                                                                                                          | Portable                                                                                                                                                 |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **x64** (Intel and AMD)        | [`noctty-1.3.134-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.134/noctty-1.3.134-windows-x64-setup.exe)     | [`noctty-1.3.134-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.134/noctty-1.3.134-windows-x64-portable.zip)     |
-| **ARM64** (Windows on Arm PCs) | [`noctty-1.3.134-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.134/noctty-1.3.134-windows-arm64-setup.exe) | [`noctty-1.3.134-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.134/noctty-1.3.134-windows-arm64-portable.zip) |
+| **x64** (Intel and AMD)        | [`noctty-1.3.135-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.135/noctty-1.3.135-windows-x64-setup.exe)     | [`noctty-1.3.135-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.135/noctty-1.3.135-windows-x64-portable.zip)     |
+| **ARM64** (Windows on Arm PCs) | [`noctty-1.3.135-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.135/noctty-1.3.135-windows-arm64-setup.exe) | [`noctty-1.3.135-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.135/noctty-1.3.135-windows-arm64-portable.zip) |
 
 > [!NOTE]
 > Releases are signed with a self-signed certificate, so Windows SmartScreen
@@ -125,7 +125,7 @@ any folder without installing.
 > `SHA256SUMS-windows-arm64.txt` from the same release:
 >
 > ```powershell
-> Get-FileHash .\noctty-1.3.134-windows-x64-setup.exe -Algorithm SHA256
+> Get-FileHash .\noctty-1.3.135-windows-x64-setup.exe -Algorithm SHA256
 > ```
 >
 > A matching checksum shows the file arrived intact, not who published it.
@@ -133,8 +133,8 @@ any folder without installing.
 > provenance and signature checks.
 
 Each release also includes signed manifests of the portable ZIP contents
-(`noctty-1.3.134-windows-x64-portable.manifest.ps1` and
-`noctty-1.3.134-windows-arm64-portable.manifest.ps1`) and `SHA256SUMS.txt`, an
+(`noctty-1.3.135-windows-x64-portable.manifest.ps1` and
+`noctty-1.3.135-windows-arm64-portable.manifest.ps1`) and `SHA256SUMS.txt`, an
 alias of the x64 checksum file kept for older auto-update clients. Newer
 releases also publish a symbols zip per architecture,
 `noctty-<version>-windows-<arch>-symbols.zip`, for reading crash dumps;
