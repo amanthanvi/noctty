@@ -49,6 +49,14 @@ pub const Windows = struct {
     /// Taken before `mutex`, never while holding it.
     scan_mutex: std.Thread.Mutex = .{},
 
+    /// Set by `stopScan` when the owner is going away. Read without a lock
+    /// by a scan in progress before each file.
+    scan_stop: std.atomic.Value(bool) = .init(false),
+
+    /// Tests only: runs just before a scan opens each file, so a test can
+    /// hold a scan inside a file or stop it there.
+    test_scan_hook: if (builtin.is_test) ?TestScanHook else void = if (builtin.is_test) null else {},
+
     /// Snapshot of the font sources at the time of the last successful
     /// scan; used by `refresh` to skip rescanning when nothing changed.
     /// Null means we have never scanned.
@@ -66,6 +74,11 @@ pub const Windows = struct {
     /// Windows would use for a codepoint the loaded fonts lack. Created on
     /// first use and guarded by `mutex`.
     system_fallback: dwrite.SystemFallback = .{},
+
+    pub const TestScanHook = struct {
+        ctx: *anyopaque,
+        call: *const fn (ctx: *anyopaque, disco: *Windows, path: [:0]const u8) void,
+    };
 
     const Record = struct {
         path: [:0]const u8,
@@ -160,6 +173,19 @@ pub const Windows = struct {
         self.refreshScanLocked();
     }
 
+    /// For an owner that is about to join a thread running `refresh` and
+    /// then free this discovery: a scan in progress stops before its next
+    /// file and publishes nothing, and so does any later scan, before its
+    /// first file. Nothing else may call it, since every lookup after it
+    /// would find no fonts.
+    pub fn stopScan(self: *Windows) void {
+        self.scan_stop.store(true, .release);
+    }
+
+    pub fn scanStopped(self: *const Windows) bool {
+        return self.scan_stop.load(.acquire);
+    }
+
     fn refreshScanLocked(self: *Windows) void {
         const state = self.scanState();
         {
@@ -168,9 +194,15 @@ pub const Windows = struct {
             if (self.state) |prev| if (prev.eql(state)) return;
         }
 
-        const records = self.scanAll() catch |err| {
-            log.warn("windows font discovery scan failed err={}", .{err});
-            return;
+        const records = self.scanAll() catch |err| switch (err) {
+            error.ScanStopped => {
+                log.debug("windows font discovery scan stopped", .{});
+                return;
+            },
+            else => {
+                log.warn("windows font discovery scan failed err={}", .{err});
+                return;
+            },
         };
         if (records.len == 0) {
             log.warn("windows font discovery found no fonts", .{});
@@ -445,9 +477,9 @@ pub const Windows = struct {
     }
 
     /// Scan all font sources and return the records. Individual files and
-    /// faces that fail to load are skipped; only allocation failure aborts
-    /// the scan.
-    fn scanAll(self: *Windows) ![]Record {
+    /// faces that fail to load are skipped; only allocation failure and
+    /// `stopScan` abort the scan.
+    fn scanAll(self: *Windows) error{ OutOfMemory, ScanStopped }![]Record {
         const alloc = self.alloc;
 
         var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
@@ -478,7 +510,11 @@ pub const Windows = struct {
             records.deinit(alloc);
         }
 
-        for (paths.items) |path| try scanPath(alloc, lib, path, &records);
+        for (paths.items) |path| {
+            if (self.scanStopped()) return error.ScanStopped;
+            if (comptime builtin.is_test) if (self.test_scan_hook) |hook| hook.call(hook.ctx, self, path);
+            try scanPath(alloc, lib, path, &records);
+        }
 
         return try records.toOwnedSlice(alloc);
     }
@@ -2044,4 +2080,46 @@ test "windows refreshExisting never starts or waits for a scan" {
     disco.scan_mutex.unlock();
     try testing.expectEqual(@as(usize, 3), disco.records.len);
     try testing.expectEqual(@as(u64, 0), disco.generation);
+}
+
+test "windows discovery scan stopped between files publishes nothing" {
+    // FLAKY-CLIFWD-CLOSE-01: a scan the owner stops ends before its next
+    // file, and what it read so far is dropped rather than published as
+    // if it were every installed font.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (fixtureFonts()) |fixture| try tmp.dir.writeFile(.{ .sub_path = fixture.name, .data = fixture.data });
+    const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir);
+
+    var disco = Windows.init();
+    defer disco.deinit();
+    if (disco.system_dir) |old| disco.alloc.free(old);
+    disco.system_dir = try disco.alloc.dupeZ(u8, dir);
+    if (disco.user_dir) |old| disco.alloc.free(old);
+    disco.user_dir = null;
+
+    const Stop = struct {
+        calls: usize = 0,
+        fn call(ctx: *anyopaque, d: *Windows, _: [:0]const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            d.stopScan();
+        }
+    };
+    var stop: Stop = .{};
+    disco.test_scan_hook = .{ .ctx = &stop, .call = Stop.call };
+
+    // The scan reads the first fixture, then stops.
+    disco.refresh();
+    try testing.expectEqual(@as(usize, 1), stop.calls);
+    try testing.expect(disco.state == null);
+    try testing.expectEqual(@as(usize, 0), disco.records.len);
+    try testing.expectEqual(@as(u64, 0), disco.generation);
+
+    // A later scan stops before its first file.
+    disco.refresh();
+    try testing.expectEqual(@as(usize, 1), stop.calls);
+    try testing.expect(disco.state == null);
 }

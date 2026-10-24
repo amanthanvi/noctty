@@ -50,6 +50,7 @@ lock: std.Thread.Mutex = .{},
 /// worker only scans; it does not take `lock`, so a grid that needs no
 /// font from the scan is built without waiting for it, and one that does
 /// waits inside discovery, which also keeps the scan from running twice.
+/// `deinit` stops a scan still in progress before joining it.
 discovery_prefetch_thread: ?std.Thread = null,
 
 pub const InitError = Library.InitError;
@@ -68,6 +69,13 @@ pub fn init(alloc: Allocator) InitError!SharedGridSet {
 
 pub fn deinit(self: *SharedGridSet) void {
     if (self.discovery_prefetch_thread) |thread| {
+        // Nothing needs the rest of the startup scan once the set goes
+        // away, so stop it at its next file instead of waiting for every
+        // installed font: on a cold disk that kept a windowless process
+        // alive for seconds after its last window closed.
+        if (comptime Discover != void and @hasDecl(Discover, "stopScan")) {
+            if (self.font_discover) |*disco| disco.stopScan();
+        }
         thread.join();
         self.discovery_prefetch_thread = null;
     }
@@ -104,11 +112,13 @@ pub fn startDiscoveryPrefetch(self: *SharedGridSet) void {
         break :disco (self.discover() catch return) orelse return;
     };
 
-    self.discovery_prefetch_thread = std.Thread.spawn(
+    const thread = std.Thread.spawn(
         .{},
         discoveryPrefetchMain,
         .{disco},
     ) catch return;
+    thread.setName("font-prefetch") catch {};
+    self.discovery_prefetch_thread = thread;
 }
 
 pub fn discoveryPrefetchStarted(self: *const SharedGridSet) bool {
@@ -1001,6 +1011,63 @@ test "SharedGridSet builds a grid that names no font without a font scan" {
         const key, _ = try set.ref(&keycfg, .{ .points = 12 });
         defer set.deref(key);
         try testing.expect(set.font_discover.?.state == null);
+    } else return error.SkipZigTest;
+}
+
+test "SharedGridSet deinit stops the startup font scan at its next file" {
+    // FLAKY-CLIFWD-CLOSE-01: closing the last window soon after launch
+    // joined a scan that opens every installed font, so the windowless
+    // process outlived its window by the rest of the scan (more than 20 s
+    // on a cold hosted runner).
+    if (comptime builtin.target.os.tag == .windows) {
+        const testing = std.testing;
+
+        // Four files the scan will try to open; the first is held open.
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        for ([_][]const u8{ "a.ttf", "b.ttf", "c.ttf", "d.ttf" }) |name| {
+            try tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+        }
+        const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
+        defer testing.allocator.free(dir);
+
+        const Hold = struct {
+            entered: std.Thread.ResetEvent = .{},
+            calls: std.atomic.Value(usize) = .init(0),
+
+            // A slow first open: it lasts until the scan is stopped, or
+            // 5 s by the clock (a 1 ms sleep can take a 15.6 ms timer
+            // tick), so a deinit that does not stop the scan fails
+            // instead of hanging.
+            fn call(ctx: *anyopaque, disco: *Discover, _: [:0]const u8) void {
+                const self: *@This() = @ptrCast(@alignCast(ctx));
+                if (self.calls.fetchAdd(1, .monotonic) != 0) return;
+                self.entered.set();
+                var timer = std.time.Timer.start() catch return;
+                while (!disco.scanStopped() and timer.read() < 5 * std.time.ns_per_s) {
+                    std.Thread.sleep(std.time.ns_per_ms);
+                }
+            }
+        };
+        var hold: Hold = .{};
+
+        var set = try SharedGridSet.init(testing.allocator);
+        var set_live = true;
+        defer if (set_live) set.deinit();
+        const disco = (try set.discover()).?;
+        if (disco.system_dir) |old| disco.alloc.free(old);
+        disco.system_dir = try disco.alloc.dupeZ(u8, dir);
+        if (disco.user_dir) |old| disco.alloc.free(old);
+        disco.user_dir = null;
+        disco.test_scan_hook = .{ .ctx = &hold, .call = Hold.call };
+
+        set.startDiscoveryPrefetch();
+        try testing.expect(set.discoveryPrefetchStarted());
+        try hold.entered.timedWait(5 * std.time.ns_per_s);
+
+        set_live = false;
+        set.deinit();
+        try testing.expectEqual(@as(usize, 1), hold.calls.load(.monotonic));
     } else return error.SkipZigTest;
 }
 

@@ -111,6 +111,8 @@ public static class ComCliNative {
     [DllImport("advapi32.dll",SetLastError=true)] static extern IntPtr OpenThreadWaitChainSession(uint flags,IntPtr callback);
     [DllImport("advapi32.dll")] static extern void CloseThreadWaitChainSession(IntPtr session);
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetThreadWaitChain(IntPtr session,UIntPtr context,uint flags,uint tid,ref uint count,IntPtr nodes,out bool cycle);
+    [DllImport("kernel32.dll")] static extern int GetThreadDescription(IntPtr thread,out IntPtr description);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
     static void Check(bool ok) { if(!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
     static Security Inheritable() { return new Security { length=Marshal.SizeOf(typeof(Security)),inherit=1 }; }
     public static string Quote(string value) {
@@ -341,6 +343,20 @@ public static class ComCliNative {
         if(!finished) cancel.Cancel();
         return new {TimedOut=!finished,Snapshot=capture.Snapshot()};
     }
+    // The name the product gave the thread (SetThreadDescription, a source
+    // literal such as "font-prefetch"), null when unset. Printable ASCII
+    // only, at most 64 characters.
+    static string ThreadName(IntPtr thread) {
+        IntPtr text;
+        if(GetThreadDescription(thread,out text)<0) return null;
+        try {
+            var raw=Marshal.PtrToStringUni(text);
+            if(String.IsNullOrEmpty(raw)) return null;
+            var name=new StringBuilder();
+            foreach(char c in raw) { if(name.Length==64) break; name.Append(c>=' ' && c<='~'?c:'?'); }
+            return name.ToString();
+        } finally { LocalFree(text); }
+    }
     sealed class WaitChainCapture {
         public readonly ConcurrentQueue<object> Chains=new ConcurrentQueue<object>();
         public volatile int SessionError,CurrentTid,TotalThreads;
@@ -379,7 +395,7 @@ public static class ComCliNative {
                             IntPtr node=IntPtr.Add(nodes,i*280); int type=Marshal.ReadInt32(node);
                             entries.Add(new {Type=type,Status=Marshal.ReadInt32(node,4),Pid=type==8?Marshal.ReadInt32(node,8):0,Tid=type==8?Marshal.ReadInt32(node,12):0,WaitTime=type==8?Marshal.ReadInt32(node,16):0,ContextSwitches=type==8?Marshal.ReadInt32(node,20):0});
                         }
-                        var entry=new Dictionary<string,object> { {"Tid",thread.Id},{"Ok",ok},{"Error",error},{"Cycle",cycle},{"Nodes",entries} };
+                        var entry=new Dictionary<string,object> { {"Tid",thread.Id},{"Name",ThreadName(pinnedThread)},{"Ok",ok},{"Error",error},{"Cycle",cycle},{"Nodes",entries} };
                         try {
                             var state=thread.ThreadState;
                             entry["SnapshotState"]=state.ToString();
