@@ -462,10 +462,11 @@ pub const RelaunchProfile = union(enum) {
 /// Build the argument string for a new elevated process.
 ///
 /// `argv` is the complete current argv, including argv[0]. Only explicit
-/// config-file overrides and `--config-default-files` are inherited, so the
-/// elevated process reads the same files (it rebuilds a `selector` profile
-/// from them); the effective class, invoking working directory, and the
-/// profile (`RelaunchProfile`) are appended after them.
+/// config-file overrides, `--config-default-files` (so the elevated process
+/// reads the same files; it rebuilds a `selector` profile from them) and
+/// `--visual-studio-profiles` (which decides whether a `vs:` key names a
+/// profile at all) are inherited; the effective class, invoking working
+/// directory, and the profile (`RelaunchProfile`) are appended after them.
 /// The result can hold a profile's variables, so it is never logged.
 pub fn buildRelaunchParameters(
     alloc: Allocator,
@@ -499,7 +500,8 @@ pub fn buildRelaunchParameters(
                 config_base_cwd,
             );
         } else if (std.mem.eql(u8, arg, "--config-default-files") or
-            std.mem.startsWith(u8, arg, "--config-default-files="))
+            std.mem.startsWith(u8, arg, "--config-default-files=") or
+            std.mem.startsWith(u8, arg, "--visual-studio-profiles="))
         {
             try appendWindowsArgument(&result, arg);
         }
@@ -1079,6 +1081,44 @@ test "elevation relaunch parameters forward config class and cwd exactly" {
             "\"--working-directory=C:\\Users\\Aman\\Source Dir\"",
         parameters,
     );
+}
+
+test "elevation relaunch parameters pass on --visual-studio-profiles with a vs: key" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const cli_args = @import("../cli/args.zig");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The user's own config file sets `none`; noctty was started with
+    // `--visual-studio-profiles=all`, so its Visual Studio shells exist and a
+    // pane runs one. The elevated process reads the same file, so without
+    // the option the key it is given would name nothing.
+    const argv = [_][]const u8{ "C:\\noctty.exe", "--visual-studio-profiles=all", "--font-size=14" };
+    const parameters = try buildRelaunchParameters(alloc, &argv, null, "C:\\work", "C:\\startup", .{ .selector = "vs:6bb7cfd9:cmd" });
+    try testing.expectEqualStrings(
+        "--visual-studio-profiles=all --working-directory=C:\\work --command= --initial-command= --default-profile=vs:6bb7cfd9:cmd",
+        parameters,
+    );
+
+    // Loaded as the elevated process loads them: its default file, then
+    // its command line.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = "visual-studio-profiles = none\n" });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    const line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+    const child_argv = try configpkg.windows_shell.splitWindowsCommandLine(alloc, line);
+    const args = try alloc.alloc([]const u8, child_argv.len - 1);
+    for (child_argv[1..], args) |arg, *out| out.* = arg;
+    var cfg = try configpkg.Config.default(testing.allocator);
+    defer cfg.deinit();
+    try cfg.loadFile(testing.allocator, path);
+    var iter: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(args) };
+    try cfg.loadIter(testing.allocator, &iter);
+    try testing.expect(cfg.@"visual-studio-profiles" == .all);
+    try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg.@"default-profile".?);
 }
 
 test "elevation relaunch parameters serialize and outer-quote direct command" {

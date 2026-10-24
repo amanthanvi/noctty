@@ -6,6 +6,7 @@ const win32 = @import("../os/windows.zig");
 const Command = @import("command.zig").Command;
 const windows_shell_types = @import("windows_shell_types.zig");
 const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
+pub const visual_studio = @import("windows_visual_studio.zig");
 const log = std.log.scoped(.windows_shell);
 const windows = std.os.windows;
 
@@ -21,6 +22,7 @@ const wsl_shell_integration_next_step =
 
 pub const ProfileKind = windows_shell_types.ProfileKind;
 pub const Utf8Console = windows_shell_types.Utf8Console;
+pub const VisualStudioProfiles = visual_studio.Mode;
 
 /// ANSI/OEM code pages where forcing 65001 would mojibake legacy programs.
 /// 932 Shift-JIS, 936 GBK, 949 Unified Hangul Code, 950 Big5, 1361 Johab.
@@ -81,6 +83,10 @@ pub const Profile = struct {
     /// `default-profile`, `new_window_elevated:<key>`, a split's profile).
     /// `arrangeProfiles` puts hidden profiles after every shown one.
     hidden: bool = false,
+    /// The first Visual Studio shell of its kind as discovery listed them
+    /// (newest instance first): what `vs:newest:cmd` or `vs:newest:pwsh`
+    /// names, wherever `profile-order` later moves it (`NewestVisualStudio`).
+    newest_visual_studio: bool = false,
 
     /// Deep copy into `alloc`.
     pub fn clone(self: Profile, alloc: Allocator) Allocator.Error!Profile {
@@ -109,6 +115,7 @@ pub const Profile = struct {
             .working_directory = working_directory,
             .user = if (self.user) |user| try user.clone(alloc) else null,
             .hidden = self.hidden,
+            .newest_visual_studio = self.newest_visual_studio,
         };
     }
 
@@ -211,6 +218,8 @@ pub const UserProfiles = struct {
     /// that `arrangeProfiles` applies to the whole list.
     order: []const []const u8 = &.{},
     hidden: []const []const u8 = &.{},
+    /// `visual-studio-profiles`.
+    visual_studio: VisualStudioProfiles = .newest,
 
     pub const Definition = struct {
         id: []const u8,
@@ -255,6 +264,7 @@ pub const UserProfiles = struct {
             .definitions = definitions.items,
             .order = order,
             .hidden = hidden,
+            .visual_studio = config.@"visual-studio-profiles",
         };
     }
 
@@ -405,10 +415,11 @@ pub fn splitWindowsCommandLine(alloc: Allocator, line: []const u8) ![][:0]const 
 }
 
 /// The command line a launch hands CreateProcess unchanged: `line` when the
-/// argv about to run is exactly its split, else null and the argv is quoted
-/// as usual. Shell integration, the WSL directory rewrite, the cmd UTF-8
-/// preamble and `initial-command` all change the argv, so a line that no
-/// longer describes it is never used.
+/// argv about to run is exactly its split, or when it is that argv's
+/// `cmdKeepOpenLine`; else null and the argv is quoted as usual. Shell
+/// integration, the WSL directory rewrite, the cmd UTF-8 preamble and
+/// `initial-command` all change the argv, so a line that no longer describes
+/// it is never used.
 pub fn verbatimCommandLine(
     alloc: Allocator,
     line: ?[]const u8,
@@ -417,19 +428,53 @@ pub fn verbatimCommandLine(
 ) Allocator.Error!?[]const u8 {
     const value = line orelse return null;
     if (windows_cmd_shell) return null;
-    const split = splitWindowsCommandLine(alloc, value) catch |err| switch (err) {
+    if (try splitsTo(alloc, value, argv)) return value;
+    const own = (try cmdKeepOpenLine(alloc, argv)) orelse return null;
+    defer alloc.free(own);
+    return if (std.mem.eql(u8, own, value)) value else null;
+}
+
+fn splitsTo(alloc: Allocator, line: []const u8, argv: []const [:0]const u8) Allocator.Error!bool {
+    const split = splitWindowsCommandLine(alloc, line) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
+        else => return false,
     };
     defer {
         for (split) |arg| alloc.free(arg);
         alloc.free(split);
     }
-    if (split.len != argv.len) return null;
+    if (split.len != argv.len) return false;
     for (split, argv) |a, b| {
-        if (!std.mem.eql(u8, a, b)) return null;
+        if (!std.mem.eql(u8, a, b)) return false;
     }
-    return value;
+    return true;
+}
+
+/// cmd's own line for `<cmd> /k <program> <arguments>`: the text after `/k`
+/// in one more pair of quotes, `<cmd> /k ""<program>" <arguments>"`. cmd
+/// takes the first and the last quote off that text and runs the rest, so
+/// the program path stays quoted whatever it holds. Measured with cmd.exe:
+/// quoted as usual, or as `/k "<program>" ...` (Windows Terminal's line), a
+/// path with `&` or `^`, or one with no space and `(`, `;`, `,` or `=`, runs
+/// something else or nothing; this form ran every one. A defined `%NAME%` in
+/// the path is still expanded. Null unless argv has that shape: a program
+/// with no `"`, and arguments with nothing cmd reads specially.
+pub fn cmdKeepOpenLine(alloc: Allocator, argv: []const []const u8) Allocator.Error!?[:0]u8 {
+    if (argv.len < 3 or !std.ascii.eqlIgnoreCase(argv[1], "/k")) return null;
+    for (argv[0..3]) |arg| {
+        if (arg.len == 0 or std.mem.indexOfScalar(u8, arg, '"') != null) return null;
+    }
+    for (argv[3..]) |arg| {
+        if (arg.len == 0 or std.mem.indexOfAny(u8, arg, " \t\r\n\"&|<>^%()") != null) return null;
+    }
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    const writer = &out.writer;
+    const quote = if (std.mem.indexOfAny(u8, argv[0], " \t") != null) "\"" else "";
+    writer.print("{s}{s}{s} {s} \"\"{s}\"", .{ quote, argv[0], quote, argv[1], argv[2] }) catch return error.OutOfMemory;
+    for (argv[3..]) |arg| writer.print(" {s}", .{arg}) catch return error.OutOfMemory;
+    writer.writeByte('"') catch return error.OutOfMemory;
+    return try out.toOwnedSliceSentinel(0);
 }
 
 /// Add the user profiles after the detected local shells (and before the SSH
@@ -1056,7 +1101,8 @@ pub fn recoveryCommand(alloc: Allocator) !Command {
 }
 
 /// Every profile the picker lists: the detected local shells, then the user's
-/// own (`user`, a snapshot of the `profile-*` keys), then the SSH hosts.
+/// own (`user`, a snapshot of the `profile-*` keys), then Visual Studio's
+/// developer shells, then the SSH hosts.
 pub fn listProfiles(
     alloc: Allocator,
     include_ssh_hosts: bool,
@@ -1074,10 +1120,7 @@ pub fn listProfiles(
         order_hint,
         null,
     );
-    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user.definitions, ProcessEnvironment{});
-    const profiles = try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, null);
-    arrangeProfiles(profiles, user.order, user.hidden);
-    return profiles;
+    return try appendLaterProfiles(alloc, shell_profiles, user, SystemStages{ .include_ssh_hosts = include_ssh_hosts }, null);
 }
 
 /// `listProfiles` that also says whether the list is complete (a WSL probe
@@ -1099,11 +1142,49 @@ pub fn discoverProfiles(
         order_hint,
         &complete,
     );
-    const local_profiles = try appendUserProfiles(alloc, shell_profiles, user.definitions, ProcessEnvironment{});
-    const profiles = try appendConfiguredSshProfiles(alloc, local_profiles, include_ssh_hosts, &complete);
-    arrangeProfiles(profiles, user.order, user.hidden);
+    const profiles = try appendLaterProfiles(alloc, shell_profiles, user, SystemStages{ .include_ssh_hosts = include_ssh_hosts }, &complete);
     return .{ .profiles = profiles, .complete = complete };
 }
+
+/// The stages after the detected local shells, in the picker's order: the
+/// user's profiles, Visual Studio's developer shells, then the SSH hosts,
+/// arranged by `profile-order` and `profile-hidden`. `stages` says how each
+/// one asks the system (`SystemStages`, or a test's). Takes ownership of
+/// `shell_profiles`, also on error.
+fn appendLaterProfiles(
+    alloc: Allocator,
+    shell_profiles: []Profile,
+    user: *const UserProfiles,
+    stages: anytype,
+    complete: ?*bool,
+) ![]Profile {
+    const user_profiles = try appendUserProfiles(alloc, shell_profiles, user.definitions, stages.environment);
+    const local_profiles = try appendVisualStudioProfiles(
+        alloc,
+        user_profiles,
+        user.visual_studio,
+        stages.arch,
+        stages.visual_studio,
+        stages.visual_studio_host,
+        complete,
+    );
+    const profiles = try stages.ssh(alloc, local_profiles, complete);
+    arrangeProfiles(profiles, user.order, user.hidden);
+    return profiles;
+}
+
+/// The real system, for `appendLaterProfiles`.
+const SystemStages = struct {
+    include_ssh_hosts: bool,
+    environment: ProcessEnvironment = .{},
+    arch: visual_studio.Arch = visual_studio.build_arch,
+    visual_studio: visual_studio.ComSource = .{},
+    visual_studio_host: VisualStudioHost = .{},
+
+    pub fn ssh(self: SystemStages, alloc: Allocator, profiles: []Profile, complete: ?*bool) ![]Profile {
+        return try appendConfiguredSshProfiles(alloc, profiles, self.include_ssh_hosts, complete);
+    }
+};
 
 fn appendConfiguredSshProfiles(
     alloc: Allocator,
@@ -1137,6 +1218,800 @@ fn appendConfiguredSshProfiles(
     }
     defer alloc.free(ssh_path.?);
     return try appendSshProfiles(alloc, shell_profiles, hosts, ssh_path.?);
+}
+
+/// What `appendVisualStudioProfiles` asks of the system: whether an install
+/// folder and a file exist, with the guards discovery uses everywhere (a
+/// fixed local drive, no link followed at any component, no cloud
+/// placeholder), and the shell lookups the other profiles use.
+const VisualStudioHost = struct {
+    pub fn installDirectory(_: VisualStudioHost, path: []const u8) bool {
+        return isLocalSearchDirectory(path);
+    }
+
+    pub fn file(_: VisualStudioHost, path: []const u8) bool {
+        return isLocalExecutableInfo(pathInfo(path) orelse return false);
+    }
+
+    pub fn lookup(_: VisualStudioHost, alloc: Allocator, exe: []const u8) !?[]u8 {
+        return try lookupExecutable(alloc, exe);
+    }
+};
+
+/// Add Visual Studio's developer shells after `shell_profiles`, newest
+/// instance first: its Developer Command Prompt, then its Developer
+/// PowerShell, then the next instance's. `source` lists the instances
+/// (`visual_studio.ComSource`, or a test's), `host` checks their files.
+/// Under `.newest` every instance after the first that makes a profile is
+/// hidden, as in Windows Terminal: still found by key. Under `.none`
+/// `source` is not asked. Takes ownership of `shell_profiles`, also on
+/// error; a failed query leaves `complete` false.
+pub fn appendVisualStudioProfiles(
+    alloc: Allocator,
+    shell_profiles: []Profile,
+    mode: VisualStudioProfiles,
+    arch: visual_studio.Arch,
+    source: anytype,
+    host: anytype,
+    complete: ?*bool,
+) ![]Profile {
+    if (mode == .none) return shell_profiles;
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const found = source.query(arena.allocator()) catch |err| {
+        deinitProfiles(alloc, shell_profiles);
+        return err;
+    };
+    if (!found.complete) {
+        if (complete) |value| value.* = false;
+    }
+    if (found.instances.len == 0) return shell_profiles;
+    visual_studio.sortNewestFirst(found.instances);
+
+    var profiles: std.ArrayList(Profile) = .empty;
+    profiles.ensureTotalCapacity(alloc, shell_profiles.len + 2 * found.instances.len) catch |err| {
+        deinitProfiles(alloc, shell_profiles);
+        return err;
+    };
+    profiles.appendSliceAssumeCapacity(shell_profiles);
+    alloc.free(shell_profiles);
+    errdefer deinitProfileList(alloc, &profiles);
+
+    var shown = false;
+    var newest_cmd = false;
+    var newest_pwsh = false;
+    for (found.instances) |instance| {
+        const first = profiles.items.len;
+        try appendVisualStudioInstance(alloc, &profiles, instance, arch, host);
+        if (profiles.items.len == first) continue;
+        for (profiles.items[first..]) |*profile| {
+            profile.hidden = mode == .newest and shown;
+            const newest = switch (profile.kind) {
+                .vs_dev_cmd => &newest_cmd,
+                .vs_dev_shell => &newest_pwsh,
+                else => continue,
+            };
+            profile.newest_visual_studio = !newest.*;
+            newest.* = true;
+        }
+        shown = true;
+    }
+    return try profiles.toOwnedSlice(alloc);
+}
+
+/// The two profiles of one instance, each only when its script is there.
+/// The key carries the instance id (`vs:<id>:cmd`, `vs:<id>:pwsh`), which
+/// survives updates and moves. Both start in home: `-startdir=none` and
+/// `-SkipAutomaticLocation` keep the scripts from changing directory. The
+/// PowerShell argv survives the usual quoting as is (its script holds no
+/// `"`), so only the Command Prompt carries a line of its own.
+fn appendVisualStudioInstance(
+    alloc: Allocator,
+    profiles: *std.ArrayList(Profile),
+    instance: visual_studio.Instance,
+    arch: visual_studio.Arch,
+    host: anytype,
+) !void {
+    // The id goes into a key and a PowerShell script; a network install
+    // would put a share's timeouts on discovery.
+    if (!visual_studio.isPlainInstanceId(instance.id)) return;
+    if (!isOnLocalDrive(instance.path)) return;
+    if (!host.installDirectory(instance.path)) return;
+    const root = std.mem.trimRight(u8, instance.path, "\\/");
+    const dev_args = visual_studio.devCmdArguments(arch, instance.version);
+
+    const bat = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, visual_studio.dev_cmd_relative });
+    defer alloc.free(bat);
+    if (host.file(bat)) {
+        if (try host.lookup(alloc, "cmd.exe")) |cmd| {
+            defer alloc.free(cmd);
+            const key = try std.fmt.allocPrint(alloc, "vs:{s}:cmd", .{instance.id});
+            defer alloc.free(key);
+            const label = try visual_studio.commandPromptLabel(alloc, instance);
+            defer alloc.free(label);
+            const argv = [_][]const u8{ cmd, "/k", bat, "-startdir=none", dev_args[0], dev_args[1] };
+            // cmd reads the raw text after `/k`: in cmd's own form an
+            // install path with `&`, `^` or `(` stays one path, where the
+            // usual quoting (and Windows Terminal's line) splits it. Exec
+            // launches this line while the argv is still this one.
+            const line = try cmdKeepOpenLine(alloc, &argv);
+            errdefer if (line) |value| alloc.free(value);
+            try appendProfile(alloc, profiles, .vs_dev_cmd, key, label, &argv);
+            if (line) |value| profiles.items[profiles.items.len - 1].user = .{ .command_line = value };
+        }
+    }
+
+    if (!visual_studio.hasDevShell(instance.version)) return;
+    const module = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, visual_studio.devShellModuleRelative(instance.version) });
+    defer alloc.free(module);
+    if (!host.file(module)) return;
+    // PowerShell 7 when it is installed, as Windows Terminal picks.
+    const shell = (try host.lookup(alloc, "pwsh.exe")) orelse
+        (try host.lookup(alloc, "powershell.exe")) orelse return;
+    defer alloc.free(shell);
+    const script = try visual_studio.devShellScript(alloc, module, instance, arch);
+    defer alloc.free(script);
+    const key = try std.fmt.allocPrint(alloc, "vs:{s}:pwsh", .{instance.id});
+    defer alloc.free(key);
+    const label = try visual_studio.powerShellLabel(alloc, instance);
+    defer alloc.free(label);
+    try appendProfile(alloc, profiles, .vs_dev_shell, key, label, &.{ shell, "-NoExit", "-Command", script });
+}
+
+/// A Visual Studio instance list for tests, counting the queries.
+const TestVsSource = struct {
+    instances: []const visual_studio.Instance = &.{},
+    complete: bool = true,
+    queries: *usize,
+
+    pub fn query(self: TestVsSource, alloc: Allocator) !visual_studio.Discovery {
+        self.queries.* += 1;
+        return .{ .instances = try alloc.dupe(visual_studio.Instance, self.instances), .complete = self.complete };
+    }
+};
+
+/// The files and folders a test's Visual Studio installs have, and the
+/// shells on the machine; counts every question.
+const TestVsHost = struct {
+    paths: []const []const u8,
+    pwsh: bool = true,
+    queries: *usize,
+
+    pub fn installDirectory(self: TestVsHost, path: []const u8) bool {
+        return self.has(path);
+    }
+
+    pub fn file(self: TestVsHost, path: []const u8) bool {
+        return self.has(path);
+    }
+
+    fn has(self: TestVsHost, path: []const u8) bool {
+        self.queries.* += 1;
+        for (self.paths) |known| if (std.mem.eql(u8, known, path)) return true;
+        return false;
+    }
+
+    pub fn lookup(self: TestVsHost, alloc: Allocator, exe: []const u8) !?[]u8 {
+        self.queries.* += 1;
+        if (std.mem.eql(u8, exe, "pwsh.exe")) return if (self.pwsh) try alloc.dupe(u8, test_pwsh) else null;
+        if (std.mem.eql(u8, exe, "powershell.exe")) return try alloc.dupe(u8, test_windows_powershell);
+        if (std.mem.eql(u8, exe, "cmd.exe")) return try alloc.dupe(u8, test_cmd);
+        return null;
+    }
+};
+
+const test_vs18_root = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community";
+const test_vs2022_root = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community";
+const test_vs18: visual_studio.Instance = .{
+    .id = "6bb7cfd9",
+    .path = test_vs18_root,
+    .version_text = "18.10.12201.205",
+    .version = visual_studio.version(18, 10) | 0x2fa9_00cd,
+    .install_date = 134145712400000000,
+    .suffix = "18",
+};
+const test_vs2022: visual_studio.Instance = .{
+    .id = "486bb794",
+    .path = test_vs2022_root,
+    .version_text = "17.14.37628.2",
+    .version = visual_studio.version(17, 14) | 0x92fc_0002,
+    .install_date = 134145709760000000,
+    .suffix = "2022",
+};
+/// What both installs have on disk.
+const test_vs_paths = [_][]const u8{
+    test_vs18_root,
+    test_vs18_root ++ "\\Common7\\Tools\\VsDevCmd.bat",
+    test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll",
+    test_vs2022_root,
+    test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat",
+    test_vs2022_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll",
+};
+
+fn testVsProfiles(
+    alloc: Allocator,
+    mode: VisualStudioProfiles,
+    arch: visual_studio.Arch,
+    source: TestVsSource,
+    host: TestVsHost,
+    complete: ?*bool,
+) ![]Profile {
+    return try appendVisualStudioProfiles(alloc, try alloc.alloc(Profile, 0), mode, arch, source, host, complete);
+}
+
+fn expectArgv(profile: Profile, argv: []const []const u8) !void {
+    try std.testing.expectEqual(argv.len, profile.command.direct.len);
+    for (argv, profile.command.direct) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+test "two Visual Studio installs give their developer shells, newest first, the older hidden" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var source_queries: usize = 0;
+    var host_queries: usize = 0;
+    // Setup Configuration's order is not the list's: the newest comes first.
+    const source: TestVsSource = .{ .instances = &.{ test_vs2022, test_vs18 }, .queries = &source_queries };
+    const host: TestVsHost = .{ .paths = &test_vs_paths, .queries = &host_queries };
+
+    const vs18_script = "&{Import-Module '" ++ test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    const vs2022_script = "&{Import-Module '" ++ test_vs2022_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 486bb794 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    for ([_]VisualStudioProfiles{ .newest, .all }) |mode| {
+        var complete = true;
+        const profiles = try testVsProfiles(alloc, mode, .x64, source, host, &complete);
+        defer deinitProfiles(alloc, profiles);
+        try testing.expect(complete);
+        try expectProfileKeys(profiles, &.{ "vs:6bb7cfd9:cmd", "vs:6bb7cfd9:pwsh", "vs:486bb794:cmd", "vs:486bb794:pwsh" });
+        const labels = [_][]const u8{
+            "Developer Command Prompt for VS 18",
+            "Developer PowerShell for VS 18",
+            "Developer Command Prompt for VS 2022",
+            "Developer PowerShell for VS 2022",
+        };
+        const kinds = [_]ProfileKind{ .vs_dev_cmd, .vs_dev_shell, .vs_dev_cmd, .vs_dev_shell };
+        for (profiles, labels, kinds, 0..) |profile, label, kind, index| {
+            try testing.expectEqualStrings(label, profile.label);
+            try testing.expectEqual(kind, profile.kind);
+            try testing.expectEqual(mode == .newest and index >= 2, profile.hidden);
+            // Home, as every detected profile, and no environment of its own.
+            try testing.expect(profile.working_directory == null);
+            try testing.expectEqual(kind == .vs_dev_cmd, profile.user != null);
+            if (profile.user) |launch| try testing.expectEqual(@as(usize, 0), launch.env.len);
+        }
+        // cmd's own form of the argv, which Exec launches as written.
+        try testing.expectEqualStrings(
+            test_cmd ++ " /k \"\"" ++ test_vs18_root ++ "\\Common7\\Tools\\VsDevCmd.bat\" -startdir=none -arch=x64 -host_arch=x64\"",
+            profiles[0].user.?.command_line,
+        );
+        try expectArgv(profiles[0], &.{ test_cmd, "/k", test_vs18_root ++ "\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=x64", "-host_arch=x64" });
+        try expectArgv(profiles[1], &.{ test_pwsh, "-NoExit", "-Command", vs18_script });
+        try expectArgv(profiles[2], &.{ test_cmd, "/k", test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=x64", "-host_arch=x64" });
+        try expectArgv(profiles[3], &.{ test_pwsh, "-NoExit", "-Command", vs2022_script });
+    }
+
+    // On ARM64 the tools run natively from 17.4, under x64 before.
+    {
+        var vs17_3 = test_vs2022;
+        vs17_3.version = visual_studio.version(17, 3);
+        const profiles = try testVsProfiles(alloc, .all, .arm64, .{ .instances = &.{ test_vs18, vs17_3 }, .queries = &source_queries }, host, null);
+        defer deinitProfiles(alloc, profiles);
+        try expectArgv(profiles[0], &.{ test_cmd, "/k", test_vs18_root ++ "\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=arm64", "-host_arch=arm64" });
+        try testing.expect(std.mem.endsWith(u8, profiles[1].command.direct[3], "-DevCmdArguments '-arch=arm64 -host_arch=arm64'}"));
+        try expectArgv(profiles[2], &.{ test_cmd, "/k", test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=arm64", "-host_arch=x64" });
+        try testing.expect(std.mem.endsWith(u8, profiles[3].command.direct[3], "-DevCmdArguments '-arch=arm64 -host_arch=x64'}"));
+    }
+
+    // `none` asks nothing at all.
+    source_queries = 0;
+    host_queries = 0;
+    const none = try testVsProfiles(alloc, .none, .x64, source, host, null);
+    defer deinitProfiles(alloc, none);
+    try testing.expectEqual(@as(usize, 0), none.len);
+    try testing.expectEqual(@as(usize, 0), source_queries);
+    try testing.expectEqual(@as(usize, 0), host_queries);
+}
+
+test "a Visual Studio install gets each developer shell only when its script is there" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+
+    // No VsDevCmd.bat: no Command Prompt, and the PowerShell is still there.
+    {
+        const paths = [_][]const u8{ test_vs18_root, test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll" };
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{test_vs18}, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try expectProfileKeys(profiles, &.{"vs:6bb7cfd9:pwsh"});
+    }
+    // Before 16.2 there is no Developer PowerShell, even with a module.
+    {
+        var vs16_1 = test_vs18;
+        vs16_1.version = visual_studio.version(16, 1);
+        const paths = [_][]const u8{
+            test_vs18_root,
+            test_vs18_root ++ "\\Common7\\Tools\\VsDevCmd.bat",
+            test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll",
+            test_vs18_root ++ "\\Common7\\Tools\\vsdevshell\\Microsoft.VisualStudio.DevShell.dll",
+        };
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{vs16_1}, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try expectProfileKeys(profiles, &.{"vs:6bb7cfd9:cmd"});
+    }
+    // 16.2 kept the module in `vsdevshell\`; 16.3 moved it.
+    {
+        var vs16_2 = test_vs18;
+        vs16_2.version = visual_studio.version(16, 2);
+        const old_module = test_vs18_root ++ "\\Common7\\Tools\\vsdevshell\\Microsoft.VisualStudio.DevShell.dll";
+        const paths = [_][]const u8{ test_vs18_root, old_module };
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{vs16_2}, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try expectProfileKeys(profiles, &.{"vs:6bb7cfd9:pwsh"});
+        try testing.expect(std.mem.startsWith(u8, profiles[0].command.direct[3], "&{Import-Module '" ++ old_module ++ "';"));
+    }
+    // No install folder: nothing, though its files answer.
+    {
+        const paths = test_vs_paths[1..3];
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{test_vs18}, .queries = &queries }, .{ .paths = paths, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try testing.expectEqual(@as(usize, 0), profiles.len);
+    }
+    // An id that could not go in a key or a script: nothing.
+    {
+        var odd = test_vs18;
+        odd.id = "6bb7cfd9'; calc";
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{odd}, .queries = &queries }, .{ .paths = &test_vs_paths, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try testing.expectEqual(@as(usize, 0), profiles.len);
+    }
+}
+
+test "under newest the first install that makes a profile stays shown" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    // The newest lacks both scripts (a broken install): the next is shown.
+    const paths = [_][]const u8{ test_vs18_root, test_vs2022_root, test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat" };
+    const profiles = try testVsProfiles(alloc, .newest, .x64, .{ .instances = &.{ test_vs18, test_vs2022 }, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+    defer deinitProfiles(alloc, profiles);
+    try expectProfileKeys(profiles, &.{"vs:486bb794:cmd"});
+    try testing.expect(!profiles[0].hidden);
+}
+
+test "the Developer Command Prompt carries cmd's own line, which Exec keeps only for its argv" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    // `Command.zig` runs this line through cmd ("a Developer Command Prompt
+    // line runs its batch file through cmd whatever the install path holds").
+    const root = "C:\\VS&calc";
+    var odd = test_vs18;
+    odd.path = root;
+    const paths = [_][]const u8{ root, root ++ "\\Common7\\Tools\\VsDevCmd.bat" };
+    const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{odd}, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+    defer deinitProfiles(alloc, profiles);
+    const line = profiles[0].user.?.command_line;
+    try testing.expectEqualStrings(test_cmd ++ " /k \"\"C:\\VS&calc\\Common7\\Tools\\VsDevCmd.bat\" -startdir=none -arch=x64 -host_arch=x64\"", line);
+    // Not the argv's split, but its cmd form, so the launch uses it.
+    try testing.expectEqualStrings(line, (try verbatimCommandLine(alloc, line, profiles[0].command.direct, false)).?);
+    // Any other argv (integration, `initial-command`) drops it.
+    const other = [_][:0]const u8{ test_cmd, "/k", "C:\\VS&calc\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none" };
+    try testing.expect((try verbatimCommandLine(alloc, line, &other, false)) == null);
+    try testing.expect((try verbatimCommandLine(alloc, line, profiles[0].command.direct, true)) == null);
+
+    // A program path with a space is quoted; anything but `/k` and plain
+    // arguments has no such form.
+    const spaced = (try cmdKeepOpenLine(alloc, &.{ "C:\\W s\\cmd.exe", "/K", "C:\\a b\\x.bat" })).?;
+    defer alloc.free(spaced);
+    try testing.expectEqualStrings("\"C:\\W s\\cmd.exe\" /K \"\"C:\\a b\\x.bat\"\"", spaced);
+    for ([_][]const []const u8{
+        &.{ "cmd.exe", "/c", "x.bat" },
+        &.{ "cmd.exe", "/k" },
+        &.{ "cmd.exe", "/k", "x\".bat" },
+        &.{ "cmd.exe", "/k", "x.bat", "a b" },
+        &.{ "cmd.exe", "/k", "x.bat", "a&b" },
+        &.{ "cmd.exe", "/k", "x.bat", "%PATH%" },
+        &.{ "cmd.exe", "/k", "x.bat", "" },
+    }) |argv| try testing.expect((try cmdKeepOpenLine(alloc, argv)) == null);
+}
+
+test "Developer PowerShell runs pwsh when it is installed, else Windows PowerShell" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    for ([_]bool{ true, false }) |pwsh| {
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{test_vs18}, .queries = &queries }, .{ .paths = &test_vs_paths, .pwsh = pwsh, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try testing.expectEqualStrings(if (pwsh) test_pwsh else test_windows_powershell, profiles[1].command.direct[0]);
+    }
+}
+
+test "a Visual Studio path with quotes and dollar signs reaches PowerShell as written" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    const root = "D:\\VS 'Pro' $env:TEMP `n";
+    var odd = test_vs18;
+    odd.path = root;
+    const paths = [_][]const u8{ root, root ++ "\\Common7\\Tools\\VsDevCmd.bat", root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll" };
+    const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{odd}, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+    defer deinitProfiles(alloc, profiles);
+    // The batch file is one argument, and quoted in the line cmd reads.
+    try testing.expectEqualStrings(root ++ "\\Common7\\Tools\\VsDevCmd.bat", profiles[0].command.direct[2]);
+    try testing.expect(std.mem.indexOf(u8, profiles[0].user.?.command_line, " /k \"\"" ++ root ++ "\\Common7") != null);
+    try testing.expectEqualStrings(
+        "&{Import-Module 'D:\\VS ''Pro'' $env:TEMP `n\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        profiles[1].command.direct[3],
+    );
+}
+
+test "Visual Studio names carry the nickname or a channel that is not Release" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    var nicknamed = test_vs18;
+    nicknamed.suffix = "18 (Work)";
+    var preview = test_vs2022;
+    preview.suffix = "2022 [Preview]";
+    const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{ nicknamed, preview }, .queries = &queries }, .{ .paths = &test_vs_paths, .queries = &queries }, null);
+    defer deinitProfiles(alloc, profiles);
+    try testing.expectEqualStrings("Developer Command Prompt for VS 18 (Work)", profiles[0].label);
+    try testing.expectEqualStrings("Developer PowerShell for VS 18 (Work)", profiles[1].label);
+    try testing.expectEqualStrings("Developer Command Prompt for VS 2022 [Preview]", profiles[2].label);
+    try testing.expectEqualStrings("Developer PowerShell for VS 2022 [Preview]", profiles[3].label);
+}
+
+test "Visual Studio installs on a share or behind a link are skipped" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+
+    // A share is refused before anything is asked of it.
+    for ([_][]const u8{ "\\\\server\\share\\VS\\18", "//server/share/VS", "\\\\?\\UNC\\server\\share\\VS", "Program Files\\VS" }) |root| {
+        var remote = test_vs18;
+        remote.path = root;
+        var host_queries: usize = 0;
+        const all_paths = [_][]const u8{root};
+        const profiles = try testVsProfiles(alloc, .all, .x64, .{ .instances = &.{remote}, .queries = &queries }, .{ .paths = &all_paths, .queries = &host_queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        try testing.expectEqual(@as(usize, 0), profiles.len);
+        try testing.expectEqual(@as(usize, 0), host_queries);
+    }
+
+    // Through the real file checks: an install reached by a junction is
+    // refused, the same install by its own path is listed.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("real/Common7/Tools");
+    try tmp.dir.makePath("link");
+    try tmp.dir.writeFile(.{ .sub_path = "real/Common7/Tools/VsDevCmd.bat", .data = "@echo off" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const real = try std.fmt.allocPrint(alloc, "{s}\\real", .{root});
+    defer alloc.free(real);
+    const link = try std.fmt.allocPrint(alloc, "{s}\\link", .{root});
+    defer alloc.free(link);
+    try testMakeJunction(alloc, link, real);
+    const lookup_host: TestVsHost = .{ .paths = &.{}, .queries = &queries };
+    const Real = struct {
+        lookups: TestVsHost,
+        pub fn installDirectory(_: @This(), path: []const u8) bool {
+            return (VisualStudioHost{}).installDirectory(path);
+        }
+        pub fn file(_: @This(), path: []const u8) bool {
+            return (VisualStudioHost{}).file(path);
+        }
+        pub fn lookup(self: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+            return try self.lookups.lookup(a, exe);
+        }
+    };
+    for ([_]struct { path: []const u8, listed: bool }{ .{ .path = real, .listed = true }, .{ .path = link, .listed = false } }) |case| {
+        var local = test_vs18;
+        local.path = case.path;
+        const profiles = try appendVisualStudioProfiles(alloc, try alloc.alloc(Profile, 0), .all, .x64, TestVsSource{ .instances = &.{local}, .queries = &queries }, Real{ .lookups = lookup_host }, null);
+        defer deinitProfiles(alloc, profiles);
+        try testing.expectEqual(@as(usize, if (case.listed) 1 else 0), profiles.len);
+    }
+}
+
+test "a failed Visual Studio query leaves the list incomplete, and asking again is the retry" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    var complete = true;
+    const profiles = try testVsProfiles(alloc, .newest, .x64, .{ .complete = false, .queries = &queries }, .{ .paths = &.{}, .queries = &queries }, &complete);
+    defer deinitProfiles(alloc, profiles);
+    try testing.expect(!complete);
+    // No Visual Studio at all is a complete answer.
+    complete = true;
+    const none = try testVsProfiles(alloc, .newest, .x64, .{ .queries = &queries }, .{ .paths = &.{}, .queries = &queries }, &complete);
+    defer deinitProfiles(alloc, none);
+    try testing.expect(complete);
+}
+
+test "Visual Studio profile listing frees what it built when an allocation fails" {
+    var queries: usize = 0;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+        const start = alloc.alloc(Profile, 0) catch continue;
+        const profiles = appendVisualStudioProfiles(alloc, start, .newest, .x64, TestVsSource{ .instances = &.{ test_vs18, test_vs2022 }, .queries = &queries }, TestVsHost{ .paths = &test_vs_paths, .queries = &queries }, null) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        deinitProfiles(alloc, profiles);
+        break;
+    }
+}
+
+/// `appendLaterProfiles`'s stages with a fake Visual Studio (`Source`,
+/// `Host`) or the real one, and one SSH host, `prod`.
+fn TestStages(comptime Source: type, comptime Host: type) type {
+    return struct {
+        environment: TestEnvironment = .{},
+        arch: visual_studio.Arch = .x64,
+        visual_studio: Source,
+        visual_studio_host: Host,
+
+        pub fn ssh(_: @This(), alloc: Allocator, profiles: []Profile, _: ?*bool) ![]Profile {
+            const hosts = [_]windows_ssh_hosts.Host{.{ .alias = "prod" }};
+            return try appendSshProfiles(alloc, profiles, &hosts, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+        }
+    };
+}
+
+/// One detected shell, Command Prompt, for `appendLaterProfiles`.
+fn testShellProfiles(alloc: Allocator) ![]Profile {
+    const shell = try alloc.alloc(Profile, 1);
+    errdefer alloc.free(shell);
+    shell[0] = try makeProfile(alloc, .cmd, "cmd.exe", "Command Prompt", &.{test_cmd});
+    return shell;
+}
+
+test "Visual Studio profiles list after the user's and before SSH, the hidden ones last" {
+    // The stages `listProfiles` and `discoverProfiles` run after the local
+    // shells, with a fake Visual Studio.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var queries: usize = 0;
+    const definitions = [_]UserProfiles.Definition{.{ .id = "py", .command = "cmd.exe /k py" }};
+    var user: UserProfiles = .{ .arena = .init(alloc), .definitions = &definitions };
+    defer user.deinit();
+    const stages: TestStages(TestVsSource, TestVsHost) = .{
+        .visual_studio = .{ .instances = &.{ test_vs2022, test_vs18 }, .queries = &queries },
+        .visual_studio_host = .{ .paths = &test_vs_paths, .queries = &queries },
+    };
+
+    // `all` shows both installs' pairs, newest first.
+    user.visual_studio = .all;
+    {
+        const profiles = try appendLaterProfiles(alloc, try testShellProfiles(alloc), &user, stages, null);
+        defer deinitProfiles(alloc, profiles);
+        try expectProfileKeys(profiles, &.{ "cmd.exe", "user:py", "vs:6bb7cfd9:cmd", "vs:6bb7cfd9:pwsh", "vs:486bb794:cmd", "vs:486bb794:pwsh", "ssh:prod" });
+        try testing.expectEqual(@as(usize, 7), visibleProfileCount(profiles));
+    }
+    // `none` asks nothing.
+    user.visual_studio = .none;
+    queries = 0;
+    {
+        const profiles = try appendLaterProfiles(alloc, try testShellProfiles(alloc), &user, stages, null);
+        defer deinitProfiles(alloc, profiles);
+        try expectProfileKeys(profiles, &.{ "cmd.exe", "user:py", "ssh:prod" });
+        try testing.expectEqual(@as(usize, 0), queries);
+    }
+
+    // `newest`, nothing else set: the older install's pair goes after SSH,
+    // hidden.
+    user.visual_studio = .newest;
+    var complete = true;
+    const profiles = try appendLaterProfiles(alloc, try testShellProfiles(alloc), &user, stages, &complete);
+    defer deinitProfiles(alloc, profiles);
+    try testing.expect(complete);
+    try expectProfileKeys(profiles, &.{ "cmd.exe", "user:py", "vs:6bb7cfd9:cmd", "vs:6bb7cfd9:pwsh", "ssh:prod", "vs:486bb794:cmd", "vs:486bb794:pwsh" });
+    try testing.expectEqual(@as(usize, 5), visibleProfileCount(profiles));
+    // A key names a Visual Studio profile, in any case, to order or hide it.
+    arrangeProfiles(profiles, &.{"VS:6BB7CFD9:PWSH"}, &.{"vs:6bb7cfd9:cmd"});
+    try expectProfileKeys(profiles, &.{ "vs:6bb7cfd9:pwsh", "cmd.exe", "user:py", "ssh:prod", "vs:6bb7cfd9:cmd", "vs:486bb794:cmd", "vs:486bb794:pwsh" });
+    // `vs:newest:*` names the newest instance's shells, resolved before the
+    // sort moves anything, whichever order the lines come in.
+    for (profiles) |*profile| profile.hidden = std.mem.startsWith(u8, profile.key, "vs:486bb794");
+    arrangeProfiles(profiles, &.{ "ssh:prod", "vs:newest:pwsh", "vs:newest:cmd" }, &.{"VS:NEWEST:CMD"});
+    try expectProfileKeys(profiles, &.{ "ssh:prod", "vs:6bb7cfd9:pwsh", "cmd.exe", "user:py", "vs:6bb7cfd9:cmd", "vs:486bb794:cmd", "vs:486bb794:pwsh" });
+    // Discovery marked the newest instance's shells, so a list that puts the
+    // older instance first (`profile-order`, the Settings rows), arranged
+    // again or copied, still resolves to the newest.
+    try testing.expectEqual(@as(usize, 4), visibleProfileCount(profiles));
+    for (profiles) |*profile| profile.hidden = false;
+    arrangeProfiles(profiles, &.{ "vs:486bb794:cmd", "vs:486bb794:pwsh" }, &.{});
+    try testing.expectEqualStrings("vs:486bb794:cmd", profiles[0].key);
+    const copied = try cloneProfiles(alloc, profiles);
+    defer deinitProfiles(alloc, copied);
+    for ([_][]const Profile{ profiles, copied }) |list| {
+        const newest: NewestVisualStudio = .of(list);
+        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", newest.resolve("vs:newest:cmd").?);
+        try testing.expectEqualStrings("vs:6bb7cfd9:pwsh", newest.resolve("vs:newest:pwsh").?);
+    }
+}
+
+test "the machine's Visual Studio shells, through the stages a listing runs" {
+    // Real Setup Configuration and file checks, between a fake shell and a
+    // fake SSH host (no WSL probe, no SSH config). Only enumerates and looks
+    // at files. A machine without Visual Studio skips.
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    // Skip where Setup Configuration is absent, lists nothing, or does not
+    // answer in full (a stale registration, an unreadable instance).
+    const found = try visual_studio.ComSource.query(.{}, arena.allocator());
+    if (!found.complete or found.instances.len == 0) return error.SkipZigTest;
+    var user: UserProfiles = .{ .arena = .init(alloc) };
+    defer user.deinit();
+    const stages: TestStages(visual_studio.ComSource, VisualStudioHost) = .{
+        .arch = visual_studio.build_arch,
+        .visual_studio = .{},
+        .visual_studio_host = .{},
+    };
+    for ([_]VisualStudioProfiles{ .newest, .all, .none }) |mode| {
+        user.visual_studio = mode;
+        var complete = true;
+        const profiles = try appendLaterProfiles(alloc, try testShellProfiles(alloc), &user, stages, &complete);
+        defer deinitProfiles(alloc, profiles);
+        if (!complete) return error.SkipZigTest;
+        const shown = visibleProfiles(profiles);
+        try testing.expectEqualStrings("cmd.exe", shown[0].key);
+        try testing.expectEqualStrings("ssh:prod", shown[shown.len - 1].key);
+        var vs_count: usize = 0;
+        for (profiles) |profile| {
+            if (!std.mem.startsWith(u8, profile.key, "vs:")) continue;
+            vs_count += 1;
+            try testing.expect(profile.kind == .vs_dev_cmd or profile.kind == .vs_dev_shell);
+            try testing.expect(std.mem.startsWith(u8, profile.label, "Developer "));
+        }
+        if (mode == .none) {
+            try testing.expectEqual(@as(usize, 2), profiles.len);
+            continue;
+        }
+        // Every shown one is between the shell and SSH; under `newest` they
+        // are one instance's, and every other instance's are hidden, last.
+        var shown_vs: usize = 0;
+        var first_id: ?[]const u8 = null;
+        for (shown[1 .. shown.len - 1]) |profile| {
+            try testing.expect(std.mem.startsWith(u8, profile.key, "vs:"));
+            shown_vs += 1;
+            const id = profile.key[3..std.mem.lastIndexOfScalar(u8, profile.key, ':').?];
+            if (first_id) |want| {
+                if (mode == .newest) try testing.expectEqualStrings(want, id);
+            } else first_id = id;
+        }
+        if (mode == .all) try testing.expectEqual(vs_count, shown_vs);
+        if (mode == .newest and vs_count > 0) {
+            try testing.expect(shown_vs > 0);
+            for (profiles[shown.len..]) |profile| {
+                try testing.expect(profile.hidden);
+                try testing.expect(!std.mem.containsAtLeast(u8, profile.key, 1, first_id.?));
+            }
+        }
+        if (std.process.hasEnvVarConstant("NOCTTY_PRINT_VISUAL_STUDIO_PROFILES")) {
+            std.debug.print("visual-studio-profiles = {s}: {d} shown, {d} hidden\n", .{ @tagName(mode), shown_vs, vs_count - shown_vs });
+            for (profiles) |profile| {
+                if (std.mem.startsWith(u8, profile.key, "vs:")) std.debug.print("  {s} {s}{s}\n", .{ profile.key, profile.label, if (profile.hidden) " (hidden)" else "" });
+            }
+        }
+    }
+}
+
+test "a Visual Studio key resolves through the host's instances, hidden ones too" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var lookups: usize = 0;
+    var wsl_probes: usize = 0;
+    var wsl_lists: usize = 0;
+    const Host = struct {
+        base: TestReferenceHost,
+        mode: VisualStudioProfiles,
+        queries: *usize,
+        answers: bool = true,
+        /// What a partial answer (`answers` false) still lists.
+        partial: []const visual_studio.Instance = &.{test_vs18},
+        pub fn lookup(self: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+            return try self.base.lookup(a, exe);
+        }
+        pub fn gitBash(self: @This(), a: Allocator) !?[]u8 {
+            return try self.base.gitBash(a);
+        }
+        pub fn sshExecutable(self: @This(), a: Allocator) !?[]u8 {
+            return try self.base.sshExecutable(a);
+        }
+        pub fn get(self: @This(), a: Allocator, name: []const u8) Allocator.Error!?[]u8 {
+            return try self.base.get(a, name);
+        }
+        pub fn visualStudio(self: @This(), a: Allocator, complete: *bool) ![]Profile {
+            const instances: []const visual_studio.Instance = if (self.answers) &.{ test_vs18, test_vs2022 } else self.partial;
+            return try testVsProfiles(a, self.mode, .x64, .{ .instances = instances, .complete = self.answers, .queries = self.queries }, .{ .paths = &test_vs_paths, .queries = self.queries }, complete);
+        }
+    };
+    var queries: usize = 0;
+    const base: TestReferenceHost = .{ .lookups = &lookups, .wsl_probes = &wsl_probes, .wsl_lists = &wsl_lists };
+    const host: Host = .{ .base = base, .mode = .newest, .queries = &queries };
+    for ([_][3][]const u8{
+        .{ "vs:6bb7cfd9:cmd", "vs:6bb7cfd9:cmd", test_cmd },
+        .{ "VS:6BB7CFD9:PWSH", "vs:6bb7cfd9:pwsh", test_pwsh },
+        // Hidden under `newest`, and still a default profile.
+        .{ "vs:486bb794:cmd", "vs:486bb794:cmd", test_cmd },
+    }) |case| {
+        var profile = (try resolveProfileReference(alloc, case[0], &.{}, host)).?;
+        defer profile.deinit(alloc);
+        try testing.expectEqualStrings(case[1], profile.key);
+        try testing.expectEqualStrings(case[2], profile.command.direct[0]);
+    }
+    for ([_][]const u8{ "vs:", "vs:6bb7cfd9", "vs:6bb7cfd9:bash", "vs:00000000:cmd" }) |ref| {
+        try testing.expect((try resolveProfileReference(alloc, ref, &.{}, host)) == null);
+    }
+    // `none`, and a host that cannot ask Visual Studio, name nothing.
+    try testing.expect((try resolveProfileReference(alloc, "vs:6bb7cfd9:cmd", &.{}, Host{ .base = base, .mode = .none, .queries = &queries })) == null);
+    try testing.expect((try resolveProfileReference(alloc, "vs:6bb7cfd9:cmd", &.{}, base)) == null);
+    // A query that failed part way still resolves what it found, and does
+    // not say the rest is absent.
+    const partial: Host = .{ .base = base, .mode = .newest, .queries = &queries, .answers = false };
+    var found = (try resolveProfileReference(alloc, "vs:6bb7cfd9:cmd", &.{}, partial)).?;
+    found.deinit(alloc);
+    try testing.expectError(error.VisualStudioUnavailable, resolveProfileReference(alloc, "vs:486bb794:cmd", &.{}, partial));
+    try testing.expectEqual(@as(usize, 0), wsl_probes + wsl_lists);
+
+    // `vs:newest:<shell>`: the newest instance (18.10 before 17.14) under
+    // `newest` and `all`, as its concrete key; nothing under `none`.
+    for ([_]VisualStudioProfiles{ .newest, .all }) |mode| {
+        for ([_][2][]const u8{
+            .{ "vs:newest:cmd", "vs:6bb7cfd9:cmd" },
+            .{ "VS:Newest:PWSH", "vs:6bb7cfd9:pwsh" },
+        }) |case| {
+            var profile = (try resolveProfileReference(alloc, case[0], &.{}, Host{ .base = base, .mode = mode, .queries = &queries })).?;
+            defer profile.deinit(alloc);
+            try testing.expectEqualStrings(case[1], profile.key);
+        }
+    }
+    for ([_][]const u8{ "vs:newest:cmd", "vs:newest:pwsh" }) |ref| {
+        try testing.expect((try resolveProfileReference(alloc, ref, &.{}, Host{ .base = base, .mode = .none, .queries = &queries })) == null);
+    }
+    try testing.expect((try resolveProfileReference(alloc, "vs:newest:bash", &.{}, host)) == null);
+    // A partial answer may lack the newest instance: `vs:newest` names
+    // none, rather than an older instance that panes would then remember,
+    // whether the newest came back (18) or not (2022 alone).
+    for ([_][]const visual_studio.Instance{ &.{test_vs2022}, &.{test_vs18} }) |instances| {
+        const lacking: Host = .{ .base = base, .mode = .newest, .queries = &queries, .answers = false, .partial = instances };
+        for ([_][]const u8{ "vs:newest:cmd", "VS:NEWEST:PWSH" }) |ref| {
+            try testing.expectError(error.VisualStudioUnavailable, resolveProfileReference(alloc, ref, &.{}, lacking));
+        }
+    }
+    var older = (try resolveProfileReference(alloc, "vs:486bb794:cmd", &.{}, Host{ .base = base, .mode = .newest, .queries = &queries, .answers = false, .partial = &.{test_vs2022} })).?;
+    older.deinit(alloc);
+}
+
+test "vs:newest skips an instance without that shell's script" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    // The newest instance (18) has no VsDevCmd.bat, only the DevShell module:
+    // `vs:newest:cmd` is 2022's prompt, `vs:newest:pwsh` 18's PowerShell.
+    var queries: usize = 0;
+    const paths = [_][]const u8{
+        test_vs18_root,
+        test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll",
+        test_vs2022_root,
+        test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat",
+        test_vs2022_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll",
+    };
+    for ([_]VisualStudioProfiles{ .newest, .all }) |mode| {
+        const profiles = try testVsProfiles(alloc, mode, .x64, .{ .instances = &.{ test_vs18, test_vs2022 }, .queries = &queries }, .{ .paths = &paths, .queries = &queries }, null);
+        defer deinitProfiles(alloc, profiles);
+        const newest: NewestVisualStudio = .of(profiles);
+        try testing.expectEqualStrings("vs:486bb794:cmd", newest.resolve("vs:newest:cmd").?);
+        try testing.expectEqualStrings("vs:6bb7cfd9:pwsh", newest.resolve("vs:newest:pwsh").?);
+        try testing.expect(newest.resolve("vs:6bb7cfd9:cmd") == null);
+    }
+    // No Visual Studio shell at all: they name nothing.
+    try testing.expectEqualStrings("", (NewestVisualStudio{}).resolve("vs:newest:cmd").?);
 }
 
 /// The profile that is the shell `defaultCommand` chose, so the picker's
@@ -1258,6 +2133,14 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .support = .unavailable,
             .summary = "SSH profile; shell integration is disabled for remote sessions",
             .next_step = "Enable shell integration inside the remote shell's own startup files.",
+        },
+        .vs_dev_cmd => .{
+            .support = .automatic,
+            .summary = "Visual Studio Developer Command Prompt with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
+        },
+        .vs_dev_shell => .{
+            .support = .unavailable,
+            .summary = "Visual Studio Developer PowerShell; it starts through -Command, which runs without OSC 133 and OSC 7 marks, as in Windows Terminal",
         },
         .user => .{
             .support = .manual,
@@ -2398,6 +3281,20 @@ pub const profile_alias_words = [_]struct { kind: ProfileKind, word: []const u8 
     .{ .kind = .cmd, .word = "command-prompt" },
 };
 
+test "a vs: key of either shell is a reference that can name a profile" {
+    const Ids = struct {
+        pub fn contains(_: @This(), _: []const u8) bool {
+            return false;
+        }
+    };
+    for ([_][]const u8{ "vs:deadbeef:cmd", "VS:6bb7cfd9:PWSH", "vs:newest:cmd", "vs:newest:pwsh" }) |ref| {
+        try std.testing.expect(referenceCanName(ref, Ids{}));
+    }
+    for ([_][]const u8{ "vs:", "vs:newest", "vs:x:bash", "vs::cmd", "vs:a b:cmd", "vs:newest:cmd # x" }) |ref| {
+        try std.testing.expect(!referenceCanName(ref, Ids{}));
+    }
+}
+
 test "every profile alias word is reserved as an id" {
     const profile_map = @import("profile_map.zig");
     for (profile_alias_words) |alias| {
@@ -2419,7 +3316,61 @@ test "every profile alias word is reserved as an id" {
 /// overlap. A distribution is always `wsl:<name>`, and labels are not
 /// references: they change.
 pub fn referenceNames(profiles: []const Profile, reference: []const u8, profile: Profile) bool {
-    const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    return referenceNamesWithNewest(profiles, reference, profile, .of(profiles));
+}
+
+/// The keys `vs:newest:cmd` and `vs:newest:pwsh` stand for in a list: the
+/// Visual Studio profile of each kind that discovery marked newest
+/// (`Profile.newest_visual_studio`; its newest instance with that shell,
+/// shown or hidden), so ordering the list (`profile-order`, the Settings
+/// rows) does not change it. A list nobody marked (built by hand) takes the
+/// first of each kind.
+pub const NewestVisualStudio = struct {
+    cmd: ?[]const u8 = null,
+    pwsh: ?[]const u8 = null,
+
+    pub fn of(profiles: []const Profile) NewestVisualStudio {
+        var marked: NewestVisualStudio = .{};
+        var first: NewestVisualStudio = .{};
+        for (profiles) |profile| {
+            const kind_slot: struct { marked: *?[]const u8, first: *?[]const u8 } = switch (profile.kind) {
+                .vs_dev_cmd => .{ .marked = &marked.cmd, .first = &first.cmd },
+                .vs_dev_shell => .{ .marked = &marked.pwsh, .first = &first.pwsh },
+                else => continue,
+            };
+            if (kind_slot.first.* == null) kind_slot.first.* = profile.key;
+            if (profile.newest_visual_studio and kind_slot.marked.* == null) kind_slot.marked.* = profile.key;
+        }
+        return .{ .cmd = marked.cmd orelse first.cmd, .pwsh = marked.pwsh orelse first.pwsh };
+    }
+
+    /// The concrete key `reference` stands for when it is `vs:newest:cmd`
+    /// or `vs:newest:pwsh` (any case): a key, or "" when the list has no
+    /// such shell. Null for any other reference.
+    pub fn resolve(self: NewestVisualStudio, reference: []const u8) ?[]const u8 {
+        return switch (newestVisualStudioKind(reference) orelse return null) {
+            .vs_dev_cmd => self.cmd orelse "",
+            .vs_dev_shell => self.pwsh orelse "",
+            else => unreachable,
+        };
+    }
+};
+
+/// The kind `vs:newest:cmd` or `vs:newest:pwsh` names, any case.
+fn newestVisualStudioKind(reference: []const u8) ?ProfileKind {
+    if (std.ascii.eqlIgnoreCase(reference, "vs:newest:cmd")) return .vs_dev_cmd;
+    if (std.ascii.eqlIgnoreCase(reference, "vs:newest:pwsh")) return .vs_dev_shell;
+    return null;
+}
+
+fn referenceNamesWithNewest(
+    profiles: []const Profile,
+    reference: []const u8,
+    profile: Profile,
+    newest: NewestVisualStudio,
+) bool {
+    var ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    if (newest.resolve(ref)) |key| ref = key;
     if (ref.len == 0) return false;
     if (userProfileWithId(profiles, ref)) |named| return named == profile.key.ptr;
     if (profile.kind == .ssh) {
@@ -2446,35 +3397,39 @@ fn userProfileWithId(profiles: []const Profile, id: []const u8) ?[*]const u8 {
 /// Apply `profile-order` and `profile-hidden` to a finished list, in place.
 /// The profiles `order` names come first, in the order of the first
 /// reference that names each, the rest keep their order. Then every profile
-/// `hidden` names is marked hidden and moved after all the shown ones, so the
-/// shown profiles are always `profiles[0..visibleProfileCount(profiles)]`.
+/// `hidden` names is marked hidden, and every hidden one (also one that
+/// discovery hid) is moved after all the shown ones, so the shown profiles
+/// are always `profiles[0..visibleProfileCount(profiles)]`.
 pub fn arrangeProfiles(
     profiles: []Profile,
     order: []const []const u8,
     hidden: []const []const u8,
 ) void {
+    // `vs:newest:*` stands for a key of the list as discovery made it: the
+    // sort below moves profiles, so it is resolved once, here.
+    const newest: NewestVisualStudio = .of(profiles);
     if (order.len > 0 and profiles.len > 1) {
         // A stable insertion sort by rank: lists are short.
         var i: usize = 1;
         while (i < profiles.len) : (i += 1) {
             var j = i;
-            while (j > 0 and referenceRank(profiles, order, profiles[j]) <
-                referenceRank(profiles, order, profiles[j - 1])) : (j -= 1)
+            while (j > 0 and referenceRank(profiles, order, profiles[j], newest) <
+                referenceRank(profiles, order, profiles[j - 1], newest)) : (j -= 1)
             {
                 std.mem.swap(Profile, &profiles[j], &profiles[j - 1]);
             }
         }
     }
-    if (hidden.len == 0) return;
     for (profiles) |*profile| {
         for (hidden) |reference| {
-            if (referenceNames(profiles, reference, profile.*)) {
+            if (referenceNamesWithNewest(profiles, reference, profile.*, newest)) {
                 profile.hidden = true;
                 break;
             }
         }
     }
-    // Stable partition: shown first.
+    // Stable partition: shown first. Discovery hides profiles too (an older
+    // Visual Studio under `visual-studio-profiles = newest`).
     var shown: usize = 0;
     for (0..profiles.len) |index| {
         if (profiles[index].hidden) continue;
@@ -2486,9 +3441,14 @@ pub fn arrangeProfiles(
     }
 }
 
-fn referenceRank(profiles: []const Profile, order: []const []const u8, profile: Profile) usize {
+fn referenceRank(
+    profiles: []const Profile,
+    order: []const []const u8,
+    profile: Profile,
+    newest: NewestVisualStudio,
+) usize {
     for (order, 0..) |reference, index| {
-        if (referenceNames(profiles, reference, profile)) return index;
+        if (referenceNamesWithNewest(profiles, reference, profile, newest)) return index;
     }
     return std.math.maxInt(usize);
 }
@@ -2508,8 +3468,11 @@ pub fn visibleProfiles(profiles: []Profile) []Profile {
 }
 
 /// What `resolveProfileReference` needs from the system: the lookups
-/// discovery uses, and noctty's environment for `%NAME%` in a user profile.
+/// discovery uses, noctty's environment for `%NAME%` in a user profile,
+/// and Visual Studio's instances (`visual-studio-profiles`) for a `vs:` key.
 pub const ReferenceHost = struct {
+    visual_studio: VisualStudioProfiles = .newest,
+
     pub fn lookup(_: ReferenceHost, alloc: Allocator, exe: []const u8) !?[]u8 {
         return try lookupExecutable(alloc, exe);
     }
@@ -2525,12 +3488,28 @@ pub const ReferenceHost = struct {
     pub fn get(_: ReferenceHost, alloc: Allocator, name: []const u8) Allocator.Error!?[]u8 {
         return try ProcessEnvironment.get(.{}, alloc, name);
     }
+
+    /// Visual Studio's developer shells, hidden ones included; `complete`
+    /// false when Setup Configuration did not answer in full.
+    pub fn visualStudio(self: ReferenceHost, alloc: Allocator, complete: *bool) ![]Profile {
+        return try appendVisualStudioProfiles(
+            alloc,
+            try alloc.alloc(Profile, 0),
+            self.visual_studio,
+            visual_studio.build_arch,
+            visual_studio.ComSource{},
+            VisualStudioHost{},
+            complete,
+        );
+    }
 };
 
 /// The profile `reference` (`default-profile`) names, built without listing
 /// the profiles: a user profile from `user`, a fixed detected key or alias
 /// through the lookups discovery uses, `wsl:<distro>` as `wsl.exe -d
-/// <distro>` and `ssh:<alias>` as `ssh.exe <alias>`. WSL is never probed and
+/// <distro>`, `ssh:<alias>` as `ssh.exe <alias>`, and a Visual Studio key
+/// (`vs:<instance>:cmd`, `vs:<instance>:pwsh`) from the instances
+/// `host.visualStudio` lists (none for a host without it). WSL is never probed and
 /// its distributions are never listed, so a stopped or hung WSL costs
 /// nothing here. Null when nothing by that name can start: an unknown
 /// reference, a program that is not installed, an alias that names no single
@@ -2564,6 +3543,25 @@ pub fn resolveProfileReference(
         const label = try std.fmt.allocPrint(alloc, "WSL: {s}", .{distro});
         defer alloc.free(label);
         return try makeProfile(alloc, .wsl_distro, key, label, &.{ wsl, "-d", distro });
+    }
+    if (std.ascii.startsWithIgnoreCase(ref, "vs:")) {
+        if (comptime !@hasDecl(@TypeOf(host), "visualStudio")) return null;
+        var complete = true;
+        const profiles = try host.visualStudio(alloc, &complete);
+        defer deinitProfiles(alloc, profiles);
+        // `vs:newest:<shell>` is the first instance, newest first, that has
+        // that shell; the profile keeps its concrete key, so a pane started
+        // through it remembers the instance it ran. A partial answer may
+        // lack the newest instance, so it names none: an older one would be
+        // started, and remembered by every pane started through it.
+        if (!complete and newestVisualStudioKind(ref) != null) return error.VisualStudioUnavailable;
+        const want = NewestVisualStudio.of(profiles).resolve(ref) orelse ref;
+        for (profiles) |profile| {
+            if (std.ascii.eqlIgnoreCase(profile.key, want)) return try profile.clone(alloc);
+        }
+        // Setup Configuration failed: the install may well be there.
+        if (!complete) return error.VisualStudioUnavailable;
+        return null;
     }
     if (std.ascii.startsWithIgnoreCase(ref, "ssh:")) {
         const alias = ref["ssh:".len..];
@@ -2617,7 +3615,8 @@ fn isPlainReferenceArgument(value: []const u8) bool {
 
 /// Whether `reference` (a `profile-order` or `profile-hidden` value) can name
 /// a profile, decided without listing any: a fixed key or word; `wsl:<x>` or
-/// `ssh:<x>` with `<x>` one plain argument; an id, bare or as `user:<id>`,
+/// `ssh:<x>` with `<x>` one plain argument; `vs:<x>:cmd` or `vs:<x>:pwsh`
+/// (`vs:newest:*` included); an id, bare or as `user:<id>`,
 /// that `commands` (the `profile-command` map) holds, also a removed one.
 /// Whether such a profile exists depends on the machine, so a shared config
 /// that names a shell this one lacks loads quietly; anything else, a typo or
@@ -2633,6 +3632,13 @@ pub fn referenceCanName(reference: []const u8, commands: anytype) bool {
     }
     for ([_][]const u8{ "wsl:", "ssh:" }) |prefix| {
         if (std.ascii.startsWithIgnoreCase(ref, prefix)) return isPlainReferenceArgument(ref[prefix.len..]);
+    }
+    if (std.ascii.startsWithIgnoreCase(ref, "vs:")) {
+        const rest = ref["vs:".len..];
+        const colon = std.mem.indexOfScalar(u8, rest, ':') orelse return false;
+        const shell = rest[colon + 1 ..];
+        return isPlainReferenceArgument(rest[0..colon]) and
+            (std.ascii.eqlIgnoreCase(shell, "cmd") or std.ascii.eqlIgnoreCase(shell, "pwsh"));
     }
     const id = if (std.ascii.startsWithIgnoreCase(ref, "user:")) ref["user:".len..] else ref;
     return commands.contains(id);
@@ -3964,6 +4970,31 @@ test "shell discovery searches only ordinary local folders" {
     try std.testing.expect(!isLocalSearchDirectory(missing));
 }
 
+/// Make the existing empty folder `link` a junction to the folder `target`
+/// (both absolute), which needs no privilege, unlike a symlink.
+fn testMakeJunction(alloc: Allocator, link: []const u8, target: []const u8) !void {
+    const nt_target = try std.fmt.allocPrint(alloc, "\\??\\{s}", .{target});
+    defer alloc.free(nt_target);
+    const target_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, nt_target);
+    defer alloc.free(target_w);
+    const link_w = try windows.sliceToPrefixedFileW(null, link);
+    const handle = windows.kernel32.CreateFileW(link_w.span().ptr, windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS, null);
+    if (handle == windows.INVALID_HANDLE_VALUE) return error.AccessDenied;
+    defer windows.CloseHandle(handle);
+    const bytes: u16 = @intCast(target_w.len * 2);
+    var record: std.ArrayList(u8) = .empty;
+    defer record.deinit(alloc);
+    try record.appendSlice(alloc, &.{ 3, 0, 0, 0xa0 }); // mount point
+    try record.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, bytes + 12)));
+    try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // reserved, substitute offset
+    try record.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, bytes)));
+    try record.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, bytes + 2)));
+    try record.appendSlice(alloc, &.{ 0, 0 }); // empty print name
+    try record.appendSlice(alloc, std.mem.sliceAsBytes(target_w));
+    try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // terminators
+    try windows.DeviceIoControl(handle, 0x900a4, record.items, null);
+}
+
 test "explicit commands and child PATH keep junctions with spaces" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = std.testing.allocator;
@@ -3976,28 +5007,9 @@ test "explicit commands and child PATH keep junctions with spaces" {
     defer alloc.free(root);
     const link = try std.fmt.allocPrint(alloc, "{s}\\current tools", .{root});
     defer alloc.free(link);
-    const target = try std.fmt.allocPrint(alloc, "\\??\\{s}\\real", .{root});
-    defer alloc.free(target);
-    const target_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, target);
-    defer alloc.free(target_w);
-    const link_w = try windows.sliceToPrefixedFileW(null, link);
-    const handle = windows.kernel32.CreateFileW(link_w.span().ptr, windows.GENERIC_WRITE, 0, null, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT | windows.FILE_FLAG_BACKUP_SEMANTICS, null);
-    if (handle == windows.INVALID_HANDLE_VALUE) return error.AccessDenied;
-    {
-        defer windows.CloseHandle(handle);
-        const bytes: u16 = @intCast(target_w.len * 2);
-        var record: std.ArrayList(u8) = .empty;
-        defer record.deinit(alloc);
-        try record.appendSlice(alloc, &.{ 3, 0, 0, 0xa0 }); // mount point
-        try record.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, bytes + 12)));
-        try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // reserved, substitute offset
-        try record.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, bytes)));
-        try record.appendSlice(alloc, &std.mem.toBytes(std.mem.nativeToLittle(u16, bytes + 2)));
-        try record.appendSlice(alloc, &.{ 0, 0 }); // empty print name
-        try record.appendSlice(alloc, std.mem.sliceAsBytes(target_w));
-        try record.appendSlice(alloc, &.{ 0, 0, 0, 0 }); // terminators
-        try windows.DeviceIoControl(handle, 0x900a4, record.items, null);
-    }
+    const real = try std.fmt.allocPrint(alloc, "{s}\\real", .{root});
+    defer alloc.free(real);
+    try testMakeJunction(alloc, link, real);
     const exe = try std.fmt.allocPrintSentinel(alloc, "{s}\\pwsh.exe", .{link}, 0);
     defer alloc.free(exe);
     const command = try executableCommand(alloc, .{ .shell = exe });

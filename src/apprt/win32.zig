@@ -1008,7 +1008,9 @@ fn applyProfileSurfaceConfig(
 /// Home for a profile launch. A bare `.home` set on a launch clone after
 /// `Config.finalize` is not resolved again: Exec then starts the program in
 /// noctty's own current directory (measured: the directory noctty was
-/// started in), so a user profile gets the path itself. Two keep `.home`:
+/// started in), so a user profile and a Visual Studio shell get the path
+/// itself (measured for a Developer Command Prompt restored with no Host: it
+/// started in the portable copy's folder). Two keep `.home`: the other
 /// detected profiles, as before, and a user profile that runs `wsl.exe`,
 /// which `.home` gives `--cd ~` (the Linux home, as a detected WSL profile
 /// gets) where a Windows path would give `--cd /mnt/c/Users/<name>`.
@@ -1016,7 +1018,11 @@ fn profileHomeWorkingDirectory(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
 ) !configpkg.Config.WorkingDirectory {
-    if (profile.kind != .user or windows_shell.isWslCommand(profile.command)) return .home;
+    switch (profile.kind) {
+        .user => if (windows_shell.isWslCommand(profile.command)) return .home,
+        .vs_dev_cmd, .vs_dev_shell => {},
+        else => return .home,
+    }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (internal_os.home(&buf) catch null) orelse return .home;
     return .{ .path = try config._arena.?.allocator().dupe(u8, home) };
@@ -1168,16 +1174,20 @@ fn elevatedProfileKey(action_key: []const u8, pane_key: ?[]const u8) ?[]const u8
 
 /// Whether `new_window_elevated` names the profile `key` to the elevated
 /// process (`RelaunchProfile.selector`) instead of passing its command and
-/// variables: a user profile whose live `profile-command` line was read from
-/// a config file, which the elevated process reads too, so the line and the
-/// variables reach it as written and stay off the elevated command line. A
-/// profile defined only by a `--profile-command` option is not forwarded, so
-/// it is still passed as arguments. So is every profile when elevation may
-/// change the account (`same_account` false: a standard user elevated with
-/// an administrator's credentials, `win32_elevation.elevationKeepsAccount`),
-/// since that account reads its own config, which need not have the profile.
+/// variables: a Visual Studio shell, which the elevated process finds as the
+/// picker does (a `cmd.exe /k` line with `&` in its path reaches it as
+/// written), or a user profile whose live `profile-command` line was read
+/// from a config file, which the elevated process reads too, so the line and
+/// the variables reach it as written and stay off the elevated command line.
+/// A profile defined only by a `--profile-command` option is not forwarded,
+/// so it is still passed as arguments. So is every profile when elevation may
+/// change the account (`same_account` false: a standard user elevated with an
+/// administrator's credentials, `win32_elevation.elevationKeepsAccount`),
+/// since that account reads its own config, which need not have the profile
+/// or, for a Visual Studio shell, may say `visual-studio-profiles = none`.
 fn elevatesBySelector(config: *const configpkg.Config, key: []const u8, same_account: bool) bool {
     if (!same_account) return false;
+    if (startsWithIgnoreCase(key, "vs:")) return true;
     if (!startsWithIgnoreCase(key, "user:")) return false;
     const id = key["user:".len..];
     if (config.@"profile-command".get(id) == null) return false;
@@ -3215,6 +3225,10 @@ pub const App = struct {
     /// relative path at save time, we'd end up writing to a different
     /// file than the one `Config.load()` used at launch.
     cli_config_override_path: ?[]u8 = null,
+    /// The last `--visual-studio-profiles=` argument on noctty's command
+    /// line, as written, which a Visual Studio shell's jump-list link passes
+    /// on (`cliVisualStudioProfilesArg`). Null when the files decide it.
+    cli_visual_studio_profiles_arg: ?[]u8 = null,
     /// The value of the launch argv's last `--class=`, read at `App.init`
     /// (`cliClass`), for the installer restart's command line.
     cli_class: ?[]u8 = null,
@@ -3388,6 +3402,7 @@ pub const App = struct {
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
+        self.cli_visual_studio_profiles_arg = cliVisualStudioProfilesArg(core_app.alloc) catch null;
         self.cli_class = cliClass(core_app.alloc) catch null;
         // Snapshot the startup cwd for reload-time restoration.
         self.startup_cwd = std.process.getCwdAlloc(core_app.alloc) catch null;
@@ -4080,6 +4095,10 @@ pub const App = struct {
         if (self.cli_config_override_path) |path| {
             self.core_app.alloc.free(path);
             self.cli_config_override_path = null;
+        }
+        if (self.cli_visual_studio_profiles_arg) |arg| {
+            self.core_app.alloc.free(arg);
+            self.cli_visual_studio_profiles_arg = null;
         }
         if (self.cli_class) |class| {
             self.core_app.alloc.free(class);
@@ -7452,7 +7471,7 @@ pub const App = struct {
                         // used the old setting.
                         if (profiles_changed) self.profiles_generation +%= 1;
                         const jump_list_profiles_pending = profiles_changed and self.jump_list != null;
-                        if (jump_list_profiles_pending) self.jump_list.?.updateProfiles(&.{});
+                        if (jump_list_profiles_pending) self.jump_list.?.updateProfiles(&.{}, self.cli_visual_studio_profiles_arg);
                         // Drop every list before asking for a new one: each drop
                         // bumps the generation, which would make a discovery
                         // started in between stale.
@@ -19546,7 +19565,7 @@ const Host = struct {
             // A later user-initiated load recovers startup discovery after its
             // bounded transient-failure retry budget has been exhausted.
             if (discovery.complete) jump_list.completeStartupProfileDiscovery();
-            jump_list.updateProfiles(windows_shell.visibleProfiles(next_profiles));
+            jump_list.updateProfiles(windows_shell.visibleProfiles(next_profiles), self.app.cli_visual_studio_profiles_arg);
         }
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
         self.app.applyLauncherQuickSlotPreferences(self.shownProfiles().?);
@@ -31720,6 +31739,68 @@ fn forwardedActivationExtraArgCount(arguments: ?[]const [:0]const u8) usize {
     return if (argv.len > 1) argv.len - 1 else 0;
 }
 
+/// The last `--visual-studio-profiles=` argument on this process's command
+/// line, as written (`App.cli_visual_studio_profiles_arg`).
+fn cliVisualStudioProfilesArg(alloc: std.mem.Allocator) !?[]u8 {
+    const argv = std.process.argsAlloc(alloc) catch return null;
+    defer std.process.argsFree(alloc, argv);
+    return cliVisualStudioProfilesArgArgs(alloc, argv);
+}
+
+/// The last `--visual-studio-profiles=` argument in `argv` (argv[0]
+/// included) that the loader accepts, duplicated, or null. The loader keeps
+/// the value before a rejected one (`--visual-studio-profiles=all
+/// --visual-studio-profiles=latest` runs `all`), so the rejected one is
+/// skipped; an empty value is accepted (it means the default). Like the
+/// loader, it stops at `-e` and at a COM activation switch.
+fn cliVisualStudioProfilesArgArgs(alloc: std.mem.Allocator, argv: []const []const u8) !?[]u8 {
+    const prefix = "--visual-studio-profiles=";
+    var last: ?[]const u8 = null;
+    for (argv[@min(1, argv.len)..]) |arg| {
+        if (std.mem.eql(u8, arg, "-e") or
+            std.ascii.eqlIgnoreCase(arg, "-Embedding") or
+            std.ascii.eqlIgnoreCase(arg, win32_toast_activator.launch_switch)) break;
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        const value = arg[prefix.len..];
+        if (value.len == 0 or std.meta.stringToEnum(windows_shell.VisualStudioProfiles, value) != null) last = arg;
+    }
+    return if (last) |arg| try alloc.dupe(u8, arg) else null;
+}
+
+test "the jump list passes on only a visual-studio-profiles argument noctty was given" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect((try cliVisualStudioProfilesArgArgs(alloc, &.{"noctty.exe"})) == null);
+    try std.testing.expect((try cliVisualStudioProfilesArgArgs(alloc, &.{ "noctty.exe", "--font-size=12" })) == null);
+    const last = (try cliVisualStudioProfilesArgArgs(alloc, &.{
+        "noctty.exe",
+        "--visual-studio-profiles=none",
+        "--visual-studio-profiles=all",
+        "-e",
+        "--visual-studio-profiles=newest",
+    })).?;
+    defer alloc.free(last);
+    try std.testing.expectEqualStrings("--visual-studio-profiles=all", last);
+    // argv[0] is not an option, and an empty value (back to the default)
+    // is passed on as written.
+    try std.testing.expect((try cliVisualStudioProfilesArgArgs(alloc, &.{"--visual-studio-profiles=all"})) == null);
+    const empty = (try cliVisualStudioProfilesArgArgs(alloc, &.{ "noctty.exe", "--visual-studio-profiles=" })).?;
+    defer alloc.free(empty);
+    try std.testing.expectEqualStrings("--visual-studio-profiles=", empty);
+    // A value the loader rejects leaves the one before it running, so the
+    // link passes that one on (or none).
+    const kept = (try cliVisualStudioProfilesArgArgs(alloc, &.{ "noctty.exe", "--visual-studio-profiles=all", "--visual-studio-profiles=latest", "--visual-studio-profiles=All" })).?;
+    defer alloc.free(kept);
+    try std.testing.expectEqualStrings("--visual-studio-profiles=all", kept);
+    try std.testing.expect((try cliVisualStudioProfilesArgArgs(alloc, &.{ "noctty.exe", "--visual-studio-profiles=latest" })) == null);
+    var cfg = try configpkg.Config.default(alloc);
+    defer cfg.deinit();
+    var iter: cli_args.ArgsIterator(cli_args.SliceIterator) = .{
+        .iterator = cli_args.sliceIterator(&.{ "--visual-studio-profiles=all", "--visual-studio-profiles=latest", "--visual-studio-profiles=All" }),
+    };
+    try cfg.loadIter(alloc, &iter);
+    try std.testing.expect(cfg.@"visual-studio-profiles" == .all);
+}
+
 /// Return the last CLI `--config-file` override as an absolute path.
 /// Settings save targets the last file because later config files
 /// override earlier ones.
@@ -33888,6 +33969,7 @@ fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !voi
     dst._default_profile = if (src._default_profile) |profile| try profile.clone(alloc) else null;
     dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
     dst.env = try src.env.clone(alloc);
+    dst.@"visual-studio-profiles" = src.@"visual-studio-profiles";
     dst.@"profile-command" = try src.@"profile-command".clone(alloc);
     dst.@"profile-name" = try src.@"profile-name".clone(alloc);
     dst.@"profile-working-directory" = try src.@"profile-working-directory".clone(alloc);
@@ -33900,11 +33982,13 @@ fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !voi
 }
 
 /// Whether a reload changed a key the profile lists are built from: a
-/// `profile-*` key (a removal included), `env` while a profile is defined
+/// `profile-*` key (a removal included), `visual-studio-profiles`, `env`
+/// while a profile is defined
 /// (`%NAME%` in a profile reads the `env` lines), or `default-profile`,
 /// which the picker starts on.
 fn userProfileKeysChanged(old: *const configpkg.Config, new: *const configpkg.Config) bool {
-    if (!old.@"profile-command".equal(new.@"profile-command") or
+    if (old.@"visual-studio-profiles" != new.@"visual-studio-profiles" or
+        !old.@"profile-command".equal(new.@"profile-command") or
         !old.@"profile-name".equal(new.@"profile-name") or
         !old.@"profile-working-directory".equal(new.@"profile-working-directory") or
         !old.@"profile-env".equal(new.@"profile-env") or
@@ -55764,6 +55848,97 @@ test "win32 user profiles restore by key, after a rename, with and without a hos
     }
 }
 
+/// Visual Studio 18 and 2022 as `windows_shell.appendVisualStudioProfiles`
+/// lists them, from fixed answers instead of the machine's.
+fn testVisualStudioList(alloc: Allocator, mode: windows_shell.VisualStudioProfiles) ![]windows_shell.Profile {
+    const vs = windows_shell.visual_studio;
+    const Fixed = struct {
+        pub fn query(_: @This(), a: Allocator) !vs.Discovery {
+            const list = try a.alloc(vs.Instance, 2);
+            list[0] = .{ .id = "486bb794", .path = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community", .version_text = "17.14.37628.2", .version = vs.version(17, 14), .install_date = 1, .suffix = "2022" };
+            list[1] = .{ .id = "6bb7cfd9", .path = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community", .version_text = "18.10.12201.205", .version = vs.version(18, 10), .install_date = 2, .suffix = "18" };
+            return .{ .instances = list };
+        }
+        pub fn installDirectory(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn file(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn lookup(_: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            if (std.mem.eql(u8, exe, "pwsh.exe")) return try a.dupe(u8, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+            return null;
+        }
+    };
+    return try windows_shell.appendVisualStudioProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), mode, .x64, Fixed{}, Fixed{}, null);
+}
+
+test "win32 Visual Studio profiles restore by key, hidden ones too, with and without a host" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+    try base.finalize();
+
+    // With no host, the list is built from the app config, whose
+    // `visual-studio-profiles` reaches the lister.
+    const lister = struct {
+        fn list(a: Allocator, _: bool, user: *const windows_shell.UserProfiles) ![]windows_shell.Profile {
+            return try testVisualStudioList(a, user.visual_studio);
+        }
+    }.list;
+    const hostless = try listProfilesForConfig(alloc, &base, lister);
+    defer windows_shell.deinitProfiles(alloc, hostless);
+    try std.testing.expectEqual(@as(usize, 4), hostless.len);
+    // 2022's pair is hidden under `newest` and still restores; every pair
+    // starts in home.
+    for ([_][]const u8{ "vs:486bb794:cmd", "VS:6BB7CFD9:CMD" }) |key| {
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, key));
+        try std.testing.expectEqualStrings("/k", clone.command.?.direct[1]);
+        try std.testing.expect(std.mem.startsWith(u8, clone._profile_launch.?.command_line, "C:\\Windows\\System32\\cmd.exe /k \"\"C:\\Program Files\\Microsoft Visual Studio\\"));
+        // Home as a path: a bare `.home` on a launch clone would start in
+        // noctty's own folder.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (try internal_os.home(&buf)) |home| try std.testing.expectEqualStrings(home, clone.@"working-directory".?.path);
+    }
+    {
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        try std.testing.expect(try applyProfileConfigByKey(&clone, hostless, "vs:6bb7cfd9:pwsh"));
+        try std.testing.expectEqualStrings("-Command", clone.command.?.direct[2]);
+        try std.testing.expect(clone._profile_launch == null);
+    }
+
+    // With a host, from its list.
+    {
+        var host: Host = undefined;
+        host.profiles = hostless;
+        host.selected_profile = 0;
+        var app: App = undefined;
+        app.config._default_profile = null;
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        try std.testing.expect(try app.applyRestoredProfileConfig(&clone, &host, "vs:486bb794:pwsh"));
+        try std.testing.expectEqualStrings("-NoExit", clone.command.?.direct[1]);
+    }
+
+    // Under `none` there is no such profile: the pane falls back to the
+    // default and keeps no launch key.
+    var none = try base.clone(alloc);
+    defer none.deinit();
+    none.@"visual-studio-profiles" = .none;
+    const empty = try listProfilesForConfig(alloc, &none, lister);
+    defer windows_shell.deinitProfiles(alloc, empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    var clone = none.shallowClone(alloc);
+    defer clone.deinit();
+    try std.testing.expect(!(try applyProfileConfigByKey(&clone, empty, "vs:6bb7cfd9:cmd")));
+    try std.testing.expect(clone.command == null);
+}
+
 test "win32 default-profile runs where nothing chose a launch, and only there" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -56168,6 +56343,45 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch", true));
     try std.testing.expect(!elevatesBySelector(&cfg, "pwsh.exe", true));
     try std.testing.expect(!elevatesBySelector(&cfg, "filed", true));
+    // A Visual Studio shell is found by the elevated process as by the
+    // picker, so its own `cmd.exe /k` line reaches it as written.
+    try std.testing.expect(elevatesBySelector(&cfg, "vs:6bb7cfd9:cmd", true));
+    try std.testing.expect(elevatesBySelector(&cfg, "VS:6BB7CFD9:PWSH", true));
+    // Not when UAC may switch to another account: that account's own config
+    // can say `visual-studio-profiles = none`, under which the key names
+    // nothing and the elevated window would start the automatic shell. The
+    // shell's argv reaches it whatever that config says.
+    try std.testing.expect(!elevatesBySelector(&cfg, "vs:6bb7cfd9:cmd", false));
+    {
+        const vs_argv = [_][:0]const u8{ "C:\\Windows\\System32\\cmd.exe", "/k", "C:\\VS\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=x64", "-host_arch=x64" };
+        const noctty_argv = [_][]const u8{"C:\\noctty.exe"};
+        const parameters = try win32_elevation.buildRelaunchParameters(alloc, &noctty_argv, null, "C:\\work", "C:\\startup", .{ .command = .{ .command = .{ .direct = &vs_argv } } });
+        defer alloc.free(parameters);
+        var other = try tmp.dir.createFile("other-account.ghostty", .{});
+        try other.writeAll("visual-studio-profiles = none\n");
+        other.close();
+        const other_path = try tmp.dir.realpathAlloc(alloc, "other-account.ghostty");
+        defer alloc.free(other_path);
+        const child_line = try std.fmt.allocPrint(alloc, "noctty.exe {s}", .{parameters});
+        defer alloc.free(child_line);
+        const child_argv = try windows_shell.splitWindowsCommandLine(alloc, child_line);
+        defer {
+            for (child_argv) |arg| alloc.free(arg);
+            alloc.free(child_argv);
+        }
+        const child_args = try alloc.alloc([]const u8, child_argv.len - 1);
+        defer alloc.free(child_args);
+        for (child_argv[1..], child_args) |arg, *out| out.* = arg;
+        var elevated = try configpkg.Config.default(alloc);
+        defer elevated.deinit();
+        try elevated.loadFile(alloc, other_path);
+        var child_iter: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(child_args) };
+        try elevated.loadIter(alloc, &child_iter);
+        try elevated.finalize();
+        try std.testing.expect(elevated.@"visual-studio-profiles" == .none);
+        try std.testing.expectEqual(vs_argv.len, elevated.command.?.direct.len);
+        for (vs_argv, elevated.command.?.direct) |want, got| try std.testing.expectEqualStrings(want, got);
+    }
 
     // A config rebuilt for a conditional state (a theme) records the places
     // again.

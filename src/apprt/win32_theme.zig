@@ -841,7 +841,7 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
                 .active_border = rgb(12, 96, 126),
                 .focus = rgb(8, 80, 108),
             },
-            .powershell => .{
+            .powershell, .vs_dev_shell => .{
                 .idle_bg = rgb(228, 232, 248),
                 .idle_border = rgb(48, 68, 156),
                 .hover_bg = rgb(218, 222, 242),
@@ -861,8 +861,9 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
                 .active_border = rgb(140, 96, 8),
                 .focus = rgb(120, 80, 4),
             },
-            // A user profile can run anything; it takes the neutral Command Prompt palette.
-            .cmd, .user => .{
+            // A user profile can run anything; it takes the neutral Command
+            // Prompt palette, as the Developer Command Prompt does.
+            .cmd, .user, .vs_dev_cmd => .{
                 .idle_bg = rgb(240, 240, 240),
                 .idle_border = rgb(128, 128, 128),
                 .hover_bg = rgb(232, 232, 232),
@@ -896,7 +897,7 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
             .active_border = rgb(136, 216, 242),
             .focus = rgb(186, 232, 248),
         },
-        .powershell => .{
+        .powershell, .vs_dev_shell => .{
             .idle_bg = rgb(34, 42, 58),
             .idle_border = rgb(98, 144, 220),
             .hover_bg = rgb(40, 50, 72),
@@ -916,7 +917,7 @@ pub fn profileChromeAccent(kind: ProfileKind, is_dark: bool) ProfileChromeAccent
             .active_border = rgb(248, 202, 134),
             .focus = rgb(255, 224, 178),
         },
-        .cmd, .user => .{
+        .cmd, .user, .vs_dev_cmd => .{
             .idle_bg = rgb(31, 41, 35),
             .idle_border = rgb(104, 186, 126),
             .hover_bg = rgb(38, 50, 42),

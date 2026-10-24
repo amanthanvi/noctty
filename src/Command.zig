@@ -1012,6 +1012,92 @@ test "Command windows_command_line reaches cmd.exe exactly as written" {
     }
 }
 
+test "a Developer Command Prompt line runs its batch file through cmd whatever the install path holds" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const windows_shell = configpkg.windows_shell;
+    const vs = windows_shell.visual_studio;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const windir = try std.process.getEnvVarOwned(alloc, "WINDIR");
+    const cmd_path = try std.fs.path.joinZ(alloc, &.{ windir, "System32", "cmd.exe" });
+    var td = try TempDir.init();
+    defer td.deinit();
+    const root = try td.dir.realpathAlloc(alloc, ".");
+
+    // The install's files are all there; only cmd is found.
+    const Fake = struct {
+        instance: vs.Instance,
+        cmd: []const u8,
+        pub fn query(self: @This(), a: Allocator) !vs.Discovery {
+            return .{ .instances = try a.dupe(vs.Instance, &.{self.instance}) };
+        }
+        pub fn installDirectory(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn file(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        pub fn lookup(self: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+            return if (std.mem.eql(u8, exe, "cmd.exe")) try a.dupe(u8, self.cmd) else null;
+        }
+    };
+    // `&` and `^` with or without a space, and `(`, `;`, `,`, `=` with no
+    // space, made cmd run something else from Windows Terminal's line (and
+    // from the usual quoting) when measured; `(x86)` with a space did not.
+    for ([_][]const u8{ "VS&calc", "V S&calc", "VS^x", "VS(1)", "VS;a,b=c", "Program Files (x86)" }) |name| {
+        try td.dir.makePath(try std.fmt.allocPrint(alloc, "{s}/Common7/Tools", .{name}));
+        try td.dir.writeFile(.{
+            .sub_path = try std.fmt.allocPrint(alloc, "{s}/Common7/Tools/VsDevCmd.bat", .{name}),
+            .data = "@echo BAT RAN %*\r\n",
+        });
+        const fake: Fake = .{
+            .instance = .{
+                .id = "6bb7cfd9",
+                .path = try std.fs.path.join(alloc, &.{ root, name }),
+                .version_text = "18.10.1.1",
+                .version = vs.version(18, 10),
+                .install_date = 1,
+                .suffix = "18",
+            },
+            .cmd = cmd_path,
+        };
+        const profiles = try windows_shell.appendVisualStudioProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), .all, .x64, fake, fake, null);
+        const profile = profiles[0];
+        try testing.expectEqual(windows_shell.ProfileKind.vs_dev_cmd, profile.kind);
+        const line = (try windows_shell.verbatimCommandLine(alloc, profile.user.?.command_line, profile.command.direct, false)).?;
+        // `/d` keeps this machine's AutoRun out; cmd's quote rule for the
+        // text after `/k` is the same.
+        const run_line = try std.mem.replaceOwned(u8, alloc, line, " /k ", " /d /k ");
+
+        var stdout = try createTestStdout(td.dir);
+        defer stdout.close();
+        var stderr = try createTestStderr(td.dir);
+        defer stderr.close();
+        var cmd: Command = .{
+            .path = cmd_path,
+            .args = profile.command.direct,
+            .windows_command_line = run_line,
+            .windows_create_no_window = true,
+            .stdout = stdout,
+            .stderr = stderr,
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+        try cmd.testingStart();
+        _ = try cmd.wait(true);
+        try stdout.seekTo(0);
+        const output = try stdout.readToEndAlloc(alloc, 4096);
+        testing.expect(std.mem.startsWith(u8, output, "BAT RAN -startdir=none -arch=x64 -host_arch=x64\r\n")) catch |err| {
+            std.debug.print("install {s}: cmd wrote {s}\n", .{ name, output });
+            return err;
+        };
+    }
+}
+
 test "PKG48 shell wrapper ignores implicit cwd programs and retains native syntax" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

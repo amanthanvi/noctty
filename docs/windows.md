@@ -490,13 +490,104 @@ shell and cannot apply to a remote session. Session restore does not reopen
 them: an SSH pane comes back as the default shell rather than dialing out
 unattended. Restore does not connect for `default-profile = ssh:<alias>`
 either: a restored pane that would run it gets the automatic shell, while a
-new tab or window still connects. SSH entries sort after the detected shells
-and your own [user profiles](#user-profiles). `profile-order` can move any
+new tab or window still connects. SSH entries sort after the detected shells,
+your own [user profiles](#user-profiles) and the
+[Visual Studio developer shells](#visual-studio-developer-shells). `profile-order` can move any
 profile, an SSH entry included, and `profile-hidden` can take one out of the
 lists (see [Default profile, order and hidden profiles](#default-profile-order-and-hidden-profiles)).
 The older `NOCTTY_WIN32_PROFILE_ORDER` environment variable is used only when
 `profile-order` is unset, and orders the detected shell profiles only. There
 is no bundled SSH client, secrets vault, or fleet/connection management.
+
+## Visual Studio developer shells
+
+When Visual Studio 2017 or later is installed, the profile picker and the
+command palette also list each instance's developer shells, as Windows
+Terminal does:
+
+- **Developer Command Prompt for VS 18** runs
+  `cmd.exe /k ""<install>\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64"`.
+  The extra pair of quotes, which cmd takes off, keeps an install path with
+  `&` or `^` (or with a parenthesis and no space) whole, where Windows
+  Terminal's line splits it.
+- **Developer PowerShell for VS 18** runs PowerShell 7 when it is installed,
+  else Windows PowerShell, as
+  `-NoExit -Command "&{Import-Module '<install>\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell <instance id> -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}"`.
+
+The name ends in the product line (`2022`, `18`), then the instance's
+nickname in parentheses when it has one, else a channel other than Release in
+brackets (`[Preview]`). Both shells start in your home directory
+(`-startdir=none` and `-SkipAutomaticLocation` keep the scripts from moving
+it) and set up the tools for the architecture noctty runs on: x64, or on ARM64
+`-arch=arm64` with `-host_arch=arm64` from Visual Studio 17.4 (`x64` before,
+when its tools ran only under emulation). A shell is listed only when its
+script is there (`VsDevCmd.bat`; the DevShell module, which Developer
+PowerShell needs and which came with 16.2), and only for an install on a local
+drive, reached without a junction or symbolic link.
+
+noctty asks Visual Studio's Setup Configuration API (the one `vswhere` and
+Windows Terminal use), which reads what the Visual Studio Installer recorded.
+Nothing is started to find the instances: not `vswhere`, `VsDevCmd.bat` or
+`Enter-VsDevShell`. A machine without Visual Studio lists none and reports
+nothing.
+
+```
+# One of newest (the default), all or none:
+visual-studio-profiles = all
+```
+
+- `newest` lists the newest instance's pair and hides the others, as Windows
+  Terminal does: a hidden pair is not in the picker, the palette, the jump list
+  or the quick slots, but a saved session or `default-profile` that names one
+  still starts it. If the newest instance has neither script, the next one
+  that has one is shown.
+- `all` lists every instance, newest first (by version, then by install date).
+- `none` lists none, and Visual Studio is not asked.
+
+Their keys are `vs:<instance id>:cmd` and `vs:<instance id>:pwsh`, where the
+instance id is the one Setup Configuration gives (eight hex digits, the
+`Enter-VsDevShell` argument above). It stays the same across Visual Studio
+updates, so a saved session, `default-profile = vs:<instance id>:cmd`,
+`profile-order` and `profile-hidden` keep naming the same install. Session
+restore brings these panes back. They are listed after your own user profiles
+and before the SSH hosts.
+
+`vs:newest:cmd` and `vs:newest:pwsh` name the newest instance's shells in
+`default-profile`, `profile-order` and `profile-hidden`, so such a line keeps
+working after Visual Studio is reinstalled or on another machine. A key that
+names one profile directly, as `new_window_elevated:<key>` does, needs the
+instance id. A pane started this way remembers the instance it ran. They
+name the first instance, newest first, that has that shell, whether
+`visual-studio-profiles` shows it or not; under `none` they name nothing.
+When Setup Configuration answers only in part (an instance it could not
+read is left out), `default-profile = vs:newest:...` is not used, since the
+newest instance may be the one missing: the automatic default starts, the
+config's problems say why, and a reload asks again. A `vs:<instance id>`
+key that came back still starts.
+
+```
+default-profile = vs:newest:cmd
+profile-hidden = vs:newest:pwsh
+```
+
+New Elevated Window for one of these shells names it to the elevated process
+(`--default-profile=vs:<instance id>:cmd`), which finds the instance itself, so
+the `cmd.exe /k` line above reaches it as written. A `--visual-studio-profiles`
+option on noctty's command line is passed on with it. When UAC would run the
+elevated window as another account (a standard user entering an
+administrator's credentials), that account reads its own config, which may
+say `visual-studio-profiles = none`, so the shell's command is passed instead
+(`--command=direct:...`), quoted again in the standard way. cmd then mangles
+an install path with `&` or `^` in it, or one with no space and `(`, `;`, `,`
+or `=`. That case was not run here (it needs a second account at the UAC
+prompt).
+
+The Developer Command Prompt gets cmd's shell integration. The Developer
+PowerShell starts through `-Command`, so it runs without OSC 133 and OSC 7
+marks, as in Windows Terminal; a split of it starts in your home directory
+rather than following its directory. To change a shell (another architecture,
+another start directory), define a [user profile](#user-profiles) with your
+own line and hide the generated one with `profile-hidden`.
 
 ## User profiles
 
@@ -517,6 +608,10 @@ profile-name = py312: Python 3.12
 profile-working-directory = py312: %USERPROFILE%\src
 profile-env = py312: PATH=C:\Python312;C:\Python312\Scripts;%PATH%
 ```
+
+noctty lists [Visual Studio's developer shells](#visual-studio-developer-shells)
+by itself. To make one of them what new tabs open, write
+`default-profile = vs:newest:cmd`.
 
 ### The four lines
 
@@ -674,8 +769,9 @@ share `ghostty\config` with Ghostty on another machine, put profile lines in
 
 ### Order, restore and limits
 
-User profiles are listed after the detected local shells and before the SSH
-hosts, in the order of their first `profile-command` line, unless
+User profiles are listed after the detected local shells and before Visual
+Studio's developer shells and the SSH hosts, in the order of their first
+`profile-command` line, unless
 `profile-order` moves them (below). A session or a named layout remembers a
 pane's profile by its id (`user:<id>`); a saved pane that names an id that is
 gone, or removed, comes back running your `default-profile` (or the automatic
@@ -720,19 +816,23 @@ it. A quick slot pinned to it keeps the pin but does not show it.
 
 All three take a profile by its key: the id of one of your profiles (`py312`,
 or `user:py312`), a detected profile's key (`pwsh.exe`, `powershell.exe`,
-`cmd.exe`, `git-bash`, `wsl-default`, `wsl:<distribution>`, `ssh:<alias>`), or
-a short name (`pwsh`, `powershell`, `git`, `cmd`, `wsl`). In `profile-order`
+`cmd.exe`, `git-bash`, `wsl-default`, `wsl:<distribution>`, `ssh:<alias>`,
+`vs:<instance id>:cmd`, `vs:<instance id>:pwsh`), `vs:newest:cmd` or
+`vs:newest:pwsh` for the newest Visual Studio, or a short name (`pwsh`,
+`powershell`, `git`, `cmd`, `wsl`). In `profile-order`
 and `profile-hidden`, `wsl` names every WSL profile. A WSL distribution is
 always written `wsl:<distribution>`. Labels are not references, because they
 can change. A value that cannot name a profile (a typo, an id no
 `profile-command` line defines, a comment after the value) is reported as a
 config problem. One that names a shell this machine does not have
-(`wsl:docker-desktop`, an `ssh:` host) is not, so a shared config loads quietly
-everywhere. `default-profile` finds its profile without listing any:
+(`wsl:docker-desktop`, an `ssh:` host, a `vs:` key) is not, so a shared config
+loads quietly everywhere. `default-profile` finds its profile without listing any:
 `wsl:Ubuntu` starts `wsl.exe -d Ubuntu` without asking WSL for its
 distributions, and `ssh:<alias>` starts `ssh.exe <alias>` without reading the
 SSH config. A `default-profile` that names no profile that can start here is
-reported as a config problem, and the automatic shell runs.
+reported as a config problem, and the automatic shell runs. If Visual Studio's
+Setup Configuration fails when a `vs:` key is looked up, that is reported
+instead, and the automatic shell runs until the config is reloaded.
 `NOCTTY_WIN32_DEFAULT_PROFILE` still chooses where the picker starts when
 `default-profile` is unset, and `NOCTTY_WIN32_PROFILE_ORDER` still orders the
 detected shells when `profile-order` is unset.
@@ -764,8 +864,12 @@ Limits:
 - New Elevated Window for one of your profiles (`new_window_elevated:user:<id>`,
   or New Elevated Window from a pane that runs it) names the profile
   (`--command= --initial-command= --default-profile=user:<id>`), as a taskbar
-  entry does. The elevated process reads the same config files and starts the
-  profile itself, so its command line and variables reach it as written, a
+  entry does. A Visual Studio shell is named the same way
+  (`--default-profile=vs:<instance id>:cmd`); it has no variables, and the
+  account rule below applies to it too (see
+  [Visual Studio developer shells](#visual-studio-developer-shells)). The
+  elevated process reads the same config files and starts the profile
+  itself, so its command line and variables reach it as written, a
   `command` or `initial-command` line in an included file does not replace
   it, and none of them appear on the elevated command line. It applies to the
   whole elevated window, not only its first pane. `%NAME%` in the profile's
@@ -775,8 +879,8 @@ Limits:
   profile defined only by a
   `--profile-command` option on noctty's command line, or given a variable by
   a `--profile-env` option there, or any profile when that command line has
-  an `--env` option (which `%NAME%` may read), or any profile when UAC would
-  run the elevated window as another account (a standard user entering an
+  an `--env` option (which `%NAME%` may read), or any of your profiles when
+  UAC would run the elevated window as another account (a standard user entering an
   administrator's credentials; that account reads its own config files, which
   need not define the profile), is still passed as
   arguments (`--command=direct:...`, quoted again in the standard way, an empty `--initial-command=`, and
@@ -989,7 +1093,14 @@ become a window.
   A [user profile](#user-profiles)'s entry names the profile instead
   (`--default-profile=user:<id>`): a jump-list entry is stored on disk and can
   roam with your Windows profile, so it never holds the profile's environment
-  variables, and the new process reads them from your config.
+  variables, and the new process reads them from your config. A
+  [Visual Studio shell](#visual-studio-developer-shells)'s entry names it the
+  same way (`--default-profile=vs:<instance id>:cmd`), and the new process asks
+  Visual Studio for it again. That entry also passes on a
+  `--visual-studio-profiles` option noctty was started with, so a shell listed
+  because of `--visual-studio-profiles=all` still starts from the jump list. A
+  value from your config files is not copied into the entry, so a later edit
+  of that line still applies to the windows it starts.
 
 From 1.3.133 a portable copy builds no jump list and writes no
 `jump-list-recents.json`, so a machine with only a portable copy gets none;
@@ -1411,8 +1522,10 @@ such profile property, for the detected shells or for
 [user profiles](#user-profiles); the per-profile equivalent is a
 `new_window_elevated:<profile-key>` binding, for example
 `new_window_elevated:user:py312`. An elevated user profile from a config file
-is named to the elevated process, which builds it from the same files (see
-[User profiles](#user-profiles), Limits).
+is named to the elevated process, which builds it from the same files, and so
+is a [Visual Studio shell](#visual-studio-developer-shells)
+(`new_window_elevated:vs:<instance id>:cmd`), unless UAC would run the window
+as another account (see [User profiles](#user-profiles), Limits).
 
 An elevated noctty is a separate process and a separate window. Its title is
 prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be
@@ -1542,8 +1655,8 @@ The save at sign-out, shutdown or reboot is the last one: the sign-out also
 ends the shells, and the panes they leave are not saved over it. A launch that forwards
 to a running noctty, a window opened with `--working-directory` (Explorer's
 "Open noctty here" and the jump list's recent folders), with
-`--default-profile` (the jump list's user profiles) or with `-e` or
-`initial-command`, the startup profile picker, a `--launch-layout` or
+`--default-profile` (the jump list's user profiles and Visual Studio shells)
+or with `-e` or `initial-command`, the startup profile picker, a `--launch-layout` or
 `initial-window = false` run, a default terminal handoff and a second
 instance under `single-instance = false` start without the saved session and
 leave it untouched when they exit. When one of these is the first noctty

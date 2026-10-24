@@ -1623,6 +1623,28 @@ class: ?[:0]const u8 = null,
 /// `false` to remove the SSH entries.
 @"ssh-config-hosts": bool = true,
 
+/// List the developer shells of each installed Visual Studio (2017 or later)
+/// in the profile picker and the command palette, as Windows Terminal does:
+/// "Developer Command Prompt for VS 18", which runs `VsDevCmd.bat`, and
+/// "Developer PowerShell for VS 18", which runs `Enter-VsDevShell`. They are
+/// listed after your own profiles and before the SSH hosts, start in your
+/// home directory, and set up the tools for the architecture noctty runs on.
+/// Their keys (for `default-profile`, `profile-order` and `profile-hidden`)
+/// are `vs:<instance id>:cmd` and `vs:<instance id>:pwsh`; the instance id
+/// survives Visual Studio updates.
+///
+/// Visual Studio is asked through its Setup Configuration API, which reads
+/// what the Visual Studio Installer recorded; nothing is run to find it.
+///
+///   * `newest` - Every instance, with all but the newest hidden: the hidden
+///     ones are not listed, but a saved session or `default-profile` that
+///     names one still starts it.
+///
+///   * `all` - Every instance, listed.
+///
+///   * `none` - None, and Visual Studio is not asked.
+@"visual-studio-profiles": VisualStudioProfiles = .newest,
+
 /// Define a profile of your own: a named command the profile picker and the
 /// command palette list next to the shells noctty detects (after the local
 /// shells, before the SSH hosts), and that session restore brings back.
@@ -1716,9 +1738,11 @@ class: ?[:0]const u8 = null,
 /// longer exists. The value names a profile: the id of one defined with
 /// `profile-command` (or `user:<id>`), a detected profile's key (`pwsh.exe`,
 /// `powershell.exe`, `cmd.exe`, `git-bash`, `wsl-default`,
-/// `wsl:<distribution>`, `ssh:<alias>`), or a short name (`pwsh`,
-/// `powershell`, `git`, `cmd`, `wsl`). A distribution is always written
-/// `wsl:<distribution>`. Labels are not references, because they can change.
+/// `wsl:<distribution>`, `ssh:<alias>`, `vs:<instance id>:cmd`,
+/// `vs:<instance id>:pwsh`), `vs:newest:cmd` or `vs:newest:pwsh` for the
+/// newest Visual Studio, or a short name (`pwsh`, `powershell`, `git`,
+/// `cmd`, `wsl`). A distribution is always written `wsl:<distribution>`.
+/// Labels are not references, because they can change.
 ///
 /// The profile brings its command, its `profile-env` variables and its
 /// `profile-working-directory`. Without a directory of its own it starts
@@ -1737,7 +1761,10 @@ class: ?[:0]const u8 = null,
 /// first window, and a restored pane or a profile chosen in the picker runs
 /// its own profile. A value that names no profile that can start here is a
 /// config problem, and the automatic default runs. Finding the profile
-/// starts nothing and lists nothing: WSL is not asked for its distributions.
+/// starts nothing: WSL is not asked for its distributions, and only a `vs:`
+/// value asks Visual Studio's Setup Configuration for its installs. When
+/// Setup Configuration does not answer, that is reported as its own problem
+/// and the automatic default runs until the config is reloaded.
 /// Safe mode does not read it. On the command line it also wins over a
 /// `default-profile` line in a file included with `config-file`, and makes
 /// an explicit launch, which starts without the saved session.
@@ -5179,7 +5206,10 @@ pub fn finalize(self: *Config) !void {
     // through this same call.
     if (comptime builtin.os.tag == .windows) {
         if (self.command == null) try self.applyDefaultProfile(
-            if (comptime builtin.is_test) TestDefaultProfileHost{} else windows_shell.ReferenceHost{},
+            if (comptime builtin.is_test)
+                TestDefaultProfileHost{ .visual_studio = self.@"visual-studio-profiles" }
+            else
+                windows_shell.ReferenceHost{ .visual_studio = self.@"visual-studio-profiles" },
         );
     }
 
@@ -5414,6 +5444,21 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
     // the automatic default, which also looks the shells up here.
     const resolved = windows_shell.resolveProfileReference(alloc, reference, user.definitions, host) catch |err| found: {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (err == error.VisualStudioUnavailable) {
+            // The value may be right: reported apart from one that names
+            // nothing, and the next load (a reload) asks again.
+            try self.appendFinalizeProblem(.{
+                .key = "default-profile",
+                .message = try std.fmt.allocPrintSentinel(
+                    alloc,
+                    "\"{s}\" could not be looked up: Visual Studio's Setup Configuration did not answer in full, so the automatic default is used until the config is reloaded",
+                    .{reference},
+                    0,
+                ),
+                .location = try self.profilePlace("default-profile", reference).clone(alloc),
+            });
+            return;
+        }
         log.warn("default-profile lookup failed err={}", .{err});
         break :found null;
     };
@@ -5422,7 +5467,7 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
             .key = "default-profile",
             .message = try std.fmt.allocPrintSentinel(
                 alloc,
-                "\"{s}\" names no profile that can start here (a profile-command id, a key such as pwsh.exe, wsl:<distribution> or ssh:<alias>, or a name such as pwsh, git, cmd or wsl), so the automatic default is used",
+                "\"{s}\" names no profile that can start here (a profile-command id, a key such as pwsh.exe, wsl:<distribution>, ssh:<alias> or vs:newest:cmd, or a name such as pwsh, git, cmd or wsl), so the automatic default is used",
                 .{reference},
                 0,
             ),
@@ -5436,8 +5481,44 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
     self._default_profile = profile;
 }
 
-/// Fixed lookups for `applyDefaultProfile` in tests: no PATH search.
+/// Fixed lookups for `applyDefaultProfile` in tests: no PATH search, and
+/// one Visual Studio 18 instead of the machine's.
 const TestDefaultProfileHost = struct {
+    visual_studio: windows_shell.VisualStudioProfiles = .newest,
+    /// False: Setup Configuration fails, and lists nothing.
+    visual_studio_answers: bool = true,
+
+    pub fn visualStudio(self: TestDefaultProfileHost, alloc: Allocator, complete: *bool) ![]windows_shell.Profile {
+        const vs = windows_shell.visual_studio;
+        const Fixed = struct {
+            answers: bool,
+            pub fn query(self_: @This(), a: Allocator) !vs.Discovery {
+                if (!self_.answers) return .{ .complete = false };
+                const list = try a.alloc(vs.Instance, 1);
+                list[0] = .{
+                    .id = "6bb7cfd9",
+                    .path = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community",
+                    .version_text = "18.10.12201.205",
+                    .version = vs.version(18, 10),
+                    .install_date = 1,
+                    .suffix = "18",
+                };
+                return .{ .instances = list };
+            }
+            pub fn installDirectory(_: @This(), _: []const u8) bool {
+                return true;
+            }
+            pub fn file(_: @This(), _: []const u8) bool {
+                return true;
+            }
+            pub fn lookup(_: @This(), a: Allocator, exe: []const u8) !?[]u8 {
+                return try a.dupe(u8, exe);
+            }
+        };
+        const fixed: Fixed = .{ .answers = self.visual_studio_answers };
+        return try windows_shell.appendVisualStudioProfiles(alloc, try alloc.alloc(windows_shell.Profile, 0), self.visual_studio, .x64, fixed, fixed, complete);
+    }
+
     pub fn lookup(_: TestDefaultProfileHost, alloc: Allocator, exe: []const u8) !?[]u8 {
         if (std.mem.eql(u8, exe, "pwsh.exe")) return try alloc.dupe(u8, "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
         if (std.mem.eql(u8, exe, "wsl.exe")) return try alloc.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
@@ -5666,7 +5747,7 @@ test "profile-order and profile-hidden report a value that can name no profile, 
     defer cfg.deinit();
     const Want = struct { key: []const u8, line: usize, message: []const u8 };
     const want = [_]Want{
-        .{ .key = "profile-order", .line = 4, .message = "\"pyy\" names no profile: use a profile-command id, a key such as pwsh.exe, wsl:<distribution> or ssh:<alias>, or a name such as pwsh, git, cmd or wsl" },
+        .{ .key = "profile-order", .line = 4, .message = "\"pyy\" names no profile: use a profile-command id, a key such as pwsh.exe, wsl:<distribution>, ssh:<alias> or vs:newest:cmd, or a name such as pwsh, git, cmd or wsl" },
         .{ .key = "profile-order", .line = 5, .message = "\"user:nope\" names no profile" },
         .{ .key = "profile-hidden", .line = 6, .message = "\"wsl:docker-desktop   # unused\" names no profile" },
         .{ .key = "profile-hidden", .line = 7, .message = "\"Ubuntu\" names no profile" },
@@ -5713,6 +5794,78 @@ test "default-profile problems carry the line that set it" {
     }
 }
 
+test "visual-studio-profiles loads, and default-profile can name a Visual Studio shell" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "default-profile = VS:6BB7CFD9:CMD\n", &.{}, "");
+        defer cfg.deinit();
+        try testing.expect(cfg._diagnostics.empty());
+        try testing.expectEqual(VisualStudioProfiles.newest, cfg.@"visual-studio-profiles");
+        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._default_profile.?.key);
+        try testing.expectEqualStrings("cmd.exe", cfg.command.?.direct[0]);
+        try testing.expectEqualStrings("/k", cfg.command.?.direct[1]);
+        try testing.expect(cfg._command_defaulted);
+    }
+    // `vs:newest:cmd` resolves to the concrete key, which the pane stores, so
+    // a restore names the instance it ran; a value that names nothing yet is
+    // quiet in profile-hidden, reported in default-profile under `none`.
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "default-profile = vs:newest:cmd\nprofile-hidden = vs:newest:pwsh\nprofile-order = vs:deadbeef:cmd\n", &.{}, "");
+        defer cfg.deinit();
+        try testing.expect(cfg._diagnostics.empty());
+        try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._default_profile.?.key);
+    }
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "visual-studio-profiles = none\ndefault-profile = vs:newest:cmd\n", &.{}, "");
+        defer cfg.deinit();
+        try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+        try testing.expect(cfg._default_profile == null);
+    }
+    // `none` asks nothing, so the key names nothing: a config problem.
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "visual-studio-profiles = none\ndefault-profile = vs:6bb7cfd9:cmd\n", &.{}, "");
+        defer cfg.deinit();
+        try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+        try testing.expect(cfg._default_profile == null);
+    }
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "visual-studio-profiles = all\n", &.{}, "");
+        defer cfg.deinit();
+        try testing.expect(cfg._diagnostics.empty());
+        try testing.expectEqual(VisualStudioProfiles.all, cfg.@"visual-studio-profiles");
+        const formatted = try testFormatChanged(alloc, &cfg);
+        defer alloc.free(formatted);
+        try testing.expect(std.mem.indexOf(u8, formatted, "visual-studio-profiles = all") != null);
+    }
+    {
+        var cfg = try testLoadDefaultProfile(alloc, "visual-studio-profiles = latest\n", &.{}, "");
+        defer cfg.deinit();
+        try testing.expect(!cfg._diagnostics.empty());
+        try testing.expectEqual(VisualStudioProfiles.newest, cfg.@"visual-studio-profiles");
+    }
+    // Setup Configuration failed: the automatic default for now, and the
+    // problem named as that, not as a key that names nothing, at the line
+    // that set the value.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var reader: std.Io.Reader = .fixed("font-size = 12\ndefault-profile = vs:6bb7cfd9:cmd\n");
+        try cfg.loadReader(alloc, &reader, "C:\\noctty-test\\config.ghostty");
+        try cfg.applyDefaultProfile(TestDefaultProfileHost{ .visual_studio_answers = false });
+        try testing.expect(cfg.command == null and cfg._default_profile == null);
+        try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+        // Asked again (a finalize run again), still one problem.
+        try cfg.applyDefaultProfile(TestDefaultProfileHost{ .visual_studio_answers = false });
+        try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+        const diag = cfg._diagnostics.items()[0];
+        try testing.expect(std.mem.indexOf(u8, diag.message, "did not answer") != null);
+        try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", diag.location.file.path);
+        try testing.expectEqual(@as(usize, 2), diag.location.file.line);
+    }
+}
+
 test "safe mode starts its recovery command over default-profile" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const testing = std.testing;
@@ -5755,7 +5908,7 @@ fn finalizeProfileReferences(self: *Config, comptime key: [:0]const u8) Allocato
         try self.appendFinalizeProblem(.{
             .key = key,
             .message = try std.fmt.allocPrintSentinel(alloc, "\"{s}\" names no profile: use a profile-command id, " ++
-                "a key such as pwsh.exe, wsl:<distribution> or ssh:<alias>, or a name such as pwsh, git, cmd or wsl{s}", .{
+                "a key such as pwsh.exe, wsl:<distribution>, ssh:<alias> or vs:newest:cmd, or a name such as pwsh, git, cmd or wsl{s}", .{
                 reference,
                 if (hasInlineComment(reference)) " (comments go on a line of their own)" else "",
             }, 0),
@@ -6646,6 +6799,21 @@ test "every example in the user profile docs loads with no problem" {
     const want = [_][]const u8{ "pwsh.exe", "-NoLogo", "-NoExit", "-Command", "& { Import-Module \"C:/Tools/My Module.dll\" }" };
     try testing.expectEqual(want.len, argv.len);
     for (want, argv) |w, got| try testing.expectEqualStrings(w, got);
+}
+
+test "every example in the Visual Studio docs loads with no problem" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var blocks: usize = 0;
+    const text = try testDocExamples(alloc, "Visual Studio developer shells", &blocks);
+    defer alloc.free(text);
+    try testing.expect(blocks >= 2);
+    var cfg = try testLoadProfileText(alloc, text);
+    defer cfg.deinit();
+    try testExpectNoProblems(&cfg);
+    try testing.expectEqual(VisualStudioProfiles.all, cfg.@"visual-studio-profiles");
+    // `default-profile = vs:newest:cmd` found the (test) instance.
+    try testing.expectEqualStrings("vs:6bb7cfd9:cmd", cfg._default_profile.?.key);
 }
 
 test "a profile line without an id is a config problem that does not show the line" {
@@ -11541,6 +11709,9 @@ pub const ShellIntegration = enum {
 
 /// See utf8-console.
 pub const Utf8Console = windows_shell.Utf8Console;
+
+/// See `visual-studio-profiles`.
+pub const VisualStudioProfiles = windows_shell.VisualStudioProfiles;
 
 /// Shell integration features
 pub const ShellIntegrationFeatures = packed struct {

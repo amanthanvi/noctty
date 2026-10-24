@@ -2376,6 +2376,7 @@ fn profileKindBadge(kind: windows_shell.ProfileKind) []const u8 {
         .cmd => "CMD",
         .ssh => "SSH",
         .user => "USER",
+        .vs_dev_cmd, .vs_dev_shell => "VS",
     };
 }
 
@@ -2391,6 +2392,9 @@ fn profileKindGlyph(kind: windows_shell.ProfileKind) []const u8 {
         .ssh => "->",
         // A profile of the user's own: no shell is implied.
         .user => "*>",
+        // The shell each one runs, as for cmd and Windows PowerShell.
+        .vs_dev_cmd => "C>",
+        .vs_dev_shell => ">_",
     };
 }
 

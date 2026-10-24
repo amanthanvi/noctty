@@ -2099,6 +2099,7 @@ test "win32 new-window IPC refuses the user profile keys" {
         "--default-profile=x",
         "--profile-order=x",
         "--profile-hidden=pwsh.exe",
+        "--visual-studio-profiles=all",
     }) |arg| {
         try std.testing.expect(!newWindowIpcArgumentsAccepted(&.{arg}));
     }
