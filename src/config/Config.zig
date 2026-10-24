@@ -3728,7 +3728,9 @@ _default_profile_file: ?[:0]const u8 = null,
 /// `--command=` and `--initial-command=` on the command line, as typed,
 /// applied again in `finalize` over every config file for the same reason:
 /// a jump-list profile link resets both with empty values, which a `command`
-/// or `initial-command` line in an included file would otherwise undo.
+/// or `initial-command` line in an included file would otherwise undo. The
+/// last value of each that the field parse took: a later one it refused
+/// (`--command=direct:`) leaves the earlier one in force.
 _command_cli: ?[:0]const u8 = null,
 _initial_command_cli: ?[:0]const u8 = null,
 
@@ -5383,8 +5385,9 @@ pub fn finalize(self: *Config) !void {
 
 /// `--command=` and `--initial-command=` from the command line once every
 /// layer has been read, over a `command` or `initial-command` line in an
-/// included file (read after the command line). A value the command line's
-/// own parse refused is left as it was; that parse reported it.
+/// included file (read after the command line). What was kept is the last
+/// value the field parse took (`takenCliValue`), so a later one it refused
+/// does not replace it.
 fn finalizeCliLaunch(self: *Config) Allocator.Error!void {
     if (self._command_cli) |value| {
         if (try self.applyCliValue("command", value)) {
@@ -5393,6 +5396,17 @@ fn finalizeCliLaunch(self: *Config) Allocator.Error!void {
         }
     }
     if (self._initial_command_cli) |value| _ = try self.applyCliValue("initial-command", value);
+}
+
+/// The value of `arg` when it is `--<key>=<value>` and the field parse takes
+/// it. It is parsed here, into the field, by the same `applyCliValue` the
+/// parse that follows uses (and `finalizeCliLaunch` repeats), so the answer is
+/// that parse's, with no copy of its rules (a blank value, `direct:`).
+fn takenCliValue(self: *Config, comptime key: []const u8, arg: []const u8) Allocator.Error!?[]const u8 {
+    const prefix = "--" ++ key ++ "=";
+    if (!std.mem.startsWith(u8, arg, prefix)) return null;
+    const value = arg[prefix.len..];
+    return if (try self.applyCliValue(key, value)) value else null;
 }
 
 fn applyCliValue(self: *Config, comptime key: []const u8, value: []const u8) Allocator.Error!bool {
@@ -5765,6 +5779,168 @@ test "default-profile gives way to a command from any layer, and says so only fo
         try testing.expect(cfg._diagnostics.empty());
         try testing.expectEqualStrings("-d", cfg.command.?.direct[1]);
         try testing.expectEqualStrings("wsl:Ubuntu", cfg._default_profile.?.key);
+    }
+}
+
+fn testCommandProblems(cfg: *const Config, key: []const u8) usize {
+    var count: usize = 0;
+    for (cfg._diagnostics.items()) |diag| {
+        if (std.mem.eql(u8, diag.key, key)) count += 1;
+    }
+    return count;
+}
+
+test "a refused --command= does not replace an accepted one over an include" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // The last ACCEPTED `--command=` is what holds over an included file's
+    // `command`; the refused one after it is reported and nothing more.
+    for ([_][]const u8{ "direct:", "direct:   ", " " }) |refused| {
+        const refused_arg = try std.fmt.allocPrint(alloc, "--command={s}", .{refused});
+        defer alloc.free(refused_arg);
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile ++ "default-profile = py\n",
+            &.{ "--command=vim.exe", refused_arg },
+            "command = other.exe\n",
+        );
+        defer cfg.deinit();
+        try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
+        try testing.expectEqualStrings("vim.exe", cfg._command_cli.?);
+        try testing.expect(!cfg._command_defaulted);
+        try testing.expectEqual(@as(usize, 1), testCommandProblems(&cfg, "command"));
+        // The command line's command is quiet toward `default-profile`.
+        try testing.expectEqual(@as(usize, 0), testDefaultProfileProblems(&cfg));
+        try testing.expect(cfg._default_profile == null);
+        // A copy and a rebuild for a conditional state (a theme) keep it.
+        var copy = try cfg.clone(alloc);
+        defer copy.deinit();
+        try testing.expectEqualStrings("vim.exe", copy._command_cli.?);
+        cfg._conditional_set.insert(.theme);
+        var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
+        defer replayed.deinit();
+        try testing.expectEqualStrings("vim.exe", replayed.command.?.shell);
+    }
+}
+
+test "a refused --initial-command= does not replace an accepted one over an include" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // The same for `--initial-command=`.
+    for ([_][]const u8{ "direct:", " " }) |refused| {
+        const refused_arg = try std.fmt.allocPrint(alloc, "--initial-command={s}", .{refused});
+        defer alloc.free(refused_arg);
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile,
+            &.{ "--initial-command=vim.exe", refused_arg },
+            "initial-command = other.exe\n",
+        );
+        defer cfg.deinit();
+        try testing.expectEqualStrings("vim.exe", cfg.@"initial-command".?.shell);
+        try testing.expectEqualStrings("vim.exe", cfg._initial_command_cli.?);
+        try testing.expectEqual(@as(usize, 1), testCommandProblems(&cfg, "initial-command"));
+    }
+}
+
+test "a refused command-line value before or after an accepted one: the accepted one holds" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // A refused value that comes first leaves the later accepted one alone,
+    // and an accepted one after a refused one still wins.
+    {
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile,
+            &.{ "--command=direct:", "--command=vim.exe", "--initial-command=direct:", "--initial-command=vim.exe" },
+            "command = other.exe\ninitial-command = other.exe\n",
+        );
+        defer cfg.deinit();
+        try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
+        try testing.expectEqualStrings("vim.exe", cfg.@"initial-command".?.shell);
+    }
+}
+
+test "a refused command-line value after a reset leaves the reset" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // A refused value after an accepted reset leaves the reset: the jump
+    // list's `--command=` still starts the profile.
+    {
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile ++ "default-profile = py\n",
+            &.{ "--command=", "--command=direct:", "--initial-command=", "--initial-command=direct:" },
+            "command = other.exe\ninitial-command = other.exe\n",
+        );
+        defer cfg.deinit();
+        try testing.expectEqualStrings("", cfg._command_cli.?);
+        try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
+        try testing.expect(cfg._command_defaulted);
+        try testing.expect(cfg.@"initial-command" == null);
+    }
+}
+
+test "a refused --command= does not claim a config file's command as the command line's" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // With nothing accepted on the command line, a config file's `command`
+    // is still the file's, so `default-profile` is reported as unused. A
+    // refused `--command=` must not mark the command as the command line's.
+    {
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile ++ "command = vim.exe\ndefault-profile = py\n",
+            &.{"--command=direct:"},
+            "",
+        );
+        defer cfg.deinit();
+        try testing.expect(cfg._command_cli == null);
+        try testing.expectEqualStrings("vim.exe", cfg.command.?.shell);
+        try testing.expectEqual(@as(usize, 1), testCommandProblems(&cfg, "command"));
+        try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+        try testing.expect(cfg._default_profile == null);
+    }
+    {
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile ++ "default-profile = py\n",
+            &.{"--command=direct:"},
+            "command = other.exe\n",
+        );
+        defer cfg.deinit();
+        try testing.expect(cfg._command_cli == null);
+        try testing.expectEqualStrings("other.exe", cfg.command.?.shell);
+        try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+    }
+}
+
+test "a refused --initial-command= leaves -e its place" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const profile = "profile-command = py: cmd.exe /k init.cmd\n";
+
+    // `-e` still comes after, and wins over, a kept `--initial-command=`.
+    {
+        var cfg = try testLoadDefaultProfile(
+            alloc,
+            profile,
+            &.{ "--initial-command=vim.exe", "--initial-command=direct:", "-e", "foo.exe" },
+            "",
+        );
+        defer cfg.deinit();
+        try testing.expect(cfg._initial_command_cli == null);
+        try testing.expectEqualStrings("foo.exe", cfg.@"initial-command".?.direct[0]);
     }
 }
 
@@ -6962,17 +7138,20 @@ pub fn parseManuallyHook(
     arg: []const u8,
     iter: anytype,
 ) !bool {
-    if (std.mem.eql(u8, arg, "--command") or std.mem.startsWith(u8, arg, "--command=")) {
+    // Only a value the field parse takes changes `command` (and so which layer
+    // set it, and what `finalize` puts back); a refused one leaves all of
+    // that as it was and is reported by the parse that follows.
+    if (try self.takenCliValue("command", arg)) |value| {
         const location = try cli.Location.fromIter(iter, alloc);
         self._command_defaulted = false;
         self._command_from_file = location == .file;
-        if (location == .cli and std.mem.startsWith(u8, arg, "--command=")) {
-            self._command_cli = try alloc.dupeZ(u8, arg["--command=".len..]);
-        }
+        if (location == .cli) self._command_cli = try alloc.dupeZ(u8, value);
     }
     if (std.mem.startsWith(u8, arg, "--initial-command=")) {
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
-            self._initial_command_cli = try alloc.dupeZ(u8, arg["--initial-command=".len..]);
+            if (try self.takenCliValue("initial-command", arg)) |value| {
+                self._initial_command_cli = try alloc.dupeZ(u8, value);
+            }
         }
     }
     if (std.mem.startsWith(u8, arg, "--default-profile=")) {
