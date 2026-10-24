@@ -3,6 +3,7 @@
 Dates descend; entries that share a date are not always newest first. A newer-dated entry, or an item under "Corrected in other files", overrides an older one on the same subject; when same-date entries disagree, the code decides. [AGENTS.md](../../../AGENTS.md) indexes the area files and says how to add an entry.
 
 Corrected in other files:
+- 2026-10-23 "An installer's Restart Manager close" (RMCLOSE-1), harness trap (a), "Leave it out until the installer excludes it (RMCLOSE-4)": the installer now excludes it (`CloseApplicationsFilterExcludes=OpenConsole.exe` in `dist/windows/noctty.iss`, the 2026-10-23 #545 entry in build-release-ci.md). Leave `OpenConsole.exe` out of the registration set only against a Setup built without that line; for one built with it, that entry's measuring trap (3) says how a harness may register the copy's hosts and accept them.
 - 2026-04-16 "`App.init` calls `CoInitializeEx`": `App.init` now calls `OleInitialize` (paired with `OleUninitialize` only after `S_OK`/`S_FALSE`), per the 2026-10-11 PKG-26 entry in input.md; its STA and `RPC_E_CHANGED_MODE` rules still hold.
 - 2026-10-23 "An installer's Restart Manager close" (RMCLOSE-1), its last sentence: restart registration while agreeing is the 2026-10-23 RMCLOSE-3 entry in build-release-ci.md.
 

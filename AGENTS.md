@@ -278,17 +278,17 @@ that govern each symbol you change, or that none does.
   and portable identity, the jump list, toasts and desktop notifications
   (their tab attribution, tags and history removal, `App.showToast`, the COM
   activator in `win32_toast_activator.zig`), an installer's Restart Manager
-  close and a session end (`App.onQueryEndSession`, `App.onEndSession`, the
-  lifecycle window), the bell, taskbar progress and icon, crash minidumps and
-  Sentry, the COM apartment, default-terminal handoff, the CLI and the
-  `noctty.com` wrapper.
+  close and a session end (`App.onQueryEndSession`, `App.onEndSession`,
+  `registerInstallerRestart`, the lifecycle window), the bell, taskbar
+  progress and icon, crash minidumps and Sentry, the COM apartment,
+  default-terminal handoff, the CLI and the `noctty.com` wrapper.
 - [build-release-ci.md](docs/agents/log/build-release-ci.md): `build.zig`
   and resources, the Windows target floor (`src/build/Config.zig`,
   `-Dtarget` `win10`/`win10_rs5`, and the std APIs it gates), packaging
   (`scripts/package-windows.ps1`, `dist/windows/noctty.iss`, what Setup's
   `CloseApplications` closes), signing, the updater (including
-  `RegisterApplicationRestart` while an installer closes noctty:
-  `registerInstallerRestart`, `stagedInstallerRunning`), release workflows
+  `RegisterApplicationRestart` while an installer closes noctty, with
+  `stagedInstallerRunning`), release workflows
   and package managers (WinGet, Scoop,
   Chocolatey), GitHub Actions CI (path filter, caching, runners), CRLF and
   `.gitattributes` in shipped files.
