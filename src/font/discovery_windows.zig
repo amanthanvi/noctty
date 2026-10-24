@@ -2085,16 +2085,19 @@ test "windows refreshExisting never starts or waits for a scan" {
 test "windows discovery scan stopped between files publishes nothing" {
     // FLAKY-CLIFWD-CLOSE-01: a scan the owner stops ends before its next
     // file, and what it read so far is dropped rather than published as
-    // if it were every installed font.
+    // if it were every installed font: the record set, state and
+    // generation it would have replaced stay as they were.
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    for (fixtureFonts()) |fixture| try tmp.dir.writeFile(.{ .sub_path = fixture.name, .data = fixture.data });
+
+    // A published record set (the fixtures), and a rescan of their folder
+    // alone, which finds it changed since.
+    var disco = try fixtureDiscovery(tmp.dir, &fixtureFonts());
+    defer disco.deinit();
+    const published = disco.state.?;
     const dir = try tmp.dir.realpathAlloc(testing.allocator, ".");
     defer testing.allocator.free(dir);
-
-    var disco = Windows.init();
-    defer disco.deinit();
     if (disco.system_dir) |old| disco.alloc.free(old);
     disco.system_dir = try disco.alloc.dupeZ(u8, dir);
     if (disco.user_dir) |old| disco.alloc.free(old);
@@ -2111,15 +2114,16 @@ test "windows discovery scan stopped between files publishes nothing" {
     var stop: Stop = .{};
     disco.test_scan_hook = .{ .ctx = &stop, .call = Stop.call };
 
-    // The scan reads the first fixture, then stops.
+    // The rescan reads the first fixture, then stops.
     disco.refresh();
     try testing.expectEqual(@as(usize, 1), stop.calls);
-    try testing.expect(disco.state == null);
-    try testing.expectEqual(@as(usize, 0), disco.records.len);
+    try testing.expectEqual(@as(usize, 3), disco.records.len);
+    try testing.expect(disco.state.?.eql(published));
     try testing.expectEqual(@as(u64, 0), disco.generation);
 
     // A later scan stops before its first file.
     disco.refresh();
     try testing.expectEqual(@as(usize, 1), stop.calls);
-    try testing.expect(disco.state == null);
+    try testing.expectEqual(@as(usize, 3), disco.records.len);
+    try testing.expectEqual(@as(u64, 0), disco.generation);
 }
