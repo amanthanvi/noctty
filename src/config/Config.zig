@@ -5364,6 +5364,16 @@ fn applyCliValue(self: *Config, comptime key: []const u8, value: []const u8) All
 /// wins over the files (included ones are read after the command line), and
 /// one that a `command` from a config file overrides is a config problem.
 /// Safe mode starts with a `command` noctty chose, so this stays quiet there.
+/// Add a problem `finalize` found, unless the config already has it:
+/// `finalize` can run again on a finalized config (a new window's clone of
+/// the app config is finalized again with its forwarded arguments).
+fn appendFinalizeProblem(self: *Config, diag: cli.Diagnostic) Allocator.Error!void {
+    for (self._diagnostics.items()) |have| {
+        if (Replay.sameDiagnostic(have, diag)) return;
+    }
+    try self._diagnostics.append(self._arena.?.allocator(), diag);
+}
+
 fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
     if (self._default_profile_cli) |value| {
         self.@"default-profile" = if (value.len == 0) null else value;
@@ -5371,7 +5381,7 @@ fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
     if (self.@"default-profile" == null or self._default_profile != null) return;
     if (self.command == null or self._command_defaulted or !self._command_from_file) return;
     const alloc = self._arena.?.allocator();
-    try self._diagnostics.append(alloc, .{
+    try self.appendFinalizeProblem(.{
         .key = "default-profile",
         .message = "is not used, because a config file sets command; remove the command line to start the profile",
         .location = try self.profilePlace("default-profile", self.@"default-profile".?).clone(alloc),
@@ -5397,7 +5407,7 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
         break :found null;
     };
     const profile = resolved orelse {
-        try self._diagnostics.append(alloc, .{
+        try self.appendFinalizeProblem(.{
             .key = "default-profile",
             .message = try std.fmt.allocPrintSentinel(
                 alloc,
@@ -5730,7 +5740,7 @@ fn finalizeProfileReferences(self: *Config, comptime key: [:0]const u8) Allocato
     const alloc = self._arena.?.allocator();
     for (@field(self, key).list.items) |reference| {
         if (windows_shell.referenceCanName(reference, &self.@"profile-command")) continue;
-        try self._diagnostics.append(alloc, .{
+        try self.appendFinalizeProblem(.{
             .key = key,
             .message = try std.fmt.allocPrintSentinel(alloc, "\"{s}\" names no profile: use a profile-command id, " ++
                 "a key such as pwsh.exe, wsl:<distribution> or ssh:<alias>, or a name such as pwsh, git, cmd or wsl{s}", .{
@@ -6016,6 +6026,23 @@ test "profile keys: a line of the longest length the reader takes formats to a l
     try testing.expect(cfg.@"profile-working-directory".equal(again.@"profile-working-directory"));
     try testing.expect(cfg.@"profile-env".equal(again.@"profile-env"));
     try testing.expectEqual(@as(usize, 2), again.@"profile-command".count());
+}
+
+test "finalize run again adds no profile problem twice" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    for ([_][]const u8{
+        "default-profile = nothing-here\nprofile-order = typo-id\nprofile-hidden = also-typo\n",
+        "command = cmd.exe\ndefault-profile = pwsh\n",
+    }, [_]usize{ 3, 1 }) |text, want| {
+        var cfg = try testLoadProfileText(alloc, text);
+        defer cfg.deinit();
+        try testing.expectEqual(want, cfg._diagnostics.items().len);
+        // As a new window's clone of the app config is finalized again.
+        try cfg.finalize();
+        try testing.expectEqual(want, cfg._diagnostics.items().len);
+    }
 }
 
 test "default-profile, profile-order and profile-hidden load and format back" {
