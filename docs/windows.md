@@ -807,6 +807,29 @@ and a restored session run it again (except a detected `ssh:` profile, which
 restore never reconnects; a user profile that runs `ssh.exe` is restored like
 any other), and the profile picker opens on it until you choose another there.
 
+Settings sets it too: Shell > Default profile lists Automatic and the
+profiles the picker shows. Choosing one writes a single `default-profile`
+line with the profile's key (`user:py312`, `pwsh.exe`, `wsl:Ubuntu`), so
+renaming the profile keeps it selected; Automatic removes the
+`default-profile` lines from the file Settings saves to. A value the file
+already has stays as written until you choose another profile. One that
+starts a profile the list does not show (an `ssh:` alias that is not in your
+SSH config) shows that profile's name, and one that names nothing that can
+start here (an `ssh:` value where `ssh.exe` cannot be found, say) is shown as
+written, marked "(not found)". A `vs:` value that could not be looked up
+when the config was read (Visual Studio's Setup Configuration did not answer
+in full) is shown as written, without the mark, until a reload asks again.
+A Default command, when set, wins over it, as the table below says.
+
+The dropdown's profiles are the ones the open terminal windows have found.
+With no terminal window open (Settings alone), or until the first window's
+search for shells finishes, it shows only Automatic and the saved value. A
+window opened from a taskbar profile entry or with New Elevated Window runs the
+profile it was opened for, but its Settings shows and saves the
+`default-profile` of your config files: a choice saved there is written to
+the file, while new tabs in that window keep starting the profile it was
+opened for.
+
 `profile-order` lists profiles first in the picker and the palette, in the
 order of its lines, and `profile-hidden` takes profiles out of the picker, the
 palette, the [▾] menu, the taskbar jump list and the quick slots. A hidden
@@ -906,8 +929,9 @@ Limits:
   running noctty was given with `--config-file` is not known to it.
 - A profile that runs `ssh.exe` is restored with the session like any other
   profile; a detected `ssh:` profile is not.
-- The Settings window does not edit these lines; it leaves them as they are
-  when it saves.
+- The Settings window does not edit the `profile-*` lines; it leaves them,
+  and every line it does not edit, as they are when it saves. Its Shell
+  page sets `default-profile` (see above).
 
 ## App identity
 

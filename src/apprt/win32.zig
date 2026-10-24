@@ -2099,10 +2099,29 @@ fn settingsDiskEditConflict(
     const effective: *const configpkg.Config = if (applied) |*config| config else disk;
     inline for (win32_settings.editable_keys) |key| {
         if (user_edited.isSet(@intFromEnum(key)) and
-            settingsDiskValueDiffers(original, effective, key) and
-            settingsDiskValueDiffers(pending, effective, key)) return true;
+            settingsDiskEditDiffers(original, effective, key) and
+            settingsDiskEditDiffers(pending, effective, key)) return true;
     }
     return false;
+}
+
+/// `settingsDiskValueDiffers` for the conflict check. Settings' copies hold
+/// the files' `default-profile` (`SettingsWindow.useSavedValues`), while the
+/// load also reads this process's command line, whose `--default-profile`
+/// (a jump-list or elevated window) wins there: compare what the files say.
+/// The masked check after a save keeps the value the process runs with.
+fn settingsDiskEditDiffers(
+    known: *const configpkg.Config,
+    disk: *const configpkg.Config,
+    comptime key: SettingsConfigKey,
+) bool {
+    if (key == .@"default-profile") {
+        const mine = known.@"default-profile";
+        const theirs = disk.defaultProfileFromFiles();
+        if (mine == null or theirs == null) return mine != null or theirs != null;
+        return !std.mem.eql(u8, mine.?, theirs.?);
+    }
+    return settingsDiskValueDiffers(known, disk, key);
 }
 
 /// `Config.load` takes a config file it cannot open (held without read
@@ -3542,6 +3561,7 @@ pub const App = struct {
             .maskedKeys = &settingsMaskedKeysThunk,
             .saveTarget = &settingsSaveTargetThunk,
             .configProblems = &settingsConfigProblemsThunk,
+            .profileChoices = &settingsProfileChoicesThunk,
             .notifySuccess = &settingsNotifySuccessThunk,
             .customUiaProvidersEnabled = &settingsCustomUiaProvidersEnabledThunk,
             .deferUiaDisconnect = &settingsDeferUiaDisconnectThunk,
@@ -6562,6 +6582,8 @@ pub const App = struct {
     fn handleProfileDiscovery(self: *App, completion: *const ProfileDiscoveryCompletion) void {
         // With no host, `scheduleIfStartupPending` re-arms when one appears.
         if (self.hosts.items.len == 0) return;
+        // Settings' Default profile dropdown reads the windows' lists.
+        defer self.settings_window.profilesChanged();
         const primary = self.hosts.items[0];
         const jump_list: ?*win32_jump_list.JumpList = if (self.jump_list) |*value|
             if (value.startupProfileDiscoveryPending()) value else null
@@ -6610,6 +6632,27 @@ pub const App = struct {
             };
             if (host != self.profiles_requesting_host) host.profilesArrived(had_profiles);
         }
+    }
+
+    /// The profile list for Settings' Default profile dropdown: a window's
+    /// complete list, else any window's list, else, when `ask`, the first
+    /// window asks the discovery worker (never discovering on this thread
+    /// when one can run) and `handleProfileDiscovery` tells Settings when the
+    /// list arrives. That refill does not ask: after a failed discovery no
+    /// window has a list, and asking again from there would start another at
+    /// once, and another when it failed. Null with no window or no list.
+    fn settingsProfileList(self: *App, ask: bool) ?struct { profiles: []const windows_shell.Profile, complete: bool } {
+        for (self.hosts.items) |host| if (host.profiles_complete) {
+            if (host.profiles) |profiles| return .{ .profiles = profiles, .complete = true };
+        };
+        for (self.hosts.items) |host| {
+            if (host.profiles) |profiles| return .{ .profiles = profiles, .complete = false };
+        }
+        if (!ask or self.hosts.items.len == 0) return null;
+        const host = self.hosts.items[0];
+        _ = host.profilesForChrome();
+        const profiles = host.profiles orelse return null;
+        return .{ .profiles = profiles, .complete = host.profiles_complete };
     }
 
     fn anyHostRequestedProfiles(self: *const App) bool {
@@ -13578,6 +13621,295 @@ test "win32 a finished discovery reaches only the windows that asked for it" {
     };
     app.handleProfileDiscovery(&stale);
     try std.testing.expectEqualStrings("pwsh", first.profiles.?[0].key);
+}
+
+test "win32 Settings' profile refill reads the windows' lists and asks for none" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var first: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &first, .register = true, .id = 1 }},
+    });
+    defer session.deinit();
+    defer testFreeHostProfiles(&app, &.{&first});
+
+    // A discovery failed, so no window has a list. The refill Settings runs
+    // then answers with none and starts no other discovery, which could
+    // fail the same way and land here again.
+    const attempt = app.profile_discovery_attempt;
+    try std.testing.expect(app.settingsProfileList(false) == null);
+    var choices = try settingsProfileChoicesThunk(&app, std.testing.allocator, "user:py312", null, false);
+    defer choices.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), choices.items.len);
+    try std.testing.expect(!first.profiles_requested);
+    try std.testing.expectEqual(attempt, app.profile_discovery_attempt);
+
+    // A list a window has is read without asking.
+    first.profiles = try testProfileList(app.core_app.alloc, &.{ "pwsh.exe", "cmd.exe" });
+    first.profiles_complete = true;
+    const list = app.settingsProfileList(false).?;
+    try std.testing.expectEqual(@as(usize, 2), list.profiles.len);
+    try std.testing.expect(list.complete);
+    try std.testing.expect(!first.profiles_requested);
+}
+
+test "win32 a finished discovery refills Settings' Default profile dropdown" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn rowCount(app: *App) LRESULT {
+            return sys.SendMessageW(app.settings_window.fields.combo_default_profile.?, 0x0146, 0, 0); // CB_GETCOUNT
+        }
+
+        fn body() !void {
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var first: Host = undefined;
+            var session: TestSession = .{};
+            try session.init(.{
+                .core_app = &core_app,
+                .app = &app,
+                .hosts = &.{.{ .storage = &first, .register = true, .id = 1 }},
+            });
+            defer session.deinit();
+            defer testFreeHostProfiles(&app, &.{&first});
+            app.initComApartment();
+            if (!app.com_initialized) return error.SkipZigTest;
+            defer sys.OleUninitialize();
+            app.settings_window.handle.deferUiaDisconnect = null;
+            const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
+            const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+            defer {
+                app.settings_window.deinit();
+                _ = sys.UnregisterClassW(settings_class, app.settings_window.handle.hinstance);
+                _ = sys.UnregisterClassW(viewport_class, app.settings_window.handle.hinstance);
+            }
+
+            // The window holds a partial list, which the Shell page shows
+            // without asking for another.
+            first.profiles = try testProfileList(app.core_app.alloc, &.{"pwsh.exe"});
+            first.profiles_complete = false;
+            try app.settings_window.openSection(.shell);
+            try std.testing.expectEqual(@as(LRESULT, 2), rowCount(&app));
+
+            // The window's discovery lands: the dropdown is refilled from it.
+            first.profiles_requested = true;
+            var completion: ProfileDiscoveryCompletion = .{
+                .arena = .init(std.testing.allocator),
+                .generation = app.profiles_generation,
+            };
+            defer completion.deinit();
+            completion.result = .{
+                .profiles = try testProfileList(completion.arena.allocator(), &.{ "pwsh.exe", "cmd.exe" }),
+                .complete = true,
+            };
+            app.handleProfileDiscovery(&completion);
+            try std.testing.expect(first.profiles_complete);
+            try std.testing.expectEqual(@as(LRESULT, 3), rowCount(&app));
+        }
+    }.body);
+}
+
+test "win32 Settings' profile choices name a resolved default the list lacks by its label" {
+    const alloc = std.testing.allocator;
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{} } },
+        .{ .kind = .ssh, .key = "ssh:listed", .label = "SSH: listed", .command = .{ .direct = &.{} } },
+    };
+    // `ssh:box` is not in the SSH config, so it is not listed, but the
+    // loaded config resolved it and it is what new terminals start.
+    const resolved: windows_shell.Profile = .{ .kind = .ssh, .key = "ssh:box", .label = "SSH: box", .command = .{ .direct = &.{} } };
+    var unlisted = try settingsProfileChoices(alloc, &profiles, true, "ssh:box", .{ .resolved = &resolved });
+    defer unlisted.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), unlisted.selected);
+    try std.testing.expectEqualStrings("SSH: box", unlisted.saved_label.?);
+
+    // A listed one is selected, by the resolved key or by the list rules.
+    const listed: windows_shell.Profile = .{ .kind = .ssh, .key = "ssh:listed", .label = "SSH: listed", .command = .{ .direct = &.{} } };
+    var by_key = try settingsProfileChoices(alloc, &profiles, true, "ssh:listed", .{ .resolved = &listed });
+    defer by_key.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, 1), by_key.selected);
+    try std.testing.expect(by_key.saved_label == null);
+    var by_rule = try settingsProfileChoices(alloc, &profiles, true, "pwsh", .untried);
+    defer by_rule.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, 0), by_rule.selected);
+
+    // An unlisted `ssh:` value the loaded config did not look up (a window
+    // started with `--default-profile`, where Settings shows the files'
+    // value) gets the label it would start under.
+    var untried = try settingsProfileChoices(alloc, &profiles, true, "ssh:box", .untried);
+    defer untried.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), untried.selected);
+    try std.testing.expectEqualStrings("SSH: box", untried.saved_label.?);
+    // One it looked up and could not start (no ssh.exe, no wsl.exe) has no
+    // label: new terminals start the automatic default, and Settings marks
+    // it not found.
+    for ([_][]const u8{ "ssh:box", "wsl:Ubuntu" }) |value| {
+        // Whatever the list: absent, partial or complete.
+        for ([_]bool{ false, true }) |complete| {
+            const list: []const windows_shell.Profile = if (complete) &profiles else profiles[0..1];
+            var failed = try settingsProfileChoices(alloc, list, complete, value, .unresolved);
+            defer failed.deinit(alloc);
+            try std.testing.expectEqual(@as(?usize, null), failed.selected);
+            try std.testing.expect(failed.saved_label == null);
+            try std.testing.expect(failed.saved_not_found);
+        }
+        var unlisted_failed = try settingsProfileChoices(alloc, &.{}, false, value, .unresolved);
+        defer unlisted_failed.deinit(alloc);
+        try std.testing.expect(unlisted_failed.saved_not_found);
+    }
+    // Nor does it take a listed row by the list's rules.
+    var failed_listed = try settingsProfileChoices(alloc, &profiles, true, "pwsh", .unresolved);
+    defer failed_listed.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), failed_listed.selected);
+
+    // A value nothing resolved has no label: Settings marks it not found.
+    var missing = try settingsProfileChoices(alloc, &profiles, true, "user:gone", .untried);
+    defer missing.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), missing.selected);
+    try std.testing.expect(missing.saved_label == null);
+    try std.testing.expect(missing.saved_not_found);
+    try std.testing.expectEqual(@as(usize, 2), missing.items.len);
+    // Unless the list may still lack it.
+    var pending = try settingsProfileChoices(alloc, &profiles, false, "user:gone", .untried);
+    defer pending.deinit(alloc);
+    try std.testing.expect(!pending.saved_not_found);
+
+    // A list from a partial Setup Configuration answer may lack the newest
+    // instance, so `vs:newest:cmd`, which the loaded config could not
+    // resolve, preselects no older instance's row; that row stays a choice
+    // of its own, which stages its concrete key. A complete list names it.
+    const vs = [_]windows_shell.Profile{
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+        .{ .kind = .vs_dev_cmd, .key = "vs:6bb7cfd9:cmd", .label = "Developer Command Prompt for VS 2022", .command = .{ .direct = &.{} }, .newest_visual_studio = true },
+    };
+    var partial = try settingsProfileChoices(alloc, &vs, false, "vs:newest:cmd", .untried);
+    defer partial.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), partial.selected);
+    try std.testing.expect(partial.saved_label == null);
+    try std.testing.expectEqualStrings("vs:6bb7cfd9:cmd", partial.items[1].key);
+    var whole = try settingsProfileChoices(alloc, &vs, true, "vs:newest:cmd", .untried);
+    defer whole.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, 1), whole.selected);
+    // The loaded config resolved it to an instance the cached list lacks (a
+    // newer Visual Studio installed since the list was found): that one is
+    // what starts, by its label, and the older row stays a choice.
+    const newer: windows_shell.Profile = .{ .kind = .vs_dev_cmd, .key = "vs:0a1b2c3d:cmd", .label = "Developer Command Prompt for VS 2026", .command = .{ .direct = &.{} }, .newest_visual_studio = true };
+    var moved = try settingsProfileChoices(alloc, &vs, true, "vs:newest:cmd", .{ .resolved = &newer });
+    defer moved.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), moved.selected);
+    try std.testing.expectEqualStrings("Developer Command Prompt for VS 2026", moved.saved_label.?);
+    // Setup Configuration did not answer the load's lookup, so new
+    // terminals start the automatic default: even a complete cached list's
+    // newest instance is not the saved row, which stays apart and unmarked,
+    // and that instance's row is a choice that stages its own key.
+    var unavailable = try settingsProfileChoices(alloc, &vs, true, "vs:newest:cmd", .unavailable);
+    defer unavailable.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), unavailable.selected);
+    try std.testing.expect(unavailable.saved_label == null);
+    try std.testing.expect(!unavailable.saved_not_found);
+    try std.testing.expectEqualStrings("vs:6bb7cfd9:cmd", unavailable.items[1].key);
+
+    // Every allocation can fail, the label's last, and nothing is freed twice
+    // or leaked.
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn run(a: Allocator, list: []const windows_shell.Profile, saved: *const windows_shell.Profile) !void {
+            var choices = try settingsProfileChoices(a, list, true, "ssh:box", .{ .resolved = saved });
+            choices.deinit(a);
+            var bare = try settingsProfileChoices(a, list, true, "ssh:box", .untried);
+            bare.deinit(a);
+        }
+    }.run, .{ @as([]const windows_shell.Profile, &profiles), &resolved });
+}
+
+test "win32 Settings' profile choices follow what the loaded config made of the value" {
+    const alloc = std.testing.allocator;
+    var app: App = undefined;
+    app.hosts = .empty;
+    app.config = try configpkg.Config.default(alloc);
+    defer app.config.deinit();
+    const arena = app.config._arena.?.allocator();
+    app.config.@"default-profile" = try arena.dupeZ(u8, "ssh:box");
+
+    // Looked up and not found (no ssh.exe here): not found, not "SSH: box",
+    // with no window's list at all.
+    app.config._default_profile_failure = .not_found;
+    var failed = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
+    defer failed.deinit(alloc);
+    try std.testing.expect(failed.saved_label == null);
+    try std.testing.expect(failed.saved_not_found);
+
+    // Visual Studio did not answer: apart from every row, and not missing.
+    app.config.@"default-profile" = try arena.dupeZ(u8, "vs:newest:cmd");
+    app.config._default_profile_failure = .unavailable;
+    try std.testing.expect(settingsDefaultProfileOutcome(&app.config, "vs:newest:cmd") == .unavailable);
+    try std.testing.expect(settingsDefaultProfileOutcome(&app.config, "vs:6bb7cfd9:cmd") == .untried);
+    var unavailable = try settingsProfileChoicesThunk(&app, alloc, "vs:newest:cmd", null, false);
+    defer unavailable.deinit(alloc);
+    try std.testing.expectEqual(@as(?usize, null), unavailable.selected);
+    try std.testing.expect(unavailable.saved_label == null);
+    try std.testing.expect(!unavailable.saved_not_found);
+    app.config.@"default-profile" = try arena.dupeZ(u8, "ssh:box");
+
+    // Resolved: the label it starts under.
+    app.config._default_profile_failure = .none;
+    app.config._default_profile = .{ .kind = .ssh, .key = "ssh:box", .label = "SSH: box", .command = .{ .direct = &.{} } };
+    var resolved = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
+    defer resolved.deinit(alloc);
+    try std.testing.expectEqualStrings("SSH: box", resolved.saved_label.?);
+
+    // The files' value in a window whose command line named another: the
+    // load did not look it up, so neither answer above is about it.
+    app.config._default_profile = null;
+    app.config._default_profile_failure = .not_found;
+    app.config.@"default-profile" = try arena.dupeZ(u8, "user:py312");
+    var untried = try settingsProfileChoicesThunk(&app, alloc, "ssh:box", null, false);
+    defer untried.deinit(alloc);
+    try std.testing.expectEqualStrings("SSH: box", untried.saved_label.?);
+}
+
+test "win32 Settings names a staged ssh: profile the list left out by its label" {
+    const alloc = std.testing.allocator;
+    // A complete list with no SSH rows: a reload switched SSH config hosts
+    // off after `ssh:box` was chosen.
+    const items = [_]win32_settings.ProfileChoice{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "ssh:Box", .label = "SSH: Box" },
+    };
+    const listed = items[0..1];
+    for ([_]?[]const u8{ null, "pwsh.exe" }) |saved| {
+        const label = (try settingsDraftProfileLabel(alloc, listed, saved, "ssh:box")) orelse return error.TestExpectedLabel;
+        defer alloc.free(label);
+        try std.testing.expectEqualStrings("SSH: box", label);
+    }
+    // No label where the row needs none (listed, the saved value, none) or
+    // where the key starts nothing without the list.
+    try std.testing.expect((try settingsDraftProfileLabel(alloc, &items, null, "ssh:Box")) == null);
+    try std.testing.expect((try settingsDraftProfileLabel(alloc, listed, "ssh:box", "ssh:box")) == null);
+    try std.testing.expect((try settingsDraftProfileLabel(alloc, listed, "pwsh.exe", null)) == null);
+    try std.testing.expect((try settingsDraftProfileLabel(alloc, listed, null, "user:gone")) == null);
+    try std.testing.expect((try settingsDraftProfileLabel(alloc, listed, null, "vs:6bb7cfd9:cmd")) == null);
+
+    // Through the App, with no window's list: the saved value's answer and
+    // the draft's label together, and every allocation can fail.
+    var app: App = undefined;
+    app.hosts = .empty;
+    app.config = try configpkg.Config.default(alloc);
+    defer app.config.deinit();
+    var choices = try settingsProfileChoicesThunk(&app, alloc, "user:gone", "ssh:box", false);
+    defer choices.deinit(alloc);
+    try std.testing.expectEqualStrings("SSH: box", choices.draft_label.?);
+    try std.testing.expect(choices.saved_label == null);
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn run(a: Allocator, target: *App) !void {
+            var both = try settingsProfileChoicesThunk(target, a, "ssh:saved", "ssh:box", false);
+            both.deinit(a);
+        }
+    }.run, .{&app});
 }
 
 fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
@@ -30159,6 +30491,133 @@ fn settingsConfigProblemsThunk(ctx: *anyopaque, buf: []u8) []const u8 {
     return app.config_problems.listText(buf);
 }
 
+fn settingsProfileChoicesThunk(
+    ctx: *anyopaque,
+    alloc: Allocator,
+    reference: ?[]const u8,
+    draft: ?[]const u8,
+    ask: bool,
+) Allocator.Error!win32_settings.ProfileChoices {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const outcome = settingsDefaultProfileOutcome(&app.config, reference);
+    var result = if (app.settingsProfileList(ask)) |list|
+        try settingsProfileChoices(alloc, list.profiles, list.complete, reference, outcome)
+    else
+        try settingsProfileChoices(alloc, &.{}, false, reference, outcome);
+    errdefer result.deinit(alloc);
+    result.draft_label = try settingsDraftProfileLabel(alloc, result.items, reference, draft);
+    return result;
+}
+
+/// The label the draft's `default-profile` value starts under when it is
+/// not the saved `reference` and no listed key is it, null otherwise. A
+/// draft is a key the dropdown staged, so only one a reload took out of
+/// the list asks: a `wsl:` or `ssh:` key still starts without a list
+/// (SSH config hosts switched off leave the list complete and without SSH
+/// rows), and anything else (a removed `user:` profile) names nothing.
+fn settingsDraftProfileLabel(
+    alloc: Allocator,
+    items: []const win32_settings.ProfileChoice,
+    reference: ?[]const u8,
+    draft: ?[]const u8,
+) Allocator.Error!?[]u8 {
+    const value = draft orelse return null;
+    if (reference) |saved| if (std.mem.eql(u8, saved, value)) return null;
+    for (items) |item| if (std.mem.eql(u8, item.key, value)) return null;
+    return try windows_shell.referenceLabelWithoutList(alloc, value);
+}
+
+/// What `config` made of `reference` when it loaded. It looked its own
+/// value up, `vs:` keys included. It did not look at a value the command
+/// line or a `command` line kept it from using, or at one that is not its
+/// value.
+fn settingsDefaultProfileOutcome(config: *const configpkg.Config, reference: ?[]const u8) SettingsDefaultProfile {
+    const value = config.@"default-profile" orelse return .untried;
+    if (reference == null or !std.mem.eql(u8, value, reference.?)) return .untried;
+    if (config._default_profile) |*profile| return .{ .resolved = profile };
+    return switch (config._default_profile_failure) {
+        .none => .untried,
+        .not_found => .unresolved,
+        .unavailable => .unavailable,
+    };
+}
+
+/// What the loaded config made of the `default-profile` value Settings asks
+/// about.
+const SettingsDefaultProfile = union(enum) {
+    /// Not looked up (see `settingsProfileChoicesThunk`).
+    untried,
+    /// The profile new terminals start.
+    resolved: *const windows_shell.Profile,
+    /// It names nothing that can start here: new terminals start the
+    /// automatic default.
+    unresolved,
+    /// Visual Studio did not answer the lookup in full: new terminals start
+    /// the automatic default until a reload asks again, and the value may
+    /// be right, so it names no listed row (a cached list may hold the
+    /// instance it would have found) and is not called missing.
+    unavailable,
+};
+
+/// The Default profile dropdown's items, from a window's `profiles` (hidden
+/// ones marked), and the one `reference` starts. When the loaded config
+/// looked `reference` up (`outcome`), its answer decides: the resolved
+/// profile's row by key, or no row for a value that names nothing (marked
+/// not found, whatever the list holds) or that it could not look up. A
+/// resolved profile the list does not hold (an `ssh:` alias outside the SSH
+/// config, a Visual Studio instance the cached list predates) does start, so
+/// its label goes to `saved_label` and the value is not called missing. A
+/// value it did not look up gets what `referenceProfileIndex` finds in the
+/// list, else the label a `wsl:` or `ssh:` value starts under, else not
+/// found once the list is complete.
+fn settingsProfileChoices(
+    alloc: Allocator,
+    profiles: []const windows_shell.Profile,
+    complete: bool,
+    reference: ?[]const u8,
+    outcome: SettingsDefaultProfile,
+) Allocator.Error!win32_settings.ProfileChoices {
+    const items = try alloc.alloc(win32_settings.ProfileChoice, profiles.len);
+    var made: usize = 0;
+    errdefer {
+        for (items[0..made]) |item| {
+            alloc.free(item.key);
+            alloc.free(item.label);
+        }
+        alloc.free(items);
+    }
+    for (profiles, items) |profile, *item| {
+        const key = try alloc.dupe(u8, profile.key);
+        const label = alloc.dupe(u8, profile.label) catch |err| {
+            alloc.free(key);
+            return err;
+        };
+        item.* = .{ .key = key, .label = label, .hidden = profile.hidden };
+        made += 1;
+    }
+    var result: win32_settings.ProfileChoices = .{ .items = items, .complete = complete };
+    // The items' errdefer above frees the rest on failure.
+    if (reference) |value| switch (outcome) {
+        // By key alone: an alias such as `vs:newest:cmd` may name another
+        // row in a list found before the instances changed.
+        .resolved => |profile| {
+            result.selected = profileIndexByKey(profiles, profile.key);
+            if (result.selected == null) result.saved_label = try alloc.dupe(u8, profile.label);
+        },
+        .unresolved => result.saved_not_found = true,
+        .unavailable => {},
+        // A `wsl:` or `ssh:` value starts without being listed (an alias
+        // outside the SSH config).
+        .untried => {
+            result.selected = windows_shell.referenceProfileIndex(profiles, value, complete);
+            if (result.selected != null) return result;
+            result.saved_label = try windows_shell.referenceLabelWithoutList(alloc, value);
+            result.saved_not_found = complete and result.saved_label == null;
+        },
+    };
+    return result;
+}
+
 /// The most of the save target's path Settings shows; a longer path keeps
 /// its end, which is what tells files apart.
 const settings_save_target_bytes = 240;
@@ -32134,7 +32593,11 @@ fn patchOrAppendEdits(
             const key = @field(SettingsConfigKey, field.name);
             if (line_key == key and user_edited.isSet(@intFromEnum(key))) {
                 const repeatable = field.type == configpkg.Config.RepeatableString;
-                if (last_line[@intFromEnum(key)] == index) {
+                if (settingsEditRemovesLines(pending, key)) {
+                    // Every assignment goes, so none from earlier in the file
+                    // takes over.
+                    handled = true;
+                } else if (last_line[@intFromEnum(key)] == index) {
                     var scratch: std.Io.Writer.Allocating = .init(alloc);
                     defer scratch.deinit();
                     try writeSettingsEntry(field, @field(pending, field.name), &scratch.writer);
@@ -32162,7 +32625,9 @@ fn patchOrAppendEdits(
     inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
         if (field.name[0] == '_') continue;
         const key = @field(SettingsConfigKey, field.name);
-        if (user_edited.isSet(@intFromEnum(key)) and !written.isSet(@intFromEnum(key))) {
+        if (user_edited.isSet(@intFromEnum(key)) and !written.isSet(@intFromEnum(key)) and
+            !settingsEditRemovesLines(pending, key))
+        {
             if (out.items.len > 0 and out.items[out.items.len - 1] != '\n')
                 try out.appendSlice(alloc, dominant_ending);
             var scratch: std.Io.Writer.Allocating = .init(alloc);
@@ -32171,6 +32636,13 @@ fn patchOrAppendEdits(
             try appendSettingsPayload(alloc, out, scratch.written(), dominant_ending);
         }
     }
+}
+
+/// Whether saving `key` takes its lines out of the file instead of writing
+/// one: Settings' "Automatic" for `default-profile`, which is the absence of
+/// the setting, not a value.
+fn settingsEditRemovesLines(pending: *const configpkg.Config, comptime key: SettingsConfigKey) bool {
+    return key == .@"default-profile" and pending.@"default-profile" == null;
 }
 
 /// One edited setting as config text, each line ending in a newline. A
@@ -32707,6 +33179,51 @@ test "win32 settings disk edit judges the file with the app's conditional state 
     try changed.loadFile(alloc, path);
     try changed.finalize();
     try std.testing.expect(settingsDiskEditConflict(&original, &pending, &changed, dark, edited));
+}
+
+test "win32 settings disk check compares the files' default-profile in a window started with one" {
+    // A jump-list or elevated window has `--default-profile` on its command
+    // line, which the check's load reads and which wins there. Settings
+    // holds the files' value, so that is what the file is judged by.
+    const alloc = std.testing.allocator;
+    const light: configpkg.ConditionalState = .{};
+    var disk = try configpkg.Config.default(alloc);
+    defer disk.deinit();
+    const arena = disk._arena.?.allocator();
+    disk._default_profile_cli = try arena.dupeZ(u8, "user:py312");
+    disk.@"default-profile" = disk._default_profile_cli;
+    disk._default_profile_file = try arena.dupeZ(u8, "pwsh");
+    var original = try disk.clone(alloc);
+    defer original.deinit();
+    original.@"default-profile" = original.defaultProfileFromFiles();
+    var pending = try original.clone(alloc);
+    defer pending.deinit();
+    pending.@"default-profile" = "cmd.exe";
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try std.testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"default-profile")));
+
+    // The file is as the window found it.
+    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    try std.testing.expect(!try settingsDiskVerdict(alloc, null, &original, &pending, &disk, light, edited));
+    // Someone else changed it, even to the command line's value.
+    for ([_][:0]const u8{ "powershell.exe", "user:py312" }) |value| {
+        disk._default_profile_file = value;
+        try std.testing.expect(settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    }
+    // ... or removed it.
+    disk._default_profile_file = null;
+    try std.testing.expect(settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+    // To the value the user is setting: nothing is lost.
+    disk._default_profile_file = "cmd.exe";
+    try std.testing.expect(!settingsDiskEditConflict(&original, &pending, &disk, light, edited));
+
+    // After the save, the command line's value still wins in this window,
+    // which the save reports; in another window the reload holds the edit.
+    var buf: [settings_masked_keys_capacity]u8 = undefined;
+    try std.testing.expectEqualStrings("default-profile", settingsMaskedKeyNames(&buf, edited, &pending, &disk));
+    disk._default_profile_cli = null;
+    disk.@"default-profile" = "cmd.exe";
+    try std.testing.expectEqualStrings("", settingsMaskedKeyNames(&buf, edited, &pending, &disk));
 }
 
 test "win32 settings disk edit does not mistake the resolved default command for an edit" {
@@ -33386,6 +33903,91 @@ test "win32 settings patch persists optional command edits" {
     try testing.expect(std.mem.indexOf(u8, patched.items, "command = cmd.exe") == null);
 }
 
+/// A config with user profiles, an include, comments and odd bytes, which a
+/// Settings save must leave as written outside the line it edits.
+const settings_test_profiles_head =
+    "# Profiles live here.\n" ++
+    "config-file = ?profiles-extra.ghostty\n" ++
+    "profile-command = py312: cmd.exe /k \"C:\\Tools Dir\\init.cmd\" \"a&b\" %PATH%\n" ++
+    "profile-name = py312: Python 3.12 # not a comment\r\n" ++
+    "  profile-env = py312: PATH=C:\\Python312;%PATH%\n" ++
+    "profile-working-directory = py312: ~/src\n" ++
+    "# profile-command = old: cmd.exe\n";
+const settings_test_profiles_config = settings_test_profiles_head ++ "font-size = 12\n";
+
+/// Run one Settings save of `pending` against `original` over a config file
+/// holding `text`, and return what the file holds afterwards.
+fn settingsTestSave(alloc: Allocator, text: []const u8, original: *const configpkg.Config, pending: *const configpkg.Config) ![]u8 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    try persistSettings(alloc, path, pending, settingsUserEditedKeys(original, pending), null);
+    return try tmp.dir.readFileAlloc(alloc, "config.ghostty", 1 << 20);
+}
+
+test "win32 settings save writes the chosen default profile as one line and reads it back" {
+    const alloc = std.testing.allocator;
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    pending.@"default-profile" = try pending._arena.?.allocator().dupeZ(u8, "user:py312");
+
+    // A first choice is appended; nothing above it moves.
+    const first = try settingsTestSave(alloc, settings_test_profiles_config, &original, &pending);
+    defer alloc.free(first);
+    try std.testing.expectEqualStrings(settings_test_profiles_config ++ "default-profile = user:py312\n", first);
+    var loaded = try configpkg.Config.default(alloc);
+    defer loaded.deinit();
+    try settingsTestLoadText(&loaded, first);
+    try std.testing.expectEqualStrings("user:py312", loaded.@"default-profile".?);
+    try std.testing.expect(!pending.changed(&loaded, .@"default-profile"));
+
+    // The next choice replaces that line in place, by key.
+    original.@"default-profile" = try original._arena.?.allocator().dupeZ(u8, "user:py312");
+    pending.@"default-profile" = try pending._arena.?.allocator().dupeZ(u8, "cmd.exe");
+    const second = try settingsTestSave(alloc, first, &original, &pending);
+    defer alloc.free(second);
+    try std.testing.expectEqualStrings(settings_test_profiles_config ++ "default-profile = cmd.exe\n", second);
+}
+
+test "win32 settings save of Automatic removes the default profile lines" {
+    const alloc = std.testing.allocator;
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    original.@"default-profile" = try original._arena.?.allocator().dupeZ(u8, "cmd.exe");
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+
+    // Every assignment in the file goes, so an earlier one cannot take over,
+    // and nothing is written in their place.
+    const text = "default-profile = py312\n" ++ settings_test_profiles_config ++ "  default-profile = cmd.exe\r\n";
+    const saved = try settingsTestSave(alloc, text, &original, &pending);
+    defer alloc.free(saved);
+    try std.testing.expectEqualStrings(settings_test_profiles_config, saved);
+    var loaded = try configpkg.Config.default(alloc);
+    defer loaded.deinit();
+    try settingsTestLoadText(&loaded, saved);
+    try std.testing.expect(loaded.@"default-profile" == null);
+}
+
+// Passes without the Default profile control too: Settings has never written
+// a `profile-*` line. Pinned so the selector does not start to.
+test "win32 settings save of another setting leaves profile lines byte-identical" {
+    const alloc = std.testing.allocator;
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+    pending.@"font-size" = 15;
+    const text = settings_test_profiles_config ++ "default-profile = py312\n";
+    const saved = try settingsTestSave(alloc, text, &original, &pending);
+    defer alloc.free(saved);
+    try std.testing.expectEqualStrings(settings_test_profiles_head ++ "font-size = 15\ndefault-profile = py312\n", saved);
+}
+
 test "win32 settings patch persists optional update channel edits" {
     const testing = std.testing;
 
@@ -33967,6 +34569,11 @@ fn keepProfileSources(dst: *configpkg.Config, src: *const configpkg.Config) !voi
     dst._command_from_file = src._command_from_file;
     dst.@"default-profile" = if (src.@"default-profile") |reference| try alloc.dupeZ(u8, reference) else null;
     dst._default_profile = if (src._default_profile) |profile| try profile.clone(alloc) else null;
+    // And what Settings reads of it: whether the lookup found nothing, and
+    // the files' value beside a command line's.
+    dst._default_profile_failure = src._default_profile_failure;
+    dst._default_profile_cli = if (src._default_profile_cli) |value| try alloc.dupeZ(u8, value) else null;
+    dst._default_profile_file = if (src._default_profile_file) |value| try alloc.dupeZ(u8, value) else null;
     dst.@"ssh-config-hosts" = src.@"ssh-config-hosts";
     dst.env = try src.env.clone(alloc);
     dst.@"visual-studio-profiles" = src.@"visual-studio-profiles";
@@ -45149,6 +45756,7 @@ const TestSession = struct {
                 .maskedKeys = &settingsMaskedKeysThunk,
                 .saveTarget = &settingsSaveTargetThunk,
                 .configProblems = &settingsConfigProblemsThunk,
+                .profileChoices = &settingsProfileChoicesThunk,
                 .notifySuccess = &settingsNotifySuccessThunk,
                 .customUiaProvidersEnabled = &settingsCustomUiaProvidersEnabledThunk,
                 .deferUiaDisconnect = &settingsDeferUiaDisconnectThunk,
@@ -50649,6 +51257,31 @@ test "win32 a palette theme preview keeps the default-profile launch until a rel
     var clone = added.shallowClone(alloc);
     defer clone.deinit();
     try std.testing.expect(try applyDefaultProfileConfig(&clone) == null);
+
+    // What Settings reads of the running value stays too: a command-line
+    // value the lookup found nothing for, over the files' own, while the
+    // files read again for the preview say nothing about it.
+    try tmp.dir.writeFile(.{ .sub_path = "running.ghostty", .data = "default-profile = pwsh\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "reread.ghostty", .data = "font-size = 13\n" });
+    const running_path = try tmp.dir.realpathAlloc(alloc, "running.ghostty");
+    defer alloc.free(running_path);
+    const reread_path = try tmp.dir.realpathAlloc(alloc, "reread.ghostty");
+    defer alloc.free(reread_path);
+    var missing = try configpkg.Config.default(alloc);
+    defer missing.deinit();
+    try missing.loadFile(alloc, running_path);
+    var missing_args: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(&.{"--default-profile=nosuch"}) };
+    try missing.loadIter(alloc, &missing_args);
+    try missing.finalize();
+    try std.testing.expectEqual(configpkg.Config.DefaultProfileFailure.not_found, missing._default_profile_failure);
+    try std.testing.expectEqualStrings("pwsh", missing.defaultProfileFromFiles().?);
+    var reread = try configpkg.Config.default(alloc);
+    defer reread.deinit();
+    try reread.loadFile(alloc, reread_path);
+    try Host.finishPaletteThemeConfig(&reread, &missing, theme);
+    try std.testing.expectEqualStrings("nosuch", reread.@"default-profile".?);
+    try std.testing.expectEqual(configpkg.Config.DefaultProfileFailure.not_found, reread._default_profile_failure);
+    try std.testing.expectEqualStrings("pwsh", reread.defaultProfileFromFiles().?);
 }
 
 test "win32 a reload after run took the startup launch-layout does not bring it back" {

@@ -5511,6 +5511,7 @@ try {
             )
             Shell = @(
                 @{ Name = 'Default command'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Default profile'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Shell integration'; Type = [System.Windows.Automation.ControlType]::ComboBox },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },
                 @{ Name = 'Discard changes'; Type = [System.Windows.Automation.ControlType]::Button }

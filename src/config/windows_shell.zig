@@ -3384,6 +3384,136 @@ fn referenceNamesWithNewest(
     return profileAliasMatches(ref, profile);
 }
 
+/// The index of the one profile in `profiles` that a `default-profile` value
+/// starts, by the rules `resolveProfileReference` applies, but read from a
+/// listed set instead of looked up: a bare id or `user:<id>` names a user
+/// profile, any other value a key (an `ssh:` key exactly, as OpenSSH aliases
+/// are case-sensitive), and a name such as `pwsh`, `git`, `cmd` or `wsl` the
+/// fixed profile it starts (`wsl` the default distribution, never another).
+/// Null when the list has no such profile. The Settings selector shows the
+/// saved value with this, so `default-profile = pwsh` preselects PowerShell.
+/// `complete`: the list is the whole answer. A partial one may lack the
+/// newest Visual Studio instance, so `vs:newest:*` names nothing in it, as
+/// `resolveProfileReference` names nothing from a partial Setup
+/// Configuration answer (an older instance's row would be shown, and
+/// choosing it would keep `vs:newest:*`).
+pub fn referenceProfileIndex(profiles: []const Profile, reference: []const u8, complete: bool) ?usize {
+    var ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    // `vs:newest:<shell>` is the newest listed instance's key ("" for none).
+    if (newestVisualStudioKind(ref) != null and !complete) return null;
+    if (NewestVisualStudio.of(profiles).resolve(ref)) |key| ref = key;
+    if (ref.len == 0) return null;
+    const user_id = if (std.ascii.startsWithIgnoreCase(ref, "user:")) ref["user:".len..] else ref;
+    if (userProfileWithId(profiles, user_id)) |named| {
+        for (profiles, 0..) |profile, index| if (profile.key.ptr == named) return index;
+    }
+    if (user_id.len != ref.len) return null;
+    for (profiles, 0..) |profile, index| {
+        // `ssh:` in any case, the alias exactly, as `resolveProfileReference`.
+        const same = if (profile.kind == .ssh)
+            ref.len == profile.key.len and std.ascii.startsWithIgnoreCase(ref, "ssh:") and
+                std.mem.eql(u8, ref["ssh:".len..], profile.key["ssh:".len..])
+        else
+            std.ascii.eqlIgnoreCase(ref, profile.key);
+        if (same) return index;
+    }
+    // The fixed profiles, first match wins, as in `resolveProfileReference`.
+    for ([_]ProfileKind{ .pwsh, .powershell, .git_bash, .cmd, .wsl_default }) |kind| {
+        const probe: Profile = .{ .kind = kind, .key = "", .label = "", .command = .{ .direct = &.{} } };
+        if (!profileAliasMatches(ref, probe)) continue;
+        for (profiles, 0..) |profile, index| if (profile.kind == kind) return index;
+        return null;
+    }
+    return null;
+}
+
+/// The label `resolveProfileReference` gives a reference it builds from the
+/// reference alone, without a list: `wsl:<distribution>` and `ssh:<alias>`
+/// with one plain argument ("WSL: <distribution>", "SSH: <alias>"). Null for
+/// any other reference. Whether wsl.exe or ssh.exe is installed is not
+/// checked. Settings shows a saved value the list lacks by this label, so a
+/// value that does start is not called missing.
+pub fn referenceLabelWithoutList(alloc: Allocator, reference: []const u8) Allocator.Error!?[]u8 {
+    const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
+    inline for (.{ .{ "wsl:", "WSL: " }, .{ "ssh:", "SSH: " } }) |form| {
+        if (std.ascii.startsWithIgnoreCase(ref, form[0])) {
+            const argument = ref[form[0].len..];
+            if (!isPlainReferenceArgument(argument)) return null;
+            return try std.fmt.allocPrint(alloc, form[1] ++ "{s}", .{argument});
+        }
+    }
+    return null;
+}
+
+test "referenceLabelWithoutList names what wsl: and ssh: references start" {
+    const alloc = std.testing.allocator;
+    const ssh = (try referenceLabelWithoutList(alloc, " SSH:box ")).?;
+    defer alloc.free(ssh);
+    try std.testing.expectEqualStrings("SSH: box", ssh);
+    const wsl = (try referenceLabelWithoutList(alloc, "wsl:Ubuntu")).?;
+    defer alloc.free(wsl);
+    try std.testing.expectEqualStrings("WSL: Ubuntu", wsl);
+    for ([_][]const u8{ "ssh:", "ssh:a b", "wsl:-d", "user:py", "pwsh", "vs:newest:cmd" }) |ref| {
+        try std.testing.expect((try referenceLabelWithoutList(alloc, ref)) == null);
+    }
+}
+
+test "referenceProfileIndex finds the profile a default-profile value starts" {
+    const testing = std.testing;
+    const profiles = [_]Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{} } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+        .{ .kind = .wsl_distro, .key = "wsl:Ubuntu", .label = "WSL: Ubuntu", .command = .{ .direct = &.{} } },
+        .{ .kind = .wsl_default, .key = "wsl-default", .label = "WSL (Default)", .command = .{ .direct = &.{} } },
+        .{ .kind = .user, .key = "user:py312", .label = "Python 3.12", .command = .{ .direct = &.{} } },
+        .{ .kind = .ssh, .key = "ssh:Box", .label = "SSH: Box", .command = .{ .direct = &.{} } },
+    };
+    try testing.expectEqual(@as(?usize, 4), referenceProfileIndex(&profiles, "py312", true));
+    try testing.expectEqual(@as(?usize, 4), referenceProfileIndex(&profiles, "USER:PY312", true));
+    try testing.expectEqual(@as(?usize, 1), referenceProfileIndex(&profiles, " CMD.EXE ", true));
+    try testing.expectEqual(@as(?usize, 0), referenceProfileIndex(&profiles, "pwsh", true));
+    try testing.expectEqual(@as(?usize, 2), referenceProfileIndex(&profiles, "wsl:ubuntu", true));
+    // A distribution's own name is no reference.
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&profiles, "Ubuntu", true));
+    // `wsl` starts the default distribution, not the first listed one.
+    try testing.expectEqual(@as(?usize, 3), referenceProfileIndex(&profiles, "wsl", true));
+    try testing.expectEqual(@as(?usize, 5), referenceProfileIndex(&profiles, "ssh:Box", true));
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&profiles, "ssh:box", true));
+    // The prefix in any case, the alias exactly.
+    try testing.expectEqual(@as(?usize, 5), referenceProfileIndex(&profiles, "SSH:Box", true));
+    // Git Bash is not listed here, and labels are not references.
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&profiles, "git", true));
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&profiles, "Python 3.12", true));
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&profiles, "user:gone", true));
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&profiles, "", true));
+
+    // `vs:newest:<shell>` is the first listed instance with that shell.
+    const vs = [_]Profile{
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{} } },
+        .{ .kind = .vs_dev_cmd, .key = "vs:new1:cmd", .label = "Developer Command Prompt for VS 18", .command = .{ .direct = &.{} } },
+        .{ .kind = .vs_dev_cmd, .key = "vs:old2:cmd", .label = "Developer Command Prompt for VS 2022", .command = .{ .direct = &.{} } },
+    };
+    try testing.expectEqual(@as(?usize, 1), referenceProfileIndex(&vs, "VS:Newest:Cmd", true));
+    try testing.expectEqual(@as(?usize, 2), referenceProfileIndex(&vs, "vs:old2:cmd", true));
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&vs, "vs:newest:pwsh", true));
+    // The rows in another order (`profile-order` put the older instance
+    // first): the one discovery marked newest is still the one named.
+    const reordered = [_]Profile{
+        .{ .kind = .vs_dev_cmd, .key = "vs:old2:cmd", .label = "Developer Command Prompt for VS 2022", .command = .{ .direct = &.{} } },
+        .{ .kind = .vs_dev_cmd, .key = "vs:new1:cmd", .label = "Developer Command Prompt for VS 18", .command = .{ .direct = &.{} }, .newest_visual_studio = true },
+    };
+    try testing.expectEqual(@as(?usize, 1), referenceProfileIndex(&reordered, "vs:newest:cmd", true));
+    // A partial list (Setup Configuration answered in part) may lack the
+    // newest instance: `vs:newest:*` names none of its rows, while a
+    // concrete key and every other reference still do.
+    const partial = [_]Profile{
+        .{ .kind = .vs_dev_cmd, .key = "vs:old2:cmd", .label = "Developer Command Prompt for VS 2022", .command = .{ .direct = &.{} }, .newest_visual_studio = true },
+    };
+    try testing.expectEqual(@as(?usize, null), referenceProfileIndex(&partial, "vs:newest:cmd", false));
+    try testing.expectEqual(@as(?usize, 0), referenceProfileIndex(&partial, "vs:old2:cmd", false));
+    try testing.expectEqual(@as(?usize, 0), referenceProfileIndex(&profiles, "pwsh", false));
+}
+
 /// The key of the user profile in `profiles` whose id is `id`, as a pointer
 /// that identifies it.
 fn userProfileWithId(profiles: []const Profile, id: []const u8) ?[*]const u8 {

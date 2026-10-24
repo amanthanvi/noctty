@@ -3703,6 +3703,12 @@ _profile_launch: ?windows_shell.UserLaunch = null,
 /// rest of it (variables, directory, line, key). Lives in this config's arena.
 _default_profile: ?windows_shell.Profile = null,
 
+/// Why `applyDefaultProfile` found no profile for `default-profile`, so the
+/// automatic default runs instead. Settings shows a value that names nothing
+/// here as not found, never by the label it would have, and one Visual
+/// Studio could not answer for as written, apart from every listed profile.
+_default_profile_failure: DefaultProfileFailure = .none,
+
 /// The last `command` line came from a config file (not the command line),
 /// for the `default-profile` problem in `finalize`.
 _command_from_file: bool = false,
@@ -3711,6 +3717,13 @@ _command_from_file: bool = false,
 /// every config file: `Config.load` reads included files after the command
 /// line, and the jump list's profile links name their profile this way.
 _default_profile_cli: ?[:0]const u8 = null,
+
+/// The last `default-profile` a config file gave (null for none, or for an
+/// empty value), whatever the command line says. Settings shows and edits
+/// this one (`defaultProfileFromFiles`): in a window noctty started with
+/// `--default-profile` (a jump-list link, New Elevated Window) the setting
+/// holds the command line's value, which no file has.
+_default_profile_file: ?[:0]const u8 = null,
 
 /// `--command=` and `--initial-command=` on the command line, as typed,
 /// applied again in `finalize` over every config file for the same reason:
@@ -5415,6 +5428,13 @@ fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
 /// wins over the files (included ones are read after the command line), and
 /// one that a `command` from a config file overrides is a config problem.
 /// Safe mode starts with a `command` noctty chose, so this stays quiet there.
+/// The `default-profile` the config files give: the setting itself, unless
+/// noctty's command line named one, which wins in this process only.
+pub fn defaultProfileFromFiles(self: *const Config) ?[:0]const u8 {
+    if (self._default_profile_cli == null) return self.@"default-profile";
+    return self._default_profile_file;
+}
+
 fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
     if (self._default_profile_cli) |value| {
         self.@"default-profile" = if (value.len == 0) null else value;
@@ -5447,6 +5467,7 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
         if (err == error.VisualStudioUnavailable) {
             // The value may be right: reported apart from one that names
             // nothing, and the next load (a reload) asks again.
+            self._default_profile_failure = .unavailable;
             try self.appendFinalizeProblem(.{
                 .key = "default-profile",
                 .message = try std.fmt.allocPrintSentinel(
@@ -5463,6 +5484,7 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
         break :found null;
     };
     const profile = resolved orelse {
+        self._default_profile_failure = .not_found;
         try self.appendFinalizeProblem(.{
             .key = "default-profile",
             .message = try std.fmt.allocPrintSentinel(
@@ -5480,6 +5502,16 @@ pub fn applyDefaultProfile(self: *Config, host: anytype) !void {
     self._command_defaulted = true;
     self._default_profile = profile;
 }
+
+pub const DefaultProfileFailure = enum {
+    /// Not looked up, or found.
+    none,
+    /// It names nothing that can start here.
+    not_found,
+    /// Visual Studio's Setup Configuration did not answer in full, so a
+    /// `vs:` value may still be right; the next load asks again.
+    unavailable,
+};
 
 /// Fixed lookups for `applyDefaultProfile` in tests: no PATH search, and
 /// one Visual Studio 18 instead of the machine's.
@@ -5678,18 +5710,34 @@ test "default-profile gives way to a command from any layer, and says so only fo
         try testing.expect(cfg._diagnostics.empty());
         try testing.expectEqualStrings("user:py", cfg._default_profile.?.key);
         try testing.expect(cfg.@"initial-command" == null);
+        // What the files give is kept apart, for Settings: the last file
+        // read (the include), not the command line's value.
+        try testing.expectEqualStrings("wsl:Ubuntu", cfg.defaultProfileFromFiles().?);
         // And it survives a rebuild for a conditional state (a theme).
         cfg._conditional_set.insert(.theme);
         var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
         defer replayed.deinit();
         try testing.expectEqualStrings("user:py", replayed.@"default-profile".?);
+        try testing.expectEqualStrings("wsl:Ubuntu", replayed.defaultProfileFromFiles().?);
+        var copy = try cfg.clone(alloc);
+        defer copy.deinit();
+        try testing.expectEqualStrings("wsl:Ubuntu", copy.defaultProfileFromFiles().?);
     }
     {
-        // An empty one on the command line undoes the files'.
+        // An empty one on the command line undoes the files', which still
+        // give theirs; an empty file line gives none.
         var cfg = try testLoadDefaultProfile(alloc, profile ++ "default-profile = py\n", &.{"--default-profile="}, "");
         defer cfg.deinit();
         try testing.expect(cfg.@"default-profile" == null);
         try testing.expect(cfg._default_profile == null);
+        try testing.expectEqualStrings("py", cfg.defaultProfileFromFiles().?);
+        var cleared = try testLoadDefaultProfile(alloc, profile ++ "default-profile = py\n", &.{"--default-profile=pwsh"}, "default-profile =\n");
+        defer cleared.deinit();
+        try testing.expect(cleared.defaultProfileFromFiles() == null);
+        // With nothing on the command line it is the setting itself.
+        var plain = try testLoadDefaultProfile(alloc, profile ++ "default-profile = py\n", &.{}, "");
+        defer plain.deinit();
+        try testing.expectEqualStrings("py", plain.defaultProfileFromFiles().?);
     }
 
     // A name that starts nothing is a problem, and the automatic default runs.
@@ -5776,11 +5824,19 @@ test "default-profile problems carry the line that set it" {
         const diag = cfg._diagnostics.items()[0];
         try testing.expectEqualStrings("default-profile", diag.key);
         try testing.expectEqual(@as(usize, 2), diag.location.file.line);
+        // Looked up and not found, which Settings shows; a clone (the
+        // app's config is one) keeps that.
+        try testing.expectEqual(DefaultProfileFailure.not_found, cfg._default_profile_failure);
+        var copy = try cfg.clone(alloc);
+        defer copy.deinit();
+        try testing.expectEqual(DefaultProfileFailure.not_found, copy._default_profile_failure);
     }
     {
         var cfg = try testLoadProfileText(alloc, "profile-command = py: cmd.exe\ndefault-profile = py\ncommand = vim.exe\n");
         defer cfg.deinit();
         try testing.expectEqual(@as(usize, 1), cfg._diagnostics.items().len);
+        // Not looked up at all: the command won.
+        try testing.expectEqual(DefaultProfileFailure.none, cfg._default_profile_failure);
         const diag = cfg._diagnostics.items()[0];
         try testing.expect(std.mem.startsWith(u8, diag.message, "is not used, because a config file sets command"));
         try testing.expectEqual(@as(usize, 2), diag.location.file.line);
@@ -5856,6 +5912,13 @@ test "visual-studio-profiles loads, and default-profile can name a Visual Studio
         try cfg.applyDefaultProfile(TestDefaultProfileHost{ .visual_studio_answers = false });
         try testing.expect(cfg.command == null and cfg._default_profile == null);
         try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
+        // Not "names nothing": Settings keeps the value apart from every
+        // listed instance, unmarked, and a clone (the app's config) keeps
+        // that.
+        try testing.expectEqual(DefaultProfileFailure.unavailable, cfg._default_profile_failure);
+        var copy = try cfg.clone(alloc);
+        defer copy.deinit();
+        try testing.expectEqual(DefaultProfileFailure.unavailable, copy._default_profile_failure);
         // Asked again (a finalize run again), still one problem.
         try cfg.applyDefaultProfile(TestDefaultProfileHost{ .visual_studio_answers = false });
         try testing.expectEqual(@as(usize, 1), testDefaultProfileProblems(&cfg));
@@ -6913,8 +6976,11 @@ pub fn parseManuallyHook(
         }
     }
     if (std.mem.startsWith(u8, arg, "--default-profile=")) {
+        const value = arg["--default-profile=".len..];
         if ((try cli.Location.fromIter(iter, alloc)) == .cli) {
-            self._default_profile_cli = try alloc.dupeZ(u8, arg["--default-profile=".len..]);
+            self._default_profile_cli = try alloc.dupeZ(u8, value);
+        } else {
+            self._default_profile_file = if (value.len == 0) null else try alloc.dupeZ(u8, value);
         }
     }
     if (builtin.os.tag == .windows and
@@ -7204,9 +7270,11 @@ pub fn clone(
     result._command_defaulted = self._command_defaulted;
     result._command_from_file = self._command_from_file;
     if (self._default_profile_cli) |value| result._default_profile_cli = try alloc_arena.dupeZ(u8, value);
+    if (self._default_profile_file) |value| result._default_profile_file = try alloc_arena.dupeZ(u8, value);
     if (self._command_cli) |value| result._command_cli = try alloc_arena.dupeZ(u8, value);
     if (self._initial_command_cli) |value| result._initial_command_cli = try alloc_arena.dupeZ(u8, value);
     if (self._default_profile) |profile| result._default_profile = try profile.clone(alloc_arena);
+    result._default_profile_failure = self._default_profile_failure;
     if (self._undecodable_file) |skipped| result._undecodable_file = try alloc_arena.dupeZ(u8, skipped);
     // An app config is installed as a clone: keep where each profile line
     // was read, which the problems and New Elevated Window read.
