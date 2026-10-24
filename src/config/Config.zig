@@ -5360,20 +5360,31 @@ fn applyCliValue(self: *Config, comptime key: []const u8, value: []const u8) All
     return true;
 }
 
-/// `default-profile` once every layer has been read: a command-line value
-/// wins over the files (included ones are read after the command line), and
-/// one that a `command` from a config file overrides is a config problem.
-/// Safe mode starts with a `command` noctty chose, so this stays quiet there.
 /// Add a problem `finalize` found, unless the config already has it:
 /// `finalize` can run again on a finalized config (a new window's clone of
 /// the app config is finalized again with its forwarded arguments).
 fn appendFinalizeProblem(self: *Config, diag: cli.Diagnostic) Allocator.Error!void {
     for (self._diagnostics.items()) |have| {
-        if (Replay.sameDiagnostic(have, diag)) return;
+        if (sameDiagnostic(have, diag)) return;
     }
     try self._diagnostics.append(self._arena.?.allocator(), diag);
 }
 
+/// The same problem: the same key, message and place.
+fn sameDiagnostic(a: cli.Diagnostic, b: cli.Diagnostic) bool {
+    if (!std.mem.eql(u8, a.key, b.key) or !std.mem.eql(u8, a.message, b.message)) return false;
+    return switch (a.location) {
+        .none => b.location == .none,
+        .cli => |index| b.location == .cli and b.location.cli == index,
+        .file => |place| b.location == .file and b.location.file.line == place.line and
+            std.mem.eql(u8, b.location.file.path, place.path),
+    };
+}
+
+/// `default-profile` once every layer has been read: a command-line value
+/// wins over the files (included ones are read after the command line), and
+/// one that a `command` from a config file overrides is a config problem.
+/// Safe mode starts with a `command` noctty chose, so this stays quiet there.
 fn finalizeDefaultProfileSetting(self: *Config) Allocator.Error!void {
     if (self._default_profile_cli) |value| {
         self.@"default-profile" = if (value.len == 0) null else value;
