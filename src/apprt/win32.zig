@@ -1172,8 +1172,12 @@ fn elevatedProfileKey(action_key: []const u8, pane_key: ?[]const u8) ?[]const u8
 /// a config file, which the elevated process reads too, so the line and the
 /// variables reach it as written and stay off the elevated command line. A
 /// profile defined only by a `--profile-command` option is not forwarded, so
-/// it is still passed as arguments.
-fn elevatesBySelector(config: *const configpkg.Config, key: []const u8) bool {
+/// it is still passed as arguments. So is every profile when elevation may
+/// change the account (`same_account` false: a standard user elevated with
+/// an administrator's credentials, `win32_elevation.elevationKeepsAccount`),
+/// since that account reads its own config, which need not have the profile.
+fn elevatesBySelector(config: *const configpkg.Config, key: []const u8, same_account: bool) bool {
+    if (!same_account) return false;
     if (!startsWithIgnoreCase(key, "user:")) return false;
     const id = key["user:".len..];
     if (config.@"profile-command".get(id) == null) return false;
@@ -7231,7 +7235,14 @@ pub const App = struct {
                         log.warn("elevated window profile not found key={s}", .{key});
                         return false;
                     };
-                    relaunch = if (elevatesBySelector(&self.config, key))
+                    // An unknown token passes the profile as arguments,
+                    // which start it whichever account UAC uses.
+                    const same_account = same: {
+                        const token_type = win32_elevation.processTokenElevationType() catch break :same false;
+                        const elevated = win32_elevation.isProcessElevated() catch break :same false;
+                        break :same win32_elevation.elevationKeepsAccount(token_type, elevated);
+                    };
+                    relaunch = if (elevatesBySelector(&self.config, key, same_account))
                         .{ .selector = key }
                     else
                         .{
@@ -55831,13 +55842,16 @@ test "win32 an elevated window names a file-defined user profile and passes a co
 
     // The elevated process reads the files, so a profile they define is
     // named; one the command line defines (or last changed) is passed.
-    try std.testing.expect(elevatesBySelector(&cfg, "user:filed"));
-    try std.testing.expect(elevatesBySelector(&cfg, "USER:FILED"));
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:clionly"));
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:both"));
+    try std.testing.expect(elevatesBySelector(&cfg, "user:filed", true));
+    try std.testing.expect(elevatesBySelector(&cfg, "USER:FILED", true));
+    // A standard user's elevation runs as another account, which reads its
+    // own config: the profile is passed, so it runs there too.
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:filed", false));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:clionly", true));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:both", true));
     // A file's profile with a variable from the command line: the elevated
     // process would not get that variable, so the profile is passed.
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:envcli"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:envcli", true));
     // `--profile-env=` cleared every profile's variables, which the files
     // would give the elevated process back: every profile is passed.
     {
@@ -55850,7 +55864,7 @@ test "win32 an elevated window names a file-defined user profile and passes a co
         try cleared.loadIter(alloc, &reset);
         try cleared.finalize();
         try std.testing.expect(cleared.@"profile-env".count() == 0);
-        try std.testing.expect(!elevatesBySelector(&cleared, "user:filed"));
+        try std.testing.expect(!elevatesBySelector(&cleared, "user:filed", true));
         // An `--env=` argument, which `%NAME%` may read, is not forwarded
         // either.
         var with_env = try configpkg.Config.default(alloc);
@@ -55861,32 +55875,32 @@ test "win32 an elevated window names a file-defined user profile and passes a co
         };
         try with_env.loadIter(alloc, &env_arg);
         try with_env.finalize();
-        try std.testing.expect(!elevatesBySelector(&with_env, "user:filed"));
+        try std.testing.expect(!elevatesBySelector(&with_env, "user:filed", true));
         // Kept for a conditional rebuild, which replays the argument.
         with_env._conditional_set.insert(.theme);
         var with_env_dark = (try with_env.changeConditionalState(.{ .theme = .dark })).?;
         defer with_env_dark.deinit();
-        try std.testing.expect(!elevatesBySelector(&with_env_dark, "user:filed"));
+        try std.testing.expect(!elevatesBySelector(&with_env_dark, "user:filed", true));
         // Nothing reset: named.
         var plain = try configpkg.Config.default(alloc);
         defer plain.deinit();
         try plain.loadFile(alloc, path);
         try plain.finalize();
-        try std.testing.expect(elevatesBySelector(&plain, "user:filed"));
+        try std.testing.expect(elevatesBySelector(&plain, "user:filed", true));
     }
     // Nothing to name: a removed or unknown profile, a detected one.
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:gone"));
-    try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch"));
-    try std.testing.expect(!elevatesBySelector(&cfg, "pwsh.exe"));
-    try std.testing.expect(!elevatesBySelector(&cfg, "filed"));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:gone", true));
+    try std.testing.expect(!elevatesBySelector(&cfg, "user:nosuch", true));
+    try std.testing.expect(!elevatesBySelector(&cfg, "pwsh.exe", true));
+    try std.testing.expect(!elevatesBySelector(&cfg, "filed", true));
 
     // A config rebuilt for a conditional state (a theme) records the places
     // again.
     cfg._conditional_set.insert(.theme);
     var replayed = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
     defer replayed.deinit();
-    try std.testing.expect(elevatesBySelector(&replayed, "user:filed"));
-    try std.testing.expect(!elevatesBySelector(&replayed, "user:clionly"));
+    try std.testing.expect(elevatesBySelector(&replayed, "user:filed", true));
+    try std.testing.expect(!elevatesBySelector(&replayed, "user:clionly", true));
 
     // What the elevated process is given for a detected profile and for a
     // command-line one is as before: the argv, and the variables for the
@@ -55903,8 +55917,8 @@ test "win32 an elevated window names a file-defined user profile and passes a co
     // A clone (a reload installs the app config as one) keeps the decision.
     var reloaded = try cfg.clone(alloc);
     defer reloaded.deinit();
-    try std.testing.expect(elevatesBySelector(&reloaded, "user:filed"));
-    try std.testing.expect(!elevatesBySelector(&reloaded, "user:clionly"));
+    try std.testing.expect(elevatesBySelector(&reloaded, "user:filed", true));
+    try std.testing.expect(!elevatesBySelector(&reloaded, "user:clionly", true));
 }
 
 test "win32 a forwarded new window keeps the default-profile launch when a theme is set" {

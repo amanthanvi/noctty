@@ -136,6 +136,24 @@ pub fn processTokenElevationType() !TokenElevationType {
     return std.meta.intToEnum(TokenElevationType, raw_type) catch error.Unexpected;
 }
 
+/// Whether UAC elevates this process as the same account, which then reads
+/// the same per-user config: an administrator's split token (`.limited`,
+/// elevated with its linked token), or a process elevated already (`.full`,
+/// or a `.default` token that is elevated: UAC off, the built-in
+/// Administrator). A standard user's token (`.default`, not elevated) is
+/// elevated with another account's credentials (over-the-shoulder), whose
+/// `%LOCALAPPDATA%` config and environment are that account's.
+pub fn elevationKeepsAccount(token_type: TokenElevationType, elevated: bool) bool {
+    return token_type != .default or elevated;
+}
+
+test "elevation keeps the account unless a standard user's token is elevated" {
+    try std.testing.expect(elevationKeepsAccount(.limited, false));
+    try std.testing.expect(elevationKeepsAccount(.full, true));
+    try std.testing.expect(elevationKeepsAccount(.default, true));
+    try std.testing.expect(!elevationKeepsAccount(.default, false));
+}
+
 /// Whether an elevated process must stay out of the ordinary user's session
 /// state. Only a genuine full split token does: a UAC-off machine and the
 /// built-in Administrator run elevated with the default elevation type and

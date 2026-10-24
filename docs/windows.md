@@ -768,10 +768,17 @@ Limits:
   profile itself, so its command line and variables reach it as written, a
   `command` or `initial-command` line in an included file does not replace
   it, and none of them appear on the elevated command line. It applies to the
-  whole elevated window, not only its first pane. A profile defined only by a
+  whole elevated window, not only its first pane. `%NAME%` in the profile's
+  lines then reads the elevated process's own environment, which Windows
+  builds for the elevated token rather than copying noctty's: a variable that
+  only the shell that started noctty set is not there (an `env` line is). A
+  profile defined only by a
   `--profile-command` option on noctty's command line, or given a variable by
   a `--profile-env` option there, or any profile when that command line has
-  an `--env` option (which `%NAME%` may read), is still passed as
+  an `--env` option (which `%NAME%` may read), or any profile when UAC would
+  run the elevated window as another account (a standard user entering an
+  administrator's credentials; that account reads its own config files, which
+  need not define the profile), is still passed as
   arguments (`--command=direct:...`, quoted again in the standard way, an empty `--initial-command=`, and
   `--elevated-profile-env=...`), which process tools and process-creation
   auditing can read, so do not keep a secret in such a profile's
@@ -1444,10 +1451,13 @@ Configuration and other per-user state still resolve from the same
 An elevated noctty loads the same config files as the non-elevated process:
 `%LOCALAPPDATA%\noctty\config.ghostty` (unless that process was started with
 `--config-default-files=false`) and the same explicit `--config-file`
-overrides. Those
-files remain writable by the ordinary user account, so anything that can
-modify the configuration, including `command`, `shell-integration`, and theme
-paths, runs at high integrity the next time an elevated window opens.
+overrides. Those files remain writable by the ordinary user account, so
+anything that can modify the configuration, including `command`,
+`shell-integration`, and theme paths, runs at high integrity the next time an
+elevated window opens. When a standard user enters an administrator's
+credentials instead, the elevated process runs as that administrator and reads
+that account's `%LOCALAPPDATA%` config; a forwarded `--config-file` still names
+the same file.
 
 At process startup, noctty restricts bare-name DLL resolution to the
 application directory, System32, and explicitly added DLL directories. The
