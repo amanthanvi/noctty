@@ -5,6 +5,16 @@ isolated measurement-AUMID ReleaseFast bin, never switches desktops or injects
 input. A hidden desktop cannot prove real pointer routing or composed output.
 Keep every run, including failures. -ExpectFlush checks the changed behavior;
 without it the same checks characterize the baseline geometry.
+
+Build the committed revision from a clean checkout (the helper archives HEAD,
+patches the measurement identity in an isolated tree and validates provenance):
+  . .\scripts\interactive-win11-measure-lib.ps1
+  Invoke-InteractiveWin11MeasureBuild -RepoRoot $PWD.Path -Optimize ReleaseFast
+  $measureBin = Split-Path (Get-InteractiveWin11MeasureExePath -RepoRoot $PWD.Path)
+  .\test\windows\hidden-win11-tabgap.ps1 -Bin $measureBin `
+      -Run .\.tabgap-evidence\measure-r2-<new-run-name> -ExpectFlush
+Keep the run directory new and preserve failed runs. Builds use the normal
+shell; only this harness's driver and app copies run on the private desktop.
 #>
 [CmdletBinding()]
 param(
@@ -17,6 +27,10 @@ param(
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'hidden-win11-local-lib.ps1')
+# Reuse the executable-byte identity check, including its HiddenWin helper.
+# Dot-sourcing only defines helpers; the hosted launcher is never invoked.
+. (Join-Path $PSScriptRoot 'hidden-win11-lib.ps1')
+Assert-MeasureAumid (Join-Path $Bin 'noctty.exe')
 Add-Type @'
 using System;
 using System.Collections.Generic;
@@ -51,8 +65,10 @@ public static class TabGap {
  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr h,EnumWindow cb,IntPtr p);
  [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h,StringBuilder s,int n);
- [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h,StringBuilder s,int n);
- public static bool MarkedActive(IntPtr h){var s=new StringBuilder(1024);GetWindowTextW(h,s,1024);return s.ToString().StartsWith("* ",StringComparison.Ordinal);}
+ [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr ReadTextTimeout(IntPtr h,uint m,IntPtr chars,[Out] StringBuilder text,uint flags,uint ms,out IntPtr result);
+ // Use WM_GETTEXT for cross-process control text; Windows marshals its
+ // writable UTF-16 buffer, and both the capacity and wait are bounded.
+ public static bool MarkedActive(IntPtr h){var s=new StringBuilder(1024);IntPtr count;if(ReadTextTimeout(h,0xD,new IntPtr(s.Capacity),s,3,2000,out count)==IntPtr.Zero)throw new Exception("Tab WM_GETTEXT failed or timed out");return s.ToString().StartsWith("* ",StringComparison.Ordinal);}
  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h,uint kind);
  [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point p);
  [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr h,uint m,IntPtr w,IntPtr l,uint flags,uint ms,out IntPtr result);
@@ -62,7 +78,13 @@ public static class TabGap {
  [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h,IntPtr dc,uint flags);
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
  [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GUI info);
- public static int MenuFlags(IntPtr host){uint pid;var tid=GetWindowThreadProcessId(host,out pid);var i=new GUI{size=Marshal.SizeOf<GUI>()};if(!GetGUIThreadInfo(tid,ref i))throw new Exception("Menu state unavailable");return i.flags;}
+ [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+ [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from,uint to,bool attach);
+ [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] state);
+ [DllImport("user32.dll")] static extern bool SetKeyboardState(byte[] state);
+ public static int MenuFlags(IntPtr host){return MenuInfo(host).flags;}
+ static GUI MenuInfo(IntPtr host){uint pid;var tid=GetWindowThreadProcessId(host,out pid);var i=new GUI{size=Marshal.SizeOf<GUI>()};if(!GetGUIThreadInfo(tid,ref i))throw new Exception("Menu state unavailable");return i;}
+ public static long MenuOwner(IntPtr host){return MenuInfo(host).menuOwner.ToInt64();}
  static string ClassOf(IntPtr h){var s=new StringBuilder(128);GetClassNameW(h,s,128);return s.ToString();}
  public static Monitor[] Monitors(){var list=new List<Monitor>();EnumDisplayMonitors(IntPtr.Zero,IntPtr.Zero,(IntPtr h,IntPtr dc,ref Rect r,IntPtr p)=>{var i=new MI{size=Marshal.SizeOf<MI>()};uint x,y;if(!GetMonitorInfoW(h,ref i)||GetDpiForMonitor(h,0,out x,out y)!=0)throw new Exception("Monitor read failed");list.Add(new Monitor{Full=i.full,Work=i.work,Dpi=x});return true;},IntPtr.Zero);return list.ToArray();}
  public static State Read(IntPtr h){Rect w,c;var o=new Point();var p=new Placement{length=Marshal.SizeOf<Placement>()};if(!GetWindowRect(h,out w)||!GetClientRect(h,out c)||!ClientToScreen(h,ref o)||!GetWindowPlacement(h,ref p))throw new Exception("Geometry read failed");var list=new List<Child>();EnumChildWindows(h,(a,b)=>{if(IsWindowVisible(a)){Rect r;GetWindowRect(a,out r);r.Left-=o.X;r.Right-=o.X;r.Top-=o.Y;r.Bottom-=o.Y;list.Add(new Child{Hwnd=a.ToInt64(),Id=GetDlgCtrlID(a),Class=ClassOf(a),Rect=r});}return true;},IntPtr.Zero);return new State{Window=w,Client=c,Origin=o,Placement=p,Dpi=GetDpiForWindow(h),Zoomed=IsZoomed(h),Children=list.ToArray()};}
@@ -79,13 +101,14 @@ public static class TabGap {
  [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc,IntPtr obj);
  [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
  [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
- public static string[] Paint(IntPtr h,string path,int localX,int rows){var s=Read(h);int w=s.Window.Right-s.Window.Left,ht=s.Window.Bottom-s.Window.Top;var info=new BitmapInfo{size=40,width=w,height=-ht,planes=1,bpp=32};var dc=CreateCompatibleDC(IntPtr.Zero);IntPtr bits;var bitmap=CreateDIBSection(dc,ref info,0,out bits,IntPtr.Zero,0);if(dc==IntPtr.Zero||bitmap==IntPtr.Zero)throw new Exception("Capture allocation failed");var old=SelectObject(dc,bitmap);try{var data=new byte[w*ht*4];for(int i=0;i<data.Length;i+=4){data[i]=255;data[i+2]=255;}Marshal.Copy(data,0,bits,data.Length);bool ok=PrintWindow(h,dc,2);Marshal.Copy(bits,data,0,data.Length);using(var f=new BinaryWriter(File.Create(path))){f.Write((ushort)0x4D42);f.Write(54+data.Length);f.Write(0);f.Write(54);f.Write(40);f.Write(w);f.Write(-ht);f.Write((ushort)1);f.Write((ushort)32);f.Write(0);f.Write(data.Length);f.Write(0);f.Write(0);f.Write(0);f.Write(0);f.Write(data);}if(!ok)throw new Exception("PrintWindow failed");var colors=new string[rows];for(int y=0;y<rows;y++){int i=((s.Origin.Y-s.Window.Top+y)*w+s.Origin.X-s.Window.Left+localX)*4;colors[y]=data[i+2].ToString("X2")+data[i+1].ToString("X2")+data[i].ToString("X2");}return colors;}finally{SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);}}
- public static void Fullscreen(IntPtr host){var s=Read(host);foreach(var c in s.Children)if(c.Class=="noctty.win32"){var h=new IntPtr(c.Hwnd);PostMessageW(h,0x100,new IntPtr(122),new IntPtr(1));PostMessageW(h,0x101,new IntPtr(122),new IntPtr(0xC0000001L));return;}throw new Exception("Surface absent");}
+ public static string[][] Paint(IntPtr h,string path,int[] localXs,int rows){var s=Read(h);int w=s.Window.Right-s.Window.Left,ht=s.Window.Bottom-s.Window.Top;var info=new BitmapInfo{size=40,width=w,height=-ht,planes=1,bpp=32};var dc=CreateCompatibleDC(IntPtr.Zero);IntPtr bits;var bitmap=CreateDIBSection(dc,ref info,0,out bits,IntPtr.Zero,0);if(dc==IntPtr.Zero||bitmap==IntPtr.Zero)throw new Exception("Capture allocation failed");var old=SelectObject(dc,bitmap);try{var data=new byte[w*ht*4];for(int i=0;i<data.Length;i+=4){data[i]=255;data[i+2]=255;}Marshal.Copy(data,0,bits,data.Length);bool ok=PrintWindow(h,dc,2);Marshal.Copy(bits,data,0,data.Length);using(var f=new BinaryWriter(File.Create(path))){f.Write((ushort)0x4D42);f.Write(54+data.Length);f.Write(0);f.Write(54);f.Write(40);f.Write(w);f.Write(-ht);f.Write((ushort)1);f.Write((ushort)32);f.Write(0);f.Write(data.Length);f.Write(0);f.Write(0);f.Write(0);f.Write(0);f.Write(data);}if(!ok)throw new Exception("PrintWindow failed");var colors=new string[localXs.Length][];for(int c=0;c<localXs.Length;c++){colors[c]=new string[rows];for(int y=0;y<rows;y++){int i=((s.Origin.Y-s.Window.Top+y)*w+s.Origin.X-s.Window.Left+localXs[c])*4;if(i<0||i+2>=data.Length)throw new Exception("Paint sample outside bitmap");colors[c][y]=data[i+2].ToString("X2")+data[i+1].ToString("X2")+data[i].ToString("X2");}}return colors;}finally{SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);}}
+ // Only the owned private-desktop input queues are attached. Synchronous
+ // key messages finish before the saved state is restored and detached.
+ public static void Key(IntPtr surface,int vk){uint pid;uint target=GetWindowThreadProcessId(surface,out pid),current=GetCurrentThreadId();if(!AttachThreadInput(current,target,true))throw new Exception("Private input attach failed");var saved=new byte[256];bool have=false;try{if(!GetKeyboardState(saved))throw new Exception("Private keyboard read failed");have=true;if(!SetKeyboardState(new byte[256]))throw new Exception("Private keyboard reset failed");IntPtr result;if(SendMessageTimeoutW(surface,0x100,new IntPtr(vk),new IntPtr(1),2,2000,out result)==IntPtr.Zero||SendMessageTimeoutW(surface,0x101,new IntPtr(vk),new IntPtr(0xC0000001L),2,2000,out result)==IntPtr.Zero)throw new Exception("Private key timeout");}finally{bool restored=!have||SetKeyboardState(saved);bool detached=AttachThreadInput(current,target,false);if(!restored||!detached)throw new Exception("Private input restore/detach failed");}}
+ public static void Fullscreen(IntPtr host){var s=Read(host);foreach(var c in s.Children)if(c.Class=="noctty.win32"){Key(new IntPtr(c.Hwnd),122);return;}throw new Exception("Surface absent");}
 }
 '@
 if(-not $Driver){
-    $attestation=Join-Path $Bin 'measurement-aumid.txt'
-    if(-not (Test-Path -LiteralPath $attestation) -or (Get-Content -LiteralPath $attestation -Raw) -notmatch 'io.github.amanthanvi.noctty.measure') {throw 'Measurement AUMID attestation required.'}
     . (Join-Path $PSScriptRoot '..\..\scripts\interactive-win11-state-guard.ps1')
     $guardDir=[IO.Path]::GetFullPath("$Run-guard")
     if(Test-Path -LiteralPath $guardDir){throw 'State guard evidence directory must be new.'}
@@ -99,11 +122,11 @@ if(-not $Driver){
 $script:checks=[Collections.Generic.List[object]]::new()
 $script:samples=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
-function Launch-Case([string]$Name,[string]$Decoration,$Monitor){
+function Launch-Case([string]$Name,[string]$Decoration,$Monitor,[bool]$AddTab=$true){
     $root=Join-Path $Run $Name; $dir=Join-Path $root 'bin'; Copy-Portable $Bin $dir
     foreach($n in @('localappdata','appdata')){[void](New-Item -ItemType Directory -Path (Join-Path $root $n))}
     $config=Join-Path $dir 'tabgap.ghostty'
-    @('command = cmd.exe /d /k','shell-integration = none','single-instance = false',"class = noctty-test-tabgap-$([guid]::NewGuid().ToString('N'))",'window-save-state = never','confirm-close-surface = false','window-show-tab-bar = always',"window-decoration = $Decoration",'clipboard-read = deny','clipboard-write = deny','copy-on-select = false','keybind = f11=toggle_fullscreen') | Set-Content -LiteralPath $config
+    @('command = cmd.exe /d /k','shell-integration = none','single-instance = false',"class = noctty-test-tabgap-$([guid]::NewGuid().ToString('N'))",'window-save-state = never','confirm-close-surface = false','window-show-tab-bar = always',"window-decoration = $Decoration",'clipboard-read = deny','clipboard-write = deny','copy-on-select = false','keybind = f11=toggle_fullscreen','keybind = f10=toggle_quick_terminal','quick-terminal-autohide = false','quick-terminal-animation-duration = 0','quick-terminal-keyboard-interactivity = on-demand') | Set-Content -LiteralPath $config
     $exe=Join-Path $dir 'noctty.exe'; $oldLocal=$env:LOCALAPPDATA;$oldRoaming=$env:APPDATA
     try{
         $env:LOCALAPPDATA=Join-Path $root 'localappdata';$env:APPDATA=Join-Path $root 'appdata'
@@ -117,7 +140,7 @@ function Launch-Case([string]$Name,[string]$Decoration,$Monitor){
     [void][TabGap]::ShowWindow($h,4);Start-Sleep -Milliseconds 1200
     [TabGap]::Move($h,($Monitor.Work.Left+100),($Monitor.Work.Top+100));Start-Sleep -Milliseconds 600
     [TabGap]::Move($h,($Monitor.Work.Left+100),($Monitor.Work.Top+100));Start-Sleep -Milliseconds 600
-    [void][TabGap]::PostMessageW($h,0x111,[IntPtr]1904,[IntPtr]::Zero);Start-Sleep -Milliseconds 1500
+    if($AddTab){[void][TabGap]::PostMessageW($h,0x111,[IntPtr]1904,[IntPtr]::Zero);Start-Sleep -Milliseconds 1500}
     return @{Process=$p;Host=$h;Root=$root}
 }
 function Close-Case($Case){
@@ -144,8 +167,13 @@ function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
     $columns=[ordered]@{first=10;tab0=[int](($tabs[0].Rect.Left+$tabs[0].Rect.Right)/2);tab1=[int](($tabs[1].Rect.Left+$tabs[1].Rect.Right)/2);empty=[int](($tabs[-1].Rect.Right+$s.Client.Right-$(if($Decoration -eq 'auto'){[int](138*$s.Dpi/96)}else{0}))/2)}
     foreach($action in @($s.Children|Where-Object {$_.Id -in @(1904,1911)})){$columns["action-$($action.Id)"]=[int](($action.Rect.Left+$action.Rect.Right)/2)}
     $scans=[ordered]@{};foreach($c in $columns.GetEnumerator()){$scans[$c.Key]=[TabGap]::Scan($h,$c.Value,$height)}
-    $pixels=[TabGap]::Paint($h,(Join-Path $Case.Root "$StateName.bmp"),$columns.tab1,($height+1))
-    $sample=@{Name=$Name;StateName=$StateName;Geometry=$s;Columns=$columns;Scans=$scans;PixelsTab1=$pixels};$script:samples.Add($sample)
+    $paintKeys=@('tab0','tab1','empty')
+    $paint=[TabGap]::Paint($h,(Join-Path $Case.Root "$Name.bmp"),[int[]]@($paintKeys|ForEach-Object {$columns[$_]}),($height+1))
+    $pixelsByColumn=[ordered]@{};for($i=0;$i -lt $paintKeys.Count;$i++){$pixelsByColumn[$paintKeys[$i]]=$paint[$i]}
+    $pixels=$pixelsByColumn.tab1
+    $active=@($tabs|Where-Object {[TabGap]::MarkedActive([IntPtr]$_.Hwnd)})
+    Check "$Name exactly one tab selected" ($active.Count -eq 1) 1 $active.Count
+    $sample=@{Name=$Name;StateName=$StateName;Geometry=$s;Columns=$columns;Scans=$scans;PixelsTab1=$pixels;PixelsByColumn=$pixelsByColumn;ActiveTab=@($active|ForEach-Object Id)};$script:samples.Add($sample)
     $script:samples|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $Run 'samples.json')
     $expected=if($ExpectFlush -and $StateName -in @('maximized','fullscreen')){0}else{[int][Math]::Floor(3*$s.Dpi/96)}
     Check "$Name tab top" ($tabs[0].Rect.Top -eq $expected -and $tabs[1].Rect.Top -eq $expected) $expected @($tabs|ForEach-Object {$_.Rect.Top})
@@ -163,8 +191,116 @@ function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
     if($ExpectFlush -and $StateName -in @('maximized','fullscreen')){
         Check "$Name painted top differs from restored background" ($pixels[0] -ne $script:restoredBackground) 'tab border rather than parent background' @($pixels[0],$script:restoredBackground)
         Check "$Name paint positive control" ($pixels[0] -ne 'FF00FF' -and $pixels[0] -ne $pixels[2]) 'top border differs from fill' @($pixels[0],$pixels[2])
-    }elseif($StateName -eq 'restored'){$script:restoredBackground=$pixels[0]}
+        $belowStrip=[int][Math]::Floor(4*$s.Dpi/96)
+        foreach($key in $paintKeys){Check "$Name $key row0 capture positive control" ($pixelsByColumn[$key][0] -ne 'FF00FF') 'painted pixel' $pixelsByColumn[$key][0]}
+        foreach($key in @('tab0','tab1')){
+            Check "$Name $key row0 border reaches edge" ($pixelsByColumn[$key][0] -ne $pixelsByColumn[$key][2] -and $pixelsByColumn[$key][0] -ne $pixelsByColumn.empty[0]) 'border differs from tab fill and empty chrome' @($pixelsByColumn[$key][0],$pixelsByColumn[$key][2],$pixelsByColumn.empty[0])
+        }
+        Check "$Name empty row0 has no accent strip" ($pixelsByColumn.empty[0] -eq $pixelsByColumn.empty[$belowStrip]) $pixelsByColumn.empty[$belowStrip] $pixelsByColumn.empty[0]
+        if($Decoration -eq 'none'){
+            Check "$Name old accent removed from empty row0" ($pixelsByColumn.empty[0] -ne $script:restoredBackground) 'empty chrome differs from restored accent' @($pixelsByColumn.empty[0],$script:restoredBackground)
+        }
+    }else{
+        Check "$Name restored row0 uniform across tab and empty columns" ($pixelsByColumn.tab0[0] -eq $pixelsByColumn.tab1[0] -and $pixelsByColumn.tab1[0] -eq $pixelsByColumn.empty[0]) $pixelsByColumn.empty[0] @($pixelsByColumn.tab0[0],$pixelsByColumn.tab1[0])
+        if($StateName -eq 'restored'){$script:restoredBackground=$pixels[0]}
+        if($Decoration -eq 'none'){
+            $belowStrip=[int][Math]::Floor(4*$s.Dpi/96)
+            Check "$Name restored accent positive control" ($pixelsByColumn.empty[0] -ne $pixelsByColumn.empty[$belowStrip]) 'accent differs from empty chrome below it' @($pixelsByColumn.empty[0],$pixelsByColumn.empty[$belowStrip])
+        }
+    }
     return $sample
+}
+function Test-WindowMenus([string]$Name,$Case){
+    $h=$Case.Host;$s=[TabGap]::Read($h)
+    $pane=@($s.Children|Where-Object Class -eq 'noctty.win32')[0]
+    if(-not $pane){throw 'Menu probe needs a visible pane.'}
+    $tabs=@($s.Children|Where-Object {$_.Id -ge 1000 -and $_.Id -lt 1100 -and $_.Class -eq 'Button'})
+    $lastRight=($tabs.Rect.Right|Measure-Object -Maximum).Maximum
+    $x=[int]$lastRight+8;$row=[int][Math]::Floor(20*$s.Dpi/96)
+    $caption=[TabGap]::Scan($h,$x,$row)[$row]
+    Check "$Name caption menu point" ($caption.Code -eq 2 -and $caption.Target -eq $h.ToInt64()) 'host HTCAPTION' @($caption.Code,$caption.Target)
+    foreach($route in @('AltSpaceSysChar','SC_KEYMENU','captionRightClick')){
+        # WM_SYSCHAR is the native Alt+Space character path. This exercises
+        # DefWindowProc and Surface.hasWindowMenu, without physical Alt input.
+        if($route -eq 'AltSpaceSysChar'){
+            [void][TabGap]::PostMessageW([IntPtr]$pane.Hwnd,0x106,[IntPtr]0x20,[IntPtr]0x20390001)
+        }elseif($route -eq 'SC_KEYMENU'){
+            [void][TabGap]::PostMessageW($h,0x112,[IntPtr]0xF100,[IntPtr]0x20)
+        }else{
+            if($caption.Code -ne 2 -or $caption.Target -ne $h.ToInt64()){continue}
+            $pos=[TabGap]::Pos(($s.Origin.X+$x),($s.Origin.Y+$row))
+            [void][TabGap]::PostMessageW($h,0xA4,[IntPtr]2,$pos)
+            [void][TabGap]::PostMessageW($h,0xA5,[IntPtr]2,$pos)
+        }
+        $opened=Wait-Until {([TabGap]::MenuFlags($h) -band 4) -ne 0 -and [TabGap]::MenuOwner($h) -eq $h.ToInt64()} 3
+        $script:samples.Add(@{Name="$Name-$route";Opened=$opened;Flags=[TabGap]::MenuFlags($h);Owner=[TabGap]::MenuOwner($h);ExpectedOwner=$h.ToInt64()})
+        Check "$Name $route opens own native menu" $opened $true $opened
+        [void][TabGap]::PostMessageW($h,0x1F,[IntPtr]::Zero,[IntPtr]::Zero)
+        $dismissed=Wait-Until {([TabGap]::MenuFlags($h) -band 4) -eq 0} 3
+        Check "$Name $route native menu dismissed" $dismissed $true $dismissed
+        if(-not $dismissed){throw 'Native menu did not leave menu mode; refusing another probe.'}
+    }
+}
+function Test-SingleTabCloseTop([string]$Name,[string]$Decoration,$Monitor){
+    $case=$null
+    try{
+        $case=Launch-Case "$Name-single-top-close" $Decoration $Monitor $false
+        [void][TabGap]::ShowWindow($case.Host,3);Start-Sleep -Milliseconds 650
+        $s=[TabGap]::Read($case.Host)
+        $script:samples.Add(@{Name="$Name-single-close-top-initial";Geometry=$s})
+        Check "$Name close-zone measured DPI" ($s.Dpi -eq $Monitor.Dpi) $Monitor.Dpi $s.Dpi
+        $tabs=@($s.Children|Where-Object {$_.Id -ge 1000 -and $_.Id -lt 1100 -and $_.Class -eq 'Button'})
+        Check "$Name close-zone single tab maximized" ($s.Zoomed -and $tabs.Count -eq 1 -and $tabs[0].Rect.Top -eq 0) 'one flush maximized tab' @($s.Zoomed,$tabs.Count,$tabs[0].Rect.Top)
+        if(-not $s.Zoomed -or $tabs.Count -ne 1 -or $tabs[0].Rect.Top -ne 0){return}
+        $tab=$tabs[0];$target=[IntPtr]$tab.Hwnd
+        # The midpoint of the existing 22 DIP close zone. Probe every row
+        # introduced above the old 3 DIP inset, including row zero.
+        $x=$tab.Rect.Right-[int][Math]::Floor(11*$s.Dpi/96)
+        $inset=[int][Math]::Floor(3*$s.Dpi/96)
+        for($y=0;$y -lt $inset;$y++){
+            $hit=[TabGap]::Scan($case.Host,$x,$y)[$y]
+            Check "$Name close-zone row $y routes to single tab" ($hit.Code -eq 1 -and $hit.Target -eq $tab.Hwnd -and $hit.WindowFromPoint -eq $tab.Hwnd) 'tab HTCLIENT' @($hit.Code,$hit.Target,$hit.WindowFromPoint)
+            if($hit.Code -ne 1 -or $hit.Target -ne $tab.Hwnd){return}
+            $pos=[TabGap]::Pos(($x-$tab.Rect.Left),$y)
+            foreach($message in @(0x201,0x202)){
+                [void][TabGap]::PostMessageW($target,$message,$(if($message -eq 0x201){[IntPtr]1}else{[IntPtr]::Zero}),$pos)
+                Start-Sleep -Milliseconds 650
+                $alive=[TabGap]::IsWindow($case.Host) -and -not $case.Process.HasExited
+                $selected=$alive -and [TabGap]::IsWindow($target) -and [TabGap]::MarkedActive($target)
+                $tabCount=if($alive){@(([TabGap]::Read($case.Host)).Children|Where-Object {$_.Id -ge 1000 -and $_.Id -lt 1100 -and $_.Class -eq 'Button'}).Count}else{0}
+                $phase=if($message -eq 0x201){'down'}else{'up'}
+                $script:samples.Add(@{Name="$Name-single-close-top-$y-$phase";Row=$y;Phase=$phase;HostAlive=$alive;Selected=$selected;TabCount=$tabCount;Hit=$hit})
+                Check "$Name close-zone row $y $phase preserves selected single tab" ($alive -and $selected -and $tabCount -eq 1) @($true,$true,1) @($alive,$selected,$tabCount)
+                if(-not $alive -or -not $selected -or $tabCount -ne 1){return}
+            }
+        }
+    }finally{Close-Case $case}
+}
+function Test-QuickTerminal([string]$Name,$Monitor){
+    $case=$null
+    try{
+        $case=Launch-Case "$Name-quick" 'auto' $Monitor $false
+        $pane=@(([TabGap]::Read($case.Host)).Children|Where-Object Class -eq 'noctty.win32')[0]
+        [TabGap]::Key([IntPtr]$pane.Hwnd,121)
+        $opened=Wait-Until {@([HiddenLocal]::Hosts($case.Process.Id)|Where-Object {$_ -ne $case.Host}).Count -eq 1} 10
+        Check "$Name quick terminal opens" $opened $true $opened
+        if(-not $opened){return}
+        $qt=@([HiddenLocal]::Hosts($case.Process.Id)|Where-Object {$_ -ne $case.Host})[0]
+        if([HiddenLocal]::WindowDesktop($qt) -ne $DesktopName){throw 'Quick terminal escaped private desktop.'}
+        Start-Sleep -Milliseconds 1000
+        [TabGap]::Move($qt,($Monitor.Work.Left+100),($Monitor.Work.Top+100));Start-Sleep -Milliseconds 650
+        [TabGap]::Move($qt,($Monitor.Work.Left+100),($Monitor.Work.Top+100));Start-Sleep -Milliseconds 650
+        $qtCase=@{Process=$case.Process;Host=$qt;Root=$case.Root}
+        foreach($state in @('restored','maximized')){
+            if($state -eq 'maximized'){[void][TabGap]::ShowWindow($qt,3);Start-Sleep -Milliseconds 650}
+            $s=[TabGap]::Read($qt);$rows=[TabGap]::Scan($qt,10,[int](40*$s.Dpi/96))
+            $script:samples.Add(@{Name="$Name-quick-$state";Geometry=$s;FirstColumn=$rows})
+            Check "$Name quick $state measured DPI" ($s.Dpi -eq $Monitor.Dpi) $Monitor.Dpi $s.Dpi
+            Check "$Name quick $state zoom readback" ($s.Zoomed -eq ($state -eq 'maximized')) ($state -eq 'maximized') $s.Zoomed
+            Check "$Name quick $state no sysmenu target" (@($rows|Where-Object {$_.Code -eq 3 -or $_.HostCode -eq 3}).Count -eq 0) 0 @($rows|Where-Object {$_.Code -eq 3 -or $_.HostCode -eq 3}).Count
+            Test-WindowMenus "$Name-quick-$state" $qtCase
+        }
+    }finally{Close-Case $case}
 }
 try{
     $monitors=@([TabGap]::Monitors());$monitors|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $Run 'monitors.json')
@@ -224,12 +360,7 @@ try{
             $full=Sample "$name-fullscreen" $case 'fullscreen' $decoration
             Check "$name fullscreen readback" (((Rect-Array $full.Geometry.Window) -join ',') -eq ((Rect-Array $m.Full) -join ',')) (Rect-Array $m.Full) (Rect-Array $full.Geometry.Window)
             [TabGap]::Fullscreen($case.Host);Start-Sleep -Milliseconds 650
-            [void][TabGap]::PostMessageW($case.Host,0x112,[IntPtr]0xF100,[IntPtr]0x20)
-            $opened=Wait-Until {([TabGap]::MenuFlags($case.Host) -band 4) -ne 0} 3
-            Check "$name system menu opens" $opened $true $opened
-            [void][TabGap]::PostMessageW($case.Host,0x1F,[IntPtr]::Zero,[IntPtr]::Zero)
-            $dismissed=Wait-Until {([TabGap]::MenuFlags($case.Host) -band 4) -eq 0} 3
-            Check "$name system menu dismisses" $dismissed $true $dismissed
+            Test-WindowMenus $name $case
             # Positive control: post the host's own measured sysmenu hit code,
             # only when the effective target really is the host and HTSYSMENU.
             $probe=@($before.Scans.first|Where-Object {$_.Code -eq 3 -and $_.Target -eq $case.Host.ToInt64()})|Select-Object -First 1
@@ -245,6 +376,10 @@ try{
                 if($probe){[void][TabGap]::PostMessageW($probeCase.Host,0xA3,[IntPtr]3,[TabGap]::Pos(($s.Origin.X+10),($s.Origin.Y+$probe.Y)));Start-Sleep -Milliseconds 800}
                 $script:samples.Add(@{Name="$name-maximized-sysmenu-doubleclick";Rows=$rows;Posted=($null -ne $probe);PostedRow=$probe.Y;HostAlive=[TabGap]::IsWindow($probeCase.Host);ProcessExited=$probeCase.Process.HasExited})
             }finally{Close-Case $probeCase}
+        }
+        if($ExpectFlush){
+            Test-SingleTabCloseTop $name $decoration $m
+            if($decoration -eq 'auto'){Test-QuickTerminal $name $m}
         }
     }}
 }catch{$script:checks.Add(@{Name='Harness execution';Passed=$false;Error=$_.Exception.Message;Location=$_.InvocationInfo.ScriptLineNumber})}

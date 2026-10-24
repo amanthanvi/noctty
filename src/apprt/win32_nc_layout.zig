@@ -204,11 +204,15 @@ pub fn captionButtonsRect(client: Rect, metrics: Metrics) CaptionButtons {
 /// Zone priority (highest first):
 ///   1. Resize corners (suppressed when maximized)
 ///   2. Close / Max / Min button rects
-///   3. Sysmenu rect (leftmost caption-row square)
-///   4. Edge-resize strips (suppressed when maximized); the top strip is
+///   3. Edge-resize strips (suppressed when maximized); the top strip is
 ///      `top_resize_height` deep, the others `edge_resize_width`
-///   5. Caption row (top `caption_button_h` pixels of the client area)
-///   6. Client area
+///   4. Caption row (top `caption_button_h` pixels of the client area)
+///   5. Client area
+///
+/// There is no system-menu icon in the painted caption, so there must be
+/// no invisible HTSYSMENU target over the first tab. Ordinary and quick
+/// terminal hosts share this classification; their window-menu commands
+/// and caption right-click handling live outside this geometry helper.
 pub fn hitTest(
     window: Rect,
     client: Rect,
@@ -237,23 +241,13 @@ pub fn hitTest(
     if (btns.max.contains(cursor.x, cursor.y)) return .maxbutton;
     if (btns.min.contains(cursor.x, cursor.y)) return .minbutton;
 
-    // --- 3. Sysmenu (leftmost caption-row square; we use
-    //     caption_button_h as the width so the icon area is square) ---
-    const sysmenu_rect = Rect{
-        .left = client.left,
-        .top = client.top,
-        .right = client.left + metrics.caption_button_h,
-        .bottom = client.top + metrics.caption_button_h,
-    };
-    if (sysmenu_rect.contains(cursor.x, cursor.y)) return .sysmenu;
-
-    // --- 4. Edge-resize strips (normal only) ---
+    // --- 3. Edge-resize strips (normal only) ---
     if (edge_hit) |hit| return hit;
 
-    // --- 5. Caption row ---
+    // --- 4. Caption row ---
     if (cursor.y >= client.top and cursor.y < client.top + metrics.caption_button_h) return .caption;
 
-    // --- 6. Client ---
+    // --- 5. Client ---
     return .client;
 }
 
@@ -427,11 +421,11 @@ test "sides preserved in both states" {
 
 // -- hitTest ----------------------------------------------------------------
 
-test "top-left corner: resize wins over sysmenu in outer frame" {
+test "top-left corner: resize wins over caption in outer frame" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     try std.testing.expectEqual(HitTest.topleft, hitTest(win, testClient(win, m, .normal), .{ .x = 0, .y = 0 }, m, .normal));
-    try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, testClient(win, m, .normal), .{ .x = 20, .y = 20 }, m, .normal));
+    try std.testing.expectEqual(HitTest.caption, hitTest(win, testClient(win, m, .normal), .{ .x = 20, .y = 20 }, m, .normal));
 }
 
 test "topleft resize at bottom-left corner" {
@@ -476,12 +470,10 @@ test "over min button" {
     try std.testing.expectEqual(HitTest.minbutton, hitTest(win, testClient(win, m, .normal), .{ .x = cx, .y = cy }, m, .normal));
 }
 
-test "caption area between sysmenu and buttons" {
+test "caption area before buttons" {
     const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    // Pick a point in the caption row, past sysmenu, before buttons.
-    // Sysmenu occupies [0, 40) horizontally; buttons start at 1280 - 3*46 = 1142.
-    // So x = 200, y = 20 should be caption.
+    // Pick a point in the caption row, before the buttons.
     try std.testing.expectEqual(HitTest.caption, hitTest(win, testClient(win, m, .normal), .{ .x = 200, .y = 20 }, m, .normal));
 }
 
@@ -507,11 +499,25 @@ test "maximized edge resize -> client not bottom" {
     try std.testing.expectEqual(HitTest.client, hitTest(win, testClient(win, m, .maximized), .{ .x = 640, .y = 799 }, m, .maximized));
 }
 
-test "sysmenu icon rect (leftmost 40px of caption row)" {
-    const m = metricsDefault(96, 40);
-    const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
-    // Centre of the sysmenu rect: x = 20, y = 20.
-    try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, testClient(win, m, .normal), .{ .x = 20, .y = 20 }, m, .normal));
+test "first caption square has resize and caption hits, never an invisible sysmenu" {
+    const win = Rect{ .left = 38, .top = 38, .right = 1318, .bottom = 838 };
+    for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+        const m = metricsDefault(dpi, 40);
+        for ([_]WindowState{ .normal, .maximized }) |state| {
+            const client = testClient(win, m, state);
+            var y = client.top;
+            while (y < client.top + m.caption_button_h) : (y += 1) {
+                var x = client.left;
+                while (x < client.left + m.caption_button_h) : (x += 1) {
+                    const expected = if (state == .normal)
+                        edgeHitTest(win, .{ .x = x, .y = y }, m) orelse HitTest.caption
+                    else
+                        HitTest.caption;
+                    try std.testing.expectEqual(expected, hitTest(win, client, .{ .x = x, .y = y }, m, state));
+                }
+            }
+        }
+    }
 }
 
 // -- captionButtonsRect -----------------------------------------------------

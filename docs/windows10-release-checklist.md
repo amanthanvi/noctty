@@ -75,22 +75,21 @@ Every place the code decides by Windows build, with the rows that check it. Add 
 row here and below when a new gate appears; the verification contract fails when a
 gate function named in the source is missing from this page.
 
-| Gate (symbol, file)                                                        | Rule                                                                                | Rows                   |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------- |
-| `probeWindowsBuild`, `App.os_build` (`win32.zig`)                          | `RtlGetVersion` build, cached; a failed probe reads 0 and takes the Windows 10 path | W10-01                 |
-| `shouldUseIntegratedTitlebar`, `App.use_integrated_titlebar` (`win32.zig`) | Build 22000 (`OS_BUILD_WIN11_21H2`) and `window-show-tab-bar` not `never`           | W10-03, W10-04, W10-05 |
-| `tabsFlushWithTop` (`win32.zig`)                                         | Build 22000, ordinary host and visible strip: maximized app-owned top edge or fullscreen tabs extend upward; Windows 10 and quick terminals retain the inset | W10-03, W10-06, W10-07, W10-09, W10-10 |
-| `handleNcHitTest` (`win32.zig`)                                          | Build 22000 and not the quick terminal: remove the integrated caption's invisible system-menu icon target, retaining resize/caption priority and the window menu | W10-03, W10-06, W10-08 |
-| `undecoratedKeepsFrame` (`win32.zig`)                                      | Build 22000 and not the quick terminal: `window-decoration = none` keeps the frame  | W10-06 to W10-10       |
-| `supportsDwmSystemBackdropAttribute` (`win32.zig`)                         | Build 22621 (`OS_BUILD_WIN11_22H2`) for `DWMWA_SYSTEMBACKDROP_TYPE`                 | W10-12                 |
-| `OS_BUILD_WIN10_22H2` (`win32/consts.zig`)                                 | 19045, used only by tests that stand in for this machine                            | W10-01                 |
-| DWM attributes 20 and 19, 34 to 36 (`win32_theme.zig`)                     | Dark caption tries 20, then 19; border, caption and text colour need build 22000    | W10-11, W10-12         |
-| Titlebar icon font chain (`createTitlebarIconFont`, `win32.zig`)           | Segoe Fluent Icons, then Segoe MDL2 Assets, by glyph table; else `win32_icons`      | W10-16                 |
-| Chrome and Settings fonts (`createChromeFont`, `recreateUiFont`)           | Segoe UI Variable Text where present, else Segoe UI                                 | W10-15                 |
-| `GUID_ENERGY_SAVER_STATUS` (`win32_power.zig`)                             | Windows 11 Energy Saver; the registration may fail elsewhere and is not a warning   | W10-26                 |
-| ConPTY source (`pty.zig`)                                                  | Bundled `conpty.dll` and `OpenConsole.exe`, else the in-box conhost                 | W10-19, W10-02         |
-| Default-terminal delegation (`win32_terminal_handoff.zig`)                 | Needs the console-delegation setting the OS provides                                | W10-22                 |
-| Toasts, AUMID, jump list, Explorer verbs                                   | Shell features that look different on Windows 10                                    | W10-23 to W10-25       |
+| Gate (symbol, file)                                                        | Rule                                                                                                                                                         | Rows                     |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------ |
+| `probeWindowsBuild`, `App.os_build` (`win32.zig`)                          | `RtlGetVersion` build, cached; a failed probe reads 0 and takes the Windows 10 path                                                                          | W10-01                   |
+| `shouldUseIntegratedTitlebar`, `App.use_integrated_titlebar` (`win32.zig`) | Build 22000 (`OS_BUILD_WIN11_21H2`) and `window-show-tab-bar` not `never`                                                                                    | W10-03, W10-04, W10-05   |
+| `tabsFlushWithTop` (`win32.zig`)                                           | Build 22000, ordinary host and visible strip: maximized app-owned top edge or fullscreen tabs extend upward; Windows 10 and quick terminals retain the inset | W10-03, W10-06 to W10-10 |
+| `undecoratedKeepsFrame` (`win32.zig`)                                      | Build 22000 and not the quick terminal: `window-decoration = none` keeps the frame                                                                           | W10-06 to W10-10         |
+| `supportsDwmSystemBackdropAttribute` (`win32.zig`)                         | Build 22621 (`OS_BUILD_WIN11_22H2`) for `DWMWA_SYSTEMBACKDROP_TYPE`                                                                                          | W10-12                   |
+| `OS_BUILD_WIN10_22H2` (`win32/consts.zig`)                                 | 19045, used only by tests that stand in for this machine                                                                                                     | W10-01                   |
+| DWM attributes 20 and 19, 34 to 36 (`win32_theme.zig`)                     | Dark caption tries 20, then 19; border, caption and text colour need build 22000                                                                             | W10-11, W10-12           |
+| Titlebar icon font chain (`createTitlebarIconFont`, `win32.zig`)           | Segoe Fluent Icons, then Segoe MDL2 Assets, by glyph table; else `win32_icons`                                                                               | W10-16                   |
+| Chrome and Settings fonts (`createChromeFont`, `recreateUiFont`)           | Segoe UI Variable Text where present, else Segoe UI                                                                                                          | W10-15                   |
+| `GUID_ENERGY_SAVER_STATUS` (`win32_power.zig`)                             | Windows 11 Energy Saver; the registration may fail elsewhere and is not a warning                                                                            | W10-26                   |
+| ConPTY source (`pty.zig`)                                                  | Bundled `conpty.dll` and `OpenConsole.exe`, else the in-box conhost                                                                                          | W10-19, W10-02           |
+| Default-terminal delegation (`win32_terminal_handoff.zig`)                 | Needs the console-delegation setting the OS provides                                                                                                         | W10-22                   |
+| Toasts, AUMID, jump list, Explorer verbs                                   | Shell features that look different on Windows 10                                                                                                             | W10-23 to W10-25         |
 
 ## Rows
 
@@ -155,12 +154,14 @@ window is frameless (see [Windows, tabs, and splits](windows.md#windows-tabs-and
 (#270: `CreateWindowEx` adds `WS_CAPTION` to an overlapped style with no frame
 bits, and the host removes it again before the first tab), no border, no shadow.
 The cursor stays an arrow at every window edge (no resize border). `Alt+Space`
-opens no window menu. Dragging the tab strip does not move the window.
+opens no window menu. Dragging the tab strip does not move the window. The
+separate tab row keeps its 3 DIP top inset, including at 150% scaling.
 
 **W10-07 Maximise covers the taskbar.** Run the palette action `toggle_maximize`
 (`Ctrl+Shift+P`) on the undecorated window. Expected, as documented: it covers the
 taskbar. If the window instead stops at the work area, the documentation line is
-out of date; record it.
+out of date; record it. The tab buttons retain their 3 DIP top inset when
+maximized; they do not extend to the client area's top edge as on Windows 11.
 
 **W10-08 Decoration toggle round trip.** From a decorated window run the palette
 action `toggle_window_decorations`, then again. Expected: the caption disappears
@@ -172,18 +173,23 @@ measurement. A maximised window is a separate observation:
 the Windows 10 path rewrites the window style without `WS_MAXIMIZE`
 (`docs/agents/log/window-frame.md`, 2026-09-24 entry, trap 4), so toggling
 while maximised is expected to leave an un-maximised window inside the maximised rectangle. Record what you
-see; neither outcome is a pass or a fail.
+see; neither outcome is a pass or a fail. The separate tab row keeps its 3 DIP
+top inset on both sides of the decoration toggle.
 
 **W10-09 Fullscreen round trip.** Maximise, then `toggle_fullscreen`, leave
 fullscreen, then restore from maximised. Expected: the window returns to its
 normal size and place, not to the maximised rectangle (the 2026-10-06 fullscreen
 entry in `docs/agents/log/window-frame.md` describes the Windows 11 failure this
-guards).
+guards). While fullscreen with tabs shown, the tab buttons retain their 3 DIP
+top inset; after leaving fullscreen, check the same inset when maximized and
+after restoring.
 
 **W10-10 Quick terminal.** There is no default key for it. Put `quick-terminal-position
 = top` and `keybind = global:ctrl+alt+q=toggle_quick_terminal` in the config, reload
 with `Ctrl+Shift+,`, and press `Ctrl+Alt+Q`. Expected: frameless on both Windows
 versions, flush with the top edge, full width, no gap and no shadow.
+The host's outer edge is flush with the screen; its tab buttons keep their
+3 DIP inset from the top of the client area, as quick terminals do on Windows 11.
 
 ### Theme and DWM
 
