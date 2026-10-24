@@ -264,8 +264,12 @@ that govern each symbol you change, or that none does.
   echo queue), palette and tab-list UIA.
 - [config.md](docs/agents/log/config.md): config loading and reload outside
   the Settings window: the config file reader (`cli/args.zig` `LineIterator`,
-  `Config.file_read_buffer_len`), `--config-file` and `startup_cwd` on reload,
-  diagnostics shown in the GUI, conditional replay, command-line values put
+  `streamDelimiterEnding`, `parseIntoField`, `ProfileMap`,
+  `Config.file_read_buffer_len`), Windows environment expansion
+  (`src/config/windows_shell.zig` `expandProfileText`), `--config-file` and
+  `startup_cwd` on reload, diagnostics shown in the GUI, conditional replay
+  (`Replay.Iterator`, `Config.finalize`, `loadTheme`,
+  `changeConditionalState`), command-line values put
   back over `config-file` includes (`Config.parseManuallyHook`,
   `finalizeCliLaunch`), `newConfig` shallow
   clones, what `Surface.DerivedConfig` must own, `RepeatableCommand.clone`
