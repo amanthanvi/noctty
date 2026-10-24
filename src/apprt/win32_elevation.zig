@@ -538,7 +538,7 @@ fn appendWindowsArgument(
 }
 
 /// Quote one complete argument according to CommandLineToArgvW parsing rules.
-fn writeWindowsArgument(writer: *std.Io.Writer, argument: []const u8) !void {
+pub fn writeWindowsArgument(writer: *std.Io.Writer, argument: []const u8) !void {
     if (!windowsArgumentNeedsQuotes(argument)) return writer.writeAll(argument);
 
     try writer.writeByte('"');

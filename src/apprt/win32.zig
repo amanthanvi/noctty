@@ -2989,6 +2989,10 @@ pub const App = struct {
     /// Set as `run` enters its message loop: the startup restore and the
     /// first window are done.
     message_loop_started: bool = false,
+    /// `RegisterApplicationRestart` ran for the Restart Manager close this
+    /// process agreed to (`registerInstallerRestart`).
+    restart_registered: bool = false,
+    restart_api: RestartApi = .{},
     /// `GetTickCount64` of the last `checkpointSessionState`.
     session_checkpoint_ms: ?u64 = null,
     /// Thread timer that saves the session once a burst of structural
@@ -3115,6 +3119,9 @@ pub const App = struct {
     /// relative path at save time, we'd end up writing to a different
     /// file than the one `Config.load()` used at launch.
     cli_config_override_path: ?[]u8 = null,
+    /// The value of the launch argv's last `--class=`, read at `App.init`
+    /// (`cliClass`), for the installer restart's command line.
+    cli_class: ?[]u8 = null,
     /// The file the last failed Settings save names in its status line.
     settings_failure_detail: win32_settings.FailureDetail = .{},
     /// The config keys the last Settings save wrote that a later layer
@@ -3285,6 +3292,7 @@ pub const App = struct {
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
+        self.cli_class = cliClass(core_app.alloc) catch null;
         // Snapshot the startup cwd for reload-time restoration.
         self.startup_cwd = std.process.getCwdAlloc(core_app.alloc) catch null;
         // A `wgh://activate?...` argument on the command line. Windows never
@@ -3977,6 +3985,10 @@ pub const App = struct {
             self.core_app.alloc.free(path);
             self.cli_config_override_path = null;
         }
+        if (self.cli_class) |class| {
+            self.core_app.alloc.free(class);
+            self.cli_class = null;
+        }
         self.settings_failure_detail.clear(self.core_app.alloc);
         self.settings_masked_keys.clear(self.core_app.alloc);
         self.config_problems.deinit(self.core_app.alloc);
@@ -4107,19 +4119,33 @@ pub const App = struct {
     /// quick terminal among them, Settings, and the lifecycle window that
     /// stands in when there is no other): true agrees to end. Without
     /// `ENDSESSION_CLOSEAPP` it is a sign-out, shutdown or reboot, which noctty
-    /// never declines. With it, an installer asks through Restart Manager to
-    /// close noctty so it can replace its files. noctty agrees only when a
+    /// never declines, and which takes back any restart registration an
+    /// installer's close left, so that Windows' option to restart apps at the
+    /// next sign-in never restarts noctty. With it, an installer asks through
+    /// Restart Manager to close noctty so it can replace its files. noctty
+    /// agrees only when a
     /// quit would ask nothing (`requestQuit`'s rules) and otherwise declines
     /// without a word, raising no prompt or window: nobody may be at the
     /// machine, and a declined close fails Setup safely (exit 5 under a
     /// package manager) with nothing lost. Nothing closes here; WM_ENDSESSION
-    /// says whether the close goes ahead (`onEndSession`).
+    /// says whether the close goes ahead (`onEndSession`). Agreeing also
+    /// registers for Setup's restart step (`registerInstallerRestart`).
     fn onQueryEndSession(self: *App, lParam: LPARAM) bool {
-        if (!endSessionClosesApp(lParam)) return true;
-        // A quit, a committed close or an update apply is under way: it has
-        // saved, or will, and ends the process itself.
-        if (!self.running or self.quitting or self.session_ending or
-            self.update_apply_queued or self.update_apply_in_flight) return true;
+        if (!endSessionClosesApp(lParam)) {
+            self.unregisterInstallerRestart();
+            return true;
+        }
+        // A committed close keeps what it registered.
+        if (self.session_ending) return true;
+        // A quit or an update apply is under way: it has saved, or will, and
+        // ends the process itself. Nothing restarts it: an update relaunches
+        // through Setup's /RELAUNCH=1, which a restart would start twice.
+        if (!self.running or self.quitting or
+            self.update_apply_queued or self.update_apply_in_flight)
+        {
+            self.unregisterInstallerRestart();
+            return true;
+        }
         // First, so that a forced close after a decline still finds the
         // session as it is now. Unthrottled, unlike `checkpointSessionState`;
         // only an earlier query of this round that agreed stands in for it.
@@ -4132,7 +4158,12 @@ pub const App = struct {
             saved and
             self.releaseHandoffForEndSession();
         self.end_session_prepared = agree;
-        if (!agree) self.retakeHandoffAfterEndSession();
+        if (agree) {
+            self.registerInstallerRestart();
+        } else {
+            self.retakeHandoffAfterEndSession();
+            self.unregisterInstallerRestart();
+        }
         return agree;
     }
 
@@ -4160,11 +4191,65 @@ pub const App = struct {
         };
     }
 
+    /// Lets Setup's restart step (Inno's RestartApplications, which calls
+    /// RmRestart) start noctty again after the close it agreed to, so the
+    /// saved session comes back. Only for the session's owner with windows to
+    /// restore: any other process closes as a quit would and stays closed.
+    /// Registered here and not at startup, and taken back when the close is
+    /// called off or a sign-out, shutdown or reboot begins, so a reboot, a
+    /// sign-in, a crash or the in-app update never restarts noctty. The
+    /// relaunch is a plain start that replays only the launch argv's
+    /// `--config-file` and `--class` (`installerRestartCommandLine`); Windows
+    /// adds the executable.
+    fn registerInstallerRestart(self: *App) void {
+        // Both are asked before the once-per-round check, so that they also
+        // take back a registration an earlier round left: this process may
+        // have stopped qualifying since (its last restorable window closed,
+        // or a reload turned saving off), or another noctty process's in-app
+        // Install is running this Setup, which starts noctty through
+        // /RELAUNCH=1, so a restart would be a second start.
+        if (!self.sessionStateEnabled() or !self.hasSessionWindows() or
+            self.restart_api.installer_apply_running(self.core_app.alloc))
+        {
+            return self.unregisterInstallerRestart();
+        }
+        if (self.restart_registered) return;
+        const line = installerRestartCommandLine(
+            self.core_app.alloc,
+            self.cli_config_override_path,
+            self.cli_class,
+        ) catch |err| {
+            log.warn("installer restart not registered err={}", .{err});
+            return;
+        } orelse {
+            log.warn("installer restart not registered: the command line is over {d} characters", .{restart_max_cmd_line - 1});
+            return;
+        };
+        defer self.core_app.alloc.free(line);
+        const hr = self.restart_api.register(if (line.len == 0) null else line.ptr, restart_flags);
+        if (hr != 0) {
+            log.warn("RegisterApplicationRestart failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+            return;
+        }
+        self.restart_registered = true;
+    }
+
+    /// Undoes `registerInstallerRestart` when the close it was made for is
+    /// declined or called off, or a sign-out, shutdown or reboot begins.
+    fn unregisterInstallerRestart(self: *App) void {
+        if (!self.restart_registered) return;
+        self.restart_registered = false;
+        const hr = self.restart_api.unregister();
+        if (hr != 0) log.warn("UnregisterApplicationRestart failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+    }
+
     /// WM_ENDSESSION, from the same windows. `ending` false: the end was
     /// called off (this or another window declined), and since nothing
-    /// closed, nothing is undone but the handoff class object an agreeing
-    /// query revoked. True without `ENDSESSION_CLOSEAPP`: a
-    /// sign-out, shutdown or reboot (`saveForEndSession`). True with it:
+    /// closed, only the restart registration and the handoff class object an
+    /// agreeing query revoked are undone. True without
+    /// `ENDSESSION_CLOSEAPP`: a sign-out, shutdown or reboot
+    /// (`saveForEndSession`), which also takes back a restart registration,
+    /// even one a committed installer close kept. True with it:
     /// Restart Manager closes noctty. Every window is saved while it is whole,
     /// as a quit saves, and the snapshot is latched; the quit itself runs from
     /// the message loop (`finishEndSessionClose`), never inside this sent
@@ -4173,8 +4258,14 @@ pub const App = struct {
     /// sizing loop) would run just the same. Once per process.
     fn onEndSession(self: *App, ending: bool, lParam: LPARAM) void {
         self.end_session_prepared = false;
-        if (!ending) return self.retakeHandoffAfterEndSession();
-        if (!endSessionClosesApp(lParam)) return self.saveForEndSession();
+        if (!ending) {
+            self.retakeHandoffAfterEndSession();
+            return self.unregisterInstallerRestart();
+        }
+        if (!endSessionClosesApp(lParam)) {
+            self.unregisterInstallerRestart();
+            return self.saveForEndSession();
+        }
         // A quit under way has saved its windows and ends the process itself.
         if (self.session_ending or !self.running or self.quitting) return;
         self.savePaletteMru();
@@ -13510,7 +13601,10 @@ fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: 
 
     // /RELAUNCH=1 is ours, not Inno's: dist/windows/noctty.iss starts noctty
     // again when it is given and Setup is silent. noctty has quit by the time
-    // Setup replaces its files, so /RESTARTAPPLICATIONS has nothing to restart.
+    // Setup replaces its files, and a process applying an update never
+    // registers for a restart (`App.onQueryEndSession`), nor does another
+    // noctty process while this Setup runs (`App.registerInstallerRestart`),
+    // so /RESTARTAPPLICATIONS has no noctty to restart.
     try buf.appendSlice(alloc, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /RELAUNCH=1");
     try appendInnoQuotedArg(alloc, &buf, " /DIR=", install_dir);
     try appendInnoQuotedArg(alloc, &buf, " /LOG=", log_path);
@@ -31345,6 +31439,103 @@ fn cliConfigFileOverrideArgs(alloc: std.mem.Allocator, argv: []const []const u8)
     });
 }
 
+/// The value of the last CLI `--class=` override.
+fn cliClass(alloc: std.mem.Allocator) !?[]u8 {
+    const argv = std.process.argsAlloc(alloc) catch return null;
+    defer std.process.argsFree(alloc, argv);
+    const class = cliClassArgs(argv) orelse return null;
+    return try alloc.dupe(u8, class);
+}
+
+fn cliClassArgs(argv: []const []const u8) ?[]const u8 {
+    const key = "--class=";
+    var class: ?[]const u8 = null;
+    for (argv[@min(1, argv.len)..]) |arg| {
+        // As `cliConfigFileOverrideArgs`: the rest is the child's argv, or
+        // COM's.
+        if (std.mem.eql(u8, arg, "-e") or
+            std.ascii.eqlIgnoreCase(arg, "-Embedding") or
+            std.ascii.eqlIgnoreCase(arg, win32_toast_activator.launch_switch)) break;
+        if (std.mem.startsWith(u8, arg, key)) class = arg[key.len..];
+    }
+    return class;
+}
+
+/// RESTART_MAX_CMD_LINE (winbase.h): `RegisterApplicationRestart` takes up to
+/// 1023 characters and the NUL, and returns E_INVALIDARG for 1024 (measured
+/// on build 26300).
+const restart_max_cmd_line = 1024;
+/// RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT: no restart after a
+/// crash or a hang (Windows Error Reporting), nor after a reboot an update
+/// forces. Nothing in the flags covers a sign-out, a reboot the user chose or
+/// Windows' option to restart apps at sign-in: the registration lasts only
+/// from an agreeing Restart Manager query until the process ends or the close
+/// is called off, and a sign-out, shutdown or reboot takes it back
+/// (`App.onQueryEndSession`, `App.onEndSession`). Not RESTART_NO_PATCH, which
+/// is the flag that stops an installer's restart.
+const restart_flags: DWORD = 0x1 | 0x2 | 0x8;
+
+/// kernel32's restart registration, and whether another noctty's in-app
+/// Install is running Setup. A test build defaults to stand-ins that register
+/// nothing and look at no update stage, so no test makes the test runner
+/// restartable or reads the user's profile.
+const RestartApi = struct {
+    register: *const fn (?LPCWSTR, DWORD) callconv(.winapi) windows.HRESULT =
+        if (builtin.is_test) &inertRegisterRestart else &sys.RegisterApplicationRestart,
+    unregister: *const fn () callconv(.winapi) windows.HRESULT =
+        if (builtin.is_test) &inertUnregisterRestart else &sys.UnregisterApplicationRestart,
+    installer_apply_running: *const fn (Allocator) bool =
+        if (builtin.is_test) &inertApplyRunning else &stagedInstallerRunning,
+
+    fn inertRegisterRestart(_: ?LPCWSTR, _: DWORD) callconv(.winapi) windows.HRESULT {
+        return 0;
+    }
+    fn inertUnregisterRestart() callconv(.winapi) windows.HRESULT {
+        return 0;
+    }
+    fn inertApplyRunning(_: Allocator) bool {
+        return false;
+    }
+    fn stagedInstallerRunning(alloc: Allocator) bool {
+        const state_path = updatepkg.defaultStatePath(alloc) catch return false;
+        defer alloc.free(state_path);
+        return updatepkg.stagedInstallerRunning(alloc, state_path);
+    }
+};
+
+/// The arguments Setup's restart replays (`App.registerInstallerRestart`):
+/// the launch's last `--config-file`, as the absolute path `App.init` resolved
+/// (the restart's working directory is not the launch's), and its `--class`,
+/// which names the single-instance pipe. Nothing else: not `-e`, a
+/// `+action`, `-Embedding` or `--working-directory`, since the restart only
+/// brings the saved session back. Quoted for `CommandLineToArgvW`. Empty when
+/// there is nothing to replay; null when the line would be too long to
+/// register.
+fn installerRestartCommandLine(
+    alloc: Allocator,
+    config_file: ?[]const u8,
+    class: ?[]const u8,
+) !?[:0]u16 {
+    var line: std.Io.Writer.Allocating = .init(alloc);
+    defer line.deinit();
+    var arg: std.Io.Writer.Allocating = .init(alloc);
+    defer arg.deinit();
+    for ([_]struct { []const u8, ?[]const u8 }{
+        .{ "--config-file=", config_file },
+        .{ "--class=", class },
+    }) |entry| {
+        const value = entry[1] orelse continue;
+        arg.clearRetainingCapacity();
+        try arg.writer.print("{s}{s}", .{ entry[0], value });
+        if (line.written().len != 0) try line.writer.writeByte(' ');
+        try win32_elevation.writeWindowsArgument(&line.writer, arg.written());
+    }
+    const wide = try std.unicode.wtf8ToWtf16LeAllocZ(alloc, line.written());
+    if (wide.len < restart_max_cmd_line) return wide;
+    alloc.free(wide);
+    return null;
+}
+
 /// Resolve a possibly-relative path to an absolute one WITHOUT
 /// requiring the leaf to exist. `std.fs.realpathAlloc` calls
 /// `GetFullPathNameW` + `CreateFileW` to canonicalise, which fails
@@ -32350,6 +32541,90 @@ test "win32 settings save target is the last config file the loader takes from t
             try std.testing.expect(actual == null);
         }
     }
+}
+
+test "win32 the installer restart replays only the launch's last config file and class, quoted for CommandLineToArgvW" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const Shell = struct {
+        extern "shell32" fn CommandLineToArgvW(lpCmdLine: LPCWSTR, pNumArgs: *c_int) callconv(.winapi) ?[*][*:0]u16;
+
+        /// What the restarted process's argv holds after the executable,
+        /// which Windows puts in front of the registered line.
+        fn parse(line: [:0]const u16) ![][]u8 {
+            const full = try std.mem.concatWithSentinel(std.testing.allocator, u16, &.{ std.unicode.utf8ToUtf16LeStringLiteral("\"C:\\noctty\\noctty.exe\" "), line }, 0);
+            defer std.testing.allocator.free(full);
+            var count: c_int = 0;
+            const argv = CommandLineToArgvW(full.ptr, &count) orelse return error.ParseFailed;
+            defer _ = sys.LocalFree(@ptrCast(argv));
+            const args = try std.testing.allocator.alloc([]u8, @intCast(count - 1));
+            for (args, 1..) |*arg, i| arg.* = try std.unicode.wtf16LeToWtf8Alloc(std.testing.allocator, std.mem.span(argv[i]));
+            return args;
+        }
+        fn free(args: [][]u8) void {
+            for (args) |arg| std.testing.allocator.free(arg);
+            std.testing.allocator.free(args);
+        }
+    };
+
+    // Spaces, non-ASCII, and quotes after backslashes and at the end come back
+    // as they went in.
+    const config_file = "C:\\Users\\Zoë Łukasz\\cfg dir\\noctty \"x\".conf";
+    const class = "a\\\"b c\\";
+    const line = (try installerRestartCommandLine(alloc, config_file, class)).?;
+    defer alloc.free(line);
+    const args = try Shell.parse(line);
+    defer Shell.free(args);
+    try std.testing.expectEqual(@as(usize, 2), args.len);
+    try std.testing.expectEqualStrings("--config-file=" ++ config_file, args[0]);
+    try std.testing.expectEqualStrings("--class=" ++ class, args[1]);
+
+    // From the launch argv: the last config file and class before `-e`,
+    // nothing of the command, the working directory, an action or the COM
+    // switch.
+    const argv = [_][]const u8{
+        "noctty",
+        "+new-window",
+        "--class=first",
+        "--config-file=C:\\first.conf",
+        "--working-directory=C:\\Windows",
+        "--config-file=C:\\last.conf",
+        "--class=last",
+        "-e",
+        "cmd.exe",
+        "--class=child",
+        "--config-file=C:\\child.conf",
+    };
+    const last_file = (try cliConfigFileOverrideArgs(alloc, &argv)).?;
+    defer alloc.free(last_file);
+    const from_argv = (try installerRestartCommandLine(alloc, last_file, cliClassArgs(&argv))).?;
+    defer alloc.free(from_argv);
+    const replayed = try Shell.parse(from_argv);
+    defer Shell.free(replayed);
+    try std.testing.expectEqual(@as(usize, 2), replayed.len);
+    try std.testing.expectEqualStrings("--config-file=C:\\last.conf", replayed[0]);
+    try std.testing.expectEqualStrings("--class=last", replayed[1]);
+    for ([_][]const []const u8{
+        &.{ "noctty", "+new-window", "--working-directory=C:\\Windows", "-e", "cmd.exe", "--class=child" },
+        &.{ "noctty", "-Embedding", "--class=com", "--config-file=C:\\com.conf" },
+        &.{ "noctty", "-toastactivated", "--class=com", "--config-file=C:\\com.conf", "-Embedding" },
+    }) |other| {
+        try std.testing.expectEqual(@as(?[]u8, null), try cliConfigFileOverrideArgs(alloc, other));
+        try std.testing.expectEqual(@as(?[]const u8, null), cliClassArgs(other));
+        const empty = (try installerRestartCommandLine(alloc, null, cliClassArgs(other))).?;
+        defer alloc.free(empty);
+        try std.testing.expectEqual(@as(usize, 0), empty.len);
+    }
+
+    // RESTART_MAX_CMD_LINE counts the NUL: 1023 characters fit, 1024 do not.
+    const prefix = "--config-file=".len;
+    var path: [1100]u8 = undefined;
+    @memset(&path, 'x');
+    const fits = (try installerRestartCommandLine(alloc, path[0 .. 1023 - prefix], null)).?;
+    defer alloc.free(fits);
+    try std.testing.expectEqual(@as(usize, 1023), fits.len);
+    try std.testing.expectEqual(@as(?[:0]u16, null), try installerRestartCommandLine(alloc, path[0 .. 1024 - prefix], null));
+    try std.testing.expectEqual(@as(?[:0]u16, null), try installerRestartCommandLine(alloc, &path, "work"));
 }
 
 fn settingsTestLoadText(config: *configpkg.Config, text: []const u8) !void {
@@ -57595,6 +57870,271 @@ test "win32 an -Embedding server agrees to a Restart Manager close only once its
     try std.testing.expect(server.cookie == null);
 }
 
+test "win32 agreeing to a Restart Manager close registers the session owner for Setup's restart, once, and nothing else does" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    app.running = true;
+    app.message_loop_started = true;
+
+    // kernel32 stand-ins that record each call.
+    const Fake = struct {
+        var registers: u32 = 0;
+        var unregisters: u32 = 0;
+        var flags: DWORD = 0;
+        var null_line: bool = false;
+        var line: [128]u16 = undefined;
+        var line_len: usize = 0;
+        fn register(cmdline: ?LPCWSTR, dwFlags: DWORD) callconv(.winapi) windows.HRESULT {
+            registers += 1;
+            flags = dwFlags;
+            null_line = cmdline == null;
+            line_len = 0;
+            if (cmdline) |text| {
+                const value = std.mem.span(text);
+                @memcpy(line[0..value.len], value);
+                line_len = value.len;
+            }
+            return 0;
+        }
+        fn unregister() callconv(.winapi) windows.HRESULT {
+            unregisters += 1;
+            return 0;
+        }
+    };
+    Fake.registers = 0;
+    Fake.unregisters = 0;
+    app.restart_api = .{ .register = &Fake.register, .unregister = &Fake.unregister };
+
+    // The queries and ends reach the window's procedure, as Restart Manager
+    // sends them.
+    const hwnd = try createTestHostWindow();
+    defer _ = sys.DestroyWindow(hwnd);
+    setWindowData(hwnd, &host);
+    defer setWindowData(hwnd, null);
+    const Rm = struct {
+        fn query(window: HWND) LRESULT {
+            return hostWindowProc(window, c.WM_QUERYENDSESSION, 0, @bitCast(c.ENDSESSION_CLOSEAPP));
+        }
+        fn cancel(window: HWND) void {
+            _ = hostWindowProc(window, c.WM_ENDSESSION, 0, @bitCast(c.ENDSESSION_CLOSEAPP));
+        }
+    };
+
+    // The session's owner. A test cannot write the session (no LOCALAPPDATA),
+    // so the query's snapshot is the one with nothing to write: the last
+    // window saved as it went.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const state_path = try std.fs.path.join(std.testing.allocator, &.{ root, "session-state.json" });
+    defer std.testing.allocator.free(state_path);
+    app.config.@"window-save-state" = .always;
+    app.session_owner = (try SessionOwnerLock.acquire(std.testing.allocator, state_path)).?;
+    defer app.releaseSessionOwnership();
+    app.session_state_saved_before_last_host_close = true;
+    var config_path = "C:\\Users\\A B\\noctty.conf".*;
+    var class = "work".*;
+    app.cli_config_override_path = &config_path;
+    defer app.cli_config_override_path = null;
+    app.cli_class = &class;
+    defer app.cli_class = null;
+
+    // A decline (a program running in a terminal) registers nothing, and has
+    // nothing to take back.
+    surface.core_surface.readonly = true;
+    surface.core_initialized = true;
+    const first_declined = Rm.query(hwnd);
+    surface.core_initialized = false;
+    surface.core_surface.readonly = false;
+    try std.testing.expectEqual(@as(LRESULT, 0), first_declined);
+    try std.testing.expectEqual(@as(u32, 0), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 0), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+
+    // Agreeing registers once, with flags 11 and the launch's config file and
+    // class; the other windows' queries of the round do not register again.
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 1), Fake.registers);
+    try std.testing.expectEqual(@as(DWORD, 11), Fake.flags);
+    const expected_line = std.unicode.utf8ToUtf16LeStringLiteral("\"--config-file=C:\\Users\\A B\\noctty.conf\" --class=work");
+    try std.testing.expectEqualSlices(u16, expected_line, Fake.line[0..Fake.line_len]);
+    // Called off: the registration goes, once.
+    Rm.cancel(hwnd);
+    Rm.cancel(hwnd);
+    try std.testing.expectEqual(@as(u32, 1), Fake.unregisters);
+
+    // Nothing to replay: a NULL command line.
+    app.cli_config_override_path = null;
+    app.cli_class = null;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 2), Fake.registers);
+    try std.testing.expect(Fake.null_line);
+    // A later query of the round that declines (a program started in a
+    // terminal) takes the registration back.
+    surface.core_surface.readonly = true;
+    surface.core_initialized = true;
+    const declined = Rm.query(hwnd);
+    surface.core_initialized = false;
+    surface.core_surface.readonly = false;
+    try std.testing.expectEqual(@as(LRESULT, 0), declined);
+    try std.testing.expectEqual(@as(u32, 2), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 2), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+
+    // An update apply queued or under way relaunches through Setup's
+    // /RELAUNCH=1: its query agrees, registers nothing, and takes back a
+    // registration an earlier round left.
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 3), Fake.registers);
+    app.update_apply_in_flight = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    app.update_apply_in_flight = false;
+    try std.testing.expectEqual(@as(u32, 3), Fake.unregisters);
+    app.update_apply_queued = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    app.update_apply_queued = false;
+    try std.testing.expectEqual(@as(u32, 3), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 3), Fake.unregisters);
+
+    // So does another noctty process's in-app Install: while its Setup runs,
+    // an idle owner beside it agrees and is not restarted, and a
+    // registration an earlier round left is taken back.
+    const OtherInstall = struct {
+        var running = false;
+        fn probe(_: Allocator) bool {
+            return running;
+        }
+    };
+    app.restart_api.installer_apply_running = &OtherInstall.probe;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 4), Fake.registers);
+    OtherInstall.running = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 4), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 4), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 4), Fake.unregisters);
+    OtherInstall.running = false;
+
+    // A process that does not restore the session agrees and is not
+    // restarted: no owner, the default-terminal server, safe mode, and an
+    // owner whose only window holds nothing the session records. An owner
+    // that registered and then stopped qualifying takes the registration back
+    // at its next agreeing query.
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 5), Fake.registers);
+    const owner = app.session_owner;
+    app.session_owner = null;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 5), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+    app.session_owner = owner;
+    app.embedding_mode = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    app.embedding_mode = false;
+    app.safe_mode = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    app.safe_mode = false;
+    host.quick_terminal = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    host.quick_terminal = false;
+    try std.testing.expectEqual(@as(u32, 5), Fake.registers);
+
+    // A command line too long to register: the close still goes ahead.
+    var long_path: [1100]u8 = undefined;
+    @memset(&long_path, 'x');
+    app.cli_config_override_path = &long_path;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    app.cli_config_override_path = null;
+    try std.testing.expectEqual(@as(u32, 5), Fake.registers);
+    try std.testing.expect(!app.restart_registered);
+
+    // A quit under way (the user's, not a committed installer close) ends
+    // the process itself and is not restarted: its query agrees and takes
+    // back a registration an earlier round left. Likewise once the message
+    // loop has stopped.
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 6), Fake.registers);
+    app.quitting = true;
+    const quitting_query = Rm.query(hwnd);
+    app.quitting = false;
+    try std.testing.expectEqual(@as(LRESULT, 1), quitting_query);
+    try std.testing.expectEqual(@as(u32, 6), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 7), Fake.registers);
+    app.running = false;
+    const stopped_query = Rm.query(hwnd);
+    app.running = true;
+    try std.testing.expectEqual(@as(LRESULT, 1), stopped_query);
+    try std.testing.expectEqual(@as(u32, 7), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 7), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+
+    // A sign-out, shutdown or reboot (no ENDSESSION_CLOSEAPP) takes back a
+    // registration a round left, at its query or at its end, so Windows'
+    // option to restart apps at sign-in does not restart noctty.
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 8), Fake.registers);
+    const logoff: LPARAM = @bitCast(@as(usize, 0x80000000)); // ENDSESSION_LOGOFF
+    try std.testing.expectEqual(@as(LRESULT, 1), hostWindowProc(hwnd, c.WM_QUERYENDSESSION, 0, logoff));
+    try std.testing.expectEqual(@as(u32, 8), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 9), Fake.registers);
+    _ = hostWindowProc(hwnd, c.WM_ENDSESSION, 1, 0);
+    try std.testing.expect(app.session_ending);
+    app.session_ending = false;
+    try std.testing.expectEqual(@as(u32, 9), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+
+    // A committed close keeps the registration, since Setup's restart step
+    // reads it after noctty has gone: not taken back by the commit
+    // (WM_ENDSESSION(TRUE) with ENDSESSION_CLOSEAPP), by a later query of
+    // the same round, or by one after the quit began.
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 10), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 9), Fake.unregisters);
+    defer {
+        app.session_ending = false;
+        app.end_session_quit_pending = false;
+        app.quitting = false;
+        app.running = true;
+    }
+    _ = hostWindowProc(hwnd, c.WM_ENDSESSION, 1, @bitCast(c.ENDSESSION_CLOSEAPP));
+    try std.testing.expect(app.session_ending);
+    try std.testing.expect(app.end_session_quit_pending);
+    try std.testing.expect(app.restart_registered);
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    app.quitting = true;
+    app.running = false;
+    try std.testing.expectEqual(@as(LRESULT, 1), Rm.query(hwnd));
+    try std.testing.expectEqual(@as(u32, 10), Fake.registers);
+    try std.testing.expectEqual(@as(u32, 9), Fake.unregisters);
+    try std.testing.expect(app.restart_registered);
+    // A sign-out, shutdown or reboot that begins before noctty has gone
+    // still takes it back.
+    _ = hostWindowProc(hwnd, c.WM_ENDSESSION, 1, 0);
+    try std.testing.expectEqual(@as(u32, 10), Fake.unregisters);
+    try std.testing.expect(!app.restart_registered);
+}
+
 test "win32 a snapshot with no session window leaves the saved session alone" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -59942,6 +60482,22 @@ test "win32 installer apply args double embedded quotes" {
     defer alloc.free(args);
 
     try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\wing\"\"hostty\"") != null);
+}
+
+test "win32 an in-app install relaunches noctty one way, through /RELAUNCH=1" {
+    // Setup's /RESTARTAPPLICATIONS restarts only a process that registered
+    // with Restart Manager, and the applying process never does
+    // (`App.onQueryEndSession` with an apply under way). So /RELAUNCH=1 is
+    // the one relaunch; a second route would start noctty twice.
+    const alloc = std.testing.allocator;
+    const args = try buildInstallerApplyArgs(alloc, "C:\\Program Files\\noctty", "C:\\logs\\apply.log");
+    defer alloc.free(args);
+    try std.testing.expectEqualStrings(
+        "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /RELAUNCH=1 " ++
+            "/DIR=\"C:\\Program Files\\noctty\" /LOG=\"C:\\logs\\apply.log\"",
+        args,
+    );
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, args, "RELAUNCH"));
 }
 
 /// Both the surface's and the renderer's repaint requests queue outside
