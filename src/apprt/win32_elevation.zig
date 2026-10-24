@@ -444,8 +444,10 @@ pub const RelaunchProfile = union(enum) {
 /// Build the argument string for a new elevated process.
 ///
 /// `argv` is the complete current argv, including argv[0]. Only explicit
-/// config-file overrides are inherited; the effective class, invoking working
-/// directory, and the profile (`RelaunchProfile`) are appended after them.
+/// config-file overrides and `--config-default-files` are inherited, so the
+/// elevated process reads the same files (it rebuilds a `selector` profile
+/// from them); the effective class, invoking working directory, and the
+/// profile (`RelaunchProfile`) are appended after them.
 /// The result can hold a profile's variables, so it is never logged.
 pub fn buildRelaunchParameters(
     alloc: Allocator,
@@ -478,6 +480,10 @@ pub fn buildRelaunchParameters(
                 arg["--config-file=".len..],
                 config_base_cwd,
             );
+        } else if (std.mem.eql(u8, arg, "--config-default-files") or
+            std.mem.startsWith(u8, arg, "--config-default-files="))
+        {
+            try appendWindowsArgument(&result, arg);
         }
         i += 1;
     }
@@ -1023,6 +1029,7 @@ test "elevation relaunch parameters forward config class and cwd exactly" {
         "--config-file",
         "C:\\configs\\one.conf",
         "--theme=Cobalt2",
+        "--config-default-files=false",
         "--config-file=C:\\configs\\two words.conf",
         "--config-file",
         "relative.conf",
@@ -1045,6 +1052,7 @@ test "elevation relaunch parameters forward config class and cwd exactly" {
 
     try testing.expectEqualStrings(
         "--config-file=C:\\configs\\one.conf " ++
+            "--config-default-files=false " ++
             "\"--config-file=C:\\configs\\two words.conf\" " ++
             "--config-file=C:\\startup\\relative.conf " ++
             "--config-file=?C:\\startup\\optional.conf " ++

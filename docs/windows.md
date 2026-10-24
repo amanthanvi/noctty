@@ -1441,8 +1441,10 @@ because there is no non-elevated split-token counterpart to protect.
 Configuration and other per-user state still resolve from the same
 `%LOCALAPPDATA%\noctty\` profile as the non-elevated process.
 
-An elevated noctty loads the same `%LOCALAPPDATA%\noctty\config.ghostty` and
-the same explicit `--config-file` overrides as a non-elevated process. Those
+An elevated noctty loads the same config files as the non-elevated process:
+`%LOCALAPPDATA%\noctty\config.ghostty` (unless that process was started with
+`--config-default-files=false`) and the same explicit `--config-file`
+overrides. Those
 files remain writable by the ordinary user account, so anything that can
 modify the configuration, including `command`, `shell-integration`, and theme
 paths, runs at high integrity the next time an elevated window opens.
