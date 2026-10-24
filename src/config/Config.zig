@@ -6057,6 +6057,71 @@ test "finalize run again adds no profile problem twice" {
     }
 }
 
+test "finalize-time profile problems are there once, at their lines, after a theme replay" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    // Theme files that exist, so `finalize` swaps in a config rebuilt by
+    // replay before the conditional replays below.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "light", .data = "background = #ffffff\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "dark", .data = "background = #000000\n" });
+    const light = try tmp.dir.realpathAlloc(alloc, "light");
+    defer alloc.free(light);
+    const dark_theme = try tmp.dir.realpathAlloc(alloc, "dark");
+    defer alloc.free(dark_theme);
+    const Want = struct { key: []const u8, line: usize, message: []const u8 };
+    const cases = [_]struct { body: []const u8, want: []const Want }{
+        .{
+            .body = "default-profile = nosuch\nprofile-order = pyy\nprofile-hidden = Ubuntu\n",
+            .want = &.{
+                .{ .key = "profile-order", .line = 3, .message = "\"pyy\" names no profile" },
+                .{ .key = "profile-hidden", .line = 4, .message = "\"Ubuntu\" names no profile" },
+                .{ .key = "default-profile", .line = 2, .message = "\"nosuch\" names no profile that can start here" },
+            },
+        },
+        .{
+            .body = "profile-command = py: cmd.exe\ndefault-profile = py\ncommand = vim.exe\n",
+            .want = &.{
+                .{ .key = "default-profile", .line = 3, .message = "is not used, because a config file sets command" },
+            },
+        },
+    };
+    for (cases) |case| {
+        const text = try std.fmt.allocPrint(alloc, "theme = light:{s},dark:{s}\n{s}", .{ light, dark_theme, case.body });
+        defer alloc.free(text);
+        var cfg = try testLoadProfileText(alloc, text);
+        defer cfg.deinit();
+        var dark = (try cfg.changeConditionalState(.{ .theme = .dark })).?;
+        defer dark.deinit();
+        var light_again = (try dark.changeConditionalState(.{ .theme = .light })).?;
+        defer light_again.deinit();
+        // As a new window's clone of the replayed config is finalized again.
+        try light_again.finalize();
+        for ([_]*const Config{ &cfg, &dark, &light_again }) |config| {
+            var found: usize = 0;
+            for (config._diagnostics.list.items) |diag| {
+                if (!std.mem.startsWith(u8, diag.key, "profile-") and !std.mem.eql(u8, diag.key, "default-profile")) continue;
+                testing.expect(found < case.want.len) catch |err| {
+                    std.debug.print("extra: {s}: {s}\n", .{ diag.key, diag.message });
+                    return err;
+                };
+                const w = case.want[found];
+                try testing.expectEqualStrings(w.key, diag.key);
+                testing.expect(std.mem.startsWith(u8, diag.message, w.message)) catch |err| {
+                    std.debug.print("{s}: {s}\n", .{ diag.key, diag.message });
+                    return err;
+                };
+                try testing.expectEqualStrings("C:\\noctty-test\\config.ghostty", diag.location.file.path);
+                try testing.expectEqual(w.line, diag.location.file.line);
+                found += 1;
+            }
+            try testing.expectEqual(case.want.len, found);
+        }
+    }
+}
+
 test "default-profile, profile-order and profile-hidden load and format back" {
     const testing = std.testing;
     const alloc = testing.allocator;
