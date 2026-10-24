@@ -397,7 +397,7 @@ $helpPromises = @{
     416 = @('pt|points', '0\s*\.\.\s*200', 'pair')
     412 = @('comma', 'default')
     413 = @('absolute path', 'light/dark', 'default')
-    414 = @('automatic.*shell|shell.*detect')
+    414 = @('automatic.*shell|shell.*detect|detect.*shell')
 }
 Assert-Contract ($cases.Count -eq 28 -and @($cases | Where-Object { $_[2] -ne 'Button' }).Count -eq 26) `
     'Independent projection manifest is incomplete.'
