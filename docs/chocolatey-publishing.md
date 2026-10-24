@@ -62,7 +62,10 @@ one with the Chocolatey Publish workflow if it is not listed; do not rerun its
 The package downloads the signed Inno Setup installer for the machine's
 architecture (x64 or arm64) from the GitHub release, checks it against the
 release's SHA-256, and runs it silently. Chocolatey's own uninstaller removes
-it through the installer's entry in Apps. The package contains no binaries, so
+it through the installer's entry in Apps. An upgrade run from inside a noctty
+window stops before it downloads anything and asks for another terminal,
+because Setup has to close noctty and noctty cannot close while Chocolatey is
+running in it. The package contains no binaries, so
 it needs no `VERIFICATION.txt`. The id is `noctty`, the title `Noctty`, the
 license is the repository's MIT `LICENSE` at the release tag, and the icon is
 the website's `https://noctty.com/assets/favicon.svg`, because the validator
