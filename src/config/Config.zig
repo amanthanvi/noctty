@@ -5655,6 +5655,7 @@ test "profile-order and profile-hidden report a value that can name no profile, 
         \\profile-order = gone
         \\profile-hidden = wsl:docker-desktop
         \\profile-hidden = ssh:build-host
+        \\profile-hidden = SSH:build-host
         \\profile-hidden = git
         \\profile-hidden = WSL
         \\profile-hidden = distro

@@ -2411,8 +2411,9 @@ test "every profile alias word is reserved as an id" {
 /// Whether `reference` (a `default-profile`, `profile-order` or
 /// `profile-hidden` value) names `profile`, one of `profiles`. A bare word
 /// names the user profile with that id when `profiles` has one; otherwise
-/// it is a key (`pwsh.exe`, `wsl:Ubuntu`, `user:<id>`; an `ssh:` key is
-/// matched exactly, as OpenSSH aliases are case-sensitive) or one of the
+/// it is a key (`pwsh.exe`, `wsl:Ubuntu`, `user:<id>`; an `ssh:` key's
+/// prefix in any case, as `resolveProfileReference` takes it, and its alias
+/// exactly, as OpenSSH aliases are case-sensitive) or one of the
 /// fixed words (`pwsh`, `git`, `wsl`, ...; `profile_alias_words`), which can
 /// name several profiles. The ids reserve those words, so the classes never
 /// overlap. A distribution is always `wsl:<name>`, and labels are not
@@ -2421,7 +2422,13 @@ pub fn referenceNames(profiles: []const Profile, reference: []const u8, profile:
     const ref = std.mem.trim(u8, reference, &std.ascii.whitespace);
     if (ref.len == 0) return false;
     if (userProfileWithId(profiles, ref)) |named| return named == profile.key.ptr;
-    if (profile.kind == .ssh) return std.mem.eql(u8, ref, profile.key);
+    if (profile.kind == .ssh) {
+        const prefix = "ssh:";
+        return ref.len == profile.key.len and
+            std.ascii.startsWithIgnoreCase(ref, prefix) and
+            std.ascii.startsWithIgnoreCase(profile.key, prefix) and
+            std.mem.eql(u8, ref[prefix.len..], profile.key[prefix.len..]);
+    }
     if (std.ascii.eqlIgnoreCase(ref, profile.key)) return true;
     return profileAliasMatches(ref, profile);
 }
@@ -2823,11 +2830,31 @@ test "profile-order puts the profiles it names first and profile-hidden moves th
     }
 
     // An alias can name several profiles: they keep their order among
-    // themselves. An SSH key is exact; a label is no reference.
+    // themselves. An SSH alias is exact; a label is no reference.
     {
         var profiles = all;
         arrangeProfiles(&profiles, &.{ "ssh:prod", "Python", "ssh:Prod", "wsl" }, &.{});
         try expectProfileKeys(&profiles, &.{ "ssh:Prod", "wsl-default", "wsl:Ubuntu", "wsl:docker-desktop", "pwsh.exe", "git-bash", "cmd.exe", "user:vs18-cmd", "user:py" });
+    }
+
+    // The `ssh:` prefix takes any case, as `default-profile` and the
+    // reference check take it; the alias still does not.
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{"SSH:Prod"}, &.{});
+        try testing.expectEqualStrings("ssh:Prod", profiles[0].key);
+    }
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{}, &.{"SSH:Prod"});
+        try testing.expectEqualStrings("ssh:Prod", profiles[profiles.len - 1].key);
+        try testing.expect(profiles[profiles.len - 1].hidden);
+        try testing.expectEqual(profiles.len - 1, visibleProfileCount(&profiles));
+    }
+    {
+        var profiles = all;
+        arrangeProfiles(&profiles, &.{}, &.{"SSH:prod"});
+        try testing.expectEqual(profiles.len, visibleProfileCount(&profiles));
     }
 
     // Hidden by key and by a fixed word: marked, and after every shown one,
