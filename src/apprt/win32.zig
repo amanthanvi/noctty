@@ -32570,7 +32570,14 @@ fn patchOrAppendEdits(
     defer lines.deinit(alloc);
     var crlf_count: usize = 0;
     var lf_count: usize = 0;
-    var it = std.mem.splitScalar(u8, raw, '\n');
+    // The loader skips a UTF-8 byte order mark, so the first assignment
+    // behind one is matched like any other; the mark is written back first.
+    const utf8_bom = "\xef\xbb\xbf";
+    const text = if (std.mem.startsWith(u8, raw, utf8_bom)) bom: {
+        try out.appendSlice(alloc, utf8_bom);
+        break :bom raw[utf8_bom.len..];
+    } else raw;
+    var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
         try lines.append(alloc, line);
         if (it.index != null) {
@@ -33967,6 +33974,25 @@ test "win32 settings save of Automatic removes the default profile lines" {
     const saved = try settingsTestSave(alloc, text, &original, &pending);
     defer alloc.free(saved);
     try std.testing.expectEqualStrings(settings_test_profiles_config, saved);
+    var loaded = try configpkg.Config.default(alloc);
+    defer loaded.deinit();
+    try settingsTestLoadText(&loaded, saved);
+    try std.testing.expect(loaded.@"default-profile" == null);
+}
+
+test "win32 settings save of Automatic removes a default profile line behind a byte order mark" {
+    const alloc = std.testing.allocator;
+    var original = try configpkg.Config.default(alloc);
+    defer original.deinit();
+    original.@"default-profile" = try original._arena.?.allocator().dupeZ(u8, "py312");
+    var pending = try configpkg.Config.default(alloc);
+    defer pending.deinit();
+
+    // The first line's key sits behind the mark; the mark stays, the line goes.
+    const text = "\xef\xbb\xbfdefault-profile = py312\n" ++ settings_test_profiles_config;
+    const saved = try settingsTestSave(alloc, text, &original, &pending);
+    defer alloc.free(saved);
+    try std.testing.expectEqualStrings("\xef\xbb\xbf" ++ settings_test_profiles_config, saved);
     var loaded = try configpkg.Config.default(alloc);
     defer loaded.deinit();
     try settingsTestLoadText(&loaded, saved);
