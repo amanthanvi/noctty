@@ -11,6 +11,12 @@ pub const ProfileKind = enum {
     git_bash,
     cmd,
     ssh,
+    /// Defined by the user with `profile-command`.
+    user,
+    /// A Visual Studio instance's Developer Command Prompt (`VsDevCmd.bat`).
+    vs_dev_cmd,
+    /// A Visual Studio instance's Developer PowerShell (`Enter-VsDevShell`).
+    vs_dev_shell,
 };
 
 pub const Utf8Console = enum {

@@ -1076,6 +1076,104 @@ fn installerImageInUse(path: []const u8) bool {
     return false;
 }
 
+/// Whether an installer staged by the updater is running now, which is how
+/// the in-app Install runs Setup. The stage directory is the user's, so this
+/// sees an Install that any noctty process started. It asks for a running
+/// process whose image is a `.exe` directly inside a version directory under
+/// `updates`, and reads neither the state record nor the file: another
+/// process may clear or replace that record while Setup runs (an update check
+/// with another feed, a new release staged), and the file cannot tell. A
+/// write open is refused alike for a running image, a read-only file and the
+/// updater's own verification handle, which shares reads only and is held
+/// across the hash and signature checks of any noctty's update check. A
+/// staged installer the user started by hand counts, as does the portable
+/// update helper (which also relaunches noctty). False when nothing can be
+/// read.
+pub fn stagedInstallerRunning(alloc: Allocator, state_path: []const u8) bool {
+    if (builtin.os.tag != .windows) return false;
+    const state_dir = std.fs.path.dirname(state_path) orelse return false;
+    const updates_dir = std.fs.path.join(alloc, &.{ state_dir, "updates" }) catch return false;
+    defer alloc.free(updates_dir);
+    return processRunsFromStage(alloc, updates_dir);
+}
+
+/// Whether any process this user can query runs an image directly inside a
+/// version directory of `updates_dir` (`isStagedImage`). The directory is
+/// compared by its final path, which is how Windows reports a process's
+/// image, so a junction or another spelling of it still matches. It asks each
+/// process for `PROCESS_QUERY_LIMITED_INFORMATION` only, which an elevated
+/// process of the same user grants (not measured with an elevated Setup); a
+/// process that refuses even that is skipped.
+fn processRunsFromStage(alloc: Allocator, updates_dir: []const u8) bool {
+    const windows = std.os.windows;
+    var dir = std.fs.openDirAbsolute(updates_dir, .{}) catch return false;
+    defer dir.close();
+    const final_buf = alloc.alloc(u16, windows.PATH_MAX_WIDE) catch return false;
+    defer alloc.free(final_buf);
+    const final = windows.GetFinalPathNameByHandle(dir.fd, .{}, final_buf) catch return false;
+
+    var pids: []u32 = alloc.alloc(u32, 1024) catch return false;
+    defer alloc.free(pids);
+    var count: usize = 0;
+    while (true) {
+        const size: u32 = @intCast(pids.len * @sizeOf(u32));
+        var needed: u32 = 0;
+        if (K32EnumProcesses(pids.ptr, size, &needed) == 0) return false;
+        // A full buffer may have cut the list short.
+        if (needed < size) {
+            count = needed / @sizeOf(u32);
+            break;
+        }
+        if (pids.len >= 1 << 20) return false;
+        pids = alloc.realloc(pids, pids.len * 2) catch return false;
+    }
+
+    const image = alloc.alloc(u16, windows.PATH_MAX_WIDE) catch return false;
+    defer alloc.free(image);
+    for (pids[0..count]) |pid| {
+        if (pid == 0) continue;
+        const process = OpenProcess(process_query_limited_information, 0, pid) orelse continue;
+        defer windows.CloseHandle(process);
+        var len: u32 = @intCast(image.len);
+        if (QueryFullProcessImageNameW(process, 0, image.ptr, &len) == 0) continue;
+        if (len == 0 or len > image.len) continue;
+        if (isStagedImage(final, image[0..len])) return true;
+    }
+    return false;
+}
+
+/// Whether `image` is `<updates>\<version>\<name>.exe`, where staging puts
+/// Setup, compared without case. A portable payload or backup, a level
+/// deeper, is not.
+fn isStagedImage(updates: []const u16, image: []const u16) bool {
+    const sep: u16 = '\\';
+    if (image.len <= updates.len + 1 or image[updates.len] != sep) return false;
+    if (!std.os.windows.eqlIgnoreCaseWTF16(image[0..updates.len], updates)) return false;
+    const rest = image[updates.len + 1 ..];
+    const split = std.mem.indexOfScalar(u16, rest, sep) orelse return false;
+    if (split == 0) return false;
+    const name = rest[split + 1 ..];
+    if (std.mem.indexOfScalar(u16, name, sep) != null) return false;
+    const exe = std.unicode.utf8ToUtf16LeStringLiteral(".exe");
+    if (name.len <= exe.len) return false;
+    return std.os.windows.eqlIgnoreCaseWTF16(name[name.len - exe.len ..], exe);
+}
+
+const process_query_limited_information: u32 = 0x1000;
+
+extern "kernel32" fn K32EnumProcesses(
+    process_ids: [*]u32,
+    size: u32,
+    needed: *u32,
+) callconv(.winapi) i32;
+
+extern "kernel32" fn QueryFullProcessImageNameW(
+    process: std.os.windows.HANDLE,
+    flags: u32,
+    exe_name: [*]u16,
+    size: *u32,
+) callconv(.winapi) i32;
+
 /// Called at start-up. Install quits the app right after launching Setup and
 /// nothing watches Setup's result, so this is the first chance to find out
 /// whether it worked: a recorded apply request while this build is still
@@ -3910,6 +4008,140 @@ test "a start while Setup is still running leaves the request for a later start"
     const message = (try takeFailedInstallerApply(alloc, state_path, old_build)).?;
     defer alloc.free(message);
     try std.testing.expect(std.mem.indexOf(u8, message, "did not finish installing") != null);
+}
+
+test "a staged installer reads as running only while a process runs from it" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    // No stage directory.
+    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+
+    const name = "noctty-1.3.200-windows-x64-setup.exe";
+    try tmp.dir.makePath("updates/1.3.200/backup");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/" ++ name, .data = "setup" });
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/noctty-1.3.200-windows-x64-portable.zip", .data = "zip" });
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/backup/noctty.exe", .data = "old" });
+    const installer_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", name });
+    defer alloc.free(installer_path);
+    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+
+    // The updater's own verification open (shared reads only), held by any
+    // noctty's update check while it hashes and checks the signature, refuses
+    // write access as a running image does. No process runs from the file,
+    // so it is not an Install, and an external upgrade's restart stays.
+    inline for (.{ name, "noctty-1.3.200-windows-x64-portable.zip", "backup\\noctty.exe" }) |other| {
+        const other_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", other });
+        defer alloc.free(other_path);
+        var held = try openLockedInstaller(other_path);
+        defer held.close();
+        try std.testing.expect(installerImageInUse(other_path));
+        try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+    }
+
+    // Nor is a read-only leftover.
+    {
+        var file = try std.fs.openFileAbsolute(installer_path, .{ .mode = .read_write });
+        defer file.close();
+        try file.setPermissions(.{ .inner = .{ .attributes = std.os.windows.FILE_ATTRIBUTE_READONLY } });
+        defer file.setPermissions(.{ .inner = .{ .attributes = std.os.windows.FILE_ATTRIBUTE_NORMAL } }) catch {};
+        try std.testing.expect(installerImageInUse(installer_path));
+        try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+    }
+
+    // A running process is: this test runner, whose image sits at
+    // <dir>\<subdir>\<name>.exe, the shape of updates\<version>\setup.exe.
+    // Its attributes and the state record play no part.
+    const self_exe = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(self_exe);
+    const self_dir = std.fs.path.dirname(self_exe).?;
+    try std.testing.expect(processRunsFromStage(alloc, std.fs.path.dirname(self_dir).?));
+    // One level off is not.
+    try std.testing.expect(!processRunsFromStage(alloc, self_dir));
+}
+
+test "a running staged Setup stays found after another feed's check drops the staged record" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    try tmp.dir.makePath("updates/1.3.200");
+    const setup_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.200", "noctty-1.3.200-windows-x64-setup.exe" });
+    defer alloc.free(setup_path);
+    // The stand-in Setup: a copy of ping.exe, started with no console window.
+    const system_root = try std.process.getEnvVarOwned(alloc, "SystemRoot");
+    defer alloc.free(system_root);
+    const ping = try std.fs.path.join(alloc, &.{ system_root, "System32", "PING.EXE" });
+    defer alloc.free(ping);
+    try std.fs.copyFileAbsolute(ping, setup_path, .{});
+
+    var state: State = .{
+        .release_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .installer,
+        .staged_installer_path = try alloc.dupe(u8, setup_path),
+        .staged_sha256 = try alloc.dupe(u8, "00"),
+        .staged_feed_url = try alloc.dupe(u8, "https://updates.example/feed-a"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+
+    var setup = std.process.Child.init(&.{ setup_path, "-n", "60", "127.0.0.1" }, alloc);
+    setup.stdin_behavior = .Ignore;
+    setup.stdout_behavior = .Ignore;
+    setup.stderr_behavior = .Ignore;
+    setup.create_no_window = true;
+    try setup.spawn();
+    var running = true;
+    defer if (running) {
+        _ = setup.kill() catch {};
+    };
+    try std.testing.expect(stagedInstallerRunning(alloc, state_path));
+
+    // An update check from another noctty with another feed drops the staged
+    // record; it cannot delete the running image, and Setup still runs.
+    try std.testing.expect(try invalidateForeignFeedState(alloc, state_path, &state, "https://updates.example/feed-b"));
+    {
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expect(loaded.staged_kind == null);
+        try std.testing.expect(loaded.staged_installer_path == null);
+    }
+    try std.fs.accessAbsolute(setup_path, .{});
+    try std.testing.expect(stagedInstallerRunning(alloc, state_path));
+
+    _ = try setup.kill();
+    running = false;
+    try std.testing.expect(!stagedInstallerRunning(alloc, state_path));
+}
+
+test "a staged installer image is an exe directly inside a version directory" {
+    @setEvalBranchQuota(10_000);
+    const w = std.unicode.utf8ToUtf16LeStringLiteral;
+    const updates = w("C:\\L\\noctty\\updates");
+    try std.testing.expect(isStagedImage(updates, w("C:\\L\\noctty\\updates\\1.3.200\\setup.exe")));
+    try std.testing.expect(isStagedImage(updates, w("c:\\l\\NOCTTY\\UPDATES\\1.3.200\\SETUP.EXE")));
+    try std.testing.expect(isStagedImage(updates, w("C:\\L\\noctty\\updates\\1.3.200\\helper.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates\\1.3.200\\payload\\noctty\\a.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates\\1.3.200\\backup\\noctty.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates\\setup.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates\\\\setup.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates\\1.3.200\\setup.zip")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates\\1.3.200\\.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\noctty\\updates-old\\1\\setup.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\L\\Temp\\WinGet\\setup.exe")));
+    try std.testing.expect(!isStagedImage(updates, w("C:\\Program Files\\noctty\\noctty.exe")));
 }
 
 test "a start leaves a portable apply request to the portable recovery" {

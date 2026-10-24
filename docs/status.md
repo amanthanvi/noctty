@@ -274,17 +274,19 @@ Win32-validated VT protocol coverage is tracked in
 ### Windows package managers
 
 - WinGet package id: `AmanThanvi.noctty` (published; `winget install --id AmanThanvi.noctty -e`).
-- Chocolatey package id: `noctty`, with no approved version on
-  community.chocolatey.org. The release workflow builds the package and its
-  last step, after WinGet, pushes it. The community maintainer `virtualex`,
-  who submitted `noctty` 1.3.131 on 2026-10-16, added `amanthanvi` as a
-  maintainer on 2026-10-20, stayed on as a co-maintainer, and rejected 1.3.131.
-  The Chocolatey Publish workflow pushed 1.3.134 on 2026-10-21, and it is
-  waiting in moderation. chocolatey.org refuses every new version while a
-  version is in moderation and none is approved, so the repository variable
-  `CHOCOLATEY_PUBLISH = off` skips the release step until a version is
-  approved; see [chocolatey-publishing.md](chocolatey-publishing.md). A
-  released version is pushed with the manual Chocolatey Publish workflow.
+- Chocolatey package id: `noctty` (published; `choco install noctty`).
+  community.chocolatey.org approved 1.3.134 on 2026-10-23. The release
+  workflow builds the package and its last step, after WinGet, pushes it; the
+  repository variable `CHOCOLATEY_PUBLISH` was deleted on 2026-10-23, so the
+  step runs on every release. Chocolatey reviews each version before listing
+  it, so a release can reach it after the other channels. The community
+  maintainer `virtualex`, who submitted `noctty` 1.3.131 on 2026-10-16, added
+  `amanthanvi` as a maintainer on 2026-10-20 and stays on as a co-maintainer.
+  The install script asks the CPU which installer to use, because Chocolatey
+  runs as an emulated x64 process on ARM64 Windows; that ships with the first
+  release built after 1.3.134, whose package installs the x64 build there. See
+  [chocolatey-publishing.md](chocolatey-publishing.md). A released version is
+  pushed with the manual Chocolatey Publish workflow.
 - Scoop bucket: `https://github.com/amanthanvi/scoop-noctty`.
 
 ### Crash reports

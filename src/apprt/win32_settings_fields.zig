@@ -10,7 +10,9 @@ pub const Section = enum { appearance, terminal, shell, privacy, updates, keybin
 /// When a saved edit reaches its consumer, independently of draft preview.
 pub const ApplyPolicy = enum { live, new_terminals, restart };
 pub const PreviewEffect = enum { none, theme, opacity };
-pub const Kind = enum { integer, number, padding, boolean, choice, blur, notifications, font_families, theme, command };
+/// `profile` is a dropdown whose items are the profiles the app lists
+/// (`AppHandle.profileChoices`), not a fixed `Combo`.
+pub const Kind = enum { integer, number, padding, boolean, choice, blur, notifications, font_families, theme, command, profile };
 /// Platform availability drives native enablement and all reason labels.
 pub const Support = enum {
     available,
@@ -248,7 +250,7 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .@"link-url", .native = .{ .binding = "combo_link_url", .id = 424, .order = 2, .form_label = "Clickable URL opening", .accessible_name = "Clickable URL opening" }, .field = .link_url, .label = "Clickable URL opening", .help = "Enable opening URLs detected in terminal output.", .section = .privacy, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration link-url url hyperlink" },
     .{ .key = .@"link-previews", .native = .{ .binding = "combo_link_previews", .id = 425, .order = 3, .form_label = "Link preview popups", .accessible_name = "Link preview popups" }, .support = .unsupported_on_windows, .field = .link_previews, .label = "Link preview popups", .help = "Choose which links request preview popups.", .section = .privacy, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration link-previews url hyperlink tooltip" },
     .{ .key = .@"window-theme", .native = .{ .binding = "combo_window_theme", .id = 405, .order = 4, .form_label = "Window theme", .accessible_name = "Window theme" }, .field = .window_theme, .label = "Window theme", .help = "Choose the appearance of window chrome independently of the terminal theme.", .section = .appearance, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration window-theme dark light mode", .preview = .theme, .preview_draft = true },
-    .{ .key = .@"shell-integration", .native = .{ .binding = "combo_shell_integ", .id = 406, .order = 1, .form_label = "Shell integration", .accessible_name = "Shell integration" }, .field = .shell_integration, .label = "Shell integration", .help = "Enable prompt and command tracking for the selected shell. Automatic includes PowerShell and cmd.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration shell-integration powershell bash prompt" },
+    .{ .key = .@"shell-integration", .native = .{ .binding = "combo_shell_integ", .id = 406, .order = 2, .form_label = "Shell integration", .accessible_name = "Shell integration" }, .field = .shell_integration, .label = "Shell integration", .help = "Enable prompt and command tracking for the selected shell. Automatic includes PowerShell and cmd.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration shell-integration powershell bash prompt" },
     .{ .key = .@"cursor-style", .native = .{ .binding = "combo_cursor_style", .id = 409, .order = 5, .form_label = "Cursor style", .accessible_name = "Cursor style" }, .field = .cursor_style, .label = "Cursor style", .help = "Default cursor shape. A terminal program can choose its own cursor shape.", .section = .appearance, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration cursor-style caret block bar underline", .preview_draft = true },
     .{ .key = .@"background-blur", .native = .{ .binding = "chk_bg_blur", .id = 410, .order = 10, .caption = "Background blur", .accessible_name = "Background blur" }, .field = .background_blur, .label = "Background blur", .help = "Request background blur behind the terminal.", .section = .appearance, .kind = .blur, .apply = .live, .support = .unsupported_on_windows, .keywords = "settings preferences configuration background-blur", .preview_draft = true },
     .{ .key = .@"window-padding-balance", .native = .{ .binding = "combo_pad_balance", .id = 411, .order = 8, .form_label = "Window padding balance", .accessible_name = "Window padding balance" }, .field = .padding_balance, .label = "Window padding balance", .help = "Distribute remaining cell space across the terminal padding.", .section = .appearance, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration window-padding-balance margin", .preview_draft = true },
@@ -257,7 +259,8 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .@"accent-follow-system", .native = .{ .binding = "chk_accent_follow", .id = 426, .order = 9, .caption = "Follow Windows accent color", .accessible_name = "Follow Windows accent color" }, .field = .accent_follow_system, .label = "Follow Windows accent color", .help = "Use the Windows accent color for the active tab highlight.", .section = .appearance, .kind = .boolean, .apply = .live, .keywords = "settings preferences configuration accent-follow-system accent color highlight tab windows personalization", .preview = .theme, .preview_draft = true },
     .{ .key = .@"font-family", .native = .{ .binding = "edit_font_family", .id = 412, .order = 0, .form_label = "Font family fallbacks (comma-separated)", .accessible_name = "Font family fallbacks" }, .label = "Font family", .help = "Comma-separated font fallback families. Leave blank to use the default font.", .placeholder = "Default font", .section = .appearance, .kind = .font_families, .apply = .live, .validation = .font_families, .keywords = "settings preferences configuration font-family", .default_display = .inherited },
     .{ .key = .theme, .native = .{ .binding = "edit_theme", .id = 413, .order = 2, .form_label = "Terminal theme name, absolute path, or light/dark pair", .accessible_name = "Terminal theme" }, .label = "Terminal theme", .help = "Built-in theme name, absolute path, or a light/dark theme pair. Leave blank for the default.", .placeholder = "Default theme", .section = .appearance, .kind = .theme, .apply = .live, .validation = .theme, .keywords = "settings preferences configuration theme", .default_display = .inherited },
-    .{ .key = .command, .native = .{ .binding = "edit_command", .id = 414, .order = 0, .form_label = "Default command (blank = auto-detect)", .accessible_name = "Default command" }, .label = "Default command", .help = "Command for new terminals. Leave blank for automatic shell detection.", .placeholder = "Automatic shell", .section = .shell, .kind = .command, .apply = .new_terminals, .validation = .command, .keywords = "settings preferences configuration command", .default_display = .automatic },
+    .{ .key = .command, .native = .{ .binding = "edit_command", .id = 414, .order = 0, .form_label = "Default command (blank = Default profile or auto-detect)", .accessible_name = "Default command" }, .label = "Default command", .help = "Command for new terminals. It wins over Default profile; leave it blank to start that profile, or to detect a shell when Default profile is Automatic.", .placeholder = "Default profile or automatic shell", .section = .shell, .kind = .command, .apply = .new_terminals, .validation = .command, .keywords = "settings preferences configuration command", .default_display = .automatic },
+    .{ .key = .@"default-profile", .native = .{ .binding = "combo_default_profile", .id = 427, .order = 1, .form_label = "Default profile (Default command wins when set)", .accessible_name = "Default profile" }, .label = "Default profile", .help = "The profile new terminals start when Default command is blank: a detected shell, a Visual Studio shell or a profile from the config file. A Default command wins over it. Automatic removes the setting.", .section = .shell, .kind = .profile, .apply = .new_terminals, .keywords = "settings preferences configuration default-profile profile shell", .default_display = .automatic },
 };
 
 pub const FormField = struct {
@@ -347,6 +350,7 @@ pub fn assertCoverage(comptime owned_keys: anytype) void {
             .font_families => T == Config.RepeatableString,
             .theme => T == ?Config.Theme,
             .command => T == ?Config.Command,
+            .profile => T == ?[:0]const u8,
         };
         if (!type_matches) @compileError("Settings editor kind differs from Config type: " ++ @tagName(spec.key));
         if (spec.label.len == 0 or spec.keywords.len == 0) @compileError("Settings metadata must be named");
@@ -578,6 +582,7 @@ pub fn writeOwnedSettingValue(comptime key: Config.Key, writer: *std.Io.Writer, 
         .command => if (config.command) |command| {
             try writeCommandForEdit(writer, command);
         } else try writer.writeAll("(automatic)"),
+        .@"default-profile" => try writer.writeAll(config.@"default-profile" orelse "(automatic)"),
         else => @compileError("Not an owned Settings edit"),
     }
 }
@@ -640,6 +645,7 @@ pub const round_trip_config =
     \\font-family = Second Font
     \\theme = light:Light,dark:Dark
     \\command = direct:pwsh.exe -NoLogo -Command "echo #; literal"
+    \\default-profile = user:py312
 ;
 /// Behavioral round trips use Config's real grammar and formatter, including
 /// composite/owned keys, rather than checking source text or pointer equality.
@@ -720,7 +726,7 @@ test "settings model validates scalar ranges with the form's exact types" {
 
 test "settings model separates saved apply timing from edit previews and Windows support" {
     for (descriptors) |spec| {
-        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance";
+        const new_terminal = spec.key == .@"scrollback-limit" or spec.key == .command or spec.key == .@"shell-integration" or spec.key == .@"window-padding-x" or spec.key == .@"window-padding-y" or spec.key == .@"window-padding-balance" or spec.key == .@"default-profile";
         try std.testing.expectEqual(if (new_terminal) ApplyPolicy.new_terminals else ApplyPolicy.live, spec.apply);
         const unavailable = spec.key == .@"background-blur" or spec.key == .@"link-previews";
         try std.testing.expectEqual(if (unavailable) Support.unsupported_on_windows else Support.available, spec.support);
@@ -730,6 +736,22 @@ test "settings model separates saved apply timing from edit previews and Windows
     try std.testing.expectEqual(PreviewEffect.opacity, descriptor(.background_opacity).preview);
     try std.testing.expectEqual(PreviewEffect.theme, descriptor(.window_theme).preview);
     try std.testing.expectEqual(PreviewEffect.theme, descriptor(.accent_follow_system).preview);
+}
+
+test "settings model has a Default profile selector beside Default command" {
+    const spec = forKey(.@"default-profile") orelse return error.TestUnexpectedResult;
+    // A dropdown of the app's profiles, saved as an owned string.
+    try std.testing.expectEqualStrings("profile", @tagName(spec.kind));
+    try std.testing.expect(spec.field == null);
+    try std.testing.expectEqual(Section.shell, spec.section);
+    try std.testing.expectEqual(ApplyPolicy.new_terminals, spec.apply);
+    try std.testing.expectEqual(DefaultDisplay.automatic, spec.default_display);
+    const names = spec.native.?;
+    try std.testing.expectEqualStrings("Default profile", names.accessible_name);
+    // The form says which of the two wins.
+    try std.testing.expect(std.mem.indexOf(u8, names.form_label.?, "Default command wins") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spec.help, "A Default command wins over it.") != null);
+    try std.testing.expectEqual(forKey(.command).?.native.?.order + 1, names.order);
 }
 
 test "settings model notification projections preserve their sibling" {

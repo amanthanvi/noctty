@@ -49,6 +49,9 @@ $script:CiPathRules = @(
     # Prose and metadata. The checks job runs the site and release copy checks
     # and the contracts that read these files; nothing compiled does.
     @{ Needs = 'none'; Pattern = '^plans/' }
+    # A unit test loads every config example in docs/windows.md's profile
+    # sections (src/config/Config.zig), so a change to it runs the Zig jobs.
+    @{ Needs = 'zig'; Pattern = '^docs/windows\.md$' }
     # docs/ includes docs/agents/log/, the Self-Correction Log AGENTS.md indexes.
     @{ Needs = 'none'; Pattern = '^docs/' }
     @{ Needs = 'none'; Pattern = '^site/' }

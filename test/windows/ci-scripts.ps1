@@ -8,7 +8,8 @@ param()
 # and scripts/ci-bench-trend.ps1. Besides fixed cases, the filter guards read the
 # repository itself: the filter is an allowlist of files the compiled jobs never
 # read, and these checks re-derive "never read" from the Zig sources and from the
-# scripts the compiled jobs run.
+# scripts the compiled jobs run. One more check reads the installer script for
+# what Setup asks Restart Manager to close, which compiling it does not check.
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -57,6 +58,7 @@ $cases = @(
     @{ Name = 'the portable smoke harness'; Paths = @('test/windows/package-portable-cli.ps1', 'test/windows/cli-shell-command.ps1'); Expect = 'arm64_build,portable_smoke' }
     @{ Name = 'a packaging-only script'; Paths = @('scripts/build-package-windows.ps1'); Expect = 'arm64_build,portable_smoke' }
     @{ Name = 'docs plus a Zig source'; Paths = @('docs/status.md', 'src/config/Config.zig'); Expect = $allFlags }
+    @{ Name = 'the docs a unit test reads'; Paths = @('docs/windows.md'); Expect = $allFlags }
     @{ Name = 'docs plus the README'; Paths = @('docs/status.md', 'README.md'); Expect = 'arm64_build,portable_smoke' }
     @{ Name = 'a path the table does not know'; Paths = @('newdir/file.txt'); Expect = $allFlags }
     @{ Name = 'a quoted git path'; Paths = @('"docs/\303\251.md"'); Expect = $allFlags }
@@ -322,6 +324,34 @@ Assert-True ($null -ne $baseline -and $baseline.RunId -ceq '100' -and $baseline.
 Assert-True ($trendCalls[0] -like '*event=schedule*' -and -not ($trendCalls -like '*/runs/300/*')) 'Only scheduled runs are candidates, and the current run is never queried.'
 Assert-True ($trendCalls[0] -like '*per_page=100*') 'The run listing must cover the whole 90-day artifact retention window.'
 Assert-True ($null -eq (Get-PreviousTrendArtifact -Repository 'owner/repo' -CurrentRunId '300' -Api { param($Path) '{"workflow_runs":[],"artifacts":[]}' | ConvertFrom-Json })) 'With no earlier nightly there is no baseline.'
+
+# --- Installer: what Setup asks Restart Manager to close --------------------
+# The native ARM64 build job compiles dist/windows/noctty.iss on a pull request
+# that touches it, with the runner image's Inno Setup (6.7.1 when measured; the
+# job skips the installer if the image has none), but a clean compile says
+# nothing about what Setup asks Restart Manager to close. This check pins that.
+# OpenConsole.exe (the bundled ConPTY host, one per pane) is an RmUnknownApp:
+# registered, it fails every non-forced RmShutdown before noctty is asked, and
+# Setup aborts. A forced close would kill the programs running in noctty's
+# terminals.
+$setup = @{}
+$inSetup = $false
+foreach ($line in [System.IO.File]::ReadLines((Join-Path $repoRoot 'dist\windows\noctty.iss'))) {
+    $trimmed = $line.Trim()
+    if ($trimmed -match '^\[(.+)\]$') { $inSetup = $Matches[1] -eq 'Setup'; continue }
+    if ($inSetup -and $trimmed -match '^([A-Za-z]+)\s*=\s*(.*)$') { $setup[$Matches[1]] = $Matches[2].Trim() }
+}
+Assert-True ($setup.ContainsKey('AppId')) 'The installer script parse found no [Setup] section; the parser is broken.'
+$closeApps = "$($setup['CloseApplications'])"
+Assert-True ($closeApps -in @('yes', 'true', '1')) "noctty.iss must ask running copies to close (CloseApplications=yes), and never force it; found '$closeApps'."
+$excludes = @("$($setup['CloseApplicationsFilterExcludes'])" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+Assert-True ($excludes -contains 'OpenConsole.exe') "noctty.iss must keep OpenConsole.exe out of Restart Manager (CloseApplicationsFilterExcludes); found '$($excludes -join ',')'."
+# Inno's default filter is *.exe,*.dll,*.chm.
+$filter = @($(if ($setup.ContainsKey('CloseApplicationsFilter')) { $setup['CloseApplicationsFilter'] } else { '*.exe,*.dll,*.chm' }) -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($kept in @('noctty.exe', 'conpty.dll')) {
+    $held = @($filter | Where-Object { $kept -like $_ }).Count -and -not @($excludes | Where-Object { $kept -like $_ }).Count
+    Assert-True $held "noctty.iss must still close what holds $kept; CloseApplicationsFilter is '$($filter -join ',')', CloseApplicationsFilterExcludes '$($excludes -join ',')'."
+}
 
 # The CLI cases above run git against a bad revision on purpose. Actions ends a
 # pwsh step with `exit $LASTEXITCODE`, so leave it clean.

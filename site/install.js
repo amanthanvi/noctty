@@ -8,6 +8,7 @@ export const INSTALL_COMMANDS = {
   winget: 'winget install --id AmanThanvi.noctty -e',
   'scoop-bucket': 'scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty',
   'scoop-install': 'scoop install noctty/noctty',
+  choco: 'choco install noctty',
 };
 
 function writeClipboardTextFallback(text) {

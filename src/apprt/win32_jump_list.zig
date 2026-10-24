@@ -902,15 +902,61 @@ pub fn buildProfileArgumentsAlloc(alloc: Allocator, command: Command) ![]u8 {
     return buildProfileArgumentsWithLaunchConfigAlloc(alloc, command, "home", false);
 }
 
+/// `visual_studio_arg` is the `--visual-studio-profiles=` argument noctty
+/// was started with, if any, which a Visual Studio shell's link passes on
+/// (see `buildSelectorArgumentsAlloc`).
 fn buildProfileArgumentsForProfileAlloc(
     alloc: Allocator,
     profile: *const windows_shell.Profile,
+    visual_studio_arg: ?[]const u8,
 ) ![]u8 {
+    switch (profile.kind) {
+        .user, .vs_dev_cmd, .vs_dev_shell => return buildSelectorArgumentsAlloc(alloc, profile, visual_studio_arg),
+        else => {},
+    }
     if (profile.kind != .ssh) return buildProfileArgumentsAlloc(alloc, profile.command);
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (try windows_ssh_hosts.userProfileDir(&home_buf)) orelse
         return error.UnsupportedProfileCommand;
     return buildProfileArgumentsWithLaunchConfigAlloc(alloc, profile.command, home, true);
+}
+
+/// A user profile's link names the profile instead of carrying its launch:
+/// a jump-list link is stored on disk and can roam with the Windows profile,
+/// so it must not hold the profile's environment. The new process reads the
+/// same config files and runs the profile as its `default-profile`; the
+/// empty `command` and `initial-command` undo any the files set, which would
+/// win over it. A profile with no directory of its own starts at home, as
+/// it does from the picker. A Visual Studio shell's link names it the same
+/// way (`vs:<instance>:cmd`), as Windows Terminal's `wt -p`: the new process
+/// asks Visual Studio again, so the link follows an install that moved. It
+/// also passes on a `--visual-studio-profiles=` argument noctty was started
+/// with, which decides whether a `vs:` key names a profile at all, as an
+/// elevated relaunch does: noctty started with `--visual-studio-profiles=all`
+/// over a file's `none` lists these shells, and a link without it would read
+/// `none` again and start the automatic shell. Only that argument: a value
+/// from the config files is left to the files, so a later edit of
+/// `visual-studio-profiles` still reaches a window the link started.
+fn buildSelectorArgumentsAlloc(
+    alloc: Allocator,
+    profile: *const windows_shell.Profile,
+    visual_studio_arg: ?[]const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeAll("--single-instance=false --command= --initial-command= ");
+    switch (profile.kind) {
+        .vs_dev_cmd, .vs_dev_shell => if (visual_studio_arg) |arg| {
+            try Command.writeDirectArg(&out.writer, arg);
+            try out.writer.writeAll(" ");
+        },
+        else => {},
+    }
+    const selector = try std.fmt.allocPrint(alloc, "--default-profile={s}", .{profile.key});
+    defer alloc.free(selector);
+    try Command.writeDirectArg(&out.writer, selector);
+    if (profile.working_directory == null) try out.writer.writeAll(" --working-directory=home");
+    return try out.toOwnedSlice();
 }
 
 fn buildProfileArgumentsWithLaunchConfigAlloc(
@@ -1146,13 +1192,21 @@ pub const JumpList = struct {
         }
     }
 
-    pub fn updateProfiles(self: *JumpList, profiles: []const windows_shell.Profile) void {
-        self.updateProfilesAlloc(profiles) catch |err| {
+    pub fn updateProfiles(
+        self: *JumpList,
+        profiles: []const windows_shell.Profile,
+        visual_studio_arg: ?[]const u8,
+    ) void {
+        self.updateProfilesAlloc(profiles, visual_studio_arg) catch |err| {
             log.warn("jump list profile snapshot failed err={}", .{err});
         };
     }
 
-    fn updateProfilesAlloc(self: *JumpList, profiles: []const windows_shell.Profile) !void {
+    fn updateProfilesAlloc(
+        self: *JumpList,
+        profiles: []const windows_shell.Profile,
+        visual_studio_arg: ?[]const u8,
+    ) !void {
         var next: std.ArrayListUnmanaged(ProfileItem) = .empty;
         errdefer {
             for (next.items) |*item| item.deinit(self.alloc);
@@ -1160,12 +1214,15 @@ pub const JumpList = struct {
         }
 
         for (profiles) |profile| {
+            // `profile-hidden`: the caller passes the shown profiles, and a
+            // hidden one never gets a link either way.
+            if (profile.hidden) continue;
             const title = try buildTitleAlloc(self.alloc, profile.label);
             const key = self.alloc.dupe(u8, profile.key) catch |err| {
                 self.alloc.free(title);
                 return err;
             };
-            const arguments = buildProfileArgumentsForProfileAlloc(self.alloc, &profile) catch |err| switch (err) {
+            const arguments = buildProfileArgumentsForProfileAlloc(self.alloc, &profile, visual_studio_arg) catch |err| switch (err) {
                 error.UnsupportedProfileCommand => {
                     self.alloc.free(key);
                     self.alloc.free(title);
@@ -3035,6 +3092,169 @@ test "jump_list rebuild retry budget is bounded" {
         try std.testing.expectEqual(expected, retry_count);
     }
     try std.testing.expect(nextRebuildRetryCount(retry_count) == null);
+}
+
+test "jump_list links a user profile by name, never by its environment" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} } },
+        .{
+            .kind = .user,
+            .key = "user:py",
+            .label = "Python",
+            .command = .{ .direct = &.{"cmd.exe"} },
+            .user = .{ .command_line = "cmd.exe", .env = &.{.{ .key = "SECRET_TOKEN", .value = "do-not-persist" }} },
+        },
+    };
+    try jump.updateProfilesAlloc(&profiles, null);
+    try std.testing.expectEqual(@as(usize, 2), jump.profiles.items.len);
+    try std.testing.expectEqualStrings("cmd.exe", jump.profiles.items[0].key);
+    try std.testing.expectEqualStrings("user:py", jump.profiles.items[1].key);
+    try std.testing.expectEqualStrings("Python", jump.profiles.items[1].title);
+    // Exactly the selector, and no directory of its own: home, as from the picker.
+    try std.testing.expectEqualStrings(
+        "--single-instance=false --command= --initial-command= --default-profile=user:py --working-directory=home",
+        jump.profiles.items[1].arguments,
+    );
+    for (jump.profiles.items) |item| {
+        try std.testing.expect(std.mem.indexOf(u8, item.arguments, "do-not-persist") == null);
+        try std.testing.expect(std.mem.indexOf(u8, item.arguments, "SECRET_TOKEN") == null);
+    }
+
+    // A pinned directory is the profile's to apply, so the link names none.
+    var pinned = profiles[1];
+    pinned.working_directory = .{ .path = "D:\\work dir" };
+    const pinned_args = try buildProfileArgumentsForProfileAlloc(alloc, &pinned, null);
+    defer alloc.free(pinned_args);
+    try std.testing.expectEqualStrings(
+        "--single-instance=false --command= --initial-command= --default-profile=user:py",
+        pinned_args,
+    );
+    pinned.working_directory = .inherit;
+    const inherit_args = try buildProfileArgumentsForProfileAlloc(alloc, &pinned, null);
+    defer alloc.free(inherit_args);
+    try std.testing.expectEqualStrings(pinned_args, inherit_args);
+
+    // The new process reads those arguments back as the selector they are.
+    var argv = try std.process.ArgIteratorGeneral(.{}).init(alloc, jump.profiles.items[1].arguments);
+    defer argv.deinit();
+    for ([_][]const u8{
+        "--single-instance=false",
+        "--command=",
+        "--initial-command=",
+        "--default-profile=user:py",
+        "--working-directory=home",
+    }) |want| try std.testing.expectEqualStrings(want, argv.next().?);
+    try std.testing.expect(argv.next() == null);
+}
+
+test "jump_list names a Visual Studio shell by its key" {
+    const alloc = std.testing.allocator;
+    const profile: windows_shell.Profile = .{
+        .kind = .vs_dev_shell,
+        .key = "vs:6bb7cfd9:pwsh",
+        .label = "Developer PowerShell for VS 18",
+        .command = .{ .direct = &.{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoExit", "-Command", "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell 6bb7cfd9}" } },
+    };
+    // noctty started with no `--visual-studio-profiles=`: the link names
+    // none, so the files decide it for the new process too, and a later edit
+    // of the setting still reaches it (a link that wrote the running mode
+    // would hold `newest` on the command line over a file's `all` forever).
+    const args = try buildProfileArgumentsForProfileAlloc(alloc, &profile, null);
+    defer alloc.free(args);
+    try std.testing.expectEqualStrings(
+        "--single-instance=false --command= --initial-command= --default-profile=vs:6bb7cfd9:pwsh --working-directory=home",
+        args,
+    );
+    {
+        var cfg = try testLoadJumpListLink(alloc, "visual-studio-profiles = all\n", args);
+        defer cfg.deinit();
+        try std.testing.expect(cfg.@"visual-studio-profiles" == .all);
+        try std.testing.expectEqualStrings("vs:6bb7cfd9:pwsh", cfg.@"default-profile".?);
+    }
+
+    // Started with `--visual-studio-profiles=all` over a file's `none`: the
+    // link passes that argument on, and the new process, reading the same
+    // file, still has the mode that lists the shell.
+    const all_args = try buildProfileArgumentsForProfileAlloc(alloc, &profile, "--visual-studio-profiles=all");
+    defer alloc.free(all_args);
+    try std.testing.expectEqualStrings(
+        "--single-instance=false --command= --initial-command= --visual-studio-profiles=all --default-profile=vs:6bb7cfd9:pwsh --working-directory=home",
+        all_args,
+    );
+    {
+        var cfg = try testLoadJumpListLink(alloc, "visual-studio-profiles = none\n", all_args);
+        defer cfg.deinit();
+        try std.testing.expect(cfg.@"visual-studio-profiles" == .all);
+        try std.testing.expectEqualStrings("vs:6bb7cfd9:pwsh", cfg.@"default-profile".?);
+    }
+
+    // A user profile's link has no reason to name it.
+    var user = profile;
+    user.kind = .user;
+    user.key = "user:py";
+    const user_args = try buildProfileArgumentsForProfileAlloc(alloc, &user, "--visual-studio-profiles=all");
+    defer alloc.free(user_args);
+    try std.testing.expect(std.mem.indexOf(u8, user_args, "visual-studio-profiles") == null);
+}
+
+/// A config as the process a jump-list link starts reads it: the file
+/// `file_text`, then the link's arguments `link_args`.
+fn testLoadJumpListLink(alloc: Allocator, file_text: []const u8, link_args: []const u8) !@import("../config/Config.zig") {
+    const Config = @import("../config/Config.zig");
+    const cli_args = @import("../cli/args.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "config.ghostty", .data = file_text });
+    const path = try tmp.dir.realpathAlloc(alloc, "config.ghostty");
+    defer alloc.free(path);
+    var argv = try std.process.ArgIteratorGeneral(.{}).init(alloc, link_args);
+    defer argv.deinit();
+    var child_args: std.ArrayList([]const u8) = .empty;
+    defer child_args.deinit(alloc);
+    while (argv.next()) |arg| try child_args.append(alloc, arg);
+    var cfg = try Config.default(alloc);
+    errdefer cfg.deinit();
+    try cfg.loadFile(alloc, path);
+    var iter: cli_args.ArgsIterator(cli_args.SliceIterator) = .{ .iterator = cli_args.sliceIterator(child_args.items) };
+    try cfg.loadIter(alloc, &iter);
+    return cfg;
+}
+
+test "jump_list gives a hidden profile no link" {
+    const alloc = std.testing.allocator;
+    var jump: JumpList = .{
+        .alloc = alloc,
+        .state_path = try alloc.dupe(u8, "unused"),
+        .exe_path = null,
+        .recents = .{},
+        .removed_recents = .{},
+        .hidden_profiles = .{},
+    };
+    defer {
+        jump.persist_dirty = false;
+        jump.deinit();
+    }
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} } },
+        .{ .kind = .wsl_distro, .key = "wsl:docker-desktop", .label = "WSL: docker-desktop", .command = .{ .direct = &.{ "wsl.exe", "-d", "docker-desktop" } }, .hidden = true },
+        .{ .kind = .user, .key = "user:gone", .label = "Gone", .command = .{ .direct = &.{"cmd.exe"} }, .user = .{ .command_line = "cmd.exe" }, .hidden = true },
+    };
+    try jump.updateProfilesAlloc(&profiles, null);
+    try std.testing.expectEqual(@as(usize, 1), jump.profiles.items.len);
+    try std.testing.expectEqualStrings("cmd.exe", jump.profiles.items[0].key);
 }
 
 test "jump_list startup profile discovery stays pending until completion" {

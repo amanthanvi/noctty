@@ -183,10 +183,15 @@ checksummed and bound to the canonical release workflow by GitHub build
 provenance. The legacy `SHA256SUMS.txt` file remains an x64 auto-update
 compatibility alias.
 
-A Chocolatey package (`noctty`) is built by the release workflow, but
-chocolatey.org has no approved version of it, so `choco install noctty` does
-not work today. Version 1.3.134 was pushed there on 2026-10-21 and is waiting
-in moderation; see [chocolatey-publishing.md](chocolatey-publishing.md).
+The Chocolatey package (`noctty`) is approved on chocolatey.org:
+`choco install noctty` installs it (1.3.134 was approved on 2026-10-23). The
+release workflow builds it and pushes it after WinGet, and Chocolatey reviews
+each version before listing it, so a release can reach Chocolatey after the
+other channels. The package runs the release's setup program for the
+architecture of the machine. On ARM64 Windows it picks the ARM64 one by asking
+the CPU, from the first release built after 1.3.134 (the 1.3.134 package
+installs the x64 build there); see
+[chocolatey-publishing.md](chocolatey-publishing.md).
 
 [getting-started.md](getting-started.md) covers download and install,
 including the SmartScreen warning. [verify-release.md](verify-release.md)
@@ -249,7 +254,8 @@ new guard. Command text, `PATH`, `PATHEXT`, variable expansion, builtins and
 literal `%` or `!`. Explicit paths such as `.\tool`, and explicitly configured
 relative PATH entries such as `.`, still select programs relative to the pane.
 
-With `command` unset, a new tab runs the first of these that is found:
+With `command` and [`default-profile`](#default-profile-order-and-hidden-profiles)
+unset, a new tab runs the first of these that is found:
 
 1. `pwsh.exe` (PowerShell 7+) on `PATH`.
 2. Windows PowerShell, from the Windows system directory.
@@ -271,8 +277,11 @@ lists the executable a new tab runs. `noctty --safe-mode` always starts
 broke, and Command Prompt loads no profile (`/D` also skips the `AutoRun`
 command that a registry value or Clink can hang there). The profile
 picker, its dropdown check mark and a right or middle click on the new-tab
-button start on the profile this default runs; a `command` you set does not
-move that choice.
+button start on the profile this default runs, or on the one
+`default-profile` names; a `command` you set does not move that choice. Once
+you choose a profile in the picker, the palette or a quick slot, they start on
+that one instead, and a reload that changes `default-profile` moves them only
+until you do.
 
 Discovery also skips drive aliases that map to a folder, such as `subst` drives.
 In safe mode, right or middle click deliberately opens the plain Command Prompt
@@ -484,9 +493,453 @@ turns the file into a one-click surface.
 SSH entries run without shell integration, which is injected into a local
 shell and cannot apply to a remote session. Session restore does not reopen
 them: an SSH pane comes back as the default shell rather than dialing out
-unattended. SSH entries sort after the detected shells;
-`NOCTTY_WIN32_PROFILE_ORDER` covers shell profiles only. There is no bundled
-SSH client, secrets vault, or fleet/connection management.
+unattended. Restore does not connect for `default-profile = ssh:<alias>`
+either: a restored pane that would run it gets the automatic shell, while a
+new tab or window still connects. SSH entries sort after the detected shells,
+your own [user profiles](#user-profiles) and the
+[Visual Studio developer shells](#visual-studio-developer-shells). `profile-order` can move any
+profile, an SSH entry included, and `profile-hidden` can take one out of the
+lists (see [Default profile, order and hidden profiles](#default-profile-order-and-hidden-profiles)).
+The older `NOCTTY_WIN32_PROFILE_ORDER` environment variable is used only when
+`profile-order` is unset, and orders the detected shell profiles only. There
+is no bundled SSH client, secrets vault, or fleet/connection management.
+
+## Visual Studio developer shells
+
+When Visual Studio 2017 or later is installed, the profile picker and the
+command palette also list each instance's developer shells, as Windows
+Terminal does:
+
+- **Developer Command Prompt for VS 18** runs
+  `cmd.exe /k ""<install>\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64"`.
+  The extra pair of quotes, which cmd takes off, keeps an install path with
+  `&` or `^` (or with a parenthesis and no space) whole, where Windows
+  Terminal's line splits it.
+- **Developer PowerShell for VS 18** runs PowerShell 7 when it is installed,
+  else Windows PowerShell, as
+  `-NoExit -Command "&{Import-Module '<install>\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell <instance id> -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}"`.
+
+The name ends in the product line (`2022`, `18`), then the instance's
+nickname in parentheses when it has one, else a channel other than Release in
+brackets (`[Preview]`). Both shells start in your home directory
+(`-startdir=none` and `-SkipAutomaticLocation` keep the scripts from moving
+it) and set up the tools for the architecture noctty runs on: x64, or on ARM64
+`-arch=arm64` with `-host_arch=arm64` from Visual Studio 17.4 (`x64` before,
+when its tools ran only under emulation). A shell is listed only when its
+script is there (`VsDevCmd.bat`; the DevShell module, which Developer
+PowerShell needs and which came with 16.2), and only for an install on a local
+drive, reached without a junction or symbolic link.
+
+noctty asks Visual Studio's Setup Configuration API (the one `vswhere` and
+Windows Terminal use), which reads what the Visual Studio Installer recorded.
+Nothing is started to find the instances: not `vswhere`, `VsDevCmd.bat` or
+`Enter-VsDevShell`. A machine without Visual Studio lists none and reports
+nothing.
+
+```
+# One of newest (the default), all or none:
+visual-studio-profiles = all
+```
+
+- `newest` lists the newest instance's pair and hides the others, as Windows
+  Terminal does: a hidden pair is not in the picker, the palette, the jump list
+  or the quick slots, but a saved session or `default-profile` that names one
+  still starts it. If the newest instance has neither script, the next one
+  that has one is shown.
+- `all` lists every instance, newest first (by version, then by install date).
+- `none` lists none, and Visual Studio is not asked.
+
+Their keys are `vs:<instance id>:cmd` and `vs:<instance id>:pwsh`, where the
+instance id is the one Setup Configuration gives (eight hex digits, the
+`Enter-VsDevShell` argument above). It stays the same across Visual Studio
+updates, so a saved session, `default-profile = vs:<instance id>:cmd`,
+`profile-order` and `profile-hidden` keep naming the same install. Session
+restore brings these panes back. They are listed after your own user profiles
+and before the SSH hosts.
+
+`vs:newest:cmd` and `vs:newest:pwsh` name the newest instance's shells in
+`default-profile`, `profile-order` and `profile-hidden`, so such a line keeps
+working after Visual Studio is reinstalled or on another machine. A key that
+names one profile directly, as `new_window_elevated:<key>` does, needs the
+instance id. A pane started this way remembers the instance it ran. They
+name the first instance, newest first, that has that shell, whether
+`visual-studio-profiles` shows it or not; under `none` they name nothing.
+When Setup Configuration answers only in part (an instance it could not
+read is left out), `default-profile = vs:newest:...` is not used, since the
+newest instance may be the one missing: the automatic default starts, the
+config's problems say why, and a reload asks again. A `vs:<instance id>`
+key that came back still starts.
+
+```
+default-profile = vs:newest:cmd
+profile-hidden = vs:newest:pwsh
+```
+
+New Elevated Window for one of these shells names it to the elevated process
+(`--default-profile=vs:<instance id>:cmd`), which finds the instance itself, so
+the `cmd.exe /k` line above reaches it as written. A `--visual-studio-profiles`
+option on noctty's command line is passed on with it. When UAC would run the
+elevated window as another account (a standard user entering an
+administrator's credentials), that account reads its own config, which may
+say `visual-studio-profiles = none`, so the shell's command is passed instead
+(`--command=direct:...`), quoted again in the standard way. cmd then mangles
+an install path with `&` or `^` in it, or one with no space and `(`, `;`, `,`
+or `=`. That case was not run here (it needs a second account at the UAC
+prompt).
+
+The Developer Command Prompt gets cmd's shell integration. The Developer
+PowerShell starts through `-Command`, so it runs without OSC 133 and OSC 7
+marks, as in Windows Terminal; a split of it starts in your home directory
+rather than following its directory. To change a shell (another architecture,
+another start directory), define a [user profile](#user-profiles) with your
+own line and hide the generated one with `profile-hidden`.
+
+## User profiles
+
+Besides the shells it detects, the profile picker and the command palette
+list profiles you define in your config. A profile has an id, and every line
+that belongs to it starts with that id and a colon. One line is enough:
+
+```
+profile-command = py312: cmd.exe
+```
+
+That adds a profile shown as `py312` that runs Command Prompt. More lines give
+it a label, a starting folder and environment variables:
+
+```
+profile-command = py312: cmd.exe
+profile-name = py312: Python 3.12
+profile-working-directory = py312: %USERPROFILE%\src
+profile-env = py312: PATH=C:\Python312;C:\Python312\Scripts;%PATH%
+```
+
+noctty lists [Visual Studio's developer shells](#visual-studio-developer-shells)
+by itself. To make one of them what new tabs open, write
+`default-profile = vs:newest:cmd`.
+
+### The four lines
+
+- `profile-command` defines the profile. Its value is a Windows command line,
+  the same text as the Command line of a Windows Terminal profile or a
+  shortcut's Target. Everything after the id's colon is used exactly as
+  written: nothing is unquoted or unescaped. noctty starts the program with
+  that line, without a `cmd.exe /C` wrapper, so cmd.exe's own quoting reaches
+  cmd.exe unchanged. When noctty has to change the arguments (PowerShell shell
+  integration, the WSL directory option, the UTF-8 preamble of a plain
+  `cmd.exe`), the changed arguments are quoted again in the standard way. The
+  `direct:` and `shell:` forms of `command` are not accepted here.
+- `profile-name` is the label in the picker and the palette. Without it the id
+  is shown. Quotes around the whole label are removed.
+- `profile-working-directory` takes the values `working-directory` takes:
+  `home`, `inherit`, or a folder (`~/` is your home folder; forward slashes
+  work; a folder with spaces needs no quotes). Without it, a profile opened
+  from the picker or the palette starts in your home folder. `home` and a
+  folder also hold for a split of the profile, though a split still takes its
+  source pane's folder when `split-inherit-working-directory` is on. For a
+  profile that runs `wsl.exe`, home is the Linux home folder (`--cd ~`), as
+  for a detected WSL profile. `inherit` follows the current tab's folder where
+  the `*-inherit-working-directory` settings allow it. With no tab to follow,
+  the `working-directory` setting decides (by default, the folder noctty was
+  started from).
+- `profile-env` sets one environment variable for this profile,
+  `<id>: KEY=VALUE`. Repeat it for more. Names are compared without case, as
+  Windows does: a later `Path=` replaces an earlier `PATH=`, and a profile
+  `PATH` replaces a `Path` set with `env`. `<id>: KEY=` takes back this
+  profile's `KEY`, for example one a shared file set. It does not remove a
+  variable that `env` or Windows gives every shell. `<id>:` takes back all of
+  the profile's variables. A profile `PATH`, like an `env` one, is the whole
+  `PATH` the shell gets: noctty no longer puts its own folder first, and
+  `%PATH%` holds that folder only where your `PATH` already does. If you run
+  `noctty` from such a profile's shell, put the folder in the value yourself;
+  `GHOSTTY_BIN_DIR` still names it.
+- `%NAME%` in `profile-command`, `profile-working-directory` and `profile-env`
+  values is replaced by the value the shell would get without this profile:
+  Windows' variables with your `env` lines applied. So `%PATH%` keeps your
+  search path, including folders an `env` line put on it, and `%USERPROFILE%`
+  is your user folder. A name that is not set stays as written. Each value is
+  replaced once, so a profile cannot use a variable it sets itself. `env`
+  values are not expanded: `env = PATH=C:\tools;%PATH%` passes the text
+  `%PATH%`. Quote a path holding a variable that may expand to spaces:
+  `"%USERPROFILE%\tools\init.cmd"`.
+
+Only whole lines that start with `#` are comments. A `#` later in a line is
+part of the value. A line can be at most 4094 bytes long; a longer one is
+reported and skipped.
+
+### Ids, renaming and removing
+
+Ids are 1 to 64 ASCII letters, digits, `.`, `_` or `-`, compared without case.
+Some are taken because they already name a detected profile or a reference:
+`pwsh.exe`, `powershell.exe`, `cmd.exe`, `git-bash`, `wsl-default`, `pwsh`,
+`powershell`, `powershell-7`, `powershell-core`, `windows-powershell`, `ps`,
+`git`, `gitbash`, `cmd`, `command-prompt`, `wsl`, `default-wsl`,
+`wsl-distro`, `distro`, `user`, `ssh` and `vs`.
+
+Saved sessions and layouts remember a profile by its id, so change
+`profile-name` freely. A new id is a new profile: saved tabs of the old one
+open your `default-profile`, or the automatic shell when none is set.
+
+`profile-command = <id>:`, with nothing after the colon, removes a profile
+together with its other lines, including lines a file read later adds for it.
+`profile-command =` removes every profile defined before it. A later
+`profile-command` line for the same id brings the profile back, with its other
+lines.
+
+A line that cannot be used is reported as a config problem with its file and
+line, and ignored: one without an id (a forgotten id often looks like a drive
+letter, `profile-command = C:\Tools\x.exe`), a taken id, a `direct:` or
+`shell:` command, a command with no program, or text that is not UTF-8
+(save the file as UTF-8). The message never shows the rest of the line, which
+may hold a token. A `profile-name`, `profile-working-directory` or
+`profile-env` line whose id no `profile-command` line names is reported too.
+A command that is empty only once its `%NAME%` variables are expanded is left
+out of the picker and written to the log.
+
+### cmd.exe quoting and copying from other terminals
+
+**cmd.exe quoting.** cmd.exe reads its own command line with its own rules.
+If the path of the batch file after `/k` holds `&` or `^`, or holds `(`, `;`,
+`,` or `=` and no space, cmd splits the path: it reports something like
+`'D:\R' is not recognized`, or runs the wrong thing. Put one more pair of
+quotes around everything after `/k`, which cmd takes off again:
+
+```
+profile-command = vs19: cmd.exe /k ""D:\R&D Tools\BuildTools\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64"
+```
+
+This form works for any path, so you can always use it.
+
+**From Windows Terminal.** Copy the Command line field from the profile's page
+in Windows Terminal's Settings, which shows the line itself. If you copy from
+settings.json instead, first turn each `\"` into `"` and each `\\` into `\`.
+`startingDirectory` becomes `profile-working-directory`, and each
+`environment` entry becomes a `profile-env` line. Icons and appearance do not
+carry over.
+
+**From WezTerm.** Write `args` as one command line. Separate the strings with
+spaces, and put a string that holds a space in double quotes. Inside such a
+string, write each `"` as `\"`; single quotes do not group anything on a
+Windows command line. An empty string is `""`, and a quoted string that ends
+in `\` needs `\\` before its closing quote. `cwd` becomes
+`profile-working-directory`, each `set_environment_variables` entry becomes a
+`profile-env` line, Lua's `\\` is `\`, and `.. os.getenv('PATH')` is
+`%PATH%`. For example:
+
+```lua
+args = { 'pwsh.exe', '-NoLogo', '-NoExit', '-Command', '& { Import-Module "C:/Tools/My Module.dll" }' },
+```
+
+```
+profile-command = devps: pwsh.exe -NoLogo -NoExit -Command "& { Import-Module \"C:/Tools/My Module.dll\" }"
+```
+
+These are the standard Windows rules, which PowerShell, Python and most
+programs follow. cmd.exe has its own rules (above).
+
+### Shared files, and sharing a config with Ghostty
+
+A file named with `config-file` is read after the whole file that names it, so
+a line in your main config cannot change what that file sets. Put your changes
+in a second file listed after it:
+
+```
+config-file = team.ghostty
+config-file = mine.ghostty
+```
+
+```
+# team.ghostty
+profile-command = buildbox: ssh.exe build-01
+profile-command = legacy: cmd.exe /k C:\legacy\env.cmd
+```
+
+```
+# mine.ghostty
+profile-command = legacy:
+profile-name = buildbox: Build Box (mine)
+profile-working-directory = buildbox: C:\src
+```
+
+The ids are the words before the colon on the shared file's `profile-command`
+lines. Everything you do not change, and whatever the team adds later, still
+comes from the team's file. On noctty's command line, `--profile-*` options
+also lose to included files, so define profiles in files.
+
+Ghostty on macOS or Linux reports every line it does not know, in any file it
+reads, and `config-file = ?x` only skips a file that does not exist. If you
+share `ghostty\config` with Ghostty on another machine, put profile lines in
+`%LOCALAPPDATA%\noctty\config.ghostty`, which noctty reads after
+`ghostty\config` and Ghostty never reads.
+
+### Order, restore and limits
+
+User profiles are listed after the detected local shells and before Visual
+Studio's developer shells and the SSH hosts, in the order of their first
+`profile-command` line, unless
+`profile-order` moves them (below). A session or a named layout remembers a
+pane's profile by its id (`user:<id>`); a saved pane that names an id that is
+gone, or removed, comes back running your `default-profile` (or the automatic
+shell when none is set), as a pane whose shell was uninstalled does. A restored pane returns to the directory it was in. A tab or
+split that an automation command opens from a user profile pane keeps the
+command and environment that pane started with, even after a reload; an
+ordinary split reads the profile's current definition.
+
+### Default profile, order and hidden profiles
+
+```
+default-profile = py312
+profile-order = py312
+profile-order = pwsh
+profile-hidden = wsl:docker-desktop
+```
+
+`default-profile` names the profile a terminal runs when nothing else chose
+one, in place of the automatic shell above: the first window, a new tab
+(Ctrl+Shift+T), a new window, the quick terminal, a split of a pane that runs
+no profile, and a restored pane whose profile no longer exists. It brings the
+profile's command, its `profile-env` variables and its
+`profile-working-directory`; a profile without a directory of its own starts
+where `working-directory` and the `*-inherit-working-directory` settings say,
+as `command` does. A directory the launch asks for with `--working-directory`
+(Explorer's "Open noctty here", a jump-list recent folder, or the option on a
+second `noctty` that hands its arguments to a running one), or the directory
+`noctty +new-window` runs in, wins over the profile's
+`profile-working-directory`. A second `noctty` that names no directory (from
+the Start menu, say) opens in the profile's directory, as the first one did.
+An SSH profile always starts in your user profile directory. The pane remembers the profile, so its splits
+and a restored session run it again (except a detected `ssh:` profile, which
+restore never reconnects; a user profile that runs `ssh.exe` is restored like
+any other), and the profile picker opens on it until you choose another there.
+
+Settings sets it too: Shell > Default profile lists Automatic and the
+profiles the picker shows. Choosing one writes a single `default-profile`
+line with the profile's key (`user:py312`, `pwsh.exe`, `wsl:Ubuntu`), so
+renaming the profile keeps it selected; Automatic removes the
+`default-profile` lines from the file Settings saves to. A value the file
+already has stays as written until you choose another profile. One that
+starts a profile the list does not show (an `ssh:` alias that is not in your
+SSH config) shows that profile's name, and one that names nothing that can
+start here (an `ssh:` value where `ssh.exe` cannot be found, say) is shown as
+written, marked "(not found)". A `vs:` value that could not be looked up
+when the config was read (Visual Studio's Setup Configuration did not answer
+in full) is shown as written, without the mark, until a reload asks again.
+A Default command, when set, wins over it, as the table below says.
+
+The dropdown's profiles are the ones the open terminal windows have found.
+With no terminal window open (Settings alone), or until the first window's
+search for shells finishes, it shows only Automatic and the saved value. A
+window opened from a taskbar profile entry or with New Elevated Window runs the
+profile it was opened for, but its Settings shows and saves the
+`default-profile` of your config files: a choice saved there is written to
+the file, while new tabs in that window keep starting the profile it was
+opened for.
+
+`profile-order` lists profiles first in the picker and the palette, in the
+order of its lines, and `profile-hidden` takes profiles out of the picker, the
+palette, the [▾] menu, the taskbar jump list and the quick slots. A hidden
+profile still runs where something names it: `default-profile`, a restored
+session or layout, `new_window_elevated:<key>`, a split of a pane that runs
+it. A quick slot pinned to it keeps the pin but does not show it.
+
+All three take a profile by its key: the id of one of your profiles (`py312`,
+or `user:py312`), a detected profile's key (`pwsh.exe`, `powershell.exe`,
+`cmd.exe`, `git-bash`, `wsl-default`, `wsl:<distribution>`, `ssh:<alias>`,
+`vs:<instance id>:cmd`, `vs:<instance id>:pwsh`), `vs:newest:cmd` or
+`vs:newest:pwsh` for the newest Visual Studio, or a short name (`pwsh`,
+`powershell`, `git`, `cmd`, `wsl`). In `profile-order`
+and `profile-hidden`, `wsl` names every WSL profile. A WSL distribution is
+always written `wsl:<distribution>`. Labels are not references, because they
+can change. A value that cannot name a profile (a typo, an id no
+`profile-command` line defines, a comment after the value) is reported as a
+config problem. One that names a shell this machine does not have
+(`wsl:docker-desktop`, an `ssh:` host, a `vs:` key) is not, so a shared config
+loads quietly everywhere. `default-profile` finds its profile without listing any:
+`wsl:Ubuntu` starts `wsl.exe -d Ubuntu` without asking WSL for its
+distributions, and `ssh:<alias>` starts `ssh.exe <alias>` without reading the
+SSH config. A `default-profile` that names no profile that can start here is
+reported as a config problem, and the automatic shell runs. If Visual Studio's
+Setup Configuration fails when a `vs:` key is looked up, that is reported
+instead, and the automatic shell runs until the config is reloaded.
+`NOCTTY_WIN32_DEFAULT_PROFILE` still chooses where the picker starts when
+`default-profile` is unset, and `NOCTTY_WIN32_PROFILE_ORDER` still orders the
+detected shells when `profile-order` is unset.
+
+What a new terminal runs, highest first:
+
+| Rank | Setting                   | Where it applies                                                                                                                                                                                                                                                                                  |
+| ---- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | `initial-command`, `-e`   | The first window of the launch only.                                                                                                                                                                                                                                                              |
+| 2    | Session or layout restore | The profile and the directory the pane was saved with. A pane whose profile is gone, or an SSH pane (never reopened), falls through to rank 4 or below, in its saved directory; an SSH `default-profile` is skipped there (rank 6).                                                               |
+| 3    | A profile you choose      | The picker, the palette, a quick slot, the [▾] menu, `new_window_elevated:<key>`, and a tab or split an automation command opens from a pane (it keeps that pane's launch).                                                                                                                       |
+| 4    | `command`                 | From any config file or the command line. Set in a file together with `default-profile`, it wins and the unused `default-profile` is reported as a config problem; `--command` on the command line wins without one, and `--command=` (empty) undoes any file's `command`, an included one's too. |
+| 5    | `default-profile`         | Everything else: a new tab, a new window, the quick terminal, a split of a pane that runs no profile.                                                                                                                                                                                             |
+| 6    | The automatic shell       | PowerShell 7, else Windows PowerShell, else Command Prompt.                                                                                                                                                                                                                                       |
+
+Safe mode reads none of your config, so it never runs a default profile.
+`default-profile`, `profile-order` and `profile-hidden` are not accepted from
+a second `noctty` that hands its arguments to a running one (single-instance
+forwarding). On the command line, `default-profile`, `command` and
+`initial-command` win over those lines in a file included with
+`config-file`, which is otherwise read after the command line. A command-line
+`command` or `initial-command` that is refused (`--command=direct:`) is
+reported and ignored, so the last value the command line gave that is
+accepted is the one that wins. The exception is `-e`: an `initial-command`
+line in a file included with `config-file` still replaces `-e` when the
+config is first loaded. A launch that names a
+profile with `--default-profile` (a jump-list entry for a user profile)
+starts without the saved session, as `-e` does.
+
+Limits:
+
+- New Elevated Window for one of your profiles (`new_window_elevated:user:<id>`,
+  or New Elevated Window from a pane that runs it) names the profile
+  (`--command= --initial-command= --default-profile=user:<id>`), as a taskbar
+  entry does. A Visual Studio shell is named the same way
+  (`--default-profile=vs:<instance id>:cmd`); it has no variables, and the
+  account rule below applies to it too (see
+  [Visual Studio developer shells](#visual-studio-developer-shells)). The
+  elevated process reads the same config files and starts the profile
+  itself, so its command line and variables reach it as written, a
+  `command` or `initial-command` line in an included file does not replace
+  it, and none of them appear on the elevated command line. It applies to the
+  whole elevated window, not only its first pane. `%NAME%` in the profile's
+  lines then reads the elevated process's own environment, which Windows
+  builds for the elevated token rather than copying noctty's: a variable that
+  only the shell that started noctty set is not there (an `env` line is). A
+  profile defined only by a
+  `--profile-command` option on noctty's command line, or given a variable by
+  a `--profile-env` option there, or any profile when that command line has
+  an `--env` option (which `%NAME%` may read), or any of your profiles when
+  UAC would run the elevated window as another account (a standard user entering an
+  administrator's credentials; that account reads its own config files, which
+  need not define the profile), is still passed as
+  arguments (`--command=direct:...`, quoted again in the standard way, an empty `--initial-command=`, and
+  `--elevated-profile-env=...`), which process tools and process-creation
+  auditing can read, so do not keep a secret in such a profile's
+  `profile-env`. A default profile is passed the same way as any other.
+- An elevated user profile starts in the directory of the pane it was opened
+  from, as every elevated window does, not in its `profile-working-directory`.
+- Profile lines take effect at a config reload. Previewing a theme in the
+  command palette reads the config files again but keeps the profiles (and the
+  `env` lines their `%NAME%` reads) the running config has. Choosing a theme
+  other than the saved one saves it and reloads the config, which applies
+  profile lines edited since, as any reload does.
+- PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
+  interactive PowerShell line. A line with `-Command` or `-File` runs as
+  written without it, as in Windows Terminal. A cmd.exe line gets cmd's
+  integration.
+- A user profile's taskbar jump-list entry names the profile
+  (`--command= --initial-command= --default-profile=user:<id>`) rather than
+  carrying its command and variables, so the new process reads the profile
+  from your config files; the empty values undo a `command` or
+  `initial-command` line in any of them. A profile defined only in a file the
+  running noctty was given with `--config-file` is not known to it.
+- A profile that runs `ssh.exe` is restored with the session like any other
+  profile; a detected `ssh:` profile is not.
+- The Settings window does not edit the `profile-*` lines; it leaves them,
+  and every line it does not edit, as they are when it saves. Its Shell
+  page sets `default-profile` (see above).
 
 ## App identity
 
@@ -667,8 +1120,19 @@ become a window.
   `%LOCALAPPDATA%\noctty\jump-list-recents.json`. To clear them, close
   noctty, delete that file, and start noctty once so Windows receives the
   empty list.
-- Profiles: the detected shell profiles. Selecting one launches noctty with
-  that profile's command.
+- Profiles: the profiles the picker shows (`profile-hidden` ones are left
+  out). Selecting a detected one launches noctty with that profile's command.
+  A [user profile](#user-profiles)'s entry names the profile instead
+  (`--default-profile=user:<id>`): a jump-list entry is stored on disk and can
+  roam with your Windows profile, so it never holds the profile's environment
+  variables, and the new process reads them from your config. A
+  [Visual Studio shell](#visual-studio-developer-shells)'s entry names it the
+  same way (`--default-profile=vs:<instance id>:cmd`), and the new process asks
+  Visual Studio for it again. That entry also passes on a
+  `--visual-studio-profiles` option noctty was started with, so a shell listed
+  because of `--visual-studio-profiles=all` still starts from the jump list. A
+  value from your config files is not copied into the entry, so a later edit
+  of that line still applies to the windows it starts.
 
 From 1.3.133 a portable copy builds no jump list and writes no
 `jump-list-recents.json`, so a machine with only a portable copy gets none;
@@ -1085,10 +1549,15 @@ the prompt leaves the current window unchanged. The relaunch call is
 synchronous, so the initiating window is unresponsive while the UAC prompt is
 open.
 
-The roadmap originally asked for a per-profile `run elevated` flag. Windows
-profiles in noctty are detected from installed shells rather than declared in
-a user-authored profile schema, so there is no profile property to set. The
-per-profile equivalent is a `new_window_elevated:<profile-key>` binding.
+The roadmap originally asked for a per-profile `run elevated` flag. There is no
+such profile property, for the detected shells or for
+[user profiles](#user-profiles); the per-profile equivalent is a
+`new_window_elevated:<profile-key>` binding, for example
+`new_window_elevated:user:py312`. An elevated user profile from a config file
+is named to the elevated process, which builds it from the same files, and so
+is a [Visual Studio shell](#visual-studio-developer-shells)
+(`new_window_elevated:vs:<instance id>:cmd`), unless UAC would run the window
+as another account (see [User profiles](#user-profiles), Limits).
 
 An elevated noctty is a separate process and a separate window. Its title is
 prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be
@@ -1124,11 +1593,16 @@ because there is no non-elevated split-token counterpart to protect.
 Configuration and other per-user state still resolve from the same
 `%LOCALAPPDATA%\noctty\` profile as the non-elevated process.
 
-An elevated noctty loads the same `%LOCALAPPDATA%\noctty\config.ghostty` and
-the same explicit `--config-file` overrides as a non-elevated process. Those
-files remain writable by the ordinary user account, so anything that can
-modify the configuration, including `command`, `shell-integration`, and theme
-paths, runs at high integrity the next time an elevated window opens.
+An elevated noctty loads the same config files as the non-elevated process:
+`%LOCALAPPDATA%\noctty\config.ghostty` (unless that process was started with
+`--config-default-files=false`) and the same explicit `--config-file`
+overrides. Those files remain writable by the ordinary user account, so
+anything that can modify the configuration, including `command`,
+`shell-integration`, and theme paths, runs at high integrity the next time an
+elevated window opens. When a standard user enters an administrator's
+credentials instead, the elevated process runs as that administrator and reads
+that account's `%LOCALAPPDATA%` config; a forwarded `--config-file` still names
+the same file.
 
 At process startup, noctty restricts bare-name DLL resolution to the
 application directory, System32, and explicitly added DLL directories. The
@@ -1212,8 +1686,9 @@ ending the process from being moved aside.
 The save at sign-out, shutdown or reboot is the last one: the sign-out also
 ends the shells, and the panes they leave are not saved over it. A launch that forwards
 to a running noctty, a window opened with `--working-directory` (Explorer's
-"Open noctty here" and the jump list's recent folders) or with `-e` or
-`initial-command`, the startup profile picker, a `--launch-layout` or
+"Open noctty here" and the jump list's recent folders), with
+`--default-profile` (the jump list's user profiles and Visual Studio shells)
+or with `-e` or `initial-command`, the startup profile picker, a `--launch-layout` or
 `initial-window = false` run, a default terminal handoff and a second
 instance under `single-instance = false` start without the saved session and
 leave it untouched when they exit. When one of these is the first noctty
@@ -1446,6 +1921,52 @@ installed build is inconsistent.
 Portable apply fails closed until a release publishes that signed complete-file
 manifest. Releases without it are not downloaded or staged for portable apply;
 the update notice opens the normal GitHub release page for manual updating.
+
+### Installing and upgrading while noctty runs
+
+Setup (run by hand, by WinGet or by Chocolatey) asks a running noctty to close
+through Windows Restart Manager before it replaces the files. noctty agrees
+when quitting would ask nothing, and closes. The process that owns the saved
+session, the first noctty started normally, first saves its windows, tabs and
+splits, as `quit` does; the quick terminal is not saved. It also asks Windows
+to let Setup start it again when Setup finishes, with the last
+`--config-file` and the `--class` it was started with (no other arguments,
+and no earlier `--config-file`), and that start restores the session; the
+programs that ran in its terminals are not started again. Any other noctty
+process closes without saving and is not started again; the session owner
+brings the session back. No process saves or is started again in safe mode,
+when elevated through UAC, or with `window-save-state = never`. Ownership
+is per process: a process started with `--working-directory` (Explorer's
+"Open noctty here"), `-e` or `initial-command`, the startup profile picker,
+`--launch-layout` or `initial-window = false`, or as a default terminal
+handoff, does not own the session, and windows forwarded into it are not
+saved either, but a later noctty started normally that does not forward to
+it (under `single-instance = false`) can still own the session
+([Session restore and recovery](#session-restore-and-recovery)). Setup
+starts noctty before its last page, so in the setup wizard, leaving
+**Launch noctty** checked there opens one more window.
+Setup's restart of noctty itself has not been tried on a real install.
+
+With the default `confirm-close-surface`, noctty declines, without a prompt,
+while a terminal runs a program (the programs `confirm-close-surface` asks
+about), and it always declines while Settings has unsaved edits. The
+declining process stays open and loses nothing, but Setup cannot replace the
+files and stops; a silent Setup under a package manager exits with code 5.
+When several noctty processes run, one that agreed may already have closed
+(as described above); a Setup that stops does not start it again. Finish or
+close those programs and run the upgrade again. For the same reason an
+upgrade started from inside a noctty tab is declined: the package manager is
+a program running in that terminal, and closing noctty would end it. Run it
+from another terminal. With `confirm-close-surface = false`, noctty asks
+about no program, so it agrees and closes even while a package manager runs
+in one of its tabs, which ends that upgrade.
+
+When the copy being upgraded is 1.3.134 or older, the running old version
+answers Setup, so it behaves as that version did: Setup may fail to close it,
+or close its windows one at a time so that the saved session keeps only the
+last one. Quit noctty before such an upgrade. The in-app **Install** is not
+affected: it quits noctty itself and Setup starts it again, through Explorer,
+as described under [Updates](#updates).
 
 ## Quick select & copy mode
 

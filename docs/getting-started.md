@@ -5,7 +5,7 @@ x64 and ARM64. The default renderer needs a GPU driver with OpenGL 4.3 or
 newer; where there is none, noctty draws text with its Direct3D 11 renderer
 (beta) instead (see [the Windows guide](windows.md#starting-without-opengl)).
 
-## Install with WinGet or Scoop
+## Install with WinGet, Scoop or Chocolatey
 
 ```powershell
 winget install --id AmanThanvi.noctty -e
@@ -19,11 +19,19 @@ scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
+The Chocolatey package runs the same installer as WinGet. chocolatey.org
+reviews each version before listing it, so a new release can reach it after the
+other channels:
+
+```powershell
+choco install noctty
+```
+
 Then skip to [First launch](#first-launch).
 
 ## Install by hand
 
-The current stable release is `1.3.134`. Every release ships these files for
+The current stable release is `1.3.135`. Every release ships these files for
 `<arch>` = `x64` and `arm64`:
 
 | File                                                    | What it is                        |

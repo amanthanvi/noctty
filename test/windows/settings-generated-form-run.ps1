@@ -335,7 +335,7 @@ if (-not $WorkerDesktop) {
     & ([scriptblock]::Create($controller)) | Out-Null
     $summary = Get-Content -LiteralPath (Join-Path $OutputDirectory 'summary.json') -Raw | ConvertFrom-Json
     Assert-Contract $summary.pass 'SETFORM worker or real-profile guard failed; inspect retained artifacts.'
-    'SETFORM PASS: 26 editable projections + 2 editor rows + 2 read-only prose rows; native order and UIA verified.'
+    'SETFORM PASS: 27 editable projections + 2 editor rows + 2 read-only prose rows; native order and UIA verified.'
     return
 }
 
@@ -373,7 +373,8 @@ $cases = @(
     @(202, 403, 'ComboBox', 'Close confirmation', 'Close confirmation', 'save'),
     @(202, 404, 'ComboBox', 'Copy on select', 'Copy on select', 'save'),
     @(202, 407, 'CheckBox', 'Clipboard trimming', $null, 'save'),
-    @(203, 414, 'Edit', 'Default command', 'Default command (blank = auto-detect)', 'new terminal'),
+    @(203, 414, 'Edit', 'Default command', 'Default command (blank = Default profile or auto-detect)', 'new terminal'),
+    @(203, 427, 'ComboBox', 'Default profile', 'Default profile (Default command wins when set)', 'new terminal'),
     @(203, 406, 'ComboBox', 'Shell integration', 'Shell integration', 'new terminal'),
     @(206, 422, 'ComboBox', 'OSC 52 clipboard read requests', 'OSC 52 clipboard read requests', 'save'),
     @(206, 423, 'ComboBox', 'OSC 52 clipboard write requests', 'OSC 52 clipboard write requests', 'save'),
@@ -387,7 +388,7 @@ $cases = @(
     @(204, 302, 'Button', 'Keybind configuration', 'Keybind configuration', $null),
     @(205, 101, 'Button', 'Full config editor', 'Full config editor', $null)
 )
-$ownedCues = @{ 412 = 'Default font'; 413 = 'Default theme'; 414 = 'Automatic shell'; 401 = '' }
+$ownedCues = @{ 412 = 'Default font'; 413 = 'Default theme'; 414 = 'Default profile or automatic shell'; 401 = '' }
 # Check meaning-bearing unit/range promises without freezing the whole sentence.
 $helpPromises = @{
     401 = @('bytes', 'zero|0', 'positive integer')
@@ -397,9 +398,9 @@ $helpPromises = @{
     416 = @('pt|points', '0\s*\.\.\s*200', 'pair')
     412 = @('comma', 'default')
     413 = @('absolute path', 'light/dark', 'default')
-    414 = @('automatic.*shell|shell.*detect')
+    414 = @('automatic.*shell|shell.*detect|detect.*shell')
 }
-Assert-Contract ($cases.Count -eq 28 -and @($cases | Where-Object { $_[2] -ne 'Button' }).Count -eq 26) `
+Assert-Contract ($cases.Count -eq 29 -and @($cases | Where-Object { $_[2] -ne 'Button' }).Count -eq 27) `
     'Independent projection manifest is incomplete.'
 function Read-Probe([IntPtr] $Handle, [string] $Kind, [string] $Name, [string] $Tag) {
     Assert-ClipboardGuard
@@ -573,13 +574,13 @@ try {
         Assert-ClipboardGuard
     }
     Assert-Contract ($clippedChecks -gt 0) 'No fully clipped control observed; clipping coverage is absent.'
-    Assert-Contract ($visibleChecks -eq 28) 'Incomplete form control coverage.'
+    Assert-Contract ($visibleChecks -eq 29) 'Incomplete form control coverage.'
     Assert-Contract ($cueChecks -eq 4 -and $absentCueChecks -eq 1) 'Incomplete positive/absent owned edit cue coverage.'
 } finally {
     try { Stop-Fixture }
     finally {
         Write-Json (Join-Path $OutputDirectory 'form-coverage.json') ([ordered]@{
-            expectedEditableProjections = 26; expectedEditorRows = 2; expectedReadOnlyProseRows = 2
+            expectedEditableProjections = 27; expectedEditorRows = 2; expectedReadOnlyProseRows = 2
             visibleControlChecks = $visibleChecks; clippedControlChecks = $clippedChecks
             expectedCueChecks = 4; cueChecks = $cueChecks; absentCueChecks = $absentCueChecks
             completedSections = $results.Count; passedSections = @($results | Where-Object { $_.pass }).Count

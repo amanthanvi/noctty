@@ -204,6 +204,16 @@ try {
         -OutputRoot $dualOutputRelative | Out-Null
     $dualInstallScript = Get-Content -LiteralPath (Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\tools\chocolateyInstall.ps1')) -Raw
 
+    # A package that carries both installers says so on its Chocolatey page.
+    $dualNuspec = [System.Xml.XmlDocument]::new()
+    $dualNuspec.Load((Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\noctty.nuspec')))
+    $dualNamespaces = [System.Xml.XmlNamespaceManager]::new($dualNuspec.NameTable)
+    $dualNamespaces.AddNamespace('n', $nuspecNamespace)
+    $dualDescription = $dualNuspec.SelectSingleNode('/n:package/n:metadata/n:description', $dualNamespaces).InnerText
+    if (-not $dualDescription.Contains(', on x64 or ARM64.', [StringComparison]::Ordinal)) {
+        throw 'Generated nuspec description for the two-architecture package must say ", on x64 or ARM64.".'
+    }
+
     # The process tree the generated script sees: this process first, then each ancestor in turn,
     # as executable paths. 'throw' makes the process query fail.
     $shellChain = @('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', 'C:\Windows\explorer.exe')

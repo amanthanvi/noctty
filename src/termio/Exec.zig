@@ -803,6 +803,10 @@ pub const ThreadData = struct {
 
 pub const Config = struct {
     command: ?configpkg.Command = null,
+    /// Windows: the command line `command` was split from (a user profile's),
+    /// passed to CreateProcess unchanged when the argv finally run is exactly
+    /// its split. See `windows_shell.verbatimCommandLine`.
+    command_line: ?[]const u8 = null,
     env: EnvMap,
     env_override: configpkg.RepeatableStringMap = .{},
     shell_integration: configpkg.Config.ShellIntegration = .detect,
@@ -834,6 +838,9 @@ const Subprocess = struct {
     env: ?EnvMap,
     args: []const [:0]const u8,
     windows_cmd_shell: bool,
+    /// The line `start` hands CreateProcess as written, when it still
+    /// describes `args`; null quotes `args` as usual.
+    command_line: ?[]const u8 = null,
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
     pty_options: ptypkg.OpenOptions = .{},
@@ -1160,6 +1167,19 @@ const Subprocess = struct {
         // integration, launch preparation and user environment overrides.
         try windows_shell.configureShellSearch(&env, exec_command.windows_cmd_shell);
 
+        // A user profile's line, kept only while it still splits to the argv
+        // this launch runs: integration, the WSL rewrite, the cmd preamble and
+        // `initial-command` all change that argv.
+        const command_line: ?[]const u8 = if (comptime builtin.os.tag == .windows)
+            if (try windows_shell.verbatimCommandLine(
+                alloc,
+                cfg.command_line,
+                exec_command.args,
+                exec_command.windows_cmd_shell,
+            )) |line| try alloc.dupe(u8, line) else null
+        else
+            null;
+
         // We separate the terminal-visible PWD from the Windows host cwd.
         // For WSL launches, the shell may start in `~` or another WSL path
         // via `wsl.exe --cd ...`, while CreateProcess still needs a valid
@@ -1235,6 +1255,7 @@ const Subprocess = struct {
             .cwd = cwd,
             .args = exec_command.args,
             .windows_cmd_shell = exec_command.windows_cmd_shell,
+            .command_line = command_line,
             .pty_options = cfg.pty_options,
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
@@ -1403,6 +1424,7 @@ const Subprocess = struct {
             .path = self.args[0],
             .args = self.args,
             .windows_cmd_shell = self.windows_cmd_shell,
+            .windows_command_line = self.command_line,
             .env = if (self.env) |*env| env else null,
             .cwd = cwd,
             .stdin = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
@@ -2813,6 +2835,42 @@ test "PKG48 final launch form scopes the cwd search guard after environment over
             try testing.expectEqualStrings(command.shell, subprocess.args[subprocess.args.len - 1]);
         } else try testing.expect(subprocess.env.?.get("NoDefaultCurrentDirectoryInExePath") == null);
         try testing.expectEqualStrings("C:\\Tools!;%literal%", subprocess.env.?.get("PATH").?);
+    }
+}
+
+test "Subprocess keeps a user profile's command line only for the argv it describes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const line = "cmd.exe /k \"\"C:\\Tools Dir\\init.cmd\" \"some arg\"\" & echo \"a&b\"";
+    const argv = try windows_shell.splitWindowsCommandLine(alloc, line);
+    const Case = struct { command: configpkg.Command, kept: bool };
+    for ([_]Case{
+        // The profile's own argv: CreateProcess gets the line as written.
+        .{ .command = .{ .direct = argv }, .kept = true },
+        // `initial-command` (or anything else) runs another argv.
+        .{ .command = .{ .direct = &.{ "cmd.exe", "/k", "other" } }, .kept = false },
+        // A shell-form command runs through the cmd /C trampoline.
+        .{ .command = .{ .shell = "cmd.exe /k echo x" }, .kept = false },
+    }) |case| {
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = case.command,
+            .command_line = line,
+            .env = EnvMap.init(testing.allocator),
+            .resources_dir = null,
+            .utf8_console = .never,
+            .term = "xterm-256color",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        if (case.kept) {
+            try testing.expectEqualStrings(line, subprocess.command_line.?);
+        } else {
+            try testing.expect(subprocess.command_line == null);
+        }
     }
 }
 

@@ -8,10 +8,26 @@ the force flag, RmEndSession. Run with -Bin <source bin directory> -Run <new
 evidence directory>; -Cases picks cases (comma-separated, all by default). The
 run directory must not already exist.
 
+The files registered are the ones Setup would check: every file of the copy
+that the installer script's CloseApplicationsFilter matches (Inno's default
+*.exe,*.dll,*.chm when it sets none) and its CloseApplicationsFilterExcludes
+does not, by file name. The script is dist/windows/noctty.iss unless -Iss
+names another, such as an older revision to show what it did.
+
 Cases (each its own portable copy, restoring a seeded session of two windows:
 the first with two tabs, the second of them split, the second with one tab):
   idle-two-windows  nothing running: RmShutdown returns 0, noctty exits 0 and
                     the saved session still holds both windows, tabs and split.
+  inno-set-idle     the installer's view of the same idle session: Restart
+                    Manager lists only noctty, RmShutdown returns 0, noctty
+                    exits 0 with the session kept, and none of its
+                    OpenConsole.exe children (one ConPTY host per pane) is
+                    still running when RmShutdown returns, so the excluded
+                    file is free by the time Setup replaces it. Against
+                    a script without the exclusion, OpenConsole.exe is
+                    registered, Restart Manager lists the hosts as
+                    RmUnknownApp, and RmShutdown fails with 351 at once,
+                    before noctty is asked anything.
   busy-always       confirm-close-surface = always, and
   busy-ping         `ping -t localhost` in every pane with the default
                     confirm-close-surface: RmShutdown returns
@@ -28,6 +44,28 @@ the first with two tabs, the second of them split, the second with one tab):
                     ENDSESSION_CLOSEAPP, as a sign-out sends them: noctty saves,
                     latches (a later checkpoint writes nothing) and does not
                     quit by itself (Windows ends the process).
+  restartable       registration for Setup's restart: not restartable at
+                    start; after an accepted query the session owner is
+                    restartable in RmGetList and GetApplicationRestartSettings
+                    returns its --config-file and --class with flags 11
+                    (RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT);
+                    WM_ENDSESSION(FALSE) removes it; a second instance of the
+                    copy (not the session owner) agrees and is not restartable.
+  restartable-busy  confirm-close-surface = always: the declining owner is not
+                    restartable.
+  restartable-install-running
+                    another noctty's in-app Install is running Setup (a
+                    stand-in Setup, a copy of ping.exe that shows no
+                    window, running from a read-only staged installer
+                    under the copy's updates\<version>): the owner agrees
+                    and is not restartable, also once the update state no
+                    longer names that installer (an update check with
+                    another feed clears it). Once it has exited, the owner
+                    is restartable again, also while a shared-read handle
+                    holds the installer as the updater's verification does,
+                    and beside a read-only leftover installer.
+These three only list (RmGetList) and send the query and end messages
+themselves; they never call RmShutdown.
 
 Cases with no terminal window (no seeded session is restored), which only the
 hidden lifecycle window (class noctty.win32.lifecycle) lets Restart Manager
@@ -52,13 +90,11 @@ ask:
                     Console\%%Startup DelegationTerminal selects noctty: a
                     console started then could be handed to this copy.
 
-Safety. Only this run's portable copies are registered with Restart Manager:
-their noctty.exe and DLLs, never OpenConsole.exe (an RmUnknownApp that fails
-every non-forced shutdown). Leaving it out models the registration set the
-planned installer exclusion (RMCLOSE-4) produces; today Setup still registers
-it. Before
-RmShutdown the script checks that Restart Manager lists exactly the copy it
-started (PID and start time, read fresh) and aborts otherwise. It never calls
+Safety. Only this run's portable copies are registered with Restart Manager,
+and only the files named above. Before RmShutdown the script checks that
+Restart Manager lists the copy it started and nothing else but that copy's
+own ConPTY hosts (PIDs and start times, read fresh; the hosts are listed only
+when OpenConsole.exe is registered) and aborts otherwise. It never calls
 RmShutdown with the force flag, RmRestart (which starts on the visible
 desktop) or anything that copies, and never switches desktops or injects
 input: keys are messages sent to this run's own windows, with the modifier
@@ -78,6 +114,7 @@ param(
     [switch] $Driver,
     [string] $DesktopName,
     [string] $Cases = '',
+    [string] $Iss = (Join-Path $PSScriptRoot '..\..\dist\windows\noctty.iss'),
     [ValidateRange(1,1800)] [int] $DriverTimeoutSeconds = 900,
     [string] $ExpectedStartupHash,
     [string] $ExpectedStartupModified
@@ -112,6 +149,15 @@ public static class Rm {
     [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint h, out uint needed, ref uint count, [In, Out] ProcessInfo[] info, out uint reasons);
     [DllImport("rstrtmgr.dll")] static extern int RmShutdown(uint h, uint flags, IntPtr status);
     [DllImport("rstrtmgr.dll")] public static extern int RmEndSession(uint h);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern int GetApplicationRestartSettings(IntPtr process, StringBuilder cmd, ref int size, out int flags);
+    // What the process registered with RegisterApplicationRestart: its
+    // HRESULT (0x80070490, not found, when nothing is registered), command
+    // line and flags.
+    public static object[] RestartSettings(IntPtr process) {
+        var cmd=new StringBuilder(1100); int size=1100, flags=0;
+        int hr=GetApplicationRestartSettings(process,cmd,ref size,out flags);
+        return new object[] { hr, hr==0 ? cmd.ToString() : null, flags };
+    }
     public static ProcessInfo[] List(uint h, out int err) {
         uint needed=0, count=0, reasons; var list=new ProcessInfo[0];
         err=RmGetList(h,out needed,ref count,null,out reasons);
@@ -223,7 +269,7 @@ if (-not $Driver) {
     Invoke-LocalHiddenDriver -Script $PSCommandPath -Bin $Bin -Run $Run -TimeoutSeconds $DriverTimeoutSeconds `
         -ExpectedStartupHash $ExpectedStartupHash -ExpectedStartupModified $ExpectedStartupModified `
         -DesktopPrefix 'noctty-rm-' -Label 'Hidden Restart Manager close' -PassDesktopName -GuardClipboard `
-        -DriverArguments @("-Cases `"$Cases`"")
+        -DriverArguments @("-Cases `"$Cases`"","-Iss `"$((Resolve-Path -LiteralPath $Iss).Path)`"")
     exit
 }
 
@@ -350,6 +396,41 @@ function Pane($h) {
     if(-not $all.Count) { throw 'Host has no pane.' }
     return $all[0]
 }
+# What Setup checks for being in use, from the installer script's [Setup]
+# section: CloseApplicationsFilter (Inno's default when unset) minus
+# CloseApplicationsFilterExcludes, matched against file names.
+$setup=@{}; $inSetup=$false
+foreach($line in [IO.File]::ReadLines($Iss)) {
+    $t=$line.Trim()
+    if($t -match '^\[(.+)\]$') { $inSetup=$Matches[1] -eq 'Setup'; continue }
+    if($inSetup -and $t -match '^([A-Za-z]+)\s*=\s*(.*)$') { $setup[$Matches[1]]=$Matches[2].Trim() }
+}
+if(-not $setup.ContainsKey('AppId')) { throw "No [Setup] section in $Iss." }
+function Patterns($Value) { return @("$Value" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+$closeFilter=Patterns $(if($setup.ContainsKey('CloseApplicationsFilter')) { $setup.CloseApplicationsFilter } else { '*.exe,*.dll,*.chm' })
+$closeExcludes=Patterns $setup.CloseApplicationsFilterExcludes
+$results.Iss=@{ Path=$Iss; Filter=$closeFilter; Excludes=$closeExcludes }
+function Close-Set([string]$Dir) {
+    return @(Get-ChildItem -LiteralPath $Dir -File -Recurse | Where-Object {
+        $n=$_.Name
+        @($closeFilter | Where-Object { $n -like $_ }).Count -and -not @($closeExcludes | Where-Object { $n -like $_ }).Count
+    } | ForEach-Object FullName)
+}
+# The copy's ConPTY hosts: OpenConsole.exe processes from its folder that it
+# started (parent PID, created after it), each as PID and start time.
+function Console-Hosts($case) {
+    $p=$case.Process; $image=Join-Path $case.Dir 'OpenConsole.exe'; $since=$p.StartTime.ToUniversalTime()
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id) AND Name='OpenConsole.exe'" -Property ProcessId,ExecutablePath,CreationDate |
+        Where-Object { $_.ExecutablePath -eq $image -and $_.CreationDate.ToUniversalTime() -ge $since } |
+        ForEach-Object { @{ Pid=[int]$_.ProcessId; Start=$_.CreationDate.ToUniversalTime() } })
+}
+# Those of the hosts that are still running (same PID and start time).
+function Running-Hosts($hosts) {
+    return @($hosts | Where-Object {
+        $q=Get-Process -Id $_.Pid -ErrorAction SilentlyContinue
+        $null -ne $q -and [Math]::Abs(($q.StartTime.ToUniversalTime() - $_.Start).TotalMilliseconds) -lt 1000
+    })
+}
 # Asks Restart Manager to close the copy, as Setup does, and records what
 # happens until it returns.
 function Rm-Close($case) {
@@ -358,22 +439,33 @@ function Rm-Close($case) {
     $key=[Text.StringBuilder]::new(64); [uint32]$h=0
     $err=[Rm]::RmStartSession([ref]$h,0,$key); if($err) { throw "RmStartSession failed: $err" }
     try {
-        $files=@(Get-ChildItem -LiteralPath $case.Dir -File | Where-Object { $_.Extension -in '.exe','.dll' -and $_.Name -ne 'OpenConsole.exe' } | ForEach-Object FullName)
+        $files=@(Close-Set $case.Dir)
         $out.Registered=@($files | ForEach-Object { Split-Path -Leaf $_ })
         $err=[Rm]::RmRegisterResources($h,[uint32]$files.Count,[string[]]$files,0,[IntPtr]::Zero,0,$null); if($err) { throw "RmRegisterResources failed: $err" }
         [int]$listErr=0
         $listed=@([Rm]::List($h,[ref]$listErr))
         if($listErr) { throw "RmGetList failed: $listErr" }
         $out.Listed=@($listed | ForEach-Object { @{ Pid=$_.Process.Pid; Type=$_.ApplicationType; Restartable=$_.Restartable } })
-        # Only the copy this case started, read fresh, may be closed.
+        # Only the copy this case started, and the ConPTY hosts it started
+        # (listed when OpenConsole.exe is registered), all read fresh, may be
+        # closed.
         $fresh=Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-        $mine=$listed.Count -eq 1 -and $null -ne $fresh -and -not $p.HasExited -and $listed[0].Process.Pid -eq $p.Id -and
-            $fresh.Path -eq $p.Path -and [Math]::Abs(([Rm]::StartTime($listed[0]) - $fresh.StartTime.ToUniversalTime()).TotalMilliseconds) -lt 1000
-        if(-not $mine) { throw "Restart Manager lists something other than this case's copy ($(@($listed | ForEach-Object { $_.Process.Pid }) -join ',')); not shutting down." }
+        $out.ConsoleHosts=@(Console-Hosts $case)
+        $near={ param($a,$b) [Math]::Abs(($a - $b).TotalMilliseconds) -lt 1000 }
+        $strangers=@($listed | Where-Object {
+            $e=$_; $start=[Rm]::StartTime($e)
+            $copy=$e.Process.Pid -eq $p.Id -and $null -ne $fresh -and -not $p.HasExited -and $fresh.Path -eq $p.Path -and (& $near $start $fresh.StartTime.ToUniversalTime())
+            $hosted=@($out.ConsoleHosts | Where-Object { $_.Pid -eq $e.Process.Pid -and (& $near $start $_.Start) }).Count -eq 1
+            -not ($copy -or $hosted)
+        })
+        if($strangers.Count -or @($listed | Where-Object { $_.Process.Pid -eq $p.Id }).Count -ne 1) {
+            throw "Restart Manager lists something other than this case's copy and its console hosts ($(@($listed | ForEach-Object { $_.Process.Pid }) -join ',')); not shutting down."
+        }
         $timeline=[Collections.Generic.List[Rm+Sample]]::new(); [long]$elapsed=0
         $out.ForegroundBefore=[Rm]::GetForegroundWindow().ToInt64()
         $out.Result=[Rm]::Shutdown($h,$p.Id,$p.Handle,$timeline,[ref]$elapsed)
         $out.Ms=$elapsed
+        $out.HostsAtReturn=@(Running-Hosts $out.ConsoleHosts | ForEach-Object { $_.Pid })
         $out.PromptSeen=@($timeline | Where-Object Prompt).Count -gt 0
         $out.ForegroundChanged=@($timeline | Where-Object { $_.Foreground.ToInt64() -ne $out.ForegroundBefore }).Count -gt 0
         $changes=@(); $last=$null
@@ -392,8 +484,50 @@ function Lock-Held([string]$State) {
 function Send-All($case,[uint32]$Message,[long]$W,[long]$L) {
     return @(@([HiddenLocal]::Hosts($case.Process.Id)) | ForEach-Object { [Rm]::Send($_,$Message,$W,$L) })
 }
+# Restart Manager's view of the copy's processes, without shutting anything
+# down: each listed PID with its RmGetList bRestartable. Throws when it lists a
+# process this run did not start (exact PID and start time, read fresh).
+function Rm-Restartable($case,[Diagnostics.Process[]]$Ours) {
+    $key=[Text.StringBuilder]::new(64); [uint32]$h=0
+    $err=[Rm]::RmStartSession([ref]$h,0,$key); if($err) { throw "RmStartSession failed: $err" }
+    try {
+        $files=@(Get-ChildItem -LiteralPath $case.Dir -File | Where-Object { $_.Extension -in '.exe','.dll' -and $_.Name -ne 'OpenConsole.exe' } | ForEach-Object FullName)
+        $err=[Rm]::RmRegisterResources($h,[uint32]$files.Count,[string[]]$files,0,[IntPtr]::Zero,0,$null); if($err) { throw "RmRegisterResources failed: $err" }
+        [int]$listErr=0
+        $listed=@([Rm]::List($h,[ref]$listErr))
+        if($listErr) { throw "RmGetList failed: $listErr" }
+        $out=@{}
+        foreach($entry in $listed) {
+            $p=@($Ours | Where-Object { $_.Id -eq $entry.Process.Pid })
+            $fresh=Get-Process -Id $entry.Process.Pid -ErrorAction SilentlyContinue
+            $mine=$p.Count -eq 1 -and $null -ne $fresh -and $fresh.Path -eq $p[0].Path -and
+                [Math]::Abs(([Rm]::StartTime($entry) - $fresh.StartTime.ToUniversalTime()).TotalMilliseconds) -lt 1000
+            if(-not $mine) { throw "Restart Manager lists a process this run did not start ($($entry.Process.Pid))." }
+            $out[[int]$entry.Process.Pid]=$entry.Restartable
+        }
+        return $out
+    } finally { [void][Rm]::RmEndSession($h) }
+}
+function Restart-Settings([Diagnostics.Process]$P) {
+    $r=[Rm]::RestartSettings($P.Handle)
+    return [ordered]@{ Hr=('0x{0:X8}' -f $r[0]); Line=$r[1]; Flags=$r[2] }
+}
+# One argument as CommandLineToArgvW reads it back (what the restart
+# registration quotes).
+function Quote-Arg([string]$Arg) {
+    if($Arg.Length -and $Arg -notmatch '[ \t\r\n"]') { return $Arg }
+    $sb=[Text.StringBuilder]::new('"'); $slashes=0
+    foreach($ch in $Arg.ToCharArray()) {
+        if($ch -eq '\') { $slashes++; continue }
+        if($ch -eq '"') { [void]$sb.Append([char]'\',2*$slashes+1) } elseif($slashes) { [void]$sb.Append([char]'\',$slashes) }
+        $slashes=0; [void]$sb.Append($ch)
+    }
+    if($slashes) { [void]$sb.Append([char]'\',2*$slashes) }
+    return $sb.Append('"').ToString()
+}
+$notFound='0x80070490'
 
-$all=@('idle-two-windows','busy-always','busy-ping','settings-dirty','cancel','signout','headless','settings-only-clean','settings-only-dirty','embedding-idle')
+$all=@('idle-two-windows','inno-set-idle','busy-always','busy-ping','settings-dirty','cancel','signout','headless','settings-only-clean','settings-only-dirty','embedding-idle','restartable','restartable-busy','restartable-install-running')
 $selected=if($Cases) { @($Cases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { $all }
 foreach($name in $selected) { if($all -notcontains $name) { throw "Unknown case $name." } }
 
@@ -414,6 +548,31 @@ foreach($name in $selected) {
                 Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
                 $r.LockFreeAfter=-not (Lock-Held $case.State)
                 Check "${name}: the session lock is free once it has exited" $r.LockFreeAfter $true $r.LockFreeAfter
+            } finally { Stop-Case $case }
+        }
+        'inno-set-idle' {
+            $case=Start-Case $name @()
+            try {
+                $before=Mtime $case.State
+                $r.Rm=Rm-Close $case
+                $exited=$case.Process.WaitForExit(10000)
+                $r.Exited=$exited; if($exited) { $r.ExitCode=$case.Process.ExitCode }
+                $r.SessionRewritten=(Mtime $case.State) -gt $before
+                $r.ShapeAfter=Session-Shape $case.State
+                [void](Wait-Until { -not @(Running-Hosts $r.Rm.ConsoleHosts).Count } 5)
+                $r.HostsLeft=@(Running-Hosts $r.Rm.ConsoleHosts | ForEach-Object { $_.Pid })
+                $registered=@($r.Rm.Registered)
+                Check "${name}: Setup's set includes noctty.exe" ($registered -contains 'noctty.exe') 'noctty.exe' ($registered -join ',')
+                Check "${name}: Restart Manager lists only noctty" (@($r.Rm.Listed).Count -eq 1) 1 (@($r.Rm.Listed | ForEach-Object { "$($_.Pid)/type $($_.Type)" }) -join ',')
+                Check "${name}: RmShutdown succeeds" ($r.Rm.Result -eq 0) 0 "$($r.Rm.Result) in $($r.Rm.Ms) ms"
+                Check "${name}: noctty exits 0" ($exited -and $r.ExitCode -eq 0) 'exit 0' $(if($exited){$r.ExitCode}else{'running'})
+                Check "${name}: the saved session keeps both windows, their tabs and the split" ($r.ShapeAfter -eq $seededShape) $seededShape $r.ShapeAfter
+                Check "${name}: the copy ran ConPTY hosts" (@($r.Rm.ConsoleHosts).Count -gt 0) '> 0' @($r.Rm.ConsoleHosts).Count
+                # Setup goes straight from the close step to [InstallDelete]
+                # OpenConsole.exe and the [Files] copy, so a host still
+                # running when RmShutdown returns holds the excluded file.
+                Check "${name}: no ConPTY host is running when RmShutdown returns" (-not @($r.Rm.HostsAtReturn).Count) 'none' (@($r.Rm.HostsAtReturn) -join ',')
+                Check "${name}: no ConPTY host outlives noctty" (-not $r.HostsLeft.Count) 'none' ($r.HostsLeft -join ',')
             } finally { Stop-Case $case }
         }
         { $_ -in 'busy-always','busy-ping' } {
@@ -577,6 +736,134 @@ foreach($name in $selected) {
                 Check "${name}: the server exits 0 on the request, before its idle timeout" ($null -ne $r.ExitedByMs -and $r.ExitedByMs -lt 4500 -and $r.ExitCode -eq 0) 'exit 0, < 4500 ms after start' "exited by $($r.ExitedByMs) ms, code $($r.ExitCode)"
                 Check "${name}: the lifecycle window never shows" (@($r.Rm.Timeline | Where-Object { $_.LifecycleShown }).Count -eq 0 -and @($r.Lifecycle | Where-Object { $_.Visible }).Count -eq 0) $false 'see Timeline'
             } finally { Stop-Case $case }
+        }
+        'restartable' {
+            $case=Start-Case $name @()
+            $second=$null
+            try {
+                $p=$case.Process
+                $expected=(Quote-Arg ('--config-file=' + (Join-Path $case.Dir 'case.ghostty'))) + ' ' + (Quote-Arg "--class=$runClass")
+                $r.AtStart=Restart-Settings $p
+                $r.ListedAtStart=(Rm-Restartable $case @($p))[$p.Id]
+                $r.Queries=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.Accepted=Restart-Settings $p
+                $r.ListedAccepted=(Rm-Restartable $case @($p))[$p.Id]
+                $r.Ends=@(Send-All $case $Msg.EndSession 0 $closeApp)
+                $r.Cancelled=Restart-Settings $p
+                $r.ListedCancelled=(Rm-Restartable $case @($p))[$p.Id]
+                Check "${name}: not restartable at start" ($r.AtStart.Hr -eq $notFound -and $r.ListedAtStart -eq $false) "$notFound, False" "$($r.AtStart.Hr), $($r.ListedAtStart)"
+                Check "${name}: every window agrees to the query" (@($r.Queries | Where-Object { $_ -ne 1 }).Count -eq 0 -and $r.Queries.Count -eq 2) '1,1' ($r.Queries -join ',')
+                Check "${name}: the agreeing owner is restartable" ($r.ListedAccepted -eq $true) $true $r.ListedAccepted
+                Check "${name}: with its config file and class, and flags 11" ($r.Accepted.Hr -eq '0x00000000' -and $r.Accepted.Line -ceq $expected -and $r.Accepted.Flags -eq 11) "$expected / 11" "$($r.Accepted.Hr) $($r.Accepted.Line) / $($r.Accepted.Flags)"
+                Check "${name}: WM_ENDSESSION(FALSE) removes the registration" ($r.Cancelled.Hr -eq $notFound -and $r.ListedCancelled -eq $false) "$notFound, False" "$($r.Cancelled.Hr), $($r.ListedCancelled)"
+
+                # A second instance of the same copy: the session lock is held,
+                # so it is not the owner and opens a window of its own.
+                $exe=Join-Path $case.Dir 'noctty.exe'
+                $cfg=Join-Path $case.Dir 'case.ghostty'
+                $pi=[HiddenLocal]::Spawn($exe,('"{0}" --config-file="{1}" --single-instance=false --class={2}' -f $exe,$cfg,$runClass),$case.Dir,"WinSta0\$DesktopName")
+                try { $second=[Diagnostics.Process]::GetProcessById($pi.pid); [void]$second.Handle }
+                finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
+                $script:processes.Add(@{ Case="$name-second"; Pid=$second.Id; StartTime=$second.StartTime.ToUniversalTime().ToString('o') })
+                $secondCase=@{ Name="$name-second"; Dir=$case.Dir; Process=$second }
+                if(-not (Wait-Until { @([HiddenLocal]::Hosts($second.Id)).Count -ge 1 } 30)) { throw "${name}: the second instance opened no window." }
+                foreach($h in @([HiddenLocal]::Hosts($second.Id))) { if([HiddenLocal]::WindowDesktop($h) -ne $DesktopName) { throw "${name}: a second-instance window is not on the private desktop." } }
+                Start-Sleep -Seconds 3
+                $r.SecondQueries=@(Send-All $secondCase $Msg.QueryEndSession 0 $closeApp)
+                $r.SecondAccepted=Restart-Settings $second
+                $listed=Rm-Restartable $case @($p,$second)
+                $r.SecondListed=$listed[$second.Id]
+                $r.OwnerStillLock=Lock-Held $case.State
+                [void](Send-All $secondCase $Msg.EndSession 0 $closeApp)
+                Check "${name}: the second instance agrees" (@($r.SecondQueries | Where-Object { $_ -ne 1 }).Count -eq 0 -and $r.SecondQueries.Count -ge 1) '1' ($r.SecondQueries -join ',')
+                Check "${name}: and is not restartable" ($r.SecondAccepted.Hr -eq $notFound -and $r.SecondListed -eq $false) "$notFound, False" "$($r.SecondAccepted.Hr), $($r.SecondListed)"
+            } finally {
+                if($second) { Stop-Case @{ Process=$second } }
+                Stop-Case $case
+            }
+        }
+        'restartable-busy' {
+            $case=Start-Case $name @('confirm-close-surface = always')
+            try {
+                $p=$case.Process
+                $r.Queries=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.Declined=Restart-Settings $p
+                $r.Listed=(Rm-Restartable $case @($p))[$p.Id]
+                [void](Send-All $case $Msg.EndSession 0 $closeApp)
+                Check "${name}: declined" (@($r.Queries | Where-Object { $_ -ne 0 }).Count -eq 0 -and $r.Queries.Count -eq 2) '0,0' ($r.Queries -join ',')
+                Check "${name}: and not restartable" ($r.Declined.Hr -eq $notFound -and $r.Listed -eq $false) "$notFound, False" "$($r.Declined.Hr), $($r.Listed)"
+            } finally { Stop-Case $case }
+        }
+        'restartable-install-running' {
+            # No update check may rewrite the state the case writes.
+            $case=Start-Case $name @('auto-update = off')
+            $held=$null; $setupCase=$null; $setup=$null
+            try {
+                $p=$case.Process
+                $stage=Join-Path $case.Dir 'updates\1.3.999'
+                [void](New-Item -ItemType Directory -Force -Path $stage)
+                $setup=Join-Path $stage 'noctty-1.3.999-windows-x64-setup.exe'
+                # The stand-in Setup: a console program started with no
+                # window, on this desktop, inside the owned job. Read-only, as
+                # a write open then fails with access denied, not a sharing
+                # violation, so only a process check sees it.
+                Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\PING.EXE') -Destination $setup
+                (Get-Item -LiteralPath $setup).IsReadOnly=$true
+                $state=[ordered]@{ staged_version='1.3.999'; staged_kind='installer'; staged_installer_path=$setup; staged_sha256='00' } | ConvertTo-Json -Compress
+                Set-Content -LiteralPath (Join-Path $case.Dir 'update-state.json') -Value $state -NoNewline -Encoding utf8NoBOM
+                $pi=[HiddenLocal]::Spawn($setup,('"{0}" -n 600 127.0.0.1' -f $setup),$stage,"WinSta0\$DesktopName")
+                try { $sp=[Diagnostics.Process]::GetProcessById($pi.pid); [void]$sp.Handle }
+                finally { [void][HiddenLocal]::CloseHandle($pi.thread); [void][HiddenLocal]::CloseHandle($pi.process) }
+                $setupCase=@{ Process=$sp }
+                $script:processes.Add(@{ Case="$name-setup"; Pid=$sp.Id; StartTime=$sp.StartTime.ToUniversalTime().ToString('o') })
+                Start-Sleep -Seconds 1
+                $r.SetupAlive=-not $sp.HasExited
+                $r.Queries=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.Running=Restart-Settings $p
+                $r.ListedRunning=(Rm-Restartable $case @($p))[$p.Id]
+                [void](Send-All $case $Msg.EndSession 0 $closeApp)
+                # Another feed's update check clears the staged record; it
+                # cannot delete the running file, and Setup still runs.
+                Set-Content -LiteralPath (Join-Path $case.Dir 'update-state.json') -Value '{}' -NoNewline -Encoding utf8NoBOM
+                $r.QueriesCleared=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.Cleared=Restart-Settings $p
+                $r.ListedCleared=(Rm-Restartable $case @($p))[$p.Id]
+                [void](Send-All $case $Msg.EndSession 0 $closeApp)
+                $r.SetupStillAlive=-not $sp.HasExited
+                Stop-Case $setupCase; $setupCase=$null
+                # Setup has exited: the same owner registers again.
+                $r.QueriesAfter=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.After=Restart-Settings $p
+                $r.ListedAfter=(Rm-Restartable $case @($p))[$p.Id]
+                [void](Send-All $case $Msg.EndSession 0 $closeApp)
+                # A read-only leftover is no Setup: an unrelated upgrade still
+                # restarts the owner.
+                $r.QueriesReadOnly=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.ReadOnly=Restart-Settings $p
+                $r.ListedReadOnly=(Rm-Restartable $case @($p))[$p.Id]
+                [void](Send-All $case $Msg.EndSession 0 $closeApp)
+                (Get-Item -LiteralPath $setup).IsReadOnly=$false
+                # Nor is the updater's verification open (shared reads only),
+                # which refuses write access as a running image does.
+                $held=[IO.File]::Open($setup,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+                $r.QueriesVerifying=@(Send-All $case $Msg.QueryEndSession 0 $closeApp)
+                $r.Verifying=Restart-Settings $p
+                $r.ListedVerifying=(Rm-Restartable $case @($p))[$p.Id]
+                [void](Send-All $case $Msg.EndSession 0 $closeApp)
+                $held.Dispose(); $held=$null
+                Check "${name}: the stand-in Setup ran throughout" ($r.SetupAlive -and $r.SetupStillAlive) 'True, True' "$($r.SetupAlive), $($r.SetupStillAlive)"
+                Check "${name}: every window agrees" (@($r.Queries | Where-Object { $_ -ne 1 }).Count -eq 0 -and $r.Queries.Count -eq 2) '1,1' ($r.Queries -join ',')
+                Check "${name}: and the owner is not restartable while that Setup runs" ($r.Running.Hr -eq $notFound -and $r.ListedRunning -eq $false) "$notFound, False" "$($r.Running.Hr), $($r.ListedRunning)"
+                Check "${name}: also once the update state no longer names it" ($r.Cleared.Hr -eq $notFound -and $r.ListedCleared -eq $false) "$notFound, False" "$($r.Cleared.Hr), $($r.ListedCleared)"
+                Check "${name}: once it has exited, the owner is restartable again" ($r.After.Hr -eq '0x00000000' -and $r.After.Flags -eq 11 -and $r.ListedAfter -eq $true) '0x00000000 / 11, True' "$($r.After.Hr) / $($r.After.Flags), $($r.ListedAfter)"
+                Check "${name}: a read-only leftover installer does not stop the restart" ($r.ReadOnly.Hr -eq '0x00000000' -and $r.ReadOnly.Flags -eq 11 -and $r.ListedReadOnly -eq $true) '0x00000000 / 11, True' "$($r.ReadOnly.Hr) / $($r.ReadOnly.Flags), $($r.ListedReadOnly)"
+                Check "${name}: nor does the updater's verification handle" ($r.Verifying.Hr -eq '0x00000000' -and $r.Verifying.Flags -eq 11 -and $r.ListedVerifying -eq $true) '0x00000000 / 11, True' "$($r.Verifying.Hr) / $($r.Verifying.Flags), $($r.ListedVerifying)"
+            } finally {
+                if($held) { $held.Dispose() }
+                if($setupCase) { Stop-Case $setupCase }
+                if($setup -and (Test-Path -LiteralPath $setup)) { (Get-Item -LiteralPath $setup).IsReadOnly=$false }
+                Stop-Case $case
+            }
         }
     }
     $results.Cases[$name]=$r

@@ -1119,6 +1119,12 @@ pub fn init(
         // Initialize our IO backend
         const exec_config: termio.Exec.Config = .{
             .command = command,
+            // A user profile's command line, which Exec runs as written when
+            // `command` still is its split (never for an `initial-command`).
+            .command_line = if (builtin.os.tag == .windows)
+                rt_surface.launchCommandLine()
+            else
+                null,
             .env = env,
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",

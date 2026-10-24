@@ -46,7 +46,18 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #endif
 ChangesAssociations=yes
+; Setup asks Restart Manager to close what holds the files it replaces. The
+; bundled OpenConsole.exe runs once per pane as a headless ConPTY host, and
+; Restart Manager classes it RmUnknownApp, which only a forced shutdown can
+; close: with it registered, every non-forced RmShutdown failed with 351 in
+; under 100 ms before noctty saw any message, and Setup aborted (exit 5 under
+; /SUPPRESSMSGBOXES). It exits with noctty (measured: no OpenConsole child
+; survived once Restart Manager had closed noctty), so leaving it out still
+; frees the file. noctty.exe, conpty.dll and the handoff proxy stay registered.
+; Needs Inno Setup 6.4.2 or later. Keep CloseApplications off "force": a
+; forced close kills the programs running in noctty's terminals.
 CloseApplications=yes
+CloseApplicationsFilterExcludes=OpenConsole.exe
 RestartApplications=yes
 UninstallDisplayIcon={app}\noctty.exe
 SetupIconFile={#SourceDir}\dist\windows\noctty.ico
@@ -127,15 +138,22 @@ Root: HKA; Subkey: "Software\Classes\Drive\shell\noctty\command"; ValueType: str
 Filename: "{win}\explorer.exe"; Parameters: """{app}\noctty.exe"""; Description: "Launch noctty"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; The in-app Install quits noctty and runs this Setup silently with
 ; /RELAUNCH=1, so nothing else starts noctty again: /RESTARTAPPLICATIONS only
-; restarts what Restart Manager closed, and noctty has already exited by then.
+; restarts what Restart Manager closed and registered for a restart, noctty has
+; already exited by then, and another noctty process does not register while
+; this Setup runs.
 ; Install starts Setup with ShellExecute "runas", the case where
 ; runasoriginaluser does nothing, hence Explorer here too.
 Filename: "{win}\explorer.exe"; Parameters: """{app}\noctty.exe"""; Flags: nowait runasoriginaluser; Check: RelaunchAfterSilentSetup
 
 [Code]
 { True for the silent apply that noctty starts from its update notice, which
-  passes /RELAUNCH=1. A hand-run silent install (winget, Chocolatey, a script)
-  does not pass it and so does not start the app, as before. }
+  passes /RELAUNCH=1. A silent install started any other way (WinGet,
+  Chocolatey, a script) does not pass it, so this entry does not start noctty
+  there. RestartApplications does instead, when the noctty that owns the saved
+  session agreed to close: it registers for Setup's restart while agreeing.
+  Setup restarts applications after the [Run] entries and before the finished
+  page, so in a wizard run a "Launch noctty" left checked starts noctty a
+  second time, which opens one more window. }
 function RelaunchAfterSilentSetup(): Boolean;
 begin
   Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');

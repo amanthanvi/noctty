@@ -131,6 +131,7 @@ const SPI_GETWHEELSCROLLLINES: UINT = 0x0068;
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_PAGESCROLL: u32 = 0xFFFF_FFFF;
 const CB_GETDROPPEDSTATE: UINT = 0x0157;
+const CB_SHOWDROPDOWN: UINT = 0x014F;
 const VK_CONTROL: i32 = 0x11;
 const VK_MENU: i32 = 0x12;
 const VK_SHIFT: i32 = 0x10;
@@ -169,6 +170,9 @@ const WM_SETTINGS_PROOF_PAINT_COUNT: UINT = WM_APP + 0x109;
 const WM_SETTINGS_PROOF_LAYOUT_BATCHED: UINT = WM_APP + 0x10A;
 /// Posted by a raw scalar field's `EN_KILLFOCUS`; wParam is its `RawScalarField`.
 const WM_SETTINGS_FIELD_LEFT: UINT = WM_APP + 0x10B;
+/// Posted when the Default profile dropdown closes over a profile list that
+/// changed while it was open, so the refill runs after its selection is read.
+const WM_SETTINGS_PROFILES_CHANGED: UINT = WM_APP + 0x10C;
 const WS_CHILD: u32 = 0x40000000;
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_TABSTOP: u32 = 0x00010000;
@@ -381,6 +385,9 @@ const OwnedSettingField = enum {
     font_family,
     theme,
     command,
+    /// A dropdown, not a text field: a choice is staged at once and never
+    /// waits in `owned_text_changed`.
+    default_profile,
 
     fn section(self: OwnedSettingField) Section {
         return nativeSection(self.descriptor().section);
@@ -394,6 +401,7 @@ const OwnedSettingField = enum {
             .font_family => .@"font-family",
             .theme => .theme,
             .command => .command,
+            .default_profile => .@"default-profile",
         }).?;
     }
 };
@@ -429,7 +437,7 @@ fn expectNativeFieldNames(names: field_model.NativeNames, kind: field_model.Kind
         control_index = index;
         const role: SettingsControlRole = switch (kind) {
             .boolean, .blur => .check_box,
-            .choice => .combo_box,
+            .choice, .profile => .combo_box,
             else => .edit,
         };
         try std.testing.expectEqual(role, spec.role);
@@ -554,6 +562,7 @@ const field_adapters = .{
     .edit_font_family = FieldAdapter{ .display = display_edit_font_family, .changed = ownedEditChanged(.font_family, "edit_font_family"), .left = SettingsWindow.syncFontFamilyFromEdit },
     .edit_theme = FieldAdapter{ .display = display_edit_theme, .changed = ownedEditChanged(.theme, "edit_theme"), .left = SettingsWindow.syncThemeFromEdit },
     .edit_command = FieldAdapter{ .display = display_edit_command, .changed = ownedEditChanged(.command, "edit_command"), .left = SettingsWindow.syncCommandFromEdit },
+    .combo_default_profile = FieldAdapter{ .display = SettingsWindow.displayDefaultProfile, .changed = SettingsWindow.syncDefaultProfileFromCombo },
     .edit_pad_x = paddingAdapter(.window_padding_x),
     .edit_pad_y = paddingAdapter(.window_padding_y),
     .chk_app_notify_clipboard = checkboxAdapter(.app_notify_clipboard),
@@ -608,7 +617,7 @@ pub const editable_keys = .{
     Config.Key.@"shell-integration",      Config.Key.@"cursor-style",      Config.Key.@"background-blur",
     Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
     Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
-    Config.Key.@"accent-follow-system",
+    Config.Key.@"accent-follow-system",   Config.Key.@"default-profile",
 };
 
 /// Scalar EDIT controls whose raw text can temporarily be invalid and
@@ -1031,7 +1040,7 @@ const FormControl = struct {
 fn fieldRole(kind: field_model.Kind) SettingsControlRole {
     return switch (kind) {
         .boolean, .blur => .check_box,
-        .choice => .combo_box,
+        .choice, .profile => .combo_box,
         else => .edit,
     };
 }
@@ -1422,6 +1431,274 @@ fn pointerLresult(pointer: anytype) LRESULT {
     return @bitCast(@intFromPtr(pointer));
 }
 
+/// One profile the Default profile dropdown can save: its key, which is what
+/// `default-profile` gets (never the label, which a rename changes), and the
+/// label the picker shows.
+pub const ProfileChoice = struct {
+    key: []const u8,
+    label: []const u8,
+    /// Named by `profile-hidden`: offered only while it is the saved value
+    /// or the draft's.
+    hidden: bool = false,
+};
+
+/// What `AppHandle.profileChoices` answers. Every string is owned by the
+/// allocator it was made with.
+pub const ProfileChoices = struct {
+    items: []ProfileChoice = &.{},
+    /// The item the value asked about starts, if one does.
+    selected: ?usize = null,
+    /// The label of the profile the value asked about starts when no item
+    /// is it: the loaded config resolved it without the list (an `ssh:`
+    /// alias outside the SSH config, say), so it does start.
+    saved_label: ?[]const u8 = null,
+    /// Whether `items` is the whole list. A value no item matches in a
+    /// complete list names nothing here; in a partial one it may still.
+    complete: bool = false,
+    /// The value asked about, when no item is it and it has no
+    /// `saved_label`, names nothing here: the loaded config found nothing
+    /// for it, or the list is complete and holds nothing it names. Shown as
+    /// "(not found)".
+    saved_not_found: bool = false,
+    /// The label the draft's value, the one asked about apart from the
+    /// saved value, starts under when no item's key is it: a `wsl:` or
+    /// `ssh:` key starts without being listed, so one a reload left out of
+    /// the list (SSH config hosts switched off) is not called missing.
+    draft_label: ?[]const u8 = null,
+
+    pub fn deinit(self: *ProfileChoices, alloc: std.mem.Allocator) void {
+        for (self.items) |item| {
+            alloc.free(item.key);
+            alloc.free(item.label);
+        }
+        alloc.free(self.items);
+        if (self.saved_label) |label| alloc.free(label);
+        if (self.draft_label) |label| alloc.free(label);
+        self.* = .{};
+    }
+};
+
+/// What a row of the Default profile dropdown shows.
+const ProfileRow = union(enum) {
+    /// No `default-profile` line.
+    automatic,
+    /// `ProfileChoices.items[index]`; choosing it saves its key.
+    choice: usize,
+    /// The saved value, as written, when no listed profile matches it.
+    kept,
+    /// The draft's value when it is neither the saved value nor a listed
+    /// profile: a choice whose profile left the list after it was made (a
+    /// reload took it out), which Save would still write.
+    draft,
+};
+
+/// The rows of the Default profile dropdown, built from the app's choices,
+/// the saved value (the window's baseline) and the draft's value. The row
+/// the saved value starts is `saved`, and choosing it keeps that value as
+/// written (`pwsh` stays `pwsh`, not `pwsh.exe`), so the line is rewritten
+/// only when another row is chosen. A saved or draft value that names no
+/// listed profile gets a row of its own, and a hidden profile is listed only
+/// while one of them names it, so the dropdown always shows what Save
+/// writes.
+const ProfileRows = struct {
+    /// `len` rows in use, owned by the allocator `build` was given.
+    storage: []ProfileRow = &.{},
+    len: usize = 0,
+    /// The row of the saved value (Automatic for none).
+    saved: usize = 0,
+
+    fn build(
+        alloc: std.mem.Allocator,
+        choices: *const ProfileChoices,
+        saved_value: ?[]const u8,
+        draft_value: ?[]const u8,
+    ) std.mem.Allocator.Error!ProfileRows {
+        // Automatic, every item, and the saved and draft values' own rows.
+        var result: ProfileRows = .{ .storage = try alloc.alloc(ProfileRow, choices.items.len + 3) };
+        // The draft as a value apart from the saved one.
+        const draft: ?[]const u8 = if (draft_value) |text|
+            if (saved_value != null and std.mem.eql(u8, saved_value.?, text)) null else text
+        else
+            null;
+        result.append(.automatic);
+        var draft_listed = false;
+        for (choices.items, 0..) |item, index| {
+            const saved = saved_value != null and choices.selected == index;
+            const drafted = draft != null and std.mem.eql(u8, item.key, draft.?);
+            if (item.hidden and !saved and !drafted) continue;
+            if (saved) result.saved = result.len;
+            if (drafted) draft_listed = true;
+            result.append(.{ .choice = index });
+        }
+        if (saved_value != null and choices.selected == null) {
+            result.saved = result.len;
+            result.append(.kept);
+        }
+        if (draft != null and !draft_listed) result.append(.draft);
+        return result;
+    }
+
+    fn deinit(self: *ProfileRows, alloc: std.mem.Allocator) void {
+        alloc.free(self.storage);
+        self.* = .{};
+    }
+
+    /// The row that shows `value`, the draft's: the saved row for the saved
+    /// value, Automatic for none, else the profile whose key it is (a key
+    /// this dropdown staged), else the draft's own row.
+    fn rowFor(
+        self: *const ProfileRows,
+        choices: *const ProfileChoices,
+        saved_value: ?[]const u8,
+        value: ?[]const u8,
+    ) usize {
+        const text = value orelse return 0;
+        if (saved_value) |saved| if (std.mem.eql(u8, saved, text)) return self.saved;
+        for (self.slice(), 0..) |row, index| switch (row) {
+            .choice => |item| if (std.mem.eql(u8, choices.items[item].key, text)) return index,
+            .draft => return index,
+            else => {},
+        };
+        return self.saved;
+    }
+
+    /// What choosing `row` stages: null for Automatic.
+    fn valueFor(
+        self: *const ProfileRows,
+        choices: *const ProfileChoices,
+        saved_value: ?[]const u8,
+        draft_value: ?[]const u8,
+        row: usize,
+    ) ?[]const u8 {
+        if (row == self.saved) return saved_value;
+        return switch (self.storage[row]) {
+            .automatic => null,
+            .choice => |item| choices.items[item].key,
+            // Only the saved value has a row of its own.
+            .kept => saved_value,
+            .draft => draft_value,
+        };
+    }
+
+    fn append(self: *ProfileRows, row: ProfileRow) void {
+        self.storage[self.len] = row;
+        self.len += 1;
+    }
+
+    fn slice(self: *const ProfileRows) []const ProfileRow {
+        return self.storage[0..self.len];
+    }
+};
+
+/// Room for a Default profile row's text (512 UTF-8 bytes at most, so as many
+/// UTF-16 units) and its terminating zero.
+const combo_text_max = 513;
+
+/// A combo's selected row and its text, which must fit `buf` with its zero.
+fn comboSelectionText(combo: HWND, buf: []u16) ?struct { index: usize, text: []const u16 } {
+    const CB_GETLBTEXT: UINT = 0x0148;
+    const CB_GETLBTEXTLEN: UINT = 0x0149;
+    const index = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if (index < 0) return null;
+    const len = sys.SendMessageW(combo, CB_GETLBTEXTLEN, @intCast(index), 0);
+    if (len < 0 or len >= buf.len) return null;
+    const n = sys.SendMessageW(combo, CB_GETLBTEXT, @intCast(index), @bitCast(@intFromPtr(buf.ptr)));
+    if (n < 0) return null;
+    return .{ .index = @intCast(index), .text = buf[0..@intCast(n)] };
+}
+
+/// What the Default profile dropdown says for `row`. A saved value that
+/// names no listed profile shows the label of the profile it starts, else
+/// it is shown as written, as is a draft whose profile left the list.
+fn writeProfileRowText(
+    writer: *std.Io.Writer,
+    row: ProfileRow,
+    choices: *const ProfileChoices,
+    saved_value: ?[]const u8,
+    draft_value: ?[]const u8,
+) !void {
+    switch (row) {
+        .automatic => try writer.writeAll(automatic_profile_text),
+        .choice => |index| {
+            const item = choices.items[index];
+            try writer.writeAll(item.label);
+            if (item.hidden) try writer.writeAll(" (hidden)");
+        },
+        .kept => if (choices.saved_label) |label| {
+            try writer.writeAll(label);
+        } else {
+            try writer.writeAll(saved_value orelse "");
+            if (choices.saved_not_found) try writer.writeAll(" (not found)");
+        },
+        .draft => if (choices.draft_label) |label| {
+            try writer.writeAll(label);
+        } else {
+            try writer.writeAll(draft_value orelse "");
+            if (choices.complete) try writer.writeAll(" (not found)");
+        },
+    }
+}
+
+/// A row's text in `buf`. Text that does not fit (a profile label may be
+/// thousands of bytes long) is cut at a character boundary and ends in an
+/// ellipsis, so the row never comes out empty or cut inside a character.
+fn profileRowText(
+    buf: []u8,
+    row: ProfileRow,
+    choices: *const ProfileChoices,
+    saved_value: ?[]const u8,
+    draft_value: ?[]const u8,
+) []const u8 {
+    var writer: std.Io.Writer = .fixed(buf);
+    writeProfileRowText(&writer, row, choices, saved_value, draft_value) catch {
+        const ellipsis = "\u{2026}";
+        const written = writer.buffered().len;
+        var end = @min(written, buf.len - ellipsis.len);
+        while (end > 0 and end < written and buf[end] & 0xC0 == 0x80) end -= 1;
+        @memcpy(buf[end..][0..ellipsis.len], ellipsis);
+        return buf[0 .. end + ellipsis.len];
+    };
+    return writer.buffered();
+}
+
+test "settings default profile row text is cut at a character with an ellipsis" {
+    var items = [_]ProfileChoice{
+        // 1 + 2 * 300 bytes: the 512-byte row ends inside a character.
+        .{ .key = "user:long", .label = "a" ++ "\u{e9}" ** 300 },
+        .{ .key = "user:short", .label = "Short", .hidden = true },
+    };
+    const choices: ProfileChoices = .{ .items = &items, .complete = true };
+    var buf: [512]u8 = undefined;
+    const long = profileRowText(&buf, .{ .choice = 0 }, &choices, null, null);
+    try std.testing.expect(long.len <= buf.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(long));
+    try std.testing.expect(std.mem.endsWith(u8, long, "\u{e9}\u{2026}"));
+    try std.testing.expect(std.mem.startsWith(u8, items[0].label, long[0 .. long.len - "\u{2026}".len]));
+    var wide: [512]u16 = undefined;
+    try std.testing.expect(std.mem.len(utf8ToW(&wide, long)) > 0);
+    try std.testing.expectEqualStrings("Short (hidden)", profileRowText(&buf, .{ .choice = 1 }, &choices, null, null));
+}
+
+test "settings default profile rows hold every listed profile and keep the saved one past 255" {
+    const alloc = std.testing.allocator;
+    var items: [300]ProfileChoice = undefined;
+    var keys: [300][16]u8 = undefined;
+    for (&items, &keys, 0..) |*item, *key, index| {
+        const text = std.fmt.bufPrint(key, "ssh:h{d}", .{index}) catch unreachable;
+        item.* = .{ .key = text, .label = text };
+    }
+    const choices: ProfileChoices = .{ .items = &items, .selected = 299, .complete = true };
+    var rows = try ProfileRows.build(alloc, &choices, "ssh:h299", null);
+    defer rows.deinit(alloc);
+    // Automatic and all 300, the saved one last.
+    try std.testing.expectEqual(@as(usize, 301), rows.len);
+    try std.testing.expectEqual(@as(usize, 300), rows.saved);
+    try std.testing.expectEqual(@as(usize, 300), rows.rowFor(&choices, "ssh:h299", "ssh:h299"));
+    try std.testing.expectEqualStrings("ssh:h298", rows.valueFor(&choices, "ssh:h299", null, 299).?);
+}
+
+const automatic_profile_text = "Automatic";
+
 /// Minimal hook into the apprt `App` so the settings module can fetch
 /// the chrome brush colors without pulling in the whole app type.
 pub const AppHandle = struct {
@@ -1500,6 +1777,17 @@ pub const AppHandle = struct {
     /// Optional. The problems the config load found, as the Advanced page lists
     /// them (`config_problems.Problems.listText`), copied into `buf`.
     configProblems: ?*const fn (ctx: *anyopaque, buf: []u8) []const u8 = null,
+    /// Optional. The profiles the Default profile dropdown offers, from the
+    /// list the profile picker shows (hidden profiles included and marked),
+    /// and which of them `reference` (a `default-profile` value) starts, and
+    /// the label `draft` (the draft's value) starts under when it is not
+    /// `reference` and no listed key is it. Allocated with `alloc`; the caller frees it with `deinit`. Must not
+    /// discover profiles on this thread: with no list yet it asks for one and
+    /// answers what it has, and the app calls `profilesChanged` when the list
+    /// arrives. `ask` false: answer only what the windows already have and
+    /// never ask (that refill, which must not start another discovery when
+    /// one failed). Without it the dropdown offers only Automatic.
+    profileChoices: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices = null,
     /// Fire-and-forget success toast for the app-level in-app stack
     /// (e.g. "Settings saved"). Borrowed title + body — caller must
     /// keep them alive only for the duration of the call; the stack
@@ -1718,6 +2006,21 @@ pub const SettingsWindow = struct {
     restoring_focus: bool = false,
     /// Lines per wheel notch for tests; null reads the system setting.
     wheel_lines_override: ?u32 = null,
+    /// What the Default profile dropdown was last filled from
+    /// (`displayDefaultProfile`): the app's profiles, the rows, and the saved
+    /// value they were built for, as written (owned by `handle.alloc`).
+    profile_choices: ProfileChoices = .{},
+    profile_rows: ProfileRows = .{},
+    profile_saved_value: ?[]u8 = null,
+    /// The draft's value the rows were built for, when it is not the saved
+    /// one (owned by `handle.alloc`).
+    profile_draft_value: ?[]u8 = null,
+    /// The profile list or the config changed while the dropdown was open;
+    /// it is refilled when it closes.
+    profile_rows_stale: bool = false,
+    /// A refill put off while the list was open was to ask the app for a
+    /// list (`fillDefaultProfile`'s `ask`).
+    profile_rows_ask: bool = false,
 
     pub fn init(handle: AppHandle) SettingsWindow {
         return .{ .handle = handle, .combo_trace = bench_trace.SettingsComboTrace.init(handle.alloc) };
@@ -1833,6 +2136,7 @@ pub const SettingsWindow = struct {
         self.resetClosePromptState();
         self.quit_after_close = false;
         self.clearPending();
+        self.forgetProfileRows();
     }
 
     /// Put every live preview back to the saved value. The preview writes the
@@ -1872,7 +2176,27 @@ pub const SettingsWindow = struct {
         self.original = null;
         if (self.current) |*c| c.deinit();
         self.current = null;
+        // An open Default profile list keeps the rows it shows, so a choice
+        // made in it after a save (which starts the draft over) is still
+        // staged; they are rebuilt when it closes (`fillDefaultProfile`).
+        if (!self.profileListOpen()) self.forgetProfileRows();
         self.updateSaveEnabled();
+    }
+
+    fn profileListOpen(self: *const SettingsWindow) bool {
+        const combo = self.fields.combo_default_profile orelse return false;
+        return sys.IsWindow(combo) != 0 and sys.SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) != 0;
+    }
+
+    fn forgetProfileRows(self: *SettingsWindow) void {
+        self.profile_choices.deinit(self.handle.alloc);
+        if (self.profile_saved_value) |value| self.handle.alloc.free(value);
+        self.profile_saved_value = null;
+        if (self.profile_draft_value) |value| self.handle.alloc.free(value);
+        self.profile_draft_value = null;
+        self.profile_rows.deinit(self.handle.alloc);
+        self.profile_rows_stale = false;
+        self.profile_rows_ask = false;
     }
 
     fn currentRevision(self: *const SettingsWindow) u64 {
@@ -2376,6 +2700,7 @@ pub const SettingsWindow = struct {
             .font_family => self.displayFontFamilyInEdit(),
             .theme => self.displayThemeInEdit(),
             .command => self.displayCommandInEdit(),
+            .default_profile => self.displayDefaultProfile(),
         }
     }
 
@@ -2384,6 +2709,8 @@ pub const SettingsWindow = struct {
             .font_family => self.syncFontFamilyFromEdit(),
             .theme => self.syncThemeFromEdit(),
             .command => self.syncCommandFromEdit(),
+            // A choice is staged when it is made.
+            .default_profile => {},
         }
     }
 
@@ -2401,7 +2728,7 @@ pub const SettingsWindow = struct {
         };
         var replacement_owned = true;
         defer if (replacement_owned) replacement.deinit();
-        if (replacement._command_defaulted) replacement.command = null;
+        useSavedValues(&replacement);
         var changes: [setting_field_count]SettingsTransaction.FieldValue = undefined;
         for (std.enums.values(SettingField), 0..) |field, i| {
             changes[i] = .{ .field = field, .value = settingValue(&replacement, field) };
@@ -3756,6 +4083,109 @@ pub const SettingsWindow = struct {
         setEditText(edit, writer.buffered(), &self.suppress_edit_events);
     }
 
+    /// Fill the Default profile dropdown from the app's profiles, the saved
+    /// `default-profile` and the draft's, asking the app for a list when no
+    /// window has one, and select the draft's row.
+    fn displayDefaultProfile(self: *SettingsWindow) void {
+        self.fillDefaultProfile(true);
+    }
+
+    fn fillDefaultProfile(self: *SettingsWindow, ask_now: bool) void {
+        const combo = self.fields.combo_default_profile orelse return;
+        // An open list keeps the rows the user is looking at, whatever asked
+        // for the refill (a discovery, a config reload); `CBN_CLOSEUP` refills
+        // it once it closes.
+        if (self.profileListOpen()) {
+            self.profile_rows_stale = true;
+            self.profile_rows_ask = self.profile_rows_ask or ask_now;
+            return;
+        }
+        // Taken before asking: a discovery that fails on the UI thread calls
+        // `profilesChanged` from inside `profileChoices`, and that refill must
+        // not ask again.
+        const ask = ask_now or self.profile_rows_ask;
+        self.profile_rows_ask = false;
+        const p = self.pending orelse return;
+        const o = self.original orelse return;
+        const alloc = self.handle.alloc;
+        const saved: ?[]const u8 = if (o.@"default-profile") |text| text else null;
+        const draft: ?[]const u8 = if (p.@"default-profile") |text| text else null;
+        var choices: ProfileChoices = if (self.handle.profileChoices) |get|
+            get(self.handle.ctx, alloc, saved, draft, ask) catch |err| blk: {
+                std.log.warn("settings: could not list profiles err={}", .{err});
+                break :blk .{};
+            }
+        else
+            .{};
+        var rows = ProfileRows.build(alloc, &choices, saved, draft) catch {
+            choices.deinit(alloc);
+            std.log.warn("settings: could not list profiles err=OutOfMemory", .{});
+            return;
+        };
+        const saved_copy = if (saved) |text| alloc.dupe(u8, text) catch null else null;
+        const draft_copy = if (draft) |text| alloc.dupe(u8, text) catch null else null;
+        if ((saved != null and saved_copy == null) or (draft != null and draft_copy == null)) {
+            if (saved_copy) |text| alloc.free(text);
+            if (draft_copy) |text| alloc.free(text);
+            rows.deinit(alloc);
+            choices.deinit(alloc);
+            std.log.warn("settings: could not keep the default profile values", .{});
+            return;
+        }
+        self.forgetProfileRows();
+        self.profile_choices = choices;
+        self.profile_saved_value = saved_copy;
+        self.profile_draft_value = draft_copy;
+        self.profile_rows = rows;
+
+        self.suppress_edit_events = true;
+        defer self.suppress_edit_events = false;
+        var before_w: [combo_text_max]u16 = undefined;
+        const before = comboSelectionText(combo, &before_w);
+        _ = sys.SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        for (self.profile_rows.slice()) |row| {
+            var text: [512]u8 = undefined;
+            var text_w: [512]u16 = undefined;
+            const w = utf8ToW(&text_w, profileRowText(&text, row, &self.profile_choices, saved, draft));
+            _ = sys.SendMessageW(combo, CB_ADDSTRING, 0, @bitCast(@intFromPtr(w)));
+        }
+        const row = self.profile_rows.rowFor(&self.profile_choices, saved, draft);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, row, 0);
+        // A new row is announced by the provider (`syncNativeState`, on
+        // `CB_SETCURSEL`), which compares indexes only. The same row with
+        // other text (a relabelled profile, "(not found)" once the list is
+        // complete) is announced here.
+        if (before) |old| if (old.index == row) {
+            var after_w: [combo_text_max]u16 = undefined;
+            const same = if (comboSelectionText(combo, &after_w)) |now| std.mem.eql(u16, old.text, now.text) else false;
+            if (!same) if (self.controlIndex(combo)) |index| if (self.control_uia_providers[index]) |provider| provider.valueTextChanged();
+        };
+    }
+
+    /// Stage the chosen row: Automatic clears `default-profile`, a profile
+    /// saves its key, and the saved value's row keeps it as written.
+    fn syncDefaultProfileFromCombo(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const combo = self.fields.combo_default_profile orelse return;
+        const index = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if (index < 0 or index >= self.profile_rows.len) return;
+        const next = self.profile_rows.valueFor(&self.profile_choices, self.profile_saved_value, self.profile_draft_value, @intCast(index));
+        const arena = p.*._arena.?.allocator();
+        p.*.@"default-profile" = if (next) |text| arena.dupeZ(u8, text) catch {
+            std.log.warn("settings: could not stage the default profile", .{});
+            return;
+        } else null;
+        self.trackOwnedEdit(.default_profile);
+    }
+
+    /// The app's profile list changed (a discovery finished or failed):
+    /// refill the Default profile dropdown from what the windows have, or,
+    /// while its list is open, once it closes. Never asks for a list itself.
+    pub fn profilesChanged(self: *SettingsWindow) void {
+        self.fillDefaultProfile(false);
+    }
+
     fn syncPaddingFromEdit(self: *SettingsWindow, comptime field: RawScalarField) void {
         const setting = comptime field.setting();
         if (self.suppress_edit_events) return;
@@ -4243,6 +4673,16 @@ pub const SettingsWindow = struct {
         self.finishSuccessfulSave(masked);
     }
 
+    /// Make a copy of the app's config hold what the config files say, which
+    /// is what Settings shows and saves: no `command` when noctty chose the
+    /// command itself (the automatic default), and the files'
+    /// `default-profile` when noctty's command line named another one for
+    /// this process (a jump-list link's, an elevated window's).
+    fn useSavedValues(config: *Config) void {
+        if (config._command_defaulted) config.command = null;
+        config.@"default-profile" = config.defaultProfileFromFiles();
+    }
+
     fn adoptCurrentConfig(self: *SettingsWindow) !void {
         return self.adoptConfig(self.handle.currentConfig(self.handle.ctx));
     }
@@ -4258,11 +4698,7 @@ pub const SettingsWindow = struct {
         errdefer current_snapshot.deinit();
         var pending = try current.clone(self.handle.alloc);
         errdefer pending.deinit();
-        if (current._command_defaulted) {
-            original.command = null;
-            current_snapshot.command = null;
-            pending.command = null;
-        }
+        for ([_]*Config{ &original, &current_snapshot, &pending }) |copy| useSavedValues(copy);
 
         self.clearPending();
         self.original = original;
@@ -4626,6 +5062,8 @@ pub const SettingsWindow = struct {
                     const row = comptime field_model.form_fields[item.control_index];
                     @field(self.fields, spec.binding) = switch (comptime row.kind()) {
                         .choice => makeCombo(form, hinstance, spec.id, settings_combo_popup_height, &field_model.Combo(row.field.?).labels, style),
+                        // Its items come from the app's profiles when it is shown.
+                        .profile => makeCombo(form, hinstance, spec.id, settings_combo_popup_height, &.{}, style),
                         .boolean, .blur => makeCheckbox(form, hinstance, spec.id, std.unicode.utf8ToUtf16LeStringLiteral(spec.caption.?), style),
                         else => makeEdit(form, hinstance, spec.id, style | if (row.kind() == .integer) ES_NUMBER else 0),
                     };
@@ -5877,7 +6315,7 @@ test "settings open and a first visit create each window once in its final form"
             try std.testing.expectEqual(@as(usize, 0), Work.created().len);
             // Every section shown: the whole form, and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 72), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 74), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -5945,7 +6383,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 72), states[0].len);
+            try std.testing.expectEqual(@as(usize, 74), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -8194,6 +8632,33 @@ const dialog_test = struct {
         live_previews: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
+        /// What the Default profile dropdown is offered: `test_profiles`,
+        /// whole or not yet.
+        profiles_complete: bool = true,
+        profile_lists: u32 = 0,
+        /// The lists asked with `ask` false (refills that must not ask).
+        profile_refills: u32 = 0,
+        /// Leave `user:py312` out of the list, as a reload that removed it.
+        drop_py312: bool = false,
+        /// Show `user:py312` with this label, as a reload that relabelled it.
+        relabel_py312: ?[]const u8 = null,
+        /// Refill the dropdown from inside a list that asks, as a discovery
+        /// that fails on the UI thread does (`profilesChanged`), up to 3 deep.
+        refill_when_asked: bool = false,
+        nested_refills: u32 = 0,
+        /// The label of the profile the loaded config resolved an unlisted
+        /// saved value to, as the App answers for an `ssh:` alias outside
+        /// the SSH config.
+        resolved_label: ?[]const u8 = null,
+
+        /// The fixture's profiles, as `AppHandle.profileChoices` lists them:
+        /// shown ones first, then the hidden tail.
+        const test_profiles = [_]ProfileChoice{
+            .{ .key = "pwsh.exe", .label = "PowerShell" },
+            .{ .key = "cmd.exe", .label = "Command Prompt" },
+            .{ .key = "user:py312", .label = "Python 3.12" },
+            .{ .key = "wsl:docker-desktop", .label = "WSL: docker-desktop", .hidden = true },
+        };
 
         fn start() !*Fixture {
             return startWith(false);
@@ -8231,6 +8696,7 @@ const dialog_test = struct {
                 .customUiaProvidersEnabled = &customUia,
                 .previewField = &previewField,
                 .highContrast = &highContrast,
+                .profileChoices = &profileChoices,
                 .onClosed = &onClosed,
             });
             self.settings.wheel_lines_override = 3;
@@ -8282,6 +8748,67 @@ const dialog_test = struct {
         fn highContrast(ctx: *anyopaque) bool {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             return self.high_contrast;
+        }
+
+        /// The App resolves a reference by the picker's rules; here a key in
+        /// any case, `pwsh`, or a bare user id.
+        fn profileChoices(ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices {
+            const self: *Fixture = @ptrCast(@alignCast(ctx));
+            // The fixture's drafts are its own keys, which no label stands
+            // in for (`settingsDraftProfileLabel` is tested in win32.zig).
+            _ = draft;
+            self.profile_lists += 1;
+            if (!ask) self.profile_refills += 1;
+            if (ask and self.refill_when_asked and self.nested_refills < 3) {
+                self.nested_refills += 1;
+                self.settings.profilesChanged();
+            }
+            var kept: [test_profiles.len]ProfileChoice = undefined;
+            var kept_len: usize = 0;
+            for (if (self.profiles_complete) test_profiles[0..] else test_profiles[0..1]) |source| {
+                if (self.drop_py312 and std.mem.eql(u8, source.key, "user:py312")) continue;
+                kept[kept_len] = source;
+                kept_len += 1;
+            }
+            const listed = kept[0..kept_len];
+            const items = try alloc.alloc(ProfileChoice, listed.len);
+            var made: usize = 0;
+            errdefer {
+                for (items[0..made]) |item| {
+                    alloc.free(item.key);
+                    alloc.free(item.label);
+                }
+                alloc.free(items);
+            }
+            for (listed, items) |source, *item| {
+                const key = try alloc.dupe(u8, source.key);
+                const shown = if (self.relabel_py312 != null and std.mem.eql(u8, source.key, "user:py312")) self.relabel_py312.? else source.label;
+                const label = alloc.dupe(u8, shown) catch |err| {
+                    alloc.free(key);
+                    return err;
+                };
+                item.* = .{ .key = key, .label = label, .hidden = source.hidden };
+                made += 1;
+            }
+            var selected: ?usize = null;
+            if (reference) |value| for (listed, 0..) |source, index| {
+                const user_id = std.mem.startsWith(u8, source.key, "user:") and std.ascii.eqlIgnoreCase(source.key["user:".len..], value);
+                if (std.ascii.eqlIgnoreCase(source.key, value) or user_id or
+                    (index == 0 and std.ascii.eqlIgnoreCase(value, "pwsh"))) selected = index;
+            };
+            var result: ProfileChoices = .{
+                .items = items,
+                .selected = selected,
+                .complete = self.profiles_complete,
+                .saved_not_found = self.profiles_complete and selected == null and self.resolved_label == null,
+            };
+            if (reference != null and selected == null) if (self.resolved_label) |label| {
+                result.saved_label = alloc.dupe(u8, label) catch |err| {
+                    result.deinit(alloc);
+                    return err;
+                };
+            };
+            return result;
         }
 
         fn notifySuccess(_: *anyopaque, _: []const u8, _: []const u8) void {}
@@ -9094,7 +9621,7 @@ test "settings display-only text row needs no persistence adapter" {
             try std.testing.expectEqual(@as(LONG_PTR, 499), sys.GetWindowLongPtrW(control, -12));
             try std.testing.expect(sys.GetWindowLongPtrW(control, GWL_STYLE) & WS_TABSTOP == 0);
             try std.testing.expect(sys.IsWindowEnabled(fixture.settings.btn_save.?) == 0);
-            try std.testing.expectEqual(@as(usize, 25), editable_keys.len);
+            try std.testing.expectEqual(@as(usize, 26), editable_keys.len);
         }
     }.body);
 }
@@ -10070,6 +10597,352 @@ test "settings descriptor support matches every native editor enabled state" {
     }.body);
 }
 
+test "settings default profile dropdown offers the listed profiles and saves keys" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn rows(combo: HWND, expected: []const []const u8) !void {
+            try std.testing.expectEqual(@as(LRESULT, @intCast(expected.len)), sys.SendMessageW(combo, 0x0146, 0, 0)); // CB_GETCOUNT
+            for (expected, 0..) |text, index| {
+                var buf_w: [128:0]u16 = @splat(0);
+                const len = sys.SendMessageW(combo, 0x0148, index, @bitCast(@intFromPtr(&buf_w))); // CB_GETLBTEXT
+                var buf: [256]u8 = undefined;
+                const n = try std.unicode.utf16LeToUtf8(&buf, buf_w[0..@intCast(len)]);
+                try std.testing.expectEqualStrings(text, buf[0..n]);
+            }
+        }
+
+        fn choose(settings: *SettingsWindow, combo: HWND, row: usize) void {
+            _ = sys.SendMessageW(combo, CB_SETCURSEL, row, 0);
+            const id: usize = @intCast(sys.GetDlgCtrlID(combo));
+            _ = sys.SendMessageW(settings.hwnd.?, WM_COMMAND, id | (@as(usize, CBN_SELCHANGE) << 16), @bitCast(@intFromPtr(combo)));
+        }
+
+        fn draft(settings: *const SettingsWindow) ?[]const u8 {
+            return if (settings.pending.?.@"default-profile") |value| value else null;
+        }
+
+        fn body() !void {
+            {
+                const fixture = try dialog_test.Fixture.start();
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                // The list is asked for when the Shell page is made, not at open.
+                try std.testing.expectEqual(@as(u32, 0), fixture.profile_lists);
+                settings.setActiveSection(.shell);
+                try std.testing.expect(fixture.profile_lists > 0);
+                const combo = settings.fields.combo_default_profile.?;
+                // Automatic, then the shown profiles; the hidden one is left out.
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12" });
+                try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                // It sits right after Default command, in Tab order too.
+                try std.testing.expectEqual(combo, dialog_test.GetNextDlgTabItem(settings.hwnd.?, settings.fields.edit_command.?, 0).?);
+
+                // A profile is staged by its key, never its label.
+                choose(settings, combo, 3);
+                try std.testing.expectEqualStrings("user:py312", draft(settings).?);
+                try std.testing.expect(settings.hasPendingChanges());
+                choose(settings, combo, 1);
+                try std.testing.expectEqualStrings("pwsh.exe", draft(settings).?);
+                // Automatic is no value at all, and nothing is left to save.
+                choose(settings, combo, 0);
+                try std.testing.expect(draft(settings) == null);
+                try std.testing.expect(!settings.hasPendingChanges());
+            }
+            {
+                // A saved `pwsh` preselects PowerShell and stays `pwsh` when
+                // that row is chosen again: the line is rewritten only for
+                // another profile.
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "pwsh");
+                const settings = &fixture.settings;
+                try settings.open();
+                settings.setActiveSection(.shell);
+                const combo = settings.fields.combo_default_profile.?;
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12" });
+                try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                choose(settings, combo, 2);
+                try std.testing.expectEqualStrings("cmd.exe", draft(settings).?);
+                choose(settings, combo, 1);
+                try std.testing.expectEqualStrings("pwsh", draft(settings).?);
+                try std.testing.expect(!settings.hasPendingChanges());
+                choose(settings, combo, 0);
+                try std.testing.expect(draft(settings) == null);
+                try std.testing.expect(settings.hasPendingChanges());
+            }
+            {
+                // A hidden profile is offered while it is the saved one; a
+                // value that names nothing is shown as written and kept.
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                const arena = fixture.config._arena.?.allocator();
+                fixture.config.@"default-profile" = try arena.dupeZ(u8, "wsl:docker-desktop");
+                const settings = &fixture.settings;
+                try settings.open();
+                settings.setActiveSection(.shell);
+                const combo = settings.fields.combo_default_profile.?;
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "WSL: docker-desktop (hidden)" });
+                try std.testing.expectEqual(@as(LRESULT, 4), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+
+                fixture.config.@"default-profile" = try arena.dupeZ(u8, "user:gone");
+                try settings.adoptCurrentConfig();
+                settings.refreshAllControls();
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:gone (not found)" });
+                try std.testing.expectEqual(@as(LRESULT, 4), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                choose(settings, combo, 1);
+                choose(settings, combo, 4);
+                try std.testing.expectEqualStrings("user:gone", draft(settings).?);
+                try std.testing.expect(!settings.hasPendingChanges());
+
+                // While the list is partial the value may still be on its way,
+                // so it is not called missing; the full list replaces it.
+                fixture.profiles_complete = false;
+                settings.profilesChanged();
+                try rows(combo, &.{ "Automatic", "PowerShell", "user:gone" });
+                fixture.profiles_complete = true;
+                settings.profilesChanged();
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:gone (not found)" });
+                // A refill after a discovery never asks for a list: one that
+                // failed would otherwise start another at once.
+                try std.testing.expectEqual(@as(u32, 2), fixture.profile_refills);
+
+                // While the list is open, neither a config reload nor a new
+                // profile list replaces its rows. Closing it sends
+                // `CBN_CLOSEUP`, which posts the refill.
+                settings.ensureControlVisible(combo);
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 1, 0);
+                try std.testing.expect(sys.SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) != 0);
+                fixture.config.@"default-profile" = try arena.dupeZ(u8, "user:other");
+                try settings.adoptCurrentConfig();
+                settings.refreshAllControls();
+                settings.profilesChanged();
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:gone (not found)" });
+                try std.testing.expectEqual(@as(LRESULT, 4), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                try std.testing.expect(settings.profile_rows_stale);
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 0, 0);
+                try std.testing.expect(sys.SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) == 0);
+                try std.testing.expect(!settings.profile_rows_stale);
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:gone (not found)" });
+                dialog_test.pump();
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:other (not found)" });
+                // A save while it is open starts the draft over, and a row
+                // chosen in it then is still staged.
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 1, 0);
+                try settings.adoptCurrentConfig();
+                settings.refreshAllControls();
+                choose(settings, combo, 1);
+                try std.testing.expectEqualStrings("pwsh.exe", draft(settings).?);
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 0, 0);
+                dialog_test.pump();
+                try std.testing.expectEqualStrings("pwsh.exe", draft(settings).?);
+                try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                choose(settings, combo, 4);
+                try std.testing.expectEqualStrings("user:other", draft(settings).?);
+                try std.testing.expect(!settings.hasPendingChanges());
+                // A list closed with nothing put off posts nothing.
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 1, 0);
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 0, 0);
+                const lists_before_pump = fixture.profile_lists;
+                dialog_test.pump();
+                try std.testing.expectEqual(lists_before_pump, fixture.profile_lists);
+
+                // The refill that was to ask asks once: a discovery that fails
+                // on the UI thread refills from inside the ask, and that refill
+                // must not ask again.
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 1, 0);
+                try settings.adoptCurrentConfig();
+                settings.refreshAllControls();
+                _ = sys.SendMessageW(combo, CB_SHOWDROPDOWN, 0, 0);
+                fixture.refill_when_asked = true;
+                const asked_before = fixture.profile_lists - fixture.profile_refills;
+                dialog_test.pump();
+                try std.testing.expectEqual(asked_before + 1, fixture.profile_lists - fixture.profile_refills);
+                try std.testing.expectEqual(@as(u32, 1), fixture.nested_refills);
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "user:other (not found)" });
+            }
+            {
+                // In a window noctty started with `--default-profile` (a
+                // jump-list link, New Elevated Window) that value wins in this
+                // process, but Settings shows and saves the files' value: it
+                // preselects what the files name, and Automatic removes what
+                // they hold, not the command line's value.
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                const arena = fixture.config._arena.?.allocator();
+                fixture.config._default_profile_cli = try arena.dupeZ(u8, "user:py312");
+                fixture.config.@"default-profile" = fixture.config._default_profile_cli;
+                fixture.config._default_profile_file = try arena.dupeZ(u8, "pwsh");
+                const settings = &fixture.settings;
+                try settings.open();
+                settings.setActiveSection(.shell);
+                const combo = settings.fields.combo_default_profile.?;
+                try std.testing.expectEqualStrings("pwsh", settings.original.?.@"default-profile".?);
+                try std.testing.expectEqual(@as(LRESULT, 1), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                choose(settings, combo, 0);
+                try std.testing.expect(draft(settings) == null);
+                try std.testing.expect(settings.hasPendingChanges());
+                // No file line: Automatic, with nothing to save.
+                fixture.config._default_profile_file = null;
+                try settings.adoptCurrentConfig();
+                settings.refreshAllControls();
+                try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                try std.testing.expect(!settings.hasPendingChanges());
+                // A reload keeps showing the files' value.
+                fixture.config._default_profile_file = try arena.dupeZ(u8, "cmd.exe");
+                settings.externalConfigChanged(&fixture.config, 2);
+                try std.testing.expectEqualStrings("cmd.exe", settings.original.?.@"default-profile".?);
+                try std.testing.expectEqual(@as(LRESULT, 2), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            }
+            {
+                // A saved value the loaded config resolved without the list
+                // (an `ssh:` alias outside the SSH config) does start, so it
+                // shows that profile's label and is not called missing.
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "ssh:box");
+                fixture.resolved_label = "SSH: box";
+                const settings = &fixture.settings;
+                try settings.open();
+                settings.setActiveSection(.shell);
+                const combo = settings.fields.combo_default_profile.?;
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "Python 3.12", "SSH: box" });
+                try std.testing.expectEqual(@as(LRESULT, 4), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            }
+            {
+                // A staged profile that a reload takes out of the list keeps
+                // a row of its own, selected, so the dropdown shows what Save
+                // would write rather than the saved Automatic.
+                const fixture = try dialog_test.Fixture.prepare(false);
+                defer fixture.finish();
+                const settings = &fixture.settings;
+                try settings.open();
+                settings.setActiveSection(.shell);
+                const combo = settings.fields.combo_default_profile.?;
+                choose(settings, combo, 3);
+                try std.testing.expectEqualStrings("user:py312", draft(settings).?);
+                fixture.drop_py312 = true;
+                settings.externalConfigChanged(&fixture.config, 2);
+                try std.testing.expectEqualStrings("user:py312", draft(settings).?);
+                try rows(combo, &.{ "Automatic", "PowerShell", "Command Prompt", "user:py312 (not found)" });
+                try std.testing.expectEqual(@as(LRESULT, 3), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+                // Choosing it again keeps it; Automatic drops it.
+                choose(settings, combo, 1);
+                choose(settings, combo, 3);
+                try std.testing.expectEqualStrings("user:py312", draft(settings).?);
+                choose(settings, combo, 0);
+                try std.testing.expect(draft(settings) == null);
+                try std.testing.expect(!settings.hasPendingChanges());
+            }
+        }
+    }.body);
+}
+
+test "settings default profile announces a changed label on the same row" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const events = @import("win32_uia/events.zig");
+            const fixture = try dialog_test.Fixture.prepare(true);
+            defer fixture.finish();
+            fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "user:py312");
+            const settings = &fixture.settings;
+            try settings.open();
+            settings.setActiveSection(.shell);
+            const combo = settings.fields.combo_default_profile.?;
+            try std.testing.expect(settings.control_uia_providers[settings.controlIndex(combo).?] != null);
+            try std.testing.expectEqual(@as(LRESULT, 3), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            // A refill that changes nothing says nothing.
+            const quiet = events.testing_property_changes;
+            settings.profilesChanged();
+            try std.testing.expectEqual(quiet, events.testing_property_changes);
+            // The saved profile is relabelled and keeps its row: one Value change.
+            fixture.relabel_py312 = "Python 3.13";
+            settings.profilesChanged();
+            try std.testing.expectEqual(@as(LRESULT, 3), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            try std.testing.expectEqual(quiet + 1, events.testing_property_changes);
+            // A new row is announced once, by the provider.
+            fixture.config.@"default-profile" = try fixture.config._arena.?.allocator().dupeZ(u8, "cmd.exe");
+            try settings.adoptCurrentConfig();
+            const moved = events.testing_property_changes;
+            settings.profilesChanged();
+            try std.testing.expectEqual(@as(LRESULT, 2), sys.SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            try std.testing.expectEqual(moved + 1, events.testing_property_changes);
+        }
+    }.body);
+}
+
+test "settings default profile rows keep an unresolved vs:newest value apart from an older instance" {
+    var items = [_]ProfileChoice{
+        .{ .key = "vs:6bb7cfd9:cmd", .label = "Developer Command Prompt for VS 2022" },
+    };
+    // A partial list: the app found no row the value starts.
+    const choices: ProfileChoices = .{ .items = &items, .complete = false };
+    var rows = try ProfileRows.build(std.testing.allocator, &choices, "vs:newest:cmd", "vs:newest:cmd");
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqual(@as(usize, 2), rows.saved);
+    // The older instance is a choice of its own, which stages its key.
+    try std.testing.expectEqualStrings("vs:6bb7cfd9:cmd", rows.valueFor(&choices, "vs:newest:cmd", "vs:newest:cmd", 1).?);
+    try std.testing.expectEqualStrings("vs:newest:cmd", rows.valueFor(&choices, "vs:newest:cmd", "vs:newest:cmd", 2).?);
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("vs:newest:cmd", profileRowText(&buf, rows.storage[2], &choices, "vs:newest:cmd", null));
+
+    // Not found, as the loaded config said, with a partial list or none.
+    const not_found: ProfileChoices = .{ .items = &items, .complete = false, .saved_not_found = true };
+    try std.testing.expectEqualStrings("ssh:box (not found)", profileRowText(&buf, .kept, &not_found, "ssh:box", null));
+    const no_list: ProfileChoices = .{ .complete = false, .saved_not_found = true };
+    var alone = try ProfileRows.build(std.testing.allocator, &no_list, "ssh:box", null);
+    defer alone.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), alone.len);
+    try std.testing.expectEqualStrings("ssh:box (not found)", profileRowText(&buf, alone.storage[alone.saved], &no_list, "ssh:box", null));
+    // Visual Studio did not answer the load's lookup: a complete list
+    // leaves the value unmarked, apart from the instance's row, which
+    // stages that instance's key.
+    const unavailable: ProfileChoices = .{ .items = &items, .complete = true };
+    var apart = try ProfileRows.build(std.testing.allocator, &unavailable, "vs:newest:cmd", null);
+    defer apart.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), apart.saved);
+    try std.testing.expectEqualStrings("vs:newest:cmd", profileRowText(&buf, apart.storage[2], &unavailable, "vs:newest:cmd", null));
+    try std.testing.expectEqualStrings("vs:6bb7cfd9:cmd", apart.valueFor(&unavailable, "vs:newest:cmd", null, 1).?);
+
+    // A complete list that predates the instance the loaded config resolved
+    // the value to: the saved row is that instance, by its label, and the
+    // older row still stages its own key.
+    const resolved: ProfileChoices = .{ .items = &items, .complete = true, .saved_label = "Developer Command Prompt for VS 2026" };
+    var newer = try ProfileRows.build(std.testing.allocator, &resolved, "vs:newest:cmd", null);
+    defer newer.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), newer.saved);
+    try std.testing.expectEqualStrings("Developer Command Prompt for VS 2026", profileRowText(&buf, newer.storage[2], &resolved, "vs:newest:cmd", null));
+    try std.testing.expectEqualStrings("vs:6bb7cfd9:cmd", newer.valueFor(&resolved, "vs:newest:cmd", null, 1).?);
+    try std.testing.expectEqualStrings("vs:newest:cmd", newer.valueFor(&resolved, "vs:newest:cmd", null, 2).?);
+}
+
+test "settings default profile shows a draft the list left out by the label it starts under" {
+    // `ssh:box` was chosen from the list, and a reload switched SSH config
+    // hosts off: the complete list now has no SSH rows, but the key still
+    // starts, so the App gives its label and the row is not "(not found)".
+    var items = [_]ProfileChoice{
+        .{ .key = "pwsh.exe", .label = "PowerShell" },
+        .{ .key = "cmd.exe", .label = "Command Prompt" },
+    };
+    const labelled: ProfileChoices = .{ .items = &items, .selected = 0, .complete = true, .draft_label = "SSH: box" };
+    var rows = try ProfileRows.build(std.testing.allocator, &labelled, "pwsh.exe", "ssh:box");
+    defer rows.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), rows.len);
+    const row = rows.rowFor(&labelled, "pwsh.exe", "ssh:box");
+    try std.testing.expectEqual(@as(usize, 3), row);
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("SSH: box", profileRowText(&buf, rows.storage[row], &labelled, "pwsh.exe", "ssh:box"));
+    // Choosing it again stages the key, never the label.
+    try std.testing.expectEqualStrings("ssh:box", rows.valueFor(&labelled, "pwsh.exe", "ssh:box", row).?);
+    // Automatic as the saved value: the same row.
+    var automatic = try ProfileRows.build(std.testing.allocator, &labelled, null, "ssh:box");
+    defer automatic.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("SSH: box", profileRowText(&buf, automatic.storage[automatic.rowFor(&labelled, null, "ssh:box")], &labelled, null, "ssh:box"));
+    // A draft nothing starts (a removed `user:` profile) has no label and is
+    // still not found.
+    const missing: ProfileChoices = .{ .items = &items, .selected = 0, .complete = true };
+    try std.testing.expectEqualStrings("user:gone (not found)", profileRowText(&buf, .draft, &missing, "pwsh.exe", "user:gone"));
+}
+
 test "settings UIA checkbox and combo actions update the draft and discard restores it" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -10181,7 +11054,7 @@ test "settings UIA checkbox and combo actions update the draft and discard resto
                 }
             }
             try std.testing.expectEqual(@as(usize, 6), checks);
-            try std.testing.expectEqual(@as(usize, 12), combos);
+            try std.testing.expectEqual(@as(usize, 13), combos);
             const retired = settings.control_uia_providers[settings.controlIndex(settings.fields.chk_trim_trail.?).?].?;
             retired.detach();
             try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, retired.toggle_iface.vtbl.Toggle(&retired.toggle_iface));
@@ -11296,6 +12169,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const id: usize = wParam & 0xFFFF;
             const notify: u16 = @intCast((wParam >> 16) & 0xFFFF);
             if (notify == 8 and lParam != 0) { // CBN_CLOSEUP
+                if (owner) |o| if (o.profile_rows_stale and o.fields.combo_default_profile == @as(?HWND, @ptrFromInt(@as(usize, @bitCast(lParam))))) {
+                    o.profile_rows_stale = false;
+                    _ = sys.PostMessageW(hwnd, WM_SETTINGS_PROFILES_CHANGED, 0, 0);
+                };
                 if (owner) |o| if (o.combo_trace.enabled()) {
                     const control: HWND = @ptrFromInt(@as(usize, @bitCast(lParam)));
                     if (o.controlIndex(control)) |index| {
@@ -11376,7 +12253,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             inline for (field_model.form_fields) |row| if (id == row.native.id) {
                 const adapter = comptime @field(field_adapters, row.native.binding);
                 const changed = switch (comptime row.kind()) {
-                    .choice => CBN_SELCHANGE,
+                    .choice, .profile => CBN_SELCHANGE,
                     .boolean, .blur => BN_CLICKED,
                     else => EN_CHANGE,
                 };
@@ -11426,6 +12303,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         },
         WM_SETTINGS_FIELD_LEFT => {
             if (owner) |o| if (wParam < raw_scalar_field_count) o.fieldLeft(@enumFromInt(wParam));
+            return 0;
+        },
+        WM_SETTINGS_PROFILES_CHANGED => {
+            if (owner) |o| o.profilesChanged();
             return 0;
         },
         WM_SETTINGS_CLOSE_NOW => {
@@ -11655,11 +12536,17 @@ fn optionalCommandEql(a: ?Config.Command, b: ?Config.Command) bool {
     return commandEql(a.?, b.?);
 }
 
+fn optionalStringEql(a: ?[:0]const u8, b: ?[:0]const u8) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
 fn ownedSettingEql(a: *const Config, b: *const Config, field: OwnedSettingField) bool {
     return switch (field) {
         .font_family => a.@"font-family".equal(b.@"font-family"),
         .theme => optionalThemeEql(a.theme, b.theme),
         .command => optionalCommandEql(a.command, b.command),
+        .default_profile => optionalStringEql(a.@"default-profile", b.@"default-profile"),
     };
 }
 
@@ -11669,6 +12556,7 @@ fn copyOwnedSetting(target: *Config, source: *const Config, field: OwnedSettingF
         .font_family => target.@"font-family" = try source.@"font-family".clone(alloc),
         .theme => target.theme = if (source.theme) |*value| try value.clone(alloc) else null,
         .command => target.command = if (source.command) |*value| try value.clone(alloc) else null,
+        .default_profile => target.@"default-profile" = if (source.@"default-profile") |value| try alloc.dupeZ(u8, value) else null,
     }
 }
 
@@ -11978,6 +12866,7 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     var pending_command: Config.Command = undefined;
     try pending_command.parseCLI(pending_alloc, "direct:pwsh.exe -NoLogo");
     pending.command = pending_command;
+    pending.@"default-profile" = try pending_alloc.dupeZ(u8, "user:py312");
 
     const dirty = [_]bool{true} ** owned_setting_field_count;
     var conflict = [_]bool{false} ** owned_setting_field_count;
@@ -11985,12 +12874,13 @@ test "win32_settings: advanced diff includes arena-backed-only edits" {
     var buf: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     const owned = writeOwnedSettingDiffs(&writer, &original, &pending, dirty, conflict);
-    try std.testing.expectEqual(@as(usize, 3), owned.lines);
+    try std.testing.expectEqual(@as(usize, 4), owned.lines);
     try std.testing.expect(!owned.truncated);
     const text = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, text, "Font family: Cascadia Mono -> JetBrains Mono, Symbols Nerd Font") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Terminal theme: Old Theme -> light:Day,dark:Night (conflict)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Default command: cmd.exe -> direct:pwsh.exe -NoLogo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Default profile: (automatic) -> user:py312") != null);
 }
 
 test "win32_settings: font-family edit text builds repeatable list" {

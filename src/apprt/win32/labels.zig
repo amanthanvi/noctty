@@ -765,10 +765,15 @@ pub fn profileIndexByKey(profiles: []const windows_shell.Profile, key: []const u
     return null;
 }
 
+/// Where the picker starts: the profile chosen last (in this window, else in
+/// any), then the one `default-profile` names (`default_key`), then the
+/// `NOCTTY_WIN32_DEFAULT_PROFILE` hint. Null when none of them is in
+/// `profiles` (the shown ones); the caller then tries the automatic default.
 pub fn preferredProfileIndex(
     profiles: []const windows_shell.Profile,
     selected_key: ?[]const u8,
     app_key: ?[]const u8,
+    default_key: ?[]const u8,
     hint: ?[]const u8,
     fallback_index: usize,
 ) ?usize {
@@ -784,6 +789,9 @@ pub fn preferredProfileIndex(
         for (profiles, 0..) |profile, index| {
             if (profileKeyEquals(profile, key)) return index;
         }
+    }
+    if (default_key) |key| {
+        if (profileIndexByKey(profiles, key)) |index| return index;
     }
 
     if (hint) |value| {
@@ -2367,6 +2375,8 @@ fn profileKindBadge(kind: windows_shell.ProfileKind) []const u8 {
         .git_bash => "GIT",
         .cmd => "CMD",
         .ssh => "SSH",
+        .user => "USER",
+        .vs_dev_cmd, .vs_dev_shell => "VS",
     };
 }
 
@@ -2380,6 +2390,11 @@ fn profileKindGlyph(kind: windows_shell.ProfileKind) []const u8 {
         // Distinct from WSL's "<>": this is the one kind that opens a network
         // session, so it should not share another kind's cue.
         .ssh => "->",
+        // A profile of the user's own: no shell is implied.
+        .user => "*>",
+        // The shell each one runs, as for cmd and Windows PowerShell.
+        .vs_dev_cmd => "C>",
+        .vs_dev_shell => ">_",
     };
 }
 
@@ -2398,15 +2413,40 @@ fn profileOpenTargetActionText(target: ProfileOpenTarget) []const u8 {
     };
 }
 
+/// A menu item's text: the label, then the shortcut after a tab. In a menu
+/// `&` marks the next character as the mnemonic and a tab starts the
+/// shortcut column, and a `profile-name` may contain either, so the label
+/// doubles `&` and turns a tab into a space.
 pub fn buildDropdownProfileLabel(
     alloc: Allocator,
     profile: *const windows_shell.Profile,
     index: usize,
 ) ![]u8 {
-    if (index < 9) {
-        return try std.fmt.allocPrint(alloc, "{s}\tCtrl+Shift+{d}", .{ profile.label, index + 1 });
-    }
-    return try alloc.dupe(u8, profile.label);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (profile.label) |byte| switch (byte) {
+        '&' => try out.appendSlice(alloc, "&&"),
+        '\t' => try out.append(alloc, ' '),
+        else => try out.append(alloc, byte),
+    };
+    if (index < 9) try out.print(alloc, "\tCtrl+Shift+{d}", .{index + 1});
+    return try out.toOwnedSlice(alloc);
+}
+
+test "win32 a profile's menu item keeps an ampersand and a tab in its label" {
+    const alloc = std.testing.allocator;
+    const profile: windows_shell.Profile = .{
+        .kind = .user,
+        .key = "user:qa",
+        .label = "Q&A\tshell",
+        .command = .{ .shell = "cmd.exe" },
+    };
+    const first = try buildDropdownProfileLabel(alloc, &profile, 0);
+    defer alloc.free(first);
+    try std.testing.expectEqualStrings("Q&&A shell\tCtrl+Shift+1", first);
+    const tenth = try buildDropdownProfileLabel(alloc, &profile, 9);
+    defer alloc.free(tenth);
+    try std.testing.expectEqualStrings("Q&&A shell", tenth);
 }
 
 fn targetButtonLabelRightInset(target: ?ProfileOpenTarget) i32 {
@@ -3078,10 +3118,27 @@ test "win32 preferredProfileIndex respects host key then app key then hint" {
         },
     };
 
-    try std.testing.expectEqual(@as(?usize, 1), preferredProfileIndex(&profiles, "git-bash", null, "cmd", 0));
-    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, null, "cmd.exe", "pwsh", 0));
-    try std.testing.expectEqual(@as(?usize, 0), preferredProfileIndex(&profiles, null, null, "power", 2));
-    try std.testing.expectEqual(@as(?usize, null), preferredProfileIndex(&profiles, null, null, "definitely_not_real", 1));
+    try std.testing.expectEqual(@as(?usize, 1), preferredProfileIndex(&profiles, "git-bash", null, null, "cmd", 0));
+    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, null, "cmd.exe", null, "pwsh", 0));
+    try std.testing.expectEqual(@as(?usize, 0), preferredProfileIndex(&profiles, null, null, null, "power", 2));
+    try std.testing.expectEqual(@as(?usize, null), preferredProfileIndex(&profiles, null, null, null, "definitely_not_real", 1));
+}
+
+test "win32 preferredProfileIndex puts default-profile after a choice and before the hint" {
+    const profiles = [_]windows_shell.Profile{
+        .{ .kind = .pwsh, .key = "pwsh.exe", .label = "PowerShell", .command = .{ .direct = &.{"pwsh.exe"} } },
+        .{ .kind = .git_bash, .key = "git-bash", .label = "Git Bash", .command = .{ .direct = &.{"bash.exe"} } },
+        .{ .kind = .cmd, .key = "cmd.exe", .label = "Command Prompt", .command = .{ .direct = &.{"cmd.exe"} } },
+    };
+
+    // `default-profile` comes after a choice the user made and before the
+    // `NOCTTY_WIN32_DEFAULT_PROFILE` hint, in any case of its key.
+    try std.testing.expectEqual(@as(?usize, 1), preferredProfileIndex(&profiles, null, null, "GIT-BASH", "cmd", 0));
+    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, "cmd.exe", null, "git-bash", "pwsh", 0));
+    try std.testing.expectEqual(@as(?usize, 0), preferredProfileIndex(&profiles, null, "pwsh.exe", "git-bash", null, 1));
+    // One the list does not show (hidden, or gone) leaves the hint.
+    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, null, null, "user:gone", "cmd", 0));
+    try std.testing.expectEqual(@as(?usize, null), preferredProfileIndex(&profiles, null, null, "user:gone", null, 0));
 }
 
 test "win32 resolveProfileSelection supports index and prefix matching" {

@@ -1628,6 +1628,14 @@ pub const SettingsControlProvider = struct {
         }
     }
 
+    /// A combo's rows were rebuilt and its selected row kept its index but
+    /// not its text (Settings' Default profile dropdown relabels a profile):
+    /// announce the new Value. `syncNativeState` compares indexes only.
+    pub fn valueTextChanged(self: *SettingsControlProvider) void {
+        if (!self.available() or self.role != .combo_box) return;
+        events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ValueValuePropertyId);
+    }
+
     fn getHostRawElementProvider(
         p: *com.IRawElementProviderSimple,
         out: *?*com.IRawElementProviderSimple,
