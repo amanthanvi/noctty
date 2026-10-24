@@ -204,6 +204,16 @@ try {
         -OutputRoot $dualOutputRelative | Out-Null
     $dualInstallScript = Get-Content -LiteralPath (Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\tools\chocolateyInstall.ps1')) -Raw
 
+    # A package that carries both installers says so on its Chocolatey page.
+    $dualNuspec = [System.Xml.XmlDocument]::new()
+    $dualNuspec.Load((Join-Path $repoRoot (Join-Path $dualOutputRelative 'chocolatey\noctty.nuspec')))
+    $dualNamespaces = [System.Xml.XmlNamespaceManager]::new($dualNuspec.NameTable)
+    $dualNamespaces.AddNamespace('n', $nuspecNamespace)
+    $dualDescription = $dualNuspec.SelectSingleNode('/n:package/n:metadata/n:description', $dualNamespaces).InnerText
+    if (-not $dualDescription.Contains(', on x64 or ARM64.', [StringComparison]::Ordinal)) {
+        throw 'Generated nuspec description for the two-architecture package must say ", on x64 or ARM64.".'
+    }
+
     function Get-GeneratedInstallerChoice {
         param([string] $InstallScript, [AllowNull()] $CpuArchitecture)
 

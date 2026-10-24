@@ -380,16 +380,23 @@ to `bucket/noctty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 ### Chocolatey
 
 - Secret: `CHOCO_API_KEY` (in the `release` environment)
-- Optional repo variable: `CHOCOLATEY_PUBLISH` (`off` skips the push)
+- Optional repo variable: `CHOCOLATEY_PUBLISH` (`off` skips the push; it is
+  unset, so the push runs)
 - Package id: `noctty`
 
-The release workflow always generates the Chocolatey package metadata, and
-its Chocolatey step runs after Scoop and WinGet, so a refusal there cannot hold
-them back. It skips `choco pack` and `choco push` cleanly when
-`CHOCO_API_KEY` is absent, and the step does not run while `CHOCOLATEY_PUBLISH`
-is `off`. chocolatey.org refuses the push with `403` while another account
-owns the id, or while a version is in moderation and none is approved, which
-can take weeks; the step then fails after everything else has published.
+The package is published: users install with `choco install noctty`
+(chocolatey.org approved 1.3.134 on 2026-10-23, and the `CHOCOLATEY_PUBLISH`
+variable was deleted that day). The release workflow always generates the
+Chocolatey package metadata, and its Chocolatey step runs after Scoop and
+WinGet, so a refusal there cannot hold them back. It skips `choco pack` and
+`choco push` cleanly when `CHOCO_API_KEY` is absent, and the step does not run
+while `CHOCOLATEY_PUBLISH` is `off`. The package carries both installers, and
+its install script picks one by asking the CPU, because Chocolatey runs as an
+emulated x64 process on ARM64 Windows. chocolatey.org reviews each version
+before listing it, so a release can reach Chocolatey after the other channels,
+and it refuses the push with `403` while another account owns the id, or while
+a version is in moderation and none is approved; the step then fails after
+everything else has published.
 [docs/chocolatey-publishing.md](docs/chocolatey-publishing.md) has the id's
 state, how to turn the push off and back on, and the steps for resubmitting a
 version during moderation; do not rerun a published Release for that. To push a
@@ -405,7 +412,8 @@ choco push .\out\noctty.<version>.nupkg --source https://push.chocolatey.org/ --
 ```
 
 The chocolatey.org account and its API key (stored on 2026-10-17) are the
-maintainer's, outside this repository.
+maintainer's, outside this repository. `virtualex`, who created the package,
+stays a co-maintainer of the id.
 
 ## Zig version
 

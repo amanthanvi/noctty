@@ -183,10 +183,15 @@ checksummed and bound to the canonical release workflow by GitHub build
 provenance. The legacy `SHA256SUMS.txt` file remains an x64 auto-update
 compatibility alias.
 
-A Chocolatey package (`noctty`) is built by the release workflow, but
-chocolatey.org has no approved version of it, so `choco install noctty` does
-not work today. Version 1.3.134 was pushed there on 2026-10-21 and is waiting
-in moderation; see [chocolatey-publishing.md](chocolatey-publishing.md).
+The Chocolatey package (`noctty`) is approved on chocolatey.org:
+`choco install noctty` installs it (1.3.134 was approved on 2026-10-23). The
+release workflow builds it and pushes it after WinGet, and Chocolatey reviews
+each version before listing it, so a release can reach Chocolatey after the
+other channels. The package runs the release's setup program for the
+architecture of the machine. On ARM64 Windows it picks the ARM64 one by asking
+the CPU, from the first release built after 1.3.134 (the 1.3.134 package
+installs the x64 build there); see
+[chocolatey-publishing.md](chocolatey-publishing.md).
 
 [getting-started.md](getting-started.md) covers download and install,
 including the SmartScreen warning. [verify-release.md](verify-release.md)

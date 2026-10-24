@@ -21,12 +21,28 @@ the feed's
 [entry for it](https://community.chocolatey.org/api/v2/Packages(Id='noctty',Version='1.3.134'))
 had `PackageStatus` `Submitted`, `PackageSubmittedStatus` `Pending`,
 `IsApproved` `false`, `PackageValidationResultStatus` `Passing` (since 10:16
-UTC) and `PackageTestResultStatus` `Pending`. No version of `noctty` is
-approved yet.
+UTC) and `PackageTestResultStatus` `Pending`.
+
+Chocolatey approved 1.3.134 on 2026-10-23, about two days after the push. Read
+at 16:28 UTC on 2026-10-24, the same feed entry had `PackageStatus` `Approved`,
+`IsApproved` `true`, `PackageReviewer` `Windos` (reviewed and approved at
+07:44 UTC on 2026-10-23), `PackageValidationResultStatus` `Passing` and
+`PackageTestResultStatus` `Passing`, and `choco search noctty --exact` listed
+`noctty|1.3.134`. So `choco install noctty` works. Chocolatey's own install
+test passed; this repository did not run an install, which would run Setup on
+the machine that checked.
 
 ## Turning the release push off and on
 
-While chocolatey.org cannot accept the push, turn it off with a repository
+The release push runs again. The repository variable `CHOCOLATEY_PUBLISH` was
+deleted on 2026-10-23, after 1.3.134 was approved, so each release's
+**Publish Chocolatey package** step pushes the new version once the releases on
+GitHub, Scoop and WinGet are out. It had been `off` while
+chocolatey.org could not accept a push: it refuses every new version while a
+version is in moderation and none is approved, and that refusal ended the
+release run red.
+
+If chocolatey.org cannot accept the push again, turn it off with a repository
 variable, so that a release does not end red for a refusal nothing in this
 repository can fix:
 
@@ -39,34 +55,49 @@ run lists it as skipped) and keeps the `CHOCO_API_KEY` secret. Only `off` skips
 it (GitHub compares the text without regard to case); with the variable unset,
 or set to anything else, the step runs. The Chocolatey Publish workflow below
 does not read the variable: it runs only when someone starts it, and it is the
-way to try a push while the release step is off.
-
-Chocolatey accepts a push only when this repository's account owns (or
-co-maintains) the id; `amanthanvi` has maintained it since 2026-10-20. While
-the package has a version in moderation and none approved, which has been the
-case since 1.3.134 was pushed on 2026-10-21, Chocolatey also refuses every new
-version. (A corrected package that a moderator asks for keeps the version in
-moderation; see below.) So the variable stays `off` until a version is
-approved. Then delete it, and each release pushes again:
+way to try a push while the release step is off. To turn the push back on,
+delete the variable:
 
 ```powershell
 gh variable delete CHOCOLATEY_PUBLISH --repo amanthanvi/noctty
 ```
 
+Chocolatey accepts a push only when this repository's account owns (or
+co-maintains) the id; `amanthanvi` has maintained it since 2026-10-20. It also
+refuses every new version while the package has a version in moderation and
+none approved, which was the case from the push of 1.3.134 on 2026-10-21 until
+its approval. (A corrected package that a moderator asks for keeps the version
+in moderation; see below.) The package has an approved version now.
+
 The `Release` workflow never pushes the releases it skipped. Push the latest
 one with the Chocolatey Publish workflow if it is not listed; do not rerun its
-`Release` run.
+`Release` run. Versions 1.3.132 and 1.3.133 were refused (see above) and are
+not on Chocolatey.
 
 ## What the package is
 
 The package downloads the signed Inno Setup installer for the machine's
 architecture (x64 or arm64) from the GitHub release, checks it against the
-release's SHA-256, and runs it silently. Chocolatey's own uninstaller removes
-it through the installer's entry in Apps. The package contains no binaries, so
-it needs no `VERIFICATION.txt`. The id is `noctty`, the title `Noctty`, the
-license is the repository's MIT `LICENSE` at the release tag, and the icon is
-the website's `https://noctty.com/assets/favicon.svg`, because the validator
-rejects an icon served from GitHub.
+release's SHA-256, and runs it silently. The install script asks the CPU for the
+architecture (`Win32_Processor.Architecture` 12 is ARM64), because Chocolatey
+runs as an emulated x64 process on ARM64 Windows and the process reports x64
+there; a package without an ARM64 installer keeps the x64 one. Chocolatey's own
+uninstaller removes it through the installer's entry in Apps. The package
+contains no binaries, so it needs no `VERIFICATION.txt`. The id is `noctty`, the
+title `Noctty`, the license is the repository's MIT `LICENSE` at the release
+tag, and the icon is the website's `https://noctty.com/assets/favicon.svg`,
+because the validator rejects an icon served from GitHub. The package has its
+own description for its Chocolatey page, which names the packaged architectures
+("on x64 or ARM64").
+
+The CPU question and the description came with
+[#526](https://github.com/amanthanvi/noctty/pull/526) and
+[#525](https://github.com/amanthanvi/noctty/pull/525), both merged on
+2026-10-23 after 1.3.134 was built, so they ship with the first release built
+after them. The 1.3.134 package asks the process only: #526's author measured
+it installing the x64 build on a Windows 11 ARM64 machine, where it runs under
+emulation. An upgrade over such an install is expected to switch to the ARM64
+build; that was not tested.
 
 ## The account and the key
 
@@ -161,14 +192,18 @@ repository's code cannot change: limit deployment branches and tags to `main`
 and the `v*` tags (with a tag ruleset, otherwise a writer can create a
 matching tag on any commit), or require a reviewer for the environment.
 
-## What happens after the first push
+## What happens after a push
 
 Every version on the community repository is reviewed before it is listed. An
 automatic validator and an install test start about 30 minutes after the push,
-then a human moderator reviews it. Expect weeks, not days, for a first package:
-another project recorded 28 and 54 days for its first two approvals in 2026.
-Follow the state at `https://community.chocolatey.org/packages/noctty/<version>`
-under **Package Status**; `Submitted` means it is still queued.
+then a human moderator reviews it. The wait varies: 1.3.134, the first push from
+this repository that Chocolatey accepted, was approved about two days later
+(09:42 UTC on 2026-10-21 to 07:44 UTC on 2026-10-23), while another project
+recorded 28 and 54 days for its first two approvals in 2026. How long later
+versions take has not been measured, so a release can reach Chocolatey after
+GitHub, WinGet and Scoop. Follow the state at
+`https://community.chocolatey.org/packages/noctty/<version>` under
+**Package Status**; `Submitted` means it is still queued.
 
 If a moderator asks for changes, the status turns to **Waiting for
 Maintainer** and the email says what to change. The fix goes into
@@ -178,7 +213,7 @@ run the **Chocolatey Publish** workflow again for that version, with
 `resubmit` so that the listed version is not skipped:
 
 ```powershell
-gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f version=1.3.134 -f push=true -f resubmit=true
+gh workflow run chocolatey-publish.yml --repo amanthanvi/noctty --ref main -f version=<version> -f push=true -f resubmit=true
 ```
 
 Do not rerun the release instead: it would rebuild its installers.
@@ -201,7 +236,7 @@ The workflow is these two scripts, so the same steps run from a checkout of
 Actions is unavailable:
 
 ```powershell
-$version = "1.3.134"   # the version the moderator asked about
+$version = "<version>"   # the version the moderator asked about
 $ErrorActionPreference = "Stop"
 function Assert-Exit([string] $What) { if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" } }
 git switch main; Assert-Exit "git switch"
@@ -220,12 +255,12 @@ While a version is in moderation and none is approved, Chocolatey refuses every
 new version with `403`: one of the causes it documents is "Package has a
 version in moderation and no approved versions"
 ([common errors](https://docs.chocolatey.org/en-us/community-repository/maintainers/common-errors/)).
-The releases in that window still publish everywhere else. The Chocolatey step
-runs last so that it cannot hold back WinGet; it fails, the run turns red, and
-its message names the possible causes of a `403`, unless `CHOCOLATEY_PUBLISH`
-is `off` and the step is skipped. Those versions simply never reach Chocolatey
-from the release, and once the push is turned back on the next release pushes
-again.
+That was the state of `noctty` from 2026-10-21 to 2026-10-23. A release in such
+a window still publishes everywhere else. The Chocolatey step runs last so that
+it cannot hold back WinGet; it fails, the run turns red, and its message names
+the possible causes of a `403`, unless `CHOCOLATEY_PUBLISH` is `off` and the
+step is skipped. Such a version never reaches Chocolatey from the release, and
+the next release pushes again once Chocolatey accepts pushes.
 
 A `403` can also mean an invalid or revoked API key, or that another account
 owns the id. A `409 Conflict` is treated as success only when the feed then

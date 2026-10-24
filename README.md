@@ -97,6 +97,15 @@ scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
 scoop install noctty/noctty
 ```
 
+### With Chocolatey
+
+```powershell
+choco install noctty
+```
+
+chocolatey.org reviews each version before listing it, so it can trail the
+other channels after a release.
+
 ### Direct download
 
 The installer adds a Start menu entry, an "Open noctty here" item to
@@ -132,8 +141,8 @@ releases also publish a symbols zip per architecture,
 [docs/windows.md](docs/windows.md#crash-reports-and-diagnostics) says which
 releases have it.
 
-Scoop puts `noctty` on your `PATH`. WinGet runs the installer, and neither the
-installer nor the portable ZIP adds it.
+Scoop puts `noctty` on your `PATH`. WinGet and Chocolatey run the installer, and
+neither the installer nor the portable ZIP adds it.
 To run the `noctty` commands in this README, add the install folder to `PATH`
 or run `.\noctty.com` from that folder.
 
