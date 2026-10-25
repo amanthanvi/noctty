@@ -68,9 +68,8 @@ Wait-HiddenDriverApproval -Run $Run -DesktopName $desktopName
 $driverApproved = $true
 $job = [HiddenWin]::CreateOwnedJob()
 $desktopReceipt = Join-Path $Run 'profile-desktops.jsonl'
-# One line before each step that has no deadline of its own, and before the process-tree query. The
-# driver has no console, so a stall leaves the step it was in as the last line here; the stall of run
-# 40161015852 had to be placed from the desktop receipts instead.
+# One line as each step starts. The driver has no console, so a stall leaves the step it was in as
+# the last line here; the stall of run 40161015852 had to be placed from the desktop receipts instead.
 $stepReceipt = Join-Path $Run 'profile-steps.jsonl'
 function Write-Step([string] $Case, [string] $Step) {
     [ordered]@{ At = [datetime]::UtcNow.ToString('o'); Case = $Case; Step = $Step } | ConvertTo-Json -Compress | Add-Content -LiteralPath $stepReceipt
@@ -285,6 +284,7 @@ function Invoke-Case([string] $Key, [switch] $Control) {
             $shell = Get-Descendants $started.Pid | Where-Object { $_.Name -ieq $expected.Name } | Select-Object -First 1
             if (-not $shell) { Start-Sleep -Milliseconds 200 }
         }
+        Write-Step $label 'interact'
         Check $label "starts $($expected.Name) under noctty" ($null -ne $shell) $expected.Name ($(if ($shell) { $shell.Name } else { $null }))
         $full = if ($shell) { Get-RedactedCommandLine $shell.CommandLine @($Run) -MaxArgumentLength 4000 -MaxArguments 40 } else { '' }
         $shape = if ($shell) { Get-RedactedCommandLine $shell.CommandLine @($Run) } else { '' }
@@ -314,10 +314,11 @@ function Invoke-Case([string] $Key, [switch] $Control) {
             Start-Sleep -Milliseconds 2000
             Check $label 'the typed command ran in the new directory' (Test-Path -LiteralPath (Join-Path $case.Cwd.B 'typed.txt')) 'typed.txt in b' (@(Get-ChildItem -LiteralPath $case.Cwd.B -Name) -join ',')
         }
+        Write-Step $label 'close'
         foreach ($h in [HiddenWin]::Hosts($started.Pid)) { [void][HiddenWin]::PostMessageW($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
         if (-not $started.Process.WaitForExit(15000)) { throw "noctty ($label) did not exit after WM_CLOSE" }
         Write-Step $label 'read session'
-        $saved =Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw | ConvertFrom-Json
+        $saved = Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw | ConvertFrom-Json
         $pane = $saved.windows[0].tabs[0].layout.nodes[0].pane
         Check $label 'the profile key survives a close and save' ($pane.profile -eq $Key) $Key $pane.profile
         if ($Control) {

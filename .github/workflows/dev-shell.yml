@@ -6,7 +6,8 @@ name: Dev shell bootstrap
 # windows-2025 image moved to Visual Studio 2026 (version 18). This runs both on
 # an image with each version and on ARM64: first through vswhere, then through
 # the default install paths with vswhere out of reach (fake installs under
-# RUNNER_TEMP whose VsDevCmd.bat fails on purpose), and with nothing installed.
+# RUNNER_TEMP whose VsDevCmd.bat fails on purpose, one of them a leftover with
+# no C++ tools), and with nothing installed.
 on:
   workflow_dispatch: {}
   pull_request:
@@ -54,8 +55,8 @@ jobs:
       # the image's own install, and the dev shell must then run cl and the
       # command it was given. Without vswhere (ProgramW6432 too: Windows sets a
       # 64-bit child's ProgramFiles from it) it is the newest default install
-      # path, and a failing VsDevCmd.bat must fail the script. With nothing
-      # installed the script must say so and exit 1.
+      # path with an MSVC toolset, and a failing VsDevCmd.bat must fail the
+      # script. With nothing usable installed the script must say so and fail.
       - name: Check the dev shell bootstrap scripts
         shell: pwsh
         env:
@@ -94,22 +95,26 @@ jobs:
             "${label}: $($r.VsDevCmd)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
 
-          function New-FakeInstall([string] $Root, [string] $Version, [string] $Edition) {
-            $tools = Join-Path $Root "Microsoft Visual Studio\$Version\$Edition\Common7\Tools"
-            New-Item -ItemType Directory -Force -Path $tools | Out-Null
-            Set-Content -LiteralPath (Join-Path $tools 'VsDevCmd.bat') -Value "@echo fake VsDevCmd %*`r`n@exit /b 7`r`n" -NoNewline
+          # An install is VsDevCmd.bat plus, unless it is a leftover, an MSVC toolset folder.
+          function New-FakeInstall([string] $Root, [string] $Version, [string] $Edition, [switch] $Leftover) {
+            $install = Join-Path $Root "Microsoft Visual Studio\$Version\$Edition"
+            New-Item -ItemType Directory -Force -Path (Join-Path $install 'Common7\Tools') | Out-Null
+            if (-not $Leftover) { New-Item -ItemType Directory -Force -Path (Join-Path $install 'VC\Tools\MSVC\14.50.0') | Out-Null }
+            Set-Content -LiteralPath (Join-Path $install 'Common7\Tools\VsDevCmd.bat') -Value "@echo fake VsDevCmd %*`r`n@exit /b 7`r`n" -NoNewline
           }
           $cases = @(
             @{ Name = 'only 18'; Installs = @(@('pf', '18', 'BuildTools')); Expect = 'pf\Microsoft Visual Studio\18\BuildTools' }
             @{ Name = 'only 2022 in Program Files (x86)'; Installs = @(@('pf (x86)', '2022', 'BuildTools')); Expect = 'pf (x86)\Microsoft Visual Studio\2022\BuildTools' }
             @{ Name = '18 and 2022'; Installs = @(@('pf', '2022', 'Enterprise'), @('pf', '18', 'Community')); Expect = 'pf\Microsoft Visual Studio\18\Community' }
+            @{ Name = 'a leftover 18 without tools and a 2022'; Installs = @(@('pf', '18', 'Community', 'leftover'), @('pf', '2022', 'Community')); Expect = 'pf\Microsoft Visual Studio\2022\Community' }
+            @{ Name = 'only a leftover without tools'; Installs = @(@('pf', '2022', 'Community', 'leftover')); Expect = $null }
             @{ Name = 'nothing'; Installs = @(); Expect = $null }
           )
           $saved = @{ ProgramFiles = $env:ProgramFiles; ProgramW6432 = $env:ProgramW6432; 'ProgramFiles(x86)' = ${env:ProgramFiles(x86)} }
           foreach ($case in $cases) {
             $base = Join-Path $env:RUNNER_TEMP ('dev-shell-' + ($case.Name -replace '\W', '-'))
             New-Item -ItemType Directory -Force -Path (Join-Path $base 'pf'), (Join-Path $base 'pf (x86)') | Out-Null
-            foreach ($install in $case.Installs) { New-FakeInstall (Join-Path $base $install[0]) $install[1] $install[2] }
+            foreach ($install in $case.Installs) { New-FakeInstall (Join-Path $base $install[0]) $install[1] $install[2] -Leftover:($install.Count -gt 3) }
             try {
               $env:ProgramFiles = Join-Path $base 'pf'
               $env:ProgramW6432 = $env:ProgramFiles
@@ -131,3 +136,6 @@ jobs:
               foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
             }
           }
+          # The runner's wrapper ends the step with `exit $LASTEXITCODE`, which the last
+          # expected failure above would otherwise set.
+          exit 0

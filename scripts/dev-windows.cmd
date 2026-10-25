@@ -41,17 +41,16 @@ if /i not "%DEV_WINDOWS_ARCH%"=="x64" if /i not "%DEV_WINDOWS_ARCH%"=="arm64" (
 )
 
 rem vswhere ships with the Visual Studio Installer at this fixed path and knows every instance
-rem (2026 is version 18, 2022 is 17), any edition and install directory. When it is there it
-rem decides: an instance without the C++ tools for this architecture is skipped, though its
-rem VsDevCmd.bat exists. Only without it are the default install paths probed.
+rem (2026 is version 18, 2022 is 17), any edition and install directory. It is asked for one
+rem with the C++ tools for this architecture, a release first and then a preview. If it is
+rem missing or finds none, the default install paths are probed, newest first, and a
+rem VsDevCmd.bat counts only beside an MSVC toolset: an instance left behind by an uninstall
+rem can keep its VsDevCmd.bat without the C++ tools.
 set "_VC_TOOLS=Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
 if /i "%DEV_WINDOWS_ARCH%"=="arm64" set "_VC_TOOLS=Microsoft.VisualStudio.Component.VC.Tools.ARM64"
 set "_VSWHERE=%_PROGRAM_FILES_X86%\Microsoft Visual Studio\Installer\vswhere.exe"
-if exist "%_VSWHERE%" (
-  for /f "usebackq delims=" %%P in (`"%_VSWHERE%" -latest -products * -requires %_VC_TOOLS% -find Common7\Tools\VsDevCmd.bat 2^>nul`) do if not defined VSDEVCMD set "VSDEVCMD=%%P"
-) else (
-  for %%V in (18 2022) do for %%E in (BuildTools Community Professional Enterprise) do for %%R in ("%_PROGRAM_FILES%" "%_PROGRAM_FILES_X86%") do if not defined VSDEVCMD if exist "%%~R\Microsoft Visual Studio\%%V\%%E\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%%~R\Microsoft Visual Studio\%%V\%%E\Common7\Tools\VsDevCmd.bat"
-)
+if exist "%_VSWHERE%" for %%Q in ("" "-prerelease") do if not defined VSDEVCMD for /f "usebackq delims=" %%P in (`"%_VSWHERE%" -latest -products * %%~Q -requires %_VC_TOOLS% -find Common7\Tools\VsDevCmd.bat 2^>nul`) do if not defined VSDEVCMD set "VSDEVCMD=%%P"
+for %%V in (18 2022) do for %%E in (BuildTools Community Professional Enterprise) do for %%R in ("%_PROGRAM_FILES%" "%_PROGRAM_FILES_X86%") do if not defined VSDEVCMD if exist "%%~R\Microsoft Visual Studio\%%V\%%E\VC\Tools\MSVC\" if exist "%%~R\Microsoft Visual Studio\%%V\%%E\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%%~R\Microsoft Visual Studio\%%V\%%E\Common7\Tools\VsDevCmd.bat"
 
 if "%VSDEVCMD%"=="" (
   echo Missing VS Dev shell bootstrap. Install Visual Studio 2026 or 2022 Build Tools with the C++ workload for %DEV_WINDOWS_ARCH%.

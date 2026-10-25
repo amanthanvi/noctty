@@ -32,22 +32,27 @@ $tempDir = if ($env:TEMP) { $env:TEMP } else { Join-Path $localAppData "Temp" }
 $tmpDir = if ($env:TMP) { $env:TMP } else { $tempDir }
 
 # vswhere ships with the Visual Studio Installer at this fixed path and knows every instance (2026 is
-# version 18, 2022 is 17), any edition and install directory. When it is there it decides: an
-# instance without the C++ tools for this architecture is skipped, though its VsDevCmd.bat exists.
-# Only without it are the default install paths probed.
+# version 18, 2022 is 17), any edition and install directory. It is asked for one with the C++
+# tools for this architecture, a release first and then a preview. If it is missing or finds none,
+# the default install paths are probed, newest first, and a VsDevCmd.bat counts only beside an MSVC
+# toolset: an instance left behind by an uninstall can keep its VsDevCmd.bat without the C++ tools.
 $vcTools = if ($Architecture -eq "arm64") { "Microsoft.VisualStudio.Component.VC.Tools.ARM64" } else { "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" }
 $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
 if (Test-Path -LiteralPath $vswhere) {
-    # Windows PowerShell turns native stderr into errors that "Stop" makes terminating.
-    $found = & { $ErrorActionPreference = "Continue"; & $vswhere -latest -products * -requires $vcTools -find "Common7\Tools\VsDevCmd.bat" 2>$null }
-    $vsDevCmd = @($found | Where-Object { $_ }) | Select-Object -First 1
-} else {
-    foreach ($version in @("18", "2022")) {
-        foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
-            foreach ($candidateRoot in @($programFiles, $programFilesX86)) {
-                $candidate = Join-Path $candidateRoot "Microsoft Visual Studio\$version\$edition\Common7\Tools\VsDevCmd.bat"
-                if (-not $vsDevCmd -and (Test-Path -LiteralPath $candidate)) { $vsDevCmd = $candidate }
-            }
+    foreach ($prerelease in @($false, $true)) {
+        $query = @("-latest", "-products", "*") + @(if ($prerelease) { "-prerelease" }) + @("-requires", $vcTools, "-find", "Common7\Tools\VsDevCmd.bat")
+        # Windows PowerShell turns native stderr into errors that "Stop" makes terminating.
+        $found = & { $ErrorActionPreference = "Continue"; & $vswhere @query 2>$null }
+        $vsDevCmd = @($found | Where-Object { $_ }) | Select-Object -First 1
+        if ($vsDevCmd) { break }
+    }
+}
+foreach ($version in @("18", "2022")) {
+    foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
+        foreach ($candidateRoot in @($programFiles, $programFilesX86)) {
+            $install = Join-Path $candidateRoot "Microsoft Visual Studio\$version\$edition"
+            $candidate = Join-Path $install "Common7\Tools\VsDevCmd.bat"
+            if (-not $vsDevCmd -and (Test-Path -LiteralPath (Join-Path $install "VC\Tools\MSVC")) -and (Test-Path -LiteralPath $candidate)) { $vsDevCmd = $candidate }
         }
     }
 }
@@ -123,15 +128,13 @@ if ([string]::IsNullOrWhiteSpace($env:ZIG_LOCAL_CACHE_DIR)) {
     $env:ZIG_LOCAL_CACHE_DIR = Join-Path (Get-Location) ".zig-cache"
 }
 
-$bootstrap = @"
-call "$vsDevCmd" -arch=$Architecture || exit /b 1
-set "PATH=$gitCmd;$gitUsrBin;$env:ZIG_HOME;%PATH%"
-set "APPDATA=$env:APPDATA"
-set "LOCALAPPDATA=$env:LOCALAPPDATA"
-set "TEMP=$env:TEMP"
-set "TMP=$env:TMP"
-set "ZIG_GLOBAL_CACHE_DIR=$env:ZIG_GLOBAL_CACHE_DIR"
-set "ZIG_LOCAL_CACHE_DIR=$env:ZIG_LOCAL_CACHE_DIR"
+# A batch file, because `cmd /c` runs only the first line of a multi-line string. It is plain ASCII,
+# whatever the code page: every path reaches it through the environment the child inherits (the
+# variables set above, and the three below).
+$bootstrap = @'
+@echo off
+call "%NOCTTY_DEV_VSDEVCMD%" -arch=%NOCTTY_DEV_ARCH% || exit /b 1
+set "PATH=%NOCTTY_DEV_PATH%;%PATH%"
 echo == Versions ==
 where git || exit /b 1
 where cl || exit /b 1
@@ -148,8 +151,20 @@ wsl.exe -l -v || exit /b 1
 ) else (
 echo skipped ^(set DEV_WINDOWS_CHECK_WSL=1 to probe WSL^)
 )
-"@
+'@
 
-cmd.exe /d /c $bootstrap
+$bootstrapPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-dev-windows-" + [guid]::NewGuid().ToString("N") + ".cmd")
+$env:NOCTTY_DEV_VSDEVCMD = $vsDevCmd
+$env:NOCTTY_DEV_ARCH = $Architecture
+$env:NOCTTY_DEV_PATH = "$gitCmd;$gitUsrBin;$env:ZIG_HOME"
+try {
+    [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap.Replace("`r`n", "`n").Replace("`n", "`r`n"), [System.Text.Encoding]::ASCII)
+    # `call`, so that cmd /c never strips the quotes around a path with spaces or parentheses.
+    cmd.exe /d /c call $bootstrapPath
+    $bootstrapExit = $LASTEXITCODE
+} finally {
+    Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction Ignore
+    Remove-Item -LiteralPath Env:NOCTTY_DEV_VSDEVCMD, Env:NOCTTY_DEV_ARCH, Env:NOCTTY_DEV_PATH -ErrorAction Ignore
+}
 # A script run with -File exits 0 when it ends normally, whatever its last native command returned.
-if ($LASTEXITCODE -ne 0) { throw "The Visual Studio developer shell bootstrap failed with exit code $LASTEXITCODE." }
+if ($bootstrapExit -ne 0) { throw "The Visual Studio developer shell bootstrap failed with exit code $bootstrapExit." }

@@ -1441,7 +1441,9 @@ Assert-HiddenMutation 'WSL bash accepted' $gitFunctions ($gitFunctions.Replace('
 # took its number. Here noctty (100) took the number of an older process whose stale children (500,
 # and 600 under it) still name it, and noctty's own real parent is 600, so the links form the cycle
 # 100 -> 500 -> 600 -> 100. Its real descendants are cmd.exe (101) and conhost.exe (102); the stale
-# 500 is a pwsh.exe listed first, which a walk without the age rule takes for noctty's shell. With
+# 500 is a pwsh.exe listed first, which a walk without the age rule takes for noctty's shell, and the
+# stale 103 names 101 but is older than it (not older than noctty), which a rule that compares a
+# child with the root instead of its own parent keeps. With
 # one start time for all, only the visited set ends the cycle; a start time CIM did not return
 # proves nothing. The fake CIM query drops CreationDate unless it is asked for, as CIM does, and
 # records the deadline. Each walk runs in a runspace of its own with a deadline, because a walk that
@@ -1455,6 +1457,7 @@ $walkTables = @(
         New-WalkProcess 500 100 'pwsh.exe' $walkStart.AddHours(-1)
         New-WalkProcess 600 500 'stale.exe' $walkStart.AddHours(-1).AddSeconds(1)
         New-WalkProcess 100 600 'noctty.exe' $walkStart
+        New-WalkProcess 103 101 'pwsh.exe' $walkStart.AddMilliseconds(500)
         New-WalkProcess 101 100 'cmd.exe' $walkStart.AddSeconds(1)
         New-WalkProcess 102 101 'conhost.exe' $walkStart.AddSeconds(2)
         New-WalkProcess 700 4 'other.exe' $walkStart.AddHours(-2)) }
@@ -1500,11 +1503,13 @@ $descendantsWalk = Get-HiddenFunction $hiddenLibText 'Get-Descendants'
 Test-HiddenDescendants $descendantsWalk
 Assert-HiddenMutation 'descendant walk without a visited set' $descendantsWalk ($descendantsWalk.Replace('if (-not $seen.Add([int]$child.ProcessId)) { continue }', '[void]$seen.Add([int]$child.ProcessId)')) ${function:Test-HiddenDescendants}
 Assert-HiddenMutation 'descendant walk without the age rule' $descendantsWalk ($descendantsWalk.Replace('$childStart.ToUniversalTime() -lt $parentStart.ToUniversalTime()', '$false')) ${function:Test-HiddenDescendants}
+Assert-HiddenMutation 'descendant walk dating children against the root' $descendantsWalk ($descendantsWalk.Replace('$parentStart = $started[$parent]', '$parentStart = $started[$RootPid]')) ${function:Test-HiddenDescendants}
 Assert-HiddenMutation 'descendant walk without start times' $descendantsWalk ($descendantsWalk.Replace(', CreationDate -OperationTimeoutSec', ' -OperationTimeoutSec')) ${function:Test-HiddenDescendants}
 Assert-HiddenMutation 'descendant query without a deadline' $descendantsWalk ($descendantsWalk.Replace(' -OperationTimeoutSec 15', '')) ${function:Test-HiddenDescendants}
 $defaultShellWalk = Get-HiddenFunction (Remove-PowerShellComments (Get-Content -LiteralPath (Join-Path $repoRoot 'test\windows\hidden-win11-default-shell.ps1') -Raw)) 'Find-Shell'
 Test-DefaultShellWalk $defaultShellWalk
 Assert-HiddenMutation 'default-shell walk without the age rule' $defaultShellWalk ($defaultShellWalk.Replace('$p.CreationDate.ToUniversalTime() -lt $parentStart.ToUniversalTime()', '$false')) ${function:Test-DefaultShellWalk}
+Assert-HiddenMutation 'default-shell walk dating children against the root' $defaultShellWalk ($defaultShellWalk.Replace('$parentStart = $started[[int]$p.ParentProcessId]', '$parentStart = $started[$RootPid]')) ${function:Test-DefaultShellWalk}
 Assert-HiddenMutation 'default-shell walk without start times' $defaultShellWalk ($defaultShellWalk.Replace(',CreationDate -OperationTimeoutSec', ' -OperationTimeoutSec')) ${function:Test-DefaultShellWalk}
 Assert-HiddenMutation 'default-shell query without a deadline' $defaultShellWalk ($defaultShellWalk.Replace(' -OperationTimeoutSec 15', '')) ${function:Test-DefaultShellWalk}
 

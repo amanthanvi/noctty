@@ -376,9 +376,9 @@ measurement build's `noctty.exe` but stages `zig-out\bin` (the product build, or
 nothing), so it would test the wrong binary until that is changed.
 
 On the runner the step sets `NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED=1`
-and runs the harness under `powershell.exe`: with `-NoBuild` it needs no Visual
-Studio developer shell, so the relaunch through `scripts\dev-windows.cmd` that
-the harness otherwise makes is skipped. `-NoBuild` needs a build of this checkout in
+and runs the harness under `powershell.exe`. The sentinel skips the relaunch
+through `scripts\dev-windows.cmd` that the harness otherwise makes, which
+`-NoBuild` does not need: it builds nothing. `-NoBuild` needs a build of this checkout in
 `zig-out`. `-RequireAll` fails a scenario that is skipped because `pwsh.exe` or
 vim is missing, which otherwise counts as a pass. The job uploads the scenarios'
 text evidence (before, after and marker rows, `inner.log`, the results JSON) and
@@ -513,10 +513,10 @@ AUMID in the real `%APPDATA%`, which redirection does not move) unless
 `-AllowProductAumid` says the machine is an ephemeral runner. Results are in
 `profile-matrix-results.json`.
 
-The driver has no console, so it writes `profile-steps.jsonl`: one line before
-each step that has no deadline of its own (detecting a profile, copying a case, the launch, reading
-the saved session, the forced stop, the results) and before the process-tree
-query. After a stall the last line names the step. That query, `Get-Descendants`
+The driver has no console, so it writes `profile-steps.jsonl`: one line as each
+step starts (detecting a profile, copying a case, the launch, the process-tree
+query, the prompt and typing, the close, reading the saved session, a forced
+stop, the results). After a stall the last line names the step. The query, `Get-Descendants`
 in `hidden-win11-lib.ps1`, has a 15 s deadline, and its walk keeps a child only
 if the child is not older than its parent, and visits each process once:
 Windows reuses process numbers, so a stale `ParentProcessId` can point at a
