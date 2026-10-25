@@ -1008,21 +1008,16 @@ fn applyProfileSurfaceConfig(
 /// Home for a profile launch. A bare `.home` set on a launch clone after
 /// `Config.finalize` is not resolved again: Exec then starts the program in
 /// noctty's own current directory (measured: the directory noctty was
-/// started in), so a user profile and a Visual Studio shell get the path
-/// itself (measured for a Developer Command Prompt restored with no Host: it
-/// started in the portable copy's folder). Two keep `.home`: the other
-/// detected profiles, as before, and a user profile that runs `wsl.exe`,
-/// which `.home` gives `--cd ~` (the Linux home, as a detected WSL profile
-/// gets) where a Windows path would give `--cd /mnt/c/Users/<name>`.
+/// started in), so a profile gets the path itself. For a Start menu launch
+/// that directory is the install folder, the start folder of the installer's
+/// shortcut (read from the installed `.lnk`, not measured by a launch). Only
+/// a profile that runs `wsl.exe` keeps `.home`, which gives it `--cd ~` (the
+/// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
 fn profileHomeWorkingDirectory(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
 ) !configpkg.Config.WorkingDirectory {
-    switch (profile.kind) {
-        .user => if (windows_shell.isWslCommand(profile.command)) return .home,
-        .vs_dev_cmd, .vs_dev_shell => {},
-        else => return .home,
-    }
+    if (windows_shell.isWslCommand(profile.command)) return .home;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (internal_os.home(&buf) catch null) orelse return .home;
     return .{ .path = try config._arena.?.allocator().dupe(u8, home) };
@@ -56445,6 +56440,52 @@ test "win32 applyProfileSurfaceConfig replaces shallow-cloned command safely" {
     try std.testing.expect(base.command != null);
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
     try std.testing.expectEqualStrings("pwsh.exe", base.command.?.shell);
+}
+
+test "win32 a detected profile chosen from the picker starts in home itself" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)).?;
+    const pwsh = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
+    const powershell = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
+    const cmd = [_][:0]const u8{"C:\\Windows\\System32\\cmd.exe"};
+    const git_bash = [_][:0]const u8{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" };
+    const wsl_default = [_][:0]const u8{"C:\\Windows\\System32\\wsl.exe"};
+    const wsl_distro = [_][:0]const u8{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu" };
+    for ([_]struct { kind: windows_shell.ProfileKind, argv: []const [:0]const u8 }{
+        .{ .kind = .pwsh, .argv = &pwsh },
+        .{ .kind = .powershell, .argv = &powershell },
+        .{ .kind = .cmd, .argv = &cmd },
+        .{ .kind = .git_bash, .argv = &git_bash },
+        .{ .kind = .wsl_default, .argv = &wsl_default },
+        .{ .kind = .wsl_distro, .argv = &wsl_distro },
+    }) |case| {
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        clone.@"working-directory" = .{ .path = try clone._arena.?.allocator().dupe(u8, "C:\\work") };
+        const profile: windows_shell.Profile = .{
+            .kind = case.kind,
+            .key = "detected",
+            .label = "Detected",
+            .command = .{ .direct = case.argv },
+        };
+        try applyProfileSurfaceConfig(&clone, &profile);
+        const wd = clone.@"working-directory".?;
+        switch (case.kind) {
+            // `.home` gives WSL `--cd ~`, the Linux home.
+            .wsl_default, .wsl_distro => try std.testing.expect(wd == .home),
+            // The path, which Exec uses as given. A bare `.home` here would
+            // start the shell in noctty's own current directory.
+            else => switch (wd) {
+                .path => |path| try std.testing.expectEqualStrings(home, path),
+                else => return error.TestExpectedHomePath,
+            },
+        }
+    }
 }
 
 test "win32 applyProfileCommandConfig preserves inherited working directory" {

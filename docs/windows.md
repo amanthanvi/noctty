@@ -305,6 +305,14 @@ The profile picker detects:
 - Git Bash
 - WSL distributions, when `wsl.exe` is installed and responsive
 
+A shell you open from the picker, the command palette or a quick slot starts
+in your home folder (a WSL one in its Linux home, `--cd ~`), whatever
+`working-directory` says and whichever folder noctty itself was started from
+(for the Start menu shortcut, the install folder). To start one somewhere
+else, define it as a [user profile](#user-profiles) with
+`profile-working-directory`. A restored pane goes back to the last folder its
+shell reported.
+
 Shell integration is automatic for PowerShell and for directly launched
 Unix-like shells such as Git Bash. WSL sessions manage their own
 integration inside the distribution. PowerShell integration emits OSC 7
