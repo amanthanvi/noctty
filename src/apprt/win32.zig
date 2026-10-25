@@ -1397,6 +1397,10 @@ const UpdateCheckCompletion = struct {
     alloc: Allocator,
     release: ?updatepkg.Release = null,
     manual_message: ?[]u8 = null,
+    /// How `manual_message` reads. A check or a staging that failed is `.err`
+    /// and stays in the banner until dismissed; a result ("already current",
+    /// "staged") is `.info` and counts down.
+    manual_kind: HostBannerKind = .info,
     staged: bool = false,
     /// The check discarded state that belonged to a previously configured
     /// feed, so a notice raised from that feed must not stay actionable.
@@ -6697,7 +6701,7 @@ pub const App = struct {
             };
         }
         if (completion.manual_message) |message| {
-            self.showUpdateInfo(.info, message) catch |err| {
+            self.showUpdateInfo(completion.manual_kind, message) catch |err| {
                 log.warn("failed to show updater status message err={}", .{err});
             };
         }
@@ -13925,7 +13929,16 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         return;
     };
     completion.* = .{ .alloc = alloc };
+    runUpdateCheck(request, completion);
+    postUpdateCheckCompletion(request.delivery, completion);
+}
 
+/// The check itself, off the UI thread. What it found goes into `completion`,
+/// and for a manual check what to tell the user and how loudly: a failure is
+/// `.err`, so it stays in the banner until dismissed instead of counting down
+/// like a result does.
+fn runUpdateCheck(request: *const UpdateCheckRequest, completion: *UpdateCheckCompletion) void {
+    const alloc = request.alloc;
     const outcome = updatepkg.checkLatestStableRelease(alloc, request.state_path, .{
         .current_version = request.current_version,
         .release_feed_url = request.release_feed_url,
@@ -13933,6 +13946,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         .respect_dismissal = request.respect_dismissal,
     }) catch |err| {
         if (request.manual) {
+            completion.manual_kind = .err;
             completion.manual_message = std.fmt.allocPrint(
                 alloc,
                 "Unable to check GitHub Releases right now ({s}).",
@@ -13940,7 +13954,6 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
             ) catch null;
         }
         appendConfiguredFeedIgnoredNote(request, completion);
-        postUpdateCheckCompletion(request.delivery, completion);
         return;
     };
     defer {
@@ -13962,6 +13975,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
                     ) catch |err| {
                         log.warn("failed to stage verified updater download err={}", .{err});
                         if (request.manual) {
+                            completion.manual_kind = .err;
                             completion.manual_message = updateStageFailureMessage(alloc, err) catch null;
                         }
                         break :stage_download;
@@ -13988,14 +14002,14 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
             } else {
                 if (version_text) |value| alloc.free(value);
                 if (release_url) |value| alloc.free(value);
-                completion.manual_message = if (request.manual)
-                    std.fmt.allocPrint(
+                if (request.manual) {
+                    completion.manual_kind = .err;
+                    completion.manual_message = std.fmt.allocPrint(
                         alloc,
                         "Unable to prepare the update notice for noctty {s}.",
                         .{release.version_text},
-                    ) catch null
-                else
-                    null;
+                    ) catch null;
+                }
             }
         },
         .up_to_date, .throttled => {
@@ -14010,7 +14024,6 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
     }
 
     appendConfiguredFeedIgnoredNote(request, completion);
-    postUpdateCheckCompletion(request.delivery, completion);
 }
 
 test "update worker OOM clears running and releases its detached lifetime" {
@@ -14052,6 +14065,123 @@ test "update completion post failure clears running and frees its payload" {
     postUpdateCheckCompletion(delivery, completion);
     try std.testing.expect(!delivery.update_running.load(.acquire));
     try std.testing.expect(delivery.pop() == null);
+}
+
+/// A manual or automatic update check against a state file the check can
+/// answer from without the network: a throttled one, or one that remembers a
+/// newer release. A directory where the state file belongs makes it fail.
+fn testRunUpdateCheck(
+    alloc: Allocator,
+    state_path: []const u8,
+    manual: bool,
+    download: bool,
+) !UpdateCheckCompletion {
+    const feed = "https://feed.invalid/releases/latest";
+    var request: UpdateCheckRequest = .{
+        .alloc = alloc,
+        // The check itself never touches it; posting the result does.
+        .delivery = undefined,
+        .state_path = @constCast(state_path),
+        .current_version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .current_version_string = @constCast("1.0.0"),
+        .release_feed_url = @constCast(feed),
+        .force = false,
+        .manual = manual,
+        .ignored_feed_source = null,
+        .respect_dismissal = true,
+        .download = download,
+        .staged_kind = .installer,
+    };
+    var completion: UpdateCheckCompletion = .{ .alloc = alloc };
+    errdefer completion.deinit();
+    runUpdateCheck(&request, &completion);
+    return completion;
+}
+
+test "a manual update check reports a failure as an error and a result as information" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+
+    // The check fails: a directory stands where the state file belongs. A
+    // failure stays in the banner until dismissed.
+    var failed = try testRunUpdateCheck(alloc, root, true, false);
+    defer failed.deinit();
+    try std.testing.expectEqual(HostBannerKind.err, failed.manual_kind);
+    try std.testing.expect(std.mem.startsWith(u8, failed.manual_message.?, "Unable to check GitHub Releases right now ("));
+    // An automatic check says nothing, whatever happened.
+    var silent = try testRunUpdateCheck(alloc, root, false, false);
+    defer silent.deinit();
+    try std.testing.expectEqual(@as(?[]u8, null), silent.manual_message);
+
+    // A throttled check with nothing newer remembered: "already current" is
+    // a result, and counts down like one.
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    var state: updatepkg.State = .{
+        .last_checked_at = std.time.timestamp() - 60,
+        .release_feed_url = try alloc.dupe(u8, "https://feed.invalid/releases/latest"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/releases/tag/v99.0.0"),
+    };
+    defer state.deinit(alloc);
+    try updatepkg.saveState(state_path, &state);
+    var current = try testRunUpdateCheck(alloc, state_path, true, false);
+    defer current.deinit();
+    try std.testing.expectEqual(HostBannerKind.info, current.manual_kind);
+    try std.testing.expect(std.mem.indexOf(u8, current.manual_message.?, "is already current") != null);
+
+    // A newer release is remembered but cannot be staged (the throttle cache
+    // keeps no assets): the notice is raised, and the failure to stage it is
+    // an error. Without a download there is nothing to report.
+    state.last_seen_version = try alloc.dupe(u8, "99.0.0");
+    try updatepkg.saveState(state_path, &state);
+    var unstaged = try testRunUpdateCheck(alloc, state_path, true, true);
+    defer unstaged.deinit();
+    try std.testing.expect(unstaged.release != null);
+    try std.testing.expectEqual(HostBannerKind.err, unstaged.manual_kind);
+    try std.testing.expect(std.mem.startsWith(u8, unstaged.manual_message.?, "Update found, but it could not be verified or staged"));
+    var found = try testRunUpdateCheck(alloc, state_path, true, false);
+    defer found.deinit();
+    try std.testing.expect(found.release != null);
+    try std.testing.expectEqual(HostBannerKind.info, found.manual_kind);
+    try std.testing.expectEqual(@as(?[]u8, null), found.manual_message);
+}
+
+test "the update check's banner keeps a failure up and lets a result count down" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+    });
+    defer session.deinit();
+
+    var failure: UpdateCheckCompletion = .{
+        .alloc = std.testing.allocator,
+        .manual_message = try std.testing.allocator.dupe(u8, "Unable to check GitHub Releases right now (error.ConnectionRefused)."),
+        .manual_kind = .err,
+    };
+    defer failure.deinit();
+    app.handleUpdateCheckCompletion(&failure);
+    try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+    try std.testing.expectEqualStrings(failure.manual_message.?, host.banner_text.?);
+
+    var result: UpdateCheckCompletion = .{
+        .alloc = std.testing.allocator,
+        .manual_message = try std.testing.allocator.dupe(u8, "noctty 1.0.0 is already current on the stable channel."),
+    };
+    defer result.deinit();
+    app.handleUpdateCheckCompletion(&result);
+    try std.testing.expectEqual(HostBannerKind.info, host.banner_kind);
+    try std.testing.expectEqualStrings(result.manual_message.?, host.banner_text.?);
 }
 
 fn tryOrNull(alloc: Allocator, text: []const u8) ?[]u8 {
