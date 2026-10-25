@@ -375,7 +375,14 @@ try {
     $class="noctty-test-fwdsource-$runId"
     $primary=Start-Case (New-Case 'source-primary' @('window-position-x =','window-position-y =','window-save-state = never','undo-timeout = 60s','keybind = f9=close_tab:this') -Class $class)
     $second=New-Case 'source-second' @('window-save-state = never') -Class $class
-    function Cascaded($s) { $step=[int][math]::Floor(32*$s.Dpi/96); return [pscustomobject]@{ Left=$s.Rect.Left+$step; Top=$s.Rect.Top+$step; Right=$s.Rect.Right+$step; Bottom=$s.Rect.Bottom+$step } }
+    # One step off the window `s` describes, as `cascadeStep` (MulDiv,
+    # rounded) and `fitRectInWork` place it.
+    function Cascaded($s) {
+        $step=[int][math]::Round(32*[math]::Max($s.Dpi,96)/96.0,[MidpointRounding]::AwayFromZero)
+        $w=[math]::Min($s.Rect.Right-$s.Rect.Left,$s.Work.Right-$s.Work.Left); $h=[math]::Min($s.Rect.Bottom-$s.Rect.Top,$s.Work.Bottom-$s.Work.Top)
+        $l=[math]::Max($s.Work.Left,[math]::Min($s.Rect.Left+$step,$s.Work.Right-$w)); $t=[math]::Max($s.Work.Top,[math]::Min($s.Rect.Top+$step,$s.Work.Bottom-$h))
+        return [pscustomobject]@{ Left=$l; Top=$t; Right=$l+$w; Bottom=$t+$h }
+    }
     function Copied([string]$Name,$source,$h) {
         $s=Sample $Name $h; $want=Cascaded $source
         Check "${Name}: one step off the window active last" (Rect-Same $s.Rect $want 0) (Rect-Array $want) (Rect-Array $s.Rect)
