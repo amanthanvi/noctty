@@ -218,15 +218,16 @@ pub fn Transaction(
             if (self.pending_apply_id != null) return error.ApplyAlreadyPending;
             if (update.revision < self.current_revision) return error.StaleExternalRevision;
 
-            var conflict_effect_count: usize = 0;
+            var effect_capacity: usize = 0;
             for (update.changes) |change| {
                 const target = self.entry(change.field) orelse return error.UnknownField;
                 const will_conflict = target.dirty and
                     !valueEql(change.value, target.baseline) and
                     !valueEql(change.value, target.draft);
-                if (will_conflict and !target.conflict) conflict_effect_count += 1;
+                if (will_conflict and !target.conflict) effect_capacity += 1;
+                if (target.dirty and target.previewed and valueEql(change.value, target.draft)) effect_capacity += 1;
             }
-            if (effects.len < conflict_effect_count) return error.EffectBufferTooSmall;
+            if (effects.len < effect_capacity) return error.EffectBufferTooSmall;
 
             var effect_count: usize = 0;
             for (update.changes) |change| {
@@ -241,6 +242,16 @@ pub fn Transaction(
                 }
 
                 if (valueEql(change.value, target.draft)) {
+                    // Adopted, so a preview of it ends, at the value now in
+                    // effect: what it showed can differ from the draft (the
+                    // Settings opacity floor).
+                    if (target.previewed) {
+                        effects[effect_count] = .{ .set_preview = .{
+                            .field = target.field,
+                            .value = change.value,
+                        } };
+                        effect_count += 1;
+                    }
                     target.baseline = change.value;
                     target.draft = change.value;
                     target.dirty = false;
@@ -530,6 +541,51 @@ test "settings transaction use disk rolls back active preview" {
     try std.testing.expectEqual(@as(usize, 1), resolved.len);
     try std.testing.expectEqual(@as(f64, 0.6), resolved[0].set_preview.value.decimal);
     try std.testing.expectEqual(@as(usize, 0), transaction.dirtyCount());
+}
+
+test "settings transaction ends a preview when an external update adopts its draft" {
+    var storage: [2]TestTransaction.Entry = undefined;
+    var transaction = try initialTestTransaction(&storage);
+    var effects: [3]TestTransaction.Effect = undefined;
+
+    _ = try transaction.dispatch(.{ .edit = .{
+        .field = .opacity,
+        .value = .{ .decimal = 0.1 },
+        .live_preview = true,
+    } }, &effects);
+    // A dirty, unpreviewed field the same update also adopts says nothing.
+    _ = try transaction.dispatch(.{ .edit = .{
+        .field = .font_size,
+        .value = .{ .integer = 14 },
+    } }, &effects);
+    const adopted = try transaction.dispatch(.{ .external_update = .{
+        .revision = 11,
+        .changes = &.{
+            .{ .field = .opacity, .value = .{ .decimal = 0.1 } },
+            .{ .field = .font_size, .value = .{ .integer = 14 } },
+        },
+    } }, &effects);
+
+    // The caller may have shown something else for the draft, so the preview
+    // is set to the adopted value rather than left to stand.
+    try std.testing.expectEqual(@as(usize, 1), adopted.len);
+    try std.testing.expectEqual(TestField.opacity, adopted[0].set_preview.field);
+    try std.testing.expectEqual(@as(f64, 0.1), adopted[0].set_preview.value.decimal);
+    try std.testing.expect(!transaction.entry(.opacity).?.previewed);
+    try std.testing.expectEqual(@as(usize, 0), transaction.dirtyCount());
+
+    // The effect is counted before anything changes.
+    var again = try initialTestTransaction(&storage);
+    _ = try again.dispatch(.{ .edit = .{
+        .field = .opacity,
+        .value = .{ .decimal = 0.1 },
+        .live_preview = true,
+    } }, &effects);
+    try std.testing.expectError(error.EffectBufferTooSmall, again.dispatch(.{ .external_update = .{
+        .revision = 11,
+        .changes = &.{.{ .field = .opacity, .value = .{ .decimal = 0.1 } }},
+    } }, effects[0..0]));
+    try std.testing.expect(again.entry(.opacity).?.previewed);
 }
 
 test "settings transaction staged edit rolls back an active live preview" {

@@ -785,19 +785,21 @@ pub fn paletteDescriptor(field: SettingField) palette_catalog.Descriptor {
     };
 }
 
-/// What a live preview of a field has to refresh once the App writes it to
-/// `app.config`. Rebuilding the theme costs 80-150 ms of UI thread (every host's
-/// brushes, fonts and DWM attributes, a forced redraw of everything, then the
-/// Settings window), and the preview fires on every keystroke, so each field
-/// gets only the work that shows it. Font size, padding, cursor style and
-/// blur have no consumer on a live surface, which reads its own copy of the
-/// config: the written value reaches terminals created afterwards, and
-/// `Surface.applyRuntimeConfig` reads none of them. A previewed field that
-/// gains one must be listed here.
+/// What a live preview of a field has to refresh once the App shows it.
+/// Rebuilding the theme costs 80-150 ms of UI thread (every host's brushes,
+/// fonts and DWM attributes, a forced redraw of everything, then the Settings
+/// window), and the preview fires on every keystroke, so each field gets only
+/// the work that shows it. A field with `.none` is not previewed at all: font
+/// size, padding, cursor style and blur have no consumer on a live surface,
+/// which reads its own copy of the config, so a preview of them could only
+/// have reached terminals opened before the draft was saved (PKG-39). A field
+/// that gains a consumer in the open windows must be listed here.
+///
+/// The App keeps a preview out of the config it hands back
+/// (`currentConfig`), which new terminals and reloads read.
 ///
 /// The status line reads this too: only a field with an effect other than
-/// `.none` can say "Previewing now", because the other previewed fields show
-/// nothing in the open terminals until they are saved.
+/// `.none` can say "Previewing now".
 pub const PreviewEffect = field_model.PreviewEffect;
 pub fn previewEffect(field: SettingField) PreviewEffect {
     return field_model.descriptor(field).preview;
@@ -806,7 +808,7 @@ pub fn previewEffect(field: SettingField) PreviewEffect {
 pub const ConflictResolution = SettingsTransaction.Resolution;
 pub const ApplyId = SettingsTransaction.ApplyId;
 
-const settingValue = field_model.settingValue;
+pub const settingValue = field_model.settingValue;
 pub const setSettingValue = field_model.setSettingValue;
 
 /// `field`'s value in `config`, unwrapped from the transaction's union.
@@ -2139,9 +2141,8 @@ pub const SettingsWindow = struct {
         self.forgetProfileRows();
     }
 
-    /// Put every live preview back to the saved value. The preview writes the
-    /// draft into the app's config, which is what `currentConfig` hands out, so
-    /// that is not "what is saved" while previews are on: use `self.current`.
+    /// Put every live preview back to the saved value, the window's own
+    /// `current` snapshot.
     fn rollbackPreviews(self: *SettingsWindow) void {
         const transaction = &(self.transaction orelse return);
         var effects: [setting_field_count]SettingsTransaction.Effect = undefined;
@@ -2235,7 +2236,7 @@ pub const SettingsWindow = struct {
     }
 
     fn trackFieldEdit(self: *SettingsWindow, field: SettingField) void {
-        self.trackEdit(field, field_model.descriptor(field).preview_draft);
+        self.trackEdit(field, previewEffect(field) != .none);
     }
 
     fn trackEdit(self: *SettingsWindow, field: SettingField, live_preview: bool) void {
@@ -2256,10 +2257,8 @@ pub const SettingsWindow = struct {
         };
         self.dispatchEffects(emitted);
         self.refreshNativeSectionText();
-        // Whether the edit shows in the open terminals now or only after a
-        // save is told by what its preview refreshes, not by the transaction's
-        // `live_preview` flag: font size, padding and cursor style are
-        // previewed into the config but no open terminal reads it.
+        // Whether the edit shows in the open windows now or only after a save
+        // is told by what its preview refreshes.
         self.status_note = if (previewEffect(field) != .none) .previews_live else .applies_on_save;
         self.updateSaveEnabled();
     }
@@ -4549,9 +4548,9 @@ pub const SettingsWindow = struct {
         if (self.close_posted or !self.hasPendingChanges()) return;
         const saved = &(self.current orelse return);
         self.freeNoteText();
-        // From this window's own snapshot of what is saved, not from
-        // `currentConfig`: the live previews have written the draft into that
-        // one. The copies come first, then the previews are rolled back
+        // From this window's own snapshot of what is saved, which does not
+        // depend on an App keeping its previews out of `currentConfig`. The
+        // copies come first, then the previews are rolled back
         // (`clearPending`), so a failure to copy leaves the draft whole.
         self.adoptConfig(saved) catch |err| {
             std.log.warn("settings: discarding the draft failed err={}", .{err});
@@ -6985,8 +6984,8 @@ test "settings a Discard that cannot copy the saved config leaves the draft and 
             const settings = &fixture.settings;
             var buf: [256]u8 = undefined;
             fixture.live_previews = true;
-            typeInto(settings.fields.edit_font_size.?, "16");
-            try std.testing.expectEqual(@as(f32, 16), fixture.config.@"font-size");
+            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
 
             const real = settings.handle.alloc;
             var failing = std.testing.FailingAllocator.init(real, .{ .fail_index = 0 });
@@ -6996,14 +6995,14 @@ test "settings a Discard that cannot copy the saved config leaves the draft and 
 
             // Still a draft that asks before closing, still previewed.
             try std.testing.expect(settings.hasPendingChanges());
-            try std.testing.expectEqual(@as(f32, 16), settings.pending.?.@"font-size");
-            try std.testing.expectEqual(@as(f32, 16), fixture.config.@"font-size");
+            try std.testing.expectEqual(@as(f64, 0.5), settings.pending.?.@"background-opacity");
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
             try std.testing.expectEqualStrings("Could not discard the changes; they are kept.", try statusTextOf(settings, &buf));
 
             // And the next try, with memory, does it.
             settings.discardChangesNow();
             try std.testing.expect(!settings.hasPendingChanges());
-            try std.testing.expectEqual(@as(f32, 12), fixture.config.@"font-size");
+            try std.testing.expectEqual(@as(f64, 1), fixture.config.@"background-opacity");
         }
     }.body);
 }
@@ -7083,6 +7082,42 @@ test "settings offers accent-follow-system as a checkbox that previews the theme
     }.body);
 }
 
+test "settings previews only the fields an open window shows" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            var buf: [256]u8 = undefined;
+
+            // Font size, padding and cursor style reach no open terminal, so
+            // a preview of them could only reach terminals opened before Save
+            // (PKG-39): none is sent, and the status says when they apply.
+            typeInto(settings.fields.edit_font_size.?, "16");
+            typeInto(settings.fields.edit_pad_x.?, "4");
+            _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.cursor_style);
+            try std.testing.expectEqual(@as(f32, 16), settings.pending.?.@"font-size");
+            try std.testing.expect(settings.pending.?.@"cursor-style" == .underline);
+            try std.testing.expectEqual(@as(u32, 0), fixture.previews);
+            try std.testing.expectEqualStrings("Applies when you save.", try statusTextOf(settings, &buf));
+
+            // Opacity and the window theme show in the open windows.
+            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
+            try std.testing.expectEqual(@as(u32, 1), fixture.previews);
+            try std.testing.expectEqualStrings("Previewing now. Save to keep it.", try statusTextOf(settings, &buf));
+            _ = sys.SendMessageW(settings.fields.combo_window_theme.?, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.window_theme);
+            try std.testing.expectEqual(@as(u32, 2), fixture.previews);
+
+            // Discard takes back the two previews, and only those.
+            settings.discardChangesNow();
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(u32, 4), fixture.previews);
+        }
+    }.body);
+}
+
 test "SET Discard asks before losing edits and supports keyboard cancellation" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -7090,12 +7125,12 @@ test "SET Discard asks before losing edits and supports keyboard cancellation" {
             defer fixture.finish();
             const settings = &fixture.settings;
             fixture.live_previews = true;
-            typeInto(settings.fields.edit_font_size.?, "16");
+            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
             _ = sys.SetFocus(settings.btn_discard_changes.?);
             _ = sys.SendMessageW(settings.btn_discard_changes.?, BM_CLICK, 0, 0);
             try std.testing.expect(settings.hasPendingChanges());
             try std.testing.expect(settings.close_prompt_visible);
-            try std.testing.expectEqual(@as(f32, 16), fixture.config.@"font-size");
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
             var text_buf: [128]u8 = undefined;
             try std.testing.expectEqualStrings("Discard unsaved changes to 1 field?", readEditUtf8(settings.text_close_prompt.?, &text_buf).?);
             try std.testing.expect(sys.IsWindowVisible(settings.btn_close_save.?) == 0);
@@ -7353,16 +7388,16 @@ test "settings Discard changes throws the draft away and keeps the window" {
             try std.testing.expect(discard_rect.right <= save_rect.left);
             try std.testing.expectEqual(discard_rect.top, save_rect.top);
 
-            // Edits across sections, one of them half typed. The App's live
-            // preview writes a valid draft into the config `currentConfig`
-            // hands out, so Discard has to take it back before it reads it.
+            // Three edits, one of them half typed. Two are previewed, into the
+            // config `currentConfig` hands out (`live_previews`), so Discard
+            // has to take them back before it reads it.
             fixture.live_previews = true;
-            const original_cursor = settings.original.?.@"cursor-style";
-            _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
-            settings.syncCombo(.cursor_style);
-            typeInto(settings.fields.edit_font_size.?, "16");
-            try std.testing.expectEqual(@as(f32, 16), fixture.config.@"font-size");
-            try std.testing.expect(fixture.config.@"cursor-style" != original_cursor);
+            const original_theme = settings.original.?.@"window-theme";
+            _ = sys.SendMessageW(settings.fields.combo_window_theme.?, CB_SETCURSEL, 2, 0);
+            settings.syncCombo(.window_theme);
+            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
+            try std.testing.expect(fixture.config.@"window-theme" != original_theme);
             typeInto(settings.fields.edit_font_size.?, "1");
             try std.testing.expect(sys.IsWindowEnabled(discard) != 0);
 
@@ -7370,20 +7405,21 @@ test "settings Discard changes throws the draft away and keeps the window" {
             _ = sys.SendMessageW(discard, BM_CLICK, 0, 0);
             try std.testing.expect(settings.hasPendingChanges());
             var prompt_buf: [128]u8 = undefined;
-            try std.testing.expectEqualStrings("Discard unsaved changes to 2 fields?", readEditUtf8(settings.text_close_prompt.?, &prompt_buf).?);
+            try std.testing.expectEqualStrings("Discard unsaved changes to 3 fields?", readEditUtf8(settings.text_close_prompt.?, &prompt_buf).?);
             _ = sys.SetFocus(settings.btn_close_discard.?);
             try std.testing.expect(fixture.pumpKey(0x0D));
 
             // Everything is back to what is saved, the window is open, and the
             // button that was pressed is no longer where the keyboard sits.
             try std.testing.expect(!settings.hasPendingChanges());
-            try std.testing.expectEqual(original_cursor, fixture.config.@"cursor-style");
-            try std.testing.expectEqual(@as(f32, 12), fixture.config.@"font-size");
+            try std.testing.expectEqual(original_theme, fixture.config.@"window-theme");
+            try std.testing.expectEqual(@as(f64, 1), fixture.config.@"background-opacity");
             try std.testing.expectEqual(@as(f32, 12), settings.pending.?.@"font-size");
-            try std.testing.expectEqual(original_cursor, settings.pending.?.@"cursor-style");
+            try std.testing.expectEqual(@as(f64, 1), settings.pending.?.@"background-opacity");
+            try std.testing.expectEqual(original_theme, settings.pending.?.@"window-theme");
             try std.testing.expectEqual(
-                @as(LRESULT, @intCast(comboIndexFromCursorStyle(original_cursor))),
-                sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_GETCURSEL, 0, 0),
+                @as(LRESULT, @intCast(comboIndexFromWindowTheme(original_theme))),
+                sys.SendMessageW(settings.fields.combo_window_theme.?, CB_GETCURSEL, 0, 0),
             );
             var edit_text: [16]u8 = undefined;
             try std.testing.expectEqualStrings("12", readEditUtf8(settings.fields.edit_font_size.?, &edit_text).?);
@@ -8632,9 +8668,14 @@ const dialog_test = struct {
         editor_opened: u32 = 0,
         saved: u32 = 0,
         custom_uia: bool = false,
-        /// Whether a live preview writes into `config`, as the App's does into
-        /// `app.config`, which is what `currentConfig` hands back.
+        /// Whether a live preview writes into `config`, which is what
+        /// `currentConfig` hands back. The App keeps its previews out of that
+        /// config (`App.settings_preview`); one that wrote them in, as it once
+        /// did, is the harder case for Discard, which then has to take them
+        /// back before it reads it.
         live_previews: bool = false,
+        /// How many live previews reached the App.
+        previews: u32 = 0,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// What the Default profile dropdown is offered: `test_profiles`,
@@ -8742,6 +8783,7 @@ const dialog_test = struct {
 
         fn previewField(ctx: *anyopaque, _: SettingField, value: SettingValue) void {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
+            self.previews += 1;
             if (self.live_previews) setSettingValue(&self.config, value);
         }
 
@@ -11162,8 +11204,8 @@ test "settings status line says whether an edit previews or waits for a save" {
             settings.syncCombo(.window_theme);
             try std.testing.expectEqualStrings("Previewing now. Save to keep it.", try statusTextOf(settings, &buf));
 
-            // Cursor style is previewed into the config, but no open terminal
-            // reads it until the save, so it must not claim a preview.
+            // No open terminal reads cursor style until the save, so it is
+            // not previewed and must not claim a preview.
             _ = sys.SendMessageW(settings.fields.combo_cursor_style.?, CB_SETCURSEL, 2, 0);
             settings.syncCombo(.cursor_style);
             try std.testing.expectEqualStrings("Applies when you save.", try statusTextOf(settings, &buf));

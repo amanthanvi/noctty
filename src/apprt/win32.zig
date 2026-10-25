@@ -2920,6 +2920,13 @@ pub const App = struct {
 
     core_app: *CoreApp,
     config: configpkg.Config,
+    /// What Settings previews and has not saved: a copy of `config` with the
+    /// previewed drafts in it, null while it would equal `config`. The chrome
+    /// theme and the windows' opacity are drawn from it (`shownConfig`).
+    /// `config` keeps what the files say: new terminals, reloads (a Windows
+    /// light/dark switch is one) and Settings' own snapshots read it, and an
+    /// unsaved draft must reach none of them (PKG-39).
+    settings_preview: ?configpkg.Config = null,
     /// Cached TokenElevation state. This scopes the title and IPC namespace
     /// consistently for the full lifetime of the process.
     is_elevated: bool = false,
@@ -4093,7 +4100,11 @@ pub const App = struct {
             if (slot.*) |owned| self.core_app.alloc.free(owned);
             slot.* = null;
         }
+        // The window rolls its previews back as it goes, and the hosts and
+        // windows a redraw walks are gone by now: nothing to show it to.
+        self.settings_window.handle.previewField = null;
         self.settings_window.deinit();
+        self.dropSettingsPreview();
         const uia_disconnect_hr = win32_uia.disconnectAllProviders();
         if (uia_disconnect_hr != 0) {
             log.warn("win32 UIA disconnect-all failed hr=0x{x}", .{@as(u32, @bitCast(uia_disconnect_hr))});
@@ -7507,8 +7518,10 @@ pub const App = struct {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
                         self.unregisterGlobalHotkeys();
-                        self.config.deinit();
+                        var replaced = self.config;
                         self.config = config;
+                        self.rebaseSettingsPreview(&replaced);
+                        replaced.deinit();
                         if (background_blur_newly_requested) logBackgroundBlurUnsupported();
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
@@ -9246,7 +9259,7 @@ pub const App = struct {
     }
 
     fn reconfigureSystemTheme(self: *App) void {
-        const snapshot = SystemThemeSnapshot.capture(&self.config);
+        const snapshot = SystemThemeSnapshot.capture(self.shownConfig());
         const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
         if (!changed) {
             const missing_resources = for (self.hosts.items) |host| {
@@ -9278,7 +9291,9 @@ pub const App = struct {
         // off `frame_mode_changed` alone.
         const chrome_layout_changed = frame_mode_changed or
             previous_tab_bar_visible != self.tab_bar_visible;
-        self.resolved_theme = resolveTheme(&self.config);
+        // The theme as Settings previews it.
+        const shown = self.shownConfig();
+        self.resolved_theme = resolveTheme(shown);
         for (self.hosts.items) |host| {
             host.rebuildThemeBrushes();
             host.recreateChromeFont();
@@ -9293,7 +9308,7 @@ pub const App = struct {
                 host.handleNcMouseLeave();
             }
             if (host.hwnd) |hwnd| {
-                applyDwmThemeWithBuild(hwnd, &self.resolved_theme, &self.config, self.os_build);
+                applyDwmThemeWithBuild(hwnd, &self.resolved_theme, shown, self.os_build);
                 if (frame_mode_changed) {
                     _ = sys.SetWindowPos(
                         hwnd,
@@ -9325,6 +9340,104 @@ pub const App = struct {
         for (self.windows.items) |surface| surface.invalidateScrollbarWindow();
         self.theme_rebuilds +%= 1;
         self.settings_window.themeChanged();
+    }
+
+    /// The config the chrome is drawn from: `settings_preview` while Settings
+    /// previews a draft, else `config`. The windows' opacity has its own
+    /// (`shownBackgroundOpacity`); terminal configs, new ones too, come from
+    /// `config`.
+    fn shownConfig(self: *const App) *const configpkg.Config {
+        return if (self.settings_preview) |*preview| preview else &self.config;
+    }
+
+    /// The opacity a window applies along with `config`
+    /// (`Surface.applyRuntimeConfig`): Settings' preview of it while one is
+    /// shown, whatever `config` is. A reload reaches each terminal's own
+    /// config before the app's (`CoreApp.updateConfig`), so a window that
+    /// took the saved value there would show it until the app's
+    /// `config_change` put the preview back, a theme rebuild later.
+    fn shownBackgroundOpacity(self: *const App, config: *const configpkg.Config) f64 {
+        if (self.settings_preview) |*preview| {
+            if (preview.@"background-opacity" != self.config.@"background-opacity") return preview.@"background-opacity";
+        }
+        return config.@"background-opacity";
+    }
+
+    /// Show `value` as Settings' preview of its field, leaving `config` alone.
+    /// Returns whether what the windows show for the field changed.
+    fn previewSetting(self: *App, value: win32_settings.SettingValue) bool {
+        const field = std.meta.activeTag(value);
+        if (std.meta.eql(win32_settings.settingValue(self.shownConfig(), field), value)) return false;
+        if (self.settings_preview == null) {
+            self.settings_preview = self.config.clone(self.core_app.alloc) catch |err| {
+                log.warn("settings live preview copy failed field={} err={}", .{ field, err });
+                return false;
+            };
+        }
+        const preview = &self.settings_preview.?;
+        win32_settings.setSettingValue(preview, value);
+        if (settingsPreviewShowsNothingNew(preview, &self.config)) self.dropSettingsPreview();
+        return true;
+    }
+
+    /// Redraw what a preview of a field with `effect` changes.
+    fn refreshSettingsPreview(self: *App, effect: win32_settings.PreviewEffect) void {
+        switch (effect) {
+            .none => {},
+            .theme => self.reconfigureTheme(),
+            .opacity => for (self.windows.items) |surface| {
+                surface.applyRuntimeConfig(&self.config) catch |err| {
+                    log.warn("settings live preview apply failed err={}", .{err});
+                };
+            },
+        }
+    }
+
+    fn dropSettingsPreview(self: *App) void {
+        if (self.settings_preview) |*preview| preview.deinit();
+        self.settings_preview = null;
+    }
+
+    /// `config` was replaced, and `replaced` is the config it was. The
+    /// preview sat on that one, so it is made again on the new config with
+    /// the drafts it showed (its fields that differed from `replaced`), and is
+    /// gone where the new config says the same. The caller redraws.
+    ///
+    /// A reload's `config_change` does this before it redraws, so the chrome
+    /// is not rebuilt from the bare config first; Settings then previews its
+    /// drafts again (`externalConfigChanged`), which changes nothing. The
+    /// palette's theme preview replaces `config` without telling Settings, so
+    /// there this is all that keeps the drafts shown.
+    fn rebaseSettingsPreview(self: *App, replaced: *const configpkg.Config) void {
+        var previous = self.settings_preview orelse return;
+        self.settings_preview = null;
+        defer previous.deinit();
+        for (std.enums.values(win32_settings.SettingField)) |field| {
+            if (win32_settings.previewEffect(field) == .none) continue;
+            const value = win32_settings.settingValue(&previous, field);
+            if (std.meta.eql(value, win32_settings.settingValue(replaced, field))) continue;
+            _ = self.previewSetting(value);
+        }
+    }
+
+    /// Settings previews nothing any more: a save wrote every draft, or the
+    /// window closed (its rollback normally leaves nothing to end). A save's
+    /// reload already moved the preview onto the saved config, where it is gone
+    /// unless a later config layer overrides a saved value (a masked save):
+    /// then the windows go to what is in effect, not to the draft. The
+    /// transaction ends its previews at a save without a rollback effect.
+    fn endSettingsPreview(self: *App) void {
+        var previous = self.settings_preview orelse return;
+        self.settings_preview = null;
+        defer previous.deinit();
+        var changed = std.EnumSet(win32_settings.PreviewEffect).initEmpty();
+        for (std.enums.values(win32_settings.SettingField)) |field| {
+            const effect = win32_settings.previewEffect(field);
+            if (effect == .none) continue;
+            if (!std.meta.eql(win32_settings.settingValue(&previous, field), win32_settings.settingValue(&self.config, field))) changed.insert(effect);
+        }
+        var effects = changed.iterator();
+        while (effects.next()) |effect| self.refreshSettingsPreview(effect);
     }
 
     /// Where the picker starts when nothing was chosen or hinted: the profile
@@ -9598,7 +9711,7 @@ pub const App = struct {
         ) orelse return lastError();
         host.hwnd = hwnd;
         setWindowIcon(hwnd, self.hinstance);
-        applyDwmThemeWithBuild(hwnd, &self.resolved_theme, &self.config, self.os_build);
+        applyDwmThemeWithBuild(hwnd, &self.resolved_theme, self.shownConfig(), self.os_build);
         if (!startup_decorations_visible and keeps_frame) {
             win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, false);
         }
@@ -17748,6 +17861,8 @@ const Host = struct {
     fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
         const old = self.app.config;
         self.app.config = new_config;
+        // A Settings preview stays shown over the palette's theme.
+        self.app.rebaseSettingsPreview(&old);
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme();
@@ -25013,7 +25128,7 @@ const Host = struct {
     ) void {
         const titlebar_theme = clientTitlebarTheme(
             &self.app.resolved_theme,
-            &self.app.config,
+            self.app.shownConfig(),
             self.usingIntegratedTitlebar(),
             isHighContrastActive(),
         );
@@ -25077,7 +25192,7 @@ const Host = struct {
         const icon = self.searchBarButtonIcon(draw.hwndItem);
         const titlebar_theme = clientTitlebarTheme(
             &self.app.resolved_theme,
-            &self.app.config,
+            self.app.shownConfig(),
             tab_button and self.usingIntegratedTitlebar(),
             is_hc,
         );
@@ -27748,7 +27863,7 @@ const Host = struct {
         // caption. Unconfigured, this is byte-identical to `theme`.
         const titlebar_theme_value = clientTitlebarTheme(
             theme,
-            &self.app.config,
+            self.app.shownConfig(),
             self.usingIntegratedTitlebar(),
             isHighContrastActive(),
         );
@@ -30885,16 +31000,20 @@ fn settingsPreviewFieldThunk(
 ) void {
     const app: *App = @ptrCast(@alignCast(ctx));
     std.debug.assert(std.meta.activeTag(value) == field);
-    win32_settings.setSettingValue(&app.config, value);
-    switch (win32_settings.previewEffect(field)) {
-        .none => {},
-        .theme => app.reconfigureTheme(),
-        .opacity => for (app.windows.items) |surface| {
-            surface.applyRuntimeConfig(&app.config) catch |err| {
-                log.warn("settings live preview apply failed field={} err={}", .{ field, err });
-            };
-        },
+    // Nothing in an open window shows such a field (Settings sends none).
+    const effect = win32_settings.previewEffect(field);
+    if (effect == .none) return;
+    if (app.previewSetting(value)) app.refreshSettingsPreview(effect);
+}
+
+/// Whether a Settings preview shows nothing that `config` does not: equal in
+/// every field Settings previews.
+fn settingsPreviewShowsNothingNew(preview: *const configpkg.Config, config: *const configpkg.Config) bool {
+    for (std.enums.values(win32_settings.SettingField)) |field| {
+        if (win32_settings.previewEffect(field) == .none) continue;
+        if (!std.meta.eql(win32_settings.settingValue(preview, field), win32_settings.settingValue(config, field))) return false;
     }
+    return true;
 }
 
 test "CHROME57 repeated host system messages apply the app theme only once" {
@@ -30918,35 +31037,196 @@ test "CHROME57 repeated host system messages apply the app theme only once" {
     try std.testing.expectEqual(applied + @as(u32, @intFromBool(changed)), app.theme_rebuilds);
 }
 
-test "settings live preview refreshes only what the field shows" {
+test "PKG-39 a Settings preview is shown without reaching the config terminals and reloads read" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var core = try CoreApp.create(std.testing.allocator);
-    defer core.destroy();
+    const alloc = std.testing.allocator;
+    var core_app: CoreApp = undefined;
     var app: App = undefined;
-    try app.init(core, .{});
-    defer app.terminate();
+    var palette_host: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &palette_host }} });
+    defer session.deinit();
+    defer testFreeConfigProblems(&app, alloc);
+    app.config.@"window-theme" = .dark;
+    const saved_font_size = app.config.@"font-size";
+    const saved_accent = app.config.@"accent-follow-system";
 
+    // A field no open window shows is not previewed at all: written into the
+    // config, it reached only the terminals opened before Save.
     const baseline = app.theme_rebuilds;
-    settingsPreviewFieldThunk(&app, .font_size, .{ .font_size = 14 });
+    settingsPreviewFieldThunk(&app, .font_size, .{ .font_size = saved_font_size + 2 });
     settingsPreviewFieldThunk(&app, .window_padding_x, .{ .window_padding_x = .{ .top_left = 4, .bottom_right = 4 } });
-    settingsPreviewFieldThunk(&app, .window_padding_y, .{ .window_padding_y = .{ .top_left = 4, .bottom_right = 4 } });
     settingsPreviewFieldThunk(&app, .cursor_style, .{ .cursor_style = .underline });
+    try std.testing.expectEqual(saved_font_size, app.config.@"font-size");
+    try std.testing.expect(app.settings_preview == null);
+    try std.testing.expectEqual(baseline, app.theme_rebuilds);
+
+    // Opacity, the window theme and the accent are shown from a copy of the
+    // config; only the theme fields rebuild the theme, once per change.
     settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
     try std.testing.expectEqual(baseline, app.theme_rebuilds);
-    // The write itself still happens: it is what a new terminal inherits.
-    try std.testing.expectEqual(@as(f32, 14), app.config.@"font-size");
-    try std.testing.expectEqual(@as(f64, 0.5), app.config.@"background-opacity");
-
     settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
     try std.testing.expectEqual(baseline + 1, app.theme_rebuilds);
-    try std.testing.expect(app.config.@"window-theme" == .light);
-
-    // The tab strip follows the accent only while the setting is on, so the
-    // checkbox rebuilds the theme like the window theme does.
-    settingsPreviewFieldThunk(&app, .accent_follow_system, .{ .accent_follow_system = false });
+    if (!isHighContrastActive()) try std.testing.expect(!app.resolved_theme.is_dark);
+    settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
+    try std.testing.expectEqual(baseline + 1, app.theme_rebuilds);
+    settingsPreviewFieldThunk(&app, .accent_follow_system, .{ .accent_follow_system = !saved_accent });
     try std.testing.expectEqual(baseline + 2, app.theme_rebuilds);
-    try std.testing.expect(!app.config.@"accent-follow-system");
+    try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+    try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+    try std.testing.expectEqual(!saved_accent, app.shownConfig().@"accent-follow-system");
+    try std.testing.expectEqual(@as(f64, 1), app.config.@"background-opacity");
+    try std.testing.expect(app.config.@"window-theme" == .dark);
+    try std.testing.expectEqual(saved_accent, app.config.@"accent-follow-system");
+    // A window shows the previewed opacity whatever config it applies: in a
+    // reload, a terminal's own config reaches its window before the app's.
+    try std.testing.expectEqual(@as(f64, 0.5), app.shownBackgroundOpacity(&app.config));
+
+    // A new tab starts from what is saved.
+    {
+        var tab = try apprt.surface.newConfig(&core_app, &app.config, .tab);
+        defer tab.deinit();
+        try std.testing.expectEqual(@as(f64, 1), tab.@"background-opacity");
+        try std.testing.expect(tab.@"window-theme" == .dark);
+    }
+
+    // A reload replaces the config, and the preview moves onto the new one.
+    {
+        var reloaded = try app.config.clone(alloc);
+        defer reloaded.deinit();
+        reloaded.@"font-size" = saved_font_size + 3;
+        try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &reloaded }));
+    }
+    try std.testing.expectEqual(saved_font_size + 3, app.config.@"font-size");
+    try std.testing.expectEqual(saved_font_size + 3, app.shownConfig().@"font-size");
+    try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+    try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+    try std.testing.expect(app.config.@"window-theme" == .dark);
+
+    // So does a palette theme preview, which replaces the config itself, and
+    // its revert.
+    {
+        var palette = try app.config.clone(alloc);
+        palette.@"split-divider-color" = .{ .r = 1, .g = 2, .b = 3 };
+        const running = palette_host.swapRuntimeConfigFromPalette(palette);
+        try std.testing.expect(app.shownConfig().@"split-divider-color" != null);
+        try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+        try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+        var previewed = palette_host.swapRuntimeConfigFromPalette(running);
+        previewed.deinit();
+        try std.testing.expect(app.shownConfig().@"split-divider-color" == null);
+        try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
+    }
+
+    // Back to the saved values, nothing is previewed.
+    settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .dark });
+    settingsPreviewFieldThunk(&app, .accent_follow_system, .{ .accent_follow_system = saved_accent });
+    try std.testing.expect(app.settings_preview != null);
+    settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 1 });
+    try std.testing.expect(app.settings_preview == null);
+
+    // A reload that brings the config to the draft ends that preview.
+    settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
+    {
+        var reloaded = try app.config.clone(alloc);
+        defer reloaded.deinit();
+        reloaded.@"background-opacity" = 0.5;
+        try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &reloaded }));
+    }
+    try std.testing.expect(app.settings_preview == null);
+
+    // A save ends the preview: after one that a later config layer overrides
+    // (still dark here), the windows show what is in effect, not the draft.
+    settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
+    {
+        // No opacity is previewed now, so a window keeps the one it applies.
+        var own = try app.config.clone(alloc);
+        defer own.deinit();
+        own.@"background-opacity" = 0.7;
+        try std.testing.expectEqual(@as(f64, 0.7), app.shownBackgroundOpacity(&own));
+    }
+    const rebuilds = app.theme_rebuilds;
+    app.endSettingsPreview();
+    try std.testing.expect(app.settings_preview == null);
+    try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+    if (!isHighContrastActive()) try std.testing.expect(app.resolved_theme.is_dark);
+    app.endSettingsPreview();
+    try std.testing.expectEqual(rebuilds + 1, app.theme_rebuilds);
+}
+
+test "PKG-39 a Windows light/dark switch leaves an unsaved Settings preview a draft" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            const alloc = std.testing.allocator;
+            var core_app: CoreApp = undefined;
+            var app: App = undefined;
+            var session: TestSession = .{};
+            try session.init(.{ .core_app = &core_app, .app = &app });
+            defer session.deinit();
+            defer testFreeConfigProblems(&app, alloc);
+            app.initComApartment();
+            if (!app.com_initialized) return error.SkipZigTest;
+            defer sys.OleUninitialize();
+            // This test has no app message loop to drain COM teardown.
+            app.settings_window.handle.deferUiaDisconnect = null;
+            const settings_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
+            const viewport_class = comptime std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings.viewport");
+            defer {
+                app.settings_window.deinit();
+                _ = sys.UnregisterClassW(settings_class, app.settings_window.handle.hinstance);
+                _ = sys.UnregisterClassW(viewport_class, app.settings_window.handle.hinstance);
+            }
+            const bm_click = 0x00F5;
+            const cb_setcursel = 0x014E;
+            const cbn_selchange = 1;
+            app.config.@"window-theme" = .dark;
+            const settings = &app.settings_window;
+            try settings.open();
+
+            // An unsaved Light window theme, previewed.
+            const combo = settings.fields.combo_window_theme.?;
+            _ = sys.SendMessageW(combo, cb_setcursel, 2, 0);
+            const id: usize = @intCast(sys.GetDlgCtrlID(combo));
+            _ = sys.SendMessageW(settings.hwnd.?, c.WM_COMMAND, id | (@as(usize, cbn_selchange) << 16), @bitCast(@intFromPtr(combo)));
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+            try std.testing.expect(app.config.@"window-theme" == .dark);
+
+            // Windows switches light/dark: the soft reload applies what is
+            // saved, and the draft stays a draft, still previewed.
+            const scheme: apprt.ColorScheme = if (core_app.config_conditional_state.theme == .light) .dark else .light;
+            try core_app.colorSchemeEvent(&app, scheme);
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expect(settings.pending.?.@"window-theme" == .light);
+            try std.testing.expect(app.config.@"window-theme" == .dark);
+            try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+            if (!isHighContrastActive()) try std.testing.expect(!app.resolved_theme.is_dark);
+
+            // Discard takes the preview back.
+            _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);
+            _ = sys.SendMessageW(settings.btn_close_discard.?, bm_click, 0, 0);
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(app.settings_preview == null);
+            if (!isHighContrastActive()) try std.testing.expect(app.resolved_theme.is_dark);
+
+            // A reload that adopts a draft ends its preview, also where the
+            // preview showed something else: a typed 0.1 previews the 0.2
+            // floor. Left standing, it outlived the draft (review round 1).
+            _ = sys.SetWindowTextW(settings.fields.edit_bg_opacity.?, std.unicode.utf8ToUtf16LeStringLiteral("0.1"));
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(f64, 0.2), app.shownConfig().@"background-opacity");
+            {
+                var reloaded = try app.config.clone(alloc);
+                defer reloaded.deinit();
+                reloaded.@"background-opacity" = 0.1;
+                try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &reloaded }));
+            }
+            try std.testing.expect(!settings.hasPendingChanges());
+            try std.testing.expect(app.settings_preview == null);
+            try std.testing.expectEqual(@as(f64, 0.1), app.shownBackgroundOpacity(&app.config));
+        }
+    }.body);
 }
 fn settingsNotifyConflictThunk(ctx: *anyopaque, field: win32_settings.SettingField) void {
     const app: *App = @ptrCast(@alignCast(ctx));
@@ -31135,7 +31415,13 @@ fn settingsSaveAndReloadThunk(
     original: *const configpkg.Config,
 ) win32_settings.SaveError!void {
     const app: *App = @ptrCast(@alignCast(ctx));
-    return app.settingsSaveAndReload(pending, original);
+    // A completed save ends the window's previews (`endSettingsPreview`); a
+    // failed one keeps the draft, and its preview with it.
+    app.settingsSaveAndReload(pending, original) catch |err| {
+        if (err == error.SavedButMasked) app.endSettingsPreview();
+        return err;
+    };
+    app.endSettingsPreview();
 }
 fn settingsQueryEndSessionThunk(ctx: *anyopaque, lParam: LPARAM) bool {
     const app: *App = @ptrCast(@alignCast(ctx));
@@ -31149,6 +31435,8 @@ fn settingsEndSessionThunk(ctx: *anyopaque, ending: bool, lParam: LPARAM) void {
 
 fn settingsOnClosedThunk(ctx: *anyopaque) void {
     const app: *App = @ptrCast(@alignCast(ctx));
+    // No preview outlives the window.
+    app.endSettingsPreview();
     const restore_id = app.settings_restore_surface_id;
     app.settings_restore_surface_id = null;
     const restored = settingsRestoreSurface(app, restore_id);
@@ -44105,7 +44393,7 @@ pub const Surface = struct {
                 log.warn("win32 decoration update failed during config reload err={}", .{err});
             };
         }
-        self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
+        self.background_opacity_default = normalizedBackgroundOpacity(self.app.shownBackgroundOpacity(config));
         self.scrollbar_config = config.scrollbar;
         if (self.background_opacity_default >= 0.999) {
             self.background_opacity_force_opaque = false;
@@ -46493,6 +46781,7 @@ const TestSession = struct {
         if (self.app_initialized) {
             const app = self.app.?;
             app.shell_runtime.deinit();
+            app.dropSettingsPreview();
             app.config.deinit();
             app.hosts.deinit(self.allocator);
             app.windows.deinit(self.allocator);
