@@ -465,19 +465,21 @@ lands incrementally.
   two 96 DPI monitors, no injected delay). Over 30 drags of a single pane, no
   text shifted and no size mismatched. A build that logs what termio applied,
   over 30 more, sent no old-font size to the core, made no intermediate grid
-  and pushed no rows into scrollback. In a split window, 10 drags brought one
-  termio resize per pane, in the final font, with every pane's scrollback
-  unchanged (the panes' PTY sizes were not captured). An earlier split run, on
-  a different executable, logged one pane's resize on 7 of 10 drags, and its
-  screenshot check flagged 5 of 10. The agent log (test-harnesses.md,
+  and pushed no rows into scrollback. In a split window, 10 drags on a
+  rebuilt logging build brought one termio resize per pane, in the final font,
+  with every pane's scrollback unchanged (the panes' PTY sizes were not
+  captured). The first split run, on the earlier build of the logging
+  executable (which the 30 logged single-pane drags used too; their logs are
+  complete), logged one pane's resize on 7 of 10 drags. The screenshot check
+  flagged 5 of 10 drags in both split runs. The agent log (test-harnesses.md,
   2026-10-19) reads the first as overwritten bytes in the logger (shown for 4
   of the 7, consistent with the other 3) and the second as a split pane
-  compared with an unsplit reference. A hidden-desktop check of 40 crossings
-  between 144 and 96 DPI, with one tab and with two panes, matched on all 80
-  observations (client pixels, core grid and the PTY size read back through
-  `AttachConsole`), so neither shows a product miss; it did not cover an
-  unspecified initial size, transient sizes, composed output or the message
-  order of a real drag. A tab hidden during the move takes the font and the
+  compared with an unsplit reference. A hidden-desktop check (20 crossings per
+  orientation between 144 and 96 DPI, on a one-tab window and on two-pane
+  splits) matched all 80 of its observations (client pixels, core, IO and
+  terminal grids, and the PTY size read back through `AttachConsole`), so
+  neither shows a product miss; it did not cover an unspecified initial size,
+  transient sizes, composed output or the message order of a real drag. A tab hidden during the move takes the font and the
   size as separate resizes when it is shown, so a slow font build there can
   still wrap long lines into scrollback.
   A pane whose new font cannot be built gets the new size in the old font at

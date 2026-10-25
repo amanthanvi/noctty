@@ -194,7 +194,8 @@ user's prompt writes itself lands after A. B is written by the line reader
 (below), after the host has drawn the prompt and before PSReadLine starts, so
 it lands where input begins whatever the prompt returned, and the returned
 string stays exactly the user's: a `Start-Transcript` transcript records the
-prompt without it (measured). The "Turn on PowerShell Transcription" group
+prompt without it (measured in FullLanguage, which the automatic bootstrap
+needs: it skips ConstrainedLanguage). The "Turn on PowerShell Transcription" group
 policy is expected to start the same host transcription, so its transcript
 should do the same; that is inferred, not measured, and no policy has been
 set to check it.

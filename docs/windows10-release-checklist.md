@@ -90,7 +90,7 @@ gate function named in the source is missing from this page.
 | ConPTY source (`pty.zig`)                                                  | Bundled `conpty.dll` and `OpenConsole.exe`, else the in-box conhost                                                                                          | W10-19, W10-02           |
 | Default-terminal delegation (`win32_terminal_handoff.zig`)                 | Needs the console-delegation setting the OS provides                                                                                                         | W10-22                   |
 | Toasts, AUMID, jump list, Explorer verbs                                   | Shell features that look different on Windows 10                                                                                                             | W10-23 to W10-25         |
-| `directVolumePath`, `directVolumeDeviceName` (`os/windows.zig`)            | Maps the DOS drive alias to its volume path before an `OBJ_DONT_REPARSE` open                                                                                | W10-27, W10-28           |
+| `directVolumePath`, `directVolumeDeviceName` (`os/windows.zig`)            | Any build: maps the DOS drive alias before a guarded open; Windows 10 may reject it                                                                          | W10-27, W10-28           |
 
 ## Rows
 
@@ -374,12 +374,14 @@ near 30 fps.
 
 ### Default shell and file links
 
-Both rows check #450, which resolves the DOS drive alias (`C:`) to its direct
-volume path before a file is opened with `OBJ_DONT_REPARSE`. It was written
-because an upstream report (openai/codex#46290) has Windows 10 22H2 build
-19045.6456 rejecting the alias itself under that flag. That the same happens to
-noctty is inferred, and neither row has been run on Windows 10. Record the
-build number with the result.
+Both rows check the change in #450, which resolves the DOS drive alias (`C:`)
+to its direct volume path before a file is opened with `OBJ_DONT_REPARSE`:
+in shell detection (whose guarded open came with #443), in the link opener and
+in the WSL probe. It was written because an upstream report
+(openai/codex#46290) has Windows 10 22H2 build 19045.6456 rejecting the alias
+itself under that flag. That the same happens to noctty is inferred, and
+neither row has been run on Windows 10. Record the build number with the
+result.
 
 **W10-27 Default shell with `command` unset (Core).** Gate: `directVolumePath`
 (`os/windows.zig`), used by shell detection in `windows_shell.zig`. Install
