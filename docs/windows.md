@@ -1454,8 +1454,8 @@ for bold text. An explicit `wght` in `font-variation-bold` or
 `font-variation-bold-italic` takes precedence; other configured axes are
 preserved. Regular and italic-only requests receive no automatic weight
 override.
-When a static face provides the same style and weight, it wins a tie unless
-variations were explicitly requested.
+Otherwise equal matches prefer a static face unless variations were
+explicitly requested.
 
 `noctty +list-fonts --family="Cascadia Code" --bold` lists matching installed
 faces. Discovery does not enumerate variable fonts' named instances or add

@@ -1192,7 +1192,7 @@ pub const Windows = struct {
 
         if (desc.variations.len > 0 and record.variable) result |= 1 << 7;
         // Prefer a real static style on a tie unless axes were requested.
-        if (desc.variations.len == 0 and !record.variable) result |= 1 << 7;
+        if (desc.variations.len == 0 and !record.variable) result |= 1 << 5;
         if (record.color) result |= 1 << 6;
 
         return result;
@@ -2077,6 +2077,11 @@ test "FONTVF weight range eligibility ranking and other axes" {
     static_bold.bold = true;
     try testing.expect(Windows.score(.{}, vf) > Windows.score(.{}, static_bold));
     try testing.expect(Windows.score(bold, static_bold) > Windows.score(bold, vf));
+    // Static preference breaks an otherwise equal score; it must not
+    // override the pre-existing preference for a color-capable face.
+    var color_vf = vf;
+    color_vf.color = true;
+    try testing.expect(Windows.score(bold, color_vf) > Windows.score(bold, static_bold));
 
     const other = [_]Variation{.{ .id = .init("wdth"), .value = 90 }};
     const combined = try Windows.faceVariations(testing.allocator, vf, true, &other);
