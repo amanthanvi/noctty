@@ -337,6 +337,19 @@ function Get-StatefulScreenshotDecision($Facts) {
     return [pscustomobject]@{ Capture = $null -eq $note; CaptureRect = $capture; Note = $note; Occluders = $occluders }
 }
 
+# The screen over $Area as a new bitmap. Only Save-StatefulScreenCapture calls
+# it; the contracts substitute it to test that function without a desktop.
+function Read-StatefulScreenArea($Area) {
+    $bitmap = [Drawing.Bitmap]::new($Area.Right - $Area.Left, $Area.Bottom - $Area.Top)
+    try {
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try { $graphics.CopyFromScreen($Area.Left, $Area.Top, 0, 0, $bitmap.Size) }
+        finally { $graphics.Dispose() }
+    }
+    catch { $bitmap.Dispose(); throw }
+    return $bitmap
+}
+
 # Every screenshot a harness saves goes through here, because the interactive
 # job uploads the sandbox logs to the artifacts of a public repository
 # (EVIDENCE-SCREENSHOT-PRIVACY-01). It reads the screen over the decision's
@@ -352,11 +365,8 @@ function Save-StatefulScreenCapture([IntPtr] $Hwnd, [string] $Path, [switch] $Pa
     $area = $decision.CaptureRect
     $result = [pscustomobject][ordered]@{ Path = $null; Note = $decision.Note; Bitmap = $null; Area = $area; WindowRect = $Facts.Rect }
     if ($null -eq $area -or -not ($decision.Capture -or $PassThru)) { return $result }
-    $bitmap = [Drawing.Bitmap]::new($area.Right - $area.Left, $area.Bottom - $area.Top)
+    $bitmap = Read-StatefulScreenArea $area
     try {
-        $graphics = [Drawing.Graphics]::FromImage($bitmap)
-        try { $graphics.CopyFromScreen($area.Left, $area.Top, 0, 0, $bitmap.Size) }
-        finally { $graphics.Dispose() }
         if ($decision.Capture) {
             $recheck = Get-StatefulScreenshotDecision (Get-StatefulScreenFacts $Hwnd)
             $again = $recheck.CaptureRect
