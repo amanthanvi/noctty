@@ -9904,17 +9904,21 @@ pub const App = struct {
     }
 
     /// The window a new one copies its state from: the target's, or, for a
-    /// request no window made (a forwarded launch) or one from the quick
-    /// terminal, the ordinary window activated last. Never the quick
-    /// terminal, a floating, undecorated strip pinned to a screen edge that a
-    /// copy would repeat, and never a window kept with no tab for undo, which
-    /// has no pane to copy. With neither, an ordinary new window. `hosts` is
-    /// no guide: `detachHostReference` reorders it.
+    /// request no window made (a forwarded launch), one from the quick
+    /// terminal or one whose surface is gone, the ordinary window activated
+    /// last. Never the quick terminal, a floating, undecorated strip pinned
+    /// to a screen edge that a copy would repeat, and never a window kept
+    /// with no tab for undo, which has no pane to copy. With neither, an
+    /// ordinary new window. `hosts` is no guide: `detachHostReference`
+    /// reorders it.
     fn newWindowSource(self: *App, target: apprt.Target) ?*Surface {
-        if (target == .surface) if (self.findSurfaceForTarget(target)) |surface| {
-            const host = surface.host orelse return surface;
-            if (!host.quick_terminal) return surface;
-        };
+        switch (target) {
+            .app => {},
+            .surface => |core_surface| if (self.findSurfaceByCore(core_surface)) |surface| {
+                const host = surface.host orelse return surface;
+                if (!host.quick_terminal) return surface;
+            },
+        }
         var latest: ?*Host = null;
         for (self.hosts.items) |host| {
             if (host.quick_terminal or host.activeSurface() == null) continue;
@@ -31927,7 +31931,8 @@ fn newWindowPlacement(app: *App, source: HWND, fullscreen: bool, destination: ?H
     if (size) |own| rect = rectWithSize(rect, own);
     const step = cascadeStep(sys.GetDpiForWindow(source));
     // One step off the source, and on past any window already there: one
-    // window can be the source of several (`new_window` pressed again in it).
+    // window can be the source of several, as when the user goes back to it
+    // and opens another, or when Windows does not activate a forwarded one.
     var placed = cascadedRect(rect, step, info.rcWork);
     var steps: u8 = 0;
     while (steps < 8 and app.windowStartsAt(placed, destination)) : (steps += 1) {
@@ -53004,10 +53009,12 @@ test "win32 new_window from the app copies the window activated last, never the 
     first_host.activated = 5;
     try std.testing.expect(try Hook.source(&app, .app) == &first);
 
-    // From the quick terminal too.
-    try std.testing.expect(try Hook.source(&app, .{ .surface = quick_surface.core() }) == &first);
+    // From the quick terminal too. Before, that was the first ordinary
+    // window in the list.
+    second_host.activated = 6;
+    try std.testing.expect(try Hook.source(&app, .{ .surface = quick_surface.core() }) == &second);
     // From an ordinary window, that window, whenever it was activated.
-    try std.testing.expect(try Hook.source(&app, .{ .surface = second.core() }) == &second);
+    try std.testing.expect(try Hook.source(&app, .{ .surface = first.core() }) == &first);
 }
 
 test "win32 a new window is not maximized by a restore-to-maximized flag left on a normal window" {
@@ -53949,9 +53956,10 @@ test "win32 a forwarded window copies the window activated last, not the first i
             defer t.deinit();
             const app = &t.fixture.app;
 
-            // Two more windows, each where no copy is cascaded onto.
+            // Two more windows, each where no copy is cascaded onto, and with
+            // room for a copy of `second` on a 1024x768 runner.
             var buf: [2][2][32]u8 = undefined;
-            const second_at = try ForwardedKeysTest.placedAt(&buf[0], t.work.left + 300, t.work.top + 200);
+            const second_at = try ForwardedKeysTest.placedAt(&buf[0], t.work.left + 240, t.work.top + 140);
             const second = try t.forward(&second_at, null);
             const third_at = try ForwardedKeysTest.placedAt(&buf[1], t.work.left + 120, t.work.top + 120);
             const third = try t.forward(&third_at, null);
@@ -53971,7 +53979,8 @@ test "win32 a forwarded window copies the window activated last, not the first i
             // window then opened as if no window were open.
             const kept = third.host.?;
             var entry = kept.detachTabForUndo(0).?;
-            defer entry.dispose(kept, .host_destroy) catch {};
+            // Back in its window before teardown closes it, if a check fails.
+            errdefer _ = kept.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
             try activate(second);
             try activateHost(kept);
             try expectCopies(&t, second);

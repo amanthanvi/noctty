@@ -2238,22 +2238,24 @@ and decoration (`--window-width`, `--window-height`, `--window-position-*`,
 colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
 `--background-opacity`).
 
-The new window copies one of the running instance's windows, as a
-`new_window` does: the window that was active last, never the quick terminal
-or a window whose last tab was closed and is kept only for undo (if none of
-the others has been active yet, the first of them in the instance's window
-list). The new window takes that window's size, one step down and right of
-it, its maximized or fullscreen state, always-on-top, its decorations and its
-background opacity. Forwarded arguments win over the copy: `--window-width`
-and `--window-height` give it its own size (both must be set, by the
-arguments or the config; from a maximized or fullscreen window, it is the
-size the new window returns to), `--window-decoration` its decorations and
-`--background-opacity` its opacity. `--window-position-*` place it as the
-config's `window-position-*` do, at the copied size unless a size is
-forwarded, except that a window opened from a maximized or fullscreen one
-returns to that window's normal place. When there is nothing to copy (no
-window is open, or only the quick terminal and windows kept for undo), the
-arguments apply as they do to a first window.
+The new window copies one of the running instance's windows, the way a
+`new_window` copies the window it is pressed in: the window that was active
+last, never the quick terminal or a window whose last tab was closed and is
+kept only for undo (if none of the others has been active yet, as with windows
+started minimized, one of them). A window a forward opens becomes the active
+one as it is shown, so the next forward usually copies it, with any
+decorations or opacity it was given. The new window takes the copied window's
+size, one step down and right of it, its maximized or fullscreen state,
+always-on-top, its decorations and its background opacity. Forwarded arguments
+win over the copy: `--window-width` and `--window-height` give it its own size
+(both must be set, by the arguments or the config; from a maximized or
+fullscreen window, it is the size the new window returns to),
+`--window-decoration` its decorations and `--background-opacity` its opacity.
+`--window-position-*` place it as the config's `window-position-*` do, at the
+copied size unless a size is forwarded, except that a window opened from a
+maximized or fullscreen one returns to that window's normal place. When there
+is nothing to copy (no window is open, or only the quick terminal and windows
+kept for undo), the arguments apply as they do to a first window.
 
 Anything that runs code (`--command`, `--initial-command`, `-e`, `--input`,
 `--env`), loads a file (`--background-image`, `--custom-shader`,

@@ -370,9 +370,10 @@ try {
     # only tab was closed and is kept, empty, for undo. Before, it was the
     # first in the instance's window list: a forward copied the first
     # window, and with that one kept empty it copied nothing and opened as a
-    # first window does, at the configured place.
+    # first window does. No configured position (an empty value resets it),
+    # so a plain forward is one cascade step off the window it copies.
     $class="noctty-test-fwdsource-$runId"
-    $primary=Start-Case (New-Case 'source-primary' @('window-save-state = never','undo-timeout = 60s','keybind = f9=close_tab:this') -Class $class)
+    $primary=Start-Case (New-Case 'source-primary' @('window-position-x =','window-position-y =','window-save-state = never','undo-timeout = 60s','keybind = f9=close_tab:this') -Class $class)
     $second=New-Case 'source-second' @('window-save-state = never') -Class $class
     function Cascaded($s) { $step=[int][math]::Floor(32*$s.Dpi/96); return [pscustomobject]@{ Left=$s.Rect.Left+$step; Top=$s.Rect.Top+$step; Right=$s.Rect.Right+$step; Bottom=$s.Rect.Bottom+$step } }
     function Copied([string]$Name,$source,$h) {
@@ -390,10 +391,10 @@ try {
             if($last) {
                 Copied 'source-plain' (Sample 'source-c' $c) $last
                 # The first window's only tab closed: it stays, empty, first
-                # in the list. The plain forward is still the active window.
+                # in the list, and active, as the target of undo's keys.
                 Press (Pane $first) 0x78 1200        # F9: close_tab:this
                 $panes=@([HiddenLocal]::Surfaces($first)|Where-Object {[Ws]::Read($_).Visible})
-                Check 'control: the first window is kept, with no pane shown' ([Ws]::Alive($first) -and $panes.Count -eq 0 -and [Ws]::ActiveOf($last) -eq $last) 'alive, no pane, the last forward active' @{Alive=[Ws]::Alive($first); Panes=$panes.Count; Active=[Ws]::ActiveOf($last).ToInt64()}
+                Check 'control: the first window is kept, with no pane shown, and active' ([Ws]::Alive($first) -and $panes.Count -eq 0 -and [Ws]::ActiveOf($first) -eq $first) 'alive, no pane, active' @{Alive=[Ws]::Alive($first); Panes=$panes.Count; Active=[Ws]::ActiveOf($first).ToInt64(); First=$first.ToInt64()}
                 $h=Forward 'source-empty-first' ''
                 if($h) { Copied 'source-empty-first' (Sample 'source-last' $last) $h }
             }
