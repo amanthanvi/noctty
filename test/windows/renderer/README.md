@@ -80,6 +80,31 @@ because the cursor moves there and back. The cases run on OpenGL, D3D11
 hardware and WARP (hardware matching OpenGL exactly, WARP within the
 tolerances above) and once with the fixture's cursor hidden (DECTCEM off).
 No IME is installed, switched or driven.
+The palette theme cases (`-PaletteThemeOnly` runs just them, and `-WarpOnly`
+runs the WARP one) read the command palette's theme preview, cancel and commit
+from the renderer's own frames, so nothing on the screen can disturb them.
+`../interactive-win11-palette-theme.ps1` reads screen pixels, and a
+release-evidence run of it once read `3c3c3c`, which is no noctty colour, where
+it expected Dracula (attributed to another window over the app, not measured).
+The fixture's config sets `theme = Dracula`, whose background is `282a36`, and
+no background or foreground of its own. The case opens the palette through the
+host's toolbar hook (`WM_COMMAND` 1901) and sets its query edit to `0x96f`, a
+theme with background `262427`. It then polls fresh readbacks until the most
+frequent colour of the frame (`dominant` in the receipt) is that background,
+while the config file still says Dracula. A click on the palette's cancel
+button must bring `282a36` back with the file unchanged. Opening the palette
+again and clicking its first result commits the theme: the palette closes and
+the file says `0x96f`. The commit saves the file and reloads from it, so the
+frame is `262427` in the first readback after the palette closes and again one
+second later; a frame that went back to Dracula in between fails the case. A
+wait for a colour gives up after 20 seconds and names the colours it saw in
+order, and a wait for a palette control or for the saved file gives up after
+10. The case fails at once under High Contrast, where the palette does not
+preview a theme, and checks that each label ran on the backend it names. It
+runs on OpenGL (which needs an OpenGL 4.3 driver, so not under `-WarpOnly`),
+D3D11 hardware and WARP. The readback is the render target, so it does not
+prove what DWM composes, and the High Contrast suppression is for
+`interactive-win11-palette-theme.ps1 -ExerciseHighContrast` to check.
 Readback is the render target before DWM: the production OpenGL path that
 draws straight into the window's sRGB framebuffer (off in test-tools builds)
 and D3D11 after composition need a visible check.

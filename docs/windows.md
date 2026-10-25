@@ -98,8 +98,9 @@ fault-injection controls are absent from normal builds. Run
 `test/windows/renderer/Invoke-RendererParity.ps1` against the resulting
 executable; it copies a portable run, redirects app data, and uses a hidden
 desktop. On ARM64/hosts without a suitable OpenGL driver, `-WarpOnly` runs the
-software-rendering lifecycle smoke, including failed GL image/effect fallback,
-without claiming cross-backend parity. The Windows ARM64 workflow runs that
+software-rendering lifecycle smoke, including failed GL image/effect fallback
+and the command palette's theme preview, cancel and commit read back from the
+renderer's frames, without claiming cross-backend parity. The Windows ARM64 workflow runs that
 smoke on a native `windows-11-arm` runner; hardware Direct3D 11 on a Snapdragon
 GPU has not been measured.
 

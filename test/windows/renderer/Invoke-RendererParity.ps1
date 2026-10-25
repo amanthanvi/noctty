@@ -9,6 +9,7 @@ param(
     [switch]$OpenGLStartupOnly,
     [switch]$SplitDimOnly,
     [switch]$PreeditCaretOnly,
+    [switch]$PaletteThemeOnly,
     [switch]$Driver,
     [string]$RealProfile = '',
     [string]$DesktopName = ''
@@ -65,6 +66,7 @@ if (!$Driver) {
         if ($OpenGLStartupOnly) { $command += ' -OpenGLStartupOnly' }
         if ($SplitDimOnly) { $command += ' -SplitDimOnly' }
         if ($PreeditCaretOnly) { $command += ' -PreeditCaretOnly' }
+        if ($PaletteThemeOnly) { $command += ' -PaletteThemeOnly' }
         if (![RendererNative]::CreateProcessW($exe, [Text.StringBuilder]::new($command), [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x08004000, [IntPtr]::Zero, $PSScriptRoot, [ref]$si, [ref]$pi)) { throw 'Hidden driver CreateProcess failed.' }
         Write-Output "Hidden renderer driver PID=$($pi.pid) desktop=$DesktopName"
         $wait = [Diagnostics.Stopwatch]::StartNew()
@@ -88,8 +90,10 @@ if (!$Driver) {
 if ([RendererNative]::DesktopName() -ne $DesktopName -or !$DesktopName.StartsWith('renderer-test-')) { throw 'Driver is not on its verified hidden desktop.' }
 [void][RendererNative]::SetThreadDpiAwarenessContext([IntPtr]-4)
 $result = [ordered]@{ status = 'error'; hiddenDesktop = $DesktopName; profileBefore = $before; binarySHA256 = (Get-FileHash -LiteralPath $Binary).Hash; runs = @(); comparisons = @() }
-function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironment = @{}, [string[]]$ExtraConfig = @(), [switch]$Lifecycle, [switch]$MultiPane, [switch]$Streaming, [int]$FailureAction = 0, [switch]$ReloadUnsupported, [switch]$ReloadImages, [switch]$RetryHardware, [switch]$OpenGLStartupFallback, [switch]$SplitDim, [switch]$HoldSync, [switch]$NoShaderReload, [string]$SplitFill = '', [double]$SplitOpacity = 0.7, [switch]$PreeditCaret, [switch]$HideCursor) {
+function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironment = @{}, [string[]]$ExtraConfig = @(), [switch]$Lifecycle, [switch]$MultiPane, [switch]$Streaming, [int]$FailureAction = 0, [switch]$ReloadUnsupported, [switch]$ReloadImages, [switch]$RetryHardware, [switch]$OpenGLStartupFallback, [switch]$SplitDim, [switch]$HoldSync, [switch]$NoShaderReload, [string]$SplitFill = '', [double]$SplitOpacity = 0.7, [switch]$PreeditCaret, [switch]$HideCursor, [switch]$PaletteTheme) {
     [void](Assert-Profile $before)
+    # The palette previews no theme under High Contrast, so the case could only fail.
+    if ($PaletteTheme -and [RendererNative]::HighContrast()) { throw 'High Contrast is on, and the palette does not preview a theme then; turn it off for the palette theme cases.' }
     $run = Join-Path $OutputDirectory $Label
     $bin = Join-Path $run 'bin'
     [void](New-Item -ItemType Directory -Path $bin)
@@ -102,6 +106,8 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
     $architecture = if ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
     if (!(Install-ConPtyRedist -PinPath (Join-Path $repoRoot 'dist/windows/conpty-redist.json') -Architecture $architecture -Destination $bin -CacheRoot (Join-Path $OutputDirectory 'conpty-cache') -RequireConPty)) { throw 'Pinned bundled ConPTY is required for protocol coverage.' }
     $config = @('auto-update=off', 'window-save-state=never', 'confirm-close-surface=false', 'window-width=96', 'window-height=28', 'font-size=14', 'font-family=JetBrains Mono', 'cursor-style=block', 'cursor-style-blink=false', 'background=#101010', 'foreground=#eeeeee', 'minimum-contrast=4.5', 'window-vsync=false', 'shell-integration=none', 'single-instance=false', 'windows-job-object-kill-on-close=true', ('renderer=' + $Backend))
+    # The theme supplies the colours; a background or foreground set here would override it.
+    if ($PaletteTheme) { $config = @($config | Where-Object { $_ -notmatch '^(background|foreground)=' }) + 'theme=Dracula' }
     $config += 'command=direct:"' + (Get-Command pwsh).Source + '" -NoProfile -File "' + (Join-Path $bin 'Fixture.ps1') + '"'
     if ($Streaming) { $config[-1] += ' -Stream' }
     if ($HoldSync) { $config[-1] += ' -HoldSync' }
@@ -639,6 +645,94 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             $c = $p.cleared.caret
             if ($c.count -ne $cell.count -or $c.x0 -ne $cell.x0 -or $c.y0 -ne $cell.y0) { throw "Clearing the composition did not bring the terminal cursor back: $($c | ConvertTo-Json -Compress)." }
         }
+        if ($PaletteTheme) {
+            # The palette's theme preview, cancel and commit, read from the
+            # renderer's own frames. The config theme is Dracula (background
+            # 282a36) and the theme searched for is 0x96f (262427). A screen
+            # pixel read cannot tell a frame from another window drawn over
+            # the app: the 1.3.134 evidence run read 3c3c3c, which is no noctty
+            # colour, where it expected Dracula (attributed to such a window,
+            # not measured).
+            $dracula = '282a36'; $preview = '262427'
+            $configPath = Join-Path $bin 'config.ghostty'
+            $t = [ordered]@{}
+            $case.paletteTheme = $t
+            # Fresh readbacks until the frame's dominant colour is `Expected`.
+            # A theme reaches the renderer through the app's mailbox, so the
+            # first frames can still show the old one. With -Steady no frame
+            # may show another colour: the state was already in place, so a
+            # frame that went back and returned is a failure.
+            $shows = {
+                param([string]$Expected, [string]$Name, [switch]$Steady)
+                $clock = [Diagnostics.Stopwatch]::StartNew(); $seen = @()
+                while ($true) {
+                    $frame = & $capture $Name
+                    if ($seen.Count -eq 0 -or $seen[-1] -ne $frame.pixels.dominant) { $seen += $frame.pixels.dominant }
+                    if ($frame.pixels.dominant -eq $Expected) { $frame.seen = $seen -join ' '; $frame.waitMs = $clock.ElapsedMilliseconds; return $frame }
+                    if ($Steady -or $clock.Elapsed.TotalSeconds -gt 20) { throw "${Name}: the readback's dominant colour was #$($frame.pixels.dominant) after $($clock.ElapsedMilliseconds) ms (seen: $($seen -join ' ')), expected #$Expected$(if ($Steady) { ' from the first frame' })." }
+                    Start-Sleep -Milliseconds 150
+                }
+            }
+            # The palette's controls exist only while it is open.
+            $control = {
+                param([int]$Id, [string]$What)
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                while ($true) {
+                    $found = [RendererNative]::VisibleChildOfId($hostWindow, $Id)
+                    if ($found -ne [IntPtr]::Zero) { return $found }
+                    if ($clock.Elapsed.TotalSeconds -gt 10) { throw "${What}: control $Id never became visible." }
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+            $open = {
+                param([string]$What)
+                if (![RendererNative]::TogglePalette($hostWindow)) { throw "${What}: the palette hook was rejected." }
+                $edit = & $control 2002 $What
+                if (![RendererNative]::Query($edit, '0x96f')) { throw "${What}: the theme query was rejected." }
+            }
+            $dismissed = {
+                param([string]$What)
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                while ($true) {
+                    $left = @(2001..2006 | Where-Object { [RendererNative]::VisibleChildOfId($hostWindow, $_) -ne [IntPtr]::Zero })
+                    if ($left.Count -eq 0) { return }
+                    if ($clock.Elapsed.TotalSeconds -gt 10) { throw "${What}: palette controls $($left -join ', ') stayed visible." }
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+            # The theme in the config file; null while the app is replacing it.
+            $fileTheme = {
+                try { $line = @(Get-Content -LiteralPath $configPath | Where-Object { $_ -match '^\s*theme\s*=' }) | Select-Object -Last 1 } catch { return $null }
+                if ($line) { return ($line -replace '^\s*theme\s*=\s*', '').Trim() }
+            }
+            $t.initial = & $shows $dracula 'theme-initial'
+            # Preview: the frame takes the theme and the file keeps its own.
+            & $open 'Preview'
+            $t.preview = & $shows $preview 'theme-preview'
+            $t.previewFileTheme = & $fileTheme
+            if ($t.previewFileTheme -ne 'Dracula') { throw "Previewing a theme changed the config file: theme = $($t.previewFileTheme)." }
+            # Cancel: the frame goes back to Dracula, and so does the palette.
+            if (![RendererNative]::Click((& $control 2004 'Cancel'))) { throw 'Cancel: the click was rejected.' }
+            & $dismissed 'Cancel'
+            $t.cancelled = & $shows $dracula 'theme-cancelled'
+            $t.cancelledFileTheme = & $fileTheme
+            if ($t.cancelledFileTheme -ne 'Dracula') { throw "Cancelling a preview changed the config file: theme = $($t.cancelledFileTheme)." }
+            # Commit: choosing the row saves the theme and keeps its frame.
+            & $open 'Commit'
+            $t.previewAgain = & $shows $preview 'theme-preview-again'
+            if (![RendererNative]::ClickFirstRow((& $control 2006 'Commit'))) { throw 'Commit: the click on the first row was rejected.' }
+            & $dismissed 'Commit'
+            # The commit saves the file and reloads from it, so the frame is
+            # the saved theme's, and it never went back to Dracula.
+            $t.committed = & $shows $preview 'theme-committed' -Steady
+            $saveClock = [Diagnostics.Stopwatch]::StartNew()
+            while (($t.committedFileTheme = & $fileTheme) -ne '0x96f') {
+                if ($saveClock.Elapsed.TotalSeconds -gt 10) { throw "Committing the theme never reached the config file: theme = $($t.committedFileTheme)." }
+                Start-Sleep -Milliseconds 100
+            }
+            Start-Sleep -Milliseconds 1000
+            $t.settled = & $shows $preview 'theme-settled' -Steady
+        }
         if ($MultiPane) {
             if (![RendererNative]::Action($surfaceWindow, 2)) { throw 'Split action rejected.' }
             Start-Sleep -Milliseconds 1500
@@ -736,10 +830,25 @@ function Invoke-PreeditCaretCases {
         }
     }
 }
+# The palette's theme preview, cancel and commit, read from the renderer's
+# frames (see Invoke-Case -PaletteTheme), on the backend each label names.
+function Invoke-PaletteThemeCase([string]$Label, [string]$Backend) {
+    $run = Invoke-Case $Label $Backend -PaletteTheme; $result.runs += $run
+    $status = $run.initial.status
+    if ($status.backend -ne $(if ($Backend -eq 'opengl') { 'opengl' } else { 'd3d11' }) -or ($Backend -eq 'd3d11-warp' -and !$status.warp)) { throw "${Label} ran on $($status.backend) (WARP: $($status.warp)), not on $Backend." }
+    if ($Backend -eq 'd3d11' -and $RequireHardware -and $status.warp) { throw 'Hardware required, but the palette theme case used WARP.' }
+}
+function Invoke-PaletteThemeCases {
+    Invoke-PaletteThemeCase 'palette-theme-opengl' 'opengl'
+    Invoke-PaletteThemeCase 'palette-theme-hardware' 'd3d11'
+    Invoke-PaletteThemeCase 'palette-theme-warp' 'd3d11-warp'
+}
 try {
-    # The split-dim cases include OpenGL runs, so they need an OpenGL 4.3 driver.
+    # The split-dim, preedit and palette theme cases include OpenGL runs, so
+    # they need an OpenGL 4.3 driver.
     if ($SplitDimOnly) { Invoke-SplitDimCases; $result.status = 'pass'; return }
     if ($PreeditCaretOnly) { Invoke-PreeditCaretCases; $result.status = 'pass'; return }
+    if ($PaletteThemeOnly) { Invoke-PaletteThemeCases; $result.status = 'pass'; return }
     # These cases need no GL driver and run on x64 and native ARM64 CI too.
     $startupFallback = Invoke-Case 'opengl-startup-fallback' 'opengl' @{NOCTTY_RENDERER_FAIL_OPENGL_VERSION='1'} -OpenGLStartupFallback
     $result.runs += $startupFallback
@@ -756,6 +865,7 @@ try {
         if (!$warp.initial.status.warp) { throw 'Forced WARP selected hardware.' }
         $splitWarp = Invoke-Case 'split-dim-warp' 'd3d11-warp' -SplitDim -SplitFill 'ffffff' -NoShaderReload; $result.runs += $splitWarp
         $result.runs += Invoke-Case 'preedit-caret-warp' 'd3d11-warp' -PreeditCaret
+        Invoke-PaletteThemeCase 'palette-theme-warp' 'd3d11-warp'
         $result.status = 'pass'
         return
     }
@@ -773,6 +883,7 @@ try {
     }
     Invoke-SplitDimCases
     Invoke-PreeditCaretCases
+    Invoke-PaletteThemeCases
     $noDevice = Invoke-Case 'no-device' 'd3d11' @{ NOCTTY_RENDERER_FAIL_DEVICE = '1' }; $result.runs += $noDevice
     if ($noDevice.initial.status.backend -ne 'opengl') { throw 'Unavailable D3D11 did not select OpenGL.' }
     $noLibrary = Invoke-Case 'no-library' 'd3d11' @{ NOCTTY_RENDERER_FAIL_LIBRARY = '1' }; $result.runs += $noLibrary

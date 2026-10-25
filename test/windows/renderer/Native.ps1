@@ -77,7 +77,23 @@ public static class RendererNative {
  public static bool Resize(IntPtr host,int w,int h) { return SetWindowPos(host,IntPtr.Zero,0,0,w,h,0x16); }
  public static void Readback(string bmp,string png) {using(var image=new Bitmap(bmp)){image.Save(png,ImageFormat.Png);} }
  public static bool Capture(IntPtr h,string path) { RECT r;GetClientRect(h,out r); using(var b=new Bitmap(Math.Max(1,r.r),Math.Max(1,r.b),PixelFormat.Format32bppArgb)) { bool ok;using(var g=Graphics.FromImage(b)){g.Clear(Color.Magenta);IntPtr dc=g.GetHdc();try{IntPtr result;ok=SendMessageTimeoutW(h,0x0318,dc,(IntPtr)4,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero;}finally{g.ReleaseHdc(dc);}}b.Save(path,ImageFormat.Png);return ok;} }
- public static string PixelStats(string path) { using(var b=new Bitmap(path)){var c=new HashSet<int>();long nonblack=0;for(int y=0;y<b.Height;y++)for(int x=0;x<b.Width;x++){int p=b.GetPixel(x,y).ToArgb()&0xffffff;c.Add(p);if(p!=0)nonblack++;}return string.Format(System.Globalization.CultureInfo.InvariantCulture,"{{\"width\":{0},\"height\":{1},\"colors\":{2},\"nonblack\":{3}}}",b.Width,b.Height,c.Count,nonblack);} }
+ // `dominant` is the most frequent colour as rrggbb: a theme's background fills most of a frame.
+ public static string PixelStats(string path) { using(var b=new Bitmap(path)){var c=new Dictionary<int,long>();long nonblack=0;for(int y=0;y<b.Height;y++)for(int x=0;x<b.Width;x++){int p=b.GetPixel(x,y).ToArgb()&0xffffff;long n;c.TryGetValue(p,out n);c[p]=n+1;if(p!=0)nonblack++;}int top=0;long best=-1;foreach(var kv in c)if(kv.Value>best){best=kv.Value;top=kv.Key;}return string.Format(System.Globalization.CultureInfo.InvariantCulture,"{{\"width\":{0},\"height\":{1},\"colors\":{2},\"nonblack\":{3},\"dominant\":\"{4:x6}\"}}",b.Width,b.Height,c.Count,nonblack,top);} }
+ // The command palette, driven past the screen. The host's toolbar hook 1901 toggles it;
+ // the query edit (2002), the cancel button (2004) and the result list (2006) exist only
+ // while it is open.
+ [DllImport("user32",EntryPoint="SendMessageTimeoutW",CharSet=CharSet.Unicode)] static extern IntPtr SendMessageTimeoutText(IntPtr h,uint m,IntPtr w,string l,uint f,uint timeout,out IntPtr result);
+ [StructLayout(LayoutKind.Sequential)] struct HIGHCONTRAST { public uint cb,flags; public IntPtr scheme; }
+ [DllImport("user32",SetLastError=true)] static extern bool SystemParametersInfoW(uint action,uint param,ref HIGHCONTRAST value,uint flags);
+ // As the app reads it: a failed read counts as off.
+ public static bool HighContrast() { var hc=new HIGHCONTRAST();hc.cb=(uint)Marshal.SizeOf(typeof(HIGHCONTRAST));return SystemParametersInfoW(0x42,hc.cb,ref hc,0) && (hc.flags&1)!=0; }
+ public static IntPtr VisibleChildOfId(IntPtr parent,int id) {IntPtr found=IntPtr.Zero;EnumChildWindows(parent,(h,l)=>{if(GetDlgCtrlID(h)==id && IsWindowVisible(h)){found=h;return false;}return true;},IntPtr.Zero);return found;}
+ public static bool TogglePalette(IntPtr host) { return PostMessageW(host,0x0111,(IntPtr)1901,IntPtr.Zero); }
+ // WM_SETTEXT on the query edit; the edit reports EN_CHANGE to the host itself, on the app's UI thread.
+ public static bool Query(IntPtr edit,string text) { IntPtr r;return SendMessageTimeoutText(edit,0x000C,IntPtr.Zero,text,2,15000,out r)!=IntPtr.Zero && r!=IntPtr.Zero;}
+ public static bool Click(IntPtr button) { IntPtr r;return SendMessageTimeoutW(button,0x00F5,IntPtr.Zero,IntPtr.Zero,2,15000,out r)!=IntPtr.Zero;}
+ // A theme row saves the config on the app's UI thread before the message returns.
+ public static bool ClickFirstRow(IntPtr list) { IntPtr r;return SendMessageTimeoutW(list,0x0201,IntPtr.Zero,(IntPtr)(4|(4<<16)),2,15000,out r)!=IntPtr.Zero;}
  // Shows IME composition fixture `fixture` (0 clears) with its caret at UTF-16
  // unit `cursor` (-1 for none) through the test-tools hook, past the IMM read.
  public static bool Preedit(IntPtr surf,int fixture,int cursor) { IntPtr result;return SendMessageTimeoutW(surf,0x8059,(IntPtr)fixture,(IntPtr)cursor,2,5000,out result)!=IntPtr.Zero && result!=IntPtr.Zero; }
