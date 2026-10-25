@@ -388,7 +388,10 @@ result.
 (`os/windows.zig`), used by shell detection in `windows_shell.zig`. Install
 PowerShell 7 so that `pwsh.exe` is on `PATH`, for example with the MSI or
 `winget install Microsoft.PowerShell`, after W10-21, which needs the machine
-without it. Start the portable copy with `--single-instance=false` and a
+without it. Open a new console afterwards (a session started before the
+install keeps the old `PATH`, which noctty would inherit) and check that
+`Get-Command pwsh.exe` finds it. Start the portable copy from that console
+with `--single-instance=false` and a
 `config.ghostty` that sets neither `command` nor `default-profile`. In the
 first tab run `$PSVersionTable.PSVersion` and `(Get-Process -Id $PID).Path`.
 Expected: PowerShell 7.x, and a path ending in `pwsh.exe`

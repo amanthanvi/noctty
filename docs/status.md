@@ -351,8 +351,8 @@ menus, toasts, the tab drag preview, quick-terminal chrome, and the
 in-progress IME composition. noctty draws the composition itself and exposes
 none of it through UI Automation, as Windows Terminal does. NVDA reads IMM32
 and TSF compositions through its own IME support (from its source, not
-measured in noctty). Microsoft's IME requirements have an IME's own
-candidate window expose itself to Narrator, and how Narrator reads the
+measured in noctty). Microsoft's IME requirements require an IME's own
+candidate window to expose itself to Narrator, and how Narrator reads the
 composition string is not documented; neither is measured here. A
 hands-on check with real IMEs and screen readers is still owed (see
 [accessibility-matrix.md](accessibility-matrix.md)). `Ctrl+F6` and
