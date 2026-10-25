@@ -2786,12 +2786,9 @@ pub const SettingsWindow = struct {
             setSettingValue(original, entry.current);
             setSettingValue(pending, entry.current);
         }
-        if (self.handle.previewField) |preview| {
-            // The reload replaced the live config, so the drafts are
-            // previewed again, floored like the keystrokes that made them.
-            var buf: [setting_field_count]SettingValue = undefined;
-            for (self.livePreviews(&buf)) |value| preview(self.handle.ctx, std.meta.activeTag(value), value);
-        }
+        // The reload replaced the live config, so the drafts are previewed
+        // again, floored like the keystrokes that made them.
+        self.previewDrafts();
         self.refreshAllControls();
         self.surfaceNextValidation(false);
         self.updateSaveEnabled();
@@ -2814,6 +2811,14 @@ pub const SettingsWindow = struct {
             count += 1;
         }
         return buf[0..count];
+    }
+
+    /// Hand every live preview to the App again. Showing a draft that is
+    /// already shown changes nothing there.
+    fn previewDrafts(self: *SettingsWindow) void {
+        const preview = self.handle.previewField orelse return;
+        var buf: [setting_field_count]SettingValue = undefined;
+        for (self.livePreviews(&buf)) |value| preview(self.handle.ctx, std.meta.activeTag(value), value);
     }
 
     pub fn conflictCount(self: *const SettingsWindow) usize {
@@ -4371,6 +4376,10 @@ pub const SettingsWindow = struct {
                 // the user can retry Save once the underlying issue
                 // is fixed, or close the window to discard.
                 if (apply_id) |id| if (!self.failApply(id)) return;
+                // A reload that applied before the save failed showed no
+                // preview (`livePreviews` is empty while a save is in
+                // flight); the draft stays, and so does its preview.
+                self.previewDrafts();
                 std.log.warn("settings: save failed err={}; draft preserved", .{err});
                 self.setSaveFailureNote(err);
                 self.updateSaveEnabled();
@@ -7170,6 +7179,25 @@ test "settings previews only the fields an open window shows" {
     }.body);
 }
 
+test "settings a save that fails after its reload keeps the draft previewed" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            fixture.live_previews = true;
+            typeInto(settings.fields.edit_bg_opacity.?, "0.5");
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
+
+            fixture.reload_then_fail = true;
+            settings.save();
+            try std.testing.expectEqual(@as(u32, 1), fixture.saved);
+            try std.testing.expect(settings.hasPendingChanges());
+            try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
+        }
+    }.body);
+}
+
 test "SET Discard asks before losing edits and supports keyboard cancellation" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -8728,6 +8756,8 @@ const dialog_test = struct {
         live_previews: bool = false,
         /// How many live previews reached the App.
         previews: u32 = 0,
+        /// A save writes, its reload applies, and then it fails.
+        reload_then_fail: bool = false,
         /// What the window's High Contrast probe answers.
         high_contrast: bool = false,
         /// What the Default profile dropdown is offered: `test_profiles`,
@@ -8831,6 +8861,11 @@ const dialog_test = struct {
         fn saveAndReload(ctx: *anyopaque, _: *const Config, _: *const Config) SaveError!void {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             self.saved += 1;
+            if (self.reload_then_fail) {
+                // The App's reload during a save shows no preview.
+                self.config.@"background-opacity" = 1;
+                return error.ReloadFailed;
+            }
         }
 
         fn previewField(ctx: *anyopaque, _: SettingField, value: SettingValue) void {
