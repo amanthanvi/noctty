@@ -4709,6 +4709,7 @@ pub const App = struct {
                 shape.width = null;
                 shape.height = null;
                 shape.state = null;
+                shape.fullscreen_maximized = null;
                 const surface = self.restoreSessionWindow(shape) catch |err| {
                     log.warn("named layout materialization failed name={s} err={}", .{ name, err });
                     if (banner_host) |host| host.setBanner(.err, "Layout could not be opened.") catch {};
@@ -44263,7 +44264,7 @@ pub const Surface = struct {
             // and shows nothing.
             if (sys.IsWindowVisible(hwnd) == 0) _ = sys.ShowWindow(hwnd, c.SW_HIDE);
             self.enterFullscreen() catch |err| {
-                log.warn("win32 configured fullscreen failed err={}", .{err});
+                log.warn("win32 startup fullscreen failed err={}", .{err});
             };
         }
         if (start.maximize) {
@@ -61567,7 +61568,12 @@ test "win32 session placement roundtrips fullscreen and the window it leaves ful
                 fixture.closeWindows();
                 app.config.maximize = false;
                 app.config.fullscreen = .false;
+                // Create at a different size so skipping saved placement
+                // cannot accidentally return to the right rectangle.
+                Fixture.initial_size = .{ .width = 400, .height = 300 };
+                defer Fixture.initial_size = null;
                 const restored = try app.restoreSessionWindow(parsed.value.windows[0]);
+                try std.testing.expect(!std.meta.eql(created, Fixture.hidden_rect));
                 const restored_hwnd = restored.windowHwnd().?;
                 try std.testing.expect(restored.fullscreen);
                 try std.testing.expectEqualDeep(try Fixture.monitorRect(restored_hwnd), try Fixture.screenRect(restored_hwnd));
@@ -61708,6 +61714,7 @@ test "win32 a restored window and a launched layout take maximize and fullscreen
                 .{ .minimized = true, .fullscreen = true, .maximized = false },
                 .{ .state = .fullscreen, .maximized = false },
                 .{ .state = .fullscreen, .fullscreen_maximized = true, .maximized = true },
+                .{ .fullscreen = true, .state = .fullscreen, .fullscreen_maximized = true, .maximized = true },
                 .{ .minimized = true, .state = .fullscreen, .maximized = false },
                 .{ .minimized = true, .state = .fullscreen, .fullscreen_maximized = true, .maximized = true },
                 .{ .maximize = true, .state = .fullscreen, .maximized = true },

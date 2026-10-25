@@ -445,7 +445,7 @@ try {
             Check 'save fullscreen, next launch with fullscreen = false: fullscreen' ($s.Popup -and (Rect-Same $s.Rect $s.Monitor 0)) (Rect-Array $s.Monitor) @{Popup=$s.Popup; Rect=(Rect-Array $s.Rect)}
             Press (Pane $case.Host) 0x7A 1200      # F11: toggle_fullscreen
             $r=Sample 'save-fullscreen-again-left' $case.Host
-            Check 'save, fullscreen = true, next launch: leaves it to the configured window' (-not $r.Popup -and -not $r.Zoomed -and (Rect-Same $r.Rect $normal.Rect)) (Rect-Array $normal.Rect) @{Popup=$r.Popup; Zoomed=$r.Zoomed; Rect=(Rect-Array $r.Rect)}
+            Check 'save fullscreen, next launch with fullscreen = false: leaves it to the saved window' (-not $r.Popup -and -not $r.Zoomed -and (Rect-Same $r.Rect $normal.Rect)) (Rect-Array $normal.Rect) @{Popup=$r.Popup; Zoomed=$r.Zoomed; Rect=(Rect-Array $r.Rect)}
         } finally { Stop-Case $case }
     }
     # F11 on a maximized window: saved fullscreen, returning maximized over
