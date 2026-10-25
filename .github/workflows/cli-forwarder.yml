@@ -96,7 +96,7 @@ jobs:
       - name: Hidden desktop CLI forwarding contracts
         shell: pwsh
         timeout-minutes: 10
-        run: ./test/windows/cli-com-forwarder.ps1 -BinDir ./zig-out/bin -OutputDir ./zig-out/cli-forwarder-evidence -DesktopFixture ./zig-out/cli-com-fixture.exe -ThinForwarder
+        run: ./test/windows/cli-com-forwarder.ps1 -BinDir ./zig-out/bin -OutputDir ./zig-out/cli-forwarder-evidence -DesktopFixture ./zig-out/cli-com-fixture.exe -ThinForwarder -ExerciseInheritedCtrlCIgnore
 
       - name: Only the AUMID measurement patch differs from the checkout
         if: always()

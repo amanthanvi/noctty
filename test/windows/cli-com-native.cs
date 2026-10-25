@@ -84,6 +84,7 @@ public static class ComCliNative {
     [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetConsoleCtrlHandler(ControlHandler handler,bool add);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GenerateConsoleCtrlEvent(uint kind,uint group);
+    [DllImport("ntdll.dll")] static extern IntPtr RtlGetCurrentPeb();
     [DllImport("kernel32.dll")] static extern uint GetConsoleProcessList([Out] uint[] processes,uint count);
     [DllImport("kernel32.dll",SetLastError=true)] public static extern bool FreeConsole();
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool ReadConsoleOutputCharacterW(IntPtr h,[Out] char[] text,uint count,uint coordinate,out uint read);
@@ -289,6 +290,17 @@ public static class ComCliNative {
         Check(GenerateConsoleCtrlEvent(0,0));
     }
     public static bool HasConsole() { return GetConsoleProcessList(new uint[1],1)!=0; }
+    // The inheritable Ctrl+C-ignore attribute (SetConsoleCtrlHandler(NULL,TRUE),
+    // CREATE_NEW_PROCESS_GROUP, cmd's `start /b`) passes to every child, so a
+    // CTRL_C_EVENT would reach no process of the CLI under test. A real handler
+    // is not inherited. Only this read-only oracle touches the PEB (the same
+    // ConsoleFlags bit 0 the product's own unit test reads); the reset is the
+    // documented call.
+    public static bool CtrlCIgnored() {
+        IntPtr parameters=Marshal.ReadIntPtr(RtlGetCurrentPeb(),4*IntPtr.Size);
+        return (Marshal.ReadInt32(parameters,16+IntPtr.Size)&1)!=0;
+    }
+    public static void EnableCtrlC() { Check(SetConsoleCtrlHandler(null,false)); }
     public static string ConsoleText() {
         var h=FileHandle("CONOUT$",true);
         try { var text=new char[32768]; uint read; Check(ReadConsoleOutputCharacterW(h,text,(uint)text.Length,0,out read)); return new string(text,0,(int)read); }
