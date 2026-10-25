@@ -86,6 +86,9 @@ pub const Window = struct {
     width: ?i32 = null,
     height: ?i32 = null,
     state: ?WindowState = null,
+    /// For fullscreen only: leaving fullscreen returns maximized over the
+    /// saved normal rect. Older readers skip this optional field.
+    fullscreen_maximized: ?bool = null,
     selected_tab: usize,
     tabs: []const Tab = &.{},
 };
@@ -93,8 +96,9 @@ pub const Window = struct {
 pub const WindowState = enum {
     normal,
     maximized,
+    fullscreen,
 
-    /// A state a later build adds (fullscreen, say) restores as a normal
+    /// A state a later build adds restores as a normal
     /// window; the window's rect is still its own. `std.json` would reject
     /// the whole document for an unknown name.
     pub fn jsonParse(
@@ -951,7 +955,7 @@ test "win32 session state parse tolerates what a later build adds beside a node 
     // whatever `ignore_unknown_fields` says; and an unknown `state` name
     // rejects the document unless it is read leniently.
     const raw =
-        \\{"schema_version":1,"windows":[{"state":"fullscreen","selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"id":7,"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2},"label":{"a":[1]}},{"pane":{"cwd":"C:\\src"},"id":8},{"future":null,"pane":{}}]}}]}]}
+        \\{"schema_version":1,"windows":[{"state":"future-state","selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"id":7,"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2},"label":{"a":[1]}},{"pane":{"cwd":"C:\\src"},"id":8},{"future":null,"pane":{}}]}}]}]}
     ;
 
     var parsed = try parseAlloc(std.testing.allocator, raw);
@@ -962,6 +966,23 @@ test "win32 session state parse tolerates what a later build adds beside a node 
     try std.testing.expectEqual(@as(usize, 3), nodes.len);
     try std.testing.expectEqual(@as(u16, 2), nodes[0].split.second);
     try std.testing.expectEqualStrings("C:\\src", nodes[1].pane.cwd.?);
+}
+
+test "win32 session state fullscreen survives decoding and encoding" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"x":10,"y":20,"width":640,"height":480,"state":"fullscreen","fullscreen_maximized":true,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+    ;
+    var parsed = try parseAlloc(std.testing.allocator, raw);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("fullscreen", @tagName(parsed.value.windows[0].state.?));
+    const encoded = try encodeAlloc(std.testing.allocator, parsed.value);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"fullscreen_maximized\":true") != null);
+
+    // Named layouts discard every placement field, including fullscreen.
+    var layout = try parseLayoutAlloc(std.testing.allocator, raw);
+    defer layout.deinit();
+    try std.testing.expect(layout.value.windows[0].state == null);
 }
 
 test "win32 session state parse rejects a node with two kinds, none, or an axis it does not know" {

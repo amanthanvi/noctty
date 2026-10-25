@@ -1764,11 +1764,14 @@ way: they come back at their saved rect, not minimized.
 `--fullscreen=true` on the command line) apply to restored windows too: each
 is placed at its saved rect first and then maximized or made fullscreen, so
 the saved rect is the one it returns to. Without them a window comes back in
-its saved state. The saved session does not record fullscreen: a window that
-was fullscreen when the session was saved is saved as the window it leaves
-fullscreen to, at the rect it had before fullscreen and maximized if it was
-maximized then, and comes back as that window (fullscreen again with
-`fullscreen = true`).
+its saved state, including fullscreen. A window saved while fullscreen comes
+back fullscreen even with `fullscreen = false`. Leaving fullscreen returns to
+its saved normal rectangle, or to maximized if it was maximized before entering
+fullscreen; restoring that maximized window then returns to the saved normal
+rectangle. Named layouts continue to save only their tab and pane shape.
+The state file remains schema version 1: older builds that tolerate unknown
+state names restore a saved fullscreen window as normal at its saved rectangle
+and ignore the optional `fullscreen_maximized` field.
 
 A snapshot that merely exceeds the limits above (too many lines, a line over
 16 KiB, or the shared budget) is dropped on load and the window's layout still

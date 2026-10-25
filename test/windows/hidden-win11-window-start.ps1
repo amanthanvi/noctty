@@ -422,10 +422,8 @@ try {
     try { $s=Sample 'restore-normal-maximize' $case.Host } finally { Stop-Case $case }
     Check 'restore with maximize: maximized over the saved rect' ($s.Zoomed -and (Rect-Same $s.Normal $saved)) (Rect-Array $saved) @{Zoomed=$s.Zoomed; Normal=(Rect-Array $s.Normal)}
 
-    # The session has no fullscreen state, so a fullscreen window is saved as
-    # the window leaving fullscreen gives back. It was saved as a normal
-    # window over its whole monitor, and with `fullscreen = true` every later
-    # launch then left fullscreen to that.
+    # Persist fullscreen separately from its return placement. It must survive
+    # a relaunch without the fullscreen config preference.
     function Saved-Window($case) {
         $file=Join-Path $case.Dir 'session-state.json'
         if(-not (Test-Path -LiteralPath $file)) { return $null }
@@ -438,19 +436,20 @@ try {
     try { [void](Sample 'save-fullscreen' $case.Host) } finally { Stop-Case $case }
     $w=Saved-Window $case
     $actual=if($w){@{State=$w.state; Rect=(Rect-Array (Saved-Rect $w))}}else{'no saved window'}
-    Check 'save, fullscreen = true: saved as the configured window' ($w -and $w.state -eq 'normal' -and (Rect-Same (Saved-Rect $w) $normal.Rect)) (Rect-Array $normal.Rect) $actual
+    Check 'save, fullscreen = true: saved fullscreen over the configured window' ($w -and $w.state -eq 'fullscreen' -and -not $w.fullscreen_maximized -and (Rect-Same (Saved-Rect $w) $normal.Rect)) (Rect-Array $normal.Rect) $actual
     if($w) {
         $json=Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw
-        $case=Start-Case (New-Case 'save-fullscreen-again' @('window-save-state = always','fullscreen = true') @{ 'session-state.json'=$json })
+        $case=Start-Case (New-Case 'save-fullscreen-again' @('window-save-state = always','fullscreen = false') @{ 'session-state.json'=$json })
         try {
             $s=Sample 'save-fullscreen-again' $case.Host
-            Check 'save, fullscreen = true, next launch: fullscreen' ($s.Popup -and (Rect-Same $s.Rect $s.Monitor 0)) (Rect-Array $s.Monitor) @{Popup=$s.Popup; Rect=(Rect-Array $s.Rect)}
+            Check 'save fullscreen, next launch with fullscreen = false: fullscreen' ($s.Popup -and (Rect-Same $s.Rect $s.Monitor 0)) (Rect-Array $s.Monitor) @{Popup=$s.Popup; Rect=(Rect-Array $s.Rect)}
             Press (Pane $case.Host) 0x7A 1200      # F11: toggle_fullscreen
             $r=Sample 'save-fullscreen-again-left' $case.Host
             Check 'save, fullscreen = true, next launch: leaves it to the configured window' (-not $r.Popup -and -not $r.Zoomed -and (Rect-Same $r.Rect $normal.Rect)) (Rect-Array $normal.Rect) @{Popup=$r.Popup; Zoomed=$r.Zoomed; Rect=(Rect-Array $r.Rect)}
         } finally { Stop-Case $case }
     }
-    # F11 on a maximized window: saved maximized over its normal rect.
+    # F11 on a maximized window: saved fullscreen, returning maximized over
+    # its normal rect. The next launch must retain both levels of restore.
     $case=Start-Case (New-Case 'save-f11-maximized' @('window-save-state = always'))
     try {
         [void][Ws]::ShowWindow($case.Host,3); Start-Sleep -Milliseconds 800   # SW_MAXIMIZE
@@ -460,7 +459,21 @@ try {
     } finally { Stop-Case $case }
     $w=Saved-Window $case
     $actual=if($w){@{State=$w.state; Rect=(Rect-Array (Saved-Rect $w))}}else{'no saved window'}
-    Check 'save, F11 from maximized: saved maximized over its normal rect' ($w -and $w.state -eq 'maximized' -and (Rect-Same (Saved-Rect $w) $normal.Rect)) (Rect-Array $normal.Rect) $actual
+    Check 'save, F11 from maximized: saved fullscreen returning maximized over its normal rect' ($w -and $w.state -eq 'fullscreen' -and $w.fullscreen_maximized -and (Rect-Same (Saved-Rect $w) $normal.Rect)) (Rect-Array $normal.Rect) $actual
+    if($w) {
+        $json=Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw
+        $case=Start-Case (New-Case 'save-f11-maximized-again' @('window-save-state = always','fullscreen = false') @{ 'session-state.json'=$json })
+        try {
+            $s=Sample 'save-f11-maximized-again' $case.Host
+            Check 'saved F11 from maximized, next launch: fullscreen' ($s.Popup -and -not $s.Zoomed -and (Rect-Same $s.Rect $s.Monitor 0)) (Rect-Array $s.Monitor) @{Popup=$s.Popup; Zoomed=$s.Zoomed; Rect=(Rect-Array $s.Rect)}
+            Press (Pane $case.Host) 0x7A 1200
+            $r=Sample 'save-f11-maximized-again-left' $case.Host
+            Check 'saved F11 from maximized: leaves fullscreen maximized over its normal rect' (-not $r.Popup -and $r.Zoomed -and (Rect-Same $r.Normal $normal.Normal)) (Rect-Array $normal.Normal) @{Popup=$r.Popup; Zoomed=$r.Zoomed; Normal=(Rect-Array $r.Normal)}
+            [void][Ws]::ShowWindow($case.Host,9); Start-Sleep -Milliseconds 800 # SW_RESTORE
+            $r=Sample 'save-f11-maximized-again-restored' $case.Host
+            Check 'saved F11 from maximized: restore returns the normal rect' (-not $r.Popup -and -not $r.Zoomed -and (Rect-Same $r.Rect $normal.Rect)) (Rect-Array $normal.Rect) @{Popup=$r.Popup; Zoomed=$r.Zoomed; Rect=(Rect-Array $r.Rect)}
+        } finally { Stop-Case $case }
+    }
 
     # Not the quick terminal: with `maximize = true` it keeps its strip.
     $case=Start-Case (New-Case 'quick-terminal' @('window-save-state = never','maximize = true','keybind = f12=toggle_quick_terminal','quick-terminal-screen = main','quick-terminal-autohide = false','quick-terminal-animation-duration = 0','quick-terminal-size = 25%'))
