@@ -31,15 +31,25 @@ $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $u
 $tempDir = if ($env:TEMP) { $env:TEMP } else { Join-Path $localAppData "Temp" }
 $tmpDir = if ($env:TMP) { $env:TMP } else { $tempDir }
 
-foreach ($candidateRoot in @($programFilesX86, $programFiles)) {
-    foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
-        $candidate = Join-Path $candidateRoot "Microsoft Visual Studio\2022\$edition\Common7\Tools\VsDevCmd.bat"
-        if (Test-Path -LiteralPath $candidate) {
-            $vsDevCmd = $candidate
-            break
+# vswhere ships with the Visual Studio Installer at this fixed path and knows every instance (2026 is
+# version 18, 2022 is 17), any edition and install directory. When it is there it decides: an
+# instance without the C++ tools for this architecture is skipped, though its VsDevCmd.bat exists.
+# Only without it are the default install paths probed.
+$vcTools = if ($Architecture -eq "arm64") { "Microsoft.VisualStudio.Component.VC.Tools.ARM64" } else { "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" }
+$vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path -LiteralPath $vswhere) {
+    # Windows PowerShell turns native stderr into errors that "Stop" makes terminating.
+    $found = & { $ErrorActionPreference = "Continue"; & $vswhere -latest -products * -requires $vcTools -find "Common7\Tools\VsDevCmd.bat" 2>$null }
+    $vsDevCmd = @($found | Where-Object { $_ }) | Select-Object -First 1
+} else {
+    foreach ($version in @("18", "2022")) {
+        foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
+            foreach ($candidateRoot in @($programFiles, $programFilesX86)) {
+                $candidate = Join-Path $candidateRoot "Microsoft Visual Studio\$version\$edition\Common7\Tools\VsDevCmd.bat"
+                if (-not $vsDevCmd -and (Test-Path -LiteralPath $candidate)) { $vsDevCmd = $candidate }
+            }
         }
     }
-    if ($vsDevCmd) { break }
 }
 
 if (-not $env:ZIG_HOME) {
@@ -80,8 +90,9 @@ if (-not $env:ZIG_HOME) {
 }
 
 if (-not $vsDevCmd) {
-    throw "Missing VS Dev shell bootstrap. Install Visual Studio 2022 Build Tools with the C++ workload."
+    throw "Missing VS Dev shell bootstrap. Install Visual Studio 2026 or 2022 Build Tools with the C++ workload for $Architecture."
 }
+Write-Host "VS Dev shell: `"$vsDevCmd`""
 if (-not (Test-Path (Join-Path $gitCmd "git.exe"))) {
     throw "Missing Git executable under $gitCmd"
 }
@@ -140,3 +151,5 @@ echo skipped ^(set DEV_WINDOWS_CHECK_WSL=1 to probe WSL^)
 "@
 
 cmd.exe /d /c $bootstrap
+# A script run with -File exits 0 when it ends normally, whatever its last native command returned.
+if ($LASTEXITCODE -ne 0) { throw "The Visual Studio developer shell bootstrap failed with exit code $LASTEXITCODE." }

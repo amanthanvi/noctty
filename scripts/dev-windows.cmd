@@ -28,11 +28,6 @@ if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-x86_64-windows-0.15.2\zig.e
 if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig"
 if "%ZIG_HOME%"=="" if exist "%_PROGRAM_FILES%\Zig" set "ZIG_HOME=%_PROGRAM_FILES%\Zig"
 for %%I in (zig.exe) do if "%ZIG_HOME%"=="" if not "%%~$PATH:I"=="" set "ZIG_HOME=%%~dp$PATH:I"
-if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES_X86%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES_X86%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
-if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
-if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
-if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"
-if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"
 if "%DEV_WINDOWS_ARCH%"=="" (
   if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
     set "DEV_WINDOWS_ARCH=arm64"
@@ -45,10 +40,24 @@ if /i not "%DEV_WINDOWS_ARCH%"=="x64" if /i not "%DEV_WINDOWS_ARCH%"=="arm64" (
   exit /b 1
 )
 
+rem vswhere ships with the Visual Studio Installer at this fixed path and knows every instance
+rem (2026 is version 18, 2022 is 17), any edition and install directory. When it is there it
+rem decides: an instance without the C++ tools for this architecture is skipped, though its
+rem VsDevCmd.bat exists. Only without it are the default install paths probed.
+set "_VC_TOOLS=Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+if /i "%DEV_WINDOWS_ARCH%"=="arm64" set "_VC_TOOLS=Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+set "_VSWHERE=%_PROGRAM_FILES_X86%\Microsoft Visual Studio\Installer\vswhere.exe"
+if exist "%_VSWHERE%" (
+  for /f "usebackq delims=" %%P in (`"%_VSWHERE%" -latest -products * -requires %_VC_TOOLS% -find Common7\Tools\VsDevCmd.bat 2^>nul`) do if not defined VSDEVCMD set "VSDEVCMD=%%P"
+) else (
+  for %%V in (18 2022) do for %%E in (BuildTools Community Professional Enterprise) do for %%R in ("%_PROGRAM_FILES%" "%_PROGRAM_FILES_X86%") do if not defined VSDEVCMD if exist "%%~R\Microsoft Visual Studio\%%V\%%E\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%%~R\Microsoft Visual Studio\%%V\%%E\Common7\Tools\VsDevCmd.bat"
+)
+
 if "%VSDEVCMD%"=="" (
-  echo Missing VS Dev shell bootstrap. Install Visual Studio 2022 Build Tools with the C++ workload.
+  echo Missing VS Dev shell bootstrap. Install Visual Studio 2026 or 2022 Build Tools with the C++ workload for %DEV_WINDOWS_ARCH%.
   exit /b 1
 )
+echo VS Dev shell: "%VSDEVCMD%"
 
 if not exist "%GIT_CMD%\git.exe" (
   echo Missing Git: "%GIT_CMD%\git.exe"

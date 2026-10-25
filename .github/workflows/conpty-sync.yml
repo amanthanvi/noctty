@@ -78,10 +78,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # -NoBuild never needs the Visual Studio dev shell the harness otherwise
-      # relaunches itself through. scripts\dev-windows.cmd probes only Visual
-      # Studio 2022 paths and printed "Missing VS Dev shell bootstrap" on this
-      # windows-2025-vs2026 image, so the harness's own bootstrap sentinel is
-      # set and Windows PowerShell 5.1, the host it is written for, runs it.
+      # relaunches itself through (scripts\dev-windows.cmd), so the harness's
+      # own bootstrap sentinel is set and Windows PowerShell 5.1, the host it is
+      # written for, runs it.
       # -RequireAll: a scenario skipped for a missing pwsh.exe or vim fails.
       # A run takes 2 to 3 minutes here; -TimeoutSeconds 600 bounds a stuck one
       # (a wholly broken build can spend 20 s or more per scenario before it

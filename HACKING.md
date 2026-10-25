@@ -76,6 +76,10 @@ powershell -ExecutionPolicy Bypass -File scripts/fetch-zig-deps.ps1
 The repo also ships `scripts/dev-windows.ps1` and
 `scripts/dev-windows.cmd` to open a Windows-native shell with the
 expected Visual Studio and Zig cache environment already configured.
+They find Visual Studio 2026 or 2022 with the C++ tools through `vswhere`,
+or at the default install paths when the Visual Studio Installer is not
+there, and exit with code 1 when they find none.
+`.github/workflows/dev-shell.yml` runs both on hosted images.
 
 ## Manual validation
 

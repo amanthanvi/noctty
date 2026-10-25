@@ -1,0 +1,133 @@
+name: Dev shell bootstrap
+
+# Not a required check. scripts/dev-windows.cmd and scripts/dev-windows.ps1 set
+# up the Visual Studio developer shell for local builds, and no other job runs
+# them, so they kept probing only Visual Studio 2022 paths after the hosted
+# windows-2025 image moved to Visual Studio 2026 (version 18). This runs both on
+# an image with each version and on ARM64: first through vswhere, then through
+# the default install paths with vswhere out of reach (fake installs under
+# RUNNER_TEMP whose VsDevCmd.bat fails on purpose), and with nothing installed.
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - 'scripts/dev-windows.cmd'
+      - 'scripts/dev-windows.ps1'
+      - '.github/workflows/dev-shell.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bootstrap:
+    name: Dev shell on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            vs: '18'
+          - os: windows-2022
+            vs: '2022'
+          - os: windows-11-arm
+            vs: '18|2022'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      # Each script must name the VsDevCmd.bat it found. Through vswhere that is
+      # the image's own install, and the dev shell must then run cl and the
+      # command it was given. Without vswhere (ProgramW6432 too: Windows sets a
+      # 64-bit child's ProgramFiles from it) it is the newest default install
+      # path, and a failing VsDevCmd.bat must fail the script. With nothing
+      # installed the script must say so and exit 1.
+      - name: Check the dev shell bootstrap scripts
+        shell: pwsh
+        env:
+          EXPECTED_VS: ${{ matrix.vs }}
+        run: |
+          $cmdScript = Join-Path $env:GITHUB_WORKSPACE 'scripts\dev-windows.cmd'
+          $psScript = Join-Path $env:GITHUB_WORKSPACE 'scripts\dev-windows.ps1'
+          $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          Write-Host "Image $env:ImageOS $env:ImageVersion, $env:PROCESSOR_ARCHITECTURE; Visual Studio instances:"
+          & $vswhere -all -products * -property installationPath
+          $bootstraps = [ordered]@{
+            'dev-windows.cmd zig version' = { & $cmdScript zig version }
+            'dev-windows.ps1 under PowerShell 7' = { & pwsh -NoProfile -NonInteractive -File $psScript }
+            'dev-windows.ps1 under Windows PowerShell 5.1' = { & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $psScript }
+          }
+          function Invoke-Bootstrap([string] $Label, [scriptblock] $Run) {
+            Write-Host "::group::$Label"
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $Run 2>&1 | ForEach-Object { "$_" })
+            $code = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            Write-Host "exit $code"
+            Write-Host '::endgroup::'
+            $named = @($output | ForEach-Object { if ($_ -match '^VS Dev shell: "(.+)"$') { $Matches[1] } }) | Select-Object -First 1
+            return [pscustomobject]@{ Exit = $code; Output = $output; VsDevCmd = $named }
+          }
+
+          $installed = '\\Microsoft Visual Studio\\(?:' + $env:EXPECTED_VS + ')\\[^\\]+\\Common7\\Tools\\VsDevCmd\.bat$'
+          foreach ($label in $bootstraps.Keys) {
+            $r = Invoke-Bootstrap $label $bootstraps[$label]
+            if ($r.Exit -ne 0) { throw "$label exited $($r.Exit)." }
+            if ($r.VsDevCmd -notmatch $installed -or -not (Test-Path -LiteralPath $r.VsDevCmd)) { throw "$label named '$($r.VsDevCmd)', not the image's Visual Studio $env:EXPECTED_VS." }
+            if (-not ($r.Output -match 'C/C\+\+ Optimizing Compiler Version')) { throw "$label did not reach cl." }
+            if ($label -like '*.cmd*' -and $r.Output[-1] -notmatch '^0\.15\.') { throw "$label did not run zig version in the dev shell: '$($r.Output[-1])'." }
+            "${label}: $($r.VsDevCmd)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
+          function New-FakeInstall([string] $Root, [string] $Version, [string] $Edition) {
+            $tools = Join-Path $Root "Microsoft Visual Studio\$Version\$Edition\Common7\Tools"
+            New-Item -ItemType Directory -Force -Path $tools | Out-Null
+            Set-Content -LiteralPath (Join-Path $tools 'VsDevCmd.bat') -Value "@echo fake VsDevCmd %*`r`n@exit /b 7`r`n" -NoNewline
+          }
+          $cases = @(
+            @{ Name = 'only 18'; Installs = @(@('pf', '18', 'BuildTools')); Expect = 'pf\Microsoft Visual Studio\18\BuildTools' }
+            @{ Name = 'only 2022 in Program Files (x86)'; Installs = @(@('pf (x86)', '2022', 'BuildTools')); Expect = 'pf (x86)\Microsoft Visual Studio\2022\BuildTools' }
+            @{ Name = '18 and 2022'; Installs = @(@('pf', '2022', 'Enterprise'), @('pf', '18', 'Community')); Expect = 'pf\Microsoft Visual Studio\18\Community' }
+            @{ Name = 'nothing'; Installs = @(); Expect = $null }
+          )
+          $saved = @{ ProgramFiles = $env:ProgramFiles; ProgramW6432 = $env:ProgramW6432; 'ProgramFiles(x86)' = ${env:ProgramFiles(x86)} }
+          foreach ($case in $cases) {
+            $base = Join-Path $env:RUNNER_TEMP ('dev-shell-' + ($case.Name -replace '\W', '-'))
+            New-Item -ItemType Directory -Force -Path (Join-Path $base 'pf'), (Join-Path $base 'pf (x86)') | Out-Null
+            foreach ($install in $case.Installs) { New-FakeInstall (Join-Path $base $install[0]) $install[1] $install[2] }
+            try {
+              $env:ProgramFiles = Join-Path $base 'pf'
+              $env:ProgramW6432 = $env:ProgramFiles
+              ${env:ProgramFiles(x86)} = Join-Path $base 'pf (x86)'
+              $seen = (& cmd.exe /d /c 'echo %ProgramFiles%^|%ProgramFiles(x86)%') -join ''
+              if ($seen -cne "$(Join-Path $base 'pf')|$(Join-Path $base 'pf (x86)')") { throw "cmd sees '$seen', not the fake roots." }
+              foreach ($label in $bootstraps.Keys) {
+                $r = Invoke-Bootstrap "$label, $($case.Name)" $bootstraps[$label]
+                if ($r.Exit -eq 0) { throw "$label, $($case.Name): exit 0." }
+                if ($case.Expect) {
+                  if ($r.VsDevCmd -cne (Join-Path $base "$($case.Expect)\Common7\Tools\VsDevCmd.bat") -or -not ($r.Output -match '^fake VsDevCmd -arch=')) {
+                    throw "$label, $($case.Name): named '$($r.VsDevCmd)', expected $($case.Expect)."
+                  }
+                } elseif ($r.VsDevCmd -or -not ($r.Output -match 'Missing VS Dev shell bootstrap')) {
+                  throw "$label, $($case.Name): did not report the missing Visual Studio."
+                }
+              }
+            } finally {
+              foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+            }
+          }
