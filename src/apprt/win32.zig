@@ -27775,9 +27775,9 @@ const Host = struct {
             // remainder before this lane. Drawn on the parent HWND so the single
             // rect can slide across child button boundaries; children
             // paint themselves above this region via WM_DRAWITEM and do
-            // not occlude it. Inset 3 px on each horizontal edge to
-            // match Windows Terminal's tab indicator treatment
-            // (wt-chrome-reference.md §1).
+            // not occlude it. The 3 px inset on each horizontal edge is
+            // noctty's own choice: Windows Terminal draws no accent
+            // underline or tab indicator (wt-chrome-reference.md §1).
             {
                 const now_ms = sys.GetTickCount64();
                 const cur = self.tab_underline.currentRect(now_ms);
