@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const formatterpkg = @import("formatter.zig");
+const redact = @import("../os/redact.zig");
 
 /// A command to execute (argv0 and args).
 ///
@@ -184,6 +185,24 @@ pub const Command = union(enum) {
             },
         }
     }
+
+    /// What a log line may say about this command: its kind and how many
+    /// arguments and bytes it has, never the text (`os/redact.zig`). Use it
+    /// with `{f}` wherever a log would print the command.
+    pub fn redacted(self: Self) Redacted {
+        return .{ .command = self };
+    }
+
+    pub const Redacted = struct {
+        command: Self,
+
+        pub fn format(self: Redacted, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            switch (self.command) {
+                .shell => |v| try writer.print("shell {f}", .{redact.bytes(v)}),
+                .direct => |v| try writer.print("direct {f}", .{redact.argv(v)}),
+            }
+        }
+    };
 
     pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
         switch (self) {
@@ -424,6 +443,19 @@ pub const Command = union(enum) {
         try v.parseCLI(alloc, "direct: echo hello");
         try v.formatEntry(formatterpkg.entryFormatter("a", &buf.writer));
         try std.testing.expectEqualSlices(u8, "a = direct:echo hello\n", buf.written());
+    }
+
+    test "Command: redacted says the kind and the size, not the text" {
+        const testing = std.testing;
+        var buf: [128]u8 = undefined;
+
+        const direct: Self = .{ .direct = &.{ "tool.exe", "--token=hunter2" } };
+        try testing.expectEqualStrings("direct <2 args, 23 bytes>", try std.fmt.bufPrint(&buf, "{f}", .{direct.redacted()}));
+
+        const shell: Self = .{ .shell = "tool.exe --token=hunter2" };
+        const text = try std.fmt.bufPrint(&buf, "{f}", .{shell.redacted()});
+        try testing.expectEqualStrings("shell <24 bytes>", text);
+        try testing.expect(std.mem.indexOf(u8, text, "hunter") == null);
     }
 };
 

@@ -27,6 +27,9 @@ pub const Action = enum {
     /// List keybind actions
     @"list-actions",
 
+    /// List the profiles the profile picker offers
+    @"list-profiles",
+
     /// Print a deterministic VT capability summary for diagnostics
     @"vt-probe",
 

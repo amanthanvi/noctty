@@ -3727,7 +3727,7 @@ pub const App = struct {
         const cwd = std.process.getCwdAlloc(self.core_app.alloc) catch null;
         defer if (cwd) |v| self.core_app.alloc.free(v);
         if (cwd) |v| {
-            log.debug("win32 current directory cwd={s}", .{v});
+            log.debug("win32 current directory cwd={f}", .{internal_os.redact.bytes(v)});
         }
 
         try self.ensureWindowClass();
@@ -11554,7 +11554,7 @@ pub const App = struct {
 
         if (cwd) |v| {
             if (isSafeStartupCwd(v)) return;
-            log.warn("win32 current directory is unsafe, resetting cwd={s}", .{v});
+            log.warn("win32 current directory is unsafe, resetting cwd={f}", .{internal_os.redact.bytes(v)});
         } else {
             log.warn("win32 current directory unavailable, resetting to profile", .{});
         }
@@ -11571,7 +11571,7 @@ pub const App = struct {
             return lastError();
         }
 
-        log.debug("win32 current directory reset cwd={s}", .{profile});
+        log.debug("win32 current directory reset cwd={f}", .{internal_os.redact.bytes(profile)});
     }
 
     fn clientSize(self: *App, hwnd: HWND) !apprt.SurfaceSize {
@@ -12378,7 +12378,7 @@ pub const App = struct {
             if (!self.moved) return;
             const cwd = self.before orelse return;
             std.process.changeCurDir(cwd) catch |err| {
-                std.log.warn("config load: couldn't restore sanitized cwd path={s} err={}", .{ cwd, err });
+                std.log.warn("config load: couldn't restore sanitized cwd path={f} err={}", .{ internal_os.redact.bytes(cwd), err });
             };
         }
     };
@@ -12393,7 +12393,7 @@ pub const App = struct {
             if (std.process.changeCurDir(cwd)) |_| {
                 scope.moved = true;
             } else |err| {
-                std.log.warn("config load: couldn't restore startup cwd path={s} err={}", .{ cwd, err });
+                std.log.warn("config load: couldn't restore startup cwd path={f} err={}", .{ internal_os.redact.bytes(cwd), err });
             }
         }
         return scope;
@@ -17849,7 +17849,7 @@ const Host = struct {
             changed_cwd = true;
         }
         defer if (changed_cwd) std.process.changeCurDir(cwd_before) catch |err| {
-            log.warn("palette theme cwd restore failed path={s} err={}", .{ cwd_before, err });
+            log.warn("palette theme cwd restore failed path={f} err={}", .{ internal_os.redact.bytes(cwd_before), err });
         };
 
         var preview = try configpkg.Config.default(alloc);
@@ -30122,20 +30122,11 @@ fn isHighContrastActive() bool {
     return false;
 }
 
+/// The color scheme Windows reports for apps. The lookup is shared with the
+/// command line actions (`os/color_scheme.zig`), which apply the same scheme
+/// to the configuration they load.
 fn isSystemDarkMode() bool {
-    const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
-    const value_name = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
-    var hkey: sys.HKEY = undefined;
-    if (sys.RegOpenKeyExW(@ptrFromInt(c.HKEY_CURRENT_USER), subkey, 0, c.KEY_READ, &hkey) != c.ERROR_SUCCESS) return true;
-    defer _ = sys.RegCloseKey(hkey);
-
-    var data: u32 = 1;
-    var data_size: DWORD = @sizeOf(u32);
-    var reg_type: DWORD = 0;
-    if (sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != c.ERROR_SUCCESS) return true;
-    if (reg_type != c.REG_DWORD or data_size != @sizeOf(u32)) return true;
-
-    return data == 0; // 0 = dark mode, 1 = light mode
+    return internal_os.color_scheme.isDark();
 }
 
 const immersive_color_set_w = std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet");

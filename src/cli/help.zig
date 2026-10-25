@@ -48,6 +48,7 @@ const help_prelude =
     \\Useful Windows actions:
     \\  `noctty +new-window` forwards into the running instance when possible.
     \\  `noctty +list-windows` prints local automation window IDs as JSON.
+    \\  `noctty +list-profiles` prints the profile keys that `default-profile` takes.
     \\  `noctty +perform-action new_tab` forwards a safe UI action.
     \\  `noctty --safe-mode` uses built-in config and skips session restore.
     \\  `noctty +diagnostic-bundle` creates a local redacted support bundle.
@@ -109,6 +110,7 @@ test "help prelude points to CLI discovery commands" {
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --docs") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "--safe-mode") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+diagnostic-bundle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-profiles") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "src/config/Config.zig") == null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "future update") == null);
 }

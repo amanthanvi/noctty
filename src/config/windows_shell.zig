@@ -2660,7 +2660,7 @@ pub fn shellPwd(
         if (!is_wsl) break :result null;
         if (std.mem.eql(u8, value, "~")) break :result try alloc.dupe(u8, value);
         if (isWslPath(value)) break :result try normalizeWslPath(alloc, value);
-        log.warn("dropping unsupported windows shell pwd cwd={s} is_wsl={}", .{ value, is_wsl });
+        log.warn("dropping unsupported windows shell pwd cwd={f} is_wsl={}", .{ internal_os.redact.bytes(value), is_wsl });
         break :result null;
     };
     if (result) |path| {
@@ -2714,11 +2714,11 @@ fn safeCurrentDirectoryWithCurrent(
         if (isWindowsUriPath(value)) return try uriPathToWindows(alloc, value);
         if (isDriveAbsolutePath(value)) return try alloc.dupe(u8, value);
         if (is_wsl or isWslPath(value) or isObviouslyInvalidWindowsCurrentDirectory(value)) {
-            log.warn("falling back to windows home for unsafe cwd cwd={s} is_wsl={}", .{ value, is_wsl });
+            log.warn("falling back to windows home for unsafe cwd cwd={f} is_wsl={}", .{ internal_os.redact.bytes(value), is_wsl });
             return try defaultWindowsHome(alloc);
         }
 
-        log.warn("falling back to windows home for unsupported cwd cwd={s} is_wsl={}", .{ value, is_wsl });
+        log.warn("falling back to windows home for unsupported cwd cwd={f} is_wsl={}", .{ internal_os.redact.bytes(value), is_wsl });
         return try defaultWindowsHome(alloc);
     }
 
@@ -2726,11 +2726,11 @@ fn safeCurrentDirectoryWithCurrent(
         if (isDriveAbsolutePath(value)) return try alloc.dupe(u8, value);
         if (isWindowsUriPath(value)) return try uriPathToWindows(alloc, value);
         if (isObviouslyInvalidWindowsCurrentDirectory(value)) {
-            log.warn("falling back to windows home for inherited unsafe cwd cwd={s} is_wsl={}", .{ value, is_wsl });
+            log.warn("falling back to windows home for inherited unsafe cwd cwd={f} is_wsl={}", .{ internal_os.redact.bytes(value), is_wsl });
             return try defaultWindowsHome(alloc);
         }
 
-        log.warn("using inherited windows cwd cwd={s} is_wsl={}", .{ value, is_wsl });
+        log.warn("using inherited windows cwd cwd={f} is_wsl={}", .{ internal_os.redact.bytes(value), is_wsl });
         return try alloc.dupe(u8, value);
     }
 
@@ -3051,7 +3051,16 @@ fn listProfilesWithLookupAndProbeAndWslListAndOrder(
                 &.{path},
             );
 
-            const distros = try list_wsl(alloc, path);
+            // The default distribution starts without the list. A list that
+            // fails or comes late (`WslListTimeout`, `WslListFailed`) costs
+            // the distributions and marks the discovery incomplete, so it is
+            // retried; it must not cost every other profile.
+            const distros: []const []u8 = list_wsl(alloc, path) catch |err| failed: {
+                const any: anyerror = err;
+                if (any == error.OutOfMemory) return err;
+                if (complete) |value| value.* = false;
+                break :failed &.{};
+            };
             defer deinitOwnedStringList(alloc, distros);
 
             for (distros) |distro| {
@@ -5637,6 +5646,57 @@ test "profile discovery reports a retryable WSL probe failure" {
     try testing.expect(complete);
     try testing.expectEqual(@as(usize, 2), recovered.len);
     try testing.expectEqual(ProfileKind.wsl_default, recovered[0].kind);
+}
+
+test "profile discovery keeps the other profiles when the WSL list fails" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Stages = struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
+            if (std.mem.eql(u8, exe, "cmd.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\cmd.exe");
+            return null;
+        }
+        fn probe(_: Allocator, _: []const u8) !bool {
+            return true;
+        }
+        fn timeout(_: Allocator, _: []const u8) ![][]u8 {
+            return error.WslListTimeout;
+        }
+        fn failed(_: Allocator, _: []const u8) ![][]u8 {
+            return error.WslListFailed;
+        }
+        fn noMemory(_: Allocator, _: []const u8) ![][]u8 {
+            return error.OutOfMemory;
+        }
+    };
+
+    inline for (.{ Stages.timeout, Stages.failed }) |list| {
+        var complete = true;
+        const profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(
+            alloc,
+            Stages.lookup,
+            Stages.probe,
+            list,
+            null,
+            &complete,
+        );
+        defer deinitProfiles(alloc, profiles);
+        try testing.expect(!complete);
+        try expectProfileKeys(profiles, &.{ "wsl-default", "cmd.exe" });
+    }
+
+    // Running out of memory is still an error, not an incomplete list.
+    var complete = true;
+    try testing.expectError(error.OutOfMemory, listProfilesWithLookupAndProbeAndWslListAndOrder(
+        alloc,
+        Stages.lookup,
+        Stages.probe,
+        Stages.noMemory,
+        null,
+        &complete,
+    ));
 }
 
 test "WSL enumeration requires a successful child exit" {

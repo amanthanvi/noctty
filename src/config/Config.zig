@@ -5243,7 +5243,7 @@ pub fn finalize(self: *Config) !void {
         if (self.command == null or wd == .home) command: {
             // First look up the command using the SHELL env var if needed.
             if (self.command) |cmd|
-                log.info("shell src=config value={}", .{cmd})
+                log.info("shell src=config value={f}", .{cmd.redacted()})
             else shell_env: {
                 // Windows shell resolution is handled explicitly below so that
                 // an unset `command` consistently follows pwsh, then Windows
@@ -5256,7 +5256,7 @@ pub fn finalize(self: *Config) !void {
                 if (!probable_cli) break :shell_env;
 
                 if (std.process.getEnvVarOwned(alloc, "SHELL")) |value| {
-                    log.info("default shell source=env value={s}", .{value});
+                    log.info("default shell source=env value={f}", .{internal_os.redact.bytes(value)});
 
                     const copy = try alloc.dupeZ(u8, value);
                     self.command = .{ .shell = copy };
@@ -5285,14 +5285,14 @@ pub fn finalize(self: *Config) !void {
                     const pw = try internal_os.passwd.get(alloc);
                     if (self.command == null) {
                         if (pw.shell) |sh| {
-                            log.info("default shell src=passwd value={s}", .{sh});
+                            log.info("default shell src=passwd value={f}", .{internal_os.redact.bytes(sh)});
                             self.command = .{ .shell = sh };
                         }
                     }
 
                     if (wd == .home) {
                         if (pw.home) |home| {
-                            log.info("default working directory src=passwd value={s}", .{home});
+                            log.info("default working directory src=passwd value={f}", .{internal_os.redact.bytes(home)});
                             wd = .{ .path = home };
                         } else {
                             wd = .inherit;
@@ -7091,7 +7091,7 @@ pub fn useWindowsRecoveryCommand(self: *Config) !void {
 
 /// Set `command` to `cmd`, chosen by noctty rather than a config layer.
 fn setAutomaticCommand(self: *Config, comptime src: []const u8, cmd: Command) void {
-    log.info("default shell src=" ++ src ++ " value={}", .{cmd});
+    log.info("default shell src=" ++ src ++ " value={f}", .{cmd.redacted()});
     self.command = cmd;
     self._command_defaulted = true;
 }
@@ -7916,8 +7916,8 @@ pub const WorkingDirectory = union(enum) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const expanded = internal_os.expandHome(path, &buf) catch |err| {
             log.warn(
-                "error expanding home directory for working-directory path={s}: {}",
-                .{ path, err },
+                "error expanding home directory for working-directory path={f}: {}",
+                .{ internal_os.redact.bytes(path), err },
             );
             return;
         };

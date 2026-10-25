@@ -1345,7 +1345,7 @@ pub const StreamHandler = struct {
 
     /// Record `path` as the working directory and tell the surface.
     fn setReportedPwd(self: *StreamHandler, path: []const u8) !void {
-        log.debug("terminal pwd: {s}", .{path});
+        log.debug("terminal pwd: {f}", .{internal_os.redact.bytes(path)});
         try self.terminal.setPwd(path);
 
         // Report it to the surface. If creating our write request fails

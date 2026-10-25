@@ -888,7 +888,8 @@ or `user:py312`), a detected profile's key (`pwsh.exe`, `powershell.exe`,
 `powershell`, `git`, `cmd`, `wsl`). In `profile-order`
 and `profile-hidden`, `wsl` names every WSL profile. A WSL distribution is
 always written `wsl:<distribution>`. Labels are not references, because they
-can change. A value that cannot name a profile (a typo, an id no
+can change. `noctty +list-profiles` prints the keys
+(see [Listing profiles](#listing-profiles)). A value that cannot name a profile (a typo, an id no
 `profile-command` line defines, a comment after the value) is reported as a
 config problem. One that names a shell this machine does not have
 (`wsl:docker-desktop`, an `ssh:` host, a `vs:` key) is not, so a shared config
@@ -980,6 +981,67 @@ Limits:
 - The Settings window does not edit the `profile-*` lines; it leaves them,
   and every line it does not edit, as they are when it saves. Its Shell
   page sets `default-profile` (see above).
+
+### Listing profiles
+
+`noctty +list-profiles` prints the profiles the picker and the palette offer,
+with the key each one has for `default-profile`, `profile-order` and
+`profile-hidden`:
+
+```text
+KEY              LABEL                                     SOURCE         STATE
+pwsh.exe         PowerShell                                detected       shown
+powershell.exe   Windows PowerShell                        detected       shown
+cmd.exe          Command Prompt                            detected       shown
+user:py312       Python 3.12                               config         shown
+vs:7b2b9776:cmd  Developer Command Prompt for VS 2022 (2)  visual-studio  shown
+vs:869111bd:cmd  Developer Command Prompt for VS 2022      visual-studio  hidden
+```
+
+The profiles come in the picker's order: the shown ones in the order the
+rules above give, then the hidden ones, which still start when something names
+them. The source is `detected` for a shell, WSL distribution or SSH host found
+on this machine, `config` for a profile you defined with `profile-command`
+(its key is `user:<id>`), and `visual-studio` for a developer shell. The
+command never prints a command line, an environment variable or a working
+directory.
+
+It reads your configuration files and searches for shells the way a new
+noctty does when it starts, with its own environment and for the light or dark
+scheme Windows reports for apps (a `theme = light:A,dark:B` can set profile
+keys, so a dark desktop can list other profiles than a light one), so it lists
+what a new window started from the same shell would: it asks `wsl.exe` for its
+distributions when `wsl.exe` is on `PATH`, reads your SSH config, and asks
+Visual Studio's Setup Configuration, which takes a fraction of a second. A
+running noctty may list differently: it keeps the environment and options it
+started with, and a quick slot you pin in it moves a profile to the front of
+its pickers until it exits, which the command, a separate process, does not
+see. A `profile-command` line the config reader rejects leaves its profile
+out; `noctty +validate-config` reports it.
+
+On a terminal the output is the table above. When it is piped or redirected,
+or with `--plain`, each profile is one line of tab-separated fields (key,
+label, source, state) without a header, for scripts that split on tabs. The
+text forms are UTF-8, and a control character in a label prints as `?`.
+`--format=json` prints one document instead, whatever the destination, with
+`hidden` as true or false in place of the state:
+
+```json
+{"schema":"noctty.profiles.v1","complete":true,"profiles":[{"key":"pwsh.exe","label":"PowerShell","source":"detected","hidden":false}]}
+```
+
+```powershell
+noctty +list-profiles --format=json | ConvertFrom-Json | ForEach-Object profiles | Where-Object hidden
+```
+
+The JSON is ASCII (any other character is a `\u` escape), so a console code
+page cannot garble it on its way through a pipeline.
+
+`complete` is `false`, and a note on stderr says so, when a search did not
+finish in time (WSL, the SSH config or Visual Studio) and profiles may be
+missing. A repeat usually settles it. Actions switch noctty's log off;
+`GHOSTTY_LOG=stderr` switches it on, and a log line says how big a command or
+a directory is (`<2 args, 32 bytes>`), never what it is.
 
 ## App identity
 

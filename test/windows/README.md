@@ -525,6 +525,35 @@ in another harness and never returned. `flagship/contracts/Contracts.96-HiddenHa
 drives the walk, and the same rule in `hidden-win11-default-shell.ps1`'s
 `Find-Shell`, with a recycled-number process table.
 
+## hidden-win11-list-profiles.ps1
+
+Runs `noctty.com +list-profiles` from a portable copy on a hidden desktop and
+checks the profile list it prints: the profiles of a fixture configuration (two
+`profile-order` entries first, one `profile-hidden` entry last), the detected
+shells and SSH hosts after them, the fields of each line, `--plain` equal to the
+redirected default, `--format=json` equal in order to the text, a bad argument
+exiting 1 with nothing on stdout, and none of the fixture's command line,
+variable or working directory in any output, as text or as the decimal or hex
+list of numbers a byte string prints as. One run has `GHOSTTY_LOG=stderr`, which
+switches the log that actions turn off back on, with a default profile and an
+explicit `working-directory = home` so the log line that names the command is
+reached: its stderr must say how big the command was (`<2 args, 32 bytes>`) and
+not what it was. A last run has a `theme = light:A,dark:B` whose files hide different shells, and must list
+the one for the scheme Windows reports for apps (read from the registry, never written). The fixture's `PATH` holds no
+`wsl.exe`, so discovery never starts WSL, and its Visual Studio profiles are
+off, so the result does not depend on the machine. The aligned table needs a
+console and is covered by the unit tests. A CLI action returns before the app
+creates a window, an AppUserModelID or a jump list, so any build works. The
+harness proves the real `startup-attempts.json`, the PowerShell history files'
+metadata and the clipboard sequence number did not change.
+
+```powershell
+pwsh -NoProfile -File .\hidden-win11-list-profiles.ps1 -Bin <dir with noctty.exe and noctty.com> -Run <new dir>
+```
+
+Results are in `results.json` and `checks.txt`; the output of each run is in
+`<name>.out.txt` and `<name>.err.txt`.
+
 ## hidden-win11-embedding-idle.ps1
 
 Ephemeral-runner lifecycle of `noctty.exe -Embedding`, the process Windows starts to hand
@@ -594,7 +623,7 @@ desktop evidence separate. The Server 2022 run is not a Windows 10 desktop pass.
 Shared by the hidden-desktop harnesses that run on a developer machine
 (`hidden-win11-docked-search.ps1`, `-single-tab-close`, `-dpi-geometry`,
 `-quick-terminal-identity`, `-session-restore`, `-default-shell`,
-`-restore-quarantine`, `-app-delivery` and `-restart-manager`); each dot-sources it and still runs on
+`-restore-quarantine`, `-app-delivery`, `-restart-manager` and `-list-profiles`); each dot-sources it and still runs on
 its own. It holds the private desktop, the owned kill-on-close job, the two
 explicit-desktop launches (`Launch` for the driver, `Spawn` for a case),
 `Invoke-LocalHiddenDriver` (the outer half: run the harness again as its driver

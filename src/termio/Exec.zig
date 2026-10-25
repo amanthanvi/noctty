@@ -877,17 +877,6 @@ const Subprocess = struct {
         flatpak: FlatpakHostCommand,
     };
 
-    const ArgsFormatter = struct {
-        args: []const [:0]const u8,
-
-        pub fn format(this: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            for (this.args, 0..) |a, i| {
-                if (i > 0) try writer.writeAll(", ");
-                try writer.print("`{s}`", .{a});
-            }
-        }
-    };
-
     /// Initialize the subprocess. This will NOT start it, this only sets
     /// up the internal state necessary to start it later.
     pub fn init(gpa: Allocator, cfg: Config) !Subprocess {
@@ -1208,9 +1197,9 @@ const Subprocess = struct {
         } else shell_pwd;
 
         if (builtin.os.tag == .windows) {
-            log.info("windows launch host_cwd={?s} shell_pwd={?s} is_wsl={}", .{
-                cwd,
-                shell_pwd,
+            log.info("windows launch host_cwd={f} shell_pwd={f} is_wsl={}", .{
+                internal_os.redact.optionalBytes(cwd),
+                internal_os.redact.optionalBytes(shell_pwd),
                 windows_shell.isWslCommand(launch_command),
             });
         }
@@ -1345,7 +1334,7 @@ const Subprocess = struct {
             }
         };
 
-        log.debug("starting command command={f}", .{ArgsFormatter{ .args = self.args }});
+        log.debug("starting command command={f}", .{internal_os.redact.argv(self.args)});
 
         // If we can't access the cwd, then don't set any cwd and inherit.
         // This is important because our cwd can be set by the shell (OSC 7)
