@@ -326,7 +326,7 @@ fn defaultDistributionWithQuery(query: anytype) ?DefaultDistribution {
 }
 
 /// Read only the registration's name, using the GUID already validated above.
-/// Older inbox WSL supports -d, but not --distribution-id (WSL 2.4.4+).
+/// Windows 10 1809 supports --distribution, but not --distribution-id (WSL 2.4.4+).
 fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
     if (comptime builtin.os.tag != .windows) return null;
     const prefix = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\");
@@ -335,7 +335,7 @@ fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
     @memcpy(subkey[prefix.len..], &id);
     subkey[subkey.len] = 0;
     return distributionNameWithQuery(alloc, &subkey, struct {
-        fn query(key: [*:0]const u16, buf: *[256]u16, bytes: *windows.DWORD) windows.LSTATUS {
+        fn query(key: [*:0]const u16, buf: *[257]u16, bytes: *windows.DWORD) windows.LSTATUS {
             return windows.advapi32.RegGetValueW(
                 windows.HKEY_CURRENT_USER,
                 key,
@@ -351,13 +351,26 @@ fn readDistributionName(alloc: Allocator, id: DefaultDistribution) ?[]u8 {
 }
 
 fn distributionNameWithQuery(alloc: Allocator, key: [*:0]const u16, query: anytype) ?[]u8 {
-    var buf: [256]u16 = @splat(0);
+    var buf: [257]u16 = @splat(0);
     var bytes: windows.DWORD = @sizeOf(@TypeOf(buf));
     if (query(key, &buf, &bytes) != @intFromEnum(windows.Win32Error.SUCCESS) or
         bytes < 4 or bytes > @sizeOf(@TypeOf(buf)) or bytes % 2 != 0) return null;
     const len = bytes / 2 - 1;
-    if (buf[len] != 0 or std.mem.indexOfScalar(u16, buf[0..len], 0) != null) return null;
+    if (buf[len] != 0) return null;
+    for (buf[0..len]) |c| {
+        if (c > 0x7f or !distributionNameCharacter(@intCast(c))) return null;
+    }
     return std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..len]) catch null;
+}
+
+fn distributionNameCharacter(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-';
+}
+
+fn validDistributionName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 256) return false;
+    for (name) |c| if (!distributionNameCharacter(c)) return false;
+    return true;
 }
 
 /// A local drive path only. Screen it before any file operation, including
@@ -477,7 +490,9 @@ fn probeKey(alloc: Allocator, env: *const EnvMap, argv: []const []const u8, cwd:
 /// Implicit selections include the current registry default ID in their key;
 /// an unavailable ID bypasses the cache so a default change is still seen.
 const Answer = enum { pending, yes, no };
-var probe_cache: std.AutoHashMapUnmanaged(u64, Answer) = .empty;
+const ProbeEntry = struct { answer: Answer, generation: u64 };
+var probe_cache: std.AutoHashMapUnmanaged(u64, ProbeEntry) = .empty;
+var probe_generation: u64 = 0;
 var probe_mutex: std.Thread.Mutex = .{};
 var probe_done: std.Thread.Condition = .{};
 
@@ -519,37 +534,65 @@ fn cachedProbeWithHost(
     cwd: []const u8,
     comptime Host: type,
 ) bool {
-    const default_distro: ?DefaultDistribution = if (hasExplicitDistribution(probe)) null else Host.defaultDistribution() orelse return Host.run(alloc, env, probe, cwd) orelse false;
-    const name = if (default_distro) |id| Host.distributionName(alloc, id) orelse
-        return Host.run(alloc, env, probe, cwd) orelse false else null;
+    const default_distro: ?DefaultDistribution = if (hasExplicitDistribution(probe))
+        null
+    else
+        Host.defaultDistribution() orelse return Host.run(alloc, env, probe, cwd) orelse false;
+    const name = if (default_distro) |id|
+        Host.distributionName(alloc, id) orelse return Host.run(alloc, env, probe, cwd) orelse false
+    else
+        null;
     defer if (name) |value| alloc.free(value);
-    // Bind the question to the captured registration using the legacy -d
+    if (name) |value| {
+        if (!validDistributionName(value)) return Host.run(alloc, env, probe, cwd) orelse false;
+    }
+    // Bind the question to the captured registration using --distribution
     // option. The session launch stays implicit. Include the name in the key
     // too, so a rename cannot reuse an answer for the previous selector.
     const pinned = if (default_distro != null) alloc.alloc([]const u8, probe.len + 2) catch return false else null;
     defer if (pinned) |args| alloc.free(args);
     if (name) |value| {
         pinned.?[0] = probe[0];
-        pinned.?[1] = "-d";
+        pinned.?[1] = "--distribution";
         pinned.?[2] = value;
         @memcpy(pinned.?[3..], probe[1..]);
     }
     const key = probeKey(alloc, env, pinned orelse probe, cwd, default_distro) catch return false;
 
     probe_mutex.lock();
+    var waited_generation: ?u64 = null;
     while (true) {
-        const known = probe_cache.get(key) orelse break;
-        switch (known) {
+        const known = probe_cache.get(key) orelse {
+            if (waited_generation != null) {
+                probe_mutex.unlock();
+                return false;
+            }
+            break;
+        };
+        // A new launch may already have replaced an unanswered attempt.
+        // Existing waiters share only their original attempt's outcome.
+        if (waited_generation) |generation| {
+            if (known.generation != generation) {
+                probe_mutex.unlock();
+                return false;
+            }
+        }
+        switch (known.answer) {
             .yes, .no => {
                 probe_mutex.unlock();
                 if (!defaultStillMatches(alloc, default_distro, name, Host)) return false;
-                return known == .yes;
+                return known.answer == .yes;
             },
             // Another tab is asking the same question.
-            .pending => probe_done.wait(&probe_mutex),
+            .pending => {
+                if (waited_generation == null and @hasDecl(Host, "beforeWait")) Host.beforeWait();
+                waited_generation = known.generation;
+                probe_done.wait(&probe_mutex);
+            },
         }
     }
-    probe_cache.put(std.heap.page_allocator, key, .pending) catch {
+    probe_generation +%= 1;
+    probe_cache.put(std.heap.page_allocator, key, .{ .answer = .pending, .generation = probe_generation }) catch {
         probe_mutex.unlock();
         return false;
     };
@@ -566,7 +609,7 @@ fn cachedProbeWithHost(
     probe_mutex.lock();
     defer probe_mutex.unlock();
     if (answer) |yes| {
-        probe_cache.putAssumeCapacity(key, if (yes) .yes else .no);
+        probe_cache.getPtr(key).?.answer = if (yes) .yes else .no;
     } else {
         _ = probe_cache.remove(key);
     }
@@ -926,7 +969,7 @@ test "WSLCACHE implicit launches reuse answers and miss after a default change" 
             calls += 1;
             if (distro != null and name_available) {
                 const expected = if (distro.?[1] == '1') "Ubuntu" else "Debian";
-                if (args.len != 6 or !std.mem.eql(u8, args[1], "-d") or
+                if (args.len != 6 or !std.mem.eql(u8, args[1], "--distribution") or
                     !std.mem.eql(u8, args[2], expected)) bad_argv = true;
             } else {
                 if (args.len != 4 or !std.mem.eql(u8, args[1], "--exec")) bad_argv = true;
@@ -1032,7 +1075,7 @@ test "WSLCACHE rechecks reject changed or unavailable IDs without pending entrie
     Host.sequence(&.{ first, first, first });
     try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\cached", Host));
     try std.testing.expectEqual(@as(usize, 1), Host.calls);
-    const pinned = &[_][]const u8{ probe[0], "-d", "Ubuntu", "--exec", "infocmp", "xterm-ghostty" };
+    const pinned = &[_][]const u8{ probe[0], "--distribution", "Ubuntu", "--exec", "infocmp", "xterm-ghostty" };
     const cached_key = try probeKey(alloc, &env, pinned, "C:\\cached", first);
     const fresh_key = try probeKey(alloc, &env, pinned, "C:\\fresh", first);
     for ([_]?DefaultDistribution{ second, null }) |changed| {
@@ -1042,7 +1085,7 @@ test "WSLCACHE rechecks reject changed or unavailable IDs without pending entrie
         const before = Host.calls;
         try std.testing.expect(!cachedProbeWithHost(alloc, &env, probe, "C:\\cached", Host));
         try std.testing.expectEqual(before, Host.calls);
-        try std.testing.expectEqual(Answer.yes, probe_cache.get(cached_key));
+        try std.testing.expectEqual(@as(?Answer, .yes), if (probe_cache.get(cached_key)) |entry| entry.answer else null);
 
         // A change before a new probe starts must not run it and must remove
         // its pending slot, so the next caller can try this question again.
@@ -1061,7 +1104,7 @@ test "WSLCACHE rechecks reject changed or unavailable IDs without pending entrie
     Host.sequence(&.{ first, first, first });
     try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\fresh", Host));
     try std.testing.expectEqual(@as(usize, 4), Host.calls);
-    try std.testing.expectEqual(Answer.yes, probe_cache.get(fresh_key));
+    try std.testing.expectEqual(@as(?Answer, .yes), if (probe_cache.get(fresh_key)) |entry| entry.answer else null);
 }
 
 test "WSLCACHE explicit selections reuse answers without reading the default" {
@@ -1145,11 +1188,11 @@ test "WSLCACHE registry query rejects errors and malformed default IDs" {
 
 test "WSLCACHE registry name query validates strings without starting WSL" {
     const Query = struct {
-        var data: [256]u16 = @splat(0);
+        var data: [257]u16 = @splat(0);
         var size: windows.DWORD = 0;
         var status: windows.LSTATUS = 0;
         var bad_input = false;
-        fn query(key: [*:0]const u16, buf: *[256]u16, bytes: *windows.DWORD) windows.LSTATUS {
+        fn query(key: [*:0]const u16, buf: *[257]u16, bytes: *windows.DWORD) windows.LSTATUS {
             if (bytes.* != @sizeOf(@TypeOf(data)) or !std.mem.eql(u16, std.mem.span(key), &.{'x'})) bad_input = true;
             buf.* = data;
             bytes.* = size;
@@ -1157,18 +1200,18 @@ test "WSLCACHE registry name query validates strings without starting WSL" {
         }
     };
     const alloc = std.testing.allocator;
-    const name = std.unicode.utf8ToUtf16LeStringLiteral("Ubuntu-é");
+    const name = std.unicode.utf8ToUtf16LeStringLiteral("Ubuntu-24.04_amd64");
     @memcpy(Query.data[0..name.len], name);
     Query.size = (name.len + 1) * 2;
     const actual = distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query) orelse return error.TestUnexpectedResult;
     defer alloc.free(actual);
-    try std.testing.expectEqualStrings("Ubuntu-é", actual);
+    try std.testing.expectEqualStrings("Ubuntu-24.04_amd64", actual);
     for ([_]windows.Win32Error{ .FILE_NOT_FOUND, .ACCESS_DENIED, .MORE_DATA, .UNSUPPORTED_TYPE }) |err| {
         Query.status = @intFromEnum(err);
         try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
     }
     Query.status = 0;
-    for ([_]windows.DWORD{ 0, 1, 2, 3, 513, 514 }) |size| {
+    for ([_]windows.DWORD{ 0, 1, 2, 3, 513, 515, 516 }) |size| {
         Query.size = size;
         try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
     }
@@ -1180,7 +1223,190 @@ test "WSLCACHE registry name query validates strings without starting WSL" {
     try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
     Query.data[1] = 0xd800;
     try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
+    for ([_]u16{ ' ', '"', '/', '\\', 0xe9 }) |invalid| {
+        Query.data[1] = invalid;
+        try std.testing.expectEqual(null, distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query));
+    }
+    Query.data = @splat('a');
+    Query.data[256] = 0;
+    Query.size = @sizeOf(@TypeOf(Query.data));
+    const longest = distributionNameWithQuery(alloc, &.{ 'x', 0 }, Query.query) orelse return error.TestUnexpectedResult;
+    defer alloc.free(longest);
+    try std.testing.expectEqual(@as(usize, 256), longest.len);
     try std.testing.expect(!Query.bad_input);
+}
+
+test "WSLCACHE invalid names use the unpinned uncached probe" {
+    const Host = struct {
+        var name: []const u8 = "";
+        var calls: usize = 0;
+        var bad_argv = false;
+        fn defaultDistribution() ?DefaultDistribution {
+            return std.unicode.utf8ToUtf16LeStringLiteral("{11111111-1111-1111-1111-111111111111}")[0..38].*;
+        }
+        fn distributionName(alloc: Allocator, _: DefaultDistribution) ?[]u8 {
+            return alloc.dupe(u8, name) catch null;
+        }
+        fn run(_: Allocator, _: *const EnvMap, args: []const []const u8, _: []const u8) ?bool {
+            calls += 1;
+            if (args.len != 4 or !std.mem.eql(u8, args[1], "--exec")) bad_argv = true;
+            return true;
+        }
+    };
+    defer {
+        probe_cache.deinit(std.heap.page_allocator);
+        probe_cache = .empty;
+    }
+    const alloc = std.testing.allocator;
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    const probe = &[_][]const u8{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" };
+    for ([_][]const u8{ "", "Ubuntu Space", "Ubuntu-é", "a/b", "a\\b", "a\"b", "a" ** 257 }) |name| {
+        Host.name = name;
+        const before = Host.calls;
+        try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\invalid", Host));
+        try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\invalid", Host));
+        try std.testing.expectEqual(before + 2, Host.calls);
+        try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
+    }
+    try std.testing.expect(!Host.bad_argv);
+    try std.testing.expect(validDistributionName("a" ** 256));
+    try std.testing.expect(validDistributionName("A0._-z"));
+}
+
+test "WSLCACHE waiters share timeout fallback even when a fresh attempt replaces it" {
+    const Host = struct {
+        var mutex: std.Thread.Mutex = .{};
+        var changed: std.Thread.Condition = .{};
+        var entered = false;
+        var release = false;
+        var waiting: usize = 0;
+        var finished: usize = 0;
+        var calls: usize = 0;
+        fn defaultDistribution() ?DefaultDistribution {
+            return std.unicode.utf8ToUtf16LeStringLiteral("{11111111-1111-1111-1111-111111111111}")[0..38].*;
+        }
+        fn distributionName(alloc: Allocator, _: DefaultDistribution) ?[]u8 {
+            return alloc.dupe(u8, "Ubuntu") catch null;
+        }
+        fn beforeWait() void {
+            mutex.lock();
+            defer mutex.unlock();
+            waiting += 1;
+            changed.broadcast();
+        }
+        fn waitFor(count: usize) !void {
+            mutex.lock();
+            defer mutex.unlock();
+            while (!(if (count == 0) entered else waiting >= count))
+                try changed.timedWait(&mutex, 30 * std.time.ns_per_s);
+        }
+        fn waitForFinished(count: usize) !void {
+            mutex.lock();
+            defer mutex.unlock();
+            while (finished < count) try changed.timedWait(&mutex, 30 * std.time.ns_per_s);
+        }
+        fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
+            mutex.lock();
+            defer mutex.unlock();
+            calls += 1;
+            if (calls > 1) return true;
+            entered = true;
+            changed.broadcast();
+            while (!release) changed.wait(&mutex);
+            return null; // Stubbed timeout; never starts WSL.
+        }
+        fn launch(env: *const EnvMap, answer: *bool) void {
+            answer.* = cachedProbeWithHost(std.heap.page_allocator, env, &.{ "wsl.exe", "--exec", "infocmp", "xterm-ghostty" }, "C:\\waiters", @This());
+            mutex.lock();
+            defer mutex.unlock();
+            finished += 1;
+            changed.broadcast();
+        }
+    };
+    defer {
+        probe_cache.deinit(std.heap.page_allocator);
+        probe_cache = .empty;
+    }
+    var env = EnvMap.init(std.testing.allocator);
+    defer env.deinit();
+    for ([_]bool{ false, true }) |replace| {
+        probe_cache.clearRetainingCapacity();
+        Host.entered = false;
+        Host.release = false;
+        Host.waiting = 0;
+        Host.finished = 0;
+        Host.calls = 0;
+        var answers: [5]bool = @splat(true);
+        const owner = try std.Thread.spawn(.{}, Host.launch, .{ &env, &answers[0] });
+        var owner_joined = false;
+        defer if (!owner_joined) owner.join();
+        // Release before joining even if spawning a waiter fails.
+        var waiters: [4]std.Thread = undefined;
+        var spawned: usize = 0;
+        defer {
+            Host.mutex.lock();
+            Host.release = true;
+            Host.changed.broadcast();
+            Host.mutex.unlock();
+            for (waiters[0..spawned]) |waiter| waiter.join();
+        }
+        try Host.waitFor(0);
+        for (&waiters, answers[1..]) |*waiter, *answer| {
+            waiter.* = try std.Thread.spawn(.{}, Host.launch, .{ &env, answer });
+            spawned += 1;
+        }
+        try Host.waitFor(waiters.len);
+        if (replace) {
+            // Deterministically model removal and a fresh insertion before any
+            // subscribed waiter can reacquire the table lock. Hold the stubbed
+            // owner until all waiters finish so another pending generation alone
+            // must release them; no scheduler timing or WSL process is involved.
+            {
+                probe_mutex.lock();
+                defer probe_mutex.unlock();
+                var entries = probe_cache.valueIterator();
+                const entry = entries.next() orelse return error.TestUnexpectedResult;
+                entry.generation +%= 1;
+                probe_done.broadcast();
+            }
+            try Host.waitForFinished(waiters.len);
+        }
+        Host.mutex.lock();
+        Host.release = true;
+        Host.changed.broadcast();
+        Host.mutex.unlock();
+        for (waiters) |waiter| waiter.join();
+        spawned = 0;
+        owner.join();
+        owner_joined = true;
+        for (answers) |answer| try std.testing.expect(!answer);
+        try std.testing.expectEqual(@as(usize, 1), Host.calls);
+        try std.testing.expectEqual(@as(usize, 0), probe_cache.count());
+        var fresh = false;
+        Host.launch(&env, &fresh);
+        try std.testing.expect(fresh);
+        try std.testing.expectEqual(@as(usize, 2), Host.calls);
+    }
+}
+
+test "WSLCACHE runProbe treats exit minus one as unanswered" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(cwd);
+    var env = try std.process.getEnvMap(alloc);
+    defer env.deinit();
+    const root = env.get("SystemRoot") orelse return error.TestUnexpectedResult;
+    const cmd = try std.fs.path.join(alloc, &.{ root, "System32", "cmd.exe" });
+    defer alloc.free(cmd);
+    // /D disables AutoRun. runProbe uses CREATE_NO_WINDOW and NUL handles;
+    // only cmd's built-in exit runs, with no WSL, app or interactive shell.
+    try std.testing.expectEqual(@as(?bool, true), runProbe(alloc, &env, &.{ cmd, "/d", "/c", "exit", "0" }, cwd));
+    try std.testing.expectEqual(@as(?bool, false), runProbe(alloc, &env, &.{ cmd, "/d", "/c", "exit", "1" }, cwd));
+    try std.testing.expectEqual(@as(?bool, null), runProbe(alloc, &env, &.{ cmd, "/d", "/c", "exit", "-1" }, cwd));
 }
 
 test "WSLCACHE timeout and WSL CLI rejection retry but infocmp absence is cached" {
