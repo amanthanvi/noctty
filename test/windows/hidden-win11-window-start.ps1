@@ -3,18 +3,19 @@
 Portable, hidden-desktop integration regression for the state a new window
 starts in: `maximize` and `fullscreen` (#496), and the window keys a
 `+new-window` forward sets over the state the new window copies from the
-running one (position, size, decorations, opacity). Run with -Bin <source bin
+running one (position, size, decorations, opacity), and which running window
+that is (the one active last). Run with -Bin <source bin
 directory> -Run <new evidence directory>. The run directory must not already
 exist. Every file the app reads or writes is a sample this script creates
 beside a portable copy of the app: the real %LOCALAPPDATA%\noctty is never
 written, and only the hash and time of its startup state file are read,
 before and after. Never switches desktops, injects real input or registers a
 global hotkey: the only keys are posted F11 (`toggle_fullscreen`), F12
-(`toggle_quick_terminal`) and F8 (`open_config`, which opens Settings and saves
-nothing) messages, the last two bound in the case's config, and nothing it
-does can copy. The clipboard sequence number is logged before and after and a
+(`toggle_quick_terminal`), F8 (`open_config`, which opens Settings and saves
+nothing) and F9 (`close_tab:this`) messages, the last three bound in the
+case's config, and nothing it does can copy. The clipboard sequence number is logged before and after and a
 change fails the run. Every launch uses `--single-instance=false` and a class
-of its own, except the two forwarding cases, each a pair of copies sharing a
+of its own, except the three forwarding cases, each a pair of copies sharing a
 class no other process uses. Results contain only window geometry, window
 state, process IDs and assertions. It exits 1 when a check fails, so it can be
 run against a build that still has the problem to show what fails; the saved
@@ -83,6 +84,14 @@ public static class Ws {
     delegate bool EnumProc(IntPtr h,IntPtr p);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f,IntPtr p);
     [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h,out int pid);
+    [StructLayout(LayoutKind.Sequential)] struct GuiInfo { public int cb,flags; public IntPtr active,focus,capture,menuOwner,moveSize,caret; public Rect caretRect; }
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(int tid,ref GuiInfo info);
+    // The active window of the thread that owns `h`.
+    public static IntPtr ActiveOf(IntPtr h) {
+        int pid; var info=new GuiInfo { cb=Marshal.SizeOf<GuiInfo>() };
+        if(!GetGUIThreadInfo(GetWindowThreadProcessId(h,out pid),ref info)) throw new Exception("GetGUIThreadInfo failed");
+        return info.active;
+    }
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h,StringBuilder s,int n);
     // The top-level windows of class `cls` that process `pid` has on this desktop.
     public static IntPtr[] TopLevel(int pid,string cls) {
@@ -354,6 +363,40 @@ try {
         if($h) {
             $s=Sample 'keys-none-open' $h; $hit=Close-Button $h $s
             Check 'no window open: the forwarded place, size and decorations' ($s.Rect.Left -eq 400 -and $s.Rect.Top -eq 300 -and ((Size $s.Client) -join 'x') -eq ((Size $reference.Client) -join 'x') -and $hit -eq 2) @{Left=400; Top=300; Client=(Size $reference.Client); HitTest='HTCAPTION'} @{Left=$s.Rect.Left; Top=$s.Rect.Top; Client=(Size $s.Client); HitTest=$hit}
+        }
+    } finally { Stop-Case $primary }
+
+    # Which window a forward copies: the one active last, never one whose
+    # only tab was closed and is kept, empty, for undo. Before, it was the
+    # first in the instance's window list: a forward copied the first
+    # window, and with that one kept empty it copied nothing and opened as a
+    # first window does, at the configured place.
+    $class="noctty-test-fwdsource-$runId"
+    $primary=Start-Case (New-Case 'source-primary' @('window-save-state = never','undo-timeout = 60s','keybind = f9=close_tab:this') -Class $class)
+    $second=New-Case 'source-second' @('window-save-state = never') -Class $class
+    function Cascaded($s) { $step=[int][math]::Floor(32*$s.Dpi/96); return [pscustomobject]@{ Left=$s.Rect.Left+$step; Top=$s.Rect.Top+$step; Right=$s.Rect.Right+$step; Bottom=$s.Rect.Bottom+$step } }
+    function Copied([string]$Name,$source,$h) {
+        $s=Sample $Name $h; $want=Cascaded $source
+        Check "${Name}: one step off the window active last" (Rect-Same $s.Rect $want 0) (Rect-Array $want) (Rect-Array $s.Rect)
+    }
+    try {
+        $first=$primary.Host
+        [void](Forward 'source-b' '--window-position-x=400 --window-position-y=300')
+        $c=Forward 'source-c' '--window-position-x=240 --window-position-y=200'
+        if($c) {
+            $active=[Ws]::ActiveOf($c)
+            Check 'control: the newest window is the active one' ($active -eq $c) $c.ToInt64() $active.ToInt64()
+            $last=Forward 'source-plain' ''
+            if($last) {
+                Copied 'source-plain' (Sample 'source-c' $c) $last
+                # The first window's only tab closed: it stays, empty, first
+                # in the list. The plain forward is still the active window.
+                Press (Pane $first) 0x78 1200        # F9: close_tab:this
+                $panes=@([HiddenLocal]::Surfaces($first)|Where-Object {[Ws]::Read($_).Visible})
+                Check 'control: the first window is kept, with no pane shown' ([Ws]::Alive($first) -and $panes.Count -eq 0 -and [Ws]::ActiveOf($last) -eq $last) 'alive, no pane, the last forward active' @{Alive=[Ws]::Alive($first); Panes=$panes.Count; Active=[Ws]::ActiveOf($last).ToInt64()}
+                $h=Forward 'source-empty-first' ''
+                if($h) { Copied 'source-empty-first' (Sample 'source-last' $last) $h }
+            }
         }
     } finally { Stop-Case $primary }
 
