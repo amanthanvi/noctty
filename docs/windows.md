@@ -422,10 +422,14 @@ does. `wsl.exe` passes a Linux process only the Windows variables that
 flag so that a Windows program started from inside WSL does not get the Linux
 values back. It adds `TERM` too when the distribution has a terminfo entry for
 noctty's `term`, which noctty asks the distribution itself with `infocmp`; the
-answer for an explicitly selected distribution is remembered until noctty
-exits, so install the entry first, then start noctty again. An implicit
-distribution is probed for each launch, so changing WSL's default while
-noctty runs cannot reuse the previous distribution's answer. To give a
+answer is remembered until noctty exits, so install the entry first, then
+start noctty again. For an implicit distribution, noctty reads the current
+default's ID from `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
+(`DefaultDistribution`) and includes it in the cache key. Changing WSL's
+default makes the next launch ask again. The probe explicitly selects the
+captured ID; if the default changes before its answer is consumed, that
+launch keeps the fallback. If the ID cannot be read, the launch bypasses
+the cache. No registry value is changed. To give a
 distribution the entry, compile
 `share/terminfo/ghostty.terminfo` from the noctty folder with `tic -x` inside
 it. Without the entry `TERM` stays `xterm-256color`, the value `wsl.exe` sets,
@@ -447,8 +451,8 @@ shell started from inside cmd or PowerShell.
 An existing `/w` entry stays Windows-only; noctty does not override that
 choice. Automatic `TERM` probing uses the launch environment and working
 directory, including `--cd`, and caches answers separately for different
-environments or directories for explicit distribution selections. The
-optional probe resolves only a local `.exe`;
+environments or directories, including for implicit distribution selections.
+The optional probe resolves only a local `.exe`;
 if resolution would need a network/device path, a mapped network drive, or
 reparse traversal (including directory symlinks and junctions),
 it keeps the fallback. For shell-form commands, automatic `TERM` is limited
