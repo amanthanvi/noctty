@@ -1440,6 +1440,27 @@ render trace when the first traced surface is destroyed. Presented fps is
 `(swap_buffers_count - 1) * 1000 / (last_swap_at_ms - first_swap_at_ms)`
 when at least two swaps are present and the time difference is positive.
 
+## Installed variable fonts
+
+Font discovery includes the system and per-user font directories and both
+the HKCU and HKLM Windows font registrations, including registered fonts
+outside those directories. Config reload checks both registry keys for
+changes before deciding whether to rescan.
+
+For a variable font with a `wght` axis reaching at least 600, a bold request
+uses `wght=700` (limited to the font's supported range by FreeType). For
+example, `font-family = Cascadia Code` can use the font's variable weight
+for bold text. An explicit `wght` in `font-variation-bold` or
+`font-variation-bold-italic` takes precedence; other configured axes are
+preserved. Regular and italic-only requests receive no automatic weight
+override.
+When a static face provides the same style and weight, it wins a tie unless
+variations were explicitly requested.
+
+`noctty +list-fonts --family="Cascadia Code" --bold` lists matching installed
+faces. Discovery does not enumerate variable fonts' named instances or add
+localized family-name aliases.
+
 ## Font stroke weight
 
 `font-thicken = true` thickens FreeType grayscale outline glyphs before
