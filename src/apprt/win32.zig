@@ -88,6 +88,7 @@ const sendNewSplitIpc = ipc_server.sendNewSplitIpc;
 const sendNewTabIpc = ipc_server.sendNewTabIpc;
 const sendNewWindowIpc = ipc_server.sendNewWindowIpc;
 const sendPerformActionIpc = ipc_server.sendPerformActionIpc;
+const withoutAppWideArguments = ipc_server.withoutAppWideArguments;
 const win32_ipc = @import("win32_ipc.zig");
 const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const win32_hints = @import("win32_hints.zig");
@@ -8170,7 +8171,13 @@ pub const App = struct {
                 );
                 defer alloc.free(pipe_name);
                 const forwarded = switch (launch_layout) {
-                    .none => try sendNewWindowIpc(alloc, pipe_name, elevated, value.arguments, response_timeout_ms),
+                    .none => sent: {
+                        // Settings the instance applies to every window are
+                        // left out, so the request is not refused for them.
+                        const arguments = try withoutAppWideArguments(alloc, value.arguments);
+                        defer if (arguments) |argv| alloc.free(argv);
+                        break :sent try sendNewWindowIpc(alloc, pipe_name, elevated, arguments, response_timeout_ms);
+                    },
                     .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, elevated, name, response_timeout_ms),
                 };
                 if (forwarded) return true;
