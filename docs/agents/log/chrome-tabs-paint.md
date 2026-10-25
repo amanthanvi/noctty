@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 Corrected in other files:
 - 2026-04-17 `win32_icons.zig` (the geometric icons): for the search bar's buttons it is only the fallback since the 2026-10-01 Codicons entry in search-scrollbar.md.
+- 2026-04-17 "Focused-tab underline is painted as a single parent-HWND rect": its closing sentence, "Insets 3 px on each horizontal edge per WT reference", is wrong about the source. Windows Terminal draws no accent underline or tab indicator (docs/wt-chrome-reference.md section 1 has the corrected facts); the inset is noctty's own choice. Its "buttons occupy y∈[3, tab_h-3)" holds for a restored window; with `Host.tabsFlushWithTop` the buttons start at y = 0 and keep their bottom edge and the underline lane (the 2026-10-24 TABGAP (#552) entry in this file). The paint comment in `win32.zig` that repeats the WT claim is still there.
 
 See also:
 - A `WM_DESTROY` handler that destroys a sibling can cut the parent's destroy walk short: a pane's `windowDestroyed` destroys its tab's button (`Host.destroyTabButton`), and where that button sat right below the pane in the z-order, a host's `DestroyWindow` sent the later panes only `WM_NCDESTROY`; destroy each pane through its own window (`App.destroyPaneOf`): the 2026-10-20 QUIT2TABS entry in tabs-panes.md.
