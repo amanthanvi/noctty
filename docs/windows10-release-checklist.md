@@ -130,8 +130,9 @@ shell (W10-19).
 bar and its minimise, maximise and close buttons; the tab strip is a separate row
 below it (32 DIP tall at 100%, not the 40 DIP integrated row); noctty draws no
 caption buttons of its own. Open two tabs, maximise, restore, double-click the
-caption. Repeat at 150% scaling (Settings > Display, then start a fresh noctty):
-the row scales and nothing clips. The separate tab row keeps its 3 DIP top
+caption, then run `toggle_fullscreen` and leave fullscreen. Repeat at 150%
+scaling (Settings > Display, then start a fresh noctty): the row scales and nothing
+clips. The separate tab row keeps its 3 DIP top
 inset when maximized and fullscreen; the flush top edge is a Windows 11 change.
 
 **W10-04 `window-show-tab-bar = never`.** Expected: no strip and no one-pixel

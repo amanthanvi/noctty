@@ -406,4 +406,4 @@ try{
     }}
 }catch{$script:checks.Add(@{Name='Harness execution';Passed=$false;Error=$_.Exception.Message;Location=$_.InvocationInfo.ScriptLineNumber})}
 finally{@{Checks=$script:checks;Samples=$script:samples;Processes=$script:processes;Limit='Never-switched WinSta0 private desktop; no real input, clipboard operations or composed-pixel acceptance. WindowFromPoint recorded separately from modeled recursive procedure chain. PrintWindow re-renders children and cannot prove displayed occlusion or stale pixels.'}|ConvertTo-Json -Depth 16|Set-Content -LiteralPath (Join-Path $Run 'tabgap-results.json')}
-if(@($script:checks|Where-Object {-not $_.Passed}).Count){exit 1}
+if($script:checks.Count -eq 0 -or @($script:checks|Where-Object {-not $_.Passed}).Count){exit 1}
