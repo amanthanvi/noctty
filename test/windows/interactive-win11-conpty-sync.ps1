@@ -1276,7 +1276,8 @@ if ($Clink) {
     # stray path never copies some other tree into the sandbox.
     $clinkExe = (Resolve-Path -LiteralPath $Clink -ErrorAction Stop).ProviderPath
     $clinkDir = Split-Path -Parent $clinkExe
-    if ((Split-Path -Leaf $clinkExe) -ine 'clink_x64.exe' -or -not (Test-Path -LiteralPath (Join-Path $clinkDir 'clink_dll_x64.dll') -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $clinkExe -PathType Leaf) -or (Split-Path -Leaf $clinkExe) -ine 'clink_x64.exe' -or
+        -not (Test-Path -LiteralPath (Join-Path $clinkDir 'clink_dll_x64.dll') -PathType Leaf)) {
         throw "-Clink must be clink_x64.exe in an extracted portable Clink folder: $clinkExe"
     }
     Copy-Item -LiteralPath $clinkDir -Destination (Join-Path $runRoot 'tools\clink') -Recurse

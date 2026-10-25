@@ -92,6 +92,7 @@ local function resize_wait()
     local old_rows = visible_rows("RESIZE " .. before .. ">")
     check(new_rows == 1 and old_rows == 0, "resized prompt shown once, without the old one" ..
         ((new_rows == 1 and old_rows == 0) and "" or (": new " .. new_rows .. ", old " .. old_rows)))
+    resize.finished = true
     touch(assert(os.getenv("NOCTTY_CLINK_RESIZE_DONE")), "done")
 end
 
@@ -201,6 +202,7 @@ clink.onprovideline(function()
         return nil
     end
     theme_mode = "pass"
+    check(resize.finished == true, "resize step finished before the line was accepted")
     local all = table.concat(marks)
     check(count(all, ESC .. "]133;C") == 2, "real command input emits C exactly twice")
     check(all:find(ESC .. "]133;D;0" .. BEL, 1, true) ~= nil,

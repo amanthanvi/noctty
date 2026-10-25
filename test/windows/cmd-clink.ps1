@@ -104,7 +104,9 @@ public static class ClinkSmoke {
         Rect r; if(!GetWindowRect(window,out r)) throw new Win32Exception(Marshal.GetLastWin32Error());
         // SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
         SetWindowPos(window,IntPtr.Zero,0,0,(r.right-r.left)*3/5,r.bottom-r.top,0x16);
-        waitFor(done,30000);
+        // Without it the checks never ran; pressing Enter would let the test
+        // finish without them.
+        if(!waitFor(done,30000)) throw new Exception("The resize step's checks did not finish");
         long down=1|((long)MapVirtualKeyW(0x0D,0)<<16);
         if(ClassOf(window)=="noctty.win32.host") {
             IntPtr surface=IntPtr.Zero;
@@ -137,7 +139,7 @@ public static class ClinkSmoke {
             var desk=OpenPrivateDesktop(desktop); bool verified=false;
             try {
                 for(int attempt=0; attempt<200 && !verified; attempt++) {
-                    EnumDesktopWindows(desk,(h,p)=>{int owner; GetWindowThreadProcessId(h,out owner); if(owner==pi.pid) verified=true; return true;},IntPtr.Zero);
+                    EnumDesktopWindows(desk,(h,p)=>{int owner; GetWindowThreadProcessId(h,out owner); if(owner==pi.pid || (ClassOf(h)=="ConsoleWindowClass" && InJob(owner,job))) verified=true; return true;},IntPtr.Zero);
                     if(!verified) System.Threading.Thread.Sleep(10);
                 }
             } finally { CloseDesktop(desk); }
