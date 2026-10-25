@@ -5288,11 +5288,20 @@ pub const App = struct {
         }
         selected.applyWindowStart(start);
         // Fullscreen is kept per surface, and every tab shares the window's.
-        if (start.fullscreen and selected.fullscreen) self.syncHostWindowState(selected) catch |err| {
-            log.warn("win32 session restore: fullscreen sync failed err={}", .{err});
-        };
+        if (start.fullscreen and selected.fullscreen) syncRestoredHostWindowState(restored_host, selected);
         transaction.commit();
         return selected;
+    }
+
+    /// Every pane already shares this HWND. Only copy its cached state;
+    /// generic window cloning allocates and repeats native placement calls.
+    fn syncRestoredHostWindowState(host: *Host, source: *const Surface) void {
+        for (host.tabs.items) |*tab| {
+            for (tab.tree.nodes) |node| switch (node) {
+                .leaf => |surface| if (surface != source) surface.copySharedWindowStateFrom(source, .{}),
+                .split => {},
+            };
+        }
     }
 
     fn restoreSessionTab(
@@ -6098,18 +6107,7 @@ pub const App = struct {
         // Keep fullscreen separately from the return placement. The popup's
         // current rect covers its monitor and is not its normal rect.
         if (host.activeSurface()) |surface| if (surface.fullscreen) {
-            if (surface.fullscreenReturn(hwnd)) |back| {
-                const maximized = back.placement.showCmd == c.SW_MAXIMIZE;
-                var rect = back.rect;
-                if (maximized) {
-                    rect = back.placement.rcNormalPosition;
-                    if (monitor orelse back.monitor) |info| rect = workspaceRectToScreen(rect, info);
-                }
-                if (rect.right <= rect.left or rect.bottom <= rect.top) return .{ .rect = null, .maximized = maximized, .fullscreen = true };
-                return .{ .rect = rect, .maximized = maximized, .fullscreen = true };
-            } else |err| {
-                log.warn("win32 session save: fullscreen window placement failed err={}", .{err});
-            }
+            return sessionFullscreenWindowPlacement(surface, surface.fullscreenReturn(hwnd), monitor);
         };
         var maximized = sys.IsZoomed(hwnd) != 0;
         var rect: RECT = undefined;
@@ -6138,6 +6136,31 @@ pub const App = struct {
 
         if (rect.right <= rect.left or rect.bottom <= rect.top) return .{ .rect = null, .maximized = maximized };
         return .{ .rect = rect, .maximized = maximized };
+    }
+
+    /// A failed current-monitor lookup still has the enter-time placement.
+    /// Never substitute the fullscreen popup's bounds for its normal rect.
+    fn sessionFullscreenWindowPlacement(
+        surface: *const Surface,
+        result: anyerror!Surface.FullscreenReturn,
+        monitor: ?MONITORINFO,
+    ) ?SessionWindowPlacement {
+        const back = result catch |err| fallback: {
+            log.warn("win32 session save: fullscreen window placement failed; using captured placement err={}", .{err});
+            break :fallback Surface.FullscreenReturn{
+                .rect = surface.restore_rect,
+                .placement = surface.restore_placement,
+                .monitor = if (surface.restore_monitor) |source| source.info else null,
+            };
+        };
+        const maximized = back.placement.showCmd == c.SW_MAXIMIZE;
+        var rect = back.rect;
+        if (maximized) {
+            rect = back.placement.rcNormalPosition;
+            if (monitor orelse back.monitor) |info| rect = workspaceRectToScreen(rect, info);
+        }
+        if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
+        return .{ .rect = rect, .maximized = maximized, .fullscreen = true };
     }
 
     /// Push an action string onto the palette MRU list, dedup'd by
@@ -61390,6 +61413,42 @@ test "win32 a saved window rect on a monitor that is gone moves to the nearest w
     );
 }
 
+test "win32 fullscreen session placement retains captured geometry after lookup failure" {
+    var surface: Surface = undefined;
+    const normal: RECT = .{ .left = 100, .top = 200, .right = 740, .bottom = 680 };
+    surface.restore_rect = normal;
+    surface.restore_placement = std.mem.zeroes(WINDOWPLACEMENT);
+    surface.restore_placement.showCmd = 1; // SW_SHOWNORMAL
+    surface.restore_monitor = .{
+        .monitor = @ptrFromInt(1),
+        .dpi = 96,
+        .info = .{
+            .cbSize = @sizeOf(MONITORINFO),
+            .rcMonitor = .{ .left = 0, .top = 0, .right = 1920, .bottom = 1080 },
+            .rcWork = .{ .left = 48, .top = 0, .right = 1920, .bottom = 1080 },
+            .dwFlags = 0,
+        },
+    };
+    var placed = App.sessionFullscreenWindowPlacement(&surface, error.Unexpected, null).?;
+    try std.testing.expect(placed.fullscreen and !placed.maximized);
+    try std.testing.expectEqualDeep(normal, placed.rect.?);
+
+    // A captured maximized normal rect is in the source's workspace.
+    surface.restore_placement.showCmd = c.SW_MAXIMIZE;
+    surface.restore_placement.rcNormalPosition = .{ .left = 52, .top = 200, .right = 692, .bottom = 680 };
+    placed = App.sessionFullscreenWindowPlacement(&surface, error.Unexpected, null).?;
+    try std.testing.expect(placed.fullscreen and placed.maximized);
+    try std.testing.expectEqualDeep(normal, placed.rect.?);
+
+    // No trustworthy return rect: omit placement instead of persisting
+    // fullscreen with an invented normal rect or saving popup bounds.
+    surface.restore_placement.rcNormalPosition = std.mem.zeroes(RECT);
+    try std.testing.expect(App.sessionFullscreenWindowPlacement(&surface, error.Unexpected, null) == null);
+    surface.restore_placement.showCmd = 1; // SW_SHOWNORMAL
+    surface.restore_rect = std.mem.zeroes(RECT);
+    try std.testing.expect(App.sessionFullscreenWindowPlacement(&surface, error.Unexpected, null) == null);
+}
+
 test "win32 session placement saves the normal rect in screen coordinates for every window state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -61688,6 +61747,26 @@ test "win32 a restored window and a launched layout take maximize and fullscreen
                     try std.testing.expectEqual(case.fullscreen or case.state == .fullscreen, each.focusedSurface().?.fullscreen);
                 }
                 if (case.fullscreen or case.state == .fullscreen) {
+                    // Same-host synchronization must finish even when the
+                    // app allocator cannot collect a generic clone list.
+                    {
+                        const alloc = app.core_app.alloc;
+                        app.core_app.alloc = std.testing.failing_allocator;
+                        defer app.core_app.alloc = alloc;
+                        for (host.tabs.items) |*each| {
+                            const other = each.focusedSurface().?;
+                            if (other == surface) continue;
+                            other.fullscreen = false;
+                            other.restore_rect = std.mem.zeroes(RECT);
+                        }
+                        App.syncRestoredHostWindowState(host, surface);
+                        for (host.tabs.items) |*each| {
+                            const other = each.focusedSurface().?;
+                            try std.testing.expect(other.fullscreen);
+                            try std.testing.expectEqualDeep(surface.restore_rect, other.restore_rect);
+                            try std.testing.expectEqualDeep(surface.restore_placement, other.restore_placement);
+                        }
+                    }
                     try std.testing.expectEqualDeep(try Fixture.monitorRect(hwnd), try Fixture.screenRect(hwnd));
                     try std.testing.expect(sys.IsZoomed(hwnd) == 0);
                     try surface.toggleFullscreen(.native);
