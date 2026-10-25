@@ -53999,13 +53999,14 @@ test "win32 a forwarded window copies the window activated last, not the first i
             try std.testing.expectEqual(host.app.activations, host.activated);
         }
 
-        /// A plain forward is one cascade step off `source`, at its size.
+        /// A plain forward is one cascade step off `source`, at its size,
+        /// kept in its work area as `newWindowPlacement` keeps it.
         fn expectCopies(t: *ForwardedKeysTest, source: *Surface) !void {
             const hwnd = source.windowHwnd().?;
             const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
-            const step = cascadeStep(sys.GetDpiForWindow(hwnd));
+            const work = (try Surface.windowMonitor(hwnd)).info.rcWork;
             const clone = try t.forward(null, null);
-            try std.testing.expectEqualDeep(ForwardedKeysTest.at(rect, rect.left + step, rect.top + step), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
+            try std.testing.expectEqualDeep(cascadedRect(rect, cascadeStep(sys.GetDpiForWindow(hwnd)), work), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
             t.fixture.closeWindow(clone);
         }
     }.body);
