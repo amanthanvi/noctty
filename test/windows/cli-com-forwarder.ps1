@@ -28,13 +28,15 @@ in-process shim runs actions itself, so those cases do not apply to it.
 
 The Ctrl+C case needs a driver that does not ignore Ctrl+C. The ignore attribute
 is inherited (cmd's `start /b`, CREATE_NEW_PROCESS_GROUP and several agent shells
-set it) and a CTRL_C_EVENT then reaches no process of the CLI under test, so the
-case failed with "Ctrl+C did not end the CLI action." only when the harness was
-started that way. The driver now clears the attribute with
-SetConsoleCtrlHandler(NULL, FALSE) before it starts any child (CLIFWD-CTRLC-
-HARNESS-01, after #477). -ExerciseInheritedCtrlCIgnore is the positive control:
-the controller starts the driver under CREATE_NEW_PROCESS_GROUP, and the driver
-asserts that it really arrived ignoring Ctrl+C and that the reset cleared it.
+set it), and every process of the CLI under test then ignores the CTRL_C_EVENT
+it is sent, so the case failed with "Ctrl+C did not end the CLI action." only
+when the harness was started that way. The driver now clears the attribute with
+SetConsoleCtrlHandler(NULL, FALSE) before it starts any child
+(CLIFWD-CTRLC-HARNESS-01, after #477). -ExerciseInheritedCtrlCIgnore is the
+positive control: this script starts the driver (the process `$controller`
+holds) under CREATE_NEW_PROCESS_GROUP, and the driver asserts that it really
+arrived ignoring Ctrl+C and that the reset cleared it. The reset belongs in the
+driver, not in the pwsh session running this script.
 Removing the reset fails that check at once; removing the check as well fails
 the Ctrl+C case with its original message.
 #>
