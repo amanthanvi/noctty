@@ -617,13 +617,20 @@ error ends the `-Command` script before the integration loads.
 
 That script is the one `-Command` line noctty adds integration to, because
 noctty wrote it and it changes nothing the integration relies on (the prompt,
-the folder). A line of your own (a user profile, `command` or `-e`) in exactly
-that form gets the same. Any other `-Command` line runs as written without
-marks, including a variant of this one and the line Windows Terminal generates
-(which quotes with `"""`). To change a shell (another architecture, another
-start directory), define a [user profile](#user-profiles) with your own line
-and hide the generated one with `profile-hidden`; that shell then runs without
-marks.
+the folder). noctty recognises it by its exact form, wherever the line comes
+from, so a user profile, a `command` line or `-e` that uses exactly the
+generated line also gets the integration (`shell-integration = none` turns it
+off). The recognised forms are the generated line for any install path and
+instance id with one of the three architecture pairs noctty generates
+(`-arch=x64 -host_arch=x64`, `-arch=arm64 -host_arch=arm64` and
+`-arch=arm64 -host_arch=x64`), whichever architecture noctty itself runs on.
+Any other `-Command` line runs as written without marks, including the line
+Windows Terminal generates (which quotes with `"""`). To change a shell
+(another architecture, another start directory), define a
+[user profile](#user-profiles) with your own line and hide the generated one
+with `profile-hidden`; a changed line runs without marks unless it still
+matches one of the recognised forms (switching among those three architecture
+pairs, for example, keeps the marks).
 
 ## User profiles
 
