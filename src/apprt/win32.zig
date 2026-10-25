@@ -18363,8 +18363,9 @@ const Host = struct {
         }
     }
 
-    /// Show every pane of `tab`, the active one, and lay the window out, with
-    /// each pane's terminal resizes held until the whole tab is placed.
+    /// Show the panes of `tab`, the active one (only its zoomed pane when it
+    /// has one), and lay the window out, with each pane's terminal resizes
+    /// held until the whole tab is placed.
     /// `setVisible` puts a pane hidden during a DPI change into the new font
     /// at its old size, and the layout gives it its new size later, after the
     /// other panes' fonts; on their own the first resize is the old pixel
@@ -18380,7 +18381,15 @@ const Host = struct {
             while (end_it.next()) |entry| entry.view.endCoreResizeBatch(entry.view.core_initialized);
         }
         var show_it = tab.tree.iterator();
-        while (show_it.next()) |entry| entry.view.setVisible(true);
+        while (show_it.next()) |entry| {
+            // A zoomed tab shows its zoomed pane alone. Showing the others
+            // would put the new DPI's font into them at their old size, and
+            // the layout hides them again without placing them, so that grid
+            // would stay until the zoom ends; hidden, they take the font when
+            // a layout places and shows them.
+            if (tab.tree.zoomed) |zoomed| if (entry.handle != zoomed) continue;
+            entry.view.setVisible(true);
+        }
         runUiActionOrLog("tab activation layout failed", self.layout());
     }
 
@@ -19650,6 +19659,11 @@ const Host = struct {
         try runOnPrivateDesktop(shownTabResizeTestBody);
     }
 
+    test "showing a zoomed tab keeps its other panes hidden until a layout places them" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(shownZoomedTabTestBody);
+    }
+
     /// A stand-in pane window that takes what has reached `watched`'s termio
     /// when it is shown (`WM_SHOWWINDOW`) or resized (`WM_SIZE`), steps of
     /// a layout that come after a font change or after another pane's step
@@ -19815,6 +19829,60 @@ const Host = struct {
         try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.at_size);
         try expectOneLaidOutResize(&surface_a);
         try expectOneLaidOutResize(&surface_b);
+    }
+
+    fn shownZoomedTabTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface_a: Surface = undefined;
+        var surface_b: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{
+                .{ .storage = &surface_a, .host = &host, .register = true, .window_visible = false },
+                .{ .storage = &surface_b, .host = &host, .register = true, .window_visible = false },
+            },
+            .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        host.surfaces_visible = true;
+        try startTestPane(&surface_a, &host, window.parent);
+        defer stopTestPane(&surface_a);
+        try startTestPane(&surface_b, &host, window.parent);
+        defer stopTestPane(&surface_b);
+
+        // [A | B], zoomed on A, as `goto_tab` finds a tab it left zoomed.
+        var inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
+        defer inserted.deinit();
+        const tab = &host.tabs.items[0];
+        const next_tree = try tab.tree.split(std.testing.allocator, .root, .right, 0.5, &inserted);
+        tab.tree.deinit();
+        tab.tree = next_tree;
+        tab.focused = tab.findHandle(&surface_a).?;
+        tab.tree.zoom(tab.focused);
+        const high_contrast = isHighContrastActive();
+        surface_a.split_dimmed_sent = win32_chrome_state.splitDimmed(2, true, high_contrast);
+        surface_b.split_dimmed_sent = win32_chrome_state.splitDimmed(2, false, high_contrast);
+
+        // The layout places and shows A alone. B must not be shown on the
+        // way: `setVisible` would put the new DPI's font into it at its old
+        // size, which no layout corrects until the zoom ends.
+        PaneQueueRecorder.install(surface_b.hwnd.?, &surface_b);
+        host.showTabPanes(tab);
+        try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.shows);
+        try std.testing.expect(!surface_b.window_visible);
+        try std.testing.expect(sys.IsWindowVisible(surface_b.hwnd.?) == 0);
+        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop() == null);
+        try std.testing.expectEqual(@as(u8, 0), surface_b.core_surface.resize_batch.depth);
+        try expectOneLaidOutResize(&surface_a);
     }
 
     /// Stand-in pane windows that note when one is about to be shown over
