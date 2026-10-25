@@ -263,6 +263,25 @@ pub fn buildInjectedArgv(
     integration_path: []const u8,
     utf8_console: bool,
 ) InjectError!?[]const [:0]const u8 {
+    return buildInjectedArgvAfter(alloc, pwsh_argv, null, integration_path, utf8_console);
+}
+
+/// `buildInjectedArgv`, with `prelude`, a `-Command` script noctty built
+/// (a Developer PowerShell's: `windows_visual_studio.devShellPrelude`), run
+/// before the integration loads. `pwsh_argv` is the launch without that
+/// script and its `-Command`. The payload is `<prelude>; & { ... }`: the
+/// script runs at the top of `-Command` exactly as it does alone, which is
+/// how the caller runs it when integration is off, and only its own
+/// statements are between the host and the integration. A script that
+/// stops the whole `-Command` (an error under a profile's
+/// `$ErrorActionPreference = 'Stop'`) stops the integration with it.
+pub fn buildInjectedArgvAfter(
+    alloc: Allocator,
+    pwsh_argv: []const []const u8,
+    prelude: ?[]const u8,
+    integration_path: []const u8,
+    utf8_console: bool,
+) InjectError!?[]const [:0]const u8 {
     if (pwsh_argv.len == 0) return InjectError.EmptyCommand;
 
     const mode = analyzeInteractiveMode(pwsh_argv) orelse return null;
@@ -271,8 +290,13 @@ pub fn buildInjectedArgv(
         return InjectError.OutOfMemory;
     defer alloc.free(escaped);
 
-    const cmd_val = buildCommandValue(alloc, escaped, utf8_console) catch
+    const bootstrap = buildCommandValue(alloc, escaped, utf8_console) catch
         return InjectError.OutOfMemory;
+    const cmd_val = if (prelude) |script| joined: {
+        defer alloc.free(bootstrap);
+        break :joined std.mem.concat(alloc, u8, &.{ script, "; ", bootstrap }) catch
+            return InjectError.OutOfMemory;
+    } else bootstrap;
     defer alloc.free(cmd_val);
 
     var result: std.ArrayList([:0]const u8) = .empty;
@@ -1523,6 +1547,27 @@ test "buildInjectedArgv: existing slash noexit is not duplicated" {
     try std.testing.expectEqualStrings("/NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
     try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[4]);
+}
+
+test "buildInjectedArgvAfter: a prelude runs at the top of -Command, before the integration" {
+    const alloc = std.testing.allocator;
+    const prelude = "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    // The Developer PowerShell's own `-NoExit` is kept, not doubled.
+    const argv = [_][]const u8{ "pwsh.exe", "-NoExit" };
+    const r = (try buildInjectedArgvAfter(alloc, &argv, prelude, "C:\\int.ps1", true)).?;
+    defer {
+        for (r) |s| alloc.free(s);
+        alloc.free(r);
+    }
+    try std.testing.expectEqual(@as(usize, 4), r.len);
+    try std.testing.expectEqualStrings("pwsh.exe", r[0]);
+    try std.testing.expectEqualStrings("-NoExit", r[1]);
+    try std.testing.expectEqualStrings("-Command", r[2]);
+    try std.testing.expectEqualStrings(prelude ++ "; & { $__ghostty_utf8_console = $true; $__ghostty_integration_path = 'C:\\int.ps1" ++ expected_bootstrap_suffix, r[3]);
+
+    // A launch the integration would not wrap stays unwrapped with one.
+    const scripted = [_][]const u8{ "pwsh.exe", "-NoExit", "-File", "x.ps1" };
+    try std.testing.expect((try buildInjectedArgvAfter(alloc, &scripted, prelude, "C:\\int.ps1", true)) == null);
 }
 
 test "buildInjectedArgv: path with single quote" {

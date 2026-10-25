@@ -404,8 +404,8 @@ as `/d`, `/q`, and `/v:on` are kept in order ahead of it, and it is a no-op
 when the console already uses code page 65001. The PowerShell half runs inside
 the injected shell-integration script, so it does nothing with
 `shell-integration = none` or a command line that injection declines
-(`-Command`, `-File`, `-EncodedCommand`, `-NonInteractive`). WSL and Git Bash
-are unaffected.
+(`-Command` other than a Developer PowerShell's, `-File`, `-EncodedCommand`,
+`-NonInteractive`). WSL and Git Bash are unaffected.
 
 WSL appears in the picker but never becomes the default shell implicitly,
 because `wsl.exe --status` can report a healthy installation even when
@@ -533,7 +533,7 @@ Terminal does:
   Terminal's line splits it.
 - **Developer PowerShell for VS 18** runs PowerShell 7 when it is installed,
   else Windows PowerShell, as
-  `-NoExit -Command "&{Import-Module '<install>\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell <instance id> -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}"`.
+  `-NoExit -Command "&{Import-Module '<install>\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '<instance id>' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}"`.
 
 The name ends in the product line (`2022`, `18`), then the instance's
 nickname in parentheses when it has one, else a channel other than Release in
@@ -604,11 +604,26 @@ or `=`. That case was not run here (it needs a second account at the UAC
 prompt).
 
 The Developer Command Prompt gets cmd's shell integration. The Developer
-PowerShell starts through `-Command`, so it runs without OSC 133 and OSC 7
-marks, as in Windows Terminal; a split of it starts in your home directory
-rather than following its directory. To change a shell (another architecture,
-another start directory), define a [user profile](#user-profiles) with your
-own line and hide the generated one with `profile-hidden`.
+PowerShell gets PowerShell's, which Windows Terminal does not give it: noctty
+runs the `-Command` script above first, exactly as it runs on its own, and
+loads the integration after it. Its prompts then carry OSC 133 marks and
+report the folder with OSC 7, so a split of it runs the same Developer
+PowerShell in the folder it is in (`-SkipAutomaticLocation` keeps it there), a
+new tab opens your default shell there, and a restored pane goes back to it.
+With `shell-integration = none` the script runs alone, as before. If your
+PowerShell profile sets `$ErrorActionPreference = 'Stop'` and the script fails
+(the module cannot be loaded, or `Enter-VsDevShell` reports an error), that
+error ends the `-Command` script before the integration loads.
+
+That script is the one `-Command` line noctty adds integration to, because
+noctty wrote it and it changes nothing the integration relies on (the prompt,
+the folder). A line of your own (a user profile, `command` or `-e`) in exactly
+that form gets the same. Any other `-Command` line runs as written without
+marks, including a variant of this one and the line Windows Terminal generates
+(which quotes with `"""`). To change a shell (another architecture, another
+start directory), define a [user profile](#user-profiles) with your own line
+and hide the generated one with `profile-hidden`; that shell then runs without
+marks.
 
 ## User profiles
 
@@ -943,8 +958,10 @@ Limits:
   profile lines edited since, as any reload does.
 - PowerShell shell integration (OSC 133 and OSC 7 marks) is added only to an
   interactive PowerShell line. A line with `-Command` or `-File` runs as
-  written without it, as in Windows Terminal. A cmd.exe line gets cmd's
-  integration.
+  written without it, as in Windows Terminal, unless it is exactly the
+  Developer PowerShell line noctty builds (see
+  [Visual Studio developer shells](#visual-studio-developer-shells)). A
+  cmd.exe line gets cmd's integration.
 - A user profile's taskbar jump-list entry names the profile
   (`--command= --initial-command= --default-profile=user:<id>`) rather than
   carrying its command and variables, so the new process reads the profile

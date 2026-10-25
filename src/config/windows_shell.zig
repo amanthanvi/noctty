@@ -1070,6 +1070,18 @@ test "profileShellIntegrationDiagnostic reads a user profile's program" {
         shellIntegrationDiagnostic(.cmd).summary,
         (try profileShellIntegrationDiagnostic(alloc, &cmd)).summary,
     );
+
+    // A Developer PowerShell, generated or written in its exact form, is
+    // integrated; a variant of the line is a user's `-Command` script.
+    try testing.expectEqual(ShellIntegrationSupport.automatic, shellIntegrationDiagnostic(.vs_dev_shell).support);
+    const script = "&{Import-Module 'C:\\VS\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '1234abcd' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    const own: Profile = .{ .kind = .user, .key = "user:vs", .label = "vs", .command = .{ .direct = &.{ "powershell.exe", "-NoExit", "-Command", script } } };
+    try testing.expectEqualStrings(
+        shellIntegrationDiagnostic(.vs_dev_shell).summary,
+        (try profileShellIntegrationDiagnostic(alloc, &own)).summary,
+    );
+    const variant: Profile = .{ .kind = .user, .key = "user:vs", .label = "vs", .command = .{ .direct = &.{ "powershell.exe", "-NoLogo", "-NoExit", "-Command", script } } };
+    try testing.expect(std.mem.indexOf(u8, (try profileShellIntegrationDiagnostic(alloc, &variant)).summary, "unless the line passes -Command") != null);
 }
 
 pub const ProfileDiscovery = struct {
@@ -1355,6 +1367,8 @@ fn appendVisualStudioInstance(
     defer alloc.free(key);
     const label = try visual_studio.powerShellLabel(alloc, instance);
     defer alloc.free(label);
+    // The argv `visual_studio.devShellPrelude` recognises, so the shell
+    // integration loads after the script.
     try appendProfile(alloc, profiles, .vs_dev_shell, key, label, &.{ shell, "-NoExit", "-Command", script });
 }
 
@@ -1453,8 +1467,8 @@ test "two Visual Studio installs give their developer shells, newest first, the 
     const source: TestVsSource = .{ .instances = &.{ test_vs2022, test_vs18 }, .queries = &source_queries };
     const host: TestVsHost = .{ .paths = &test_vs_paths, .queries = &host_queries };
 
-    const vs18_script = "&{Import-Module '" ++ test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
-    const vs2022_script = "&{Import-Module '" ++ test_vs2022_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 486bb794 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    const vs18_script = "&{Import-Module '" ++ test_vs18_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    const vs2022_script = "&{Import-Module '" ++ test_vs2022_root ++ "\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '486bb794' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
     for ([_]VisualStudioProfiles{ .newest, .all }) |mode| {
         var complete = true;
         const profiles = try testVsProfiles(alloc, mode, .x64, source, host, &complete);
@@ -1486,6 +1500,11 @@ test "two Visual Studio installs give their developer shells, newest first, the 
         try expectArgv(profiles[1], &.{ test_pwsh, "-NoExit", "-Command", vs18_script });
         try expectArgv(profiles[2], &.{ test_cmd, "/k", test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=x64", "-host_arch=x64" });
         try expectArgv(profiles[3], &.{ test_pwsh, "-NoExit", "-Command", vs2022_script });
+        // Shell integration recognises these argv, and only the PowerShell
+        // ones, as a Developer PowerShell it may run ahead of itself.
+        for (profiles) |profile| {
+            try testing.expectEqual(profile.kind == .vs_dev_shell, visual_studio.devShellPrelude(profile.command.direct) != null);
+        }
     }
 
     // On ARM64 the tools run natively from 17.4, under x64 before.
@@ -1498,6 +1517,9 @@ test "two Visual Studio installs give their developer shells, newest first, the 
         try testing.expect(std.mem.endsWith(u8, profiles[1].command.direct[3], "-DevCmdArguments '-arch=arm64 -host_arch=arm64'}"));
         try expectArgv(profiles[2], &.{ test_cmd, "/k", test_vs2022_root ++ "\\Common7\\Tools\\VsDevCmd.bat", "-startdir=none", "-arch=arm64", "-host_arch=x64" });
         try testing.expect(std.mem.endsWith(u8, profiles[3].command.direct[3], "-DevCmdArguments '-arch=arm64 -host_arch=x64'}"));
+        for ([_]usize{ 1, 3 }) |index| {
+            try testing.expect(visual_studio.devShellPrelude(profiles[index].command.direct) != null);
+        }
     }
 
     // `none` asks nothing at all.
@@ -1638,7 +1660,7 @@ test "a Visual Studio path with quotes and dollar signs reaches PowerShell as wr
     try testing.expectEqualStrings(root ++ "\\Common7\\Tools\\VsDevCmd.bat", profiles[0].command.direct[2]);
     try testing.expect(std.mem.indexOf(u8, profiles[0].user.?.command_line, " /k \"\"" ++ root ++ "\\Common7") != null);
     try testing.expectEqualStrings(
-        "&{Import-Module 'D:\\VS ''Pro'' $env:TEMP `n\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "&{Import-Module 'D:\\VS ''Pro'' $env:TEMP `n\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
         profiles[1].command.direct[3],
     );
 }
@@ -2139,8 +2161,8 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .summary = "Visual Studio Developer Command Prompt with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
         },
         .vs_dev_shell => .{
-            .support = .unavailable,
-            .summary = "Visual Studio Developer PowerShell; it starts through -Command, which runs without OSC 133 and OSC 7 marks, as in Windows Terminal",
+            .support = .automatic,
+            .summary = "Visual Studio Developer PowerShell with automatic shell integration, loaded after Enter-VsDevShell",
         },
         .user => .{
             .support = .manual,
@@ -2158,11 +2180,17 @@ pub fn profileShellIntegrationDiagnostic(alloc: Allocator, profile: *const Profi
     const shell = (try @import("../termio/shell_integration.zig").detectShell(alloc, profile.command)) orelse
         return shellIntegrationDiagnostic(.user);
     return switch (shell) {
-        .powershell => .{
-            .support = .automatic,
-            .summary = "User profile running PowerShell; automatic shell integration applies unless the line passes -Command or -File",
-            .next_step = "A -Command or -File line runs without OSC 133 and OSC 7 marks, as in Windows Terminal.",
-        },
+        // A line in exactly the form of noctty's own Developer PowerShell
+        // is integrated as that profile is.
+        .powershell => if (profile.command == .direct and
+            visual_studio.devShellPrelude(profile.command.direct) != null)
+            shellIntegrationDiagnostic(.vs_dev_shell)
+        else
+            .{
+                .support = .automatic,
+                .summary = "User profile running PowerShell; automatic shell integration applies unless the line passes -Command or -File",
+                .next_step = "A -Command or -File line runs without OSC 133 and OSC 7 marks, as in Windows Terminal.",
+            },
         .cmd => shellIntegrationDiagnostic(.cmd),
         else => .{
             .support = .automatic,

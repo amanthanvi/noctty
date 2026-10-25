@@ -5,6 +5,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const EnvMap = std.process.EnvMap;
 const win32_powershell_install = @import("../apprt/win32_powershell_install.zig");
 const windows_shell = @import("../config/windows_shell.zig");
+const visual_studio = @import("../config/windows_visual_studio.zig");
 const config = @import("../config.zig");
 const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
@@ -655,6 +656,55 @@ test "a user profile's PowerShell line is quoted again once integration rewrites
     try testing.expectEqualStrings(scripted, (try windows_shell.verbatimCommandLine(alloc, scripted, scripted_argv, false)).?);
 }
 
+test "setup powershell: a Developer PowerShell runs its script, then the integration" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    var res: TmpResourcesDir = try .init(alloc, .powershell);
+    defer res.deinit();
+    const integration_path = try std.fs.path.join(alloc, &.{ res.path, "shell-integration", "powershell", "integration.ps1" });
+    const bootstrap = try std.fmt.allocPrint(
+        alloc,
+        "& {{ $__ghostty_utf8_console = $true; $__ghostty_integration_path = '{s}{s}",
+        .{ integration_path, expected_powershell_bootstrap_suffix },
+    );
+
+    const instance: visual_studio.Instance = .{ .id = "6bb7cfd9", .path = "", .version_text = "", .version = visual_studio.version(18, 10), .install_date = 0, .suffix = "18" };
+    const script = try visual_studio.devShellScript(alloc, "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll", instance, .x64);
+    const shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+    // What `windows_shell.appendVisualStudioInstance` gives the profile.
+    const profile_argv = [_][:0]const u8{ shell, "-NoExit", "-Command", try alloc.dupeZ(u8, script) };
+    const result = (try setup(alloc, res.path, .{ .direct = &profile_argv }, &env, null, true)).?;
+    try testing.expectEqual(.powershell, result.shell);
+    try testing.expectEqual(@as(usize, 4), result.command.direct.len);
+    try testing.expectEqualStrings(shell, result.command.direct[0]);
+    try testing.expectEqualStrings("-NoExit", result.command.direct[1]);
+    try testing.expectEqualStrings("-Command", result.command.direct[2]);
+    try testing.expectEqualStrings(try std.mem.concat(alloc, u8, &.{ script, "; ", bootstrap }), result.command.direct[3]);
+
+    // A user profile that writes the same line gets the same; the line no
+    // longer describes the argv, so the argv is quoted again (the script
+    // holds no `"`, so nothing changes in that).
+    const line = try std.fmt.allocPrint(alloc, "\"{s}\" -NoExit -Command \"{s}\"", .{ shell, script });
+    const line_argv = try windows_shell.splitWindowsCommandLine(alloc, line);
+    const from_line = (try setup(alloc, res.path, .{ .direct = line_argv }, &env, null, true)).?;
+    try testing.expectEqualStrings(result.command.direct[3], from_line.command.direct[3]);
+    try testing.expect((try windows_shell.verbatimCommandLine(alloc, line, from_line.command.direct, false)) == null);
+
+    // A variant of the line is the user's own script, run as written.
+    for ([_][]const [:0]const u8{
+        &.{ shell, "-NoLogo", "-NoExit", "-Command", profile_argv[3] },
+        &.{ shell, "-NoExit", "-Command", try std.mem.concatWithSentinel(alloc, u8, &.{ script, "; Set-Location C:\\src" }, 0) },
+        &.{ shell, "-Command", profile_argv[3] },
+    }) |argv| {
+        try testing.expect((try setup(alloc, res.path, .{ .direct = argv }, &env, null, true)) == null);
+    }
+}
+
 test "setup powershell: interactive shell command auto injects" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -912,9 +962,15 @@ fn setupPowerShell(
         try argv.append(alloc, arg);
     }
 
-    const injected = (try win32_powershell_install.buildInjectedArgv(
+    // A Developer PowerShell profile's `-Command` script runs first, as it
+    // does on its own, and the integration loads after it. No other
+    // `-Command` line is wrapped (`visual_studio.devShellPrelude`).
+    const prelude = visual_studio.devShellPrelude(argv.items);
+    const injected = (try win32_powershell_install.buildInjectedArgvAfter(
         alloc,
-        argv.items,
+        // The shell and its `-NoExit`, without `-Command` and the script.
+        if (prelude != null) argv.items[0 .. argv.items.len - 2] else argv.items,
+        prelude,
         integration_path,
         utf8_console,
     )) orelse return null;

@@ -132,6 +132,29 @@ pub fn devCmdArguments(arch: Arch, instance_version: u64) [2][]const u8 {
     };
 }
 
+/// The flags a Developer PowerShell profile gives its shell, before its
+/// script (`devShellScript`): `<shell> -NoExit -Command <script>`.
+pub const dev_shell_flags = [_][]const u8{ "-NoExit", "-Command" };
+
+// The fixed text of `devShellScript`, around the module path, the instance
+// id and the `VsDevCmd.bat` arguments. The id is quoted too: PowerShell
+// reads a bare argument made of digits, or of digits and a `d` or `e`, as a
+// number, so `01234567` would reach Enter-VsDevShell as `1234567` and
+// `1234567d` as `1234567` (measured with the parser, both hosts).
+const dev_shell_import = "&{Import-Module '";
+const dev_shell_enter = "'; Enter-VsDevShell '";
+const dev_shell_arguments = "' -SkipAutomaticLocation -DevCmdArguments '";
+const dev_shell_end = "'}";
+
+/// The quote characters a PowerShell single-quoted string opens and closes
+/// with: `'` and the typographic single quotes.
+fn isPowerShellSingleQuote(cp: u21) bool {
+    return switch (cp) {
+        '\'', 0x2018, 0x2019, 0x201A, 0x201B => true,
+        else => false,
+    };
+}
+
 /// The `-Command` script of a Developer PowerShell profile. The module path
 /// goes in a PowerShell single-quoted string, in which nothing is expanded:
 /// a `$` or a backtick in an install path stays as written. The quote
@@ -145,24 +168,90 @@ pub fn devShellScript(
 ) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
-    try out.appendSlice(alloc, "&{Import-Module '");
+    try out.appendSlice(alloc, dev_shell_import);
     var view = std.unicode.Wtf8View.initUnchecked(module_path);
     var it = view.iterator();
     while (it.nextCodepointSlice()) |slice| {
         try out.appendSlice(alloc, slice);
         const cp = std.unicode.wtf8Decode(slice) catch continue;
-        switch (cp) {
-            '\'', 0x2018, 0x2019, 0x201A, 0x201B => try out.appendSlice(alloc, slice),
-            else => {},
-        }
+        if (isPowerShellSingleQuote(cp)) try out.appendSlice(alloc, slice);
     }
     const args = devCmdArguments(arch, instance.version);
-    try out.print(alloc, "'; Enter-VsDevShell {s} -SkipAutomaticLocation -DevCmdArguments '{s} {s}'}}", .{
-        instance.id,
-        args[0],
-        args[1],
-    });
+    for ([_][]const u8{ dev_shell_enter, instance.id, dev_shell_arguments, args[0], " ", args[1], dev_shell_end }) |part| {
+        try out.appendSlice(alloc, part);
+    }
     return try out.toOwnedSlice(alloc);
+}
+
+/// The script of a Developer PowerShell profile's argv (a slice of strings,
+/// with or without sentinels): `dev_shell_flags` after the shell, then a
+/// script `isDevShellScript` accepts. Null for any other argv.
+///
+/// It is the one `-Command` line shell integration wraps
+/// (`shell_integration.setupPowerShell`): the script runs first, as it does
+/// on its own, and the integration loads after it. noctty wrote it, and all
+/// it does is import a module from a path that is never expanded and enter
+/// the developer environment, which sets variables and leaves the prompt
+/// and the directory as they were, so nothing the integration adds changes
+/// what it does or when the shell exits. A line a user wrote in exactly
+/// this form is the same line and gets the same. Any other line, a variant
+/// of this one included, is the user's own script, which runs as written.
+pub fn devShellPrelude(argv: anytype) ?[]const u8 {
+    if (argv.len != 1 + dev_shell_flags.len + 1) return null;
+    for (dev_shell_flags, argv[1 .. argv.len - 1]) |flag, arg| {
+        if (!std.mem.eql(u8, flag, arg)) return null;
+    }
+    const script: []const u8 = argv[argv.len - 1];
+    return if (isDevShellScript(script)) script else null;
+}
+
+/// Whether `script` is what `devShellScript` builds for some module path, a
+/// plain instance id (`isPlainInstanceId`) and the `VsDevCmd.bat` arguments
+/// of an architecture (`devCmdArguments`), exactly.
+pub fn isDevShellScript(script: []const u8) bool {
+    if (!std.mem.startsWith(u8, script, dev_shell_import)) return false;
+    // The module path: a doubled quote character is one quote in it, as
+    // `devShellScript` writes them, and the first quote that is not doubled
+    // ends it. PowerShell also reads two different quote characters as one
+    // quote (measured with the parser, both hosts). noctty never writes
+    // that, and such a path ends here at a quote the checks below refuse,
+    // so up to an accepted end PowerShell reads the same string.
+    const body = script[dev_shell_import.len..];
+    var view = std.unicode.Wtf8View.init(body) catch return false;
+    var it = view.iterator();
+    const closed = while (it.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.wtf8Decode(slice) catch return false;
+        if (!isPowerShellSingleQuote(cp)) continue;
+        const quote_at = it.i - slice.len;
+        const next = it.nextCodepoint() orelse break quote_at;
+        if (next != cp) break quote_at;
+    } else return false;
+    // `devShellScript` closes the string with `'`.
+    var rest = body[closed..];
+    if (!std.mem.startsWith(u8, rest, dev_shell_enter)) return false;
+    rest = rest[dev_shell_enter.len..];
+    const id_end = std.mem.indexOfScalar(u8, rest, '\'') orelse return false;
+    if (!isPlainInstanceId(rest[0..id_end])) return false;
+    rest = rest[id_end..];
+    if (!std.mem.startsWith(u8, rest, dev_shell_arguments)) return false;
+    rest = rest[dev_shell_arguments.len..];
+    if (!std.mem.endsWith(u8, rest, dev_shell_end)) return false;
+    return isDevCmdArgumentsText(rest[0 .. rest.len - dev_shell_end.len]);
+}
+
+/// Whether `text` is `devCmdArguments` of some architecture and version,
+/// as `devShellScript` joins them.
+fn isDevCmdArgumentsText(text: []const u8) bool {
+    for ([_]Arch{ .x64, .arm64 }) |arch| {
+        for ([_]u64{ 0, version(17, 4) }) |instance_version| {
+            const args = devCmdArguments(arch, instance_version);
+            if (text.len == args[0].len + 1 + args[1].len and
+                std.mem.startsWith(u8, text, args[0]) and
+                text[args[0].len] == ' ' and
+                std.mem.endsWith(u8, text, args[1])) return true;
+        }
+    }
+    return false;
 }
 
 /// An instance id noctty puts in a profile key and a PowerShell script:
@@ -591,16 +680,110 @@ test "the Developer PowerShell script quotes the module path for PowerShell" {
     const plain = try devShellScript(alloc, "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll", instance, .x64);
     defer alloc.free(plain);
     try testing.expectEqualStrings(
-        "&{Import-Module 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "&{Import-Module 'C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
         plain,
     );
     // `'` (and its typographic forms) doubled; `$`, a backtick and `"` kept.
     const odd = try devShellScript(alloc, "D:\\VS 'o\u{2019}$env:x`n\\m.dll", instance, .arm64);
     defer alloc.free(odd);
     try testing.expectEqualStrings(
-        "&{Import-Module 'D:\\VS ''o\u{2019}\u{2019}$env:x`n\\m.dll'; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments '-arch=arm64 -host_arch=arm64'}",
+        "&{Import-Module 'D:\\VS ''o\u{2019}\u{2019}$env:x`n\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=arm64 -host_arch=arm64'}",
         odd,
     );
+    // An id PowerShell would read as a number if it were bare.
+    var numeric = instance;
+    numeric.id = "01234567";
+    const quoted = try devShellScript(alloc, "C:\\m.dll", numeric, .x64);
+    defer alloc.free(quoted);
+    try testing.expectEqualStrings(
+        "&{Import-Module 'C:\\m.dll'; Enter-VsDevShell '01234567' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        quoted,
+    );
+}
+
+test "every Developer PowerShell script noctty builds is recognised as its own" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const paths = [_][]const u8{
+        "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll",
+        "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\Common7\\Tools\\vsdevshell\\Microsoft.VisualStudio.DevShell.dll",
+        "D:\\VS 'o\u{2019}$env:x`n\\m.dll",
+        // Every quote PowerShell pairs, at the end, before the closing one.
+        "D:\\a'\u{2018}\u{2019}\u{201A}\u{201B}",
+        "D:\\'; Enter-VsDevShell x -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "D:\\\u{00E9}\u{1F600}\"$(Remove-Item x)\\m.dll",
+        "",
+    };
+    for (paths) |path| {
+        for ([_]Arch{ .x64, .arm64 }) |arch| {
+            for ([_]u64{ version(16, 2), version(17, 4), version(18, 10) }, [_][]const u8{ "6bb7cfd9", "01234567", "1234567d" }) |instance_version, id| {
+                const instance: Instance = .{ .id = id, .path = "", .version_text = "", .version = instance_version, .install_date = 0, .suffix = "" };
+                const script = try devShellScript(alloc, path, instance, arch);
+                defer alloc.free(script);
+                try testing.expect(isDevShellScript(script));
+                const argv = [_][]const u8{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoExit", "-Command", script };
+                try testing.expectEqualStrings(script, devShellPrelude(&argv).?);
+            }
+        }
+    }
+}
+
+test "a script noctty did not build is not a Developer PowerShell prelude" {
+    const testing = std.testing;
+    const ok = "&{Import-Module 'C:\\VS\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}";
+    try testing.expect(isDevShellScript(ok));
+    for ([_][]const u8{
+        // Windows Terminal's line, as the shell receives it: double-quoted,
+        // so expandable, strings.
+        "&{Import-Module \"C:\\VS\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll\"; Enter-VsDevShell 6bb7cfd9 -SkipAutomaticLocation -DevCmdArguments \"-arch=x64 -host_arch=x64\"}",
+        // A user's variants: another architecture, another start directory,
+        // another statement, a space too many.
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x86 -host_arch=x64'}",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}; Set-Location C:\\src",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'} ",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64  -host_arch=x64'}",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=arm64'}",
+        // A lone quote ends the path, so the rest is code.
+        "&{Import-Module 'C:\\VS\\'; Remove-Item x; 'm.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        // A typographic quote closes it too, where noctty closes with `'`.
+        "&{Import-Module 'C:\\VS\\m.dll\u{2019}; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        // Two different quote characters, which PowerShell reads as one
+        // quote and noctty never writes.
+        "&{Import-Module 'C:\\VS\\a'\u{2019}m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "&{Import-Module 'C:\\VS\\a\u{2019}'m.dll'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        // An id that is not one word of letters and digits.
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '$(Remove-Item x)' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell '6bb7'cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        // A bare id, which PowerShell may read as a number.
+        "&{Import-Module 'C:\\VS\\m.dll'; Enter-VsDevShell 01234567 -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+        // Unclosed, cut short, empty, not text.
+        "&{Import-Module 'C:\\VS\\m.dll",
+        "&{Import-Module 'C:\\VS\\m.dll''",
+        ok[0 .. ok.len - 1],
+        "",
+        "&{Import-Module '\xff'; Enter-VsDevShell '6bb7cfd9' -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'}",
+    }) |script| {
+        try testing.expect(!isDevShellScript(script));
+    }
+
+    // The argv must be the profile's: the shell, `-NoExit -Command`, the
+    // script, and nothing else.
+    const shell = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+    const profile_argv = [_][:0]const u8{ shell, "-NoExit", "-Command", ok };
+    try testing.expectEqualStrings(ok, devShellPrelude(&profile_argv).?);
+    for ([_][]const []const u8{
+        &.{ shell, "-NoExit", "-Command" },
+        &.{ shell, "-NoExit", "-Command", ok, "x" },
+        &.{ shell, "-NoLogo", "-NoExit", "-Command", ok },
+        &.{ shell, "-noexit", "-command", ok },
+        &.{ shell, "-Command", "-NoExit", ok },
+        &.{ shell, "-NoExit", "-c", ok },
+        &.{ shell, "-NoExit", "-Command", ok[0 .. ok.len - 1] },
+    }) |argv| {
+        try testing.expect(devShellPrelude(argv) == null);
+    }
 }
 
 test "instances sort newest first, by version then install date" {
