@@ -121,6 +121,18 @@ jobs:
             $env:TEMP = $savedTemp.TEMP
             $env:TMP = $savedTemp.TMP
           }
+
+          # A caller that runs dev-windows.ps1 inside its own PowerShell and captures the
+          # output (`& .\scripts\dev-windows.ps1 2>&1 | Tee-Object log`) must get the
+          # bootstrap's lines: the cmd.exe call stays a native call in PowerShell's streams.
+          $capture = "`$ErrorActionPreference = 'Continue'; `$out = @(& '$psScript' 2>&1 | ForEach-Object { `"`$_`" }); " +
+            "if (`$LASTEXITCODE -ne 0) { exit 3 }; if (-not (`$out -match '^Bootstrap: ')) { exit 4 }; " +
+            "if (-not (`$out -match 'C/C\+\+ Optimizing Compiler Version')) { exit 5 }; exit 0"
+          foreach ($hostExe in @('pwsh', $powershell)) {
+            & $hostExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $capture
+            if ($LASTEXITCODE -ne 0) { throw "dev-windows.ps1 run inside $hostExe with its output captured: check $LASTEXITCODE failed (3 = exit code, 4 = no Bootstrap line, 5 = no cl banner)." }
+            "dev-windows.ps1 inside ${hostExe}: output captured" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
           # The default-path fallback reads VC\Tools\MSVC\<version>\lib\<arch>; show the real layout.
           $install = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $r.VsDevCmd))
           foreach ($toolset in @(Get-ChildItem -LiteralPath (Join-Path $install 'VC\Tools\MSVC') -Directory)) {
