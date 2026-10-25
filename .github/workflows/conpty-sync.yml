@@ -1,7 +1,8 @@
 name: Windows ConPTY Sync
 
 # Differential check that noctty's screen agrees with ConPTY's own buffer after
-# resizes, the search bar, splits, maximize, minimize and full-screen programs
+# resizes, the search bar, splits, maximize, minimize, full-screen programs and
+# a resize at a Clink prompt
 # (test/windows/interactive-win11-conpty-sync.ps1, PKG-13). Every scenario runs
 # a portable noctty on a hidden desktop of the runner's session; nothing here
 # takes the foreground or any real input.
@@ -77,6 +78,20 @@ jobs:
           zig build -Doptimize=ReleaseFast -Dcpu=baseline --summary all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The Clink scenario's portable Clink: the release and checksum test.yml's
+      # Clink step uses. Extracted under the runner's temp, never installed.
+      - name: Fetch portable Clink
+        shell: pwsh
+        run: |
+          $clinkRoot = Join-Path $env:RUNNER_TEMP 'noctty-clink'
+          New-Item -ItemType Directory -Path $clinkRoot | Out-Null
+          $archive = Join-Path $clinkRoot 'clink.zip'
+          Invoke-WebRequest 'https://github.com/chrisant996/clink/releases/download/v1.9.34/clink.1.9.34.4e8ae4.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '50F6EE0474E3BD02B48CE8C8F63ED933A14AEE5127FC7072CB976CE10A43CE23') {
+            throw 'Portable Clink checksum mismatch'
+          }
+          Expand-Archive $archive -DestinationPath (Join-Path $clinkRoot 'portable')
+
       # -NoBuild never needs the Visual Studio dev shell the harness otherwise
       # relaunches itself through (scripts\dev-windows.cmd), so the harness's
       # own bootstrap sentinel is set and Windows PowerShell 5.1, the host it is
@@ -93,7 +108,8 @@ jobs:
           NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED: '1'
         run: |
           $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-          & $powershell -NoProfile -ExecutionPolicy Bypass -File ./test/windows/interactive-win11-conpty-sync.ps1 -NoBuild -RequireAll -ResetState -TimeoutSeconds 600
+          $clink = Join-Path $env:RUNNER_TEMP 'noctty-clink\portable\clink_x64.exe'
+          & $powershell -NoProfile -ExecutionPolicy Bypass -File ./test/windows/interactive-win11-conpty-sync.ps1 -NoBuild -RequireAll -ResetState -TimeoutSeconds 600 -Clink $clink
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Terminal text only: each scenario's before, after and marker rows from

@@ -361,6 +361,20 @@ retain the PROMPT fallback and C/D hooks. Exit codes are truthful only while Cli
 navigation and cwd reporting still work, but there are no command-finish marks
 or exit codes.
 
+After a resize at a Clink prompt, the prompt is on screen once. Clink moves up
+to where its prompt starts after every resize, clears below and draws the
+prompt and the line you were typing again, and a theme that calls
+`clink.refilterafterterminalresize()` gets its prompt filters run again, and its
+prompt drawn again, once the size has held for 1.5 seconds. The prompt marks
+keep `redraw=0`, so noctty leaves the old prompt in place for Clink to draw
+over: measured with Clink 1.9.34, clearing it first (the OSC 133 default) made
+Clink start its redraw one row too high and overwrite the line above the
+prompt. One limit is Clink's own: with a prompt wider than the window and a
+line typed after it, narrowing makes Clink scroll the line sideways, and
+widening again can leave the prompt's first row on screen twice. ConPTY's own
+console buffer holds the same duplicate, so noctty shows what the console
+holds.
+
 Caveats: on a UNC working directory `$P` yields `\\server\share\dir`, which
 noctty reports unchanged, but cmd.exe itself cannot use a UNC cwd (it warns and
 falls back), so a new cmd tab or split will generally not land on the share. A

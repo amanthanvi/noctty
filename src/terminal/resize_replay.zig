@@ -71,6 +71,10 @@ test "resize replay: conpty shrink rows with the prompt at the bottom" {
     try runCase("conpty-shrink-rows-bottom.vt");
 }
 
+test "resize replay: conpty Clink line that wraps when the window narrows" {
+    try runCase("conpty-clink-narrow-widen.vt");
+}
+
 test "resize replay: alternate screen frame repainted after a resize" {
     try runCase("altscreen-repaint.vt");
 }

@@ -26,6 +26,10 @@ if internal and type(internal._filter_prompt) == "function" and
         local prompt, rprompt, ok = filter_prompt(...)
         if type(prompt) == "string" and ok ~= false and
             not prompt:find(ESC .. "]133;A[;\7\27]") then
+            -- redraw=0 although Clink redraws after every resize: it moves up
+            -- by the rows its last drawing takes at the new width, so the
+            -- terminal must keep those rows and reflow them as the console
+            -- does, not clear them.
             local prefix = ESC .. "[<99u" .. ESC .. "[>4;0m" ..
                 ESC .. "]133;A;redraw=0" .. BEL ..
                 ESC .. "]9;9;kitty-shell-cwd://localhost/" .. os.getcwd() .. BEL

@@ -10,6 +10,9 @@ param(
     [switch] $RequireAll,
     [switch] $ResetState,
     [int] $TimeoutSeconds = 900,
+    # An extracted official portable Clink's clink_x64.exe, for the Clink
+    # scenario (skipped without it). Copied into the sandbox, never installed.
+    [string] $Clink,
     # Internal: the half of the harness that runs on the hidden desktop.
     [switch] $Inner,
     [string] $DesktopName,
@@ -375,9 +378,13 @@ function Get-ConptySyncRealPSReadLineState {
 if ($Inner) {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     [void][NocttyConptySyncNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
+    # noctty prepends its own Lua folder to an inherited CLINK_PATH; keep a
+    # developer's own Clink scripts out of the Clink scenario.
+    Remove-Item -LiteralPath Env:\CLINK_PATH -ErrorAction Ignore
 
     $script:Exe = Join-Path $RunRoot 'bin\noctty.exe'
     $script:DumpExe = Join-Path $RunRoot 'tools\conpty-sync-dump.exe'
+    $script:ClinkExe = Join-Path $RunRoot 'tools\clink\clink_x64.exe'
     $script:Evidence = Join-Path $RunRoot 'evidence'
     $script:Work = Join-Path $RunRoot 'work'
     $script:LogPath = Join-Path $script:Evidence 'inner.log'
@@ -623,14 +630,27 @@ if ($Inner) {
             $Exe, $historyPath, $ExtraOptions, $integration)
     }
 
+    # cmd with Clink injected from the sandbox copy, using a scenario-local
+    # profile (settings, history), as `clink inject` from AutoRun would. The
+    # build's own Lua script reaches Clink through CLINK_PATH as usual.
+    function Get-SyncClinkCommand([string] $Name) {
+        $clinkProfile = Join-Path $script:Work "$Name-clink-profile"
+        New-Item -ItemType Directory -Force -Path $clinkProfile | Out-Null
+        [IO.File]::WriteAllLines((Join-Path $clinkProfile 'clink_settings'), [string[]]@('clink.autoupdate = off', 'clink.logo = none'))
+        $launch = Join-Path $script:Work "$Name-clink.cmd"
+        [IO.File]::WriteAllText($launch, "@echo off`r`n`"$script:ClinkExe`" inject -q -p `"$clinkProfile`"`r`n")
+        return "cmd.exe /d /k `"$launch`""
+    }
+
     function Start-SyncNoctty([string] $Name, [string] $Shell, [string] $PSReadLineOptions = '', [string[]] $History = @()) {
         $shellCommand = switch ($Shell) {
             'cmd' { 'cmd.exe' }
+            'clink' { Get-SyncClinkCommand $Name }
             'powershell' { Get-SyncPowerShellCommand 'powershell.exe' $Name $PSReadLineOptions $History }
             'pwsh' { Get-SyncPowerShellCommand 'pwsh.exe' $Name $PSReadLineOptions $History }
             default { throw "unknown shell $Shell" }
         }
-        $shellExe = "$Shell.exe"
+        $shellExe = if ($Shell -eq 'clink') { 'cmd.exe' } else { "$Shell.exe" }
         # A config file rather than flags: the PowerShell command line holds
         # quotes that do not survive another round of argv quoting.
         $config = @(
@@ -687,7 +707,7 @@ if ($Inner) {
             ((Read-SyncNoctty $ctx.Surface) -join "`n").Contains('>')
         }
         Write-SyncLog ('{0}: first prompt' -f $Name)
-        if ($Shell -ne 'cmd') {
+        if ($Shell -in @('powershell', 'pwsh')) {
             # The scenarios mean nothing without the integration's prompt
             # marks (redraw=0), so prove it loaded.
             Send-SyncText $ctx.Surface ("if ((Get-Command __ghostty_write_osc -ErrorAction Ignore) -and (Get-PSReadLineOption).HistorySavePath.StartsWith('$($script:Work)')) { 'integration=' + 'on' } else { 'integration=' + 'off' }`r")
@@ -753,10 +773,7 @@ if ($Inner) {
     # -- shell setups ---------------------------------------------------------
 
     function Invoke-SyncFill($Ctx, [int] $Count = 40) {
-        $command = switch ($Ctx.Shell) {
-            'cmd' { "for /L %i in (1,1,$Count) do @echo L%i" }
-            default { "1..$Count | % { 'L' + `$_ }" }
-        }
+        $command = if ($Ctx.Shell -in @('cmd', 'clink')) { "for /L %i in (1,1,$Count) do @echo L%i" } else { "1..$Count | % { 'L' + `$_ }" }
         Send-SyncText $Ctx.Surface ($command + "`r")
         Wait-SyncText $Ctx ("L$Count")
     }
@@ -1008,6 +1025,49 @@ if ($Inner) {
             }
         }
         [pscustomobject]@{
+            Name = 'clink-typed-narrow-widen'; Shell = 'clink'; Expect = 'sync'; Finding = 'CLINK-RESIZE-01'
+            Description = 'Clink at the bottom of a full screen with a typed line that wraps when the window narrows, then widens'
+            # Clink leaves blank prompt rows under its line (its input hint
+            # and comment rows). A reflow that kept them scrolled this screen a
+            # row more than ConPTY's when narrowing, and the redraw Clink makes
+            # after the widen then drew the line twice.
+            Requires = { if (-not (Test-Path -LiteralPath $script:ClinkExe -PathType Leaf)) { 'no portable Clink (pass -Clink)' } }
+            Setup = {
+                param($c)
+                # `clink inject` is quiet: without Clink in cmd this would
+                # only test plain cmd, which never leaves those rows. Any cmd
+                # under noctty: the interactive one may be a child of the one
+                # noctty started.
+                Wait-SyncCondition -Description 'Clink loaded in cmd' -Condition {
+                    @(Get-SyncShellPids $c | Where-Object {
+                            @((Get-Process -Id $_ -ErrorAction Ignore).Modules | Where-Object { $_.ModuleName -ieq 'clink_dll_x64.dll' }).Count -gt 0
+                        }).Count -gt 0
+                }
+                Invoke-SyncFill $c
+                Send-SyncText $c.Surface 'echo some pending input that is long enough to wrap when narrowed'
+                Wait-SyncText $c 'when narrowed'
+            }
+            Trigger = {
+                param($c)
+                $before = Read-SyncConpty $c.ShellPid
+                $rect = Get-SyncHostRect $c
+                Resize-SyncHost $c 0.6 1.0
+                # Narrow until Clink has drawn the line wrapped. The desync
+                # starts here, so compare here too, not only after the widen.
+                [void](Wait-SyncGrid $c {
+                    param($d)
+                    $d.Cols -lt $before.Cols -and @($d.Lines | Where-Object { $_.Contains('narrowed') }).Count -eq 1 -and
+                        @($d.Lines | Where-Object { $_.Contains('echo some') -and $_.Contains('narrowed') }).Count -eq 0
+                } 'the line wrapped')
+                $narrow = Get-SyncComparison $c 'narrow'
+                if ($narrow.Diff -ne 0) { throw "views differ after the narrow ($($narrow.Diff) rows, $($narrow.File))" }
+                Set-SyncHostSize $c ($rect.Right - $rect.Left) ($rect.Bottom - $rect.Top)
+                [void](Wait-SyncGrid $c { param($d) $d.Cols -eq $before.Cols } 'wide again')
+            }
+            # The marker would join the pending line.
+            NoMarker = $true
+        }
+        [pscustomobject]@{
             Name = 'altscreen-maximize-powershell'; Shell = 'powershell'; Expect = 'sync'; Finding = 'F015'
             Description = 'maximize while a full-screen program runs, then leave it (the vim exit case)'
             Setup = { param($c) Invoke-SyncFill $c }
@@ -1153,6 +1213,7 @@ if ($Rebuild) { $forwardedArgs += '-Rebuild' }
 if ($NoBuild) { $forwardedArgs += '-NoBuild' }
 if ($RequireAll) { $forwardedArgs += '-RequireAll' }
 if ($ResetState) { $forwardedArgs += '-ResetState' }
+if ($Clink) { $forwardedArgs += @('-Clink', (Resolve-Path -LiteralPath $Clink -ErrorAction Stop).ProviderPath) }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
@@ -1207,6 +1268,17 @@ Set-Content -LiteralPath $altApp -Encoding ASCII -Value @(
 )
 $env:NOCTTY_SYNC_ALTAPP = $altApp
 Add-Type -TypeDefinition $script:ConptySyncDumpSource -OutputAssembly (Join-Path $runRoot 'tools\conpty-sync-dump.exe') -OutputType ConsoleApplication
+if ($Clink) {
+    # The whole extracted folder: clink_x64.exe loads its DLL and scripts from
+    # beside itself. Refuse anything that does not look like that folder, so a
+    # stray path never copies some other tree into the sandbox.
+    $clinkExe = (Resolve-Path -LiteralPath $Clink -ErrorAction Stop).ProviderPath
+    $clinkDir = Split-Path -Parent $clinkExe
+    if ((Split-Path -Leaf $clinkExe) -ine 'clink_x64.exe' -or -not (Test-Path -LiteralPath (Join-Path $clinkDir 'clink_dll_x64.dll') -PathType Leaf)) {
+        throw "-Clink must be clink_x64.exe in an extracted portable Clink folder: $clinkExe"
+    }
+    Copy-Item -LiteralPath $clinkDir -Destination (Join-Path $runRoot 'tools\clink') -Recurse
+}
 
 $historyBefore = Get-ConptySyncRealPSReadLineState
 $clipboardBefore = [NocttyConptySyncNative]::GetClipboardSequenceNumber()

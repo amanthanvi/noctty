@@ -1,0 +1,99 @@
+# Clink at the bottom of a full screen, with a typed line that wraps when the
+# window narrows. Shortened from what the bundled ConPTY sent noctty for
+# portable Clink 1.9.34 in cmd (CLINK-RESIZE-01, 2026-10-25, hidden desktop,
+# 80x20 at 150%); the expectations are ConPTY's own buffer, read through
+# AttachConsole at each step.
+#
+# Every LF Clink writes while the line is being edited marks the row it
+# reaches as a prompt continuation, so the two rows it leaves blank under the
+# line (its input hint and comment rows) count as prompt rows. A column
+# reflow kept them as rows of their own and pushed the top of the screen into
+# history; conhost reflows only down to the cursor's row and drops them. The
+# screen then sat one row above ConPTY's, Clink's redraw after the resize
+# ended where ConPTY's cursor report put it, one row below the line, and the
+# next resize drew the line a second time under the first.
+size 80 20
+pty conpty
+send \e]133;C\x07
+seq L 1 30
+send \r\n\e[19;1H\r\n
+send \e]133;D;0\x07\r\e]133;A;redraw=0\e\\\e]9;9;kitty-shell-cwd://localhost/C:\\\e\\C:\\>\e]133;B\e\\\e[m\e[5G\e[K\r\n\r\e[m\e[K\e[A\e[5G\e[19;5H
+# Typed so far. Clink then draws its input hint after the line: the hint wraps
+# past the bottom row and scrolls the screen, and Clink clears the new bottom
+# row and goes back up to the line.
+send \e[0;1mecho\e[m some pending input that is long enough to wrap w\e[19;58H
+send \e[0;90m                       \e[m \x08\e[0;90m                                                            F2=List Suggestions\e[m\e[K\r\n\r\e[m\e[K\e[A\e[A\e[58G
+# The next key erases the hint, the row it wrapped into included.
+send h\e[K\r\n\r\e[K\e[m\e[K\e[A\e[59G\e[18;59H
+send en narrowed\e[18;70H
+expect
+|L15
+|L16
+|L17
+|L18
+|L19
+|L20
+|L21
+|L22
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|
+|C:\>echo some pending input that is long enough to wrap when narrowed
+end
+cursor 69 17
+resize 47 20
+# Clink redraws its prompt and line after every resize: up to where it
+# measures the prompt starts, clear to the end of the screen, draw. ConPTY
+# then reports the cursor at its own coordinates.
+send \e[1A\r\e[J\r\e]133;A;redraw=0\e\\\e]9;9;kitty-shell-cwd://localhost/C:\\\e\\C:\\>\e]133;B\e\\\e[m\e[5G\e[0;1mecho\e[m some pending input that is long enough\e[m \x08 to wrap when narrowed\e[K\r\n\r\e[m\e[K\e[A\e[23G\e[19;23H
+expect
+|L15
+|L16
+|L17
+|L18
+|L19
+|L20
+|L21
+|L22
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|
+|C:\>echo some pending input that is long enough
+| to wrap when narrowed
+end
+cursor 22 18
+resize 80 20
+send \r\e[J\r\e]133;A;redraw=0\e\\\e]9;9;kitty-shell-cwd://localhost/C:\\\e\\C:\\>\e]133;B\e\\\e[m\e[5G\e[0;1mecho\e[m some pending input that is long enough to wrap when narrowed\e[K\r\n\r\e[m\e[K\e[A\e[70G\e[18;70H
+expect
+|L15
+|L16
+|L17
+|L18
+|L19
+|L20
+|L21
+|L22
+|L23
+|L24
+|L25
+|L26
+|L27
+|L28
+|L29
+|L30
+|
+|C:\>echo some pending input that is long enough to wrap when narrowed
+end
+cursor 69 17

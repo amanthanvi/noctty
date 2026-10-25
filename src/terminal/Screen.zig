@@ -1827,6 +1827,19 @@ pub const Resize = struct {
     pull_scrollback: bool = true,
 };
 
+/// Clear the prompt mark of the rows at the bottom of the screen that are
+/// below the cursor's row and hold no text, up to the first one with text
+/// (a written space counts as text, as it does for the reflow).
+fn unmarkBlankRowsBelowCursor(self: *Screen) void {
+    const cursor = self.cursor.page_pin.*;
+    var it = self.pages.getBottomRight(.screen).?.rowIterator(.left_up, cursor);
+    while (it.next()) |row| {
+        if (row.node == cursor.node and row.y == cursor.y) return;
+        if (pagepkg.Cell.hasTextAny(row.cells(.all))) return;
+        row.rowAndCell().row.semantic_prompt = .none;
+    }
+}
+
 /// Resize the screen. The rows or cols can be bigger or smaller.
 ///
 /// If this returns an error, the screen is left in a likely garbage state.
@@ -1907,6 +1920,19 @@ pub inline fn resize(
         break :saved_cursor try self.pages.trackPin(pin);
     };
     defer if (saved_cursor_pin) |p| self.pages.untrackPin(p);
+
+    // A pty without scrollback (conhost) reflows its buffer only down to the
+    // cursor's row or its last character that is not a space, so the empty
+    // rows under both cannot push the top of its screen up. Our reflow drops
+    // trailing empty rows too, but keeps one marked as a prompt row, and an LF
+    // in a prompt marks the row it reaches: a line editor such as Clink leaves
+    // such rows empty under its line. Unmark them, or a narrowing scrolls this
+    // screen a row more than ConPTY's and every later absolute write lands a
+    // row off. This runs before the prompt is cleared below, so a row only
+    // that clearing empties keeps its mark.
+    if (!opts.pull_scrollback and opts.reflow and opts.cols != self.pages.cols) {
+        self.unmarkBlankRowsBelowCursor();
+    }
 
     // If our cursor is on a prompt or input line, clear it so the shell can
     // redraw it. This works with OSC 133 semantic prompts.
@@ -7091,6 +7117,62 @@ test "Screen: resize less cols no scrollback pull keeps the cursor row when wrap
         const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
         defer alloc.free(contents);
         try testing.expectEqualStrings("2AA\nAA\n3BB\nBB", contents);
+    }
+}
+
+test "Screen: resize less cols no scrollback pull drops blank prompt rows below the cursor" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10 });
+    defer s.deinit();
+    try s.testWriteString("0\n1\n2\n");
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    // A line editor (Clink) steps down past its line to draw a hint and
+    // back up. Each LF marks the row it reaches as a prompt continuation, so
+    // the two blank rows under the line are prompt rows.
+    try s.testWriteString("abcdefg\n\n");
+    s.cursorAbsolute(9, 2);
+    try testing.expect(s.pages.pin(.{ .active = .{ .y = 4 } }).?.rowAndCell().row.semantic_prompt != .none);
+
+    // The line wraps at 6 columns. A pty without scrollback reflows only down
+    // to the cursor's row, so the top of the screen stays where it was.
+    try s.resize(.{ .cols = 6, .rows = 5, .pull_scrollback = false });
+    try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.y);
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("1\n2\n> abcd\nefg", contents);
+    }
+}
+
+test "Screen: resize less cols no scrollback pull keeps input rows below the cursor the prompt redraw clears" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 5, .max_scrollback = 10 });
+    defer s.deinit();
+    try s.testWriteString("0\n1\n");
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    // A three-line command, edited on its first line.
+    try s.testWriteString("abcdefg\nhi\nyo");
+    s.cursorAbsolute(9, 2);
+
+    // The prompt is cleared for the shell to redraw, rows below the cursor
+    // included. The pty still holds their text and reflows them, so they
+    // keep their rows here too: the first line wraps and the top goes.
+    try s.resize(.{ .cols = 6, .rows = 5, .prompt_redraw = .true, .pull_scrollback = false });
+    try testing.expectEqual(@as(size.CellCountInt, 3), s.cursor.x);
+    try testing.expectEqual(@as(size.CellCountInt, 2), s.cursor.y);
+    {
+        const contents = try s.dumpStringAlloc(alloc, .{ .active = .{} });
+        defer alloc.free(contents);
+        try testing.expectEqualStrings("1", contents);
     }
 }
 
