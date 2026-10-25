@@ -9,7 +9,8 @@ name: Windows ConPTY Sync
 # This is the only per-change coverage for that class: the interactive
 # composite that also runs on the maintainer's machine is dispatch-only, and
 # the harness cannot join it as it stands (test/windows/README.md). x64 only;
-# the CLI forwarder is the one hidden-desktop workflow that also runs ARM64.
+# on ARM64 the CLI forwarder and the WARP lifecycle smoke in windows-arm64.yml
+# are the hidden-desktop runs.
 # Not a required check, like the CLI forwarder: a pull request that touches
 # none of the build or resource inputs skips the ReleaseFast build.
 on:
