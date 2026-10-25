@@ -6,12 +6,14 @@ $reviewedArtifactDigests = @{
     # audit, which adds load-time pane-text rejection without changing the
     # on-disk schema, and for PKG-44, which skips unknown fields within the
     # schema version and reports a newer schema_version as NewerSchema instead
-    # of rejecting it. PR branch commits are intentionally squashed and
+    # of rejecting it, and for FULLSCREEN-SESSION-01, which adds fullscreen
+    # with an optional fullscreen_maximized return flag within schema v1.
+    # PR branch commits are intentionally squashed and
     # deleted, so pin this digest independently of the manifest's durable base
     # commit rather than disabling verification when an intermediate source
     # commit becomes unreachable.
     'src/apprt/win32_session_state.zig' =
-        '58ca692b407a1c107da2c819d5975a7aaf23395a176f779896e88fdf36a2256f'
+        'de66d7d1c3859a56540d4dc8b67080befc1a52a46e53baafc07e7a84699fd11d'
 
     # Reviewed in full after the Noctty rebrand and for PKG-35's packaged DLL
     # load/allocator smoke, retaining the staged portable CLI siblings.
