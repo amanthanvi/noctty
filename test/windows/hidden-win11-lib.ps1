@@ -670,12 +670,35 @@ function Send-Text([IntPtr] $Hwnd, [string] $Text) {
 
 # Every descendant of `RootPid` with its name and command line. Callers reduce the command line to a
 # redacted shape before anything is written down.
+# ParentProcessId is the number a process was created with, and Windows reuses numbers (on hosted
+# VMs they ranged from 620 to 9144). A process whose parent exited can therefore name a newer process
+# that took its number, even one of its own descendants, and a walk that follows the number alone
+# finds a cycle and never returns (interactive-win11-conpty-sync.ps1's copy hung 5 of 54 hosted
+# runs that way). A real child is not older than its parent, and each process is visited once; a
+# start time CIM could not read proves nothing, so that child is kept. The query has a deadline of
+# its own: the callers' polling deadlines cannot interrupt a call that does not return.
 function Get-Descendants([int] $RootPid) {
-    $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
-    $found = [Collections.Generic.List[object]]::new(); $queue = [Collections.Generic.Queue[int]]::new(); $queue.Enqueue($RootPid)
+    try {
+        $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate -OperationTimeoutSec 15 -ErrorAction Stop)
+    } catch { throw "The process table query failed or took longer than 15 s: $($_.Exception.Message)" }
+    $started = @{}; $byParent = @{}
+    foreach ($process in $all) {
+        $started[[int]$process.ProcessId] = $process.CreationDate
+        $parent = [int]$process.ParentProcessId
+        if (-not $byParent.ContainsKey($parent)) { $byParent[$parent] = [Collections.Generic.List[object]]::new() }
+        $byParent[$parent].Add($process)
+    }
+    $found = [Collections.Generic.List[object]]::new(); $seen = [Collections.Generic.HashSet[int]]::new(); $queue = [Collections.Generic.Queue[int]]::new()
+    [void]$seen.Add($RootPid); $queue.Enqueue($RootPid)
     while ($queue.Count) {
         $parent = $queue.Dequeue()
-        foreach ($child in $all | Where-Object { $_.ParentProcessId -eq $parent }) { $found.Add($child); $queue.Enqueue([int]$child.ProcessId) }
+        if (-not $byParent.ContainsKey($parent)) { continue }
+        foreach ($child in $byParent[$parent]) {
+            $childStart = $child.CreationDate; $parentStart = $started[$parent]
+            if ($null -ne $childStart -and $null -ne $parentStart -and $childStart.ToUniversalTime() -lt $parentStart.ToUniversalTime()) { continue }
+            if (-not $seen.Add([int]$child.ProcessId)) { continue }
+            $found.Add($child); $queue.Enqueue([int]$child.ProcessId)
+        }
     }
     return $found.ToArray()
 }

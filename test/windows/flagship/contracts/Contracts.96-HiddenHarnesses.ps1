@@ -1355,6 +1355,7 @@ function Test-RequiredProfile([string] $Code) {
             $expectations = @{ 'missing.exe' = @{} }; $cases = [Collections.Generic.List[object]]::new()
             $script:requiredFailures = 0
             function Test-Available { return $false }
+            function Write-Step { }
             function Check($Case, $Name, $Passed, $Expected, $Actual) { if (-not $Passed) { $script:requiredFailures++ } }
             function Invoke-Case { throw 'Unavailable profile must never launch.' }
             . ([scriptblock]::Create($Code))
@@ -1433,6 +1434,79 @@ Assert-HiddenMutation 'WSL bash accepted' $gitFunctions ($gitFunctions.Replace('
             $probes[0] -ine 'C:\PKG76\bin\git.exe') { throw 'Local PATH lookup lost quoting/order or queried an unsafe component.' }
     } finally { $env:PATH = $savedPath }
 }
+
+# The two process-tree walks, Get-Descendants (the profile matrix finds the shell under noctty with it)
+# and the default-shell harness's Find-Shell, follow ParentProcessId, which is a number and not an
+# identity: Windows reuses numbers, so a process whose parent exited can name a newer process that
+# took its number. Here noctty (100) took the number of an older process whose stale children (500,
+# and 600 under it) still name it, and noctty's own real parent is 600, so the links form the cycle
+# 100 -> 500 -> 600 -> 100. Its real descendants are cmd.exe (101) and conhost.exe (102); the stale
+# 500 is a pwsh.exe listed first, which a walk without the age rule takes for noctty's shell. With
+# one start time for all, only the visited set ends the cycle; a start time CIM did not return
+# proves nothing. The fake CIM query drops CreationDate unless it is asked for, as CIM does, and
+# records the deadline. Each walk runs in a runspace of its own with a deadline, because a walk that
+# regresses hangs instead of throwing.
+$walkStart = [datetime]'2026-10-25T02:00:00Z'
+function New-WalkProcess([int] $Id, [int] $Parent, [string] $Name, $Created) {
+    [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; Name = $Name; ExecutablePath = "C:\fixture\$Name"; CommandLine = $Name; CreationDate = $Created }
+}
+$walkTables = @(
+    @{ Name = 'a recycled parent number'; Descendants = '101,102'; Shell = '101'; Table = @(
+        New-WalkProcess 500 100 'pwsh.exe' $walkStart.AddHours(-1)
+        New-WalkProcess 600 500 'stale.exe' $walkStart.AddHours(-1).AddSeconds(1)
+        New-WalkProcess 100 600 'noctty.exe' $walkStart
+        New-WalkProcess 101 100 'cmd.exe' $walkStart.AddSeconds(1)
+        New-WalkProcess 102 101 'conhost.exe' $walkStart.AddSeconds(2)
+        New-WalkProcess 700 4 'other.exe' $walkStart.AddHours(-2)) }
+    @{ Name = 'a parent cycle with one start time'; Descendants = '500,600'; Shell = '500'; Table = @(
+        New-WalkProcess 100 600 'noctty.exe' $walkStart
+        New-WalkProcess 500 100 'cmd.exe' $walkStart
+        New-WalkProcess 600 500 'stale.exe' $walkStart) }
+    @{ Name = 'a child without a start time'; Descendants = '110'; Shell = '110'; Table = @(
+        New-WalkProcess 100 4 'noctty.exe' $walkStart
+        New-WalkProcess 110 100 'cmd.exe' $null) }
+)
+$walkRunner = {
+    param($Tables, $FunctionText, $FunctionName)
+    $script:walkTable = $null; $script:walkTimeout = $null
+    function Get-CimInstance {
+        [CmdletBinding()] param([string] $ClassName, [string[]] $Property, [uint32] $OperationTimeoutSec)
+        if ($ClassName -cne 'Win32_Process') { throw "Unexpected CIM class $ClassName." }
+        $script:walkTimeout = $OperationTimeoutSec
+        if ($Property -and $Property -notcontains 'CreationDate') { return @($script:walkTable | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine) }
+        return $script:walkTable
+    }
+    $shellNames = @('pwsh.exe', 'powershell.exe', 'cmd.exe')
+    . ([scriptblock]::Create($FunctionText))
+    foreach ($case in $Tables) {
+        $script:walkTable = $case.Table
+        $result = & $FunctionName 100
+        $ids = if ($FunctionName -ceq 'Find-Shell') { "$($result.Pid)" } else { (@($result | ForEach-Object { [int]$_.ProcessId }) | Sort-Object) -join ',' }
+        [pscustomobject]@{ Name = $case.Name; Ids = $ids; Timeout = $script:walkTimeout }
+    }
+}
+function Test-ProcessWalk([string] $Code, [string] $FunctionName, [string] $Expected) {
+    $results = @(Invoke-ContractScriptWithDeadline -Script $walkRunner -Arguments @($walkTables, $Code, $FunctionName) -TimeoutSeconds 10 `
+            -HangMessage "$FunctionName did not return for a process table with a parent cycle.")
+    foreach ($case in $walkTables) {
+        $got = $results | Where-Object { $_.Name -ceq $case.Name }
+        if ($got.Ids -cne $case[$Expected]) { throw "$FunctionName returned '$($got.Ids)' for $($case.Name); expected '$($case[$Expected])'." }
+        if ($got.Timeout -lt 1 -or $got.Timeout -gt 60) { throw "$FunctionName queried the process table without a deadline." }
+    }
+}
+function Test-HiddenDescendants([string] $Code) { Test-ProcessWalk $Code 'Get-Descendants' 'Descendants' }
+function Test-DefaultShellWalk([string] $Code) { Test-ProcessWalk $Code 'Find-Shell' 'Shell' }
+$descendantsWalk = Get-HiddenFunction $hiddenLibText 'Get-Descendants'
+Test-HiddenDescendants $descendantsWalk
+Assert-HiddenMutation 'descendant walk without a visited set' $descendantsWalk ($descendantsWalk.Replace('if (-not $seen.Add([int]$child.ProcessId)) { continue }', '[void]$seen.Add([int]$child.ProcessId)')) ${function:Test-HiddenDescendants}
+Assert-HiddenMutation 'descendant walk without the age rule' $descendantsWalk ($descendantsWalk.Replace('$childStart.ToUniversalTime() -lt $parentStart.ToUniversalTime()', '$false')) ${function:Test-HiddenDescendants}
+Assert-HiddenMutation 'descendant walk without start times' $descendantsWalk ($descendantsWalk.Replace(', CreationDate -OperationTimeoutSec', ' -OperationTimeoutSec')) ${function:Test-HiddenDescendants}
+Assert-HiddenMutation 'descendant query without a deadline' $descendantsWalk ($descendantsWalk.Replace(' -OperationTimeoutSec 15', '')) ${function:Test-HiddenDescendants}
+$defaultShellWalk = Get-HiddenFunction (Remove-PowerShellComments (Get-Content -LiteralPath (Join-Path $repoRoot 'test\windows\hidden-win11-default-shell.ps1') -Raw)) 'Find-Shell'
+Test-DefaultShellWalk $defaultShellWalk
+Assert-HiddenMutation 'default-shell walk without the age rule' $defaultShellWalk ($defaultShellWalk.Replace('$p.CreationDate.ToUniversalTime() -lt $parentStart.ToUniversalTime()', '$false')) ${function:Test-DefaultShellWalk}
+Assert-HiddenMutation 'default-shell walk without start times' $defaultShellWalk ($defaultShellWalk.Replace(',CreationDate -OperationTimeoutSec', ' -OperationTimeoutSec')) ${function:Test-DefaultShellWalk}
+Assert-HiddenMutation 'default-shell query without a deadline' $defaultShellWalk ($defaultShellWalk.Replace(' -OperationTimeoutSec 15', '')) ${function:Test-DefaultShellWalk}
 
 # Pin the actual executable workflow line, so a comment or reporting-only invocation cannot pass.
 $skipWorkflow = Get-Content -LiteralPath (Join-Path $repoRoot '.github\workflows\windows10-branches.yml') -Raw

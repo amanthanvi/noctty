@@ -26,36 +26,6 @@ function Get-ConptySyncFunctionText {
     return $found[0].Extent.Text
 }
 
-# Runs a script block in a fresh runspace and returns its output, or throws if it
-# has not finished by the deadline (the runspace is stopped first).
-function Invoke-ConptySyncContractScript {
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Script,
-        [Parameter(Mandatory)] [object[]] $Arguments,
-        [Parameter(Mandatory)] [string] $HangMessage,
-        [int] $TimeoutSeconds = 20
-    )
-
-    $shell = [powershell]::Create()
-    try {
-        [void]$shell.AddScript($Script.ToString())
-        foreach ($argument in $Arguments) { [void]$shell.AddArgument($argument) }
-        $pending = $shell.BeginInvoke()
-        if (-not $pending.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
-            $shell.Stop()
-            throw $HangMessage
-        }
-        $output = $shell.EndInvoke($pending)
-        # HadErrors is also set by an exception the script caught on purpose.
-        if ($shell.Streams.Error.Count -gt 0) {
-            $first = $shell.Streams.Error | Select-Object -First 1
-            throw "The runspace reported $($shell.Streams.Error.Count) error(s), the first: $(($first | Out-String).Trim())"
-        }
-        return @($output)
-    }
-    finally { $shell.Dispose() }
-}
-
 # A process table in which Windows reused a number. noctty (100) took the number
 # of an older process, so two older processes still name 100 as their parent
 # (500 directly, 600 through 500), and noctty's own real parent is 600: the
@@ -78,7 +48,7 @@ $conptySyncWalk = {
     , @(Get-SyncDescendants 100 | ForEach-Object { [int]$_.ProcessId })
 }
 $conptySyncWalkText = Get-ConptySyncFunctionText 'Get-SyncDescendants'
-$conptySyncIds = @(Invoke-ConptySyncContractScript `
+$conptySyncIds = @(Invoke-ContractScriptWithDeadline `
         -Script $conptySyncWalk `
         -Arguments @($conptySyncProcessTable, $conptySyncWalkText) `
         -HangMessage 'Get-SyncDescendants did not return for a process table with a recycled parent PID: it cycles.' |
@@ -94,7 +64,7 @@ $conptySyncTiedTable = @(
     [pscustomobject]@{ ProcessId = 500; ParentProcessId = 100; Name = 'b.exe'; CreationDate = $conptySyncStarted },
     [pscustomobject]@{ ProcessId = 600; ParentProcessId = 500; Name = 'c.exe'; CreationDate = $conptySyncStarted }
 )
-$conptySyncTiedIds = @(Invoke-ConptySyncContractScript `
+$conptySyncTiedIds = @(Invoke-ContractScriptWithDeadline `
         -Script $conptySyncWalk `
         -Arguments @($conptySyncTiedTable, $conptySyncWalkText) `
         -HangMessage 'Get-SyncDescendants did not return for a parent cycle among processes with equal start times.' |
@@ -108,7 +78,7 @@ $conptySyncUnknownTable = @(
     [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; Name = 'noctty.exe'; CreationDate = $conptySyncStarted },
     [pscustomobject]@{ ProcessId = 110; ParentProcessId = 100; Name = 'cmd.exe'; CreationDate = $null }
 )
-$conptySyncUnknownIds = @(Invoke-ConptySyncContractScript `
+$conptySyncUnknownIds = @(Invoke-ContractScriptWithDeadline `
         -Script $conptySyncWalk `
         -Arguments @($conptySyncUnknownTable, $conptySyncWalkText) `
         -HangMessage 'Get-SyncDescendants did not return for a child without a start time.' |
@@ -180,7 +150,7 @@ $conptySyncRead = {
     finally { Remove-Item -LiteralPath $script:Work -Recurse -Force -ErrorAction Ignore }
 }
 # @() keeps the one ordered dictionary from being indexed by position.
-$conptySyncReadResults = @(Invoke-ConptySyncContractScript `
+$conptySyncReadResults = @(Invoke-ContractScriptWithDeadline `
         -Script $conptySyncRead `
         -Arguments @($conptySyncReadText) `
         -HangMessage 'Read-SyncConpty did not return for a scripted dump helper.')[0]

@@ -197,13 +197,23 @@ function Check([string]$Case,[string]$Name,[bool]$Passed,$Expected,$Actual) {
 $shellNames = @('pwsh.exe','powershell.exe','cmd.exe')
 # Names, image paths and ids only. The command line of a shell is tested for the integration
 # payload inside this function and never returned.
+# ParentProcessId is a number Windows reuses: a process whose parent exited can name the newer
+# process that took its number, so a shell older than the process it claims as its parent is not
+# under noctty (its screen would be someone else's), and is skipped. A start time CIM could not read
+# proves nothing. The query has a deadline of its own: the caller's 30 s loop cannot interrupt a call.
 function Find-Shell([int]$RootPid) {
-    $all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine)
+    $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate -OperationTimeoutSec 15 -ErrorAction Stop)
+    $started = @{}; foreach ($p in $all) { $started[[int]$p.ProcessId] = $p.CreationDate }
     $ids = [Collections.Generic.HashSet[int]]::new(); [void]$ids.Add($RootPid)
     $grew = $true
     while ($grew) {
         $grew = $false
-        foreach ($p in $all) { if ($ids.Contains([int]$p.ParentProcessId) -and $ids.Add([int]$p.ProcessId)) { $grew = $true } }
+        foreach ($p in $all) {
+            if (-not $ids.Contains([int]$p.ParentProcessId)) { continue }
+            $parentStart = $started[[int]$p.ParentProcessId]
+            if ($null -ne $p.CreationDate -and $null -ne $parentStart -and $p.CreationDate.ToUniversalTime() -lt $parentStart.ToUniversalTime()) { continue }
+            if ($ids.Add([int]$p.ProcessId)) { $grew = $true }
+        }
     }
     foreach ($p in $all) {
         if ($ids.Contains([int]$p.ProcessId) -and $p.ProcessId -ne $RootPid -and $shellNames -contains $p.Name.ToLowerInvariant()) {

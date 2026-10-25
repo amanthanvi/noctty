@@ -68,6 +68,13 @@ Wait-HiddenDriverApproval -Run $Run -DesktopName $desktopName
 $driverApproved = $true
 $job = [HiddenWin]::CreateOwnedJob()
 $desktopReceipt = Join-Path $Run 'profile-desktops.jsonl'
+# One line before each step that has no deadline of its own, and before the process-tree query. The
+# driver has no console, so a stall leaves the step it was in as the last line here; the stall of run
+# 40161015852 had to be placed from the desktop receipts instead.
+$stepReceipt = Join-Path $Run 'profile-steps.jsonl'
+function Write-Step([string] $Case, [string] $Step) {
+    [ordered]@{ At = [datetime]::UtcNow.ToString('o'); Case = $Case; Step = $Step } | ConvertTo-Json -Compress | Add-Content -LiteralPath $stepReceipt
+}
 $checks = [Collections.Generic.List[object]]::new()
 $cases = [Collections.Generic.List[object]]::new()
 function Check([string] $Case, [string] $Name, [bool] $Passed, $Expected, $Actual) {
@@ -258,6 +265,7 @@ function Wait-Ready($Case, $Process) {
 function Invoke-Case([string] $Key, [switch] $Control) {
     $suffix = if ($Control) { '_control' } else { '' }
     $label = if ($Control) { "$Key (control)" } else { $Key }
+    Write-Step $label 'copy'
     $case = Start-Case $Key $suffix $(if ($Control) { @('shell-integration = none') } else { @() })
     $expected = $expectations[$Key]
     $savedHome = $env:HOME; $savedHistfile = $env:HISTFILE
@@ -265,11 +273,13 @@ function Invoke-Case([string] $Key, [switch] $Control) {
     $env:HOME = $case.Home; $env:HISTFILE = Join-Path $case.Home '.bash_history'
     $started = $null
     try {
+        Write-Step $label 'launch'
         $started = Start-HiddenNoctty -Dir $case.Dir -DesktopName $desktopName -Job $job -StderrPath (Join-Path $Run "$($case.Name)\stderr.txt") -Arguments @(
             "--config-file=`"$($case.Config)`"", '--single-instance=false', "--class=noctty-test-pkg76-$runId-$($case.Name)")
         $ready = Wait-Ready $case $started.Process
         # The profile's own process appears under noctty (through ConPTY's host).
         $shell = $null; $deadline = [datetime]::UtcNow.AddSeconds(20)
+        Write-Step $label 'process tree'
         while ([datetime]::UtcNow -lt $deadline -and -not $shell) {
             Assert-HiddenDesktop -Job $job -DesktopName $desktopName -ReceiptPath $desktopReceipt
             $shell = Get-Descendants $started.Pid | Where-Object { $_.Name -ieq $expected.Name } | Select-Object -First 1
@@ -306,7 +316,8 @@ function Invoke-Case([string] $Key, [switch] $Control) {
         }
         foreach ($h in [HiddenWin]::Hosts($started.Pid)) { [void][HiddenWin]::PostMessageW($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }
         if (-not $started.Process.WaitForExit(15000)) { throw "noctty ($label) did not exit after WM_CLOSE" }
-        $saved = Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw | ConvertFrom-Json
+        Write-Step $label 'read session'
+        $saved =Get-Content -LiteralPath (Join-Path $case.Dir 'session-state.json') -Raw | ConvertFrom-Json
         $pane = $saved.windows[0].tabs[0].layout.nodes[0].pane
         Check $label 'the profile key survives a close and save' ($pane.profile -eq $Key) $Key $pane.profile
         if ($Control) {
@@ -322,6 +333,7 @@ function Invoke-Case([string] $Key, [switch] $Control) {
     } finally {
         $env:HOME = $savedHome; $env:HISTFILE = $savedHistfile
         if ($started -and -not $started.Process.HasExited) {
+            Write-Step $label 'stop'
             $p = Get-Process -Id $started.Pid -ErrorAction SilentlyContinue
             if ($p -and $p.StartTime -eq $started.StartTime) { Stop-Process -Id $p.Id -Force }
         }
@@ -330,6 +342,7 @@ function Invoke-Case([string] $Key, [switch] $Control) {
 
 foreach ($key in $Profile) {
     if (-not $expectations.ContainsKey($key)) { throw "Unknown profile '$key'." }
+    Write-Step $key 'detect'
     if (-not (Test-Available $key)) {
         $cases.Add(@{ Profile = $key; Result = 'skipped'; Reason = 'not installed on this machine' })
         if ($RequireAll) { Check $key 'required profile is installed and detected' $false 'available' 'not detected' }
@@ -340,6 +353,7 @@ foreach ($key in $Profile) {
 if ($Profile -contains 'cmd.exe') { Invoke-Case 'cmd.exe' -Control }
 $anyRan = @($cases | Where-Object { $_.Result -eq 'ran' }).Count
 Check 'matrix' 'at least one profile ran' ($anyRan -gt 0) '>= 1' $anyRan
+Write-Step 'matrix' 'results'
 @{ Checks = $checks; Cases = $cases; Limit = 'Hidden desktop, posted keys only. WSL, SSH and PowerShell panes are not typed into; the directory of a PowerShell pane is checked from its first prompt.' } |
     ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Run 'profile-matrix-results.json')
 $failed = @($checks | Where-Object { -not $_.Passed })

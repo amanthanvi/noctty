@@ -1805,3 +1805,34 @@ function Invoke-ContractTable {
         }
     }
 }
+
+# Runs a script block in a fresh runspace and returns its output, or throws if it
+# has not finished by the deadline (the runspace is stopped first). For harness
+# code whose regression is a hang, such as a process walk that cycles.
+function Invoke-ContractScriptWithDeadline {
+    param(
+        [Parameter(Mandatory)] [scriptblock] $Script,
+        [Parameter(Mandatory)] [object[]] $Arguments,
+        [Parameter(Mandatory)] [string] $HangMessage,
+        [int] $TimeoutSeconds = 20
+    )
+
+    $shell = [powershell]::Create()
+    try {
+        [void]$shell.AddScript($Script.ToString())
+        foreach ($argument in $Arguments) { [void]$shell.AddArgument($argument) }
+        $pending = $shell.BeginInvoke()
+        if (-not $pending.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+            $shell.Stop()
+            throw $HangMessage
+        }
+        $output = $shell.EndInvoke($pending)
+        # HadErrors is also set by an exception the script caught on purpose.
+        if ($shell.Streams.Error.Count -gt 0) {
+            $first = $shell.Streams.Error | Select-Object -First 1
+            throw "The runspace reported $($shell.Streams.Error.Count) error(s), the first: $(($first | Out-String).Trim())"
+        }
+        return @($output)
+    }
+    finally { $shell.Dispose() }
+}
