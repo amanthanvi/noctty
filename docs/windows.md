@@ -1548,8 +1548,10 @@ patches your config without rewriting unrelated text. While you edit, Window
 theme, Follow Windows accent color and Background opacity preview in the open
 windows; the other fields, font size among them, take effect when you save.
 A preview stays a preview: a config reload or a Windows light/dark switch
-does not make it the running setting, and Discard changes or closing without
-saving takes it back. The window's "Open in default editor" button, and
+keeps it unsaved and still shown, and Discard changes or closing without
+saving takes it back. The one exception is a reload whose file now has the
+same value: Settings takes that as saved, and the preview ends with it in
+effect. The window's "Open in default editor" button, and
 `noctty +edit-config` when neither `VISUAL` nor `EDITOR`
 is set, open the config through the `.txt` association rather than the
 file's own; they refuse a network or mapped-drive path and a link (symlink
