@@ -201,15 +201,21 @@ $environment = @{
     CLINK_PATH = (Join-Path $Run 'integration'); NOCTTY_CLINK_SCRIPT = $script; NOCTTY_CLINK_RESULTS = $result
     NOCTTY_CLINK_RESIZE_READY = $resizeReady; NOCTTY_CLINK_RESIZE_DONE = $resizeDone
 }
+# An inherited CLINK_PROFILE wins over `inject -p`, so it is removed for the
+# run. Removed, not set to $null: PowerShell passes that as "", which leaves an
+# empty CLINK_PROFILE that Clink then uses.
+$savedClinkProfile = $env:CLINK_PROFILE
 $saved = @{}
 $desktopName = 'noctty-clink-' + [guid]::NewGuid().ToString('n')
 $desktop = [ClinkSmoke]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x1ff,[IntPtr]::Zero)
 if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
 try {
     foreach ($key in $environment.Keys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key,$environment[$key]) }
+    Remove-Item -LiteralPath Env:\CLINK_PROFILE -ErrorAction Ignore
     $childPid = [ClinkSmoke]::Run($app,$arguments,$Run,$desktopName,$resizeReady,$resizeDone)
 } finally {
     foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key,$saved[$key]) }
+    if ($null -ne $savedClinkProfile) { $env:CLINK_PROFILE = $savedClinkProfile }
     [void][ClinkSmoke]::CloseDesktop($desktop)
     $after = Fingerprint $ledger
     @{Before=$before;After=$after;Unchanged=($before -eq $after);Pid=$childPid;Desktop=$desktopName} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Run 'isolation.json')

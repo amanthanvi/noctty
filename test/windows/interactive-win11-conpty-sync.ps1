@@ -378,9 +378,11 @@ function Get-ConptySyncRealPSReadLineState {
 if ($Inner) {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     [void][NocttyConptySyncNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
-    # noctty prepends its own Lua folder to an inherited CLINK_PATH; keep a
-    # developer's own Clink scripts out of the Clink scenario.
+    # noctty prepends its own Lua folder to an inherited CLINK_PATH, and an
+    # inherited CLINK_PROFILE wins over `clink inject -p`: keep a developer's
+    # own Clink scripts, settings and history out of the Clink scenario.
     Remove-Item -LiteralPath Env:\CLINK_PATH -ErrorAction Ignore
+    Remove-Item -LiteralPath Env:\CLINK_PROFILE -ErrorAction Ignore
 
     $script:Exe = Join-Path $RunRoot 'bin\noctty.exe'
     $script:DumpExe = Join-Path $RunRoot 'tools\conpty-sync-dump.exe'
