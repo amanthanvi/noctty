@@ -94,6 +94,29 @@ jobs:
             if ($label -like '*.cmd*' -and $r.Output[-1] -notmatch '^0\.15\.') { throw "$label did not run zig version in the dev shell: '$($r.Output[-1])'." }
             "${label}: $($r.VsDevCmd)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
+
+          # dev-windows.ps1 writes its bootstrap under the temp folder and has cmd.exe run it.
+          # A temp folder whose name holds cmd's special characters (a profile named A&B) must
+          # not split that path: before the fix the ampersand started a new command. No
+          # parentheses: VsDevCmd.bat itself fails with a ')' in TEMP ("...\dd_vsdevcmd17_
+          # preinit_env.log was unexpected at this time", measured 10-25), whatever we pass it.
+          $oddTemp = Join-Path $env:RUNNER_TEMP 'dev shell A&B ^x'
+          New-Item -ItemType Directory -Force -Path $oddTemp | Out-Null
+          $savedTemp = @{ TEMP = $env:TEMP; TMP = $env:TMP }
+          $env:TEMP = $oddTemp
+          $env:TMP = $oddTemp
+          try {
+            foreach ($label in @($bootstraps.Keys | Where-Object { $_ -like 'dev-windows.ps1*' })) {
+              $oddRun = Invoke-Bootstrap "$label, temp folder '$oddTemp'" $bootstraps[$label]
+              if ($oddRun.Exit -ne 0) { throw "$label with the temp folder '$oddTemp' exited $($oddRun.Exit)." }
+              if ($oddRun.VsDevCmd -notmatch $installed) { throw "$label with the temp folder '$oddTemp' named '$($oddRun.VsDevCmd)'." }
+              if (-not ($oddRun.Output -match 'C/C\+\+ Optimizing Compiler Version')) { throw "$label with the temp folder '$oddTemp' did not reach cl." }
+              if (@(Get-ChildItem -LiteralPath $oddTemp -Filter 'noctty-dev-windows-*.cmd').Count -ne 0) { throw "$label left its bootstrap file in '$oddTemp'." }
+            }
+          } finally {
+            $env:TEMP = $savedTemp.TEMP
+            $env:TMP = $savedTemp.TMP
+          }
           # The default-path fallback reads VC\Tools\MSVC\<version>\lib\<arch>; show the real layout.
           $install = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $r.VsDevCmd))
           foreach ($toolset in @(Get-ChildItem -LiteralPath (Join-Path $install 'VC\Tools\MSVC') -Directory)) {

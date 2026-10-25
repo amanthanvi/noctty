@@ -163,9 +163,19 @@ $env:NOCTTY_DEV_ARCH = $Architecture
 $env:NOCTTY_DEV_PATH = "$gitCmd;$gitUsrBin;$env:ZIG_HOME"
 try {
     [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap.Replace("`r`n", "`n").Replace("`n", "`r`n"), [System.Text.Encoding]::ASCII)
-    # `call`, so that cmd /c never strips the quotes around a path with spaces or parentheses.
-    cmd.exe /d /c call $bootstrapPath
-    $bootstrapExit = $LASTEXITCODE
+    # A raw argument string, not PowerShell's native-argument quoting: 5.1 and 7 quote
+    # differently, and both leave a path without spaces unquoted, so an `&` in it (a
+    # profile named A&B) started a new command, which could even exit 0. With /s, cmd
+    # removes only the outer pair of quotes and reads the path inside its own, where
+    # &, ^, parentheses and spaces are literal. No `call`: it expands % a second time.
+    $cmdInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $cmdInfo.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $cmdInfo.Arguments = '/d /s /c ""' + $bootstrapPath + '""'
+    $cmdInfo.UseShellExecute = $false
+    $cmdProcess = [System.Diagnostics.Process]::Start($cmdInfo)
+    $cmdProcess.WaitForExit()
+    $bootstrapExit = $cmdProcess.ExitCode
+    $cmdProcess.Dispose()
 } finally {
     Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction Ignore
     Remove-Item -LiteralPath Env:NOCTTY_DEV_VSDEVCMD, Env:NOCTTY_DEV_ARCH, Env:NOCTTY_DEV_PATH -ErrorAction Ignore
