@@ -9,41 +9,128 @@ build mode, run count, seed, endpoint, and observer disclosures match.
 
 Recorded 2026-08-29 with Zig 0.15.2, `ReleaseFast`, Windows build 26200, an AMD
 Ryzen 9 9900X (12 physical / 24 logical cores), 4,194,304-byte payloads, seed
-121, 45 rows, and 140 columns. The dev figures use three runs per workload;
-the runner figures and CI gate use five. These
-parser/terminal-state results do not exercise ConPTY, the renderer, OpenGL,
-DWM, or the display.
+121, 45 rows, and 140 columns. The dev figures use three runs per workload. The
+CI gate takes 60 runs (20 for OSC); the runner figures below were measured on
+2026-10-25 (see "Runner pool and noise"). These parser/terminal-state results do
+not exercise ConPTY, the renderer, OpenGL, DWM, or the display.
 
 The build graph applies the selected optimize mode to every reachable root,
 generated, lazy, and transitive Zig module and fails construction on a mode
 mismatch. This prevents a nominal `ReleaseFast` executable or benchmark from
 silently retaining Debug modules inside the same compiler invocation.
 
-| Workload | Dev median | Runner median | Runner slowest run | CI minimum |
-| -------- | ---------: | ------------: | -----------------: | ---------: |
-| ASCII    |   195 MB/s |       78 MB/s |          77.7 MB/s |    50 MB/s |
-| UTF-8    |   115 MB/s |       61 MB/s |          59.8 MB/s |    35 MB/s |
-| OSC      |    13 MB/s |      5.8 MB/s |           5.8 MB/s |     3 MB/s |
-| Scroll   |   196 MB/s |       79 MB/s |          63.3 MB/s |    50 MB/s |
+| Workload | Dev median | Runner median, slowest class | CI floor (fastest run) |
+| -------- | ---------: | ---------------------------: | ---------------------: |
+| ASCII    |   195 MB/s |               66.5-68.0 MB/s |                50 MB/s |
+| UTF-8    |   115 MB/s |               58.6-60.1 MB/s |                35 MB/s |
+| OSC      |    13 MB/s |                 5.7-6.0 MB/s |                 3 MB/s |
+| Scroll   |   196 MB/s |                   58-69 MB/s |                50 MB/s |
 
-The CI minimum is set against the **runner** columns, not the dev column. The
-pinned `windows-2025` runner is roughly 2.5x slower than the baseline machine,
-so a tolerance derived from dev numbers is meaningless there.
-
-The gate takes a median of five runs, and the first run on a workload can be a
-long way under the steady state: in the run these figures come from, scroll run 1
-measured 63.3 MB/s against 79.0-80.0 MB/s for runs 2-5. There is no warmup run,
-so the floor has to clear that cold outlier and not merely the median. The
-earlier 70 MB/s ascii/scroll floors did not: they sat 4% under the ascii median
-and above observed individual scroll runs, so only the median-of-5 was keeping
-them green. The floors are now set under the slowest observed run, not under the
-median.
+The CI floor is set against the **runner** column, not the dev column: it sits at
+0.74x (ASCII), 0.59x (UTF-8), 0.51x (OSC) and 0.73x (scroll) of the slowest
+class's usual figure. The slowest class is 1.9-2.9x slower than the baseline
+machine, depending on the workload (3.4x on the one degraded scroll runner), and
+the fastest class 1.3-1.5x, so a tolerance derived from dev numbers is
+meaningless there.
 
 Figures are rounded because they do not warrant more precision. Each dev figure
 was taken three times on an otherwise idle machine and reproduced within about
 1% (ASCII 194.65 / 195.17 / 195.93; UTF-8 114.55 / 116.87 / 114.47; OSC 13.48 /
-13.40 / 13.61; Scroll 196.99 / 194.63 / 196.76). Runner figures are read from
-the CI gate step's own log on this branch, which uses five runs.
+13.40 / 13.61; Scroll 196.99 / 194.63 / 196.76).
+
+### Runner pool and noise
+
+Two things move a runner's figure, and they need different answers
+(BENCH-VT-FLOOR-01). Both were measured on 2026-10-25 on 28 `windows-2025`
+runners, 20 started within 15 s of 00:40 UTC and 8 between 01:16 and 01:26 UTC,
+each running the gate's four workloads for 60 runs (OSC 20) while recording its
+CPU. The bench job's own step logs for every Test attempt from 2026-10-17 to 25
+add 420 unique five-run blocks for ASCII and 418 for each other workload (a
+re-run copies the logs of the jobs that already passed, which are counted once).
+
+**The pool is not one machine.** Medians per runner, in MB/s:
+
+| Runner CPU (4 vCPU) | Runners |     ASCII |     UTF-8 |       OSC |    Scroll |
+| ------------------- | ------: | --------: | --------: | --------: | --------: |
+| AMD EPYC 7763       |      16 | 66.5-68.0 | 58.6-60.1 |   5.7-6.0 |     58-69 |
+| AMD EPYC 9V74       |       3 |      87.3 | 67.0-67.5 |   7.7-7.9 | 86.9-88.7 |
+| Intel Xeon 8573C    |       1 |      95.9 |      64.9 |       6.5 |      98.8 |
+| AMD EPYC 9V45       |       8 |   131-137 | 85.6-90.5 |  9.6-10.7 |   104-143 |
+
+That is the "about 2x between fast and slow machines" the trend job sees. It is
+the CPU model, not noise. Absolute floors have to hold on the slowest class, so
+on an EPYC 9V45 the gate needs a slowdown of 2.5-3.7x to fail. The nightly trend
+job records its medians without the CPU, so a night-to-night change mixes drift
+with the pool's CPU mix; read it over weeks. (The one scroll median of 58 on an
+EPYC 7763 is the runner in the next paragraph.)
+
+The four sampled classes are not the whole pool. The historical logs hold 11
+unique jobs (2026-10-18 to 10-23) with a profile none of them has: a steady
+UTF-8 best of five of 51.6-57.7 MB/s (block spread under 5%) beside ASCII at
+65.8-73.4, scroll 67.3-75.1 and OSC 5.6-6.5. The CPU was not logged there, so
+another class is inferred, not shown. Its UTF-8 margin over the floor of 35 is
+51.56 / 35 = 1.47x.
+
+**Noise only slows a run down, and it comes in episodes.** The old gate (median
+of five against 50 MB/s) failed three of the historical blocks, and none
+reproduced (the pull request's rerun passed, and so did the next `main` run after
+each of the two `main` failures): ASCII on `main` (runs 41.97, 56.85, 31.78,
+35.82, 27.60; median 35.82), ASCII on a pull request (51.25, 43.46, 47.95, 36.75,
+48.24; median 47.95) and scroll on `main` (24.43, 35.01, 45.32, 65.30, 60.64;
+median 45.32). Each holds a run above the old floor, but only the scroll block's
+best (65.30, 0.95x of the usual 68.9; its job's other workloads point to an EPYC
+7763, inferred) is near speed. The two ASCII bests (56.85 and 51.25) are 0.84x and
+0.76x of the slowest class's usual 67.7, so those jobs were depressed for the
+whole block. In the 28 long sequences 12 of 5,600 runs fell under 0.7x of their
+runner's own median, in clusters of at most six runs (five of six in the worst).
+The longest episode was one EPYC 7763 runner's scroll runs 19-56 as the tool
+prints them: 38 consecutive runs, about 3.1 s, all under 62.5 MB/s on a class
+that gives 68, with a best of only 56.95 in the last 20 (1.7 s). So a median of
+five can sit entirely inside an episode, and
+so can a best of five: the lowest best of any five consecutive scroll runs was
+49.89 MB/s, just under 50. The first run of a sequence is slightly slower (the
+slowest of its five in 29-48% of the historical blocks, against 20% by chance,
+by a median of 0.2-1.5%), which a gate on the fastest run does not care about; a
+ten-second pause after the build changed nothing.
+
+**The gate** therefore compares the fastest of 60 runs (about 4 s on the slowest
+class and 2 s on the fastest; 20 runs for OSC, whose runs take 0.7 s) with the
+floor. A regression slows every run, the fastest included, so the gate keeps its
+power against a real one, while noise would have to hold every run of the window
+under the floor. In all 28 sequences the fastest run was at
+least 67.08 (ASCII), 59.41 (UTF-8) and 69.09 MB/s (scroll), and 5.81 of 20 OSC
+runs: 1.34x, 1.70x, 1.38x and 1.94x over the floors. A fastest of 60 cannot fail
+where the best of its first five passes, and in the historical logs the best of
+five was under 50 in 0 of 420 unique ASCII and 0 of 418 unique scroll blocks
+(the lowest were 51.25 and 59.67; UTF-8 51.56 and OSC 5.45). Only the
+inferred class above has a UTF-8 margin as small as 1.47x.
+
+**Why ASCII and scroll stay at 50.** A lower floor of 40 was considered and
+rejected: the statistic is what removes the noise failures, and lowering the
+floor is a separate change that gives up coverage the old gate had. Taking the
+fastest run of each EPYC 7763 sequence, the gate fails at a slowdown of 1.34-1.37x
+(ASCII) and 1.38-1.39x (scroll), the same as the old gate on ASCII (1.33-1.36x of
+the runner medians); at 40 it would need 1.68-1.71x and 1.73-1.74x. Applied to
+the best of each unique historical block, a uniform 1.5x slowdown fails 60% of
+jobs at 50 and none at 40, 1.7x fails 64% (ASCII) and 63% (scroll) at 50 and 11%
+and 2% at 40, and 2x fails 82% against 61% and 60%. That 60% is the share of jobs
+on the slowest class (16 of the 28 sampled runners; a best ASCII block under 75
+MB/s), where a 1.4x-1.7x slowdown is caught at 50 and almost never at 40. The
+nightly trend job is report-only and records no CPU, so nothing else would catch
+it. 50 is also stable: the lowest fastest-of-60 sat 34% (ASCII) and 38% (scroll)
+above it, and the longest stretch of consecutive runs under 50 on the slowest
+class was 11 runs, about 1.0 s (one scroll sequence; ASCII never went under 50
+there), whereas failing the gate takes all 60 runs under 50, which is 5 s or more.
+
+What 50 does not rule out is an episode deep and long enough to fail it. Both
+ASCII failures stopped their jobs after the ASCII block, and a block is five runs,
+so how long those two episodes lasted is unknown: had the state of runs 2-5 of the
+pull request's block (best 48.24) held for a whole 60-run window, the gate would
+fail at 50 and pass at 40. Nothing in the data shows an episode that long and that
+deep. The gate step now logs the runner's CPU, so a failure can be told apart (an
+episode, or a new slower class); the remedy is a rerun, and if an episode that
+deep and long does appear, the floor can be revisited with that evidence in hand.
+The Debug-linked class this gate exists for is 25-46x slower.
 
 Machine load dominates these numbers, so treat any single run on a busy machine
 as a lower bound rather than a regression. The same four workloads on the same
@@ -70,10 +157,10 @@ comparable absolute performance.
 Reproduce the headless gates:
 
 ```powershell
-zig build bench:vt-throughput -- --workload=ascii --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=50
-zig build bench:vt-throughput -- --workload=utf8 --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=35
-zig build bench:vt-throughput -- --workload=osc --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=3
-zig build bench:vt-throughput -- --workload=scroll --bytes=4194304 --seed=121 --runs=5 --rows=45 --cols=140 --min-mb-s=50
+zig build bench:vt-throughput -- --workload=ascii --bytes=4194304 --seed=121 --runs=60 --rows=45 --cols=140 --min-mb-s=50
+zig build bench:vt-throughput -- --workload=utf8 --bytes=4194304 --seed=121 --runs=60 --rows=45 --cols=140 --min-mb-s=35
+zig build bench:vt-throughput -- --workload=osc --bytes=4194304 --seed=121 --runs=20 --rows=45 --cols=140 --min-mb-s=3
+zig build bench:vt-throughput -- --workload=scroll --bytes=4194304 --seed=121 --runs=60 --rows=45 --cols=140 --min-mb-s=50
 zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=2500
 ```
 

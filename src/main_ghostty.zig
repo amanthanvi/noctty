@@ -142,6 +142,7 @@ test {
     _ = @import("tripwire.zig");
     _ = @import("benchmark/main.zig");
     _ = @import("bench/palette_match.zig");
+    _ = @import("bench/stats.zig");
     _ = @import("crash/main.zig");
     _ = @import("datastruct/main.zig");
     _ = @import("inspector/main.zig");

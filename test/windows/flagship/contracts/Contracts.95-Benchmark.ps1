@@ -49,15 +49,65 @@ foreach ($threshold in $thresholds) {
     }
 }
 
+# Each gate command is pinned as a whole line, followed by the exit-code check
+# that lets its failure fail the step. Matching argument by argument let a
+# trailing `--min-mb-s=0` (the tool takes the last value, so it disables the
+# gate), a changed `--bytes` or a commented-out line through. The floors are for
+# the fastest run (docs/windows-benchmark-methodology.md, BENCH-VT-FLOOR-01).
+$benchmarkGateCommands = @(
+    'zig build bench:vt-throughput -- --workload=ascii --bytes=4194304 --seed=121 --runs=60 --rows=45 --cols=140 --min-mb-s=50'
+    'zig build bench:vt-throughput -- --workload=utf8 --bytes=4194304 --seed=121 --runs=60 --rows=45 --cols=140 --min-mb-s=35'
+    'zig build bench:vt-throughput -- --workload=osc --bytes=4194304 --seed=121 --runs=20 --rows=45 --cols=140 --min-mb-s=3'
+    'zig build bench:vt-throughput -- --workload=scroll --bytes=4194304 --seed=121 --runs=60 --rows=45 --cols=140 --min-mb-s=50'
+    'zig build bench:palette-match -- --entries=5000 --keystrokes=5000 --budget-us=2500'
+)
+$benchmarkGateLinePatterns = foreach ($command in $benchmarkGateCommands) {
+    '^[ \t]*' + [regex]::Escape($command) + '[ \t]*\r?\n[ \t]*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}[ \t]*\r?$'
+}
+$benchmarkGateStepPattern = '(?ms)' + ($benchmarkGateLinePatterns -join '.*?')
+# Exactly four throughput invocations in the job: an extra one could re-run a
+# workload with a floor of 0.
+$benchmarkGateCountPattern = '(?s)\A(?:(?!bench:vt-throughput).)*(?:bench:vt-throughput(?:(?!bench:vt-throughput).)*){4}\z'
+# The runner's CPU is logged to read a failure against; looking it up must never
+# be able to fail the step before any benchmark runs.
+$benchmarkGateCpuLine = "try { Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()) } catch { Write-Host 'runner cpu: unknown' }"
+$benchmarkGateCpuPattern = '(?m)^[ \t]*' + [regex]::Escape($benchmarkGateCpuLine) + '[ \t]*\r?$'
+$benchmarkGateStepName = 'Headless benchmark regression gates'
+
+function Test-BenchmarkGateJob([string] $JobText) {
+    $step = Get-YamlStepBlock -Content $JobText -Name $benchmarkGateStepName -Source $testWorkflow
+    [regex]::IsMatch($step, $benchmarkGateStepPattern) -and
+    [regex]::IsMatch($step, $benchmarkGateCpuPattern) -and
+    [regex]::IsMatch($JobText, $benchmarkGateCountPattern)
+}
+
 Invoke-ContractTable -Contracts @(
+    @{
+        File = "$testWorkflow :: bench headless benchmark gates"
+        Content = {
+            (Get-YamlStepBlock -Content (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow) -Name $benchmarkGateStepName -Source $testWorkflow)
+        }
+        Pattern = $benchmarkGateStepPattern
+        Kind = 'Text'
+        Description = 'CI runs every headless throughput floor on the fastest of 60 runs (20 for OSC) and the palette budget, each command exactly'
+    }
+    @{
+        File = "$testWorkflow :: bench headless benchmark gates"
+        Content = {
+            (Get-YamlStepBlock -Content (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow) -Name $benchmarkGateStepName -Source $testWorkflow)
+        }
+        Pattern = $benchmarkGateCpuPattern
+        Kind = 'Text'
+        Description = 'the gate step logs the runner CPU best effort, so the lookup cannot fail the step'
+    }
     @{
         File = "$testWorkflow :: bench headless benchmark gates"
         Content = {
             (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow)
         }
-        Pattern = '(?ms)- name: Headless benchmark regression gates.*?--workload=ascii.*?--min-mb-s=50.*?--workload=utf8.*?--min-mb-s=35.*?--workload=osc.*?--min-mb-s=3.*?--workload=scroll.*?--min-mb-s=50.*?bench:palette-match.*?--budget-us=2500'
+        Pattern = $benchmarkGateCountPattern
         Kind = 'Text'
-        Description = 'CI runs every headless throughput floor and the palette budget'
+        Description = 'the bench job invokes the throughput gate exactly four times'
     }
     @{
         File = $benchmarkHarness
@@ -172,3 +222,46 @@ Invoke-ContractTable -Contracts @(
         Description = 'the frame-time p95 threshold compares the p95 statistic rather than the median'
     }
 )
+
+# Negative controls for the gate commands above. They mutate only the workflow
+# text already read and never run anything. Every mutant must be rejected: the
+# trailing floor of 0, the changed bytes, the commented-out line and the
+# unchecked exit code each left the older argument-by-argument pattern passing.
+$benchmarkGateJob = Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow
+if (Test-BenchmarkGateJob $benchmarkGateJob) {
+    $gateCmd = $benchmarkGateCommands
+    $benchmarkGateMutants = [System.Collections.Generic.List[object]]::new()
+    foreach ($case in @(
+        @{ Index = 0; To = "$($gateCmd[0]) --min-mb-s=0" }
+        @{ Index = 3; To = "$($gateCmd[3]) --runs=1" }
+        @{ Index = 0; To = $gateCmd[0].Replace('--bytes=4194304', '--bytes=4096') }
+        @{ Index = 1; To = $gateCmd[1].Replace('--seed=121', '--seed=7') }
+        @{ Index = 2; To = $gateCmd[2].Replace('--rows=45', '--rows=4') }
+        @{ Index = 1; To = $gateCmd[1].Replace('--cols=140', '--cols=14') }
+        @{ Index = 0; To = "# $($gateCmd[0])" }
+        @{ Index = 3; To = "# $($gateCmd[3])" }
+        @{ Index = 0; To = $gateCmd[0].Replace('--min-mb-s=50', '--min-mb-s=40') }
+        @{ Index = 3; To = $gateCmd[3].Replace('--min-mb-s=50', '--min-mb-s=5') }
+        @{ Index = 1; To = $gateCmd[1].Replace('--min-mb-s=35', '--min-mb-s=3.5') }
+        @{ Index = 2; To = $gateCmd[2].Replace('--min-mb-s=3', '--min-mb-s=3e-9') }
+        @{ Index = 0; To = $gateCmd[0].Replace('--runs=60', '--runs=5') }
+        @{ Index = 0; To = $gateCmd[0].Replace('--runs=60', '--runs=600') }
+        @{ Index = 2; To = $gateCmd[2].Replace('--runs=20', '--runs=2') }
+        @{ Index = 4; To = $gateCmd[4].Replace('--budget-us=2500', '--budget-us=250000') }
+    )) {
+        $benchmarkGateMutants.Add(@{ Name = $case.To; Text = $benchmarkGateJob.Replace($gateCmd[$case.Index], $case.To) })
+    }
+    # A fifth throughput invocation after the real four, with its floor disabled.
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation'; Text = $benchmarkGateJob.TrimEnd() + "`n          $($gateCmd[0]) --min-mb-s=0`n" })
+    # A CPU lookup that can fail the step.
+    $benchmarkGateMutants.Add(@{ Name = 'a CPU lookup without try/catch'; Text = $benchmarkGateJob.Replace($benchmarkGateCpuLine, "Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim())") })
+    # A command whose exit code is no longer checked.
+    foreach ($command in $gateCmd) {
+        $unchecked = '(' + [regex]::Escape($command) + ')[ \t]*\r?\n[ \t]*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
+        $benchmarkGateMutants.Add(@{ Name = "no exit-code check after '$command'"; Text = [regex]::Replace($benchmarkGateJob, $unchecked, '$1') })
+    }
+    foreach ($mutant in $benchmarkGateMutants) {
+        if ($mutant.Text -ceq $benchmarkGateJob) { throw "Benchmark gate mutation '$($mutant.Name)' changed nothing." }
+        if (Test-BenchmarkGateJob $mutant.Text) { throw "Benchmark gate contract accepted '$($mutant.Name)'." }
+    }
+}
