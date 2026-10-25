@@ -12,7 +12,8 @@ hist = json.load(open(sys.argv[1], encoding="utf-8"))
 noise_dirs = sys.argv[2:]
 W = ("ascii", "utf8", "osc", "scroll")
 OLD = {"ascii": 50, "utf8": 35, "osc": 3, "scroll": 50}
-NEW = {"ascii": 40, "utf8": 35, "osc": 3, "scroll": 40}
+NEW = {"ascii": 50, "utf8": 35, "osc": 3, "scroll": 50}  # the gate
+LOW = {"ascii": 40, "utf8": 35, "osc": 3, "scroll": 40}  # the lower floor considered and rejected
 
 
 def clsname(cpu):
@@ -128,7 +129,15 @@ for d, c, runs, _ in runners:
         v = runs[w]
         ratios.append(statistics.median(v[:5]) / statistics.median(v[5:]))
 print(f"  long sequences, median(first 5)/median(rest): {min(ratios):.3f}..{max(ratios):.3f}, median {statistics.median(ratios):.3f}")
-ok = [e for e in hist if e.get("workloads")]
+_all = sorted((e for e in hist if e.get("workloads")), key=lambda e: (e["run"], e["attempt"]))
+_seen = set()
+ok = []
+for e in _all:
+    key = (e["run"], tuple((w, tuple(tuple(b) for b in e["workloads"].get(w, []))) for w in W))
+    if key not in _seen:
+        _seen.add(key)
+        ok.append(e)
+print(f"\n== historical jobs: {len(_all)} records with a parsed log, {len(ok)} unique (re-runs copy earlier jobs' logs)")
 for w in W:
     blocks = [b for e in ok for b in e["workloads"].get(w, []) if len(b) == 5]
     first_slowest = sum(1 for b in blocks if b[0] == min(b))
@@ -143,12 +152,78 @@ for w in W:
     fails = sum(1 for e, b in blocks if sorted(b)[2] < OLD[w])
     print(f"  {w}: blocks={len(blocks)} lowest fastest-of-5 {lo:.2f}; blocks the old gate (median<{OLD[w]}) failed: {fails}")
 
-print("\n== slowdown needed to fail the gate on the slowest class (EPYC 7763): class median / threshold")
+print("\n== slowdown needed to fail the gate = the runner's fastest run of its whole sequence / the floor")
 slow = [r for d, c, r, _ in runners if c == "EPYC 7763"]
-for w in W:
-    meds = [statistics.median(r[w]) for r in slow]
-    print(f"  {w}: old (median-of-5 < {OLD[w]}): {min(meds)/OLD[w]:.2f}-{max(meds)/OLD[w]:.2f}x   new (fastest-of-30 < {NEW[w]}): {min(meds)/NEW[w]:.2f}-{max(meds)/NEW[w]:.2f}x")
 fast = [r for d, c, r, _ in runners if c == "EPYC 9V45"]
+
+
+def best_of_gate(r, w):
+    return max(r[w][:20 if w == "osc" else 60])
+
+
 for w in W:
-    meds = [statistics.median(r[w]) for r in fast]
-    print(f"  fast class EPYC 9V45 {w}: new {min(meds)/NEW[w]:.2f}-{max(meds)/NEW[w]:.2f}x")
+    bests = [best_of_gate(r, w) for r in slow]
+    meds = [statistics.median(r[w]) for r in slow]
+    print(f"  slowest class (EPYC 7763, n={len(slow)}) {w}: new fastest-of-{'20' if w == 'osc' else '60'} / floor {NEW[w]}: {min(bests)/NEW[w]:.2f}-{max(bests)/NEW[w]:.2f}x"
+          f"   at floor {LOW[w]}: {min(bests)/LOW[w]:.2f}-{max(bests)/LOW[w]:.2f}x   old gate (median of five vs {OLD[w]}, runner medians): {min(meds)/OLD[w]:.2f}-{max(meds)/OLD[w]:.2f}x")
+for w in W:
+    bests = [best_of_gate(r, w) for r in fast]
+    print(f"  fast class (EPYC 9V45, n={len(fast)}) {w}: new / floor {NEW[w]}: {min(bests)/NEW[w]:.2f}-{max(bests)/NEW[w]:.2f}x")
+
+print("\n== floor / the slowest class's usual figure (median of the 16 EPYC 7763 runner medians)")
+for w in W:
+    usual = statistics.median([statistics.median(r[w]) for r in slow])
+    print(f"  {w}: usual {usual:.2f}; floor {NEW[w]} = {NEW[w]/usual:.2f}x (floor {LOW[w]} = {LOW[w]/usual:.2f}x)")
+
+print("\n== dev machine / runner: 195 197 115 13 (ASCII, scroll, UTF-8, OSC dev medians)")
+dev = {"ascii": 195, "utf8": 115, "osc": 13, "scroll": 196}
+for w in W:
+    for name, group in (("EPYC 7763", slow), ("EPYC 9V45", fast)):
+        usual = statistics.median([statistics.median(r[w]) for r in group])
+        print(f"  {w} {name}: dev / runner = {dev[w]/usual:.2f}x")
+
+print("\n== share of unique historical jobs that fail a uniform slowdown (best of the job's 5-run block / slowdown < floor)")
+for w in ("ascii", "scroll"):
+    blocks = [max(b) for e in ok for b in e["workloads"].get(w, []) if len(b) == 5]
+    for slowdown in (1.4, 1.5, 1.7, 2.0):
+        a = sum(1 for x in blocks if x / slowdown < NEW[w]) / len(blocks)
+        b = sum(1 for x in blocks if x / slowdown < LOW[w]) / len(blocks)
+        print(f"  {w} {slowdown}x: fails at {NEW[w]}: {100*a:.0f}%   at {LOW[w]}: {100*b:.0f}%   (n={len(blocks)})")
+
+print("\n== a CPU population not in the 28-runner sample (historical jobs only; the CPU was not logged)")
+odd = []
+for e in ok:
+    w = e["workloads"]
+    if not all(w.get(k) and len(w[k][0]) == 5 for k in W):
+        continue
+    u = w["utf8"][0]
+    spread = (max(u) - min(u)) / max(u)
+    if max(u) < 58.0 and spread < 0.05 and 65.0 <= max(w["ascii"][0]) <= 76.0:
+        odd.append((e["startedAt"][:10], e["run"], max(w["ascii"][0]), max(u), max(w["osc"][0]), max(w["scroll"][0])))
+print(f"  {len(odd)} unique jobs with a UTF-8 best-of-5 under 58, a block spread under 5% and ASCII 65-76:")
+for row in sorted(odd):
+    print("   ", row)
+if odd:
+    lo = min(r[3] for r in odd)
+    print(f"  UTF-8 best-of-5 {lo:.2f}-{max(r[3] for r in odd):.2f}; ASCII {min(r[2] for r in odd):.1f}-{max(r[2] for r in odd):.1f}; scroll {min(r[5] for r in odd):.1f}-{max(r[5] for r in odd):.1f}; OSC {min(r[4] for r in odd):.2f}-{max(r[4] for r in odd):.2f}")
+    print(f"  UTF-8 margin over its floor {NEW['utf8']}: {lo/NEW['utf8']:.2f}x (inferred class; the CPU was not logged)")
+
+print("\n== longest stretch of consecutive runs under the floor 50 (ASCII and scroll; EPYC 7763 runners)")
+for w in ("ascii", "scroll"):
+    best = (0, 0.0, "")
+    for d, c, runs, _ in runners:
+        if c != "EPYC 7763":
+            continue
+        v = runs[w]
+        cur = 0
+        secs = 0.0
+        for x in v:
+            if x < 50:
+                cur += 1
+                secs += 4194304 / 1e6 / x
+                if cur > best[0]:
+                    best = (cur, secs, os.path.basename(d))
+            else:
+                cur = 0
+                secs = 0.0
+    print(f"  {w}: {best[0]} runs, about {best[1]:.1f} s ({best[2]}); failing the gate takes all 60 runs under 50, which is 5 s or more")
