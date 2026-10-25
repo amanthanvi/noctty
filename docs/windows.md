@@ -1606,8 +1606,8 @@ the same file.
 
 An elevated window started by noctty is given only a short command line: the
 config files above (`--config-file` and `--config-default-files`),
-`--visual-studio-profiles`, the working directory and window class of the
-window it was opened from, and the profile it should run. Other command-line
+`--visual-studio-profiles`, the working directory of the pane it was opened
+from, noctty's window class, and the profile it should run. Other command-line
 overrides are not forwarded, so `--env=NAME=value`, `--font-size` and the rest
 do not reach it. That is deliberate for `--env=`: a forwarded value would
 appear on the elevated process's command line, where other programs can read
