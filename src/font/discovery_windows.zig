@@ -59,6 +59,9 @@ pub const Windows = struct {
     /// hold a scan inside a file or stop it there.
     test_scan_hook: if (builtin.is_test) ?TestScanHook else void = if (builtin.is_test) null else {},
 
+    /// Tests can replace registry reads without writing installed font keys.
+    test_registry: if (builtin.is_test) ?TestRegistry else void = if (builtin.is_test) null else {},
+
     /// Snapshot of the font sources at the time of the last successful
     /// scan; used by `refresh` to skip rescanning when nothing changed.
     /// Null means we have never scanned.
@@ -80,6 +83,12 @@ pub const Windows = struct {
     pub const TestScanHook = struct {
         ctx: *anyopaque,
         call: *const fn (ctx: *anyopaque, disco: *Windows, path: [:0]const u8) void,
+    };
+
+    const TestRegistry = struct {
+        ctx: *anyopaque,
+        collect: *const fn (*anyopaque, Allocator, winreg.HKEY, *std.ArrayListUnmanaged([:0]const u8), *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!void,
+        last_write: *const fn (*anyopaque, winreg.HKEY) ?u64,
     };
 
     const Record = struct {
@@ -520,6 +529,10 @@ pub const Windows = struct {
         if (self.system_dir) |dir| try collectDirFontPaths(alloc, dir, &paths, &seen);
         if (self.user_dir) |dir| try collectDirFontPaths(alloc, dir, &paths, &seen);
         for (font_registry_roots) |root| {
+            if (comptime builtin.is_test) if (self.test_registry) |registry| {
+                try registry.collect(registry.ctx, alloc, root, &paths, &seen);
+                continue;
+            };
             try collectRegistryFontPaths(alloc, root, self.system_dir, &paths, &seen);
         }
 
@@ -1159,7 +1172,11 @@ pub const Windows = struct {
                 if (std.ascii.eqlIgnoreCase(typographic, family)) result |= 1 << 19;
                 if (containsIgnoreCase(typographic, family)) result |= 1 << 17;
             }
-            if (std.ascii.eqlIgnoreCase(record.full_name, family)) result |= 1 << 18;
+            // A Regular-named VF is a new bold candidate only because of
+            // its axis. Its default name must not outrank a real Bold.
+            if (std.ascii.eqlIgnoreCase(record.full_name, family) and
+                !(desc.bold and !(record.bold or record.weight >= 600) and isBold(record)))
+                result |= 1 << 18;
             if (containsIgnoreCase(record.family_name, family)) result |= 1 << 17;
         }
 
@@ -1191,8 +1208,9 @@ pub const Windows = struct {
         result |= weightRank(desc, record) << 8;
 
         if (desc.variations.len > 0 and record.variable) result |= 1 << 7;
-        // Prefer a real static style on a tie unless axes were requested.
-        if (desc.variations.len == 0 and !record.variable) result |= 1 << 5;
+        // New bold candidates must not displace an otherwise equal static
+        // style. Preserve regular/fallback scan order and explicit axes.
+        if (desc.bold and desc.variations.len == 0 and !record.variable) result |= 1 << 5;
         if (record.color) result |= 1 << 6;
 
         return result;
@@ -1273,9 +1291,15 @@ pub const Windows = struct {
         return .{
             .system_mtime = if (self.system_dir) |dir| dirMtime(dir) else null,
             .user_mtime = if (self.user_dir) |dir| dirMtime(dir) else null,
-            .registry_write = registryLastWrite(winreg.HKEY_CURRENT_USER),
-            .machine_registry_write = registryLastWrite(winreg.HKEY_LOCAL_MACHINE),
+            .registry_write = self.registryWrite(winreg.HKEY_CURRENT_USER),
+            .machine_registry_write = self.registryWrite(winreg.HKEY_LOCAL_MACHINE),
         };
+    }
+
+    fn registryWrite(self: *const Windows, root: winreg.HKEY) ?u64 {
+        if (comptime builtin.is_test) if (self.test_registry) |registry|
+            return registry.last_write(registry.ctx, root);
+        return registryLastWrite(root);
     }
 
     fn dirMtime(path: [:0]const u8) ?i128 {
@@ -2011,6 +2035,78 @@ fn fixtureFonts() [3]Fixture {
     };
 }
 
+test "FONTVF HKLM paths and last-write changes reach the scan" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "machine-only.ttf", .data = @import("embedded.zig").regular });
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "machine-only.ttf");
+    defer testing.allocator.free(path);
+    const FixtureRegistry = struct {
+        path: []const u8,
+        machine_write: u64 = 7,
+        user_reads: usize = 0,
+        machine_reads: usize = 0,
+        scanned: usize = 0,
+
+        fn collect(ctx: *anyopaque, alloc: Allocator, root: Windows.winreg.HKEY, paths: *std.ArrayListUnmanaged([:0]const u8), seen: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            switch (root) {
+                Windows.winreg.HKEY_CURRENT_USER => self.user_reads += 1,
+                Windows.winreg.HKEY_LOCAL_MACHINE => {
+                    self.machine_reads += 1;
+                    try Windows.addUniquePath(alloc, paths, seen, self.path);
+                },
+                else => unreachable,
+            }
+        }
+
+        fn lastWrite(ctx: *anyopaque, root: Windows.winreg.HKEY) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return switch (root) {
+                Windows.winreg.HKEY_CURRENT_USER => 3,
+                Windows.winreg.HKEY_LOCAL_MACHINE => self.machine_write,
+                else => unreachable,
+            };
+        }
+
+        fn scan(ctx: *anyopaque, _: *Windows, scanned_path: [:0]const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.eql(u8, self.path, scanned_path)) self.scanned += 1;
+        }
+    };
+    var registry: FixtureRegistry = .{ .path = path };
+    var disco: Windows = .{
+        .alloc = testing.allocator,
+        .system_dir = null,
+        .user_dir = null,
+        .records = try testing.allocator.alloc(Windows.Record, 0),
+        .mutex = .{},
+        .state = null,
+        .test_registry = .{ .ctx = &registry, .collect = FixtureRegistry.collect, .last_write = FixtureRegistry.lastWrite },
+        .test_scan_hook = .{ .ctx = &registry, .call = FixtureRegistry.scan },
+    };
+    defer disco.deinit();
+    disco.refresh();
+    try testing.expectEqual(@as(usize, 1), registry.user_reads);
+    try testing.expectEqual(@as(usize, 1), registry.machine_reads);
+    try testing.expectEqual(@as(usize, 1), registry.scanned);
+    try testing.expectEqual(@as(usize, 1), disco.records.len);
+    try testing.expectEqualStrings(path, disco.records[0].path);
+    const state = disco.state orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(?u64, 3), state.registry_write);
+    try testing.expectEqual(@as(?u64, 7), state.machine_registry_write);
+    disco.refresh();
+    try testing.expectEqual(@as(u64, 1), disco.generation);
+    // Only the machine timestamp changes: refresh must rescan, then settle.
+    registry.machine_write = 8;
+    disco.refresh();
+    try testing.expectEqual(@as(u64, 2), disco.generation);
+    try testing.expectEqual(@as(usize, 2), registry.scanned);
+    disco.refresh();
+    try testing.expectEqual(@as(u64, 2), disco.generation);
+}
+
 test "FONTVF Lilex bold discovery applies weight without overriding explicit axes" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
     const alloc = testing.allocator;
@@ -2026,8 +2122,9 @@ test "FONTVF Lilex bold discovery applies weight without overriding explicit axe
     try testing.expect(disco.records[0].variable);
     try testing.expect(!disco.records[0].bold);
     try testing.expect(disco.records[0].weight < 600);
-    try testing.expectEqual(@as(f64, 100), disco.records[0].weight_axis.?.minimum);
-    try testing.expectEqual(@as(f64, 700), disco.records[0].weight_axis.?.maximum);
+    const axis = disco.records[0].weight_axis orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(f64, 100), axis.minimum);
+    try testing.expectEqual(@as(f64, 700), axis.maximum);
     var it = try disco.discover(alloc, .{ .family = "Lilex", .bold = true });
     defer it.deinit();
     var bold = (try it.next()) orelse return error.TestUnexpectedResult;
@@ -2062,6 +2159,28 @@ test "FONTVF Lilex bold discovery applies weight without overriding explicit axe
     try testing.expectEqual(@as(usize, 0), plain.win.variations.len);
 }
 
+test "FONTVF mixed static and variable family preserves real Bold" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    const embedded = @import("embedded.zig");
+    const regular: Fixture = .{ .name = "JetBrainsMono-Regular.ttf", .data = embedded.regular };
+    const bold: Fixture = .{ .name = "JetBrainsMono-Bold.ttf", .data = embedded.bold };
+    const variable: Fixture = .{ .name = "JetBrainsMono[wght].ttf", .data = embedded.variable };
+    // Both scan orders: a tie that merely happens to favor the first
+    // static face would conceal a missing static preference.
+    for ([_][3]Fixture{ .{ regular, bold, variable }, .{ variable, bold, regular } }) |fixtures| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var disco = try fixtureDiscovery(tmp.dir, &fixtures);
+        defer disco.deinit();
+        var it = try disco.discover(testing.allocator, .{ .family = "JetBrains Mono", .bold = true });
+        defer it.deinit();
+        var face = (try it.next()) orelse return error.TestUnexpectedResult;
+        defer face.deinit();
+        try testing.expect(std.mem.endsWith(u8, face.win.path, bold.name));
+        try testing.expectEqual(@as(usize, 0), face.win.variations.len);
+    }
+}
+
 test "FONTVF weight range eligibility ranking and other axes" {
     var vf = nerdFontRecords()[3];
     vf.variable = true;
@@ -2077,6 +2196,20 @@ test "FONTVF weight range eligibility ranking and other axes" {
     static_bold.bold = true;
     try testing.expect(Windows.score(.{}, vf) > Windows.score(.{}, static_bold));
     try testing.expect(Windows.score(bold, static_bold) > Windows.score(bold, vf));
+    // A regular-default VF must keep the regular bucket even though its
+    // axis can also serve bold. A static Medium exposes a lost bucket.
+    var medium = static_bold;
+    medium.weight = 500;
+    medium.bold = false;
+    try testing.expect(Windows.score(.{ .family = vf.family_name }, vf) >
+        Windows.score(.{ .family = vf.family_name }, medium));
+    // Non-bold queries retain their original ties and stable scan order.
+    var static_regular = vf;
+    static_regular.variable = false;
+    static_regular.weight_axis = null;
+    for ([_]Descriptor{ .{}, .{ .family = vf.family_name }, .{ .codepoint = 'A' }, .{ .italic = true } }) |desc| {
+        try testing.expectEqual(Windows.score(desc, vf), Windows.score(desc, static_regular));
+    }
     // Static preference breaks an otherwise equal score; it must not
     // override the pre-existing preference for a color-capable face.
     var color_vf = vf;

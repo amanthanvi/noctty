@@ -1454,12 +1454,16 @@ for bold text. An explicit `wght` in `font-variation-bold` or
 `font-variation-bold-italic` takes precedence; other configured axes are
 preserved. Regular and italic-only requests receive no automatic weight
 override.
-Otherwise equal matches prefer a static face unless variations were
-explicitly requested.
+For bold requests, otherwise equal matches prefer a static face unless
+variations were explicitly requested. A variable font's Regular name does
+not outrank the same family's static Bold. Regular and fallback queries
+retain their existing ordering.
 
 `noctty +list-fonts --family="Cascadia Code" --bold` lists matching installed
 faces. Discovery does not enumerate variable fonts' named instances or add
-localized family-name aliases.
+localized family-name aliases. Scan cancellation is checked between files;
+one blocked font-file open, including an unreachable network path in an
+HKCU or HKLM registration, can still delay shutdown.
 
 ## Font stroke weight
 
