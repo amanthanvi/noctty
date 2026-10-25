@@ -68,8 +68,14 @@ The four sampled classes are not the whole pool. The historical logs hold 11
 unique jobs (2026-10-18 to 10-23) with a profile none of them has: a steady
 UTF-8 best of five of 51.6-57.7 MB/s (block spread under 5%) beside ASCII at
 65.8-73.4, scroll 67.3-75.1 and OSC 5.6-6.5. The CPU was not logged there, so
-another class is inferred, not shown. Its UTF-8 margin over the floor of 35 is
-51.56 / 35 = 1.47x.
+what they are is inferred, not shown. About six of the 11 (UTF-8 52.4-54.0, OSC
+6.1-6.45) are a steady group that looks like a fifth CPU population. Four (UTF-8
+56.2-57.7, OSC 5.6-5.9) look like the low end of the EPYC 7763: jobs in the same
+logs with the same ASCII, an OSC under 6.0 and a wider block spread reach UTF-8
+55.05-57.80. The last, the lowest (UTF-8 51.56), also had its ASCII block depressed
+(runs 2-5 at 52.9-58.3 against 67.5 for the first), so it may be an episode on an
+EPYC 7763. Either way the UTF-8 margin over the floor of 35 is 1.47-1.50x
+(51.56 / 35 and 52.38 / 35).
 
 **Noise only slows a run down, and it comes in episodes.** The old gate (median
 of five against 50 MB/s) failed three of the historical blocks, and none
@@ -103,7 +109,7 @@ runs: 1.34x, 1.70x, 1.38x and 1.94x over the floors. A fastest of 60 cannot fail
 where the best of its first five passes, and in the historical logs the best of
 five was under 50 in 0 of 420 unique ASCII and 0 of 418 unique scroll blocks
 (the lowest were 51.25 and 59.67; UTF-8 51.56 and OSC 5.45). Only the
-inferred class above has a UTF-8 margin as small as 1.47x.
+inferred jobs above have a UTF-8 margin as small as 1.47-1.50x.
 
 **Why ASCII and scroll stay at 50.** A lower floor of 40 was considered and
 rejected: the statistic is what removes the noise failures, and lowering the
@@ -111,13 +117,17 @@ floor is a separate change that gives up coverage the old gate had. Taking the
 fastest run of each EPYC 7763 sequence, the gate fails at a slowdown of 1.34-1.37x
 (ASCII) and 1.38-1.39x (scroll), the same as the old gate on ASCII (1.33-1.36x of
 the runner medians); at 40 it would need 1.68-1.71x and 1.73-1.74x. Applied to
-the best of each unique historical block, a uniform 1.5x slowdown fails 60% of
-jobs at 50 and none at 40, 1.7x fails 64% (ASCII) and 63% (scroll) at 50 and 11%
-and 2% at 40, and 2x fails 82% against 61% and 60%. That 60% is the share of jobs
-on the slowest class (16 of the 28 sampled runners; a best ASCII block under 75
-MB/s), where a 1.4x-1.7x slowdown is caught at 50 and almost never at 40. The
-nightly trend job is report-only and records no CPU, so nothing else would catch
-it. 50 is also stable: the lowest fastest-of-60 sat 34% (ASCII) and 38% (scroll)
+the best of each unique historical block, a uniform 1.4x slowdown fails 30% of
+jobs at 50 and none at 40, 1.5x fails 60% against none, 1.7x fails 64% (ASCII)
+and 63% (scroll) at 50 and 11% and 2% at 40, and 2x fails 82% against 61% and
+60%. The 60% at 1.5x is the share of jobs whose best ASCII block is under 75
+MB/s: the slowest class and the inferred jobs above, which run at about the same
+ASCII speed (16 of the 28 sampled runners, 57%, are on the slowest class). A 1.4x
+slowdown sits at the edge of the 1.34-1.39x the gate needs there, so it is caught
+on about 30% of jobs, half of what 1.5x catches; from 1.5x to 1.7x the gate
+catches most jobs at 50, and a floor of 40 catches none at 1.5x and 11% or fewer
+at 1.7x. The nightly trend job is report-only and records no CPU, so nothing else
+would catch it. 50 is also stable: the lowest fastest-of-60 sat 34% (ASCII) and 38% (scroll)
 above it, and the longest stretch of consecutive runs under 50 on the slowest
 class was 11 runs, about 1.0 s (one scroll sequence; ASCII never went under 50
 there), whereas failing the gate takes all 60 runs under 50, which is 5 s or more.

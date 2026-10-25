@@ -66,8 +66,12 @@ $benchmarkGateLinePatterns = foreach ($command in $benchmarkGateCommands) {
 }
 $benchmarkGateStepPattern = '(?ms)' + ($benchmarkGateLinePatterns -join '.*?')
 # Exactly four throughput invocations in the job: an extra one could re-run a
-# workload with a floor of 0.
+# workload with a floor of 0. Comment lines are not invocations, so a note in
+# the job that names the step does not count; every other line that names it does.
 $benchmarkGateCountPattern = '(?s)\A(?:(?!bench:vt-throughput).)*(?:bench:vt-throughput(?:(?!bench:vt-throughput).)*){4}\z'
+function Get-BenchmarkGateCountText([string] $JobText) {
+    [regex]::Replace($JobText, '(?m)^[ \t]*#[^\r\n]*', '')
+}
 # The runner's CPU is logged to read a failure against; looking it up must never
 # be able to fail the step before any benchmark runs.
 $benchmarkGateCpuLine = "try { Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim()) } catch { Write-Host 'runner cpu: unknown' }"
@@ -78,7 +82,7 @@ function Test-BenchmarkGateJob([string] $JobText) {
     $step = Get-YamlStepBlock -Content $JobText -Name $benchmarkGateStepName -Source $testWorkflow
     [regex]::IsMatch($step, $benchmarkGateStepPattern) -and
     [regex]::IsMatch($step, $benchmarkGateCpuPattern) -and
-    [regex]::IsMatch($JobText, $benchmarkGateCountPattern)
+    [regex]::IsMatch((Get-BenchmarkGateCountText $JobText), $benchmarkGateCountPattern)
 }
 
 Invoke-ContractTable -Contracts @(
@@ -103,11 +107,11 @@ Invoke-ContractTable -Contracts @(
     @{
         File = "$testWorkflow :: bench headless benchmark gates"
         Content = {
-            (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow)
+            Get-BenchmarkGateCountText (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow)
         }
         Pattern = $benchmarkGateCountPattern
         Kind = 'Text'
-        Description = 'the bench job invokes the throughput gate exactly four times'
+        Description = 'the bench job invokes the throughput gate exactly four times, comment lines aside'
     }
     @{
         File = $benchmarkHarness
@@ -227,6 +231,7 @@ Invoke-ContractTable -Contracts @(
 # text already read and never run anything. Every mutant must be rejected: the
 # trailing floor of 0, the changed bytes, the commented-out line and the
 # unchecked exit code each left the older argument-by-argument pattern passing.
+# One positive control follows them: a comment line that names the step is accepted.
 $benchmarkGateJob = Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow
 if (Test-BenchmarkGateJob $benchmarkGateJob) {
     $gateCmd = $benchmarkGateCommands
@@ -253,6 +258,9 @@ if (Test-BenchmarkGateJob $benchmarkGateJob) {
     }
     # A fifth throughput invocation after the real four, with its floor disabled.
     $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation'; Text = $benchmarkGateJob.TrimEnd() + "`n          $($gateCmd[0]) --min-mb-s=0`n" })
+    # The same, behind a `#` that is not the first character of its line: only a line
+    # that starts with `#` is a comment.
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation behind a mid-line #'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host '#'; $($gateCmd[0]) --min-mb-s=0`n" })
     # A CPU lookup that can fail the step.
     $benchmarkGateMutants.Add(@{ Name = 'a CPU lookup without try/catch'; Text = $benchmarkGateJob.Replace($benchmarkGateCpuLine, "Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim())") })
     # A command whose exit code is no longer checked.
@@ -264,4 +272,10 @@ if (Test-BenchmarkGateJob $benchmarkGateJob) {
         if ($mutant.Text -ceq $benchmarkGateJob) { throw "Benchmark gate mutation '$($mutant.Name)' changed nothing." }
         if (Test-BenchmarkGateJob $mutant.Text) { throw "Benchmark gate contract accepted '$($mutant.Name)'." }
     }
+    # Positive control: a comment line that names the step is not an invocation. The
+    # unfiltered count rejects the same text, so this exercises the comment filter.
+    $benchmarkGateCommented = $benchmarkGateJob.Replace($gateCmd[0], "# the floors below run bench:vt-throughput four times`n          $($gateCmd[0])")
+    if ($benchmarkGateCommented -ceq $benchmarkGateJob) { throw 'The benchmark gate comment control changed nothing.' }
+    if ([regex]::IsMatch($benchmarkGateCommented, $benchmarkGateCountPattern)) { throw 'The benchmark gate comment control does not reach the invocation count.' }
+    if (-not (Test-BenchmarkGateJob $benchmarkGateCommented)) { throw 'Benchmark gate contract rejected a comment that names the step.' }
 }
