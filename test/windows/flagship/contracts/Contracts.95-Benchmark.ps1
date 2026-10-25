@@ -66,12 +66,15 @@ $benchmarkGateLinePatterns = foreach ($command in $benchmarkGateCommands) {
 }
 $benchmarkGateStepPattern = '(?ms)' + ($benchmarkGateLinePatterns -join '.*?')
 # Exactly four throughput invocations in the job: an extra one could re-run a
-# workload with a floor of 0. Comment lines (a line that starts with `#`, as in the
-# job's pwsh steps) are not invocations, so a note in the job that names the step
-# does not count; every other line that names it does.
+# workload with a floor of 0. Comments (a line that starts with `#`, or a `<# ... #>`
+# block, as in the job's pwsh steps) are not invocations, so a note in the job that
+# names the step does not count; every other line that names it does.
 $benchmarkGateCountPattern = '(?s)\A(?:(?!bench:vt-throughput).)*(?:bench:vt-throughput(?:(?!bench:vt-throughput).)*){4}\z'
+# One left-to-right pass, so a `<#` inside a line comment opens no block and a `#` line
+# inside a block closes nothing early.
+$benchmarkGateCommentPattern = '<#.*?#>|^[ \t]*#[^\r\n]*'
 function Get-BenchmarkGateCountText([string] $JobText) {
-    [regex]::Replace($JobText, '(?m)^[ \t]*#[^\r\n]*', '')
+    [regex]::Replace($JobText, $benchmarkGateCommentPattern, '', [System.Text.RegularExpressions.RegexOptions]'Singleline, Multiline')
 }
 # The runner's CPU is logged to read a failure against; looking it up must never
 # be able to fail the step before any benchmark runs.
@@ -232,7 +235,7 @@ Invoke-ContractTable -Contracts @(
 # text already read and never run anything. Every mutant must be rejected: the
 # trailing floor of 0, the changed bytes, the commented-out line and the
 # unchecked exit code each left the older argument-by-argument pattern passing.
-# One positive control follows them: a comment line that names the step is accepted.
+# Positive controls follow them: comments that name the step are accepted.
 $benchmarkGateJob = Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow
 if (Test-BenchmarkGateJob $benchmarkGateJob) {
     $gateCmd = $benchmarkGateCommands
@@ -263,6 +266,12 @@ if (Test-BenchmarkGateJob $benchmarkGateJob) {
     # space, so a filter that cuts at any `#` preceded by whitespace fails too): only a
     # line that starts with `#` is a comment.
     $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation behind a mid-line #'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host ' #'; $($gateCmd[0]) --min-mb-s=0`n" })
+    # Block comments only hide what they enclose: an invocation after a closed one, one
+    # behind a `#>` with no opener, and one between two blocks (a greedy `<#.*#>` would
+    # swallow it) all still run.
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation after a closed block comment'; Text = $benchmarkGateJob.TrimEnd() + "`n          <# note #> $($gateCmd[0]) --min-mb-s=0`n" })
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation behind a lone #>'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host '#>'; $($gateCmd[0]) --min-mb-s=0`n" })
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation between two block comments'; Text = $benchmarkGateJob.TrimEnd() + "`n          <# a #>`n          $($gateCmd[0]) --min-mb-s=0`n          <# b #>`n" })
     # A CPU lookup that can fail the step.
     $benchmarkGateMutants.Add(@{ Name = 'a CPU lookup without try/catch'; Text = $benchmarkGateJob.Replace($benchmarkGateCpuLine, "Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim())") })
     # A command whose exit code is no longer checked.
@@ -274,10 +283,20 @@ if (Test-BenchmarkGateJob $benchmarkGateJob) {
         if ($mutant.Text -ceq $benchmarkGateJob) { throw "Benchmark gate mutation '$($mutant.Name)' changed nothing." }
         if (Test-BenchmarkGateJob $mutant.Text) { throw "Benchmark gate contract accepted '$($mutant.Name)'." }
     }
-    # Positive control: a comment line that names the step is not an invocation. The
-    # unfiltered count rejects the same text, so this exercises the comment filter.
-    $benchmarkGateCommented = $benchmarkGateJob.Replace($gateCmd[0], "# the floors below run bench:vt-throughput four times`n          $($gateCmd[0])")
-    if ($benchmarkGateCommented -ceq $benchmarkGateJob) { throw 'The benchmark gate comment control changed nothing.' }
-    if ([regex]::IsMatch($benchmarkGateCommented, $benchmarkGateCountPattern)) { throw 'The benchmark gate comment control does not reach the invocation count.' }
-    if (-not (Test-BenchmarkGateJob $benchmarkGateCommented)) { throw 'Benchmark gate contract rejected a comment that names the step.' }
+    # Positive controls: a comment that names the step is not an invocation. The
+    # unfiltered count rejects each of these texts, so they exercise the comment filter.
+    # The last one opens a `<#` inside a line comment and closes a block at the end of
+    # the job: a filter that strips block comments before line comments would pair
+    # them and swallow the four real invocations between.
+    $benchmarkGateCommentedJobs = @(
+        $benchmarkGateJob.Replace($gateCmd[0], "# the floors below run bench:vt-throughput four times`n          $($gateCmd[0])")
+        $benchmarkGateJob.Replace($gateCmd[0], "<# the floors below run bench:vt-throughput four times #>`n          $($gateCmd[0])")
+        $benchmarkGateJob.Replace($gateCmd[0], "<#`n          the floors below run`n          bench:vt-throughput four times`n          #>`n          $($gateCmd[0])")
+        $benchmarkGateJob.Replace($gateCmd[0], "# a note that mentions <# and never closes it`n          $($gateCmd[0])").TrimEnd() + "`n          <# bench:vt-throughput is pinned #>`n"
+    )
+    foreach ($benchmarkGateCommented in $benchmarkGateCommentedJobs) {
+        if ($benchmarkGateCommented -ceq $benchmarkGateJob) { throw 'The benchmark gate comment control changed nothing.' }
+        if ([regex]::IsMatch($benchmarkGateCommented, $benchmarkGateCountPattern)) { throw 'The benchmark gate comment control does not reach the invocation count.' }
+        if (-not (Test-BenchmarkGateJob $benchmarkGateCommented)) { throw 'Benchmark gate contract rejected a comment that names the step.' }
+    }
 }
