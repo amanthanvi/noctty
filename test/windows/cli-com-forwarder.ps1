@@ -4,7 +4,7 @@ PKG-74 / D20 baseline and replacement regression harness (x64 and ARM64).
 Requires a measure-AUMID portable directory with noctty.com, noctty.exe,
 noctty.portable and share/ghostty, plus the windowless desktop fixture built
 from test/windows/cli-com-fixture.zig. Does not build anything.
-Run: ./test/windows/cli-com-forwarder.ps1 -BinDir <portable> -OutputDir <new-dir> [-DesktopFixture <exe>] [-ThinForwarder]
+Run: ./test/windows/cli-com-forwarder.ps1 -BinDir <portable> -OutputDir <new-dir> [-DesktopFixture <exe>] [-ThinForwarder] [-ExerciseInheritedCtrlCIgnore]
 Alternatively -ExePath <portable/noctty.com>. Evidence is retained in OutputDir.
 -DesktopFixture defaults to <repo>/zig-out/cli-com-fixture.exe and must exist.
 The no-action GUI case writes gui-close.json on every run: StageMs holds the
@@ -34,8 +34,9 @@ started that way. The driver now clears the attribute with
 SetConsoleCtrlHandler(NULL, FALSE) before it starts any child (CLIFWD-CTRLC-
 HARNESS-01, after #477). -ExerciseInheritedCtrlCIgnore is the positive control:
 the controller starts the driver under CREATE_NEW_PROCESS_GROUP, and the driver
-asserts that it really arrived ignoring Ctrl+C and that the reset cleared it, so
-removing the reset fails the Ctrl+C case.
+asserts that it really arrived ignoring Ctrl+C and that the reset cleared it.
+Removing the reset fails that check at once; removing the check as well fails
+the Ctrl+C case with its original message.
 #>
 [CmdletBinding()]
 param(
@@ -209,11 +210,12 @@ $desktopHandle = [ComCliNative]::DriverDesktop($DesktopName)
 # Clear an inherited Ctrl+C-ignore attribute before this driver starts any child,
 # or the Ctrl+C case below has no process to interrupt (see the header note).
 $ctrlCIgnoredOnEntry = [ComCliNative]::CtrlCIgnored()
-Assert-Condition ($ctrlCIgnoredOnEntry -or -not $ExerciseInheritedCtrlCIgnore) 'The seeded driver did not inherit the Ctrl+C ignore attribute, so the positive control proves nothing.'
 [ComCliNative]::EnableCtrlC()
-Assert-Condition (-not [ComCliNative]::CtrlCIgnored()) 'Enabling Ctrl+C did not clear the driver''s ignore attribute.'
-@{ Pid = $PID; DetachedOnly = $DetachedOnly.IsPresent; HasConsole = [ComCliNative]::HasConsole(); Desktop = $DesktopName; CtrlCIgnoredOnEntry = $ctrlCIgnoredOnEntry } |
+$ctrlCIgnoredAfterReset = [ComCliNative]::CtrlCIgnored()
+@{ Pid = $PID; DetachedOnly = $DetachedOnly.IsPresent; HasConsole = [ComCliNative]::HasConsole(); Desktop = $DesktopName; CtrlCIgnoredOnEntry = $ctrlCIgnoredOnEntry; CtrlCIgnoredAfterReset = $ctrlCIgnoredAfterReset } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDir "driver-$($DetachedOnly.IsPresent).json") -Encoding utf8NoBOM
+Assert-Condition ($ctrlCIgnoredOnEntry -or -not $ExerciseInheritedCtrlCIgnore) 'The seeded driver did not inherit the Ctrl+C ignore attribute, so the positive control proves nothing.'
+Assert-Condition (-not $ctrlCIgnoredAfterReset) 'Enabling Ctrl+C did not clear the driver''s ignore attribute.'
 $com = Join-Path $BinDir 'noctty.com'
 $gui = Join-Path $BinDir 'noctty.exe'
 $results = [Collections.Generic.List[object]]::new()
