@@ -121,9 +121,9 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
     Set-Content -LiteralPath (Join-Path $bin 'config.ghostty') -Value ($config -join "`n") -Encoding utf8
     $environment = @{ LOCALAPPDATA = (Join-Path $run 'LocalAppData'); APPDATA = (Join-Path $run 'AppData'); NOCTTY_RENDERER_CAPTURE_PATH = (Join-Path $run 'frame.bmp'); NOCTTY_RENDERER_STATUS_PATH = (Join-Path $run 'renderer.json'); NOCTTY_RENDERER_READY_PATH = (Join-Path $run 'ready.txt'); NOCTTY_RENDERER_HIDE_NOTICES = '1' }
     foreach ($key in $ExtraEnvironment.Keys) { $environment[$key] = $ExtraEnvironment[$key] }
-    # The fallback case reads its banner through UIA. An info banner's
-    # countdown starts when it is set, so on a slow cold launch it could be
-    # gone before the first read; this test-tools switch keeps it up.
+    # The fallback case reads its banner through UIA. An info banner counts
+    # down from its first paint, but a slow UIA client may not reach it until
+    # the countdown is over; this test-tools switch keeps it up.
     if ($OpenGLStartupFallback) { [void]$environment.Remove('NOCTTY_RENDERER_HIDE_NOTICES'); $environment.NOCTTY_RENDERER_KEEP_NOTICES = '1' }
     [void](New-Item -ItemType Directory -Path $environment.LOCALAPPDATA, $environment.APPDATA)
     if (!(Test-Path -LiteralPath (Join-Path $bin 'noctty.portable'))) { throw 'Portable marker missing; app launch blocked.' }
@@ -167,8 +167,8 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
                 if ($OpenGLStartupFallback -and !$case.fallbackBanner) {
                     $bannerWait = $case.bannerWait
                     # The banner child exists, hidden, long before a banner
-                    # is set. Read it only once it is shown, which is when an
-                    # info countdown starts.
+                    # is set. Read it only once it is shown, which is when it
+                    # can be painted and an info countdown can start.
                     $banner=[RendererNative]::ChildOfId($hostWindow,1913)
                     if ($banner -ne [IntPtr]::Zero -and [RendererNative]::IsWindowVisible($banner)) {
                         if ($null -eq $bannerWait.shownMs) { $bannerWait.shownMs = $clock.ElapsedMilliseconds }

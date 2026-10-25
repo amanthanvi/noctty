@@ -15466,6 +15466,12 @@ const Host = struct {
     /// When the running `.info` countdown ends (`GetTickCount64`), null
     /// while none runs. See `syncBannerExpiry`.
     banner_expires_at: ?u64 = null,
+    /// The banner has had a `WM_PAINT` since its message was set or it was
+    /// last hidden. An `.info` countdown starts only then: a UI thread busy
+    /// for longer than the countdown would otherwise find the timer overdue
+    /// at its first turn, and `GetMessage` hands out a pending paint before
+    /// a due timer, so the message would be painted once and cleared.
+    banner_painted: bool = false,
     tab_drag_index: ?usize = null,
     tab_drag_start_x: i32 = 0,
     tab_drag_start_y: i32 = 0,
@@ -20596,7 +20602,9 @@ const Host = struct {
         try appendOwnedString(self.app.core_app.alloc, &self.banner_text, next_text);
         // This announces the banner itself, below.
         self.banner_announce_pending = false;
-        // A new message gets a full countdown of its own.
+        // A new message gets a full countdown of its own, from its first
+        // paint (`bannerPainted`).
+        self.banner_painted = false;
         self.stopBannerExpiry();
         self.placeBanner(true);
         if (self.banner_uia_provider) |provider| provider.raiseLiveRegionChanged();
@@ -20907,6 +20915,8 @@ const Host = struct {
             // surface is the topmost child).
             if (self.hwnd) |parent| raiseChildToTop(parent, hwnd);
         } else {
+            // Shown again, it is painted again, and the countdown starts there.
+            self.banner_painted = false;
             if (self.banner_pointer_inside) {
                 // A leave armed before the hide could otherwise arrive after
                 // the next show and start a countdown under a resting pointer.
@@ -20929,10 +20939,11 @@ const Host = struct {
     }
 
     /// Count an `.info` message down only while it is on screen and nobody
-    /// is reading it: the window is shown, not minimized and not cloaked,
-    /// the pointer is not over the banner and it does not hold keyboard
-    /// focus. Errors and the update notice stay until
-    /// dismissed. When any of that ends, the countdown restarts in full.
+    /// is reading it: the banner has been painted (`bannerPainted`), the
+    /// window is shown, not minimized and not cloaked, the pointer is not
+    /// over the banner and it does not hold keyboard focus. Errors and the
+    /// update notice stay until dismissed. When any of that ends, the
+    /// countdown restarts in full.
     ///
     /// The duration is the system's own notification time, Settings >
     /// Accessibility > Visual effects > "Dismiss notifications after this
@@ -20946,6 +20957,7 @@ const Host = struct {
         // whether it is shown and not minimized.
         const run = self.banner_kind == .info and
             self.banner_text != null and
+            self.banner_painted and
             self.banner_placement.visible and
             self.surfaces_visible and
             sys.IsWindowVisible(hwnd) != 0 and
@@ -20959,6 +20971,21 @@ const Host = struct {
         const duration_ms = bannerMessageDurationMs();
         self.banner_expires_at = sys.GetTickCount64() + duration_ms;
         _ = sys.SetTimer(hwnd, c.BANNER_TIMER_ID, duration_ms, null);
+    }
+
+    /// The banner child answered `WM_PAINT` (never `WM_PRINTCLIENT`, which
+    /// puts nothing on screen): the first one after a message is set, or
+    /// after the banner was hidden, starts the `.info` countdown. A message
+    /// that a busy UI thread (a slow cold start) could not paint for longer
+    /// than the countdown is therefore painted before the countdown starts,
+    /// not cleared in the same turn: the OpenGL fallback banner is the only
+    /// place a user learns custom shaders and images are off. A banner that
+    /// was painted, then waited out a minimized or hidden window, restarts
+    /// at once when the window is back, as it always did.
+    fn bannerPainted(self: *Host) void {
+        if (self.banner_painted) return;
+        self.banner_painted = true;
+        self.syncBannerExpiry();
     }
 
     fn stopBannerExpiry(self: *Host) void {
@@ -21322,6 +21349,14 @@ const Host = struct {
         return rect;
     }
 
+    /// The paint the message loop delivers once a banner is set or shown:
+    /// `WM_PAINT`, which starts an `.info` countdown (`bannerPainted`). Like
+    /// the loop, it paints only a banner that was invalidated and is shown,
+    /// so a banner that nothing invalidates stays unpainted here too.
+    fn bannerTestPaint(host: *Host) void {
+        _ = sys.UpdateWindow(host.banner_hwnd.?);
+    }
+
     fn bannerTestPress(host: *Host, button: BannerButton) void {
         const banner = host.banner_hwnd.?;
         const child = host.banner_buttons[@intFromEnum(button)].?;
@@ -21556,8 +21591,25 @@ const Host = struct {
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
         host.refreshSurfaceVisibility();
+        // Shown but not painted: the countdown starts at the paint, so a UI
+        // thread that was busy past it finds a full countdown, not an
+        // overdue timer. A print into a bitmap (`WM_PRINTCLIENT`) puts
+        // nothing on screen and starts nothing.
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        const banner = host.banner_hwnd.?;
+        const client = try bannerTestClientRect(banner);
+        const canvas = try BannerTestCanvas.init(client.right, client.bottom);
+        defer canvas.deinit();
+        canvas.print(banner);
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        try std.testing.expect(!host.banner_painted);
+        bannerTestPaint(&host);
         const first = host.banner_expires_at orelse return error.TestExpectedCountdown;
         try std.testing.expect(first >= sys.GetTickCount64() + 4000);
+        // A paint after that changes nothing.
+        _ = sys.InvalidateRect(banner, null, 0);
+        bannerTestPaint(&host);
+        try std.testing.expectEqual(@as(?u64, first), host.banner_expires_at);
         // The same message again starts it over.
         host.banner_expires_at = 1;
         try host.setBanner(.info, "Nothing to undo.");
@@ -21613,11 +21665,32 @@ const Host = struct {
         try std.testing.expectEqual(@as(?[:0]const u8, null), host.banner_text);
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
 
-        // Errors stay until dismissed, and a later info message is not
-        // cleared by the error's (absent) countdown.
+        // Errors stay until dismissed, painted or not, and a later info
+        // message is not cleared by the error's (absent) countdown.
         try host.setBanner(.err, "Layout could not be saved.");
+        bannerTestPaint(&host);
+        try std.testing.expect(host.banner_painted);
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         try host.setBanner(.info, "Layout saved.");
+        bannerTestPaint(&host);
+        try std.testing.expect(host.banner_expires_at != null);
+
+        // Every new message waits for its own paint, and a banner that was
+        // hidden (an overlay owns the feedback lane) for the paint it gets
+        // when it comes back.
+        try host.setBanner(.info, "Layout saved again.");
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        bannerTestPaint(&host);
+        try std.testing.expect(host.banner_expires_at != null);
+        host.overlay_mode = .command_palette;
+        host.syncBannerChild();
+        try std.testing.expect(!bannerTestVisible(host.banner_hwnd.?));
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        host.overlay_mode = .none;
+        host.syncBannerChild();
+        try std.testing.expect(bannerTestVisible(host.banner_hwnd.?));
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        bannerTestPaint(&host);
         try std.testing.expect(host.banner_expires_at != null);
     }
 
@@ -21647,6 +21720,7 @@ const Host = struct {
         if (windows.kernel32.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
         defer _ = windows.kernel32.SetEnvironmentVariableW(name, null);
         try host.setBanner(.info, "OpenGL could not start.");
+        bannerTestPaint(&host);
         if (build_config.renderer_test_tools) {
             // No countdown, so nothing clears it, however long the UI
             // thread is busy before a harness reads it.
@@ -36027,10 +36101,11 @@ fn bannerMessageDurationMs() UINT {
 }
 
 /// False only in a `-Drenderer-test-tools` build started with
-/// `NOCTTY_RENDERER_KEEP_NOTICES`. A countdown starts when the banner is
-/// set, so a UI thread busy past it (a slow cold start) clears the banner
-/// before a harness can read it through UIA; the renderer harness's OpenGL
-/// startup fallback case sets this switch so it can read the banner.
+/// `NOCTTY_RENDERER_KEEP_NOTICES`. A countdown starts at the banner's first
+/// paint, but a harness's UIA client can be slower than the countdown (a cold
+/// runner's first call) and read the banner only after it is gone; the
+/// renderer harness's OpenGL startup fallback case sets this switch so it can
+/// read the banner.
 fn infoBannersExpire() bool {
     return infoBannersExpireIn(build_config.renderer_test_tools);
 }
@@ -36113,10 +36188,13 @@ fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             },
             c.WM_ERASEBKGND => return 1,
             c.WM_PAINT => {
-                var ps: PAINTSTRUCT = undefined;
-                const hdc = sys.BeginPaint(hwnd, &ps) orelse return 0;
-                defer _ = sys.EndPaint(hwnd, &ps);
-                paintBannerClient(host, hwnd, hdc);
+                {
+                    var ps: PAINTSTRUCT = undefined;
+                    const hdc = sys.BeginPaint(hwnd, &ps) orelse return 0;
+                    defer _ = sys.EndPaint(hwnd, &ps);
+                    paintBannerClient(host, hwnd, hdc);
+                }
+                host.bannerPainted();
                 return 0;
             },
             c.WM_PRINTCLIENT => {

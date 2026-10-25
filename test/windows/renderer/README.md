@@ -112,9 +112,10 @@ in addition to offscreen readback. Host notices are suppressed only in this
 test-tools parity run to keep reference geometry identical; production and the
 visible check retain them. The OpenGL startup fallback case reads its banner
 through UIA instead, and sets `NOCTTY_RENDERER_KEEP_NOTICES` (also honoured only
-by test-tools builds) so the banner stays up: an info banner's countdown starts
-when it is shown, and a slow cold launch can keep the UI thread busy until it has
-expired. Before the launch the case makes one UIA read of its own desktop's root,
+by test-tools builds) so the banner stays up: an info banner counts down from its
+first paint, so a UI thread that is busy past the countdown no longer clears it
+unseen, but a slow UIA client may not reach it until the countdown is over.
+Before the launch the case makes one UIA read of its own desktop's root,
 which needs nothing from the app (`warmupMs`), so the UIA client's first-call cost
 comes before the banner wait. It reads the banner only once it is shown, and
 times a `WM_NULL` round trip to the host just before each read (`longestPingMs`);
