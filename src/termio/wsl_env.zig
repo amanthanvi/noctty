@@ -948,6 +948,70 @@ test "WSLCACHE implicit launches reuse answers and miss after a default change" 
     try std.testing.expectEqual(@as(usize, 11), Host.calls);
 }
 
+test "WSLCACHE rechecks reject changed or unavailable IDs without pending entries" {
+    const Host = struct {
+        var ids: []const ?DefaultDistribution = &.{};
+        var reads: usize = 0;
+        var calls: usize = 0;
+        fn sequence(ids_: []const ?DefaultDistribution) void {
+            ids = ids_;
+            reads = 0;
+        }
+        fn defaultDistribution() ?DefaultDistribution {
+            const i = reads;
+            reads += 1;
+            return if (i < ids.len) ids[i] else null;
+        }
+        fn run(_: Allocator, _: *const EnvMap, _: []const []const u8, _: []const u8) ?bool {
+            calls += 1;
+            return true;
+        }
+    };
+    defer {
+        probe_cache.deinit(std.heap.page_allocator);
+        probe_cache = .empty;
+    }
+    const alloc = std.testing.allocator;
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    const probe = &[_][]const u8{ "C:\\fake\\wsl.exe", "--exec", "infocmp", "xterm-ghostty" };
+    const first = std.unicode.utf8ToUtf16LeStringLiteral("{11111111-1111-1111-1111-111111111111}")[0..38].*;
+    const second = std.unicode.utf8ToUtf16LeStringLiteral("{22222222-2222-2222-2222-222222222222}")[0..38].*;
+    Host.calls = 0;
+    Host.sequence(&.{ first, first, first });
+    try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\cached", Host));
+    try std.testing.expectEqual(@as(usize, 1), Host.calls);
+    const cached_key = try probeKey(alloc, &env, probe, "C:\\cached", first);
+    const fresh_key = try probeKey(alloc, &env, probe, "C:\\fresh", first);
+    for ([_]?DefaultDistribution{ second, null }) |changed| {
+        // The first read finds a positive cached answer for A; the second
+        // observes B or a failed read. Neither may return the cached yes.
+        Host.sequence(&.{ first, changed });
+        const before = Host.calls;
+        try std.testing.expect(!cachedProbeWithHost(alloc, &env, probe, "C:\\cached", Host));
+        try std.testing.expectEqual(before, Host.calls);
+        try std.testing.expectEqual(Answer.yes, probe_cache.get(cached_key));
+
+        // A change before a new probe starts must not run it and must remove
+        // its pending slot, so the next caller can try this question again.
+        Host.sequence(&.{ first, changed });
+        try std.testing.expect(!cachedProbeWithHost(alloc, &env, probe, "C:\\fresh", Host));
+        try std.testing.expectEqual(before, Host.calls);
+        try std.testing.expectEqual(null, probe_cache.get(fresh_key));
+
+        // A change or failed read after a successful probe also removes the
+        // pending slot instead of retaining or forwarding the positive result.
+        Host.sequence(&.{ first, first, changed });
+        try std.testing.expect(!cachedProbeWithHost(alloc, &env, probe, "C:\\fresh", Host));
+        try std.testing.expectEqual(before + 1, Host.calls);
+        try std.testing.expectEqual(null, probe_cache.get(fresh_key));
+    }
+    Host.sequence(&.{ first, first, first });
+    try std.testing.expect(cachedProbeWithHost(alloc, &env, probe, "C:\\fresh", Host));
+    try std.testing.expectEqual(@as(usize, 4), Host.calls);
+    try std.testing.expectEqual(Answer.yes, probe_cache.get(fresh_key));
+}
+
 test "WSLCACHE explicit selections reuse answers without reading the default" {
     const Host = struct {
         var calls: usize = 0;

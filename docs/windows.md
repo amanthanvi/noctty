@@ -425,11 +425,12 @@ noctty's `term`, which noctty asks the distribution itself with `infocmp`; the
 answer is remembered until noctty exits, so install the entry first, then
 start noctty again. For an implicit distribution, noctty reads the current
 default's ID from `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
-(`DefaultDistribution`) and includes it in the cache key. Changing WSL's
-default makes the next launch ask again. The probe explicitly selects the
-captured ID; if the default changes before its answer is consumed, that
-launch keeps the fallback. If the ID cannot be read, the launch bypasses
-the cache. No registry value is changed. To give a
+(`DefaultDistribution`) and includes it in the cache key. A different default
+ID uses a separate cache entry. The probe explicitly selects the captured ID;
+if a recheck observes a different default, that launch keeps the fallback.
+The session itself stays implicit, so a concurrent change after the final
+check can still affect which distribution starts. If the ID cannot be read,
+the launch bypasses the cache. No registry value is changed. To give a
 distribution the entry, compile
 `share/terminfo/ghostty.terminfo` from the noctty folder with `tic -x` inside
 it. Without the entry `TERM` stays `xterm-256color`, the value `wsl.exe` sets,
