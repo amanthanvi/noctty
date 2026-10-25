@@ -168,6 +168,10 @@ function Fingerprint([string]$Path) {
 }
 $ledger = Join-Path $env:LOCALAPPDATA 'noctty/startup-attempts.json'
 $before = Fingerprint $ledger
+# A wrong -Clink would otherwise surface only as a timeout, once cmd fails to
+# start it.
+if (-not (Test-Path -LiteralPath $Clink -PathType Leaf)) { throw "-Clink must name clink_x64.exe in an extracted portable Clink: $Clink" }
+$Clink = (Resolve-Path -LiteralPath $Clink).ProviderPath
 $Run = [IO.Path]::GetFullPath($Run)
 if (Test-Path -LiteralPath $Run) { throw 'Run must be a new directory.' }
 New-Item -ItemType Directory -Path $Run | Out-Null
@@ -193,7 +197,7 @@ $batch = Join-Path $Run 'launch.cmd'
 # (no CLINK_* scrub reaches it) and searches it before any other.
 @"
 @echo off
-"$([IO.Path]::GetFullPath($Clink))" inject -q -p "$Run\profile" --scripts "$Run\scripts"
+"$Clink" inject -q -p "$Run\profile" --scripts "$Run\scripts"
 "@ | Set-Content -LiteralPath $batch -Encoding utf8NoBOM
 if ($Bin) {
     $portable = Join-Path $Run 'portable'
