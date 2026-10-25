@@ -66,14 +66,18 @@ $benchmarkGateLinePatterns = foreach ($command in $benchmarkGateCommands) {
 }
 $benchmarkGateStepPattern = '(?ms)' + ($benchmarkGateLinePatterns -join '.*?')
 # Exactly four throughput invocations in the job: an extra one could re-run a
-# workload with a floor of 0. Comments (a line that starts with `#`, or a `<# ... #>`
-# block, as in the job's pwsh steps) are not invocations, so a note in the job that
-# names the step does not count; every other line that names it does.
+# workload with a floor of 0. Every check below reads the job with its comments
+# removed (a line that starts with `#`, or a `<# ... #>` block that opens at the start of
+# a line, as in the job's pwsh steps): a note that names the step does not count as an
+# invocation, and a command or exit-code check that sits in a comment does not satisfy
+# a pin. Anchoring both at the start of a line keeps a `<#` or `#>` inside a string
+# (`Write-Host '<#'`) from hiding what lies between them. The job text is YAML around
+# several steps, not one script, so PowerShell's tokenizer cannot read it whole.
 $benchmarkGateCountPattern = '(?s)\A(?:(?!bench:vt-throughput).)*(?:bench:vt-throughput(?:(?!bench:vt-throughput).)*){4}\z'
 # One left-to-right pass, so a `<#` inside a line comment opens no block and a `#` line
 # inside a block closes nothing early.
-$benchmarkGateCommentPattern = '<#.*?#>|^[ \t]*#[^\r\n]*'
-function Get-BenchmarkGateCountText([string] $JobText) {
+$benchmarkGateCommentPattern = '^[ \t]*<#.*?#>|^[ \t]*#[^\r\n]*'
+function Get-BenchmarkGateActiveText([string] $JobText) {
     [regex]::Replace($JobText, $benchmarkGateCommentPattern, '', [System.Text.RegularExpressions.RegexOptions]'Singleline, Multiline')
 }
 # The runner's CPU is logged to read a failure against; looking it up must never
@@ -83,17 +87,17 @@ $benchmarkGateCpuPattern = '(?m)^[ \t]*' + [regex]::Escape($benchmarkGateCpuLine
 $benchmarkGateStepName = 'Headless benchmark regression gates'
 
 function Test-BenchmarkGateJob([string] $JobText) {
-    $step = Get-YamlStepBlock -Content $JobText -Name $benchmarkGateStepName -Source $testWorkflow
+    $step = Get-BenchmarkGateActiveText (Get-YamlStepBlock -Content $JobText -Name $benchmarkGateStepName -Source $testWorkflow)
     [regex]::IsMatch($step, $benchmarkGateStepPattern) -and
     [regex]::IsMatch($step, $benchmarkGateCpuPattern) -and
-    [regex]::IsMatch((Get-BenchmarkGateCountText $JobText), $benchmarkGateCountPattern)
+    [regex]::IsMatch((Get-BenchmarkGateActiveText $JobText), $benchmarkGateCountPattern)
 }
 
 Invoke-ContractTable -Contracts @(
     @{
         File = "$testWorkflow :: bench headless benchmark gates"
         Content = {
-            (Get-YamlStepBlock -Content (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow) -Name $benchmarkGateStepName -Source $testWorkflow)
+            Get-BenchmarkGateActiveText (Get-YamlStepBlock -Content (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow) -Name $benchmarkGateStepName -Source $testWorkflow)
         }
         Pattern = $benchmarkGateStepPattern
         Kind = 'Text'
@@ -102,7 +106,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = "$testWorkflow :: bench headless benchmark gates"
         Content = {
-            (Get-YamlStepBlock -Content (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow) -Name $benchmarkGateStepName -Source $testWorkflow)
+            Get-BenchmarkGateActiveText (Get-YamlStepBlock -Content (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow) -Name $benchmarkGateStepName -Source $testWorkflow)
         }
         Pattern = $benchmarkGateCpuPattern
         Kind = 'Text'
@@ -111,7 +115,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = "$testWorkflow :: bench headless benchmark gates"
         Content = {
-            Get-BenchmarkGateCountText (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow)
+            Get-BenchmarkGateActiveText (Get-YamlJobText -Content $testWorkflowText -Name 'bench' -Source $testWorkflow)
         }
         Pattern = $benchmarkGateCountPattern
         Kind = 'Text'
@@ -272,6 +276,15 @@ if (Test-BenchmarkGateJob $benchmarkGateJob) {
     $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation after a closed block comment'; Text = $benchmarkGateJob.TrimEnd() + "`n          <# note #> $($gateCmd[0]) --min-mb-s=0`n" })
     $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation behind a lone #>'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host '#>'; $($gateCmd[0]) --min-mb-s=0`n" })
     $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation between two block comments'; Text = $benchmarkGateJob.TrimEnd() + "`n          <# a #>`n          $($gateCmd[0]) --min-mb-s=0`n          <# b #>`n" })
+    # And between block delimiters that are string contents, which comment nothing.
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation between block delimiters inside strings'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host '<#'`n          $($gateCmd[0]) --min-mb-s=0`n          Write-Host '#>'`n" })
+    # A pinned command (and its exit-code check, or the protected CPU line) kept inside a block
+    # comment while an active replacement disables the floor or can fail the step: the pins
+    # must read the active text, not the comment.
+    $disabledAsciiGate = '(?m)^([ \t]*)(' + [regex]::Escape($gateCmd[0]) + '[ \t]*\r?\n[ \t]*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \})'
+    $disabledAsciiGateReplacement = '$1<#' + "`n" + '$1$2' + "`n" + '$1#>' + "`n" + '$1' + $gateCmd[0] + ' --min-mb-s=0' + "`n" + '$1if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    $benchmarkGateMutants.Add(@{ Name = 'the ASCII gate and its exit check in a block comment, beside an active one with its floor disabled'; Text = [regex]::Replace($benchmarkGateJob, $disabledAsciiGate, $disabledAsciiGateReplacement) })
+    $benchmarkGateMutants.Add(@{ Name = 'the protected CPU line in a block comment, beside an unprotected one'; Text = $benchmarkGateJob.Replace($benchmarkGateCpuLine, "<#`n          $benchmarkGateCpuLine`n          #>`n          Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim())") })
     # A CPU lookup that can fail the step.
     $benchmarkGateMutants.Add(@{ Name = 'a CPU lookup without try/catch'; Text = $benchmarkGateJob.Replace($benchmarkGateCpuLine, "Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim())") })
     # A command whose exit code is no longer checked.
