@@ -2239,12 +2239,11 @@ colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
 `--background-opacity`).
 
 The new window copies one of the running instance's windows, as a
-`new_window` does: the first in the instance's window list, or the first
-ordinary one if that is the quick terminal. That list is not kept in opening
-order (closing a window can move another into its place), so with several
-windows open, which one is copied does not follow age or focus. The new
-window takes that window's size, one step down and right of it, its
-maximized or fullscreen state, always-on-top, its decorations and its
+`new_window` does: the window that was active last, never the quick terminal
+or a window whose last tab was closed and is kept only for undo (if none of
+the others has been active yet, the first of them in the instance's window
+list). The new window takes that window's size, one step down and right of
+it, its maximized or fullscreen state, always-on-top, its decorations and its
 background opacity. Forwarded arguments win over the copy: `--window-width`
 and `--window-height` give it its own size (both must be set, by the
 arguments or the config; from a maximized or fullscreen window, it is the
@@ -2253,9 +2252,8 @@ size the new window returns to), `--window-decoration` its decorations and
 config's `window-position-*` do, at the copied size unless a size is
 forwarded, except that a window opened from a maximized or fullscreen one
 returns to that window's normal place. When there is nothing to copy (no
-window is open, or the first in the list is a window whose last tab was
-closed and is kept only for undo), the arguments apply as they do to a first
-window.
+window is open, or only the quick terminal and windows kept for undo), the
+arguments apply as they do to a first window.
 
 Anything that runs code (`--command`, `--initial-command`, `-e`, `--input`,
 `--env`), loads a file (`--background-image`, `--custom-shader`,

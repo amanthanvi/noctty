@@ -2990,6 +2990,8 @@ pub const App = struct {
     /// elevated windows or installers.
     test_shell_request: ?*const fn (app: *App, request: *const DeferredOpen) anyerror!void = null,
     next_host_id: u32 = 1,
+    /// Window activations so far, which orders `Host.activated`.
+    activations: u64 = 0,
     launcher_profile_key: ?[:0]const u8 = null,
     launcher_profile_hint: ?[:0]const u8 = null,
     launcher_quick_slot_keys: [3]?[:0]const u8 = .{ null, null, null },
@@ -9901,21 +9903,24 @@ pub const App = struct {
         return null;
     }
 
-    /// The window a new one copies its state from: the target's, but never
-    /// the quick terminal's. That is a floating, undecorated strip pinned to
-    /// a screen edge, and a window copied from it would be too. From the
-    /// quick terminal a new window follows an ordinary window if there is
-    /// one, and is otherwise an ordinary new window.
+    /// The window a new one copies its state from: the target's, or, for a
+    /// request no window made (a forwarded launch) or one from the quick
+    /// terminal, the ordinary window activated last. Never the quick
+    /// terminal, a floating, undecorated strip pinned to a screen edge that a
+    /// copy would repeat, and never a window kept with no tab for undo, which
+    /// has no pane to copy. With neither, an ordinary new window. `hosts` is
+    /// no guide: `detachHostReference` reorders it.
     fn newWindowSource(self: *App, target: apprt.Target) ?*Surface {
-        const surface = self.findSurfaceForTarget(target) orelse return null;
-        const host = surface.host orelse return surface;
-        if (!host.quick_terminal) return surface;
-        for (self.hosts.items) |other| {
-            if (!other.quick_terminal) {
-                if (other.activeSurface()) |ordinary| return ordinary;
-            }
+        if (target == .surface) if (self.findSurfaceForTarget(target)) |surface| {
+            const host = surface.host orelse return surface;
+            if (!host.quick_terminal) return surface;
+        };
+        var latest: ?*Host = null;
+        for (self.hosts.items) |host| {
+            if (host.quick_terminal or host.activeSurface() == null) continue;
+            if (latest == null or host.activated > latest.?.activated) latest = host;
         }
-        return null;
+        return if (latest) |host| host.activeSurface() else null;
     }
 
     fn focusedSurfaceForUndoRedo(self: *App) ?*Surface {
@@ -15387,6 +15392,9 @@ const Host = struct {
     focus_input_mode: focus_cue.InputMode = .pointer,
     /// Native window activation, independent of the selected terminal tab.
     window_active: bool = false,
+    /// `App.activations` when this window was last activated, 0 if never:
+    /// which window a forwarded launch copies (`App.newWindowSource`).
+    activated: u64 = 0,
     /// Fade state for the tab the user is currently hovering. Paint
     /// reads `alphaAt(now)` + pre-composites the glyph colour against
     /// the tab bg so the close X visibly fades in with
@@ -31918,8 +31926,8 @@ fn newWindowPlacement(app: *App, source: HWND, fullscreen: bool, destination: ?H
     }
     if (size) |own| rect = rectWithSize(rect, own);
     const step = cascadeStep(sys.GetDpiForWindow(source));
-    // One step off the source, and on past any window already there: every
-    // new window of a forwarded launch is opened from the same first window.
+    // One step off the source, and on past any window already there: one
+    // window can be the source of several (`new_window` pressed again in it).
     var placed = cascadedRect(rect, step, info.rcWork);
     var steps: u8 = 0;
     while (steps < 8 and app.windowStartsAt(placed, destination)) : (steps += 1) {
@@ -37105,6 +37113,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             if (host) |v| {
                 v.refreshSurfaceVisibility();
                 if ((wParam & 0xFFFF) != c.WA_INACTIVE) {
+                    v.app.activations += 1;
+                    v.activated = v.app.activations;
                     // The user brought this window forward: its active tab is
                     // seen even if focus lands on the chrome, not a terminal.
                     v.app.acknowledgeTab(v, v.active_tab);
@@ -52926,6 +52936,80 @@ test "win32 new_window does not copy state from a quick terminal" {
     try std.testing.expect(Hook.clone_state_from == &surface);
 }
 
+test "win32 new_window from the app copies the window activated last, never the quick terminal or a window kept empty for undo" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var empty_host: Host = undefined;
+    var quick_host: Host = undefined;
+    var first_host: Host = undefined;
+    var second_host: Host = undefined;
+    var quick_surface: Surface = undefined;
+    var first: Surface = undefined;
+    var second: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        // First in the list: a window whose last tab was closed and is kept
+        // for undo, then the quick terminal. Neither has a pane to copy.
+        .hosts = &.{
+            .{ .storage = &empty_host, .id = 1, .register = true, .next_tab_id = 2 },
+            .{ .storage = &quick_host, .id = 2, .register = true, .next_tab_id = 2 },
+            .{ .storage = &first_host, .id = 3, .register = true, .next_tab_id = 2 },
+            .{ .storage = &second_host, .id = 4, .register = true, .next_tab_id = 2 },
+        },
+        .surfaces = &.{
+            .{ .storage = &quick_surface, .host = &quick_host, .register = true },
+            .{ .storage = &first, .host = &first_host, .register = true },
+            .{ .storage = &second, .host = &second_host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &quick_host, .surface = &quick_surface, .id = 1 },
+            .{ .host = &first_host, .surface = &first, .id = 1 },
+            .{ .host = &second_host, .surface = &second, .id = 1 },
+        },
+    });
+    defer session.deinit();
+    quick_host.quick_terminal = true;
+
+    const Hook = struct {
+        var clone_state_from: ?*const Surface = null;
+
+        fn createSurface(_: *App, _: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
+            clone_state_from = opts.clone_state_from;
+            return error.TestWindowCreateFailed;
+        }
+
+        fn source(a: *App, target: apprt.Target) !?*const Surface {
+            clone_state_from = null;
+            _ = a.performAction(target, .new_window, .{}) catch {};
+            return clone_state_from;
+        }
+    };
+    app.test_create_window_surface = &Hook.createSurface;
+
+    // Never activated: the first ordinary window with a pane, in list order.
+    try std.testing.expect(try Hook.source(&app, .app) == &first);
+
+    // The ordinary window activated last, though the empty window and the
+    // quick terminal were activated after it. Before, the empty window in
+    // the first slot gave nothing to copy.
+    first_host.activated = 1;
+    second_host.activated = 2;
+    quick_host.activated = 3;
+    empty_host.activated = 4;
+    try std.testing.expect(try Hook.source(&app, .app) == &second);
+    first_host.activated = 5;
+    try std.testing.expect(try Hook.source(&app, .app) == &first);
+
+    // From the quick terminal too.
+    try std.testing.expect(try Hook.source(&app, .{ .surface = quick_surface.core() }) == &first);
+    // From an ordinary window, that window, whenever it was activated.
+    try std.testing.expect(try Hook.source(&app, .{ .surface = second.core() }) == &second);
+}
+
 test "win32 a new window is not maximized by a restore-to-maximized flag left on a normal window" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -53017,8 +53101,8 @@ test "win32 new windows from one source step past the windows already there" {
             try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &origin) != 0);
             const step = sys.MulDiv(32, @intCast(sys.GetDpiForWindow(source.hwnd.?)), 96);
 
-            // Every forwarded launch is opened from the same first window.
-            // The next one goes where the last one is not.
+            // Several new windows opened from the same window: the next one
+            // goes where the last one is not.
             var rect: RECT = undefined;
             for ([_]i32{ 1, 2, 3 }) |n| {
                 try clone.inheritWindowStateFrom(&source, .{});
@@ -53852,6 +53936,68 @@ test "win32 forwarded window keys apply to a new window when no window is open" 
             try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
             try std.testing.expect(!clone.decorations_visible and !clone.host.?.cached_decorations_visible);
             try std.testing.expectEqual(ForwardedKeysTest.undecoratedStyle(clone), ForwardedKeysTest.style(hwnd));
+        }
+    }.body);
+}
+
+test "win32 a forwarded window copies the window activated last, not the first in the list" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var t: ForwardedKeysTest = .{};
+            try t.init();
+            defer t.deinit();
+            const app = &t.fixture.app;
+
+            // Two more windows, each where no copy is cascaded onto.
+            var buf: [2][2][32]u8 = undefined;
+            const second_at = try ForwardedKeysTest.placedAt(&buf[0], t.work.left + 300, t.work.top + 200);
+            const second = try t.forward(&second_at, null);
+            const third_at = try ForwardedKeysTest.placedAt(&buf[1], t.work.left + 120, t.work.top + 120);
+            const third = try t.forward(&third_at, null);
+
+            // The first window is first in the list, and was copied before.
+            try activate(second);
+            try expectCopies(&t, second);
+
+            // Closing the first window moves the newest into its slot.
+            try activate(second);
+            t.fixture.closeWindow(t.source);
+            try std.testing.expect(app.hosts.items[0] == third.host.?);
+            try expectCopies(&t, second);
+
+            // A window kept with no tab for undo has no pane to copy, even
+            // first in the list and activated last. Before, the forwarded
+            // window then opened as if no window were open.
+            const kept = third.host.?;
+            var entry = kept.detachTabForUndo(0).?;
+            defer entry.dispose(kept, .host_destroy) catch {};
+            try activate(second);
+            try activateHost(kept);
+            try expectCopies(&t, second);
+            try std.testing.expect(try kept.restoreClosedTabEntryNative(&entry.payload.close_tab));
+        }
+
+        fn activate(surface: *Surface) !void {
+            try activateHost(surface.host.?);
+        }
+
+        /// Real activation: `WM_ACTIVATE` from the window manager.
+        fn activateHost(host: *Host) !void {
+            const hwnd = host.hwnd.?;
+            _ = sys.SetActiveWindow(hwnd);
+            try std.testing.expect(sys.GetActiveWindow() == hwnd);
+            try std.testing.expectEqual(host.app.activations, host.activated);
+        }
+
+        /// A plain forward is one cascade step off `source`, at its size.
+        fn expectCopies(t: *ForwardedKeysTest, source: *Surface) !void {
+            const hwnd = source.windowHwnd().?;
+            const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
+            const step = cascadeStep(sys.GetDpiForWindow(hwnd));
+            const clone = try t.forward(null, null);
+            try std.testing.expectEqualDeep(ForwardedKeysTest.at(rect, rect.left + step, rect.top + step), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
+            t.fixture.closeWindow(clone);
         }
     }.body);
 }
