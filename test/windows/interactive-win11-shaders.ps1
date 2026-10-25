@@ -152,28 +152,14 @@ try {
     Show-StatefulHost $hostHwnd
     Start-Sleep -Milliseconds $script:SHADER_SETTLE_MS
 
-    $rect = Get-StatefulWindowRect $surface.Hwnd
-    if ($null -eq $rect) {
+    if ($null -eq (Get-StatefulWindowRect $surface.Hwnd)) {
         throw 'Failed to read the shader surface bounds.'
     }
 
-    $width = [Math]::Max(1, $rect.Right - $rect.Left)
-    $height = [Math]::Max(1, $rect.Bottom - $rect.Top)
-    $bitmap = [Drawing.Bitmap]::new($width, $height)
-    try {
-        $graphics = [Drawing.Graphics]::FromImage($bitmap)
-        try {
-            Show-StatefulHost $hostHwnd
-            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
-        }
-        finally {
-            $graphics.Dispose()
-        }
-        $bitmap.Save($screenshotPath, [Drawing.Imaging.ImageFormat]::Png)
-    }
-    finally {
-        $bitmap.Dispose()
-    }
+    # Evidence only, and saved only where it shows noctty alone.
+    Show-StatefulHost $hostHwnd
+    $shot = Save-StatefulScreenCapture -Hwnd $surface.Hwnd -Path $screenshotPath
+    $screenshotText = if ($null -ne $shot.Path) { $shot.Path } else { "not saved ($($shot.Note))" }
 
     Show-StatefulHost $hostHwnd
     $argb = Get-StatefulPixel $surface.Hwnd
@@ -182,7 +168,7 @@ try {
     if (-not $isMagenta) {
         $diagnostic = try { Save-StatefulPixelDiagnostic -Hwnd $surface.Hwnd -Description 'custom shader magenta surface' -Directory $layout.Logs }
         catch { "pixel diagnostic failed: $($_.Exception.Message)" }
-        throw "Custom shader produced no magenta surface (sample RGB=$($color.R),$($color.G),$($color.B); screenshot=$screenshotPath); $diagnostic."
+        throw "Custom shader produced no magenta surface (sample RGB=$($color.R),$($color.G),$($color.B); screenshot=$screenshotText); $diagnostic."
     }
 
     $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
@@ -194,7 +180,7 @@ finally {
     Stop-InteractiveWin11Process -Process $process -Contained
 }
 
-Write-Host "interactive Win11 shader validation: PASS (RGB=$($color.R),$($color.G),$($color.B), screenshot=$screenshotPath)"
+Write-Host "interactive Win11 shader validation: PASS (RGB=$($color.R),$($color.G),$($color.B), screenshot=$screenshotText)"
 
 } finally {
     Assert-WindowsHarnessHistoryGuard -Guard $windowsHarnessHistoryGuard

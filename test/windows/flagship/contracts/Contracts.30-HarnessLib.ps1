@@ -294,11 +294,13 @@ finally {
     Remove-Variable -Scope Script -Name pixelDiagnosticCalls, InteractiveWin11PixelWindow -ErrorAction SilentlyContinue
 }
 
-# The diagnostic's screenshot goes to the uploaded artifacts of a public
-# repository, so it may show noctty only: the decision is table-tested from
-# facts, and the diagnostic captures the screen only where it allows.
+# Harness screenshots go to the uploaded artifacts of a public repository, so
+# they may show noctty only (EVIDENCE-PIXEL-DIAG-01, EVIDENCE-SCREENSHOT-PRIVACY-01):
+# the decision is table-tested from facts, and Save-StatefulScreenCapture, the
+# one place that saves a screen capture, saves only where it allows, before the
+# read and right after it.
 $diagnosticFunctions = @{}
-foreach ($name in @('Get-StatefulScreenshotDecision', 'Save-StatefulPixelDiagnostic')) {
+foreach ($name in @('Get-StatefulScreenshotDecision', 'Save-StatefulScreenCapture', 'Save-StatefulPixelDiagnostic')) {
     $diagnosticFound = @($statefulLibAst.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -306,23 +308,40 @@ foreach ($name in @('Get-StatefulScreenshotDecision', 'Save-StatefulPixelDiagnos
     if ($diagnosticFound.Count -ne 1) { throw "The stateful library must define $name once." }
     $diagnosticFunctions[$name] = $diagnosticFound[0]
 }
+$findMembers = {
+    param($Ast, [string] $Member)
+    @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Extent.Text -ceq $Member
+    }, $true))
+}
+$findCommands = {
+    param($Ast, [string] $Name)
+    @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq $Name
+    }, $true))
+}
+$underIf = {
+    param($Node, [string] $Condition)
+    for ($gate = $Node.Parent; $null -ne $gate; $gate = $gate.Parent) {
+        if ($gate -is [System.Management.Automation.Language.IfStatementAst] -and $gate.Clauses[0].Item1.Extent.Text -cmatch $Condition) { return $true }
+    }
+    return $false
+}
+$saveCapture = $diagnosticFunctions['Save-StatefulScreenCapture']
+$captureSaves = @(& $findMembers $saveCapture 'Save')
+if (@(& $findMembers $saveCapture 'CopyFromScreen').Count -ne 1 -or
+    @(& $findCommands $saveCapture 'Get-StatefulScreenshotDecision').Count -ne 2 -or
+    $captureSaves.Count -ne 1 -or -not (& $underIf $captureSaves[0] '^\$decision\.Capture$') -or
+    -not (& $underIf $captureSaves[0] '^\$recheck\.Capture -and ')) {
+    throw 'Save-StatefulScreenCapture must read the screen once and save only when Get-StatefulScreenshotDecision allows it before and after the read.'
+}
 $saveDiagnostic = $diagnosticFunctions['Save-StatefulPixelDiagnostic']
-$screenCaptures = @($saveDiagnostic.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Extent.Text -ceq 'CopyFromScreen'
-}, $true))
-$decisionCalls = @($saveDiagnostic.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Get-StatefulScreenshotDecision'
-}, $true))
-$gatedCaptures = @($screenCaptures | Where-Object {
-    $gate = $_.Parent
-    while ($null -ne $gate -and -not ($gate -is [System.Management.Automation.Language.IfStatementAst] -and
-            $gate.Clauses[0].Item1.Extent.Text -ceq '$decision.Capture')) { $gate = $gate.Parent }
-    $null -ne $gate
-})
-if ($screenCaptures.Count -ne 1 -or $gatedCaptures.Count -ne 1 -or $decisionCalls.Count -ne 2) {
-    throw 'Save-StatefulPixelDiagnostic must capture the screen once, only when Get-StatefulScreenshotDecision allows it, and decide again after the capture.'
+$diagnosticShots = @(& $findCommands $saveDiagnostic 'Save-StatefulScreenCapture')
+if (@(& $findMembers $saveDiagnostic 'CopyFromScreen').Count -ne 0 -or $diagnosticShots.Count -ne 1 -or
+    $diagnosticShots[0].Extent.Text -match '-PassThru') {
+    throw 'Save-StatefulPixelDiagnostic must take its screenshot through Save-StatefulScreenCapture, without -PassThru.'
 }
 . ([scriptblock]::Create($diagnosticFunctions['Get-StatefulScreenshotDecision'].Extent.Text))
 try {
@@ -374,9 +393,83 @@ try {
             throw "Pixel diagnostic screenshot decision ($($screenshotCase.Name)): expected '$($screenshotCase.Expected)', got '$screenshotActual'."
         }
     }
+    # Withheld means not read and not saved. A capture area no bitmap can hold
+    # makes reaching the screen read throw; -PassThru still needs a known area.
+    . ([scriptblock]::Create($diagnosticFunctions['Save-StatefulScreenCapture'].Extent.Text))
+    $unsavedPath = Join-Path ([IO.Path]::GetTempPath()) "noctty-contract-capture-$PID-$([guid]::NewGuid().ToString('N')).png"
+    $hugeRect = [pscustomobject]@{ Left = 0; Top = 0; Right = 1000000; Bottom = 1000000 }
+    foreach ($captureCase in @(
+            @{ Name = 'other process above'; PassThru = $false; Expected = 'withheld: 1 window(s) of other processes overlap the sampled rect'
+                Change = @{ Rect = $hugeRect; CaptureBounds = $hugeRect; WindowsAbove = @(& $screenshotAbove $otherProcess 0) } }
+            @{ Name = 'no capture area, -PassThru'; PassThru = $true; Expected = "withheld: noctty's top-level window could not be found"
+                Change = @{ Root = $null; CaptureBounds = $null } }
+        )) {
+        $captureShot = try {
+            Save-StatefulScreenCapture -Hwnd ([IntPtr]::Zero) -Path $unsavedPath -PassThru:$captureCase.PassThru -Facts (& $screenshotFacts $captureCase.Change)
+        }
+        catch { throw "Save-StatefulScreenCapture ($($captureCase.Name)) read the screen for a capture it may not take: $($_.Exception.Message)" }
+        if ($null -ne $captureShot.Path -or $null -ne $captureShot.Bitmap -or $captureShot.Note -cne $captureCase.Expected -or
+            (Test-Path -LiteralPath $unsavedPath)) {
+            throw "Save-StatefulScreenCapture ($($captureCase.Name)) must neither read nor save the screen: $($captureShot | ConvertTo-Json -Compress -Depth 2)"
+        }
+    }
 }
 finally {
-    Remove-Item -LiteralPath Function:\Get-StatefulScreenshotDecision -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Get-StatefulScreenshotDecision, Function:\Save-StatefulScreenCapture -ErrorAction SilentlyContinue
+}
+
+# Every screen capture a harness can save goes through Save-StatefulScreenCapture
+# (EVIDENCE-SCREENSHOT-PRIVACY-01). Allowed elsewhere: one-pixel color reads;
+# the shell-command-live harness, which keeps its captures in the sandbox temp
+# that no workflow uploads; and the maintainer's opt-in visible D3D11 check,
+# which asks before it saves one. Its -PassThru bitmap is ungated, so only the
+# resize harness may ask for it, and that harness saves no image itself.
+$screenReadAllowed = @(
+    'test\windows\interactive-win11-shell-command-live.ps1'
+    'test\windows\renderer\Invoke-VisibleD3D11Check.ps1 (embedded)'
+)
+$passThruAllowed = @('test\windows\interactive-win11-resize.ps1')
+$screenReads = foreach ($screenScript in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'test\windows'), (Join-Path $repoRoot 'scripts') -Filter '*.ps1' -Recurse -File) {
+    $relative = [IO.Path]::GetRelativePath($repoRoot, $screenScript.FullName)
+    if ($relative -like 'test\windows\flagship\contracts\*') { continue }
+    $screenTokens = $null
+    $screenErrors = $null
+    $screenAst = [System.Management.Automation.Language.Parser]::ParseFile($screenScript.FullName, [ref]$screenTokens, [ref]$screenErrors)
+    # Any use of the member, called or not (`.CopyFromScreen.Invoke(...)`).
+    foreach ($read in @($screenAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.MemberExpressionAst] -and $node.Member.Extent.Text -ceq 'CopyFromScreen'
+    }, $true))) {
+        $owner = $read.Parent
+        while ($null -ne $owner -and $owner -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
+        $onePixel = $read -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $read.Arguments.Count -gt 0 -and $read.Arguments[-1].Extent.Text -ceq '[Drawing.Size]::new(1, 1)'
+        $gated = $screenScript.FullName -eq $statefulWin11Lib -and $null -ne $owner -and $owner.Name -ceq 'Save-StatefulScreenCapture'
+        if (-not $onePixel -and -not $gated) { $relative }
+    }
+    $passThruCalls = @(& $findCommands $screenAst 'Save-StatefulScreenCapture' | Where-Object {
+        @($_.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'PassThru' }).Count -ne 0
+    })
+    if ($passThruCalls.Count -ne 0 -and ($relative -notin $passThruAllowed -or @(& $findMembers $screenAst 'Save').Count -ne 0)) {
+        "$relative (-PassThru)"
+    }
+    $embedded = @($screenAst.FindAll({
+        param($node)
+        # A string, such as C# source for Add-Type; not a member name.
+        (($node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $node.StringConstantType -ne 'BareWord') -or
+            $node -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) -and $node.Value -cmatch 'CopyFromScreen'
+    }, $true))
+    if ($embedded.Count -ne 0) { "$relative (embedded)" }
+}
+$screenReads = @($screenReads) + @(Get-ChildItem -LiteralPath (Join-Path $repoRoot '.github\workflows') -Filter '*.yml' -File |
+    Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -cmatch 'CopyFromScreen' } |
+    ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName) })
+$unexpectedScreenReads = @($screenReads | Sort-Object -Unique | Where-Object { $_ -notin $screenReadAllowed })
+if ($unexpectedScreenReads.Count -ne 0) {
+    throw "Screen captures must go through Save-StatefulScreenCapture: $($unexpectedScreenReads -join ', ')"
+}
+if ((Get-Content -LiteralPath (Join-Path $repoRoot $screenReadAllowed[0]) -Raw) -cmatch "Join-Path \`$layout\.Logs '[^']*\.png'") {
+    throw 'interactive-win11-shell-command-live.ps1 must keep its screen captures out of the uploaded sandbox logs.'
 }
 $harnessMainFunctions = @($interactiveWin11LibAst.FindAll({
     param($node)

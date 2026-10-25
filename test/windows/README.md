@@ -270,20 +270,23 @@ progress.
 Interactive Win11 validation for native progress state changes. It
 launches `noctty` inside the repo-local Win11 sandbox, emits raw
 OSC `9;4` state transitions for `set`, `pause`, `error`,
-`indeterminate`, and `remove`, captures the `noctty` window via
-screenshots for each state, and fails if:
+`indeterminate`, and `remove`, takes a screenshot of the `noctty` window
+for each state, and fails if:
 
 - the runtime logs `taskbar progress init failed`,
   `taskbar progress sync failed`, or a crash
-- the runtime never logs one of the expected taskbar progress sync
-  states (`set`, `pause`, `error`, `indeterminate`, `remove`)
+- noctty exits, or the payload does not reach one of the states before
+  the timeout
 
-The script reports whether captured `set`/`remove` and `pause`/`error`
-window images differ, and does the same for bottom-of-screen strips.
-These image comparisons are diagnostic only: hosted desktop environments
-do not always expose the rendered shell surface or Explorer taskbar to
-screen capture, and bottom-strip captures can include unrelated desktop
-content.
+The script reports whether the `set`/`remove` and `pause`/`error`
+screenshots differ (`unknown` when one was not saved). The comparison is
+diagnostic only: hosted desktop environments do not always expose the
+rendered window to screen capture. The screenshots go through the same
+gate as the pixel diagnostic (see the interactive job below), so a state
+whose screenshot would show anything but noctty logs why and saves none.
+The harness takes no capture of the taskbar: a strip of the bottom of the
+screen showed whatever the user had pinned and running there and was
+never evidence of taskbar rendering.
 
 Run with:
 
@@ -295,8 +298,9 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-progress.ps1 -R
 
 Interactive Win11 validation for custom post-processing shaders. It builds
 with `-Dcustom-shaders=true`, loads a deterministic solid-magenta ShaderToy
-fixture, captures the terminal surface child window, and fails unless the
-dominant sampled surface color is magenta. With `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`
+fixture, takes a screenshot of the terminal surface child window (through the
+screenshot gate), and fails unless the dominant sampled surface color is
+magenta. With `NOCTTY_INTERACTIVE_MEASURE_AUMID=1`
 (the release job), `-Rebuild` rebuilds the measurement generation instead, which
 always carries custom shaders.
 
@@ -331,7 +335,9 @@ Interactive Win11 validation for resize repaint coverage. It launches
 `noctty` with a light terminal background, synthesizes a live resize
 growth, exits the resize loop, captures the settled enlarged window, and fails
 if the newly exposed right or bottom content bands are mostly near-black or
-unpainted neutral gray.
+unpainted neutral gray. Each capture is clipped to noctty's client area inset
+by the corner radius, and the band check reads it in memory; it is saved to
+the logs only through the screenshot gate (see the interactive job below).
 
 Run with:
 
@@ -612,11 +618,21 @@ rect, and a screenshot of the sampled rect. The screenshot is taken only while
 noctty's window is shown, uncloaked, not minimized and opaque, every sample
 point lies on a noctty window, and no window of another process above it
 overlaps the rect (unless DWM says that window is cloaked); it is clipped to
-noctty's client area inset by the corner radius, and deleted if the same check
-fails right after the capture (`Get-StatefulScreenshotDecision`). Otherwise the
-report says why it was withheld. The 16 single-pixel colors are recorded
-either way, so a sample point on another application's window records that
-window's color at that point.
+noctty's client area inset by the corner radius, and written only if the same
+check still holds right after the capture (`Get-StatefulScreenshotDecision`).
+Otherwise the report says why it was withheld. The 16 single-pixel colors are
+recorded either way, so a sample point on another application's window records
+that window's color at that point.
+
+Every other screenshot the job uploads (progress, resize, shaders) is saved
+through the same gate, `Save-StatefulScreenCapture` in
+`interactive-win11-stateful-lib.ps1`. A verification contract fails when a
+harness, script or workflow uses `CopyFromScreen` for more than one pixel
+outside it, and when any harness but resize asks it for the in-memory image
+(`-PassThru`, which is not gated). The only other files allowed a capture are
+`interactive-win11-shell-command-live.ps1`, which keeps its captures in the
+sandbox `temp` folder that no workflow uploads, and the maintainer's opt-in
+`renderer/Invoke-VisibleD3D11Check.ps1`.
 
 ## ..\..\scripts\check-test-skips.ps1
 

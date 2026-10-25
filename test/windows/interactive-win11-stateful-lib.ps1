@@ -307,12 +307,21 @@ function Get-StatefulScreenFacts([IntPtr] $Hwnd, [switch] $WithColors) {
 # so), not minimized and opaque, every sample point lies on a window of
 # noctty's process, and no window of another process above noctty overlaps the
 # rect unless DWM says it is cloaked; the capture is clipped to noctty's inset
-# client area. Occluders lists those other-process windows in every case.
+# client area (CaptureRect, set whenever both rects are known). Occluders lists
+# those other-process windows in every case.
 function Get-StatefulScreenshotDecision($Facts) {
     $root = $Facts.Root
     $occluders = @($Facts.WindowsAbove | Where-Object { $_.Cloaked -le 0 -and ($null -eq $root -or $_.ProcessId -ne $root.ProcessId) })
     $foreign = if ($null -eq $root) { 0 } else { @($Facts.Samples | Where-Object { $null -eq $_.Root -or $_.Root.ProcessId -ne $root.ProcessId }).Count }
     $bounds = $Facts.CaptureBounds
+    $capture = $null
+    if ($null -ne $Facts.Rect -and $null -ne $bounds) {
+        $capture = [pscustomobject][ordered]@{
+            Left = [Math]::Max($Facts.Rect.Left, $bounds.Left); Top = [Math]::Max($Facts.Rect.Top, $bounds.Top)
+            Right = [Math]::Min($Facts.Rect.Right, $bounds.Right); Bottom = [Math]::Min($Facts.Rect.Bottom, $bounds.Bottom)
+        }
+        if ($capture.Right -le $capture.Left -or $capture.Bottom -le $capture.Top) { $capture = $null }
+    }
     $note = if ($null -eq $Facts.Rect) { 'not taken: the window rect could not be read' }
     elseif ($null -eq $root) { "withheld: noctty's top-level window could not be found" }
     elseif (-not $Facts.RootVisible -or -not $Facts.WindowVisible) { "withheld: noctty's window is hidden" }
@@ -323,28 +332,57 @@ function Get-StatefulScreenshotDecision($Facts) {
     elseif ($foreign -ne 0) { "withheld: $foreign sample point(s) lie on windows of other processes" }
     elseif ($occluders.Count -ne 0) { "withheld: $($occluders.Count) window(s) of other processes overlap the sampled rect" }
     elseif ($null -eq $bounds) { "withheld: noctty's client area could not be read" }
+    elseif ($null -eq $capture) { "withheld: the sampled rect lies outside noctty's client area" }
     else { $null }
-    $capture = $null
-    if ($null -eq $note) {
-        $capture = [pscustomobject][ordered]@{
-            Left = [Math]::Max($Facts.Rect.Left, $bounds.Left); Top = [Math]::Max($Facts.Rect.Top, $bounds.Top)
-            Right = [Math]::Min($Facts.Rect.Right, $bounds.Right); Bottom = [Math]::Min($Facts.Rect.Bottom, $bounds.Bottom)
-        }
-        if ($capture.Right -le $capture.Left -or $capture.Bottom -le $capture.Top) {
-            $capture = $null
-            $note = "withheld: the sampled rect lies outside noctty's client area"
-        }
-    }
     return [pscustomobject]@{ Capture = $null -eq $note; CaptureRect = $capture; Note = $note; Occluders = $occluders }
+}
+
+# Every screenshot a harness saves goes through here, because the interactive
+# job uploads the sandbox logs to the artifacts of a public repository
+# (EVIDENCE-SCREENSHOT-PRIVACY-01). It reads the screen over the decision's
+# CaptureRect (the window's rect clipped to noctty's inset client area) and
+# saves that to $Path only while Get-StatefulScreenshotDecision allows it, both
+# before the read and right after it. Without -PassThru the screen is read only
+# when it may be saved; with it the screen is read anyway and the bitmap is
+# returned for an in-memory check (the caller disposes it and never saves it).
+# Area is the screen rect the bitmap shows, WindowRect the window's rect.
+function Save-StatefulScreenCapture([IntPtr] $Hwnd, [string] $Path, [switch] $PassThru, $Facts = $null) {
+    if ($null -eq $Facts) { $Facts = Get-StatefulScreenFacts $Hwnd }
+    $decision = Get-StatefulScreenshotDecision $Facts
+    $area = $decision.CaptureRect
+    $result = [pscustomobject][ordered]@{ Path = $null; Note = $decision.Note; Bitmap = $null; Area = $area; WindowRect = $Facts.Rect }
+    if ($null -eq $area -or -not ($decision.Capture -or $PassThru)) { return $result }
+    $bitmap = [Drawing.Bitmap]::new($area.Right - $area.Left, $area.Bottom - $area.Top)
+    try {
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try { $graphics.CopyFromScreen($area.Left, $area.Top, 0, 0, $bitmap.Size) }
+        finally { $graphics.Dispose() }
+        if ($decision.Capture) {
+            $recheck = Get-StatefulScreenshotDecision (Get-StatefulScreenFacts $Hwnd)
+            $again = $recheck.CaptureRect
+            if ($recheck.Capture -and $again.Left -eq $area.Left -and $again.Top -eq $area.Top -and
+                $again.Right -eq $area.Right -and $again.Bottom -eq $area.Bottom) {
+                $bitmap.Save($Path, [Drawing.Imaging.ImageFormat]::Png)
+                $result.Path = $Path
+            }
+            else {
+                $why = if ($recheck.Capture) { 'the window moved' } else { $recheck.Note }
+                $result.Note = "discarded: the screen changed during the capture ($why)"
+            }
+        }
+        if ($PassThru) { $result.Bitmap = $bitmap; $bitmap = $null }
+    }
+    finally { if ($null -ne $bitmap) { $bitmap.Dispose() } }
+    return $result
 }
 
 # Records what was on screen where a screen-pixel assertion looked: the window
 # under each sample point and its color, the foreground window, whether
 # noctty's window was hung, cloaked, minimized, hidden or see-through, which
 # other processes' windows lay above it, and a screenshot of the sampled rect
-# when Get-StatefulScreenshotDecision says it shows only noctty. The facts are
-# read again after the capture, and the screenshot is deleted unless the
-# decision still holds for the same rect. The 16 colors are recorded either way.
+# when Get-StatefulScreenshotDecision says it shows only noctty, before the
+# capture and right after it (Save-StatefulScreenCapture). The 16 colors are
+# recorded either way.
 function Save-StatefulPixelDiagnostic([IntPtr] $Hwnd, [string] $Description, [string] $Directory = $script:StatefulDiagnosticDirectory) {
     if ([string]::IsNullOrWhiteSpace($Directory)) { $Directory = [IO.Path]::GetTempPath() }
     [void][IO.Directory]::CreateDirectory($Directory)
@@ -353,35 +391,12 @@ function Save-StatefulPixelDiagnostic([IntPtr] $Hwnd, [string] $Description, [st
     $base = Join-Path $Directory ('pixel-diagnostic-{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfff'), $slug)
     $facts = Get-StatefulScreenFacts $Hwnd -WithColors
     $decision = Get-StatefulScreenshotDecision $facts
-    $screenshot = $null
-    $screenshotNote = $decision.Note
-    if ($decision.Capture) {
-        $area = $decision.CaptureRect
-        $capture = [Drawing.Bitmap]::new($area.Right - $area.Left, $area.Bottom - $area.Top)
-        try {
-            $captureGraphics = [Drawing.Graphics]::FromImage($capture)
-            try {
-                $captureGraphics.CopyFromScreen($area.Left, $area.Top, 0, 0, $capture.Size)
-                $screenshot = "$base.png"
-                $capture.Save($screenshot, [Drawing.Imaging.ImageFormat]::Png)
-            }
-            catch { $screenshot = $null; $screenshotNote = "capture failed: $($_.Exception.Message)" }
-            finally { $captureGraphics.Dispose() }
-        }
-        finally { $capture.Dispose() }
-        if ($null -ne $screenshot) {
-            $recheck = Get-StatefulScreenshotDecision (Get-StatefulScreenFacts $Hwnd)
-            $again = $recheck.CaptureRect
-            $sameArea = $recheck.Capture -and $again.Left -eq $area.Left -and $again.Top -eq $area.Top -and
-                $again.Right -eq $area.Right -and $again.Bottom -eq $area.Bottom
-            if (-not $sameArea) {
-                [IO.File]::Delete($screenshot)
-                $screenshot = $null
-                $why = if ($recheck.Capture) { 'the window moved' } else { $recheck.Note }
-                $screenshotNote = "discarded: the screen changed during the capture ($why)"
-            }
-        }
+    try {
+        $shot = Save-StatefulScreenCapture -Hwnd $Hwnd -Path "$base.png" -Facts $facts
+        $screenshot = $shot.Path
+        $screenshotNote = $shot.Note
     }
+    catch { $screenshot = $null; $screenshotNote = "capture failed: $($_.Exception.Message)" }
     $foreground = Get-StatefulWindowFacts ([InteractiveWin11WindowNative]::GetForegroundWindow())
     $report = [ordered]@{
         Description = $Description
