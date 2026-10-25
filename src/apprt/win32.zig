@@ -51827,9 +51827,6 @@ test "win32 followed tab accent is re-checked against a custom titlebar band" {
     const plain = darkTheme();
     const own = clientTitlebarTheme(&plain, &config, true, false);
     try std.testing.expectEqual(@as(?u32, null), own.tab_accent);
-
-    // A second launch may forward the setting to the running instance.
-    try std.testing.expect(forwardedKeyAllowed("accent-follow-system"));
 }
 
 test "win32 titlebar colors honor ghostty overrides" {

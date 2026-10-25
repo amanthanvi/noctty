@@ -2236,7 +2236,13 @@ and decoration (`--window-width`, `--window-height`, `--window-position-*`,
 `--window-padding-*`, `--window-decoration`, `--maximize`, `--fullscreen=true`),
 `--title`, non-name font settings (`--font-size`, `--font-thicken`), and
 colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
-`--background-opacity`).
+`--background-opacity`). Settings that apply to all of the instance's windows
+are not forwarded: `--window-theme`, `--accent-follow-system`,
+`--window-titlebar-background`, `--window-titlebar-foreground`,
+`--split-divider-color`, `--window-show-tab-bar` and
+`--window-new-tab-position`. A second `noctty` leaves them out and logs a
+warning, and the running instance refuses a `+new-window` request that names
+one, as it does any key not listed.
 
 The new window copies one of the running instance's windows, as a
 `new_window` does: the first in the instance's window list, or the first

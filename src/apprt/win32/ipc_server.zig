@@ -652,6 +652,14 @@ pub fn automationTextAllowed(text: []const u8) bool {
 ///     are resolved by font discovery. Excluded on the admission rule rather
 ///     than because a concrete exploit is known.
 ///
+/// A key also has to be one the new window takes from its own config. The
+/// Win32 runtime reads `window-theme`, `accent-follow-system`,
+/// `window-titlebar-background`/`-foreground`, `split-divider-color`
+/// (`resolveTheme`, `clientTitlebarTheme`), `window-show-tab-bar` and
+/// `window-new-tab-position` from the app's config for every window, so a
+/// forwarded value would be accepted and ignored. They are left out until a
+/// window can have its own.
+///
 /// `working-directory` is handled separately: it is admitted, but its VALUE
 /// is constrained by `forwardedWorkingDirectoryAllowed`.
 const forwarded_argv_allowed_keys = [_][]const u8{
@@ -665,14 +673,8 @@ const forwarded_argv_allowed_keys = [_][]const u8{
     "window-padding-balance",
     "window-padding-color",
     "window-decoration",
-    "window-theme",
-    "accent-follow-system",
     "window-colorspace",
     "window-subtitle",
-    "window-titlebar-background",
-    "window-titlebar-foreground",
-    "window-show-tab-bar",
-    "window-new-tab-position",
     "window-step-resize",
     "window-vsync",
     "maximize",
@@ -702,7 +704,6 @@ const forwarded_argv_allowed_keys = [_][]const u8{
     "background-blur",
     "unfocused-split-opacity",
     "unfocused-split-fill",
-    "split-divider-color",
     "bold-color",
     "faint-opacity",
     "minimum-contrast",
@@ -2041,6 +2042,9 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
 
     try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--class=dev") == null);
     try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--safe-mode") == null);
+    // A key the running instance would refuse is left out, so the launch
+    // still opens a window there: here one the app reads for every window.
+    try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--window-theme=light") == null);
 
     const inherit = (try normalizeForwardedStartupArg(std.testing.allocator, "--working-directory=inherit")).?;
     defer std.testing.allocator.free(inherit);
@@ -2488,6 +2492,20 @@ test "win32 forwarded new-window argv refuses everything off the allowlist" {
         "window-save-state",
         "class",
         "single-instance",
+    }) |key| {
+        try expect(!forwardedKeyAllowed(key));
+    }
+
+    // Read from the app's config for every window: a forwarded value would
+    // be accepted and do nothing.
+    for ([_][]const u8{
+        "window-theme",
+        "accent-follow-system",
+        "window-titlebar-background",
+        "window-titlebar-foreground",
+        "split-divider-color",
+        "window-show-tab-bar",
+        "window-new-tab-position",
     }) |key| {
         try expect(!forwardedKeyAllowed(key));
     }
