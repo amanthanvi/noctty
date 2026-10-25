@@ -451,7 +451,7 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $shaderHarness
-        Pattern = '(?ms)Show-StatefulHost \$hostHwnd\r?\n\s+\$graphics\.CopyFromScreen.*?Show-StatefulHost \$hostHwnd\r?\n\s+\$argb = Get-StatefulPixel'
+        Pattern = '(?ms)Show-StatefulHost \$hostHwnd\r?\n\s+\$shot = Save-StatefulScreenCapture -Hwnd \$surface\.Hwnd .*?Show-StatefulHost \$hostHwnd\r?\n\s+\$argb = Get-StatefulPixel'
         Kind = 'Workflow'
         Description = 'shader harness refocuses the host immediately before both screen-pixel captures'
     }

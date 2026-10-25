@@ -371,6 +371,10 @@ pub extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
 
 pub extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
 
+pub extern "user32" fn SetActiveWindow(hWnd: HWND) callconv(.winapi) ?HWND;
+
+pub extern "user32" fn GetActiveWindow() callconv(.winapi) ?HWND;
+
 pub extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) BOOL;
 
 pub extern "user32" fn GetCaretPos(lpPoint: *POINT) callconv(.winapi) BOOL;

@@ -857,11 +857,11 @@ const Subprocess = struct {
     /// the distribution has said it knows the entry. See `wsl_env`.
     wsl_probe: ?wsl_env.Probe = null,
 
-    /// Whether this launch starts WSL: `wsl.exe` (`wsl_env.launchArgv`, the
-    /// test that lists the terminal's identity in `WSLENV`) or WSL's
-    /// `bash.exe` launcher (`wsl_env.launchesBashLauncher`). A POSIX path
-    /// such a pane prints is a Linux path. Set by `init` and never changed, so
-    /// the surface may read it on its own thread (`Exec.launchesWsl`).
+    /// Whether this launch starts WSL: `wsl.exe` (`wsl_env.launchArgv`) or
+    /// WSL's `bash.exe` launcher (`wsl_env.launchesBashLauncher`). Either
+    /// lists the terminal's identity in `WSLENV`, and a POSIX path such a
+    /// pane prints is a Linux path. Set by `init` and never changed, so the
+    /// surface may read it on its own thread (`Exec.launchesWsl`).
     wsl_launch: bool = false,
 
     rt_pre_exec_info: Command.RtPreExecInfo,
@@ -1225,16 +1225,22 @@ const Subprocess = struct {
         if (shell_pwd) |pwd| try env.put("PWD", pwd);
 
         // wsl.exe passes a Linux process only what WSLENV lists, so the
-        // terminal's identity has to be listed there. Do it after every
-        // override, to merge the user's own WSLENV instead of replacing it.
-        // TERM waits for `start`, which can ask the distribution.
+        // terminal's identity has to be listed there, for WSL's bash.exe
+        // launcher too. Do it after every override, to merge the user's own
+        // WSLENV instead of replacing it. TERM waits for `start`, which can
+        // ask the distribution of a wsl.exe launch.
         const wsl_argv: ?[]const [:0]const u8 = if (comptime builtin.os.tag == .windows)
             try wsl_env.launchArgv(alloc, exec_command.args, exec_command.windows_cmd_shell)
         else
             null;
+        const wsl_launch = if (comptime builtin.os.tag == .windows)
+            wsl_argv != null or
+                try wsl_env.launchesBashLauncher(alloc, exec_command.args, exec_command.windows_cmd_shell, &env)
+        else
+            false;
+        if (wsl_launch) try wsl_env.forwardIdentity(&env, term_overridden);
         const wsl_probe: ?wsl_env.Probe = if (comptime builtin.os.tag == .windows) wsl: {
             const argv = wsl_argv orelse break :wsl null;
-            try wsl_env.forwardIdentity(&env, term_overridden);
             if (term_overridden or std.mem.eql(u8, cfg.term, "xterm-256color")) break :wsl null;
             const can_probe = if (exec_command.windows_cmd_shell)
                 wsl_env.canProbeShell(exec_command.args[2]) and wsl_env.cmdAutoRunAbsent()
@@ -1243,11 +1249,6 @@ const Subprocess = struct {
             if (!can_probe) break :wsl null;
             break :wsl .{ .argv = argv, .term = try alloc.dupe(u8, cfg.term), .cwd = cwd };
         } else null;
-        const wsl_launch = if (comptime builtin.os.tag == .windows)
-            wsl_argv != null or
-                try wsl_env.launchesBashLauncher(alloc, exec_command.args, exec_command.windows_cmd_shell, &env)
-        else
-            false;
 
         return .{
             .arena = arena,
@@ -2959,6 +2960,52 @@ test "a WSL launch lists the terminal's identity in WSLENV" {
         }
     }
 
+    // WSL's bash.exe launcher passes WSLENV as wsl.exe does, so its pane
+    // gets the identity too. It names no distribution, so nothing asks one
+    // for TERM: that stays wsl.exe's unless the configuration sets it.
+    {
+        const system_root = try std.process.getEnvVarOwned(arena.allocator(), "SystemRoot");
+        const bash = try std.fs.path.joinZ(arena.allocator(), &.{ system_root, "System32", "bash.exe" });
+        var overrides: configpkg.RepeatableStringMap = .{};
+        try overrides.parseCLI(arena.allocator(), "WSLENV=GOPATH/l");
+        var subprocess = try Subprocess.init(testing.allocator, .{
+            .command = .{ .direct = &.{bash} },
+            .env = EnvMap.init(testing.allocator),
+            .env_override = overrides,
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer subprocess.deinit();
+        try testing.expect(subprocess.wsl_launch);
+        try testing.expectEqualStrings(
+            "GOPATH/l:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u",
+            subprocess.env.?.get("WSLENV").?,
+        );
+        try testing.expectEqual(null, subprocess.wsl_probe);
+
+        // A TERM the configuration sets is listed, as for wsl.exe.
+        var term_set: configpkg.RepeatableStringMap = .{};
+        try term_set.parseCLI(arena.allocator(), "TERM=xterm-kitty");
+        var with_term = try Subprocess.init(testing.allocator, .{
+            .command = .{ .direct = &.{bash} },
+            .env = EnvMap.init(testing.allocator),
+            .env_override = term_set,
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        });
+        defer with_term.deinit();
+        try testing.expectEqualStrings(
+            "COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u:TERM/u",
+            with_term.env.?.get("WSLENV").?,
+        );
+        try testing.expectEqualStrings("xterm-kitty", with_term.env.?.get("TERM").?);
+        try testing.expectEqual(null, with_term.wsl_probe);
+    }
+
     // Another program is not a WSL launch.
     {
         const env = EnvMap.init(testing.allocator);
@@ -3084,6 +3131,11 @@ test "a pane that starts WSL's bash.exe launcher runs WSL (#520 review)" {
         defer exec.deinit();
         testing.expectEqual(case.wsl, exec.launchesWsl()) catch |err| {
             std.debug.print("case {d}\n", .{index});
+            return err;
+        };
+        // And it lists the terminal's identity for WSL exactly then.
+        testing.expectEqual(case.wsl, exec.subprocess.env.?.get("WSLENV") != null) catch |err| {
+            std.debug.print("case {d} WSLENV\n", .{index});
             return err;
         };
     }

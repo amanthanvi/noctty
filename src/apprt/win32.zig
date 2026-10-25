@@ -88,6 +88,7 @@ const sendNewSplitIpc = ipc_server.sendNewSplitIpc;
 const sendNewTabIpc = ipc_server.sendNewTabIpc;
 const sendNewWindowIpc = ipc_server.sendNewWindowIpc;
 const sendPerformActionIpc = ipc_server.sendPerformActionIpc;
+const withoutAppWideArguments = ipc_server.withoutAppWideArguments;
 const win32_ipc = @import("win32_ipc.zig");
 const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const win32_hints = @import("win32_hints.zig");
@@ -1008,21 +1009,16 @@ fn applyProfileSurfaceConfig(
 /// Home for a profile launch. A bare `.home` set on a launch clone after
 /// `Config.finalize` is not resolved again: Exec then starts the program in
 /// noctty's own current directory (measured: the directory noctty was
-/// started in), so a user profile and a Visual Studio shell get the path
-/// itself (measured for a Developer Command Prompt restored with no Host: it
-/// started in the portable copy's folder). Two keep `.home`: the other
-/// detected profiles, as before, and a user profile that runs `wsl.exe`,
-/// which `.home` gives `--cd ~` (the Linux home, as a detected WSL profile
-/// gets) where a Windows path would give `--cd /mnt/c/Users/<name>`.
+/// started in), so a profile gets the path itself. For a Start menu launch
+/// that directory is the install folder, the start folder of the installer's
+/// shortcut (read from the installed `.lnk`, not measured by a launch). Only
+/// a profile that runs `wsl.exe` keeps `.home`, which gives it `--cd ~` (the
+/// Linux home) where a Windows path would give `--cd /mnt/c/Users/<name>`.
 fn profileHomeWorkingDirectory(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
 ) !configpkg.Config.WorkingDirectory {
-    switch (profile.kind) {
-        .user => if (windows_shell.isWslCommand(profile.command)) return .home,
-        .vs_dev_cmd, .vs_dev_shell => {},
-        else => return .home,
-    }
+    if (windows_shell.isWslCommand(profile.command)) return .home;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = (internal_os.home(&buf) catch null) orelse return .home;
     return .{ .path = try config._arena.?.allocator().dupe(u8, home) };
@@ -1397,6 +1393,10 @@ const UpdateCheckCompletion = struct {
     alloc: Allocator,
     release: ?updatepkg.Release = null,
     manual_message: ?[]u8 = null,
+    /// How `manual_message` reads. A check or a staging that failed is `.err`
+    /// and stays in the banner until dismissed; a result ("already current",
+    /// "staged") is `.info` and counts down.
+    manual_kind: HostBannerKind = .info,
     staged: bool = false,
     /// The check discarded state that belonged to a previously configured
     /// feed, so a notice raised from that feed must not stay actionable.
@@ -2990,6 +2990,8 @@ pub const App = struct {
     /// elevated windows or installers.
     test_shell_request: ?*const fn (app: *App, request: *const DeferredOpen) anyerror!void = null,
     next_host_id: u32 = 1,
+    /// Window activations so far, which orders `Host.activated`.
+    activations: u64 = 0,
     launcher_profile_key: ?[:0]const u8 = null,
     launcher_profile_hint: ?[:0]const u8 = null,
     launcher_quick_slot_keys: [3]?[:0]const u8 = .{ null, null, null },
@@ -6697,7 +6699,7 @@ pub const App = struct {
             };
         }
         if (completion.manual_message) |message| {
-            self.showUpdateInfo(.info, message) catch |err| {
+            self.showUpdateInfo(completion.manual_kind, message) catch |err| {
                 log.warn("failed to show updater status message err={}", .{err});
             };
         }
@@ -8170,7 +8172,13 @@ pub const App = struct {
                 );
                 defer alloc.free(pipe_name);
                 const forwarded = switch (launch_layout) {
-                    .none => try sendNewWindowIpc(alloc, pipe_name, elevated, value.arguments, response_timeout_ms),
+                    .none => sent: {
+                        // Settings the instance applies to every window are
+                        // left out, so the request is not refused for them.
+                        const arguments = try withoutAppWideArguments(alloc, value.arguments);
+                        defer if (arguments) |argv| alloc.free(argv);
+                        break :sent try sendNewWindowIpc(alloc, pipe_name, elevated, arguments, response_timeout_ms);
+                    },
                     .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, elevated, name, response_timeout_ms),
                 };
                 if (forwarded) return true;
@@ -9901,21 +9909,28 @@ pub const App = struct {
         return null;
     }
 
-    /// The window a new one copies its state from: the target's, but never
-    /// the quick terminal's. That is a floating, undecorated strip pinned to
-    /// a screen edge, and a window copied from it would be too. From the
-    /// quick terminal a new window follows an ordinary window if there is
-    /// one, and is otherwise an ordinary new window.
+    /// The window a new one copies its state from: the target's, or, for a
+    /// request no window made (a forwarded launch), one from the quick
+    /// terminal or one whose surface is gone, the ordinary window activated
+    /// last. Never the quick terminal, a floating, undecorated strip pinned
+    /// to a screen edge that a copy would repeat, and never a window kept
+    /// with no tab for undo, which has no pane to copy. With neither, an
+    /// ordinary new window. `hosts` is no guide: `detachHostReference`
+    /// reorders it.
     fn newWindowSource(self: *App, target: apprt.Target) ?*Surface {
-        const surface = self.findSurfaceForTarget(target) orelse return null;
-        const host = surface.host orelse return surface;
-        if (!host.quick_terminal) return surface;
-        for (self.hosts.items) |other| {
-            if (!other.quick_terminal) {
-                if (other.activeSurface()) |ordinary| return ordinary;
-            }
+        switch (target) {
+            .app => {},
+            .surface => |core_surface| if (self.findSurfaceByCore(core_surface)) |surface| {
+                const host = surface.host orelse return surface;
+                if (!host.quick_terminal) return surface;
+            },
         }
-        return null;
+        var latest: ?*Host = null;
+        for (self.hosts.items) |host| {
+            if (host.quick_terminal or host.activeSurface() == null) continue;
+            if (latest == null or host.activated > latest.?.activated) latest = host;
+        }
+        return if (latest) |host| host.activeSurface() else null;
     }
 
     fn focusedSurfaceForUndoRedo(self: *App) ?*Surface {
@@ -13923,7 +13938,16 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         return;
     };
     completion.* = .{ .alloc = alloc };
+    runUpdateCheck(request, completion);
+    postUpdateCheckCompletion(request.delivery, completion);
+}
 
+/// The check itself, off the UI thread. What it found goes into `completion`,
+/// and for a manual check what to tell the user and how loudly: a failure is
+/// `.err`, so it stays in the banner until dismissed instead of counting down
+/// like a result does.
+fn runUpdateCheck(request: *const UpdateCheckRequest, completion: *UpdateCheckCompletion) void {
+    const alloc = request.alloc;
     const outcome = updatepkg.checkLatestStableRelease(alloc, request.state_path, .{
         .current_version = request.current_version,
         .release_feed_url = request.release_feed_url,
@@ -13931,6 +13955,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         .respect_dismissal = request.respect_dismissal,
     }) catch |err| {
         if (request.manual) {
+            completion.manual_kind = .err;
             completion.manual_message = std.fmt.allocPrint(
                 alloc,
                 "Unable to check GitHub Releases right now ({s}).",
@@ -13938,7 +13963,6 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
             ) catch null;
         }
         appendConfiguredFeedIgnoredNote(request, completion);
-        postUpdateCheckCompletion(request.delivery, completion);
         return;
     };
     defer {
@@ -13960,6 +13984,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
                     ) catch |err| {
                         log.warn("failed to stage verified updater download err={}", .{err});
                         if (request.manual) {
+                            completion.manual_kind = .err;
                             completion.manual_message = updateStageFailureMessage(alloc, err) catch null;
                         }
                         break :stage_download;
@@ -13986,14 +14011,14 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
             } else {
                 if (version_text) |value| alloc.free(value);
                 if (release_url) |value| alloc.free(value);
-                completion.manual_message = if (request.manual)
-                    std.fmt.allocPrint(
+                if (request.manual) {
+                    completion.manual_kind = .err;
+                    completion.manual_message = std.fmt.allocPrint(
                         alloc,
                         "Unable to prepare the update notice for noctty {s}.",
                         .{release.version_text},
-                    ) catch null
-                else
-                    null;
+                    ) catch null;
+                }
             }
         },
         .up_to_date, .throttled => {
@@ -14008,7 +14033,6 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
     }
 
     appendConfiguredFeedIgnoredNote(request, completion);
-    postUpdateCheckCompletion(request.delivery, completion);
 }
 
 test "update worker OOM clears running and releases its detached lifetime" {
@@ -14050,6 +14074,123 @@ test "update completion post failure clears running and frees its payload" {
     postUpdateCheckCompletion(delivery, completion);
     try std.testing.expect(!delivery.update_running.load(.acquire));
     try std.testing.expect(delivery.pop() == null);
+}
+
+/// A manual or automatic update check against a state file the check can
+/// answer from without the network: a throttled one, or one that remembers a
+/// newer release. A directory where the state file belongs makes it fail.
+fn testRunUpdateCheck(
+    alloc: Allocator,
+    state_path: []const u8,
+    manual: bool,
+    download: bool,
+) !UpdateCheckCompletion {
+    const feed = "https://feed.invalid/releases/latest";
+    var request: UpdateCheckRequest = .{
+        .alloc = alloc,
+        // The check itself never touches it; posting the result does.
+        .delivery = undefined,
+        .state_path = @constCast(state_path),
+        .current_version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .current_version_string = @constCast("1.0.0"),
+        .release_feed_url = @constCast(feed),
+        .force = false,
+        .manual = manual,
+        .ignored_feed_source = null,
+        .respect_dismissal = true,
+        .download = download,
+        .staged_kind = .installer,
+    };
+    var completion: UpdateCheckCompletion = .{ .alloc = alloc };
+    errdefer completion.deinit();
+    runUpdateCheck(&request, &completion);
+    return completion;
+}
+
+test "a manual update check reports a failure as an error and a result as information" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+
+    // The check fails: a directory stands where the state file belongs. A
+    // failure stays in the banner until dismissed.
+    var failed = try testRunUpdateCheck(alloc, root, true, false);
+    defer failed.deinit();
+    try std.testing.expectEqual(HostBannerKind.err, failed.manual_kind);
+    try std.testing.expect(std.mem.startsWith(u8, failed.manual_message.?, "Unable to check GitHub Releases right now ("));
+    // An automatic check says nothing, whatever happened.
+    var silent = try testRunUpdateCheck(alloc, root, false, false);
+    defer silent.deinit();
+    try std.testing.expectEqual(@as(?[]u8, null), silent.manual_message);
+
+    // A throttled check with nothing newer remembered: "already current" is
+    // a result, and counts down like one.
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    var state: updatepkg.State = .{
+        .last_checked_at = std.time.timestamp() - 60,
+        .release_feed_url = try alloc.dupe(u8, "https://feed.invalid/releases/latest"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/releases/tag/v99.0.0"),
+    };
+    defer state.deinit(alloc);
+    try updatepkg.saveState(state_path, &state);
+    var current = try testRunUpdateCheck(alloc, state_path, true, false);
+    defer current.deinit();
+    try std.testing.expectEqual(HostBannerKind.info, current.manual_kind);
+    try std.testing.expect(std.mem.indexOf(u8, current.manual_message.?, "is already current") != null);
+
+    // A newer release is remembered but cannot be staged (the throttle cache
+    // keeps no assets): the notice is raised, and the failure to stage it is
+    // an error. Without a download there is nothing to report.
+    state.last_seen_version = try alloc.dupe(u8, "99.0.0");
+    try updatepkg.saveState(state_path, &state);
+    var unstaged = try testRunUpdateCheck(alloc, state_path, true, true);
+    defer unstaged.deinit();
+    try std.testing.expect(unstaged.release != null);
+    try std.testing.expectEqual(HostBannerKind.err, unstaged.manual_kind);
+    try std.testing.expect(std.mem.startsWith(u8, unstaged.manual_message.?, "Update found, but it could not be verified or staged"));
+    var found = try testRunUpdateCheck(alloc, state_path, true, false);
+    defer found.deinit();
+    try std.testing.expect(found.release != null);
+    try std.testing.expectEqual(HostBannerKind.info, found.manual_kind);
+    try std.testing.expectEqual(@as(?[]u8, null), found.manual_message);
+}
+
+test "the update check's banner keeps a failure up and lets a result count down" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+    });
+    defer session.deinit();
+
+    var failure: UpdateCheckCompletion = .{
+        .alloc = std.testing.allocator,
+        .manual_message = try std.testing.allocator.dupe(u8, "Unable to check GitHub Releases right now (error.ConnectionRefused)."),
+        .manual_kind = .err,
+    };
+    defer failure.deinit();
+    app.handleUpdateCheckCompletion(&failure);
+    try std.testing.expectEqual(HostBannerKind.err, host.banner_kind);
+    try std.testing.expectEqualStrings(failure.manual_message.?, host.banner_text.?);
+
+    var result: UpdateCheckCompletion = .{
+        .alloc = std.testing.allocator,
+        .manual_message = try std.testing.allocator.dupe(u8, "noctty 1.0.0 is already current on the stable channel."),
+    };
+    defer result.deinit();
+    app.handleUpdateCheckCompletion(&result);
+    try std.testing.expectEqual(HostBannerKind.info, host.banner_kind);
+    try std.testing.expectEqualStrings(result.manual_message.?, host.banner_text.?);
 }
 
 fn tryOrNull(alloc: Allocator, text: []const u8) ?[]u8 {
@@ -15385,6 +15526,9 @@ const Host = struct {
     focus_input_mode: focus_cue.InputMode = .pointer,
     /// Native window activation, independent of the selected terminal tab.
     window_active: bool = false,
+    /// `App.activations` when this window was last activated, 0 if never:
+    /// which window a forwarded launch copies (`App.newWindowSource`).
+    activated: u64 = 0,
     /// Fade state for the tab the user is currently hovering. Paint
     /// reads `alphaAt(now)` + pre-composites the glyph colour against
     /// the tab bg so the close X visibly fades in with
@@ -15464,6 +15608,12 @@ const Host = struct {
     /// When the running `.info` countdown ends (`GetTickCount64`), null
     /// while none runs. See `syncBannerExpiry`.
     banner_expires_at: ?u64 = null,
+    /// The banner has had a `WM_PAINT` since its message was set or it was
+    /// last hidden. An `.info` countdown starts only then: a UI thread busy
+    /// for longer than the countdown would otherwise find the timer overdue
+    /// at its first turn, and `GetMessage` hands out a pending paint before
+    /// a due timer, so the message would be painted once and cleared.
+    banner_painted: bool = false,
     tab_drag_index: ?usize = null,
     tab_drag_start_x: i32 = 0,
     tab_drag_start_y: i32 = 0,
@@ -20860,7 +21010,9 @@ const Host = struct {
         try appendOwnedString(self.app.core_app.alloc, &self.banner_text, next_text);
         // This announces the banner itself, below.
         self.banner_announce_pending = false;
-        // A new message gets a full countdown of its own.
+        // A new message gets a full countdown of its own, from its first
+        // paint (`bannerPainted`).
+        self.banner_painted = false;
         self.stopBannerExpiry();
         self.placeBanner(true);
         if (self.banner_uia_provider) |provider| provider.raiseLiveRegionChanged();
@@ -21171,6 +21323,8 @@ const Host = struct {
             // surface is the topmost child).
             if (self.hwnd) |parent| raiseChildToTop(parent, hwnd);
         } else {
+            // Shown again, it is painted again, and the countdown starts there.
+            self.banner_painted = false;
             if (self.banner_pointer_inside) {
                 // A leave armed before the hide could otherwise arrive after
                 // the next show and start a countdown under a resting pointer.
@@ -21193,10 +21347,11 @@ const Host = struct {
     }
 
     /// Count an `.info` message down only while it is on screen and nobody
-    /// is reading it: the window is shown, not minimized and not cloaked,
-    /// the pointer is not over the banner and it does not hold keyboard
-    /// focus. Errors and the update notice stay until
-    /// dismissed. When any of that ends, the countdown restarts in full.
+    /// is reading it: the banner has been painted (`bannerPainted`), the
+    /// window is shown, not minimized and not cloaked, the pointer is not
+    /// over the banner and it does not hold keyboard focus. Errors and the
+    /// update notice stay until dismissed. When any of that ends, the
+    /// countdown restarts in full.
     ///
     /// The duration is the system's own notification time, Settings >
     /// Accessibility > Visual effects > "Dismiss notifications after this
@@ -21210,6 +21365,7 @@ const Host = struct {
         // whether it is shown and not minimized.
         const run = self.banner_kind == .info and
             self.banner_text != null and
+            self.banner_painted and
             self.banner_placement.visible and
             self.surfaces_visible and
             sys.IsWindowVisible(hwnd) != 0 and
@@ -21223,6 +21379,21 @@ const Host = struct {
         const duration_ms = bannerMessageDurationMs();
         self.banner_expires_at = sys.GetTickCount64() + duration_ms;
         _ = sys.SetTimer(hwnd, c.BANNER_TIMER_ID, duration_ms, null);
+    }
+
+    /// The banner child answered `WM_PAINT` (never `WM_PRINTCLIENT`, which
+    /// puts nothing on screen): the first one after a message is set, or
+    /// after the banner was hidden, starts the `.info` countdown. A message
+    /// that a busy UI thread (a slow cold start) could not paint for longer
+    /// than the countdown is therefore painted before the countdown starts,
+    /// not cleared in the same turn: the OpenGL fallback banner is the only
+    /// place a user learns custom shaders and images are off. A banner that
+    /// was painted, then waited out a minimized or hidden window, restarts
+    /// at once when the window is back, as it always did.
+    fn bannerPainted(self: *Host) void {
+        if (self.banner_painted) return;
+        self.banner_painted = true;
+        self.syncBannerExpiry();
     }
 
     fn stopBannerExpiry(self: *Host) void {
@@ -21586,6 +21757,14 @@ const Host = struct {
         return rect;
     }
 
+    /// The paint the message loop delivers once a banner is set or shown:
+    /// `WM_PAINT`, which starts an `.info` countdown (`bannerPainted`). Like
+    /// the loop, it paints only a banner that was invalidated and is shown,
+    /// so a banner that nothing invalidates stays unpainted here too.
+    fn bannerTestPaint(host: *Host) void {
+        _ = sys.UpdateWindow(host.banner_hwnd.?);
+    }
+
     fn bannerTestPress(host: *Host, button: BannerButton) void {
         const banner = host.banner_hwnd.?;
         const child = host.banner_buttons[@intFromEnum(button)].?;
@@ -21820,8 +21999,25 @@ const Host = struct {
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
         host.refreshSurfaceVisibility();
+        // Shown but not painted: the countdown starts at the paint, so a UI
+        // thread that was busy past it finds a full countdown, not an
+        // overdue timer. A print into a bitmap (`WM_PRINTCLIENT`) puts
+        // nothing on screen and starts nothing.
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        const banner = host.banner_hwnd.?;
+        const client = try bannerTestClientRect(banner);
+        const canvas = try BannerTestCanvas.init(client.right, client.bottom);
+        defer canvas.deinit();
+        canvas.print(banner);
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        try std.testing.expect(!host.banner_painted);
+        bannerTestPaint(&host);
         const first = host.banner_expires_at orelse return error.TestExpectedCountdown;
         try std.testing.expect(first >= sys.GetTickCount64() + 4000);
+        // A paint after that changes nothing.
+        _ = sys.InvalidateRect(banner, null, 0);
+        bannerTestPaint(&host);
+        try std.testing.expectEqual(@as(?u64, first), host.banner_expires_at);
         // The same message again starts it over.
         host.banner_expires_at = 1;
         try host.setBanner(.info, "Nothing to undo.");
@@ -21877,11 +22073,32 @@ const Host = struct {
         try std.testing.expectEqual(@as(?[:0]const u8, null), host.banner_text);
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
 
-        // Errors stay until dismissed, and a later info message is not
-        // cleared by the error's (absent) countdown.
+        // Errors stay until dismissed, painted or not, and a later info
+        // message is not cleared by the error's (absent) countdown.
         try host.setBanner(.err, "Layout could not be saved.");
+        bannerTestPaint(&host);
+        try std.testing.expect(host.banner_painted);
         try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
         try host.setBanner(.info, "Layout saved.");
+        bannerTestPaint(&host);
+        try std.testing.expect(host.banner_expires_at != null);
+
+        // Every new message waits for its own paint, and a banner that was
+        // hidden (an overlay owns the feedback lane) for the paint it gets
+        // when it comes back.
+        try host.setBanner(.info, "Layout saved again.");
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        bannerTestPaint(&host);
+        try std.testing.expect(host.banner_expires_at != null);
+        host.overlay_mode = .command_palette;
+        host.syncBannerChild();
+        try std.testing.expect(!bannerTestVisible(host.banner_hwnd.?));
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        host.overlay_mode = .none;
+        host.syncBannerChild();
+        try std.testing.expect(bannerTestVisible(host.banner_hwnd.?));
+        try std.testing.expectEqual(@as(?u64, null), host.banner_expires_at);
+        bannerTestPaint(&host);
         try std.testing.expect(host.banner_expires_at != null);
     }
 
@@ -21911,6 +22128,7 @@ const Host = struct {
         if (windows.kernel32.SetEnvironmentVariableW(name, std.unicode.utf8ToUtf16LeStringLiteral("1")) == 0) return lastError();
         defer _ = windows.kernel32.SetEnvironmentVariableW(name, null);
         try host.setBanner(.info, "OpenGL could not start.");
+        bannerTestPaint(&host);
         if (build_config.renderer_test_tools) {
             // No countdown, so nothing clears it, however long the UI
             // thread is busy before a harness reads it.
@@ -32186,8 +32404,9 @@ fn newWindowPlacement(app: *App, source: HWND, fullscreen: bool, destination: ?H
     }
     if (size) |own| rect = rectWithSize(rect, own);
     const step = cascadeStep(sys.GetDpiForWindow(source));
-    // One step off the source, and on past any window already there: every
-    // new window of a forwarded launch is opened from the same first window.
+    // One step off the source, and on past any window already there: one
+    // window can be the source of several, as when the user goes back to it
+    // and opens another, or when Windows does not activate a forwarded one.
     var placed = cascadedRect(rect, step, info.rcWork);
     var steps: u8 = 0;
     while (steps < 8 and app.windowStartsAt(placed, destination)) : (steps += 1) {
@@ -36295,10 +36514,11 @@ fn bannerMessageDurationMs() UINT {
 }
 
 /// False only in a `-Drenderer-test-tools` build started with
-/// `NOCTTY_RENDERER_KEEP_NOTICES`. A countdown starts when the banner is
-/// set, so a UI thread busy past it (a slow cold start) clears the banner
-/// before a harness can read it through UIA; the renderer harness's OpenGL
-/// startup fallback case sets this switch so it can read the banner.
+/// `NOCTTY_RENDERER_KEEP_NOTICES`. A countdown starts at the banner's first
+/// paint, but a harness's UIA client can be slower than the countdown (a cold
+/// runner's first call) and read the banner only after it is gone; the
+/// renderer harness's OpenGL startup fallback case sets this switch so it can
+/// read the banner.
 fn infoBannersExpire() bool {
     return infoBannersExpireIn(build_config.renderer_test_tools);
 }
@@ -36381,10 +36601,13 @@ fn hostBannerProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             },
             c.WM_ERASEBKGND => return 1,
             c.WM_PAINT => {
-                var ps: PAINTSTRUCT = undefined;
-                const hdc = sys.BeginPaint(hwnd, &ps) orelse return 0;
-                defer _ = sys.EndPaint(hwnd, &ps);
-                paintBannerClient(host, hwnd, hdc);
+                {
+                    var ps: PAINTSTRUCT = undefined;
+                    const hdc = sys.BeginPaint(hwnd, &ps) orelse return 0;
+                    defer _ = sys.EndPaint(hwnd, &ps);
+                    paintBannerClient(host, hwnd, hdc);
+                }
+                host.bannerPainted();
                 return 0;
             },
             c.WM_PRINTCLIENT => {
@@ -37373,6 +37596,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             if (host) |v| {
                 v.refreshSurfaceVisibility();
                 if ((wParam & 0xFFFF) != c.WA_INACTIVE) {
+                    v.app.activations += 1;
+                    v.activated = v.app.activations;
                     // The user brought this window forward: its active tab is
                     // seen even if focus lands on the chrome, not a terminal.
                     v.app.acknowledgeTab(v, v.active_tab);
@@ -52137,9 +52362,6 @@ test "win32 followed tab accent is re-checked against a custom titlebar band" {
     const plain = darkTheme();
     const own = clientTitlebarTheme(&plain, &config, true, false);
     try std.testing.expectEqual(@as(?u32, null), own.tab_accent);
-
-    // A second launch may forward the setting to the running instance.
-    try std.testing.expect(forwardedKeyAllowed("accent-follow-system"));
 }
 
 test "win32 titlebar colors honor ghostty overrides" {
@@ -53236,6 +53458,82 @@ test "win32 new_window does not copy state from a quick terminal" {
     try std.testing.expect(Hook.clone_state_from == &surface);
 }
 
+test "win32 new_window from the app copies the window activated last, never the quick terminal or a window kept empty for undo" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var empty_host: Host = undefined;
+    var quick_host: Host = undefined;
+    var first_host: Host = undefined;
+    var second_host: Host = undefined;
+    var quick_surface: Surface = undefined;
+    var first: Surface = undefined;
+    var second: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        // First in the list: a window whose last tab was closed and is kept
+        // for undo, then the quick terminal. Neither has a pane to copy.
+        .hosts = &.{
+            .{ .storage = &empty_host, .id = 1, .register = true, .next_tab_id = 2 },
+            .{ .storage = &quick_host, .id = 2, .register = true, .next_tab_id = 2 },
+            .{ .storage = &first_host, .id = 3, .register = true, .next_tab_id = 2 },
+            .{ .storage = &second_host, .id = 4, .register = true, .next_tab_id = 2 },
+        },
+        .surfaces = &.{
+            .{ .storage = &quick_surface, .host = &quick_host, .register = true },
+            .{ .storage = &first, .host = &first_host, .register = true },
+            .{ .storage = &second, .host = &second_host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &quick_host, .surface = &quick_surface, .id = 1 },
+            .{ .host = &first_host, .surface = &first, .id = 1 },
+            .{ .host = &second_host, .surface = &second, .id = 1 },
+        },
+    });
+    defer session.deinit();
+    quick_host.quick_terminal = true;
+
+    const Hook = struct {
+        var clone_state_from: ?*const Surface = null;
+
+        fn createSurface(_: *App, _: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
+            clone_state_from = opts.clone_state_from;
+            return error.TestWindowCreateFailed;
+        }
+
+        fn source(a: *App, target: apprt.Target) !?*const Surface {
+            clone_state_from = null;
+            _ = a.performAction(target, .new_window, .{}) catch {};
+            return clone_state_from;
+        }
+    };
+    app.test_create_window_surface = &Hook.createSurface;
+
+    // Never activated: the first ordinary window with a pane, in list order.
+    try std.testing.expect(try Hook.source(&app, .app) == &first);
+
+    // The ordinary window activated last, though the empty window and the
+    // quick terminal were activated after it. Before, the empty window in
+    // the first slot gave nothing to copy.
+    first_host.activated = 1;
+    second_host.activated = 2;
+    quick_host.activated = 3;
+    empty_host.activated = 4;
+    try std.testing.expect(try Hook.source(&app, .app) == &second);
+    first_host.activated = 5;
+    try std.testing.expect(try Hook.source(&app, .app) == &first);
+
+    // From the quick terminal too. Before, that was the first ordinary
+    // window in the list.
+    second_host.activated = 6;
+    try std.testing.expect(try Hook.source(&app, .{ .surface = quick_surface.core() }) == &second);
+    // From an ordinary window, that window, whenever it was activated.
+    try std.testing.expect(try Hook.source(&app, .{ .surface = first.core() }) == &first);
+}
+
 test "win32 a new window is not maximized by a restore-to-maximized flag left on a normal window" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try runOnHiddenDesktop(struct {
@@ -53327,8 +53625,8 @@ test "win32 new windows from one source step past the windows already there" {
             try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &origin) != 0);
             const step = sys.MulDiv(32, @intCast(sys.GetDpiForWindow(source.hwnd.?)), 96);
 
-            // Every forwarded launch is opened from the same first window.
-            // The next one goes where the last one is not.
+            // Several new windows opened from the same window: the next one
+            // goes where the last one is not.
             var rect: RECT = undefined;
             for ([_]i32{ 1, 2, 3 }) |n| {
                 try clone.inheritWindowStateFrom(&source, .{});
@@ -54162,6 +54460,71 @@ test "win32 forwarded window keys apply to a new window when no window is open" 
             try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
             try std.testing.expect(!clone.decorations_visible and !clone.host.?.cached_decorations_visible);
             try std.testing.expectEqual(ForwardedKeysTest.undecoratedStyle(clone), ForwardedKeysTest.style(hwnd));
+        }
+    }.body);
+}
+
+test "win32 a forwarded window copies the window activated last, not the first in the list" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    try runOnHiddenDesktop(struct {
+        fn body() !void {
+            var t: ForwardedKeysTest = .{};
+            try t.init();
+            defer t.deinit();
+            const app = &t.fixture.app;
+
+            // Two more windows, each where no copy is cascaded onto, and with
+            // room for a copy of `second` on a 1024x768 runner.
+            var buf: [2][2][32]u8 = undefined;
+            const second_at = try ForwardedKeysTest.placedAt(&buf[0], t.work.left + 240, t.work.top + 140);
+            const second = try t.forward(&second_at, null);
+            const third_at = try ForwardedKeysTest.placedAt(&buf[1], t.work.left + 120, t.work.top + 120);
+            const third = try t.forward(&third_at, null);
+
+            // The first window is first in the list, and was copied before.
+            try activate(second);
+            try expectCopies(&t, second);
+
+            // Closing the first window moves the newest into its slot.
+            try activate(second);
+            t.fixture.closeWindow(t.source);
+            try std.testing.expect(app.hosts.items[0] == third.host.?);
+            try expectCopies(&t, second);
+
+            // A window kept with no tab for undo has no pane to copy, even
+            // first in the list and activated last. Before, the forwarded
+            // window then opened as if no window were open.
+            const kept = third.host.?;
+            var entry = kept.detachTabForUndo(0).?;
+            // Back in its window before teardown closes it, if a check fails.
+            errdefer _ = kept.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
+            try activate(second);
+            try activateHost(kept);
+            try expectCopies(&t, second);
+            try std.testing.expect(try kept.restoreClosedTabEntryNative(&entry.payload.close_tab));
+        }
+
+        fn activate(surface: *Surface) !void {
+            try activateHost(surface.host.?);
+        }
+
+        /// Real activation: `WM_ACTIVATE` from the window manager.
+        fn activateHost(host: *Host) !void {
+            const hwnd = host.hwnd.?;
+            _ = sys.SetActiveWindow(hwnd);
+            try std.testing.expect(sys.GetActiveWindow() == hwnd);
+            try std.testing.expectEqual(host.app.activations, host.activated);
+        }
+
+        /// A plain forward is one cascade step off `source`, at its size,
+        /// kept in its work area as `newWindowPlacement` keeps it.
+        fn expectCopies(t: *ForwardedKeysTest, source: *Surface) !void {
+            const hwnd = source.windowHwnd().?;
+            const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
+            const work = (try Surface.windowMonitor(hwnd)).info.rcWork;
+            const clone = try t.forward(null, null);
+            try std.testing.expectEqualDeep(cascadedRect(rect, cascadeStep(sys.GetDpiForWindow(hwnd)), work), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
+            t.fixture.closeWindow(clone);
         }
     }.body);
 }
@@ -56755,6 +57118,52 @@ test "win32 applyProfileSurfaceConfig replaces shallow-cloned command safely" {
     try std.testing.expect(base.command != null);
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
     try std.testing.expectEqualStrings("pwsh.exe", base.command.?.shell);
+}
+
+test "win32 a detected profile chosen from the picker starts in home itself" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = (try internal_os.home(&home_buf)).?;
+    const pwsh = [_][:0]const u8{"C:\\Program Files\\PowerShell\\7\\pwsh.exe"};
+    const powershell = [_][:0]const u8{"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"};
+    const cmd = [_][:0]const u8{"C:\\Windows\\System32\\cmd.exe"};
+    const git_bash = [_][:0]const u8{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" };
+    const wsl_default = [_][:0]const u8{"C:\\Windows\\System32\\wsl.exe"};
+    const wsl_distro = [_][:0]const u8{ "C:\\Windows\\System32\\wsl.exe", "-d", "Ubuntu" };
+    for ([_]struct { kind: windows_shell.ProfileKind, argv: []const [:0]const u8 }{
+        .{ .kind = .pwsh, .argv = &pwsh },
+        .{ .kind = .powershell, .argv = &powershell },
+        .{ .kind = .cmd, .argv = &cmd },
+        .{ .kind = .git_bash, .argv = &git_bash },
+        .{ .kind = .wsl_default, .argv = &wsl_default },
+        .{ .kind = .wsl_distro, .argv = &wsl_distro },
+    }) |case| {
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        clone.@"working-directory" = .{ .path = try clone._arena.?.allocator().dupe(u8, "C:\\work") };
+        const profile: windows_shell.Profile = .{
+            .kind = case.kind,
+            .key = "detected",
+            .label = "Detected",
+            .command = .{ .direct = case.argv },
+        };
+        try applyProfileSurfaceConfig(&clone, &profile);
+        const wd = clone.@"working-directory".?;
+        switch (case.kind) {
+            // `.home` gives WSL `--cd ~`, the Linux home.
+            .wsl_default, .wsl_distro => try std.testing.expect(wd == .home),
+            // The path, which Exec uses as given. A bare `.home` here would
+            // start the shell in noctty's own current directory.
+            else => switch (wd) {
+                .path => |path| try std.testing.expectEqualStrings(home, path),
+                else => return error.TestExpectedHomePath,
+            },
+        }
+    }
 }
 
 test "win32 applyProfileCommandConfig preserves inherited working directory" {

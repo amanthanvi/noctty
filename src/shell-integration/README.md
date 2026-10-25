@@ -193,8 +193,12 @@ segment percent-encoded, and OSC 133 A / B / D prompt marks with a stable
 user's prompt writes itself lands after A. B is written by the line reader
 (below), after the host has drawn the prompt and before PSReadLine starts, so
 it lands where input begins whatever the prompt returned, and the returned
-string stays exactly the user's: a transcript, including one the "Turn on
-PowerShell Transcription" group policy starts, records the prompt without it.
+string stays exactly the user's: a `Start-Transcript` transcript records the
+prompt without it (measured in FullLanguage, which the automatic bootstrap
+needs: it skips ConstrainedLanguage). The "Turn on PowerShell Transcription" group
+policy is expected to start the same host transcription, so its transcript
+should do the same; that is inferred, not measured, and no policy has been
+set to check it.
 A B written from inside the prompt function would land ahead of the visible
 prompt, because the host draws the returned string only after the function
 returns, and the prompt's cells would be taken for input. Two cases have no

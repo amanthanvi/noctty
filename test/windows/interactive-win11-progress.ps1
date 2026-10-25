@@ -33,21 +33,12 @@ Invoke-InteractiveWin11HarnessMain `
     -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 
 public static class NocttyWin32 {
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RECT {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 
@@ -56,9 +47,6 @@ public static class NocttyWin32 {
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
 }
 '@
@@ -75,22 +63,21 @@ class InteractiveWin11ProgressCapture {
     [InteractiveWin11ProgressCaptureKind] $Kind
     [string] $Marker
     [string] $Screenshot
-    [string] $BottomStrip
+    # The saved screenshot, or empty when the privacy gate withheld it.
+    [string] $Saved
+    [string] $Note
 
     InteractiveWin11ProgressCapture(
         [InteractiveWin11ProgressCaptureKind] $Kind,
         [string] $Marker,
-        [string] $Screenshot,
-        [string] $BottomStrip
+        [string] $Screenshot
     ) {
         if ([string]::IsNullOrWhiteSpace($Marker)) { throw 'Marker is required.' }
         if ([string]::IsNullOrWhiteSpace($Screenshot)) { throw 'Screenshot is required.' }
-        if ([string]::IsNullOrWhiteSpace($BottomStrip)) { throw 'BottomStrip is required.' }
 
         $this.Kind = $Kind
         $this.Marker = $Marker
         $this.Screenshot = $Screenshot
-        $this.BottomStrip = $BottomStrip
     }
 
     [string] Name() {
@@ -122,6 +109,8 @@ function Show-ProgressHarnessWindow {
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'progress' -ResetState:$ResetState -IncludeResourcesDir
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
+
+. (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
@@ -186,60 +175,6 @@ Send-Bytes ([byte[]](0x1b,0x5d,0x39,0x3b,0x34,0x3b,0x30,0x3b,0x07))
 Start-Sleep -Seconds 3
 "@ | Set-Content -LiteralPath $payloadPath -Encoding UTF8
 
-function Capture-WindowImage {
-    param(
-        [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [string] $Path
-    )
-
-    $rect = New-Object NocttyWin32+RECT
-    if (-not [NocttyWin32]::GetWindowRect($Hwnd, [ref] $rect)) {
-        throw "GetWindowRect failed for hwnd=$Hwnd"
-    }
-
-    $width = [Math]::Max(1, $rect.Right - $rect.Left)
-    $height = [Math]::Max(1, $rect.Bottom - $rect.Top)
-    $bmp = New-Object System.Drawing.Bitmap $width, $height
-    try {
-        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-        try {
-            $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
-        }
-        finally {
-            $gfx.Dispose()
-        }
-        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-    }
-    finally {
-        $bmp.Dispose()
-    }
-}
-
-function Capture-PrimaryScreenBottomStrip {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [int] $Height = 220
-    )
-
-    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $captureHeight = [Math]::Min($Height, $bounds.Height)
-    $top = $bounds.Bottom - $captureHeight
-    $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $captureHeight
-    try {
-        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-        try {
-            $gfx.CopyFromScreen($bounds.Left, $top, 0, 0, $bmp.Size)
-        }
-        finally {
-            $gfx.Dispose()
-        }
-        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-    }
-    finally {
-        $bmp.Dispose()
-    }
-}
-
 function Get-FileSha256 {
     param(
         [Parameter(Mandatory)] [string] $Path
@@ -260,6 +195,17 @@ function Get-FileSha256 {
     }
 }
 
+# Whether two saved screenshots differ, or 'unknown' when either was withheld.
+function Compare-ProgressScreenshots {
+    param(
+        [Parameter(Mandatory)] [InteractiveWin11ProgressCapture] $First,
+        [Parameter(Mandatory)] [InteractiveWin11ProgressCapture] $Second
+    )
+
+    if ([string]::IsNullOrEmpty($First.Saved) -or [string]::IsNullOrEmpty($Second.Saved)) { return 'unknown' }
+    return (Get-FileSha256 -Path $First.Saved) -ne (Get-FileSha256 -Path $Second.Saved)
+}
+
 $screenshots = [ordered]@{
     set = Join-Path $layout.Logs 'interactive-win11-progress-window-set.png'
     pause = Join-Path $layout.Logs 'interactive-win11-progress-window-pause.png'
@@ -267,21 +213,16 @@ $screenshots = [ordered]@{
     busy = Join-Path $layout.Logs 'interactive-win11-progress-window-busy.png'
     remove = Join-Path $layout.Logs 'interactive-win11-progress-window-remove.png'
 }
-$bottomStrips = [ordered]@{
-    set = Join-Path $layout.Logs 'interactive-win11-progress-bottom-strip-set.png'
-    pause = Join-Path $layout.Logs 'interactive-win11-progress-bottom-strip-pause.png'
-    error = Join-Path $layout.Logs 'interactive-win11-progress-bottom-strip-error.png'
-    busy = Join-Path $layout.Logs 'interactive-win11-progress-bottom-strip-busy.png'
-    remove = Join-Path $layout.Logs 'interactive-win11-progress-bottom-strip-remove.png'
-}
-Remove-Item -LiteralPath $screenshots.Values, $bottomStrips.Values -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $screenshots.Values -ErrorAction SilentlyContinue
+# Earlier versions also saved bottom-of-screen strips here.
+Remove-Item -Path (Join-Path $layout.Logs 'interactive-win11-progress-bottom-strip-*.png') -ErrorAction SilentlyContinue
 
 [InteractiveWin11ProgressCapture[]] $states = @(
-    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Set, $markerSet, $screenshots.set, $bottomStrips.set)
-    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Pause, $markerPause, $screenshots.pause, $bottomStrips.pause)
-    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Error, $markerError, $screenshots.error, $bottomStrips.error)
-    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Busy, $markerBusy, $screenshots.busy, $bottomStrips.busy)
-    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Remove, $markerRemove, $screenshots.remove, $bottomStrips.remove)
+    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Set, $markerSet, $screenshots.set)
+    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Pause, $markerPause, $screenshots.pause)
+    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Error, $markerError, $screenshots.error)
+    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Busy, $markerBusy, $screenshots.busy)
+    [InteractiveWin11ProgressCapture]::new([InteractiveWin11ProgressCaptureKind]::Remove, $markerRemove, $screenshots.remove)
 )
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
@@ -333,12 +274,19 @@ try {
     foreach ($state in $states) {
         $stateName = $state.Name()
         $stateDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(4, $TimeoutSeconds))
+        $stateReached = $false
         while ([DateTime]::UtcNow -lt $stateDeadline) {
             if (Test-Path -LiteralPath $state.Marker) {
                 Show-ProgressHarnessWindow -Hwnd $process.MainWindowHandle
                 Start-Sleep -Milliseconds $script:PROGRESS_CAPTURE_SETTLE_MS
-                Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $state.Screenshot
-                Capture-PrimaryScreenBottomStrip -Path $state.BottomStrip
+                # Diagnostic only, and saved only where it shows noctty alone.
+                $shot = Save-StatefulScreenCapture -Hwnd $process.MainWindowHandle -Path $state.Screenshot
+                $state.Saved = $shot.Path
+                $state.Note = $shot.Note
+                if ($null -eq $shot.Path) {
+                    Write-Host "interactive-win11 progress: screenshot for state '$stateName' not saved ($($shot.Note))"
+                }
+                $stateReached = $true
                 break
             }
 
@@ -354,11 +302,8 @@ try {
             Start-Sleep -Milliseconds $script:PROGRESS_POLL_MS
         }
 
-        if (-not (Test-Path -LiteralPath $state.Screenshot)) {
-            throw "failed to capture screenshot for state '$stateName'"
-        }
-        if (-not (Test-Path -LiteralPath $state.BottomStrip)) {
-            throw "failed to capture bottom strip for state '$stateName'"
+        if (-not $stateReached) {
+            throw "progress state '$stateName' was not reached before timeout"
         }
     }
 
@@ -367,25 +312,15 @@ try {
         throw "unexpected runtime failure reported in stderr:`n$stderr"
     }
 
-    $setHash = Get-FileSha256 -Path $screenshots.set
-    $pauseHash = Get-FileSha256 -Path $screenshots.pause
-    $errorHash = Get-FileSha256 -Path $screenshots.error
-    $removeHash = Get-FileSha256 -Path $screenshots.remove
-    $visualSetVsRemoveDistinct = $setHash -ne $removeHash
-    $visualPauseVsErrorDistinct = $pauseHash -ne $errorHash
-
-    $bottomStripSetHash = Get-FileSha256 -Path $bottomStrips.set
-    $bottomStripPauseHash = Get-FileSha256 -Path $bottomStrips.pause
-    $bottomStripErrorHash = Get-FileSha256 -Path $bottomStrips.error
-    $bottomStripRemoveHash = Get-FileSha256 -Path $bottomStrips.remove
-    $bottomStripSetVsRemoveDistinct = $bottomStripSetHash -ne $bottomStripRemoveHash
-    $bottomStripPauseVsErrorDistinct = $bottomStripPauseHash -ne $bottomStripErrorHash
+    $visualSetVsRemoveDistinct = Compare-ProgressScreenshots -First $states[0] -Second $states[4]
+    $visualPauseVsErrorDistinct = Compare-ProgressScreenshots -First $states[1] -Second $states[2]
+    $savedScreenshots = @($states | Where-Object { -not [string]::IsNullOrEmpty($_.Saved) }).Count
 }
 finally {
     Stop-InteractiveWin11Process -Process $process -Contained
 }
 
-Write-Host "interactive-win11 progress validation: PASS (stderr=$stderrPath, set-vs-remove-distinct=$visualSetVsRemoveDistinct, pause-vs-error-distinct=$visualPauseVsErrorDistinct, bottom-strip-set-vs-remove-distinct=$bottomStripSetVsRemoveDistinct, bottom-strip-pause-vs-error-distinct=$bottomStripPauseVsErrorDistinct, set=$($screenshots.set), remove=$($screenshots.remove), bottom-strip-set=$($bottomStrips.set), bottom-strip-remove=$($bottomStrips.remove))"
+Write-Host "interactive-win11 progress validation: PASS (stderr=$stderrPath, set-vs-remove-distinct=$visualSetVsRemoveDistinct, pause-vs-error-distinct=$visualPauseVsErrorDistinct, screenshots-saved=$savedScreenshots/$($states.Count), set=$($screenshots.set), remove=$($screenshots.remove))"
 
 } finally {
     Assert-WindowsHarnessHistoryGuard -Guard $windowsHarnessHistoryGuard

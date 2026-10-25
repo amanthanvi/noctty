@@ -13,7 +13,8 @@ Windows Terminal's chrome is a custom-frame Win32 window with WM_NCCALCSIZE zero
 ### Layout
 - **TabView mode:** `TabWidthMode="Equal"` (default). Also supports `SizeToContent` and `Compact` via settings.
 - **MUX TabView defaults (WinUI 2.8):** min tab width 100 DIP in Equal mode; no explicit max (fills available space equally). In SizeToContent mode, tabs grow to fit label text.
-- **Tab row height:** 32 DIP (maximized), 40 DIP (windowed; caption button drives this).
+- **Tab row height:** the `TabView` is 32 DIP tall (MUX `TabViewItemMinHeight` 32) and **bottom-aligned**: `TabRowControl.xaml` sets `VerticalAlignment="Bottom"` on it. The title bar row it sits in is sized by the caption buttons, 40 DIP windowed (`CaptionButtonHeightWindowed`) and 32 DIP maximized (`CaptionButtonHeightMaximized`); no source line states that row height, so this is read from the XAML layout. The bottom alignment is what makes the gap above the tabs: 8 DIP in a restored window (40 minus 32), plus a 1 px border row above the island (`topBorderVisibleHeight = 1`; `_GetTopBorderHeight` returns 0 when maximized or fullscreen). When maximized the title bar is 32 DIP, the same as the tabs, so they are flush with the top. WT's comment on the caption button heights says 32 was chosen for the maximized height for that reason, and points to GH#2541 (an issue titled "Do not pad tabs from the top when maximized or fullscreen").
+- **Where it comes from:** `src/cascadia/TerminalApp/TabRowControl.xaml:28-36`, `MinMaxCloseControl.xaml:148-161`, `src/cascadia/WindowsTerminal/NonClientIslandWindow.h:27` and `NonClientIslandWindow.cpp:438-448`, all at microsoft/terminal `98c8c795ebc2560af55e72beba3fa5fd31ceef64` (main, 2026-10-23); `TabViewItemMinHeight` is in `dev/TabView/TabView_themeresources.xaml:253-257` of microsoft-ui-xaml v2.8.4, the version WT pins in `dep/nuget/packages.config`.
 - **Tab border:** `TabViewItemBorderThickness: 1,1,1,0` -- 1px top/left/right, 0 bottom.
 - **Tab header padding:** `TabViewHeaderPadding: 0,0,0,0` (WT overrides MUX default to suppress top padding).
 - **Corner radius:** Inherits MUX TabViewItem default: 8px top-left/top-right, 0 bottom.
@@ -25,9 +26,9 @@ Windows Terminal's chrome is a custom-frame Win32 window with WM_NCCALCSIZE zero
 - No custom alpha animation in WT; relies on MUX default (instant show/hide on PointerOver state).
 
 ### Focused Tab Indicator
-- MUX TabView's `SelectedTabIndicator` -- a 2-3 DIP bottom border in accent color.
-- Slide animation between tabs is MUX's built-in `TabViewItemIndicator` transition (spring-based, ~300ms).
-- WT does not override this; uses MUX default entirely.
+- There is **no accent-colored underline or "SelectedTabIndicator"** in WinUI 2.8.4, the MUX version WT uses. `TabView.xaml` and `TabView_themeresources.xaml` of v2.8.4 contain no "Indicator" at all, and nothing in the template animates a selection mark sliding between tabs. Its transitions are the item container's (add/delete, content, reorder, entrance) and two short visual transitions for reordering and dragging; WT's `App.xaml` turns off the entrance and add/delete ones.
+- The selected tab is drawn as a shape: the template's `SelectedBackgroundPath` (`dev/TabView/TabView.xaml:761-768`) filled with `TabViewItemHeaderBackgroundSelected` (`SolidBackgroundFillColorTertiaryBrush` in the default theme), with inverse-rounded corners (`LeftRadiusRenderArc`, `RightRadiusRenderArc`) and a `TabViewSelectedItemBorderBrush` gradient on the tab container (transparent to `CardStrokeColorDefault`, not the accent color).
+- WT's `App.xaml` static resources override `TabViewHeaderPadding`, `TabViewItemBorderThickness` (see Layout), the list view's transitions and `TabViewBackground`, not the selected-tab visuals. At run time, when a tab has a color, `Tab.cpp` (`:2461-2485`) puts `TabViewItemHeaderBackgroundSelected` and related background and foreground keys into that tab's own theme dictionaries, so the selected tab can take the tab color. None of that is an accent-colored marker; an accent-colored active-tab marker is noctty's own design, not a copy of WT.
 
 ### Tab-width Clamping
 - In Equal mode, all tabs share space equally. When many tabs open, each tab shrinks toward MinTabWidth (100 DIP by MUX default).
@@ -226,13 +227,13 @@ Windows Terminal's chrome is a custom-frame Win32 window with WM_NCCALCSIZE zero
 | Caption button hover-out (bg) | **150ms** | Linear (no easing specified) |
 | Caption button hover-out (fg) | **100ms** | Linear |
 | Caption button hover-in | **0ms** (instant setter) | N/A |
-| Tab underline slide | ~**300ms** | MUX spring animation (not overridden) |
+| Tab selection mark slide | none | WinUI 2.8.4 has no sliding selection mark (see section 1) |
 | Command palette enter/exit | ~**250ms** | ContentThemeTransition default (cubic decelerate) |
 | Scrollbar collapse | ~**300ms** | MUX ScrollViewer default opacity fade |
-| Tab add/remove | `AddDeleteThemeTransition` + `ContentThemeTransition` + `ReorderThemeTransition` | System defaults (~200-350ms, decelerate curve) |
+| Tab add/remove | `ContentThemeTransition` + `ReorderThemeTransition` | WT's `App.xaml` removes `AddDeleteThemeTransition` and `EntranceThemeTransition` from the TabView list; the rest are system defaults |
 
 ### Notes for GDI/Win32 Implementation
 - WT's 150ms/100ms caption button transitions are simple linear color interpolations. Replicate with `SetTimer` at 16ms intervals (60 FPS) or a tween engine.
-- For spring-based tab indicator slide, approximate with cubic-bezier(0.1, 0.9, 0.2, 1.0) at 300ms.
+- There is no tab selection mark slide to reproduce: WinUI 2.8.4 draws the selected tab as a shape and animates no indicator between tabs (section 1).
 - WinUI's `ContentThemeTransition` is roughly translateY(28px->0) + opacity(0->1) over 250ms with a decelerate curve ~cubic-bezier(0.1, 0.9, 0.2, 1.0).
 - Caption buttons have **no easing curve** -- pure linear interpolation confirmed by the XAML `<ColorAnimation>` lacking an `EasingFunction` child.

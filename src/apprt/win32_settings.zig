@@ -4916,7 +4916,11 @@ pub const SettingsWindow = struct {
             .none => self.idleStatusText(),
             else => "",
         };
-        self.text_header = self.finishChild(makeStatic(hwnd, hinstance, self.active_section.headerText(), WS_VISIBLE), self.header_font, .control);
+        // The first child starts a group of its own. The dialog manager walks
+        // a group round the end of the child list, so this is what ends the
+        // action bar's run (the last in z-order) and lets the arrows wrap
+        // within the bar instead of reaching these statics.
+        self.text_header = self.finishChild(makeStatic(hwnd, hinstance, self.active_section.headerText(), WS_VISIBLE | WS_GROUP), self.header_font, .control);
         self.text_summary = self.finishChild(makeStatic(hwnd, hinstance, self.active_section.placeholderText(), WS_VISIBLE), self.secondary_font, .control);
         self.text_status = self.finishChild(makeStatic(hwnd, hinstance, status_text, WS_VISIBLE), self.statusFont(), .control);
         self.text_close_prompt = self.finishChild(makeStatic(hwnd, hinstance, "Save changes before closing?", 0), self.emphasis_font, .control);
@@ -4978,7 +4982,8 @@ pub const SettingsWindow = struct {
 
         // The action bar, in the order Tab reaches it: the conflict choices
         // and Discard sit left of Save (never together), and the close
-        // prompt's three replace them all. The first starts the bar's group.
+        // prompt's three replace them all. The first starts the bar's group
+        // and the header, the first child, ends its run at the wrap.
         // All seven exist from the start: Escape reaches the close path only
         // through the enabled "Keep editing" button, which owns IDCANCEL.
         // "Save" writes `pending` to disk and fires a hard reload; save
@@ -9535,6 +9540,30 @@ test "settings arrow-key groups stop at the rail and the action bar" {
                     const focus = sys.GetFocus().?;
                     try std.testing.expect(IsChild(viewport, focus) == 0 and !rail(settings, focus));
                 };
+                // The bar's group wraps within itself: past Save the walk
+                // comes back to Discard changes, not on to the header, summary
+                // and status lines, which are not focusable, so the arrows
+                // would otherwise leave focus where it is.
+                try std.testing.expectEqual(actions[0], dialog_test.GetNextDlgGroupItem(hwnd, actions[1], 0).?);
+                try std.testing.expectEqual(actions[1], dialog_test.GetNextDlgGroupItem(hwnd, actions[0], 1).?);
+                _ = sys.SetFocus(actions[1]);
+                try std.testing.expect(fixture.pumpKey(VK_DOWN));
+                try std.testing.expectEqual(actions[0], sys.GetFocus().?);
+                try std.testing.expect(fixture.pumpKey(VK_UP));
+                try std.testing.expectEqual(actions[1], sys.GetFocus().?);
+            }
+
+            // The close prompt's three buttons are the same run.
+            settings.showClosePrompt();
+            const prompt = [_]HWND{ settings.btn_close_save.?, settings.btn_close_discard.?, settings.btn_close_keep_editing.? };
+            for (prompt, 0..) |button, index| {
+                try std.testing.expect(sys.IsWindowVisible(button) != 0 and sys.IsWindowEnabled(button) != 0);
+                _ = sys.SetFocus(button);
+                try std.testing.expect(fixture.pumpKey(VK_DOWN));
+                try std.testing.expectEqual(prompt[(index + 1) % prompt.len], sys.GetFocus().?);
+                _ = sys.SetFocus(button);
+                try std.testing.expect(fixture.pumpKey(VK_UP));
+                try std.testing.expectEqual(prompt[(index + prompt.len - 1) % prompt.len], sys.GetFocus().?);
             }
         }
     }.body);

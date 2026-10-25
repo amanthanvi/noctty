@@ -279,47 +279,39 @@ function Show-ResizeHarnessWindow {
     [void] [NocttyResizeWin32]::SetForegroundWindow($Hwnd)
 }
 
+# Reads noctty's window from the screen, clipped to its client area inset by
+# the corner radius, and saves it to $Path only where it shows noctty alone
+# (Save-StatefulScreenCapture). -PassThru also returns the in-memory image for
+# the band check, which the caller disposes. $Promote is the top-level window
+# to raise again before a retry.
 function Capture-WindowImage {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [string] $Path
+        [Parameter(Mandatory)] [IntPtr] $Promote,
+        [Parameter(Mandatory)] [string] $Path,
+        [switch] $PassThru
     )
 
-    $rect = $null
     $lastError = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $rect = Get-WindowRectObject -Hwnd $Hwnd
-        $width = [Math]::Max(1, $rect.Width)
-        $height = [Math]::Max(1, $rect.Height)
-        $bmp = New-Object System.Drawing.Bitmap $width, $height
-        $captured = $false
         try {
-            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-            try {
-                try {
-                    $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
-                    $captured = $true
+            $shot = Save-StatefulScreenCapture -Hwnd $Hwnd -Path $Path -PassThru:$PassThru
+            if (-not $PassThru -or $null -ne $shot.Bitmap) {
+                if ($null -eq $shot.Path) {
+                    Write-Host "interactive-win11 resize: screenshot $Path not saved ($($shot.Note))"
                 }
-                catch {
-                    $lastError = $_.Exception.Message
-                }
+                return $shot
             }
-            finally {
-                $gfx.Dispose()
-            }
-            if ($captured) {
-                $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-                return
-            }
+            $lastError = $shot.Note
         }
-        finally {
-            $bmp.Dispose()
+        catch {
+            $lastError = $_.Exception.Message
         }
-        Show-ResizeHarnessWindow -Hwnd $Hwnd
+        Show-ResizeHarnessWindow -Hwnd $Promote
         Start-Sleep -Milliseconds $script:RESIZE_STEP_SETTLE_MS
     }
 
-    throw "CopyFromScreen failed after 3 attempts for hwnd=$Hwnd rect=$($rect | ConvertTo-Json -Compress): $lastError"
+    throw "Screen capture failed after 3 attempts for hwnd=${Hwnd}: $lastError"
 }
 
 function Assert-VisibleSurfaceUnionFillsHostContent {
@@ -438,27 +430,38 @@ function Measure-ExpansionBandRatios {
 
 function Assert-ResizeImageHasNoUnpaintedExpansionBands {
     param(
-        [Parameter(Mandatory)] [string] $Path
+        [Parameter(Mandatory)] $Shot
     )
 
-    $bmp = [System.Drawing.Bitmap]::FromFile($Path)
+    $bmp = $Shot.Bitmap
+    $Path = if ($null -ne $Shot.Path) { $Shot.Path } else { "<not saved: $($Shot.Note)>" }
     try {
-        if ($bmp.Width -lt 900 -or $bmp.Height -lt 560) {
-            throw "resize screenshot is too small for reliable analysis: $($bmp.Width)x$($bmp.Height)"
+        # The bands are placed in window coordinates, then moved into the
+        # capture, which starts inside the window at the inset client area.
+        $width = $Shot.WindowRect.Right - $Shot.WindowRect.Left
+        $height = $Shot.WindowRect.Bottom - $Shot.WindowRect.Top
+        $dx = $Shot.Area.Left - $Shot.WindowRect.Left
+        $dy = $Shot.Area.Top - $Shot.WindowRect.Top
+        if ($width -lt 900 -or $height -lt 560) {
+            throw "resize window is too small for reliable analysis: ${width}x${height}"
         }
 
         $rightBand = [System.Drawing.Rectangle]::new(
-            [Math]::Max(0, $bmp.Width - 260),
-            [Math]::Min([Math]::Max(96, [int] ($bmp.Height * 0.18)), $bmp.Height - 220),
+            [Math]::Max(0, $width - 260) - $dx,
+            [Math]::Min([Math]::Max(96, [int] ($height * 0.18)), $height - 220) - $dy,
             200,
-            [Math]::Max(120, $bmp.Height - [Math]::Min([Math]::Max(96, [int] ($bmp.Height * 0.18)), $bmp.Height - 220) - 96)
+            [Math]::Max(120, $height - [Math]::Min([Math]::Max(96, [int] ($height * 0.18)), $height - 220) - 96)
         )
         $bottomBand = [System.Drawing.Rectangle]::new(
-            100,
-            [Math]::Max(120, $bmp.Height - 220),
-            [Math]::Max(200, $bmp.Width - 200),
+            100 - $dx,
+            [Math]::Max(120, $height - 220) - $dy,
+            [Math]::Max(200, $width - 200),
             150
         )
+        $image = [System.Drawing.Rectangle]::new(0, 0, $bmp.Width, $bmp.Height)
+        if (-not $image.Contains($rightBand) -or -not $image.Contains($bottomBand)) {
+            throw "resize bands right=$rightBand bottom=$bottomBand fall outside the $($bmp.Width)x$($bmp.Height) capture of the ${width}x${height} window"
+        }
 
         $rightRatios = Measure-ExpansionBandRatios -Bitmap $bmp -Region $rightBand
         $bottomRatios = Measure-ExpansionBandRatios -Bitmap $bmp -Region $bottomBand
@@ -487,6 +490,8 @@ function Assert-ResizeImageHasNoUnpaintedExpansionBands {
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'resize' -ResetState:$ResetState -IncludeResourcesDir
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
+
+. (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
@@ -606,8 +611,8 @@ try {
     Show-ResizeHarnessWindow -Hwnd $process.MainWindowHandle
     [void] [NocttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds $script:RESIZE_STEP_SETTLE_MS
-    Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $liveScreenshotPath
-    $liveRatios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Path $liveScreenshotPath
+    $liveShot = Capture-WindowImage -Hwnd $process.MainWindowHandle -Promote $process.MainWindowHandle -Path $liveScreenshotPath -PassThru
+    $liveRatios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Shot $liveShot
     [void] [NocttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds $script:RESIZE_COMPLETION_SETTLE_MS
 
@@ -622,11 +627,11 @@ try {
     }
     $hostRect = Get-WindowRectObject -Hwnd $process.MainWindowHandle
     $surfaceRect = Get-WindowRectObject -Hwnd $surfaceHwnd
-    Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $screenshotPath
-    Capture-WindowImage -Hwnd $surfaceHwnd -Path $surfaceScreenshotPath
+    $grownShot = Capture-WindowImage -Hwnd $process.MainWindowHandle -Promote $process.MainWindowHandle -Path $screenshotPath -PassThru
+    $surfaceShot = Capture-WindowImage -Hwnd $surfaceHwnd -Promote $process.MainWindowHandle -Path $surfaceScreenshotPath
 
     $grownUnion = Assert-VisibleSurfaceUnionFillsHostContent -HostHwnd $process.MainWindowHandle -ExpectedSurfaceCount 2 -Label 'grown split layout'
-    $ratios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Path $screenshotPath
+    $ratios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Shot $grownShot
 
     $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
     if ($stderr -match $runtimeFailurePattern) {
@@ -642,10 +647,17 @@ finally {
             Write-Warning "cleanup WM_EXITSIZEMOVE failed: $($_.Exception.Message)"
         }
     }
+    # The band check disposes its image; this covers a failure before it.
+    foreach ($shot in @($liveShot, $grownShot)) { if ($null -ne $shot.Bitmap) { $shot.Bitmap.Dispose() } }
     Stop-InteractiveWin11Process -Process $process -Contained
 }
 
-Write-Host ("interactive-win11 resize validation: PASS (stderr={0}, screenshot={1}, live-screenshot={2}, surface-screenshot={3}, host={4}x{5}, surface={6}x{7}, split-union-before={8}x{9}, split-union-after={10}x{11}, live-right-near-black={12:P1}, live-bottom-near-black={13:P1}, live-right-neutral-gray={14:P1}, live-bottom-neutral-gray={15:P1}, right-near-black={16:P1}, bottom-near-black={17:P1}, right-neutral-gray={18:P1}, bottom-neutral-gray={19:P1})" -f $stderrPath, $screenshotPath, $liveScreenshotPath, $surfaceScreenshotPath, $hostRect.Width, $hostRect.Height, $surfaceRect.Width, $surfaceRect.Height, $initialUnion.SurfaceUnionWidth, $initialUnion.SurfaceUnionHeight, $grownUnion.SurfaceUnionWidth, $grownUnion.SurfaceUnionHeight, $liveRatios.RightBlackRatio, $liveRatios.BottomBlackRatio, $liveRatios.RightGrayRatio, $liveRatios.BottomGrayRatio, $ratios.RightBlackRatio, $ratios.BottomBlackRatio, $ratios.RightGrayRatio, $ratios.BottomGrayRatio)
+function Get-ResizeShotText($Shot) {
+    if ($null -ne $Shot.Path) { return $Shot.Path }
+    return "not saved ($($Shot.Note))"
+}
+
+Write-Host ("interactive-win11 resize validation: PASS (stderr={0}, screenshot={1}, live-screenshot={2}, surface-screenshot={3}, host={4}x{5}, surface={6}x{7}, split-union-before={8}x{9}, split-union-after={10}x{11}, live-right-near-black={12:P1}, live-bottom-near-black={13:P1}, live-right-neutral-gray={14:P1}, live-bottom-neutral-gray={15:P1}, right-near-black={16:P1}, bottom-near-black={17:P1}, right-neutral-gray={18:P1}, bottom-neutral-gray={19:P1})" -f $stderrPath, (Get-ResizeShotText $grownShot), (Get-ResizeShotText $liveShot), (Get-ResizeShotText $surfaceShot), $hostRect.Width, $hostRect.Height, $surfaceRect.Width, $surfaceRect.Height, $initialUnion.SurfaceUnionWidth, $initialUnion.SurfaceUnionHeight, $grownUnion.SurfaceUnionWidth, $grownUnion.SurfaceUnionHeight, $liveRatios.RightBlackRatio, $liveRatios.BottomBlackRatio, $liveRatios.RightGrayRatio, $liveRatios.BottomGrayRatio, $ratios.RightBlackRatio, $ratios.BottomBlackRatio, $ratios.RightGrayRatio, $ratios.BottomGrayRatio)
 
 } finally {
     Assert-WindowsHarnessHistoryGuard -Guard $windowsHarnessHistoryGuard

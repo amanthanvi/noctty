@@ -44,13 +44,21 @@ judge on synthetic output at the end of `Contracts.20-Zig.ps1`.
 
 ## Regenerating protected workflow digests
 
-`contracts/Contracts.80-Release.ps1` freezes eight canonical SHA-256 values:
-the full release and readiness workflows, three protected step envelopes, and
-their three literal `run` bodies. A legitimate workflow edit requires semantic
+`contracts/Contracts.80-Release.ps1` freezes nine canonical SHA-256 values:
+the full release and readiness workflows, the composite action file
+`.github/actions/release-preflight/action.yml`, four protected step envelopes
+(the release and readiness steps that call that action, the action's own
+`Validate release configuration` step, and the release workflow's
+`Require successful Test workflow for release SHA` step), and the two literal
+`run` bodies among them (the action's step and the evidence step). The two
+workflow steps that call the action are `uses:` steps with no `run` body, so
+they have an envelope pin only. A legitimate workflow edit requires semantic
 review of the full file and protected steps before replacing any digest.
 
 From the repository root, calculate the candidate values with the same
-canonicalization and extraction helpers used by the contracts:
+canonicalization and extraction helpers used by the contracts. The names and
+their order are those of the variables near the top of
+`Contracts.80-Release.ps1`:
 
 ```powershell
 $repoRoot = (Resolve-Path '.').Path
@@ -58,16 +66,24 @@ $repoRoot = (Resolve-Path '.').Path
 
 $releasePath = Join-Path $repoRoot '.github/workflows/release.yml'
 $readinessPath = Join-Path $repoRoot '.github/workflows/release-readiness.yml'
+$actionPath = Join-Path $repoRoot '.github/actions/release-preflight/action.yml'
 $release = Get-Content -LiteralPath $releasePath -Raw
 $readiness = Get-Content -LiteralPath $readinessPath -Raw
+$action = Get-Content -LiteralPath $actionPath -Raw
+# The action's steps sit two spaces less deep than a workflow's. The contract
+# indents every line by two spaces before it looks for the step; so must this.
+$actionAsSteps = @($action.TrimEnd() -split '\r?\n' | ForEach-Object { "  $_" }) -join "`n"
+
 $releasePreflight = Get-YamlStepBlock -Content $release -Name 'Release preflight' -Source $releasePath
 $readinessPreflight = Get-YamlStepBlock -Content $readiness -Name 'Validate release configuration' -Source $readinessPath
+$actionPreflight = Get-YamlStepBlock -Content $actionAsSteps -Name 'Validate release configuration' -Source $actionPath
 $interactiveEvidence = Get-YamlStepBlock -Content $release -Name 'Require successful Test workflow for release SHA' -Source $releasePath
 
 $pins = [ordered]@{
-    releasePreflightScriptSha256 = (Get-CanonicalTextSha256 -Text (Get-YamlLiteralRunScript -Content $releasePreflight -Source 'Release preflight'))
-    readinessPreflightScriptSha256 = (Get-CanonicalTextSha256 -Text (Get-YamlLiteralRunScript -Content $readinessPreflight -Source 'Validate release configuration'))
-    releaseInteractiveEvidenceScriptSha256 = (Get-CanonicalTextSha256 -Text (Get-YamlLiteralRunScript -Content $interactiveEvidence -Source 'Require successful Test workflow for release SHA'))
+    releasePreflightScriptSha256 = (Get-CanonicalTextSha256 -Text (Get-YamlLiteralRunScript -Content $actionPreflight -Source "$actionPath :: Validate release configuration"))
+    releasePreflightActionStepSha256 = (Get-CanonicalTextSha256 -Text $actionPreflight)
+    releasePreflightActionSha256 = (Get-CanonicalTextSha256 -Text $action)
+    releaseInteractiveEvidenceScriptSha256 = (Get-CanonicalTextSha256 -Text (Get-YamlLiteralRunScript -Content $interactiveEvidence -Source "$releasePath :: Require successful Test workflow for release SHA"))
     releaseInteractiveEvidenceStepSha256 = (Get-CanonicalTextSha256 -Text $interactiveEvidence)
     releasePreflightStepSha256 = (Get-CanonicalTextSha256 -Text $releasePreflight)
     readinessPreflightStepSha256 = (Get-CanonicalTextSha256 -Text $readinessPreflight)
@@ -77,6 +93,7 @@ $pins = [ordered]@{
 $pins.GetEnumerator() | ForEach-Object { '{0} = {1}' -f $_.Key, $_.Value }
 ```
 
+On an unedited tree the nine printed values equal the nine committed ones.
 Update only the corresponding values near the top of
 `Contracts.80-Release.ps1`, then rerun the contract entry point. The mutation
 tests must remain unchanged and green.

@@ -652,6 +652,9 @@ pub fn automationTextAllowed(text: []const u8) bool {
 ///     are resolved by font discovery. Excluded on the admission rule rather
 ///     than because a concrete exploit is known.
 ///
+/// A key the runtime reads from the app's config for every window is not
+/// admitted either (`forwarded_argv_app_wide_keys`).
+///
 /// `working-directory` is handled separately: it is admitted, but its VALUE
 /// is constrained by `forwardedWorkingDirectoryAllowed`.
 const forwarded_argv_allowed_keys = [_][]const u8{
@@ -665,14 +668,8 @@ const forwarded_argv_allowed_keys = [_][]const u8{
     "window-padding-balance",
     "window-padding-color",
     "window-decoration",
-    "window-theme",
-    "accent-follow-system",
     "window-colorspace",
     "window-subtitle",
-    "window-titlebar-background",
-    "window-titlebar-foreground",
-    "window-show-tab-bar",
-    "window-new-tab-position",
     "window-step-resize",
     "window-vsync",
     "maximize",
@@ -702,7 +699,6 @@ const forwarded_argv_allowed_keys = [_][]const u8{
     "background-blur",
     "unfocused-split-opacity",
     "unfocused-split-fill",
-    "split-divider-color",
     "bold-color",
     "faint-opacity",
     "minimum-contrast",
@@ -743,6 +739,51 @@ pub fn forwardedKeyAllowed(key: []const u8) bool {
         if (std.mem.eql(u8, key, allowed)) return true;
     }
     return false;
+}
+
+/// Presentation keys the Win32 runtime reads from the app's config for every
+/// window, so a forwarded value would be accepted and ignored: the theme,
+/// accent and split divider (`resolveTheme`), the titlebar colors
+/// (`clientTitlebarTheme`, `applyDwmThemeWithBuild`), the tab bar
+/// (`Host.shouldShowTabBar`, `App.tab_bar_visible`) and where a new tab goes
+/// (`windowNewTabInsertIndex`). They stay off the allowlist until a window
+/// can have its own, and the senders leave them out instead of having the
+/// whole request refused (`withoutAppWideArguments`,
+/// `normalizeForwardedStartupArg`).
+const forwarded_argv_app_wide_keys = [_][]const u8{
+    "window-theme",
+    "accent-follow-system",
+    "window-titlebar-background",
+    "window-titlebar-foreground",
+    "split-divider-color",
+    "window-show-tab-bar",
+    "window-new-tab-position",
+};
+
+fn forwardedKeyAppWide(key: []const u8) bool {
+    for (forwarded_argv_app_wide_keys) |app_wide| {
+        if (std.mem.eql(u8, key, app_wide)) return true;
+    }
+    return false;
+}
+
+/// `arguments` without the keys of `forwarded_argv_app_wide_keys`, each named
+/// in a warning, so `+new-window` with one still opens its window, as a
+/// second launch does. Allocated with `alloc`.
+pub fn withoutAppWideArguments(
+    alloc: Allocator,
+    arguments: ?[]const [:0]const u8,
+) Allocator.Error!?[]const [:0]const u8 {
+    const argv = arguments orelse return null;
+    var kept: std.ArrayList([:0]const u8) = try .initCapacity(alloc, argv.len);
+    for (argv) |arg| {
+        if (forwardedArgumentKey(arg)) |key| if (forwardedKeyAppWide(key)) {
+            log.warn("not forwarding --{s}: the running instance applies it to all of its windows", .{key});
+            continue;
+        };
+        kept.appendAssumeCapacity(arg);
+    }
+    return try kept.toOwnedSlice(alloc);
 }
 
 /// True when a key is safe to echo into a log line.
@@ -2041,6 +2082,9 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
 
     try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--class=dev") == null);
     try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--safe-mode") == null);
+    // A key the running instance would refuse is left out, so the launch
+    // still opens a window there: here one the app reads for every window.
+    try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--window-theme=light") == null);
 
     const inherit = (try normalizeForwardedStartupArg(std.testing.allocator, "--working-directory=inherit")).?;
     defer std.testing.allocator.free(inherit);
@@ -2492,6 +2536,22 @@ test "win32 forwarded new-window argv refuses everything off the allowlist" {
         try expect(!forwardedKeyAllowed(key));
     }
 
+    // Read from the app's config for every window: a forwarded value would
+    // be accepted and do nothing.
+    for ([_][]const u8{
+        "window-theme",
+        "accent-follow-system",
+        "window-titlebar-background",
+        "window-titlebar-foreground",
+        "split-divider-color",
+        "window-show-tab-bar",
+        "window-new-tab-position",
+    }) |key| {
+        try expect(!forwardedKeyAllowed(key));
+        try expect(forwardedKeyAppWide(key));
+    }
+    for (forwarded_argv_app_wide_keys) |key| try expect(!forwardedKeyAllowed(key));
+
     // Prefix confusion must not admit anything: `windows-...` is a different
     // key from `window-...`.
     try expect(!forwardedKeyAllowed("windows-job-object-kill-on-close"));
@@ -2511,6 +2571,36 @@ test "win32 forwarded new-window argv refuses everything off the allowlist" {
     }) |key| {
         try expect(forwardedKeyAllowed(key));
     }
+}
+
+test "win32 +new-window leaves out the keys the instance applies to every window" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(try withoutAppWideArguments(alloc, null) == null);
+
+    // Before, the instance accepted these and ignored them; refused now, they
+    // would cost the whole request its window.
+    const argv = [_][:0]const u8{
+        "--working-directory=C:\\work",
+        "--window-theme=light",
+        "--title=Inbox",
+        "--window-show-tab-bar=never",
+        "--font-size=14",
+    };
+    try std.testing.expect(forwardedArgvRejection(&argv) != null);
+    const sent = (try withoutAppWideArguments(alloc, &argv)).?;
+    defer alloc.free(sent);
+    try std.testing.expectEqual(@as(usize, 3), sent.len);
+    try std.testing.expectEqualStrings("--working-directory=C:\\work", sent[0]);
+    try std.testing.expectEqualStrings("--title=Inbox", sent[1]);
+    try std.testing.expectEqualStrings("--font-size=14", sent[2]);
+    try std.testing.expect(forwardedArgvRejection(sent) == null);
+
+    // Anything else the instance refuses is still sent, and refused.
+    const command = [_][:0]const u8{ "--window-theme=light", "--command=cmd.exe" };
+    const kept = (try withoutAppWideArguments(alloc, &command)).?;
+    defer alloc.free(kept);
+    try std.testing.expectEqual(@as(usize, 1), kept.len);
+    try std.testing.expect(forwardedArgvRejection(kept) != null);
 }
 
 test "win32 forwarded argv key extraction matches the config loader" {

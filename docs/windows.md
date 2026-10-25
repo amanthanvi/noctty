@@ -305,6 +305,14 @@ The profile picker detects:
 - Git Bash
 - WSL distributions, when `wsl.exe` is installed and responsive
 
+A shell you open from the picker, the command palette or a quick slot starts
+in your home folder (a WSL one in its Linux home, `--cd ~`), whatever
+`working-directory` says and whichever folder noctty itself was started from
+(for the Start menu shortcut, the install folder). To start one somewhere
+else, define it as a [user profile](#user-profiles) with
+`profile-working-directory`. A restored pane goes back to the last folder its
+shell reported.
+
 Shell integration is automatic for PowerShell and for directly launched
 Unix-like shells such as Git Bash. WSL sessions manage their own
 integration inside the distribution. PowerShell integration emits OSC 7
@@ -425,8 +433,15 @@ distribution waits for it to start, up to 15 seconds, before its shell
 appears; if it has not answered by then, that run keeps `xterm-256color`.
 Entries already in `WSLENV`, their flags and their order are kept, and a
 `WSLENV` set with `env` in the configuration is the one extended. A `TERM` set
-with `env` is forwarded as it is. A WSL shell started from inside cmd or
-PowerShell is not changed: only a launch of `wsl.exe` by noctty is.
+with `env` is forwarded as it is. To keep one of these variables out of WSL,
+list it with `/w`, for example `env = WSLENV=TERM_PROGRAM/w`. A pane that
+noctty starts with WSL's older `bash.exe` launcher (the one in the Windows
+folder, or the WindowsApps alias; a bare `bash` counts when the first `bash` on
+the pane's `PATH` is that launcher) gets the same three variables, but noctty
+does not ask its distribution for a terminfo entry, so its `TERM` stays
+`xterm-256color` unless `env` sets one. Other ways into WSL are not changed: a
+distribution's own launcher such as `ubuntu.exe`, `cmd /c wsl`, and a WSL
+shell started from inside cmd or PowerShell.
 
 An existing `/w` entry stays Windows-only; noctty does not override that
 choice. Automatic `TERM` probing uses the launch environment and working
@@ -1604,6 +1619,22 @@ credentials instead, the elevated process runs as that administrator and reads
 that account's `%LOCALAPPDATA%` config; a forwarded `--config-file` still names
 the same file.
 
+An elevated window started by noctty is given only a short command line: the
+config files above (`--config-file` and `--config-default-files`),
+`--visual-studio-profiles`, the working directory of the pane it was opened
+from (noctty's own when there is none), the `class` setting when one is set,
+and the profile it should run. Other command-line
+overrides are not forwarded, so `--env=NAME=value`, `--font-size` and the rest
+do not reach it. That is deliberate for `--env=`: a forwarded value would
+appear on the elevated process's command line, where other programs can read
+it (process tools and process-creation auditing), and an `--env=` value may be
+a secret. To give an elevated window a setting, put it in a config file both
+processes read (an `env = NAME=value` line, for example) or in a profile
+defined there. Such a profile's command and variables stay off the elevated
+command line, except in the cases listed under Limits in
+[User profiles](#user-profiles) and when Windows cannot say what kind of token
+the process has.
+
 At process startup, noctty restricts bare-name DLL resolution to the
 application directory, System32, and explicitly added DLL directories. The
 current directory and inherited `PATH` are excluded from that search order.
@@ -2236,26 +2267,33 @@ and decoration (`--window-width`, `--window-height`, `--window-position-*`,
 `--window-padding-*`, `--window-decoration`, `--maximize`, `--fullscreen=true`),
 `--title`, non-name font settings (`--font-size`, `--font-thicken`), and
 colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
-`--background-opacity`).
+`--background-opacity`). They are set on the new window's first terminal; a
+tab or split opened in it later starts from the instance's own configuration.
+These settings apply to every window of the instance and are not forwarded:
+`--window-theme`, `--accent-follow-system`, `--window-titlebar-background`,
+`--window-titlebar-foreground`, `--split-divider-color`,
+`--window-show-tab-bar` and `--window-new-tab-position`. A second `noctty` and
+`noctty +new-window` leave them out (with a warning on standard error, where
+there is one) and still open the window.
 
-The new window copies one of the running instance's windows, as a
-`new_window` does: the first in the instance's window list, or the first
-ordinary one if that is the quick terminal. That list is not kept in opening
-order (closing a window can move another into its place), so with several
-windows open, which one is copied does not follow age or focus. The new
-window takes that window's size, one step down and right of it, its
-maximized or fullscreen state, always-on-top, its decorations and its
-background opacity. Forwarded arguments win over the copy: `--window-width`
-and `--window-height` give it its own size (both must be set, by the
-arguments or the config; from a maximized or fullscreen window, it is the
-size the new window returns to), `--window-decoration` its decorations and
-`--background-opacity` its opacity. `--window-position-*` place it as the
-config's `window-position-*` do, at the copied size unless a size is
-forwarded, except that a window opened from a maximized or fullscreen one
-returns to that window's normal place. When there is nothing to copy (no
-window is open, or the first in the list is a window whose last tab was
-closed and is kept only for undo), the arguments apply as they do to a first
-window.
+The new window copies one of the running instance's windows, the way a
+`new_window` copies the window it is pressed in: the window that was active
+last, never the quick terminal or a window whose last tab was closed and is
+kept only for undo (if none of the others has been active yet, as with windows
+started minimized, one of them). A window a forward opens becomes the active
+one as it is shown, so the next forward usually copies it, with any
+decorations or opacity it was given. The new window takes the copied window's
+size, one step down and right of it, its maximized or fullscreen state,
+always-on-top, its decorations and its background opacity. Forwarded arguments
+win over the copy: `--window-width` and `--window-height` give it its own size
+(both must be set, by the arguments or the config; from a maximized or
+fullscreen window, it is the size the new window returns to),
+`--window-decoration` its decorations and `--background-opacity` its opacity.
+`--window-position-*` place it as the config's `window-position-*` do, at the
+copied size unless a size is forwarded, except that a window opened from a
+maximized or fullscreen one returns to that window's normal place. When there
+is nothing to copy (no window is open, or only the quick terminal and windows
+kept for undo), the arguments apply as they do to a first window.
 
 Anything that runs code (`--command`, `--initial-command`, `-e`, `--input`,
 `--env`), loads a file (`--background-image`, `--custom-shader`,
