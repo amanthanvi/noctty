@@ -454,11 +454,23 @@ lands incrementally.
   a slow font build in another pane: one resize per pane at its final grid,
   single pane and split, where the hold alone pushed lines on 29 of 30 moves.
   The two have not been measured together with real input. A tab hidden
-  during the move takes the font and the size as separate resizes when it is
-  shown, so a slow font build there can still wrap long lines into scrollback.
-  A pane whose new font cannot be built gets the new size in the old font at
-  once, which on a move to a lower DPI can do the same, and the font is
-  retried on a later layout (both inferred, not measured).
+  during the move now takes its new size and font as one resize too when it
+  is shown, by a click on its tab or by switching tabs from the keyboard.
+  Measured on a hidden desktop with a 60 ms delay injected at the start of
+  each DPI font change, showing the tab through the tab strip's command (a
+  harness hook into the same path as a click): main applied a 66x18 grid
+  before the pane's 93x29 on 20 of 20 shows, and on the first show at 96 DPI
+  9 rows went into its scrollback and stayed there; with the batch, 0 of 20.
+  Without the injected delay main gave 0 of 20 too, because the new font is
+  cached and both resizes arrive within termio's 25 ms. A split tab shown from
+  the keyboard (`goto_tab`) got a wrong grid on main on 10 of 10 shows with
+  the delay (32x18 before 49x28 at 144 DPI, and 12 rows into scrollback on
+  the first); its batch was not measured. A window that is hidden or minimized while its DPI
+  changes (a quick terminal shown on another monitor, say) can still take
+  its new size before its new font, and a pane whose new font cannot be
+  built gets the new size in the old font at once, which on a move to a
+  lower DPI can do the same; the font is retried on a later layout (both
+  inferred, not measured).
 - Alt+Space still sends ESC SPACE to the program as well as opening the
   window menu (#381). Once conhost has seen a Win32 input record it holds a
   lone ESC back until more input arrives, as under Windows Terminal (#335).
