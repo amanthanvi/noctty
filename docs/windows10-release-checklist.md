@@ -90,6 +90,7 @@ gate function named in the source is missing from this page.
 | ConPTY source (`pty.zig`)                                                  | Bundled `conpty.dll` and `OpenConsole.exe`, else the in-box conhost                                                                                          | W10-19, W10-02           |
 | Default-terminal delegation (`win32_terminal_handoff.zig`)                 | Needs the console-delegation setting the OS provides                                                                                                         | W10-22                   |
 | Toasts, AUMID, jump list, Explorer verbs                                   | Shell features that look different on Windows 10                                                                                                             | W10-23 to W10-25         |
+| `directVolumePath`, `directVolumeDeviceName` (`os/windows.zig`)            | Maps the DOS drive alias to its volume path before an `OBJ_DONT_REPARSE` open                                                                                | W10-27, W10-28           |
 
 ## Rows
 
@@ -371,6 +372,40 @@ logged at debug level only and is not a warning). On a laptop, turn on Battery S
 with `power-saver-rendering = auto` and watch a streaming command: output is paced
 near 30 fps.
 
+### Default shell and file links
+
+Both rows check #450, which resolves the DOS drive alias (`C:`) to its direct
+volume path before a file is opened with `OBJ_DONT_REPARSE`. It was written
+because an upstream report (openai/codex#46290) has Windows 10 22H2 build
+19045.6456 rejecting the alias itself under that flag. That the same happens to
+noctty is inferred, and neither row has been run on Windows 10. Record the
+build number with the result.
+
+**W10-27 Default shell with `command` unset (Core).** Gate: `directVolumePath`
+(`os/windows.zig`), used by shell detection in `windows_shell.zig`. Install
+PowerShell 7 so that `pwsh.exe` is on `PATH`, for example with the MSI or
+`winget install Microsoft.PowerShell`, after W10-21, which needs the machine
+without it. Start the portable copy with `--single-instance=false` and a
+`config.ghostty` that sets neither `command` nor `default-profile`. In the
+first tab run `$PSVersionTable.PSVersion` and `(Get-Process -Id $PID).Path`.
+Expected: PowerShell 7.x, and a path ending in `pwsh.exe`
+([windows.md](windows.md#shells) gives the order: `pwsh.exe` on `PATH`, then
+Windows PowerShell, then `cmd.exe`). Windows PowerShell 5.1 or Command Prompt
+in that tab, with `pwsh.exe` on `PATH`, is a finding: shell detection opens
+each candidate with `OBJ_DONT_REPARSE`, and a rejected `pwsh.exe` falls through
+to the next shell.
+
+**W10-28 Ctrl+click on a local file path (Core).** Gate: `directVolumePath` and
+`directVolumeDeviceName` (`os/windows.zig`), used by the link opener
+(`win32/local_target.zig`). Create a text file on a local drive with
+`Set-Content "$env:TEMP\noctty-link.txt" hello`, print its path with
+`"$env:TEMP\noctty-link.txt"`, and Ctrl+click the printed path. Expected: the
+file opens in the application registered for `.txt` (Notepad on a clean image).
+Then print `C:\no-such-folder\noctty-link.txt` and Ctrl+click it. Expected:
+nothing opens. Nothing opening for the existing file is a finding: the opener
+checks the file with `OBJ_DONT_REPARSE`, and refuses the link if that open
+fails.
+
 ## Results
 
 Copy this table into the release notes' validation section or the release PR.
@@ -403,6 +438,8 @@ Copy this table into the release notes' validation section or the release PR.
 | W10-24            |                          |       |                                              |
 | W10-25            |                          |       |                                              |
 | W10-26            |                          |       |                                              |
+| W10-27            |                          |       |                                              |
+| W10-28            |                          |       |                                              |
 | Machine and image |                          |       | `winver`, VM type, display scaling           |
 | Artifact          |                          |       | source SHA, version, SHA-256 of ZIP or setup |
 | Date and tester   |                          |       |                                              |
