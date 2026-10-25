@@ -4,6 +4,7 @@ Dates descend; entries that share a date are not always newest first. A newer-da
 
 Corrected in other files:
 - 2026-09-10 "The terminal Surface is the TOPMOST child": true only for the first pane; see the 2026-10-15 `raiseChildToTop` entry in chrome-tabs-paint.md.
+- 2026-10-11 "Host banners and the update notice are on screen now" (BANNER-01): its `.info` countdown "only while shown" counts a banner as shown once it is laid out visible in a visible window that is neither minimized nor cloaked, not once it is painted, so a UI thread that stays busy past the countdown clears the banner at its first idle moment; see the 2026-10-20 FLAKY-D3D11-BANNER-UIA-01 entry in test-harnesses.md.
 
 See also:
 - 2026-04-17 "`HostOverlayMode.confirm` is the canonical non-modal confirmation path": its "AGENTS.md:89" is the 2026-04-17 `Host.invokeConfirmAccept` entry in this file.
