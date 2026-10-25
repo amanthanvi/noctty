@@ -361,6 +361,35 @@ counterpart is `src/terminal/resize_replay.zig`.
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-conpty-sync.ps1 -ResetState
 ```
 
+`.github/workflows/conpty-sync.yml` runs it with `-NoBuild -RequireAll` on a
+hosted `windows-2025` runner (x64 only) for pushes to `main` and for pull
+requests that touch the build inputs or the harness; it is not a required check.
+It is not part of the interactive composite. The composite is dispatch-only, so
+it never sees a pull request, and in measurement mode the harness asserts the
+measurement build's `noctty.exe` but stages `zig-out\bin` (the product build, or
+nothing), so it would test the wrong binary until that is changed.
+
+On the runner the step sets `NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED=1`
+and runs the harness under `powershell.exe`, because the harness otherwise
+relaunches itself through `scripts\dev-windows.cmd`, which probes only Visual
+Studio 2022 paths and printed "Missing VS Dev shell bootstrap" on the
+`windows-2025-vs2026` image. `-NoBuild` needs a build of this checkout in
+`zig-out`. `-RequireAll` fails a scenario that is skipped because `pwsh.exe` or
+vim is missing, which otherwise counts as a pass. The job uploads the scenarios'
+text evidence (before, after and marker rows, `inner.log`, the results JSON) and
+no screenshots.
+
+Each step of a scenario's start logs a line (launched, host window, shell, first
+prompt), and when the inner half has not finished within `-TimeoutSeconds` the
+outer half prints a diagnostics block before it ends the run: the inner
+process's tree with thread states and wait reasons, and the hidden desktop's
+windows with Windows' hung flag (no command lines, titles or environment). That
+block is how a hang in this harness was traced to its cause: the walk that finds
+the shell under noctty followed `ParentProcessId` without noticing that Windows
+reuses process numbers, found a cycle and spun at 100% CPU.
+`flagship/contracts/Contracts.97-ConptySync.ps1` drives that walk, and the dump
+reader's retry, with synthetic input.
+
 ## interactive-win11-ime-candidate.ps1
 
 Interactive Win11 validation for IME candidate anchoring. It launches

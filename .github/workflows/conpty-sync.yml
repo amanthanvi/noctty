@@ -1,0 +1,109 @@
+name: Windows ConPTY Sync
+
+# Differential check that noctty's screen agrees with ConPTY's own buffer after
+# resizes, the search bar, splits, maximize, minimize and full-screen programs
+# (test/windows/interactive-win11-conpty-sync.ps1, PKG-13). Every scenario runs
+# a portable noctty on a hidden desktop of the runner's session; nothing here
+# takes the foreground or any real input.
+#
+# This is the only per-change coverage for that class: the interactive
+# composite that also runs on the maintainer's machine is dispatch-only, and
+# the harness cannot join it as it stands (test/windows/README.md). x64 only;
+# the CLI forwarder is the one hidden-desktop workflow that also runs ARM64.
+# Not a required check, like the CLI forwarder: a pull request that touches
+# none of the build or resource inputs skips the ReleaseFast build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'pkg/**'
+      - 'vendor/**'
+      - 'include/**'
+      - 'build.zig'
+      - 'build.zig.zon*'
+      - 'dist/windows/**'
+      - 'scripts/*conpty*.ps1'
+      - 'scripts/interactive-win11-*.ps1'
+      - 'scripts/windows-harness-history.ps1'
+      - 'test/windows/interactive-win11-conpty-sync.ps1'
+      - '.github/workflows/conpty-sync.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  conpty-sync:
+    name: ConPTY sync (x64)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+
+      - name: Configure Zig package cache
+        shell: pwsh
+        run: '"ZIG_GLOBAL_CACHE_DIR=$env:GITHUB_WORKSPACE\.zig-global-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+
+      - name: Cache Zig dependency packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ github.workspace }}\.zig-global-cache/p
+          key: ${{ runner.os }}-${{ runner.arch }}-zig-0.15.2-${{ github.job }}-packages-v1-${{ hashFiles('build.zig.zon', 'pkg/**/build.zig.zon') }}
+
+      # The harness needs noctty.exe, the bundled ConPTY (conpty.dll and
+      # OpenConsole.exe) and share/, all of which the default build stages.
+      - name: Build native binaries
+        shell: pwsh
+        run: |
+          zig build -Doptimize=ReleaseFast -Dcpu=baseline --summary all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # -NoBuild never needs the Visual Studio dev shell the harness otherwise
+      # relaunches itself through. scripts\dev-windows.cmd probes only Visual
+      # Studio 2022 paths and printed "Missing VS Dev shell bootstrap" on this
+      # windows-2025-vs2026 image, so the harness's own bootstrap sentinel is
+      # set and Windows PowerShell 5.1, the host it is written for, runs it.
+      # -RequireAll: a scenario skipped for a missing pwsh.exe or vim fails.
+      # A run takes about 2.5 minutes here; -TimeoutSeconds 420 bounds a stuck
+      # one, and the harness then prints what the process tree and the hidden
+      # desktop looked like.
+      - name: Hidden desktop ConPTY versus screen differential
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          NOCTTY_INTERACTIVE_WIN11_CONPTY_SYNC_BOOTSTRAPPED: '1'
+        run: |
+          $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $powershell -NoProfile -ExecutionPolicy Bypass -File ./test/windows/interactive-win11-conpty-sync.ps1 -NoBuild -RequireAll -ResetState -TimeoutSeconds 420
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Terminal text only: each scenario's before, after and marker rows from
+      # both views, the inner log and the results JSON. No screenshots are
+      # taken or uploaded.
+      - name: Upload sync evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: conpty-sync-${{ github.run_id }}
+          path: |
+            .sandbox/win11/**/conpty-sync/run/evidence/**/*.txt
+            .sandbox/win11/**/conpty-sync/run/evidence/**/*.log
+            .sandbox/win11/**/conpty-sync/logs/*.json
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
