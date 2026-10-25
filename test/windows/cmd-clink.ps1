@@ -171,7 +171,7 @@ $before = Fingerprint $ledger
 $Run = [IO.Path]::GetFullPath($Run)
 if (Test-Path -LiteralPath $Run) { throw 'Run must be a new directory.' }
 New-Item -ItemType Directory -Path $Run | Out-Null
-foreach ($dir in 'appdata','localappdata','profile','integration') { New-Item -ItemType Directory -Path (Join-Path $Run $dir) | Out-Null }
+foreach ($dir in 'appdata','localappdata','profile','integration','scripts') { New-Item -ItemType Directory -Path (Join-Path $Run $dir) | Out-Null }
 Copy-Item -LiteralPath $IntegrationScript -Destination (Join-Path $Run 'integration')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'cmd-clink.lua') -Destination (Join-Path $Run 'profile/zz-noctty-smoke.lua')
 # Clink loads the first .inputrc it finds, in the profile before %USERPROFILE%,
@@ -185,9 +185,12 @@ $result = Join-Path $Run 'results.txt'
 $resizeReady = Join-Path $Run 'resize-ready.txt'
 $resizeDone = Join-Path $Run 'resize-done.txt'
 $batch = Join-Path $Run 'launch.cmd'
+# `--scripts` names an empty folder: without it Clink takes the script folder a
+# Clink started with `--scripts` left in the hidden variable `=clink.scripts`
+# (no CLINK_* scrub reaches it) and searches it before any other.
 @"
 @echo off
-"$([IO.Path]::GetFullPath($Clink))" inject -q -p "$Run\profile"
+"$([IO.Path]::GetFullPath($Clink))" inject -q -p "$Run\profile" --scripts "$Run\scripts"
 "@ | Set-Content -LiteralPath $batch -Encoding utf8NoBOM
 if ($Bin) {
     $portable = Join-Path $Run 'portable'
@@ -213,7 +216,16 @@ $environment = @{
 # set to $null, which PowerShell passes as "" and so leaves an empty override.
 # Script folders registered with `clink installscripts` would load too, and
 # nothing turns them off, so the run refuses to start with any registered.
-if (-not [string]::IsNullOrWhiteSpace((Get-ItemProperty -LiteralPath 'HKCU:\Software\Clink' -Name InstalledScripts -ErrorAction Ignore).InstalledScripts)) {
+# Read through the registry API: a property of Get-ItemProperty's null result
+# throws under Set-StrictMode, and Get-ItemPropertyValue throws for a key that
+# exists without the value, whatever -ErrorAction says.
+function Test-ClinkInstalledScripts([string] $SubKey = 'Software\Clink', [string] $ValueName = 'InstalledScripts') {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($SubKey)
+    if ($null -eq $key) { return $false }
+    try { return -not [string]::IsNullOrWhiteSpace([string]$key.GetValue($ValueName)) }
+    finally { $key.Dispose() }
+}
+if (Test-ClinkInstalledScripts) {
     throw 'Clink script folders are registered with clink installscripts (HKCU\Software\Clink InstalledScripts); they would load into the test.'
 }
 $savedClink = @{}

@@ -386,6 +386,12 @@ if ($Inner) {
     # scripts, prompt, settings and history stay out of the Clink scenario.
     Get-ChildItem -Path Env: | Where-Object { $_.Name -like 'CLINK_*' } |
         ForEach-Object { Remove-Item -LiteralPath "Env:\$($_.Name)" -ErrorAction Ignore }
+    # Then turn a developer's Clink AutoRun off for every scenario, whatever
+    # they had set: an AutoRun Clink would use its real state folder, which it
+    # finds through SHGetFolderPathW, not LOCALAPPDATA. (The cmd scenarios
+    # also pass /d.) It only stops AutoRun, so the Clink scenario's own
+    # `clink inject` still runs.
+    $env:CLINK_NOAUTORUN = '1'
 
     $script:Exe = Join-Path $RunRoot 'bin\noctty.exe'
     $script:DumpExe = Join-Path $RunRoot 'tools\conpty-sync-dump.exe'
@@ -635,32 +641,42 @@ if ($Inner) {
             $Exe, $historyPath, $ExtraOptions, $integration)
     }
 
+    # Script folders registered with `clink installscripts` load into every
+    # Clink, and no variable or profile setting turns them off. Read through
+    # the registry API: a property of Get-ItemProperty's null result throws
+    # under Set-StrictMode, and Get-ItemPropertyValue throws for a key that
+    # exists without the value, whatever -ErrorAction says.
+    function Test-SyncClinkInstalledScripts([string] $SubKey = 'Software\Clink', [string] $ValueName = 'InstalledScripts') {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($SubKey)
+        if ($null -eq $key) { return $false }
+        try { return -not [string]::IsNullOrWhiteSpace([string]$key.GetValue($ValueName)) }
+        finally { $key.Dispose() }
+    }
+
     # cmd with Clink injected from the sandbox copy, using a scenario-local
     # profile (settings, history), as `clink inject` from AutoRun would. The
     # build's own Lua script reaches Clink through CLINK_PATH as usual.
-    # Clink loads the first .inputrc it finds, in the profile before
-    # %USERPROFILE%, %LOCALAPPDATA%, %APPDATA% and %HOME%, so an empty one in
-    # the profile keeps a developer's own key bindings out.
-    # Script folders registered with `clink installscripts` load into every
-    # Clink, and no variable or profile setting turns them off.
-    function Test-SyncClinkInstalledScripts {
-        $value = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Clink' -Name InstalledScripts -ErrorAction Ignore).InstalledScripts
-        return -not [string]::IsNullOrWhiteSpace($value)
-    }
-
+    # - Clink loads the first .inputrc it finds, in the profile before
+    #   %USERPROFILE%, %LOCALAPPDATA%, %APPDATA% and %HOME%, so an empty one
+    #   in the profile keeps a developer's own key bindings out.
+    # - `--scripts` names an empty folder: without it Clink takes the script
+    #   folder a Clink started with `--scripts` left in the hidden variable
+    #   `=clink.scripts`, which no CLINK_* scrub reaches, and searches it first.
     function Get-SyncClinkCommand([string] $Name) {
         $clinkProfile = Join-Path $script:Work "$Name-clink-profile"
-        New-Item -ItemType Directory -Force -Path $clinkProfile | Out-Null
+        $clinkScripts = Join-Path $script:Work "$Name-clink-scripts"
+        New-Item -ItemType Directory -Force -Path $clinkProfile, $clinkScripts | Out-Null
         [IO.File]::WriteAllLines((Join-Path $clinkProfile 'clink_settings'), [string[]]@('clink.autoupdate = off', 'clink.logo = none'))
         [IO.File]::WriteAllText((Join-Path $clinkProfile '.inputrc'), '')
         $launch = Join-Path $script:Work "$Name-clink.cmd"
-        [IO.File]::WriteAllText($launch, "@echo off`r`n`"$script:ClinkExe`" inject -q -p `"$clinkProfile`"`r`n")
+        [IO.File]::WriteAllText($launch, "@echo off`r`n`"$script:ClinkExe`" inject -q -p `"$clinkProfile`" --scripts `"$clinkScripts`"`r`n")
         return "cmd.exe /d /k `"$launch`""
     }
 
     function Start-SyncNoctty([string] $Name, [string] $Shell, [string] $PSReadLineOptions = '', [string[]] $History = @()) {
         $shellCommand = switch ($Shell) {
-            'cmd' { 'cmd.exe' }
+            # /d: no AutoRun, so no Clink a developer installed for AutoRun.
+            'cmd' { 'cmd.exe /d' }
             'clink' { Get-SyncClinkCommand $Name }
             'powershell' { Get-SyncPowerShellCommand 'powershell.exe' $Name $PSReadLineOptions $History }
             'pwsh' { Get-SyncPowerShellCommand 'pwsh.exe' $Name $PSReadLineOptions $History }

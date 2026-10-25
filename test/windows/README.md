@@ -363,9 +363,11 @@ runs a subset and `-ListScenarios` lists them. Missing optional programs
 (`pwsh.exe`, Git for Windows' `vim.exe`) skip their scenarios, and so does the
 Clink scenario without `-Clink <extracted portable Clink>\clink_x64.exe`; that
 folder is copied into the sandbox and injected into cmd with a profile of its
-own (an empty `.inputrc`, and every inherited `CLINK_*` override removed). It
-is also skipped while script folders are registered with `clink installscripts`,
-which would load into it. The headless counterpart is
+own (an empty `.inputrc`, an empty `--scripts` folder, and every inherited
+`CLINK_*` override removed). It is also skipped while script folders are
+registered with `clink installscripts`, which would load into it. Every cmd
+scenario starts `cmd.exe /d` with `CLINK_NOAUTORUN=1`, so a Clink installed for
+AutoRun stays out. The headless counterpart is
 `src/terminal/resize_replay.zig`.
 
 ```powershell
