@@ -96,7 +96,9 @@ button must bring `282a36` back with the file unchanged. Opening the palette
 again and clicking its first result commits the theme: the palette closes and
 the file says `0x96f`. The commit saves the file and reloads from it, so the
 frame is `262427` in the first readback after the palette closes and again one
-second later; a frame that went back to Dracula in between fails the case. A
+second later; both sampled readbacks must show it. They are samples: a frame
+that went back to Dracula only between them is not seen, which would take a
+renderer-side frame history. A
 wait for a colour gives up after 20 seconds and names the colours it saw in
 order, and a wait for a palette control or for the saved file gives up after
 10. The case fails at once under High Contrast, where the palette does not

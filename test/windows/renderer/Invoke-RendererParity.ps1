@@ -723,7 +723,8 @@ function Invoke-Case([string]$Label, [string]$Backend, [hashtable]$ExtraEnvironm
             if (![RendererNative]::ClickFirstRow((& $control 2006 'Commit'))) { throw 'Commit: the click on the first row was rejected.' }
             & $dismissed 'Commit'
             # The commit saves the file and reloads from it, so the frame is
-            # the saved theme's, and it never went back to Dracula.
+            # the saved theme's: the first readback after the palette closes
+            # and one a second later must both show it (samples, not every frame).
             $t.committed = & $shows $preview 'theme-committed' -Steady
             $saveClock = [Diagnostics.Stopwatch]::StartNew()
             while (($t.committedFileTheme = & $fileTheme) -ne '0x96f') {
