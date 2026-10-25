@@ -121,7 +121,7 @@ fastest run of each EPYC 7763 sequence, the gate fails at a slowdown of 1.34-1.3
 the runner medians); at 40 it would need 1.68-1.71x and 1.73-1.74x. Applied to
 the best of each unique historical block, a uniform 1.4x slowdown fails 30% of
 jobs at 50 (ASCII 30%, scroll 29%) and at most one job at 40, 1.5x fails 60%
-against at most two jobs (0.5%), 1.7x fails 64% (ASCII) and 63% (scroll) at 50
+against at most two jobs in either workload (0.5%), 1.7x fails 64% (ASCII) and 63% (scroll) at 50
 and 11% and 2% at 40, and 2x fails 82% against 61% and 60%. The 60% at 1.5x is
 the share of jobs whose best ASCII block is under 75 MB/s (254 of 420), and they
 are not one population. 126 sit under 70, at or below the slowest class's speed;
