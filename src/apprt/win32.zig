@@ -7518,10 +7518,9 @@ pub const App = struct {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
                         self.unregisterGlobalHotkeys();
-                        var replaced = self.config;
+                        self.config.deinit();
                         self.config = config;
-                        self.rebaseSettingsPreview(&replaced);
-                        replaced.deinit();
+                        self.restoreSettingsPreview();
                         if (background_blur_newly_requested) logBackgroundBlurUnsupported();
                         self.config_revision +%= 1;
                         if (self.config_revision == 0) self.config_revision = 1;
@@ -9398,34 +9397,31 @@ pub const App = struct {
         self.settings_preview = null;
     }
 
-    /// `config` was replaced, and `replaced` is the config it was. The
-    /// preview sat on that one, so it is made again on the new config with
-    /// the drafts it showed (its fields that differed from `replaced`), and is
-    /// gone where the new config says the same. The caller redraws.
+    /// `config` was replaced. The preview sat on the config before it, so it
+    /// is made again on the new one from the drafts Settings previews
+    /// (`SettingsWindow.livePreviews`). The caller redraws. Settings says what
+    /// is previewed, not the overlay: `previewSetting` drops a field that
+    /// equals `config`, and a config that says the draft's value for a while
+    /// (a palette theme that sets `window-theme`) would otherwise end a
+    /// preview that cancelling the palette has to bring back.
     ///
     /// A reload's `config_change` does this before it redraws, so the chrome
     /// is not rebuilt from the bare config first; Settings then previews its
     /// drafts again (`externalConfigChanged`), which changes nothing. The
     /// palette's theme preview replaces `config` without telling Settings, so
     /// there this is all that keeps the drafts shown.
-    fn rebaseSettingsPreview(self: *App, replaced: *const configpkg.Config) void {
-        var previous = self.settings_preview orelse return;
-        self.settings_preview = null;
-        defer previous.deinit();
-        for (std.enums.values(win32_settings.SettingField)) |field| {
-            if (win32_settings.previewEffect(field) == .none) continue;
-            const value = win32_settings.settingValue(&previous, field);
-            if (std.meta.eql(value, win32_settings.settingValue(replaced, field))) continue;
-            _ = self.previewSetting(value);
-        }
+    fn restoreSettingsPreview(self: *App) void {
+        self.dropSettingsPreview();
+        var drafts: [win32_settings.setting_field_count]win32_settings.SettingValue = undefined;
+        for (self.settings_window.livePreviews(&drafts)) |value| _ = self.previewSetting(value);
     }
 
     /// Settings previews nothing any more: a save wrote every draft, or the
-    /// window closed (its rollback normally leaves nothing to end). A save's
-    /// reload already moved the preview onto the saved config, where it is gone
-    /// unless a later config layer overrides a saved value (a masked save):
-    /// then the windows go to what is in effect, not to the draft. The
-    /// transaction ends its previews at a save without a rollback effect.
+    /// window closed. Normally nothing is left to end: a save's reload shows
+    /// no preview (`livePreviews` is empty while a save is in flight) and a
+    /// close rolls its previews back. A save without a reload (safe mode)
+    /// leaves the overlay, and the transaction ends its previews at a save
+    /// without a rollback effect, so the windows go to the saved config here.
     fn endSettingsPreview(self: *App) void {
         var previous = self.settings_preview orelse return;
         self.settings_preview = null;
@@ -17862,7 +17858,7 @@ const Host = struct {
         const old = self.app.config;
         self.app.config = new_config;
         // A Settings preview stays shown over the palette's theme.
-        self.app.rebaseSettingsPreview(&old);
+        self.app.restoreSettingsPreview();
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme();
@@ -31042,9 +31038,8 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     const alloc = std.testing.allocator;
     var core_app: CoreApp = undefined;
     var app: App = undefined;
-    var palette_host: Host = undefined;
     var session: TestSession = .{};
-    try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &palette_host }} });
+    try session.init(.{ .core_app = &core_app, .app = &app });
     defer session.deinit();
     defer testFreeConfigProblems(&app, alloc);
     app.config.@"window-theme" = .dark;
@@ -31090,34 +31085,6 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
         try std.testing.expect(tab.@"window-theme" == .dark);
     }
 
-    // A reload replaces the config, and the preview moves onto the new one.
-    {
-        var reloaded = try app.config.clone(alloc);
-        defer reloaded.deinit();
-        reloaded.@"font-size" = saved_font_size + 3;
-        try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &reloaded }));
-    }
-    try std.testing.expectEqual(saved_font_size + 3, app.config.@"font-size");
-    try std.testing.expectEqual(saved_font_size + 3, app.shownConfig().@"font-size");
-    try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
-    try std.testing.expect(app.shownConfig().@"window-theme" == .light);
-    try std.testing.expect(app.config.@"window-theme" == .dark);
-
-    // So does a palette theme preview, which replaces the config itself, and
-    // its revert.
-    {
-        var palette = try app.config.clone(alloc);
-        palette.@"split-divider-color" = .{ .r = 1, .g = 2, .b = 3 };
-        const running = palette_host.swapRuntimeConfigFromPalette(palette);
-        try std.testing.expect(app.shownConfig().@"split-divider-color" != null);
-        try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
-        try std.testing.expect(app.shownConfig().@"window-theme" == .light);
-        var previewed = palette_host.swapRuntimeConfigFromPalette(running);
-        previewed.deinit();
-        try std.testing.expect(app.shownConfig().@"split-divider-color" == null);
-        try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
-    }
-
     // Back to the saved values, nothing is previewed.
     settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .dark });
     settingsPreviewFieldThunk(&app, .accent_follow_system, .{ .accent_follow_system = saved_accent });
@@ -31125,18 +31092,21 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 1 });
     try std.testing.expect(app.settings_preview == null);
 
-    // A reload that brings the config to the draft ends that preview.
+    // What is previewed is the Settings window's to say: a reload, with no
+    // window whose drafts it could show again, leaves no preview.
     settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
     {
         var reloaded = try app.config.clone(alloc);
         defer reloaded.deinit();
-        reloaded.@"background-opacity" = 0.5;
+        reloaded.@"font-size" = saved_font_size + 3;
         try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = &reloaded }));
     }
+    try std.testing.expectEqual(saved_font_size + 3, app.config.@"font-size");
     try std.testing.expect(app.settings_preview == null);
+    try std.testing.expectEqual(@as(f64, 1), app.shownBackgroundOpacity(&app.config));
 
-    // A save ends the preview: after one that a later config layer overrides
-    // (still dark here), the windows show what is in effect, not the draft.
+    // A save ends the preview: where one is left (a save without a reload,
+    // in safe mode), the windows go to the saved config, not the draft.
     settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
     {
         // No opacity is previewed now, so a window keeps the one it applies.
@@ -31161,8 +31131,9 @@ test "PKG-39 a Windows light/dark switch leaves an unsaved Settings preview a dr
             const alloc = std.testing.allocator;
             var core_app: CoreApp = undefined;
             var app: App = undefined;
+            var palette_host: Host = undefined;
             var session: TestSession = .{};
-            try session.init(.{ .core_app = &core_app, .app = &app });
+            try session.init(.{ .core_app = &core_app, .app = &app, .hosts = &.{.{ .storage = &palette_host }} });
             defer session.deinit();
             defer testFreeConfigProblems(&app, alloc);
             app.initComApartment();
@@ -31202,6 +31173,26 @@ test "PKG-39 a Windows light/dark switch leaves an unsaved Settings preview a dr
             try std.testing.expect(app.config.@"window-theme" == .dark);
             try std.testing.expect(app.shownConfig().@"window-theme" == .light);
             if (!isHighContrastActive()) try std.testing.expect(!app.resolved_theme.is_dark);
+
+            // A palette theme preview replaces the config without telling
+            // Settings. One whose theme file sets the draft's own value leaves
+            // nothing to show over it, and cancelling it must bring the
+            // preview back (review round 2: the overlay alone could not).
+            {
+                var palette = try app.config.clone(alloc);
+                palette.@"window-theme" = .light;
+                palette.@"split-divider-color" = .{ .r = 1, .g = 2, .b = 3 };
+                const running = palette_host.swapRuntimeConfigFromPalette(palette);
+                try std.testing.expect(app.settings_preview == null);
+                try std.testing.expect(app.shownConfig().@"split-divider-color" != null);
+                var previewed = palette_host.swapRuntimeConfigFromPalette(running);
+                previewed.deinit();
+                try std.testing.expect(app.config.@"window-theme" == .dark);
+                try std.testing.expect(app.shownConfig().@"window-theme" == .light);
+                try std.testing.expect(app.shownConfig().@"split-divider-color" == null);
+                if (!isHighContrastActive()) try std.testing.expect(!app.resolved_theme.is_dark);
+                try std.testing.expect(settings.hasPendingChanges());
+            }
 
             // Discard takes the preview back.
             _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);

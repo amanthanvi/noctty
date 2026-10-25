@@ -746,7 +746,7 @@ fn settingValueEql(a: SettingValue, b: SettingValue) bool {
 }
 
 const SettingsTransaction = settings_transaction.Transaction(SettingField, SettingValue, settingValueEql);
-const setting_field_count = std.enums.values(SettingField).len;
+pub const setting_field_count = std.enums.values(SettingField).len;
 
 /// The lowest background opacity a live preview shows. The Background opacity
 /// field previews every keystroke, so typing 0.85 passes through 0 and the
@@ -2787,17 +2787,33 @@ pub const SettingsWindow = struct {
             setSettingValue(pending, entry.current);
         }
         if (self.handle.previewField) |preview| {
-            for (transaction.entries) |entry| {
-                if (entry.dirty and entry.previewed) {
-                    // The reload replaced the live config, so the draft is
-                    // previewed again, floored like the keystroke that made it.
-                    preview(self.handle.ctx, entry.field, previewValue(transaction, entry.draft));
-                }
-            }
+            // The reload replaced the live config, so the drafts are
+            // previewed again, floored like the keystrokes that made them.
+            var buf: [setting_field_count]SettingValue = undefined;
+            for (self.livePreviews(&buf)) |value| preview(self.handle.ctx, std.meta.activeTag(value), value);
         }
         self.refreshAllControls();
         self.surfaceNextValidation(false);
         self.updateSaveEnabled();
+    }
+
+    /// The unsaved drafts this window previews, as they are shown (with the
+    /// opacity floor), copied into `buf`. The App shows them again over a
+    /// config that replaced the one they were shown on
+    /// (`App.restoreSettingsPreview`): whether a draft is previewed is this
+    /// window's to say, not the App's, which cannot tell a draft from a config
+    /// that happens to say the same for a while. None while a save is in
+    /// flight: its reload shows what was saved.
+    pub fn livePreviews(self: *const SettingsWindow, buf: *[setting_field_count]SettingValue) []const SettingValue {
+        const transaction = &(self.transaction orelse return buf[0..0]);
+        if (transaction.pending_apply_id != null) return buf[0..0];
+        var count: usize = 0;
+        for (transaction.entries) |entry| {
+            if (!entry.dirty or !entry.previewed) continue;
+            buf[count] = previewValue(transaction, entry.draft);
+            count += 1;
+        }
+        return buf[0..count];
     }
 
     pub fn conflictCount(self: *const SettingsWindow) usize {
@@ -5964,6 +5980,42 @@ test "settings opacity preview is floored while the draft keeps the typed value"
         settings.clearPending();
         try std.testing.expectEqual(case.saved, capture.previews[capture.count - 1]);
     }
+}
+
+test "settings live previews list the unsaved drafts as shown, and none while a save is in flight" {
+    const saved = try Config.default(std.testing.allocator);
+    var settings: SettingsWindow = .{
+        .handle = modelOnlyHandle(),
+        .current = saved,
+        .original = try saved.clone(std.testing.allocator),
+        .pending = try saved.clone(std.testing.allocator),
+    };
+    defer settings.clearPending();
+    settings.initTransaction();
+    var buf: [setting_field_count]SettingValue = undefined;
+    try std.testing.expectEqual(@as(usize, 0), settings.livePreviews(&buf).len);
+
+    // A previewed draft is listed as shown (the opacity floor); one that is
+    // not previewed, and one edited back to its saved value, are not.
+    settings.pending.?.@"background-opacity" = 0.1;
+    settings.trackEdit(.background_opacity, true);
+    settings.pending.?.@"font-size" = 16;
+    settings.trackEdit(.font_size, false);
+    settings.pending.?.@"window-theme" = .light;
+    settings.trackEdit(.window_theme, true);
+    settings.pending.?.@"window-theme" = saved.@"window-theme";
+    settings.trackEdit(.window_theme, true);
+    const listed = settings.livePreviews(&buf);
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+    try std.testing.expectEqual(@as(f64, 0.2), listed[0].background_opacity);
+
+    // A save shows what it saved, so it lists none until it is done.
+    var effects: [setting_field_count + 1]SettingsTransaction.Effect = undefined;
+    const apply_id = (try settings.transaction.?.dispatch(.apply, &effects))[0].apply_requested.apply_id;
+    try std.testing.expectEqual(@as(usize, 0), settings.livePreviews(&buf).len);
+    // One that fails keeps the draft, previewed.
+    _ = try settings.transaction.?.dispatch(.{ .apply_failed = .{ .apply_id = apply_id } }, &effects);
+    try std.testing.expectEqual(@as(usize, 1), settings.livePreviews(&buf).len);
 }
 
 test "settings save checks the file for edits first, and a conflict stops it" {
