@@ -97,10 +97,11 @@ jobs:
 
           # dev-windows.ps1 writes its bootstrap under the temp folder and has cmd.exe run it.
           # A temp folder whose name holds cmd's special characters (a profile named A&B) must
-          # not split that path: before the fix the ampersand started a new command. No
-          # parentheses: VsDevCmd.bat itself fails with a ')' in TEMP ("...\dd_vsdevcmd17_
-          # preinit_env.log was unexpected at this time", measured 10-25), whatever we pass it.
-          $oddTemp = Join-Path $env:RUNNER_TEMP 'dev shell A&B ^x'
+          # not split that path: before the fix the ampersand started a new command, and a
+          # %NAME% in it must not be expanded. No parentheses: VsDevCmd.bat itself fails with
+          # a ')' in TEMP ("...\dd_vsdevcmd17_preinit_env.log was unexpected at this time",
+          # measured 10-25), whatever we pass it.
+          $oddTemp = Join-Path $env:RUNNER_TEMP 'dev shell A&B ^x %OS%'
           New-Item -ItemType Directory -Force -Path $oddTemp | Out-Null
           $savedTemp = @{ TEMP = $env:TEMP; TMP = $env:TMP }
           $env:TEMP = $oddTemp

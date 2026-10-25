@@ -166,12 +166,15 @@ try {
     [System.IO.File]::WriteAllText($bootstrapPath, $bootstrap.Replace("`r`n", "`n").Replace("`n", "`r`n"), [System.Text.Encoding]::ASCII)
     # A raw argument string, not PowerShell's native-argument quoting: 5.1 and 7 quote
     # differently, and both leave a path without spaces unquoted, so an `&` in it (a
-    # profile named A&B) started a new command, which could even exit 0. With /s, cmd
-    # removes only the outer pair of quotes and reads the path inside its own, where
-    # &, ^, parentheses and spaces are literal. No `call`: it expands % a second time.
+    # profile named A&B) started a new command, which could even exit 0. The path goes
+    # through a variable: cmd expands it once and never expands the result again, so a
+    # %NAME% in the path stays literal. With /s, cmd removes only the outer pair of
+    # quotes and reads the path inside its own, where &, ^ and spaces are literal. No
+    # `call`: it expands % a second time.
+    $env:NOCTTY_DEV_BOOTSTRAP = $bootstrapPath
     $cmdInfo = New-Object System.Diagnostics.ProcessStartInfo
     $cmdInfo.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
-    $cmdInfo.Arguments = '/d /s /c ""' + $bootstrapPath + '""'
+    $cmdInfo.Arguments = '/d /s /c ""%NOCTTY_DEV_BOOTSTRAP%""'
     $cmdInfo.UseShellExecute = $false
     $cmdProcess = [System.Diagnostics.Process]::Start($cmdInfo)
     $cmdProcess.WaitForExit()
@@ -179,7 +182,7 @@ try {
     $cmdProcess.Dispose()
 } finally {
     Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction Ignore
-    Remove-Item -LiteralPath Env:NOCTTY_DEV_VSDEVCMD, Env:NOCTTY_DEV_ARCH, Env:NOCTTY_DEV_PATH -ErrorAction Ignore
+    Remove-Item -LiteralPath Env:NOCTTY_DEV_VSDEVCMD, Env:NOCTTY_DEV_ARCH, Env:NOCTTY_DEV_PATH, Env:NOCTTY_DEV_BOOTSTRAP -ErrorAction Ignore
 }
 # A script run with -File exits 0 when it ends normally, whatever its last native command returned.
 if ($bootstrapExit -ne 0) { throw "The Visual Studio developer shell bootstrap failed with exit code $bootstrapExit." }
