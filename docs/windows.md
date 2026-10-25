@@ -426,17 +426,26 @@ answer is remembered until noctty exits, so install the entry first, then
 start noctty again. For an implicit distribution, noctty reads the current
 default's ID from `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`
 (`DefaultDistribution`) and includes it in the cache key. A different default
-ID uses a separate cache entry. The probe explicitly selects the captured ID;
-if a recheck observes a different default, that launch keeps the fallback.
+ID uses a separate cache entry. The probe reads that registration's
+`DistributionName` and selects it with `-d <name>`; a changed name also uses a
+separate entry. If a recheck observes a different default or name, that launch
+keeps the fallback.
 The session itself stays implicit, so a concurrent change after the final
-check can still affect which distribution starts. If the ID cannot be read,
-the launch bypasses the cache. No registry value is changed. To give a
-distribution the entry, compile
+check can still affect which distribution starts. If the ID or name cannot be
+read, the launch uses an unpinned, uncached probe. No registry value is changed.
+The name selector supports older inbox and Store WSL versions: noctty does
+not inject `--distribution-id`, which was added in
+[WSL 2.4.4 (pre-release)](https://github.com/microsoft/WSL/releases/tag/2.4.4)
+and first shipped in a stable release with
+[WSL 2.4.10](https://github.com/microsoft/WSL/releases/tag/2.4.10).
+To give a distribution the entry, compile
 `share/terminfo/ghostty.terminfo` from the noctty folder with `tic -x` inside
 it. Without the entry `TERM` stays `xterm-256color`, the value `wsl.exe` sets,
 and the other three are still forwarded. The first WSL tab of a stopped
 distribution waits for it to start, up to 15 seconds, before its shell
-appears; if it has not answered by then, that run keeps `xterm-256color`.
+appears; if it has not answered by then, that run keeps `xterm-256color` and
+a later tab tries again. Timeouts and WSL's own failures (exit `-1`, including
+an invalid command-line argument) are not cached as missing terminfo.
 Entries already in `WSLENV`, their flags and their order are kept, and a
 `WSLENV` set with `env` in the configuration is the one extended. A `TERM` set
 with `env` is forwarded as it is. To keep one of these variables out of WSL,
