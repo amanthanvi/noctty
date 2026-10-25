@@ -1,0 +1,32 @@
+[
+  {
+    "run": 1,
+    "exit": 0,
+    "seconds": 162.7
+  },
+  {
+    "run": 2,
+    "exit": 0,
+    "seconds": 148.2
+  },
+  {
+    "run": 3,
+    "exit": 0,
+    "seconds": 148.5
+  },
+  {
+    "run": 4,
+    "exit": 0,
+    "seconds": 145.7
+  },
+  {
+    "run": 5,
+    "exit": 0,
+    "seconds": 146.3
+  },
+  {
+    "run": 6,
+    "exit": 0,
+    "seconds": 147.2
+  }
+]

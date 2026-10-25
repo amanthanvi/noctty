@@ -1,0 +1,199 @@
+clipboard sequence before: 0
+--- timeout diagnostics (inner pid 1772) ---
+process powershell pid=1772 cpu=267.9s threads=15 [8xWait/UserRequest 5xWait/EventPairLow 1xRunning/- 1xWait/ExecutionDelay]
+process conhost pid=1556 cpu=0.0s threads=4 [2xWait/UserRequest 2xWait/EventPairLow]
+process noctty pid=728 cpu=20.6s threads=9 [1xWait/UserRequest 7xWait/EventPairLow 1xWait/Executive]
+process csrss pid=736 cpu=0.6s threads=12 [5xWait/LpcReceive 1xWait/LpcReply 5xWait/UserRequest 1xWait/EventPairLow]
+process wininit pid=860 cpu=0.3s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process OpenConsole pid=5892 cpu=0.0s threads=4 [2xWait/UserRequest 2xWait/Executive]
+process cmd pid=2260 cpu=0.0s threads=1 [1xWait/Executive]
+process services pid=956 cpu=4.4s threads=10 [1xWait/UserRequest 9xWait/EventPairLow]
+process LsaIso pid=976 cpu=0.4s threads=1 [1xWait/UserRequest]
+process lsass pid=984 cpu=2.4s threads=8 [1xWait/LpcReceive 2xWait/UserRequest 5xWait/EventPairLow]
+process fontdrvhost pid=620 cpu=0.0s threads=5 [5xWait/UserRequest]
+process svchost pid=800 cpu=2.3s threads=16 [3xWait/UserRequest 13xWait/EventPairLow]
+process svchost pid=1076 cpu=2.8s threads=9 [3xWait/UserRequest 6xWait/EventPairLow]
+process svchost pid=1128 cpu=0.3s threads=5 [2xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1308 cpu=0.2s threads=29 [26xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1316 cpu=0.0s threads=1 [1xWait/UserRequest]
+process svchost pid=1460 cpu=0.0s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1492 cpu=0.0s threads=3 [3xWait/UserRequest]
+process svchost pid=1564 cpu=0.5s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1572 cpu=0.1s threads=3 [3xWait/UserRequest]
+process svchost pid=1588 cpu=0.0s threads=3 [3xWait/UserRequest]
+process svchost pid=1624 cpu=0.1s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=1656 cpu=0.2s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=1756 cpu=0.8s threads=4 [2xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=1896 cpu=2.9s threads=15 [10xWait/UserRequest 5xWait/EventPairLow]
+process vmms pid=1940 cpu=0.6s threads=12 [8xWait/UserRequest 1xWait/Unknown 3xWait/EventPairLow]
+process svchost pid=2020 cpu=0.5s threads=10 [7xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2064 cpu=0.1s threads=1 [1xWait/UserRequest]
+process svchost pid=2124 cpu=0.2s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2252 cpu=0.0s threads=5 [3xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2280 cpu=0.2s threads=5 [3xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2288 cpu=0.1s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2364 cpu=0.2s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2436 cpu=0.0s threads=6 [1xWait/UserRequest 5xWait/EventPairLow]
+process svchost pid=2476 cpu=1.7s threads=9 [5xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=2528 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2536 cpu=0.1s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2548 cpu=0.0s threads=3 [1xWait/UserRequest 1xWait/LpcReceive 1xWait/EventPairLow]
+process svchost pid=2568 cpu=1.5s threads=12 [6xWait/UserRequest 6xWait/EventPairLow]
+process svchost pid=2652 cpu=0.1s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2688 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2708 cpu=0.1s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2780 cpu=0.1s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2820 cpu=0.2s threads=6 [4xWait/UserRequest 1xWait/LpcReceive 1xWait/EventPairLow]
+process svchost pid=2848 cpu=0.1s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2944 cpu=0.8s threads=12 [9xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2056 cpu=0.0s threads=5 [1xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=3028 cpu=0.1s threads=5 [1xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=3100 cpu=0.0s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3180 cpu=0.1s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3196 cpu=0.0s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3248 cpu=0.2s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process spoolsv pid=3332 cpu=0.2s threads=7 [5xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=3344 cpu=0.1s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3496 cpu=0.2s threads=8 [3xWait/UserRequest 5xWait/EventPairLow]
+process svchost pid=3516 cpu=3.6s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3528 cpu=0.6s threads=7 [2xWait/UserRequest 5xWait/EventPairLow]
+process svchost pid=3560 cpu=0.1s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3584 cpu=0.2s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=3692 cpu=0.1s threads=17 [4xWait/UserRequest 13xWait/EventPairLow]
+process dockerd pid=3724 cpu=0.6s threads=13 [11xWait/UserRequest 2xWait/EventPairLow]
+process MpDefenderCoreService pid=3736 cpu=1.1s threads=10 [3xWait/UserRequest 3xWait/Unknown 4xWait/EventPairLow]
+process svchost pid=3748 cpu=0.0s threads=5 [4xWait/UserRequest 1xWait/EventPairLow]
+process SMSvcHost pid=3760 cpu=0.4s threads=7 [4xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3784 cpu=0.0s threads=2 [2xWait/UserRequest]
+process sqlwriter pid=3828 cpu=0.0s threads=2 [2xWait/UserRequest]
+process WaAppAgent pid=3836 cpu=3.4s threads=41 [28xWait/UserRequest 7xWait/EventPairLow 3xWait/Unknown 2xWait/Executive 1xWait/ExecutionDelay]
+process svchost pid=3876 cpu=0.1s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3896 cpu=0.1s threads=7 [3xWait/UserRequest 4xWait/EventPairLow]
+process mqsvc pid=3932 cpu=0.2s threads=31 [7xWait/UserRequest 24xWait/EventPairLow]
+process WindowsAzureGuestAgent pid=3972 cpu=3.7s threads=19 [9xWait/UserRequest 3xWait/Unknown 6xWait/EventPairLow 1xWait/ExecutionDelay]
+process svchost pid=4000 cpu=0.4s threads=7 [4xWait/UserRequest 3xWait/EventPairLow]
+process sshd pid=4016 cpu=0.0s threads=2 [2xWait/UserRequest]
+process svchost pid=4024 cpu=0.3s threads=7 [4xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=4076 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process MsMpEng pid=3132 cpu=13.5s threads=10 [4xWait/UserRequest 5xWait/EventPairLow 1xWait/Unknown]
+process wslservice pid=4160 cpu=0.2s threads=7 [3xWait/UserRequest 4xWait/EventPairLow]
+process SMSvcHost pid=5040 cpu=0.1s threads=5 [4xWait/UserRequest 1xWait/EventPairLow]
+process vmcompute pid=5084 cpu=0.0s threads=2 [2xWait/UserRequest]
+process svchost pid=832 cpu=0.7s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=4916 cpu=6.0s threads=29 [3xWait/UserRequest 26xWait/EventPairLow]
+process svchost pid=3176 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=1820 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=5336 cpu=2.5s threads=19 [14xWait/UserRequest 5xWait/EventPairLow]
+process svchost pid=5692 cpu=0.8s threads=5 [3xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=4312 cpu=0.4s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=8188 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=7460 cpu=0.1s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=7508 cpu=0.5s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=8332 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=6792 cpu=0.1s threads=5 [1xWait/UserRequest 1xWait/Unknown 3xWait/EventPairLow]
+process SecurityHealthService pid=7736 cpu=0.6s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=8708 cpu=1.6s threads=23 [15xWait/UserRequest 8xWait/EventPairLow]
+process svchost pid=9136 cpu=0.1s threads=4 [2xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=7284 cpu=0.2s threads=11 [7xWait/UserRequest 4xWait/EventPairLow]
+process msdtc pid=1404 cpu=0.1s threads=9 [9xWait/UserRequest]
+process svchost pid=6924 cpu=46.9s threads=5 [1xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=3912 cpu=0.0s threads=10 [7xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1600 cpu=0.3s threads=13 [3xWait/UserRequest 10xWait/EventPairLow]
+process svchost pid=2880 cpu=0.0s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2600 cpu=0.1s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=5124 cpu=0.1s threads=5 [2xWait/UserRequest 3xWait/EventPairLow]
+process StartMenuExperienceHost pid=7072 cpu=2.7s threads=15 [9xWait/UserRequest 4xWait/EventPairLow 2xWait/Unknown]
+process SearchHost pid=7416 cpu=3.8s threads=10 [8xWait/UserRequest 2xWait/EventPairLow]
+process RuntimeBroker pid=7348 cpu=1.4s threads=8 [5xWait/UserRequest 3xWait/EventPairLow]
+process UserOOBEBroker pid=8412 cpu=0.0s threads=1 [1xWait/UserRequest]
+process OpenConsole pid=2664 cpu=0.2s threads=6 [4xWait/UserRequest 1xWait/EventPairLow 1xWait/Executive]
+process WindowsTerminal pid=3076 cpu=78.2s threads=10 [6xWait/UserRequest 3xWait/EventPairLow 1xWait/Unknown]
+process WmiPrvSE pid=1456 cpu=0.0s threads=10 [5xWait/UserRequest 5xWait/EventPairLow]
+process taskhostw pid=5936 cpu=4.7s threads=11 [8xWait/UserRequest 3xWait/EventPairLow]
+process taskhostw pid=5448 cpu=0.1s threads=2 [2xWait/UserRequest]
+process taskhostw pid=5996 cpu=0.1s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process hosted-compute-agent pid=6376 cpu=0.6s threads=15 [9xWait/UserRequest 2xWait/Executive 4xWait/EventPairLow]
+process ctfmon pid=8768 cpu=0.3s threads=10 [9xWait/UserRequest 1xWait/LpcReceive]
+process sihost pid=5696 cpu=2.3s threads=12 [9xWait/UserRequest 3xWait/EventPairLow]
+process WaSecAgentProv pid=6748 cpu=0.0s threads=2 [2xWait/UserRequest]
+process DefenderSessionHelper pid=2348 cpu=0.0s threads=1 [1xWait/UserRequest]
+process conhost pid=2160 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/Executive]
+process provjobd.exe3761576003 pid=9144 cpu=8.1s threads=13 [9xWait/UserRequest 4xWait/EventPairLow]
+process Runner.Listener pid=2736 cpu=2.0s threads=14 [7xWait/UserRequest 2xWait/Executive 5xWait/EventPairLow]
+process ShellHost pid=5700 cpu=0.2s threads=6 [5xWait/UserRequest 1xWait/EventPairLow]
+process conhost pid=6756 cpu=0.0s threads=2 [2xWait/UserRequest]
+process Runner.Worker pid=2920 cpu=10.1s threads=16 [8xWait/UserRequest 3xWait/Executive 5xWait/EventPairLow]
+process conhost pid=3444 cpu=0.4s threads=2 [2xWait/UserRequest]
+process pwsh pid=4888 cpu=1.0s threads=18 [8xWait/UserRequest 2xWait/Executive 7xWait/EventPairLow 1xWait/ExecutionDelay]
+process powershell pid=7740 cpu=1.9s threads=20 [11xWait/UserRequest 7xWait/EventPairLow 1xRunning/- 1xWait/ExecutionDelay]
+window 0x90042 pid=2260 class=PseudoConsoleWindow visible=True hung=False
+window 0x90156 pid=728 class=noctty.win32.host visible=True hung=False
+window 0x901F6 pid=728 class=noctty.win32.lifecycle visible=False hung=False
+window 0xC01C2 pid=728 class=MSCTFIME UI visible=False hung=False
+window 0x80106 pid=728 class=IME visible=False hung=False
+--- end of timeout diagnostics ---
+clipboard sequence after: 0
+02:13:23.920 === baseline-cmd: 40 lines of cmd output, no trigger
+02:13:23.988 baseline-cmd: launched noctty pid=1152
+02:13:24.365 baseline-cmd: host window 0x201F0
+02:13:25.053 baseline-cmd: cmd.exe pid=1208
+02:13:26.404 baseline-cmd: first prompt
+02:13:26.406 baseline-cmd: noctty pid=1152 shell pid=1208 host=0x201F0
+02:13:28.394 baseline-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:29.293 baseline-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:30.337 baseline-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:13:30.475 baseline-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\baseline-cmd-after.txt
+02:13:30.479 === minimize-restore-cmd: minimize and restore with the prompt at the bottom
+02:13:30.483 minimize-restore-cmd: launched noctty pid=8552
+02:13:30.650 minimize-restore-cmd: host window 0x50130
+02:13:30.706 minimize-restore-cmd: cmd.exe pid=6784
+02:13:30.718 minimize-restore-cmd: first prompt
+02:13:30.718 minimize-restore-cmd: noctty pid=8552 shell pid=6784 host=0x50130
+02:13:32.399 minimize-restore-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:33.813 minimize-restore-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:34.870 minimize-restore-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:13:34.953 minimize-restore-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\minimize-restore-cmd-after.txt
+02:13:34.956 === shrink-rows-bottom-cmd: rows shrink with the prompt on the bottom row
+02:13:34.959 shrink-rows-bottom-cmd: launched noctty pid=5092
+02:13:35.121 shrink-rows-bottom-cmd: host window 0x50156
+02:13:35.172 shrink-rows-bottom-cmd: cmd.exe pid=7908
+02:13:35.178 shrink-rows-bottom-cmd: first prompt
+02:13:35.178 shrink-rows-bottom-cmd: noctty pid=5092 shell pid=7908 host=0x50156
+02:13:36.852 shrink-rows-bottom-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:36.998 shrink-rows-bottom-cmd: rows shrink -> BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 5,10
+02:13:37.873 shrink-rows-bottom-cmd after: BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 5,10 diff rows=0 settled=True
+02:13:38.913 shrink-rows-bottom-cmd marker: BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 16,10 diff rows=0 settled=True
+02:13:38.991 shrink-rows-bottom-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\shrink-rows-bottom-cmd-after.txt
+02:13:38.993 === grow-rows-cursor-top-cmd: rows grow after cls, cursor near the top
+02:13:38.997 grow-rows-cursor-top-cmd: launched noctty pid=3452
+02:13:39.160 grow-rows-cursor-top-cmd: host window 0x601F0
+02:13:39.225 grow-rows-cursor-top-cmd: cmd.exe pid=5712
+02:13:39.240 grow-rows-cursor-top-cmd: first prompt
+02:13:39.240 grow-rows-cursor-top-cmd: noctty pid=3452 shell pid=5712 host=0x601F0
+02:13:41.175 grow-rows-cursor-top-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,1 diff rows=0 settled=True
+02:13:41.308 grow-rows-cursor-top-cmd: rows grow -> BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,1
+02:13:42.181 grow-rows-cursor-top-cmd after: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,1 diff rows=0 settled=True
+02:13:43.243 grow-rows-cursor-top-cmd marker: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 16,1 diff rows=0 settled=True
+02:13:43.320 grow-rows-cursor-top-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\grow-rows-cursor-top-cmd-after.txt
+02:13:43.323 === unicode-powershell: wide, surrogate-pair and VS16 cells compare equal
+02:13:43.330 unicode-powershell: launched noctty pid=1996
+02:13:43.498 unicode-powershell: host window 0x90130
+02:13:43.592 unicode-powershell: powershell.exe pid=9072
+02:13:44.568 unicode-powershell: first prompt
+02:13:49.437 unicode-powershell: noctty pid=1996 shell pid=9072 host=0x90130
+02:13:54.063 unicode-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,9 diff rows=0 settled=True
+02:13:54.945 unicode-powershell after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,9 diff rows=0 settled=True
+02:13:56.024 unicode-powershell marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 19,9 diff rows=0 settled=True
+02:13:56.105 unicode-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\unicode-powershell-after.txt
+02:13:56.107 === grow-rows-cmd: enlarge the window with the prompt at the bottom
+02:13:56.110 grow-rows-cmd: launched noctty pid=728
+02:13:56.268 grow-rows-cmd: host window 0x90156
+the hidden-desktop driver did not finish within 300 s (evidence: 
+D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence)
+At D:\a\noctty\noctty\test\windows\interactive-win11-conpty-sync.ps1:1253 char:29
++ ... nnerExit) { throw "the hidden-desktop driver did not finish within $T ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (the hidden-desk...c\run\evidence):String) [], RuntimeException
+    + FullyQualifiedErrorId : the hidden-desktop driver did not finish within 300 s (evidence: D:\a\noctty\noctty\.san 
+   dbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence)
+ 

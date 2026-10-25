@@ -1,0 +1,219 @@
+clipboard sequence before: 0
+clipboard sequence after: 0
+02:15:24.734 === baseline-cmd: 40 lines of cmd output, no trigger
+02:15:24.793 baseline-cmd: launched noctty pid=632
+02:15:24.986 baseline-cmd: host window 0x1A0090
+02:15:25.181 baseline-cmd: cmd.exe pid=5312
+02:15:25.232 baseline-cmd: first prompt
+02:15:25.234 baseline-cmd: noctty pid=632 shell pid=5312 host=0x1A0090
+02:15:27.108 baseline-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:15:27.969 baseline-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:15:29.006 baseline-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:15:29.100 baseline-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\baseline-cmd-after.txt
+02:15:29.103 === minimize-restore-cmd: minimize and restore with the prompt at the bottom
+02:15:29.107 minimize-restore-cmd: launched noctty pid=4900
+02:15:29.278 minimize-restore-cmd: host window 0x1E006E
+02:15:29.356 minimize-restore-cmd: cmd.exe pid=1124
+02:15:29.368 minimize-restore-cmd: first prompt
+02:15:29.368 minimize-restore-cmd: noctty pid=4900 shell pid=1124 host=0x1E006E
+02:15:31.003 minimize-restore-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:15:32.394 minimize-restore-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:15:33.423 minimize-restore-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:15:33.505 minimize-restore-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\minimize-restore-cmd-after.txt
+02:15:33.506 === shrink-rows-bottom-cmd: rows shrink with the prompt on the bottom row
+02:15:33.510 shrink-rows-bottom-cmd: launched noctty pid=8228
+02:15:33.676 shrink-rows-bottom-cmd: host window 0x1F0078
+02:15:33.732 shrink-rows-bottom-cmd: cmd.exe pid=1156
+02:15:33.738 shrink-rows-bottom-cmd: first prompt
+02:15:33.738 shrink-rows-bottom-cmd: noctty pid=8228 shell pid=1156 host=0x1F0078
+02:15:35.453 shrink-rows-bottom-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:15:35.582 shrink-rows-bottom-cmd: rows shrink -> BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 5,10
+02:15:36.653 shrink-rows-bottom-cmd after: BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 5,10 diff rows=0 settled=True
+02:15:37.711 shrink-rows-bottom-cmd marker: BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 16,10 diff rows=0 settled=True
+02:15:37.782 shrink-rows-bottom-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\shrink-rows-bottom-cmd-after.txt
+02:15:37.782 === grow-rows-cursor-top-cmd: rows grow after cls, cursor near the top
+02:15:37.786 grow-rows-cursor-top-cmd: launched noctty pid=8284
+02:15:37.938 grow-rows-cursor-top-cmd: host window 0x1E0090
+02:15:37.992 grow-rows-cursor-top-cmd: cmd.exe pid=1212
+02:15:38.000 grow-rows-cursor-top-cmd: first prompt
+02:15:38.000 grow-rows-cursor-top-cmd: noctty pid=8284 shell pid=1212 host=0x1E0090
+02:15:39.755 grow-rows-cursor-top-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,1 diff rows=0 settled=True
+02:15:39.854 grow-rows-cursor-top-cmd: rows grow -> BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,1
+02:15:40.741 grow-rows-cursor-top-cmd after: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,1 diff rows=0 settled=True
+02:15:41.950 grow-rows-cursor-top-cmd marker: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 16,1 diff rows=0 settled=True
+02:15:42.032 grow-rows-cursor-top-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\grow-rows-cursor-top-cmd-after.txt
+02:15:42.034 === unicode-powershell: wide, surrogate-pair and VS16 cells compare equal
+02:15:42.040 unicode-powershell: launched noctty pid=2144
+02:15:42.206 unicode-powershell: host window 0x22006E
+02:15:42.286 unicode-powershell: powershell.exe pid=2592
+02:15:42.786 unicode-powershell: first prompt
+02:15:47.691 unicode-powershell: noctty pid=2144 shell pid=2592 host=0x22006E
+02:15:52.538 unicode-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,9 diff rows=0 settled=True
+02:15:53.410 unicode-powershell after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,9 diff rows=0 settled=True
+02:15:54.670 unicode-powershell marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 19,9 diff rows=0 settled=True
+02:15:54.750 unicode-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\unicode-powershell-after.txt
+02:15:54.750 === grow-rows-cmd: enlarge the window with the prompt at the bottom
+02:15:54.754 grow-rows-cmd: launched noctty pid=9036
+02:15:54.919 grow-rows-cmd: host window 0x230078
+02:15:54.974 grow-rows-cmd: cmd.exe pid=9080
+02:15:54.980 grow-rows-cmd: first prompt
+02:15:54.982 grow-rows-cmd: noctty pid=9036 shell pid=9080 host=0x230078
+02:15:56.608 grow-rows-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:15:56.724 grow-rows-cmd: rows grow -> BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,19
+02:15:57.612 grow-rows-cmd after: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,19 diff rows=0 settled=True
+02:15:58.654 grow-rows-cmd marker: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 16,19 diff rows=0 settled=True
+02:15:58.730 grow-rows-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\grow-rows-cmd-after.txt
+02:15:58.732 === search-bar-cmd: open and close the search bar with the prompt at the bottom
+02:15:58.736 search-bar-cmd: launched noctty pid=4888
+02:15:58.891 search-bar-cmd: host window 0x220090
+02:15:58.951 search-bar-cmd: cmd.exe pid=2148
+02:15:58.958 search-bar-cmd: first prompt
+02:15:58.958 search-bar-cmd: noctty pid=4888 shell pid=2148 host=0x220090
+02:16:00.801 search-bar-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:16:00.915 search-bar-cmd: search bar takes rows -> BUFFER 80x18 WINDOW 0,0 80x18 CURSOR 5,17
+02:16:00.968 search-bar-cmd: search bar gives rows back -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,17
+02:16:01.820 search-bar-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,17 diff rows=0 settled=True
+02:16:03.056 search-bar-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,17 diff rows=0 settled=True
+02:16:03.133 search-bar-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\search-bar-cmd-after.txt
+02:16:03.135 === split-cmd: open a split below and close it again
+02:16:03.139 split-cmd: launched noctty pid=1968
+02:16:03.307 split-cmd: host window 0x26006E
+02:16:03.360 split-cmd: cmd.exe pid=3360
+02:16:03.364 split-cmd: first prompt
+02:16:03.366 split-cmd: noctty pid=1968 shell pid=3360 host=0x26006E
+02:16:04.846 split-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:16:05.010 split-cmd: split takes rows -> BUFFER 80x9 WINDOW 0,0 80x9 CURSOR 5,8
+02:16:05.639 split-cmd: rows back -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,8
+02:16:06.710 split-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,8 diff rows=0 settled=True
+02:16:07.739 split-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,8 diff rows=0 settled=True
+02:16:07.818 split-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\split-cmd-after.txt
+02:16:07.820 === maximize-cmd: maximize with the prompt at the bottom
+02:16:07.824 maximize-cmd: launched noctty pid=3604
+02:16:07.992 maximize-cmd: host window 0x270078
+02:16:08.052 maximize-cmd: cmd.exe pid=8300
+02:16:08.060 maximize-cmd: first prompt
+02:16:08.060 maximize-cmd: noctty pid=3604 shell pid=8300 host=0x270078
+02:16:09.774 maximize-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:16:09.906 maximize-cmd: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 5,19
+02:16:10.785 maximize-cmd after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 5,19 diff rows=0 settled=True
+02:16:11.825 maximize-cmd marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 16,19 diff rows=0 settled=True
+02:16:11.911 maximize-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\maximize-cmd-after.txt
+02:16:11.911 === maximize-restore-cmd: maximize and restore with the prompt at the bottom (in sync only as a round trip: the restore undoes what the maximize pulled)
+02:16:11.915 maximize-restore-cmd: launched noctty pid=7852
+02:16:12.079 maximize-restore-cmd: host window 0x260090
+02:16:12.132 maximize-restore-cmd: cmd.exe pid=8404
+02:16:12.138 maximize-restore-cmd: first prompt
+02:16:12.139 maximize-restore-cmd: noctty pid=7852 shell pid=8404 host=0x260090
+02:16:13.885 maximize-restore-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:16:14.024 maximize-restore-cmd: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 5,19
+02:16:14.589 maximize-restore-cmd: restored grid -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19
+02:16:15.664 maximize-restore-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:16:16.874 maximize-restore-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:16:16.954 maximize-restore-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\maximize-restore-cmd-after.txt
+02:16:16.956 === listview-split-pwsh: PSReadLine ListView open below the prompt, open a split below and close it
+02:16:16.968 listview-split-pwsh: launched noctty pid=2200
+02:16:17.132 listview-split-pwsh: host window 0x2A006E
+02:16:17.212 listview-split-pwsh: pwsh.exe pid=8072
+02:16:17.864 listview-split-pwsh: first prompt
+02:16:23.030 listview-split-pwsh: noctty pid=2200 shell pid=8072 host=0x2A006E
+02:16:24.867 listview-split-pwsh before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,13 diff rows=0 settled=True
+02:16:24.997 listview-split-pwsh: split takes rows -> BUFFER 80x9 WINDOW 0,0 80x9 CURSOR 24,2
+02:16:25.631 listview-split-pwsh: rows back -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,2
+02:16:26.506 listview-split-pwsh after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,2 diff rows=0 settled=True
+02:16:27.573 listview-split-pwsh marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 35,2 diff rows=0 settled=True
+02:16:27.655 listview-split-pwsh: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\listview-split-pwsh-after.txt
+02:16:27.657 === listview-narrow-pwsh: PSReadLine ListView open below the prompt, narrow the window until its rows wrap
+02:16:27.663 listview-narrow-pwsh: launched noctty pid=5936
+02:16:27.827 listview-narrow-pwsh: host window 0x2B0078
+02:16:27.909 listview-narrow-pwsh: pwsh.exe pid=7304
+02:16:28.540 listview-narrow-pwsh: first prompt
+02:16:33.599 listview-narrow-pwsh: noctty pid=5936 shell pid=7304 host=0x2B0078
+02:16:35.576 listview-narrow-pwsh before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,13 diff rows=0 settled=True
+02:16:35.680 listview-narrow-pwsh: narrower -> BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 24,7
+02:16:36.738 listview-narrow-pwsh after: BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 24,7 diff rows=0 settled=True
+02:16:37.783 listview-narrow-pwsh marker: BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 35,7 diff rows=0 settled=True
+02:16:37.860 listview-narrow-pwsh: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\listview-narrow-pwsh-after.txt
+02:16:37.862 === vim-maximize-powershell: run vim, maximize, quit vim
+02:16:37.878 vim-maximize-powershell: launched noctty pid=1280
+02:16:38.030 vim-maximize-powershell: host window 0x2A0090
+02:16:38.107 vim-maximize-powershell: powershell.exe pid=1984
+02:16:38.758 vim-maximize-powershell: first prompt
+02:16:43.824 vim-maximize-powershell: noctty pid=1280 shell pid=1984 host=0x2A0090
+02:16:45.356 vim-maximize-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:16:46.825 vim-maximize-powershell: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 0,0
+02:16:48.560 vim-maximize-powershell after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 8,19 diff rows=0 settled=True
+02:16:49.891 vim-maximize-powershell marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 19,19 diff rows=0 settled=True
+02:16:49.972 vim-maximize-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\vim-maximize-powershell-after.txt
+02:16:49.974 === narrow-widen-powershell: narrow until lines wrap, then widen back, prompt at the bottom
+02:16:49.978 narrow-widen-powershell: launched noctty pid=7064
+02:16:50.152 narrow-widen-powershell: host window 0x2E006E
+02:16:50.231 narrow-widen-powershell: powershell.exe pid=7796
+02:16:50.721 narrow-widen-powershell: first prompt
+02:16:55.766 narrow-widen-powershell: noctty pid=7064 shell pid=7796 host=0x2E006E
+02:16:57.830 narrow-widen-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:16:57.952 narrow-widen-powershell: narrower -> BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 8,19
+02:16:58.530 narrow-widen-powershell: wide again -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,10
+02:16:59.423 narrow-widen-powershell after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,10 diff rows=0 settled=True
+02:17:00.683 narrow-widen-powershell marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 19,19 diff rows=0 settled=True
+02:17:00.765 narrow-widen-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\narrow-widen-powershell-after.txt
+02:17:00.767 === altscreen-maximize-powershell: maximize while a full-screen program runs, then leave it (the vim exit case)
+02:17:00.772 altscreen-maximize-powershell: launched noctty pid=2592
+02:17:00.931 altscreen-maximize-powershell: host window 0x2F0078
+02:17:01.011 altscreen-maximize-powershell: powershell.exe pid=5464
+02:17:01.503 altscreen-maximize-powershell: first prompt
+02:17:06.490 altscreen-maximize-powershell: noctty pid=2592 shell pid=5464 host=0x2F0078
+02:17:08.000 altscreen-maximize-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:17:08.958 altscreen-maximize-powershell: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 10,0
+02:17:10.557 altscreen-maximize-powershell after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 8,19 diff rows=0 settled=True
+02:17:11.721 altscreen-maximize-powershell marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 19,19 diff rows=0 settled=True
+02:17:11.804 altscreen-maximize-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\altscreen-maximize-powershell-after.txt
+02:17:11.804 === altscreen-wrapped-maximize-powershell: the same, started from a command line that wraps
+02:17:11.809 altscreen-wrapped-maximize-powershell: launched noctty pid=6776
+02:17:11.987 altscreen-wrapped-maximize-powershell: host window 0x2E0090
+02:17:12.072 altscreen-wrapped-maximize-powershell: powershell.exe pid=3620
+02:17:12.554 altscreen-wrapped-maximize-powershell: first prompt
+02:17:17.599 altscreen-wrapped-maximize-powershell: noctty pid=6776 shell pid=3620 host=0x2E0090
+02:17:19.209 altscreen-wrapped-maximize-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:17:21.854 altscreen-wrapped-maximize-powershell: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 10,0
+02:17:23.651 altscreen-wrapped-maximize-powershell after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 8,19 diff rows=0 settled=True
+02:17:24.805 altscreen-wrapped-maximize-powershell marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 19,19 diff rows=0 settled=True
+02:17:24.887 altscreen-wrapped-maximize-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\altscreen-wrapped-maximize-powershell-after.txt
+02:17:24.887 === shrink-rows-below-cursor-powershell: rows shrink with 15 rows of content below the cursor
+02:17:24.892 shrink-rows-below-cursor-powershell: launched noctty pid=7772
+02:17:25.046 shrink-rows-below-cursor-powershell: host window 0x32006E
+02:17:25.124 shrink-rows-below-cursor-powershell: powershell.exe pid=4988
+02:17:25.764 shrink-rows-below-cursor-powershell: first prompt
+02:17:30.722 shrink-rows-below-cursor-powershell: noctty pid=7772 shell pid=4988 host=0x32006E
+02:17:35.472 shrink-rows-below-cursor-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 0,4 diff rows=0 settled=True
+02:17:35.565 shrink-rows-below-cursor-powershell: rows shrink -> BUFFER 80x8 WINDOW 0,0 80x8 CURSOR 0,0
+02:17:36.732 shrink-rows-below-cursor-powershell after: BUFFER 80x8 WINDOW 0,0 80x8 CURSOR 4,0 diff rows=0 settled=True
+02:17:36.817 shrink-rows-below-cursor-powershell: PASS before=0 after=0 marker= D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\shrink-rows-below-cursor-powershell-after.txt
+02:17:36.818 === shrink-cols-below-cursor-powershell: columns shrink so the 60-column rows below the cursor wrap
+02:17:36.823 shrink-cols-below-cursor-powershell: launched noctty pid=3360
+02:17:36.986 shrink-cols-below-cursor-powershell: host window 0x330078
+02:17:37.074 shrink-cols-below-cursor-powershell: powershell.exe pid=1172
+02:17:37.559 shrink-cols-below-cursor-powershell: first prompt
+02:17:43.051 shrink-cols-below-cursor-powershell: noctty pid=3360 shell pid=1172 host=0x330078
+02:17:49.019 shrink-cols-below-cursor-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 0,4 diff rows=0 settled=True
+02:17:49.132 shrink-cols-below-cursor-powershell: columns shrink -> BUFFER 43x20 WINDOW 0,0 43x20 CURSOR 0,0
+02:17:50.313 shrink-cols-below-cursor-powershell after: BUFFER 43x20 WINDOW 0,0 43x20 CURSOR 4,0 diff rows=0 settled=True
+02:17:50.394 shrink-cols-below-cursor-powershell: PASS before=0 after=0 marker= D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\shrink-cols-below-cursor-powershell-after.txt
+PASS   baseline-cmd                           expect=sync    control       before=0 after=0 marker=0
+PASS   minimize-restore-cmd                   expect=sync    #262          before=0 after=0 marker=0
+PASS   shrink-rows-bottom-cmd                 expect=sync    control       before=0 after=0 marker=0
+PASS   grow-rows-cursor-top-cmd               expect=sync    control       before=0 after=0 marker=0
+PASS   unicode-powershell                     expect=sync    normalisation before=0 after=0 marker=0
+PASS   grow-rows-cmd                          expect=sync    F015          before=0 after=0 marker=0
+PASS   search-bar-cmd                         expect=sync    F015          before=0 after=0 marker=0
+PASS   split-cmd                              expect=sync    F015          before=0 after=0 marker=0
+PASS   maximize-cmd                           expect=sync    F015          before=0 after=0 marker=0
+PASS   maximize-restore-cmd                   expect=sync    round trip    before=0 after=0 marker=0
+PASS   listview-split-pwsh                    expect=sync    control       before=0 after=0 marker=0
+PASS   listview-narrow-pwsh                   expect=sync    control       before=0 after=0 marker=0
+PASS   vim-maximize-powershell                expect=sync    F015          before=0 after=0 marker=0
+PASS   narrow-widen-powershell                expect=sync    F015          before=0 after=0 marker=0
+PASS   altscreen-maximize-powershell          expect=sync    F015          before=0 after=0 marker=0
+PASS   altscreen-wrapped-maximize-powershell  expect=sync    saved cursor  before=0 after=0 marker=0
+PASS   shrink-rows-below-cursor-powershell    expect=sync    F032          before=0 after=0 marker=
+PASS   shrink-cols-below-cursor-powershell    expect=sync    F032          before=0 after=0 marker=
+interactive-win11 conpty-sync validation: PASS (scenarios=18, in-sync=18, known-desync=0, skipped=0, evidence=D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence)

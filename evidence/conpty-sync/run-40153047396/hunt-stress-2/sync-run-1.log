@@ -1,0 +1,318 @@
+clipboard sequence before: 0
+--- timeout diagnostics (inner pid 7228) ---
+process powershell pid=7228 cpu=197.6s threads=14 [8xWait/UserRequest 4xWait/EventPairLow 1xRunning/- 1xWait/ExecutionDelay]
+process conhost pid=7796 cpu=0.0s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process noctty pid=5532 cpu=14.9s threads=10 [2xWait/UserRequest 7xWait/EventPairLow 1xWait/Executive]
+process OpenConsole pid=2196 cpu=0.0s threads=4 [2xWait/UserRequest 2xWait/Executive]
+process cmd pid=1620 cpu=0.0s threads=1 [1xWait/UserRequest]
+process powershell pid=724 cpu=1.0s threads=12 [6xWait/UserRequest 4xWait/EventPairLow 1xWait/ExecutionDelay 1xWait/Executive]
+process csrss pid=732 cpu=0.6s threads=11 [4xWait/LpcReceive 1xWait/LpcReply 5xWait/UserRequest 1xWait/EventPairLow]
+process wininit pid=856 cpu=0.2s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process services pid=948 cpu=4.7s threads=9 [1xWait/UserRequest 8xWait/EventPairLow]
+process LsaIso pid=968 cpu=0.4s threads=1 [1xWait/UserRequest]
+process lsass pid=976 cpu=2.2s threads=8 [1xWait/LpcReceive 2xWait/UserRequest 5xWait/EventPairLow]
+process fontdrvhost pid=700 cpu=0.0s threads=5 [5xWait/UserRequest]
+process svchost pid=8 cpu=2.2s threads=17 [4xWait/UserRequest 13xWait/EventPairLow]
+process svchost pid=1092 cpu=2.7s threads=11 [3xWait/UserRequest 8xWait/EventPairLow]
+process svchost pid=1136 cpu=0.2s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1304 cpu=0.3s threads=30 [27xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1332 cpu=0.0s threads=1 [1xWait/UserRequest]
+process svchost pid=1476 cpu=0.1s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=1500 cpu=0.0s threads=3 [3xWait/UserRequest]
+process svchost pid=1564 cpu=0.1s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=1572 cpu=0.4s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1580 cpu=0.2s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=1628 cpu=0.0s threads=3 [3xWait/UserRequest]
+process svchost pid=1664 cpu=0.7s threads=5 [2xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1676 cpu=0.0s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=1892 cpu=2.4s threads=15 [10xWait/UserRequest 5xWait/EventPairLow]
+process vmms pid=1932 cpu=0.6s threads=12 [8xWait/UserRequest 1xWait/Unknown 3xWait/EventPairLow]
+process svchost pid=2020 cpu=0.5s threads=10 [7xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2076 cpu=0.2s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2144 cpu=0.1s threads=5 [3xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2152 cpu=0.3s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2204 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2340 cpu=0.2s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2364 cpu=0.1s threads=5 [3xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2480 cpu=1.8s threads=8 [5xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2500 cpu=1.5s threads=12 [6xWait/UserRequest 6xWait/EventPairLow]
+process svchost pid=2540 cpu=0.1s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2548 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2556 cpu=0.1s threads=4 [1xWait/UserRequest 1xWait/LpcReceive 2xWait/EventPairLow]
+process svchost pid=2604 cpu=0.1s threads=6 [1xWait/UserRequest 5xWait/EventPairLow]
+process svchost pid=2632 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2740 cpu=0.1s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2784 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=2796 cpu=0.1s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2828 cpu=0.0s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=2844 cpu=0.2s threads=6 [4xWait/UserRequest 1xWait/LpcReceive 1xWait/EventPairLow]
+process svchost pid=2852 cpu=0.8s threads=13 [9xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=3020 cpu=0.1s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=2392 cpu=0.1s threads=5 [1xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=3120 cpu=0.0s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3168 cpu=0.3s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3200 cpu=0.2s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3228 cpu=0.1s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3324 cpu=0.0s threads=1 [1xWait/UserRequest]
+process spoolsv pid=3348 cpu=0.2s threads=9 [5xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=3464 cpu=0.1s threads=9 [3xWait/UserRequest 6xWait/EventPairLow]
+process svchost pid=3472 cpu=3.0s threads=10 [1xWait/UserRequest 9xWait/EventPairLow]
+process svchost pid=3496 cpu=0.5s threads=7 [2xWait/UserRequest 5xWait/EventPairLow]
+process svchost pid=3520 cpu=0.1s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=3544 cpu=0.2s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process dockerd pid=3652 cpu=0.5s threads=12 [10xWait/UserRequest 2xWait/EventPairLow]
+process MpDefenderCoreService pid=3756 cpu=1.1s threads=10 [3xWait/UserRequest 3xWait/Unknown 4xWait/EventPairLow]
+process svchost pid=3748 cpu=0.1s threads=16 [4xWait/UserRequest 12xWait/EventPairLow]
+process svchost pid=3768 cpu=0.1s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=3808 cpu=0.0s threads=2 [2xWait/UserRequest]
+process SMSvcHost pid=3832 cpu=0.4s threads=6 [4xWait/UserRequest 2xWait/EventPairLow]
+process WaAppAgent pid=3888 cpu=3.3s threads=42 [28xWait/UserRequest 8xWait/EventPairLow 3xWait/Unknown 2xWait/Executive 1xWait/ExecutionDelay]
+process svchost pid=3896 cpu=0.0s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=3916 cpu=0.0s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process mqsvc pid=3940 cpu=0.1s threads=31 [7xWait/UserRequest 24xWait/EventPairLow]
+process sshd pid=3948 cpu=0.1s threads=2 [2xWait/UserRequest]
+process MsMpEng pid=3996 cpu=12.8s threads=10 [4xWait/UserRequest 5xWait/EventPairLow 1xWait/Unknown]
+process svchost pid=4040 cpu=0.3s threads=7 [4xWait/UserRequest 3xWait/EventPairLow]
+process sqlwriter pid=4056 cpu=0.0s threads=2 [2xWait/UserRequest]
+process WindowsAzureGuestAgent pid=1008 cpu=3.3s threads=19 [9xWait/UserRequest 3xWait/Unknown 6xWait/EventPairLow 1xWait/ExecutionDelay]
+process svchost pid=2920 cpu=0.3s threads=7 [4xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=4116 cpu=0.1s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process wslservice pid=4168 cpu=0.2s threads=7 [3xWait/UserRequest 4xWait/EventPairLow]
+process SMSvcHost pid=5008 cpu=0.2s threads=5 [4xWait/UserRequest 1xWait/EventPairLow]
+process vmcompute pid=5068 cpu=0.1s threads=2 [2xWait/UserRequest]
+process svchost pid=4452 cpu=0.7s threads=4 [2xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=4888 cpu=0.0s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=5800 cpu=0.0s threads=2 [1xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=6196 cpu=2.5s threads=20 [14xWait/UserRequest 6xWait/EventPairLow]
+process svchost pid=5724 cpu=0.8s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=1948 cpu=0.4s threads=10 [4xWait/UserRequest 6xWait/EventPairLow]
+process svchost pid=8072 cpu=0.0s threads=4 [1xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=7384 cpu=0.1s threads=3 [1xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=7460 cpu=0.5s threads=7 [3xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=8624 cpu=0.0s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=8292 cpu=0.1s threads=5 [1xWait/UserRequest 1xWait/Unknown 3xWait/EventPairLow]
+process SecurityHealthService pid=4924 cpu=0.5s threads=7 [3xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=2980 cpu=1.4s threads=25 [15xWait/UserRequest 10xWait/EventPairLow]
+process svchost pid=1588 cpu=0.0s threads=4 [2xWait/UserRequest 2xWait/EventPairLow]
+process svchost pid=8948 cpu=0.1s threads=11 [7xWait/UserRequest 4xWait/EventPairLow]
+process msdtc pid=6668 cpu=0.1s threads=9 [9xWait/UserRequest]
+process svchost pid=6844 cpu=45.7s threads=5 [1xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=6080 cpu=0.1s threads=10 [7xWait/UserRequest 3xWait/EventPairLow]
+process svchost pid=5712 cpu=0.2s threads=14 [3xWait/UserRequest 11xWait/EventPairLow]
+process svchost pid=8740 cpu=0.1s threads=3 [2xWait/UserRequest 1xWait/EventPairLow]
+process svchost pid=6908 cpu=3.2s threads=38 [3xWait/UserRequest 35xWait/EventPairLow]
+process svchost pid=5688 cpu=0.0s threads=5 [1xWait/UserRequest 4xWait/EventPairLow]
+process svchost pid=6096 cpu=0.1s threads=9 [2xWait/UserRequest 7xWait/EventPairLow]
+process TrustedInstaller pid=7904 cpu=0.1s threads=6 [3xWait/UserRequest 3xWait/EventPairLow]
+process WmiPrvSE pid=6448 cpu=0.2s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process StartMenuExperienceHost pid=8188 cpu=2.3s threads=17 [11xWait/UserRequest 4xWait/EventPairLow 2xWait/Unknown]
+process SearchHost pid=6580 cpu=3.5s threads=13 [10xWait/UserRequest 3xWait/EventPairLow]
+process RuntimeBroker pid=7212 cpu=1.3s threads=12 [5xWait/UserRequest 7xWait/EventPairLow]
+process UserOOBEBroker pid=8312 cpu=0.0s threads=1 [1xWait/UserRequest]
+process OpenConsole pid=1956 cpu=0.1s threads=6 [4xWait/UserRequest 1xWait/EventPairLow 1xWait/Executive]
+process WindowsTerminal pid=6620 cpu=73.1s threads=10 [7xWait/UserRequest 2xWait/EventPairLow 1xRunning/-]
+process TiWorker pid=6268 cpu=3.0s threads=6 [2xWait/UserRequest 4xWait/EventPairLow]
+process WmiPrvSE pid=8272 cpu=0.0s threads=10 [5xWait/UserRequest 5xWait/EventPairLow]
+process taskhostw pid=5804 cpu=5.2s threads=12 [9xWait/UserRequest 3xWait/EventPairLow]
+process taskhostw pid=1068 cpu=0.1s threads=2 [2xWait/UserRequest]
+process taskhostw pid=6520 cpu=0.1s threads=4 [3xWait/UserRequest 1xWait/EventPairLow]
+process hosted-compute-agent pid=1488 cpu=0.5s threads=14 [9xWait/UserRequest 2xWait/Executive 3xWait/EventPairLow]
+process ctfmon pid=8764 cpu=0.3s threads=12 [9xWait/UserRequest 1xWait/LpcReceive 2xWait/EventPairLow]
+process sihost pid=3144 cpu=2.3s threads=13 [9xWait/UserRequest 4xWait/EventPairLow]
+process WaSecAgentProv pid=6648 cpu=0.0s threads=2 [2xWait/UserRequest]
+process DefenderSessionHelper pid=924 cpu=0.0s threads=1 [1xWait/UserRequest]
+process conhost pid=1604 cpu=0.0s threads=3 [1xWait/UserRequest 1xWait/Executive 1xWait/EventPairLow]
+process provjobd.exe2156678543 pid=8576 cpu=10.7s threads=10 [8xWait/UserRequest 2xWait/EventPairLow]
+process Runner.Listener pid=1300 cpu=1.9s threads=14 [7xWait/UserRequest 2xWait/Executive 5xWait/EventPairLow]
+process ShellHost pid=6772 cpu=0.2s threads=6 [5xWait/UserRequest 1xWait/EventPairLow]
+process conhost pid=6656 cpu=0.0s threads=2 [2xWait/UserRequest]
+process Runner.Worker pid=4828 cpu=9.7s threads=16 [8xWait/UserRequest 3xWait/Executive 5xWait/EventPairLow]
+process conhost pid=604 cpu=0.4s threads=2 [2xWait/UserRequest]
+process pwsh pid=7972 cpu=1.1s threads=19 [8xWait/UserRequest 8xWait/EventPairLow 2xWait/Executive 1xWait/ExecutionDelay]
+process powershell pid=6924 cpu=2.2s threads=20 [11xWait/UserRequest 7xWait/EventPairLow 1xRunning/- 1xWait/ExecutionDelay]
+window 0x1001C6 pid=1620 class=PseudoConsoleWindow visible=True hung=False
+window 0x18006E pid=5532 class=noctty.win32.host visible=True hung=False
+window 0x110150 pid=5532 class=noctty.win32.lifecycle visible=False hung=False
+window 0x1401DA pid=5532 class=MSCTFIME UI visible=False hung=False
+window 0x12001A pid=5532 class=IME visible=False hung=False
+--- end of timeout diagnostics ---
+clipboard sequence after: 0
+02:12:58.266 === baseline-cmd: 40 lines of cmd output, no trigger
+02:12:58.335 baseline-cmd: launched noctty pid=5964
+02:12:58.700 baseline-cmd: host window 0x4006E
+02:12:59.345 baseline-cmd: cmd.exe pid=5252
+02:13:00.787 baseline-cmd: first prompt
+02:13:00.791 baseline-cmd: noctty pid=5964 shell pid=5252 host=0x4006E
+02:13:02.803 baseline-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:03.709 baseline-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:04.777 baseline-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:13:04.906 baseline-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\baseline-cmd-after.txt
+02:13:04.911 === minimize-restore-cmd: minimize and restore with the prompt at the bottom
+02:13:04.915 minimize-restore-cmd: launched noctty pid=8688
+02:13:05.073 minimize-restore-cmd: host window 0x901D6
+02:13:05.138 minimize-restore-cmd: cmd.exe pid=8920
+02:13:05.144 minimize-restore-cmd: first prompt
+02:13:05.146 minimize-restore-cmd: noctty pid=8688 shell pid=8920 host=0x901D6
+02:13:06.685 minimize-restore-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:08.291 minimize-restore-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:09.369 minimize-restore-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:13:09.453 minimize-restore-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\minimize-restore-cmd-after.txt
+02:13:09.455 === shrink-rows-bottom-cmd: rows shrink with the prompt on the bottom row
+02:13:09.458 shrink-rows-bottom-cmd: launched noctty pid=7744
+02:13:09.612 shrink-rows-bottom-cmd: host window 0x501CE
+02:13:09.667 shrink-rows-bottom-cmd: cmd.exe pid=8568
+02:13:09.673 shrink-rows-bottom-cmd: first prompt
+02:13:09.673 shrink-rows-bottom-cmd: noctty pid=7744 shell pid=8568 host=0x501CE
+02:13:11.445 shrink-rows-bottom-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:11.592 shrink-rows-bottom-cmd: rows shrink -> BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 5,10
+02:13:12.452 shrink-rows-bottom-cmd after: BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 5,10 diff rows=0 settled=True
+02:13:13.492 shrink-rows-bottom-cmd marker: BUFFER 80x11 WINDOW 0,0 80x11 CURSOR 16,10 diff rows=0 settled=True
+02:13:13.566 shrink-rows-bottom-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\shrink-rows-bottom-cmd-after.txt
+02:13:13.567 === grow-rows-cursor-top-cmd: rows grow after cls, cursor near the top
+02:13:13.571 grow-rows-cursor-top-cmd: launched noctty pid=1292
+02:13:13.730 grow-rows-cursor-top-cmd: host window 0x8006E
+02:13:13.795 grow-rows-cursor-top-cmd: cmd.exe pid=5928
+02:13:13.801 grow-rows-cursor-top-cmd: first prompt
+02:13:13.803 grow-rows-cursor-top-cmd: noctty pid=1292 shell pid=5928 host=0x8006E
+02:13:15.564 grow-rows-cursor-top-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,1 diff rows=0 settled=True
+02:13:15.683 grow-rows-cursor-top-cmd: rows grow -> BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,1
+02:13:16.557 grow-rows-cursor-top-cmd after: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,1 diff rows=0 settled=True
+02:13:17.615 grow-rows-cursor-top-cmd marker: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 16,1 diff rows=0 settled=True
+02:13:17.723 grow-rows-cursor-top-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\grow-rows-cursor-top-cmd-after.txt
+02:13:17.724 === unicode-powershell: wide, surrogate-pair and VS16 cells compare equal
+02:13:17.732 unicode-powershell: launched noctty pid=1808
+02:13:17.891 unicode-powershell: host window 0xD01D6
+02:13:17.996 unicode-powershell: powershell.exe pid=8712
+02:13:18.795 unicode-powershell: first prompt
+02:13:23.802 unicode-powershell: noctty pid=1808 shell pid=8712 host=0xD01D6
+02:13:28.432 unicode-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,9 diff rows=0 settled=True
+02:13:29.313 unicode-powershell after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,9 diff rows=0 settled=True
+02:13:30.389 unicode-powershell marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 19,9 diff rows=0 settled=True
+02:13:30.476 unicode-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\unicode-powershell-after.txt
+02:13:30.478 === grow-rows-cmd: enlarge the window with the prompt at the bottom
+02:13:30.482 grow-rows-cmd: launched noctty pid=9184
+02:13:30.648 grow-rows-cmd: host window 0x901CE
+02:13:30.704 grow-rows-cmd: cmd.exe pid=1764
+02:13:30.713 grow-rows-cmd: first prompt
+02:13:30.714 grow-rows-cmd: noctty pid=9184 shell pid=1764 host=0x901CE
+02:13:32.380 grow-rows-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:32.505 grow-rows-cmd: rows grow -> BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,19
+02:13:33.396 grow-rows-cmd after: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 5,19 diff rows=0 settled=True
+02:13:34.442 grow-rows-cmd marker: BUFFER 80x29 WINDOW 0,0 80x29 CURSOR 16,19 diff rows=0 settled=True
+02:13:34.520 grow-rows-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\grow-rows-cmd-after.txt
+02:13:34.522 === search-bar-cmd: open and close the search bar with the prompt at the bottom
+02:13:34.527 search-bar-cmd: launched noctty pid=1744
+02:13:34.689 search-bar-cmd: host window 0xC006E
+02:13:34.753 search-bar-cmd: cmd.exe pid=2772
+02:13:34.759 search-bar-cmd: first prompt
+02:13:34.760 search-bar-cmd: noctty pid=1744 shell pid=2772 host=0xC006E
+02:13:36.400 search-bar-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:36.523 search-bar-cmd: search bar takes rows -> BUFFER 80x18 WINDOW 0,0 80x18 CURSOR 5,17
+02:13:36.580 search-bar-cmd: search bar gives rows back -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,17
+02:13:37.446 search-bar-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,17 diff rows=0 settled=True
+02:13:38.481 search-bar-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,17 diff rows=0 settled=True
+02:13:38.560 search-bar-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\search-bar-cmd-after.txt
+02:13:38.560 === split-cmd: open a split below and close it again
+02:13:38.564 split-cmd: launched noctty pid=7408
+02:13:38.716 split-cmd: host window 0x1101D6
+02:13:38.772 split-cmd: cmd.exe pid=2336
+02:13:38.779 split-cmd: first prompt
+02:13:38.780 split-cmd: noctty pid=7408 shell pid=2336 host=0x1101D6
+02:13:40.440 split-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:40.575 split-cmd: split takes rows -> BUFFER 80x9 WINDOW 0,0 80x9 CURSOR 5,8
+02:13:41.205 split-cmd: rows back -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,8
+02:13:42.061 split-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,8 diff rows=0 settled=True
+02:13:43.115 split-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,8 diff rows=0 settled=True
+02:13:43.195 split-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\split-cmd-after.txt
+02:13:43.195 === maximize-cmd: maximize with the prompt at the bottom
+02:13:43.199 maximize-cmd: launched noctty pid=4820
+02:13:43.362 maximize-cmd: host window 0xD01CE
+02:13:43.416 maximize-cmd: cmd.exe pid=3784
+02:13:43.422 maximize-cmd: first prompt
+02:13:43.425 maximize-cmd: noctty pid=4820 shell pid=3784 host=0xD01CE
+02:13:44.937 maximize-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:45.082 maximize-cmd: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 5,19
+02:13:45.972 maximize-cmd after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 5,19 diff rows=0 settled=True
+02:13:47.034 maximize-cmd marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 16,19 diff rows=0 settled=True
+02:13:47.127 maximize-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\maximize-cmd-after.txt
+02:13:47.129 === maximize-restore-cmd: maximize and restore with the prompt at the bottom (in sync only as a round trip: the restore undoes what the maximize pulled)
+02:13:47.133 maximize-restore-cmd: launched noctty pid=7736
+02:13:47.296 maximize-restore-cmd: host window 0x10006E
+02:13:47.365 maximize-restore-cmd: cmd.exe pid=4604
+02:13:47.371 maximize-restore-cmd: first prompt
+02:13:47.373 maximize-restore-cmd: noctty pid=7736 shell pid=4604 host=0x10006E
+02:13:48.901 maximize-restore-cmd before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:49.032 maximize-restore-cmd: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 5,19
+02:13:49.619 maximize-restore-cmd: restored grid -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19
+02:13:50.696 maximize-restore-cmd after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 5,19 diff rows=0 settled=True
+02:13:51.754 maximize-restore-cmd marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 16,19 diff rows=0 settled=True
+02:13:51.839 maximize-restore-cmd: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\maximize-restore-cmd-after.txt
+02:13:51.841 === listview-split-pwsh: PSReadLine ListView open below the prompt, open a split below and close it
+02:13:51.853 listview-split-pwsh: launched noctty pid=1268
+02:13:52.019 listview-split-pwsh: host window 0x1501D6
+02:13:52.087 listview-split-pwsh: pwsh.exe pid=3488
+02:13:52.891 listview-split-pwsh: first prompt
+02:13:58.060 listview-split-pwsh: noctty pid=1268 shell pid=3488 host=0x1501D6
+02:14:00.059 listview-split-pwsh before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,13 diff rows=0 settled=True
+02:14:00.197 listview-split-pwsh: split takes rows -> BUFFER 80x9 WINDOW 0,0 80x9 CURSOR 24,2
+02:14:00.839 listview-split-pwsh: rows back -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,2
+02:14:01.717 listview-split-pwsh after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,2 diff rows=0 settled=True
+02:14:02.771 listview-split-pwsh marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 35,2 diff rows=0 settled=True
+02:14:02.864 listview-split-pwsh: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\listview-split-pwsh-after.txt
+02:14:02.868 === listview-narrow-pwsh: PSReadLine ListView open below the prompt, narrow the window until its rows wrap
+02:14:02.874 listview-narrow-pwsh: launched noctty pid=1208
+02:14:03.039 listview-narrow-pwsh: host window 0x1101CE
+02:14:03.113 listview-narrow-pwsh: pwsh.exe pid=2104
+02:14:03.897 listview-narrow-pwsh: first prompt
+02:14:08.796 listview-narrow-pwsh: noctty pid=1208 shell pid=2104 host=0x1101CE
+02:14:10.753 listview-narrow-pwsh before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 24,13 diff rows=0 settled=True
+02:14:10.861 listview-narrow-pwsh: narrower -> BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 24,7
+02:14:11.750 listview-narrow-pwsh after: BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 24,7 diff rows=0 settled=True
+02:14:12.806 listview-narrow-pwsh marker: BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 35,7 diff rows=0 settled=True
+02:14:12.887 listview-narrow-pwsh: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\listview-narrow-pwsh-after.txt
+02:14:12.887 === vim-maximize-powershell: run vim, maximize, quit vim
+02:14:12.911 vim-maximize-powershell: launched noctty pid=6816
+02:14:13.072 vim-maximize-powershell: host window 0x14006E
+02:14:13.161 vim-maximize-powershell: powershell.exe pid=2196
+02:14:13.659 vim-maximize-powershell: first prompt
+02:14:18.642 vim-maximize-powershell: noctty pid=6816 shell pid=2196 host=0x14006E
+02:14:20.293 vim-maximize-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:14:22.086 vim-maximize-powershell: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 0,0
+02:14:23.926 vim-maximize-powershell after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 8,19 diff rows=0 settled=True
+02:14:25.084 vim-maximize-powershell marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 19,19 diff rows=0 settled=True
+02:14:25.169 vim-maximize-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\vim-maximize-powershell-after.txt
+02:14:25.171 === narrow-widen-powershell: narrow until lines wrap, then widen back, prompt at the bottom
+02:14:25.177 narrow-widen-powershell: launched noctty pid=4160
+02:14:25.329 narrow-widen-powershell: host window 0x1901D6
+02:14:25.414 narrow-widen-powershell: powershell.exe pid=7192
+02:14:26.058 narrow-widen-powershell: first prompt
+02:14:31.068 narrow-widen-powershell: noctty pid=4160 shell pid=7192 host=0x1901D6
+02:14:32.988 narrow-widen-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:14:33.105 narrow-widen-powershell: narrower -> BUFFER 47x20 WINDOW 0,0 47x20 CURSOR 8,19
+02:14:33.684 narrow-widen-powershell: wide again -> BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,10
+02:14:34.594 narrow-widen-powershell after: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,10 diff rows=0 settled=True
+02:14:35.691 narrow-widen-powershell marker: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 19,19 diff rows=0 settled=True
+02:14:35.776 narrow-widen-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\narrow-widen-powershell-after.txt
+02:14:35.778 === altscreen-maximize-powershell: maximize while a full-screen program runs, then leave it (the vim exit case)
+02:14:35.782 altscreen-maximize-powershell: launched noctty pid=5884
+02:14:35.947 altscreen-maximize-powershell: host window 0x1501CE
+02:14:36.028 altscreen-maximize-powershell: powershell.exe pid=6640
+02:14:36.530 altscreen-maximize-powershell: first prompt
+02:14:41.438 altscreen-maximize-powershell: noctty pid=5884 shell pid=6640 host=0x1501CE
+02:14:43.182 altscreen-maximize-powershell before: BUFFER 80x20 WINDOW 0,0 80x20 CURSOR 8,19 diff rows=0 settled=True
+02:14:43.989 altscreen-maximize-powershell: maximized grid -> BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 10,0
+02:14:45.385 altscreen-maximize-powershell after: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 8,19 diff rows=0 settled=True
+02:14:46.571 altscreen-maximize-powershell marker: BUFFER 102x32 WINDOW 0,0 102x32 CURSOR 19,19 diff rows=0 settled=True
+02:14:46.664 altscreen-maximize-powershell: PASS before=0 after=0 marker=0 D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence\altscreen-maximize-powershell-after.txt
+02:14:46.666 === altscreen-wrapped-maximize-powershell: the same, started from a command line that wraps
+02:14:46.670 altscreen-wrapped-maximize-powershell: launched noctty pid=5532
+02:14:46.841 altscreen-wrapped-maximize-powershell: host window 0x18006E
+the hidden-desktop driver did not finish within 300 s (evidence: 
+D:\a\noctty\noctty\.sandbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence)
+At D:\a\noctty\noctty\test\windows\interactive-win11-conpty-sync.ps1:1253 char:29
++ ... nnerExit) { throw "the hidden-desktop driver did not finish within $T ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (the hidden-desk...c\run\evidence):String) [], RuntimeException
+    + FullyQualifiedErrorId : the hidden-desktop driver did not finish within 300 s (evidence: D:\a\noctty\noctty\.san 
+   dbox\win11\noctty-noctty-63c6ddda36d0\conpty-sync\run\evidence)
+ 
