@@ -666,7 +666,9 @@ if ($Inner) {
         $clinkProfile = Join-Path $script:Work "$Name-clink-profile"
         $clinkScripts = Join-Path $script:Work "$Name-clink-scripts"
         New-Item -ItemType Directory -Force -Path $clinkProfile, $clinkScripts | Out-Null
-        [IO.File]::WriteAllLines((Join-Path $clinkProfile 'clink_settings'), [string[]]@('clink.autoupdate = off', 'clink.logo = none'))
+        # clink.autostart = nul: otherwise Clink runs a clink_start.cmd from
+        # its own folder (copied from -Clink) at the first prompt.
+        [IO.File]::WriteAllLines((Join-Path $clinkProfile 'clink_settings'), [string[]]@('clink.autoupdate = off', 'clink.logo = none', 'clink.autostart = nul'))
         [IO.File]::WriteAllText((Join-Path $clinkProfile '.inputrc'), '')
         $launch = Join-Path $script:Work "$Name-clink.cmd"
         [IO.File]::WriteAllText($launch, "@echo off`r`n`"$script:ClinkExe`" inject -q -p `"$clinkProfile`" --scripts `"$clinkScripts`"`r`n")

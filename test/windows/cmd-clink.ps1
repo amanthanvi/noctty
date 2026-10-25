@@ -177,6 +177,9 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'cmd-clink.lua') -Destination (J
 # Clink loads the first .inputrc it finds, in the profile before %USERPROFILE%,
 # %LOCALAPPDATA%, %APPDATA% and %HOME%; an empty one here keeps a user's own out.
 [IO.File]::WriteAllText((Join-Path $Run 'profile/.inputrc'), '')
+# clink.autostart = nul: otherwise Clink runs a clink_start.cmd from the -Clink
+# folder at the first prompt.
+[IO.File]::WriteAllLines((Join-Path $Run 'profile/clink_settings'), [string[]]@('clink.autoupdate = off', 'clink.autostart = nul'))
 $script = Join-Path $Run ('integration/' + [IO.Path]::GetFileName($IntegrationScript))
 $result = Join-Path $Run 'results.txt'
 # The resize step's handshake with the test's Lua: it writes `ready` at the
