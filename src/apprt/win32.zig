@@ -27775,8 +27775,8 @@ const Host = struct {
             // remainder before this lane. Drawn on the parent HWND so the single
             // rect can slide across child button boundaries; children
             // paint themselves above this region via WM_DRAWITEM and do
-            // not occlude it. The 3 px inset on each horizontal edge is
-            // noctty's own choice: Windows Terminal draws no accent
+            // not occlude it. The `scaled(3)` inset on each horizontal edge
+            // is noctty's own choice: Windows Terminal draws no accent
             // underline or tab indicator (wt-chrome-reference.md §1).
             {
                 const now_ms = sys.GetTickCount64();

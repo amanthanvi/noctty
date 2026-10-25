@@ -66,8 +66,9 @@ $benchmarkGateLinePatterns = foreach ($command in $benchmarkGateCommands) {
 }
 $benchmarkGateStepPattern = '(?ms)' + ($benchmarkGateLinePatterns -join '.*?')
 # Exactly four throughput invocations in the job: an extra one could re-run a
-# workload with a floor of 0. Comment lines are not invocations, so a note in
-# the job that names the step does not count; every other line that names it does.
+# workload with a floor of 0. Comment lines (a line that starts with `#`, as in the
+# job's pwsh steps) are not invocations, so a note in the job that names the step
+# does not count; every other line that names it does.
 $benchmarkGateCountPattern = '(?s)\A(?:(?!bench:vt-throughput).)*(?:bench:vt-throughput(?:(?!bench:vt-throughput).)*){4}\z'
 function Get-BenchmarkGateCountText([string] $JobText) {
     [regex]::Replace($JobText, '(?m)^[ \t]*#[^\r\n]*', '')
@@ -258,9 +259,10 @@ if (Test-BenchmarkGateJob $benchmarkGateJob) {
     }
     # A fifth throughput invocation after the real four, with its floor disabled.
     $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation'; Text = $benchmarkGateJob.TrimEnd() + "`n          $($gateCmd[0]) --min-mb-s=0`n" })
-    # The same, behind a `#` that is not the first character of its line: only a line
-    # that starts with `#` is a comment.
-    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation behind a mid-line #'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host '#'; $($gateCmd[0]) --min-mb-s=0`n" })
+    # The same, behind a `#` that is not the first character of its line (after a
+    # space, so a filter that cuts at any `#` preceded by whitespace fails too): only a
+    # line that starts with `#` is a comment.
+    $benchmarkGateMutants.Add(@{ Name = 'a fifth invocation behind a mid-line #'; Text = $benchmarkGateJob.TrimEnd() + "`n          Write-Host ' #'; $($gateCmd[0]) --min-mb-s=0`n" })
     # A CPU lookup that can fail the step.
     $benchmarkGateMutants.Add(@{ Name = 'a CPU lookup without try/catch'; Text = $benchmarkGateJob.Replace($benchmarkGateCpuLine, "Write-Host ('runner cpu: ' + (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim())") })
     # A command whose exit code is no longer checked.
