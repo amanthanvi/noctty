@@ -227,13 +227,13 @@ Windows Terminal's chrome is a custom-frame Win32 window with WM_NCCALCSIZE zero
 | Caption button hover-out (bg) | **150ms** | Linear (no easing specified) |
 | Caption button hover-out (fg) | **100ms** | Linear |
 | Caption button hover-in | **0ms** (instant setter) | N/A |
-| Tab underline slide | ~**300ms** | MUX spring animation (not overridden) |
+| Tab selection mark slide | none | WinUI 2.8.4 has no sliding selection mark (see section 1) |
 | Command palette enter/exit | ~**250ms** | ContentThemeTransition default (cubic decelerate) |
 | Scrollbar collapse | ~**300ms** | MUX ScrollViewer default opacity fade |
-| Tab add/remove | `AddDeleteThemeTransition` + `ContentThemeTransition` + `ReorderThemeTransition` | System defaults (~200-350ms, decelerate curve) |
+| Tab add/remove | `ContentThemeTransition` + `ReorderThemeTransition` | WT's `App.xaml` removes `AddDeleteThemeTransition` and `EntranceThemeTransition` from the TabView list; the rest are system defaults |
 
 ### Notes for GDI/Win32 Implementation
 - WT's 150ms/100ms caption button transitions are simple linear color interpolations. Replicate with `SetTimer` at 16ms intervals (60 FPS) or a tween engine.
-- For spring-based tab indicator slide, approximate with cubic-bezier(0.1, 0.9, 0.2, 1.0) at 300ms.
+- There is no tab selection mark slide to reproduce: WinUI 2.8.4 draws the selected tab as a shape and animates no indicator between tabs (section 1).
 - WinUI's `ContentThemeTransition` is roughly translateY(28px->0) + opacity(0->1) over 250ms with a decelerate curve ~cubic-bezier(0.1, 0.9, 0.2, 1.0).
 - Caption buttons have **no easing curve** -- pure linear interpolation confirmed by the XAML `<ColorAnimation>` lacking an `EasingFunction` child.

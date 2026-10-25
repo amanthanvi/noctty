@@ -377,7 +377,8 @@ near 30 fps.
 Both rows check the change in #450, which resolves the DOS drive alias (`C:`)
 to its direct volume path before a file is opened with `OBJ_DONT_REPARSE`:
 in shell detection (whose guarded open came with #443), in the link opener and
-in the WSL probe. It was written because an upstream report
+in the WSL safety probe. The rows exercise the first two; no row here reaches
+the WSL probe. It was written because an upstream report
 (openai/codex#46290) has Windows 10 22H2 build 19045.6456 rejecting the alias
 itself under that flag. That the same happens to noctty is inferred, and
 neither row has been run on Windows 10. Record the build number with the
