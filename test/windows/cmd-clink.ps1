@@ -112,10 +112,10 @@ public static class ClinkSmoke {
             IntPtr surface=IntPtr.Zero;
             EnumChildWindows(window,(h,p)=>{ if(IsWindowVisible(h) && ClassOf(h)=="noctty.win32") { surface=h; return false; } return true; },IntPtr.Zero);
             if(surface==IntPtr.Zero) throw new Exception("No noctty terminal surface to press Enter in");
-            // The key as TranslateMessage delivers it: noctty drops a WM_CHAR
-            // that no WM_KEYDOWN announced.
+            // The key-down/key-up pair only: noctty's pump runs
+            // TranslateMessage, which makes the WM_CHAR, so a posted WM_CHAR as
+            // well would type Enter twice (AGENTS.md, Running noctty).
             PostMessageW(surface,0x0100,(IntPtr)0x0D,(IntPtr)down);
-            PostMessageW(surface,0x0102,(IntPtr)13,(IntPtr)down);
             PostMessageW(surface,0x0101,(IntPtr)0x0D,(IntPtr)(down|0xC0000000L));
         } else {
             // conhost takes a bare WM_CHAR; with a posted WM_KEYDOWN in front
@@ -174,6 +174,9 @@ New-Item -ItemType Directory -Path $Run | Out-Null
 foreach ($dir in 'appdata','localappdata','profile','integration') { New-Item -ItemType Directory -Path (Join-Path $Run $dir) | Out-Null }
 Copy-Item -LiteralPath $IntegrationScript -Destination (Join-Path $Run 'integration')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'cmd-clink.lua') -Destination (Join-Path $Run 'profile/zz-noctty-smoke.lua')
+# Clink loads the first .inputrc it finds, in the profile before %USERPROFILE%,
+# %LOCALAPPDATA%, %APPDATA% and %HOME%; an empty one here keeps a user's own out.
+[IO.File]::WriteAllText((Join-Path $Run 'profile/.inputrc'), '')
 $script = Join-Path $Run ('integration/' + [IO.Path]::GetFileName($IntegrationScript))
 $result = Join-Path $Run 'results.txt'
 # The resize step's handshake with the test's Lua: it writes `ready` at the
@@ -203,21 +206,29 @@ $environment = @{
     CLINK_PATH = (Join-Path $Run 'integration'); NOCTTY_CLINK_SCRIPT = $script; NOCTTY_CLINK_RESULTS = $result
     NOCTTY_CLINK_RESIZE_READY = $resizeReady; NOCTTY_CLINK_RESIZE_DONE = $resizeDone
 }
-# An inherited CLINK_PROFILE wins over `inject -p`, so it is removed for the
-# run. Removed, not set to $null: PowerShell passes that as "", which leaves an
-# empty CLINK_PROFILE that Clink then uses.
-$savedClinkProfile = $env:CLINK_PROFILE
+# Clink reads its overrides from CLINK_* variables, and several beat `inject -p`
+# or add places to load from (CLINK_PROFILE, CLINK_SETTINGS, CLINK_INPUTRC,
+# CLINK_CUSTOMPROMPT, CLINK_COLORTHEME, CLINK_THEMES_DIR, CLINK_COMPLETIONS_DIR).
+# Every inherited one is removed for the run and put back after; removed, not
+# set to $null, which PowerShell passes as "" and so leaves an empty override.
+# Script folders registered with `clink installscripts` would load too, and
+# nothing turns them off, so the run refuses to start with any registered.
+if (-not [string]::IsNullOrWhiteSpace((Get-ItemProperty -LiteralPath 'HKCU:\Software\Clink' -Name InstalledScripts -ErrorAction Ignore).InstalledScripts)) {
+    throw 'Clink script folders are registered with clink installscripts (HKCU\Software\Clink InstalledScripts); they would load into the test.'
+}
+$savedClink = @{}
+foreach ($variable in @(Get-ChildItem -Path Env: | Where-Object { $_.Name -like 'CLINK_*' })) { $savedClink[$variable.Name] = $variable.Value }
 $saved = @{}
 $desktopName = 'noctty-clink-' + [guid]::NewGuid().ToString('n')
 $desktop = [ClinkSmoke]::CreateDesktopW($desktopName,[IntPtr]::Zero,[IntPtr]::Zero,0,0x1ff,[IntPtr]::Zero)
 if ($desktop -eq [IntPtr]::Zero) { throw 'CreateDesktop failed.' }
 try {
+    foreach ($name in $savedClink.Keys) { Remove-Item -LiteralPath "Env:\$name" -ErrorAction Ignore }
     foreach ($key in $environment.Keys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key,$environment[$key]) }
-    Remove-Item -LiteralPath Env:\CLINK_PROFILE -ErrorAction Ignore
     $childPid = [ClinkSmoke]::Run($app,$arguments,$Run,$desktopName,$resizeReady,$resizeDone)
 } finally {
     foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key,$saved[$key]) }
-    if ($null -ne $savedClinkProfile) { $env:CLINK_PROFILE = $savedClinkProfile }
+    foreach ($name in $savedClink.Keys) { Set-Item -LiteralPath "Env:\$name" -Value $savedClink[$name] }
     [void][ClinkSmoke]::CloseDesktop($desktop)
     $after = Fingerprint $ledger
     @{Before=$before;After=$after;Unchanged=($before -eq $after);Pid=$childPid;Desktop=$desktopName} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Run 'isolation.json')

@@ -378,11 +378,14 @@ function Get-ConptySyncRealPSReadLineState {
 if ($Inner) {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     [void][NocttyConptySyncNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
-    # noctty prepends its own Lua folder to an inherited CLINK_PATH, and an
-    # inherited CLINK_PROFILE wins over `clink inject -p`: keep a developer's
-    # own Clink scripts, settings and history out of the Clink scenario.
-    Remove-Item -LiteralPath Env:\CLINK_PATH -ErrorAction Ignore
-    Remove-Item -LiteralPath Env:\CLINK_PROFILE -ErrorAction Ignore
+    # Clink reads its overrides from CLINK_* variables, and several beat
+    # `clink inject -p` or add places to load from: CLINK_PROFILE, CLINK_PATH
+    # (noctty prepends its own folder to it), CLINK_SETTINGS, CLINK_INPUTRC,
+    # CLINK_CUSTOMPROMPT, CLINK_COLORTHEME, CLINK_THEMES_DIR,
+    # CLINK_COMPLETIONS_DIR. Remove every one, so a developer's own Clink
+    # scripts, prompt, settings and history stay out of the Clink scenario.
+    Get-ChildItem -Path Env: | Where-Object { $_.Name -like 'CLINK_*' } |
+        ForEach-Object { Remove-Item -LiteralPath "Env:\$($_.Name)" -ErrorAction Ignore }
 
     $script:Exe = Join-Path $RunRoot 'bin\noctty.exe'
     $script:DumpExe = Join-Path $RunRoot 'tools\conpty-sync-dump.exe'
@@ -635,10 +638,21 @@ if ($Inner) {
     # cmd with Clink injected from the sandbox copy, using a scenario-local
     # profile (settings, history), as `clink inject` from AutoRun would. The
     # build's own Lua script reaches Clink through CLINK_PATH as usual.
+    # Clink loads the first .inputrc it finds, in the profile before
+    # %USERPROFILE%, %LOCALAPPDATA%, %APPDATA% and %HOME%, so an empty one in
+    # the profile keeps a developer's own key bindings out.
+    # Script folders registered with `clink installscripts` load into every
+    # Clink, and no variable or profile setting turns them off.
+    function Test-SyncClinkInstalledScripts {
+        $value = (Get-ItemProperty -LiteralPath 'HKCU:\Software\Clink' -Name InstalledScripts -ErrorAction Ignore).InstalledScripts
+        return -not [string]::IsNullOrWhiteSpace($value)
+    }
+
     function Get-SyncClinkCommand([string] $Name) {
         $clinkProfile = Join-Path $script:Work "$Name-clink-profile"
         New-Item -ItemType Directory -Force -Path $clinkProfile | Out-Null
         [IO.File]::WriteAllLines((Join-Path $clinkProfile 'clink_settings'), [string[]]@('clink.autoupdate = off', 'clink.logo = none'))
+        [IO.File]::WriteAllText((Join-Path $clinkProfile '.inputrc'), '')
         $launch = Join-Path $script:Work "$Name-clink.cmd"
         [IO.File]::WriteAllText($launch, "@echo off`r`n`"$script:ClinkExe`" inject -q -p `"$clinkProfile`"`r`n")
         return "cmd.exe /d /k `"$launch`""
@@ -1033,7 +1047,10 @@ if ($Inner) {
             # and comment rows). A reflow that kept them scrolled this screen a
             # row more than ConPTY's when narrowing, and the redraw Clink makes
             # after the widen then drew the line twice.
-            Requires = { if (-not (Test-Path -LiteralPath $script:ClinkExe -PathType Leaf)) { 'no portable Clink (pass -Clink)' } }
+            Requires = {
+                if (-not (Test-Path -LiteralPath $script:ClinkExe -PathType Leaf)) { 'no portable Clink (pass -Clink)' }
+                elseif (Test-SyncClinkInstalledScripts) { 'Clink script folders are registered with clink installscripts (HKCU\Software\Clink InstalledScripts) and would load into the scenario' }
+            }
             Setup = {
                 param($c)
                 # `clink inject` is quiet: without Clink in cmd this would

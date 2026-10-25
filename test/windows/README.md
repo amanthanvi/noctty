@@ -363,7 +363,10 @@ runs a subset and `-ListScenarios` lists them. Missing optional programs
 (`pwsh.exe`, Git for Windows' `vim.exe`) skip their scenarios, and so does the
 Clink scenario without `-Clink <extracted portable Clink>\clink_x64.exe`; that
 folder is copied into the sandbox and injected into cmd with a profile of its
-own. The headless counterpart is `src/terminal/resize_replay.zig`.
+own (an empty `.inputrc`, and every inherited `CLINK_*` override removed). It
+is also skipped while script folders are registered with `clink installscripts`,
+which would load into it. The headless counterpart is
+`src/terminal/resize_replay.zig`.
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-conpty-sync.ps1 -ResetState
