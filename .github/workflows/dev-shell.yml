@@ -96,25 +96,35 @@ jobs:
           }
 
           # An install is VsDevCmd.bat plus, unless it is a leftover, an MSVC toolset folder.
-          function New-FakeInstall([string] $Root, [string] $Version, [string] $Edition, [switch] $Leftover) {
-            $install = Join-Path $Root "Microsoft Visual Studio\$Version\$Edition"
-            New-Item -ItemType Directory -Force -Path (Join-Path $install 'Common7\Tools') | Out-Null
-            if (-not $Leftover) { New-Item -ItemType Directory -Force -Path (Join-Path $install 'VC\Tools\MSVC\14.50.0') | Out-Null }
-            Set-Content -LiteralPath (Join-Path $install 'Common7\Tools\VsDevCmd.bat') -Value "@echo fake VsDevCmd %*`r`n@exit /b 7`r`n" -NoNewline
+          # Each is a hashtable: @(@('a', 'b')) would unroll to the two strings.
+          function New-FakeInstall([string] $Root, $Install) {
+            $folder = Join-Path $Root "$($Install.Root)\Microsoft Visual Studio\$($Install.Version)\$($Install.Edition)"
+            New-Item -ItemType Directory -Force -Path (Join-Path $folder 'Common7\Tools') | Out-Null
+            if (-not $Install.Leftover) { New-Item -ItemType Directory -Force -Path (Join-Path $folder 'VC\Tools\MSVC\14.50.0') | Out-Null }
+            Set-Content -LiteralPath (Join-Path $folder 'Common7\Tools\VsDevCmd.bat') -Value "@echo fake VsDevCmd %*`r`n@exit /b 7`r`n" -NoNewline
           }
           $cases = @(
-            @{ Name = 'only 18'; Installs = @(@('pf', '18', 'BuildTools')); Expect = 'pf\Microsoft Visual Studio\18\BuildTools' }
-            @{ Name = 'only 2022 in Program Files (x86)'; Installs = @(@('pf (x86)', '2022', 'BuildTools')); Expect = 'pf (x86)\Microsoft Visual Studio\2022\BuildTools' }
-            @{ Name = '18 and 2022'; Installs = @(@('pf', '2022', 'Enterprise'), @('pf', '18', 'Community')); Expect = 'pf\Microsoft Visual Studio\18\Community' }
-            @{ Name = 'a leftover 18 without tools and a 2022'; Installs = @(@('pf', '18', 'Community', 'leftover'), @('pf', '2022', 'Community')); Expect = 'pf\Microsoft Visual Studio\2022\Community' }
-            @{ Name = 'only a leftover without tools'; Installs = @(@('pf', '2022', 'Community', 'leftover')); Expect = $null }
-            @{ Name = 'nothing'; Installs = @(); Expect = $null }
+            @{ Name = 'only 18'; Expect = 'pf\Microsoft Visual Studio\18\BuildTools'; Installs = @(
+                @{ Root = 'pf'; Version = '18'; Edition = 'BuildTools' }) }
+            @{ Name = 'only 2022 in Program Files (x86)'; Expect = 'pf (x86)\Microsoft Visual Studio\2022\BuildTools'; Installs = @(
+                @{ Root = 'pf (x86)'; Version = '2022'; Edition = 'BuildTools' }) }
+            @{ Name = '18 and 2022'; Expect = 'pf\Microsoft Visual Studio\18\Community'; Installs = @(
+                @{ Root = 'pf'; Version = '2022'; Edition = 'Enterprise' }
+                @{ Root = 'pf'; Version = '18'; Edition = 'Community' }) }
+            @{ Name = 'a leftover 18 without tools and a 2022'; Expect = 'pf\Microsoft Visual Studio\2022\Community'; Installs = @(
+                @{ Root = 'pf'; Version = '18'; Edition = 'Community'; Leftover = $true }
+                @{ Root = 'pf'; Version = '2022'; Edition = 'Community' }) }
+            @{ Name = 'only a leftover without tools'; Expect = $null; Installs = @(
+                @{ Root = 'pf'; Version = '2022'; Edition = 'Community'; Leftover = $true }) }
+            @{ Name = 'nothing'; Expect = $null; Installs = @() }
           )
           $saved = @{ ProgramFiles = $env:ProgramFiles; ProgramW6432 = $env:ProgramW6432; 'ProgramFiles(x86)' = ${env:ProgramFiles(x86)} }
           foreach ($case in $cases) {
             $base = Join-Path $env:RUNNER_TEMP ('dev-shell-' + ($case.Name -replace '\W', '-'))
             New-Item -ItemType Directory -Force -Path (Join-Path $base 'pf'), (Join-Path $base 'pf (x86)') | Out-Null
-            foreach ($install in $case.Installs) { New-FakeInstall (Join-Path $base $install[0]) $install[1] $install[2] -Leftover:($install.Count -gt 3) }
+            foreach ($install in $case.Installs) { New-FakeInstall $base $install }
+            $missing = @($case.Installs | ForEach-Object { Join-Path $base "$($_.Root)\Microsoft Visual Studio\$($_.Version)\$($_.Edition)\Common7\Tools\VsDevCmd.bat" } | Where-Object { -not (Test-Path -LiteralPath $_) })
+            if ($missing.Count -ne 0) { throw "$($case.Name): the fake install was not made: $($missing -join ', ')" }
             try {
               $env:ProgramFiles = Join-Path $base 'pf'
               $env:ProgramW6432 = $env:ProgramFiles
