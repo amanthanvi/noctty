@@ -137,6 +137,7 @@ if ([string]::IsNullOrWhiteSpace($env:ZIG_LOCAL_CACHE_DIR)) {
 # variables set above, and the three below).
 $bootstrap = @'
 @echo off
+echo Bootstrap: "%~f0"
 call "%NOCTTY_DEV_VSDEVCMD%" -arch=%NOCTTY_DEV_ARCH% || exit /b 1
 set "PATH=%NOCTTY_DEV_PATH%;%PATH%"
 echo == Versions ==
