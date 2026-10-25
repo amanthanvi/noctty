@@ -347,7 +347,15 @@ the interactive UI Automation harness nor the screen-reader matrix exercises
 them.
 
 Not yet covered: the profile picker and tab-overview overlay rows, context
-menus, toasts, the tab drag preview, and quick-terminal chrome. `Ctrl+F6` and
+menus, toasts, the tab drag preview, quick-terminal chrome, and the
+in-progress IME composition. noctty draws the composition itself and exposes
+none of it through UI Automation, as Windows Terminal does. NVDA reads IMM32
+and TSF compositions through its own IME support (from its source, not
+measured in noctty). Microsoft's IME requirements require an IME's own
+candidate window to expose itself to Narrator, and how Narrator reads the
+composition string is not documented; neither is measured here. A
+hands-on check with real IMEs and screen readers is still owed (see
+[accessibility-matrix.md](accessibility-matrix.md)). `Ctrl+F6` and
 `Ctrl+Shift+F6` (`cycle_focus_region`; a bare `F6` goes to the application)
 move focus between the terminal, the tab strip, the docked search query and
 the host banner, and `Escape` returns to the terminal. The cycle does not
@@ -453,12 +461,43 @@ lands incrementally.
   desktop with a 60 ms delay injected after the font change, standing in for
   a slow font build in another pane: one resize per pane at its final grid,
   single pane and split, where the hold alone pushed lines on 29 of 30 moves.
-  The two have not been measured together with real input. A tab hidden
-  during the move takes the font and the size as separate resizes when it is
-  shown, so a slow font build there can still wrap long lines into scrollback.
-  A pane whose new font cannot be built gets the new size in the old font at
-  once, which on a move to a lower DPI can do the same, and the font is
-  retried on a later layout (both inferred, not measured).
+  The two together were then measured with real input on 2026-10-17 (a build
+  of main with #426, the D3D11 renderer, a machine with a 144 DPI primary and
+  two 96 DPI monitors, no injected delay). Over 30 drags of a single pane, no
+  text shifted and no size mismatched. A build that logs what termio applied,
+  over 30 more, sent no old-font size to the core, made no intermediate grid
+  and pushed no rows into scrollback. In a split window, 10 drags on a rebuilt
+  logging build brought one termio resize per pane, in the final font, with
+  every pane's scrollback unchanged (the panes' PTY sizes were not captured).
+  The first split run, on the earlier build of the logging executable (which
+  the 30 logged single-pane drags used too; their logs are complete), logged
+  one pane's resize on 7 of 10 drags. The screenshot check flagged 5 of 10
+  drags in both split runs. The agent log (test-harnesses.md, 2026-10-19)
+  reads the first as overwritten bytes in the logger (shown for 4 of the 7,
+  consistent with the other 3) and the second as a split pane compared with an
+  unsplit reference. A hidden-desktop check (20 crossings per orientation
+  between 144 and 96 DPI, on a one-tab window and on two-pane splits) matched
+  all 80 of its observations (client pixels, core, IO and terminal grids, and
+  the PTY size read back through `AttachConsole`), so neither shows a product
+  miss; it did not cover an unspecified initial size, transient sizes,
+  composed output or the message order of a real drag. A tab hidden during the
+  move now takes its new size and font as one resize too when it is shown, by
+  a click on its tab or by switching tabs from the keyboard. Measured on a
+  hidden desktop with a 60 ms delay injected at the start of each DPI font
+  change, showing the tab through the tab strip's command (a harness hook into
+  the same path as a click): main applied a 66x18 grid before the pane's 93x29
+  on 20 of 20 shows, and on the first show at 96 DPI 9 rows went into its
+  scrollback and stayed there; with the batch, 0 of 20. Without the injected
+  delay main gave 0 of 20 too, because the new font is cached and both resizes
+  arrive within termio's 25 ms. A split tab shown from the keyboard
+  (`goto_tab`) got a wrong grid on main on 10 of 10 shows with the delay
+  (32x18 before 49x28 at 144 DPI, and 12 rows into scrollback on the first);
+  its batch was not measured. A window that is hidden or minimized while its
+  DPI changes (a quick terminal shown on another monitor, say) can still take
+  its new size before its new font, and a pane whose new font cannot be built
+  gets the new size in the old font at once, which on a move to a lower DPI
+  can do the same; the font is retried on a later layout (both inferred, not
+  measured).
 - Alt+Space still sends ESC SPACE to the program as well as opening the
   window menu (#381). Once conhost has seen a Win32 input record it holds a
   lone ESC back until more input arrives, as under Windows Terminal (#335).

@@ -10150,9 +10150,7 @@ pub const App = struct {
         host.active_tab = tab_info.index;
         surface.syncSharedHostWindowState(previous_surface);
         host.prepareActiveTabVisibility(tab_info.index);
-        var active_it = tab_info.tab.tree.iterator();
-        while (active_it.next()) |entry| entry.view.setVisible(true);
-        runUiActionOrLog("tab activation layout failed", host.layout());
+        host.showTabPanes(tab_info.tab);
         // Same-host tab creation reaches this path before its first layout.
         // Raise selection only after the tab button/provider exists.
         host.notifyActiveTabUiaSelectionChanged(previous_tab_id);
@@ -18515,6 +18513,36 @@ const Host = struct {
         }
     }
 
+    /// Show the panes of `tab`, the active one (only its zoomed pane when it
+    /// has one), and lay the window out, with each pane's terminal resizes
+    /// held until the whole tab is placed.
+    /// `setVisible` puts a pane hidden during a DPI change into the new font
+    /// at its old size, and the layout gives it its new size later, after the
+    /// other panes' fonts; on their own the first resize is the old pixel
+    /// size in the new cells (measured: 32x18 before 49x28 for a split pane
+    /// shown by `goto_tab` at a higher DPI, with a slow font build).
+    fn showTabPanes(self: *Host, tab: *Tab) void {
+        // Nothing here starts a core, so a pane whose core runs at the end
+        // is one whose batch was opened.
+        var batch_it = tab.tree.iterator();
+        while (batch_it.next()) |entry| _ = entry.view.beginCoreResizeBatch();
+        defer {
+            var end_it = tab.tree.iterator();
+            while (end_it.next()) |entry| entry.view.endCoreResizeBatch(entry.view.core_initialized);
+        }
+        var show_it = tab.tree.iterator();
+        while (show_it.next()) |entry| {
+            // A zoomed tab shows its zoomed pane alone. Showing the others
+            // would put the new DPI's font into them at their old size, and
+            // the layout hides them again without placing them, so that grid
+            // would stay until the zoom ends; hidden, they take the font when
+            // a layout places and shows them.
+            if (tab.tree.zoomed) |zoomed| if (entry.handle != zoomed) continue;
+            entry.view.setVisible(true);
+        }
+        runUiActionOrLog("tab activation layout failed", self.layout());
+    }
+
     fn invalidateActiveSearchBarLayoutCaches(self: *Host) void {
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
@@ -19769,6 +19797,242 @@ const Host = struct {
     test "moving the zoom hides the old pane before it shows the new one" {
         if (builtin.os.tag != .windows) return error.SkipZigTest;
         try runOnPrivateDesktop(zoomMoveOrderTestBody);
+    }
+
+    test "a pane a layout shows keeps its resize until it is shown, and sends it once" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(shownPaneResizeTestBody);
+    }
+
+    test "showing a tab holds its panes' resizes until the whole tab is placed" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(shownTabResizeTestBody);
+    }
+
+    test "showing a zoomed tab keeps its other panes hidden until a layout places them" {
+        if (builtin.os.tag != .windows) return error.SkipZigTest;
+        try runOnPrivateDesktop(shownZoomedTabTestBody);
+    }
+
+    /// A stand-in pane window that takes what has reached `watched`'s termio
+    /// when it is shown (`WM_SHOWWINDOW`) or resized (`WM_SIZE`), steps of
+    /// a layout that come after a font change or after another pane's step
+    /// (DPI-HIDDEN-TAB-BATCH-01).
+    const PaneQueueRecorder = struct {
+        var watched: ?*Surface = null;
+        var previous: ?*const anyopaque = null;
+        var shows: usize = 0;
+        var at_show: usize = 0;
+        var sizes: usize = 0;
+        var at_size: usize = 0;
+
+        fn install(pane: HWND, surface: *Surface) void {
+            watched = surface;
+            shows = 0;
+            at_show = 0;
+            sizes = 0;
+            at_size = 0;
+            const old = sys.SetWindowLongPtrW(pane, c.GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(&proc))));
+            previous = if (old == 0) null else @ptrFromInt(@as(usize, @intCast(old)));
+        }
+
+        fn take() usize {
+            var count: usize = 0;
+            while (watched.?.core_surface.io.mailbox.spsc.queue.pop()) |message| {
+                message.deinit();
+                count += 1;
+            }
+            return count;
+        }
+
+        fn proc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+            if (msg == c.WM_SHOWWINDOW and wParam != 0) {
+                shows += 1;
+                at_show += take();
+            }
+            if (msg == c.WM_SIZE) {
+                sizes += 1;
+                at_size += take();
+            }
+            return sys.CallWindowProcW(previous, hwnd, msg, wParam, lParam);
+        }
+    };
+
+    /// A hidden stand-in pane, as a background tab's, with a started core
+    /// that has only what a resize reads: a termio mailbox, cells and
+    /// padding. Its font is already the host's and the renderer already knows
+    /// it is visible, so neither is called.
+    fn startTestPane(surface: *Surface, host: *const Host, parent: HWND) !void {
+        const termio = @import("../termio.zig");
+        surface.hwnd = try createTestChromeChild(parent, prompt_label_class);
+        _ = sys.ShowWindow(surface.hwnd.?, c.SW_HIDE);
+        surface.core_surface.io.mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+        surface.core_surface.rt_surface = surface;
+        surface.core_surface.config.window_padding_balance = .false;
+        surface.core_surface.size.cell = .{ .width = 10, .height = 20 };
+        const scale: f32 = @as(f32, @floatFromInt(host.current_dpi)) / 96.0;
+        surface.content_scale = .{ .x = scale, .y = scale };
+        surface.occlusion_visible = true;
+        surface.core_initialized = true;
+    }
+
+    fn stopTestPane(surface: *Surface) void {
+        surface.core_initialized = false;
+        surface.core_surface.io.mailbox.deinit(std.testing.allocator);
+        surface.hwnd = null;
+    }
+
+    /// The one resize a pane sent, at the size the layout gave it, with no
+    /// batch left open to hold every later one.
+    fn expectOneLaidOutResize(surface: *Surface) !void {
+        var client: RECT = undefined;
+        _ = sys.GetClientRect(surface.hwnd.?, &client);
+        const queue = surface.core_surface.io.mailbox.spsc.queue;
+        const resize = (queue.pop() orelse return error.TestExpectedResize).resize;
+        try std.testing.expectEqual(@as(u32, @intCast(client.right)), resize.screen.width);
+        try std.testing.expectEqual(@as(u32, @intCast(client.bottom)), resize.screen.height);
+        try std.testing.expect(queue.pop() == null);
+        try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
+    }
+
+    fn shownPaneResizeTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true, .window_visible = false }},
+            .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        host.surfaces_visible = true;
+        try startTestPane(&surface, &host, window.parent);
+        defer stopTestPane(&surface);
+
+        // `setVisible` puts in the new DPI's font just before it shows the
+        // window, after the layout gave the pane its size: nothing may have
+        // gone by then, or the size went alone in the old cells.
+        PaneQueueRecorder.install(surface.hwnd.?, &surface);
+        try host.layout();
+        try std.testing.expectEqual(@as(usize, 1), PaneQueueRecorder.shows);
+        try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.at_show);
+        try expectOneLaidOutResize(&surface);
+    }
+
+    fn shownTabResizeTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface_a: Surface = undefined;
+        var surface_b: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{
+                .{ .storage = &surface_a, .host = &host, .register = true, .window_visible = false },
+                .{ .storage = &surface_b, .host = &host, .register = true, .window_visible = false },
+            },
+            .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        host.surfaces_visible = true;
+        try startTestPane(&surface_a, &host, window.parent);
+        defer stopTestPane(&surface_a);
+        try startTestPane(&surface_b, &host, window.parent);
+        defer stopTestPane(&surface_b);
+
+        // [A | B]: the layout places A, then B.
+        var inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
+        defer inserted.deinit();
+        const tab = &host.tabs.items[0];
+        const next_tree = try tab.tree.split(std.testing.allocator, .root, .right, 0.5, &inserted);
+        tab.tree.deinit();
+        tab.tree = next_tree;
+        tab.focused = tab.findHandle(&surface_a).?;
+        // The layout dims B; the renderer it would tell is not running here,
+        // so B has already told it.
+        const high_contrast = isHighContrastActive();
+        surface_a.split_dimmed_sent = win32_chrome_state.splitDimmed(2, true, high_contrast);
+        surface_b.split_dimmed_sent = win32_chrome_state.splitDimmed(2, false, high_contrast);
+
+        // `showTabPanes` puts every pane's font in (`setVisible`) before the
+        // layout gives any pane its size, so B's font build comes between
+        // A's font and A's size. When B's layout step runs, A's resize must
+        // still be held.
+        PaneQueueRecorder.install(surface_b.hwnd.?, &surface_a);
+        host.showTabPanes(tab);
+        try std.testing.expect(PaneQueueRecorder.sizes > 0);
+        try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.at_size);
+        try expectOneLaidOutResize(&surface_a);
+        try expectOneLaidOutResize(&surface_b);
+    }
+
+    fn shownZoomedTabTestBody() !void {
+        var core_app: CoreApp = undefined;
+        var app: App = undefined;
+        var host: Host = undefined;
+        var surface_a: Surface = undefined;
+        var surface_b: Surface = undefined;
+        var session: TestSession = .{};
+        try session.init(.{
+            .core_app = &core_app,
+            .app = &app,
+            .hosts = &.{.{ .storage = &host, .register = true }},
+            .surfaces = &.{
+                .{ .storage = &surface_a, .host = &host, .register = true, .window_visible = false },
+                .{ .storage = &surface_b, .host = &host, .register = true, .window_visible = false },
+            },
+            .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+        });
+        defer session.deinit();
+        const window = try BannerTestWindow.init(&host);
+        defer window.deinit(&host);
+        _ = sys.ShowWindow(window.parent, c.SW_SHOWNOACTIVATE);
+        defer if (host.cached_window_title) |value| std.testing.allocator.free(value);
+        host.surfaces_visible = true;
+        try startTestPane(&surface_a, &host, window.parent);
+        defer stopTestPane(&surface_a);
+        try startTestPane(&surface_b, &host, window.parent);
+        defer stopTestPane(&surface_b);
+
+        // [A | B], zoomed on A, as `goto_tab` finds a tab it left zoomed.
+        var inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
+        defer inserted.deinit();
+        const tab = &host.tabs.items[0];
+        const next_tree = try tab.tree.split(std.testing.allocator, .root, .right, 0.5, &inserted);
+        tab.tree.deinit();
+        tab.tree = next_tree;
+        tab.focused = tab.findHandle(&surface_a).?;
+        tab.tree.zoom(tab.focused);
+        const high_contrast = isHighContrastActive();
+        surface_a.split_dimmed_sent = win32_chrome_state.splitDimmed(2, true, high_contrast);
+        surface_b.split_dimmed_sent = win32_chrome_state.splitDimmed(2, false, high_contrast);
+
+        // The layout places and shows A alone. B must not be shown on the
+        // way: `setVisible` would put the new DPI's font into it at its old
+        // size, which no layout corrects until the zoom ends.
+        PaneQueueRecorder.install(surface_b.hwnd.?, &surface_b);
+        host.showTabPanes(tab);
+        try std.testing.expectEqual(@as(usize, 0), PaneQueueRecorder.shows);
+        try std.testing.expect(!surface_b.window_visible);
+        try std.testing.expect(sys.IsWindowVisible(surface_b.hwnd.?) == 0);
+        try std.testing.expect(surface_b.core_surface.io.mailbox.spsc.queue.pop() == null);
+        try std.testing.expectEqual(@as(u8, 0), surface_b.core_surface.resize_batch.depth);
+        try expectOneLaidOutResize(&surface_a);
     }
 
     /// Stand-in pane windows that note when one is about to be shown over
@@ -27294,6 +27558,8 @@ const Host = struct {
             var it = active_tab.tree.iterator();
             while (it.next()) |entry| {
                 if (entry.handle != zoomed) continue;
+                const batch = entry.view.beginCoreResizeBatch();
+                defer entry.view.endCoreResizeBatch(batch);
                 const visibility_changed = !entry.view.window_visible;
                 content_layout_changed = content_layout_changed or visibility_changed;
                 entry.view.setVisible(true);
@@ -27322,6 +27588,8 @@ const Host = struct {
                 var it = active_tab.tree.iterator();
                 while (it.next()) |entry| {
                     if (entry.view.window_visible != on_screen) continue;
+                    const batch = entry.view.beginCoreResizeBatch();
+                    defer entry.view.endCoreResizeBatch(batch);
                     const visibility_changed = !entry.view.window_visible;
                     content_layout_changed = content_layout_changed or visibility_changed;
                     if (entry.view.hwnd != null) {
@@ -44553,6 +44821,48 @@ pub const Surface = struct {
         defer self.core_surface.endResizeBatch();
         self.syncContentScaleToHostDpiNow();
         self.syncCoreSizeNow();
+    }
+
+    /// Hold this pane's terminal resizes until `endCoreResizeBatch`, which
+    /// sends one with the size and cells as they are then. A pane of a tab
+    /// that was hidden while its window moved to another DPI gets its new
+    /// size and its new font as separate resizes when it is shown, in either
+    /// order (`Host.layout` places it, then `setVisible` puts the font in;
+    /// a zoomed pane and `Host.showTabPanes` put the font in first). On its
+    /// own the first is the wrong grid, the new pixel size in the old cells or
+    /// the old one in the new cells (66x18 where the pane ends at 93x29,
+    /// measured on a move from 144 to 96 DPI), which termio applies when the
+    /// font build outlasts its 25 ms coalescing and which wraps long lines
+    /// into scrollback. So `Host.layout` wraps each pane it places in one,
+    /// and `Host.showTabPanes` the whole tab. Returns whether a batch was
+    /// opened; there is none before the core exists.
+    fn beginCoreResizeBatch(self: *Surface) bool {
+        if (!self.core_initialized) return false;
+        self.core_surface.beginResizeBatch();
+        return true;
+    }
+
+    fn endCoreResizeBatch(self: *Surface, opened: bool) void {
+        if (opened and self.core_initialized) self.core_surface.endResizeBatch();
+    }
+
+    test "a pane's resize batch needs a started core" {
+        var surface: Surface = undefined;
+        surface.core_initialized = false;
+        // Before `Surface.init` starts the core, its storage is not a core.
+        surface.core_surface.resize_batch = .{};
+        const opened = surface.beginCoreResizeBatch();
+        try std.testing.expect(!opened);
+        surface.endCoreResizeBatch(opened);
+        try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
+
+        surface.core_initialized = true;
+        try std.testing.expect(surface.beginCoreResizeBatch());
+        try std.testing.expectEqual(@as(u8, 1), surface.core_surface.resize_batch.depth);
+        // No resize was held, so closing it sends nothing (`core_surface.io`
+        // is not set up here, and is not touched).
+        surface.endCoreResizeBatch(true);
+        try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
     }
 
     fn windowSizeChanged(self: *Surface) void {
