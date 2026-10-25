@@ -35,7 +35,9 @@ $tmpDir = if ($env:TMP) { $env:TMP } else { $tempDir }
 # version 18, 2022 is 17), any edition and install directory. It is asked for one with the C++
 # tools for this architecture, a release first and then a preview. If it is missing or finds none,
 # the default install paths are probed, newest first, and a VsDevCmd.bat counts only beside an MSVC
-# toolset: an instance left behind by an uninstall can keep its VsDevCmd.bat without the C++ tools.
+# toolset with libraries for this architecture (VC\Tools\MSVC\<version>\lib\x64 or lib\arm64): an
+# instance left behind by an uninstall can keep its VsDevCmd.bat without the C++ tools, and one can
+# have another architecture's.
 $vcTools = if ($Architecture -eq "arm64") { "Microsoft.VisualStudio.Component.VC.Tools.ARM64" } else { "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" }
 $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
 if (Test-Path -LiteralPath $vswhere) {
@@ -52,7 +54,9 @@ foreach ($version in @("18", "2022")) {
         foreach ($candidateRoot in @($programFiles, $programFilesX86)) {
             $install = Join-Path $candidateRoot "Microsoft Visual Studio\$version\$edition"
             $candidate = Join-Path $install "Common7\Tools\VsDevCmd.bat"
-            if (-not $vsDevCmd -and (Test-Path -LiteralPath (Join-Path $install "VC\Tools\MSVC")) -and (Test-Path -LiteralPath $candidate)) { $vsDevCmd = $candidate }
+            if ($vsDevCmd -or -not (Test-Path -LiteralPath $candidate)) { continue }
+            $toolsets = @(Get-ChildItem -LiteralPath (Join-Path $install "VC\Tools\MSVC") -Directory -ErrorAction Ignore)
+            if (@($toolsets | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "lib\$Architecture") }).Count -gt 0) { $vsDevCmd = $candidate }
         }
     }
 }

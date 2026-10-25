@@ -78,7 +78,8 @@ The repo also ships `scripts/dev-windows.ps1` and
 expected Visual Studio and Zig cache environment already configured.
 They find Visual Studio 2026 or 2022 with the C++ tools through `vswhere`,
 or failing that at the default install paths (where a folder counts only
-if it holds an MSVC toolset), and fail with exit code 1 when they find none.
+if its MSVC toolset has libraries for the requested architecture), and fail
+with exit code 1 when they find none.
 `.github/workflows/dev-shell.yml` runs both on hosted images.
 
 ## Manual validation
