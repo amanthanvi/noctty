@@ -425,8 +425,15 @@ distribution waits for it to start, up to 15 seconds, before its shell
 appears; if it has not answered by then, that run keeps `xterm-256color`.
 Entries already in `WSLENV`, their flags and their order are kept, and a
 `WSLENV` set with `env` in the configuration is the one extended. A `TERM` set
-with `env` is forwarded as it is. A WSL shell started from inside cmd or
-PowerShell is not changed: only a launch of `wsl.exe` by noctty is.
+with `env` is forwarded as it is. To keep one of these variables out of WSL,
+list it with `/w`, for example `env = WSLENV=TERM_PROGRAM/w`. A pane that
+noctty starts with WSL's older `bash.exe` launcher (the one in the Windows
+folder, or the WindowsApps alias; a bare `bash` counts when the first `bash` on
+the pane's `PATH` is that launcher) gets the same three variables, but noctty
+does not ask its distribution for a terminfo entry, so its `TERM` stays
+`xterm-256color` unless `env` sets one. Other ways into WSL are not changed: a
+distribution's own launcher such as `ubuntu.exe`, `cmd /c wsl`, and a WSL
+shell started from inside cmd or PowerShell.
 
 An existing `/w` entry stays Windows-only; noctty does not override that
 choice. Automatic `TERM` probing uses the launch environment and working

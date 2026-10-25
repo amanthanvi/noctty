@@ -216,9 +216,11 @@ that:
   `wsl.exe`, noctty lists `COLORTERM`, `TERM_PROGRAM` and
   `TERM_PROGRAM_VERSION`, and `TERM` when the distribution has a terminfo
   entry for it (asked with `infocmp`); otherwise the distribution keeps
-  `xterm-256color`. `ssh.exe` sends `TERM` to the server, so a host without
-  the entry needs the `ssh-env` or `ssh-terminfo` shell integration feature,
-  or `term = xterm-256color`.
+  `xterm-256color`. A launch of WSL's `bash.exe` gets the same three, and
+  keeps `xterm-256color`. In both, a `TERM` that `env` sets is listed as it
+  is. `ssh.exe` sends `TERM` to the server, so a host
+  without the entry needs the `ssh-env` or `ssh-terminfo` shell integration
+  feature, or `term = xterm-256color`.
 
 ### Keyboard input
 
