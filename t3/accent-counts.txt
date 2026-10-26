@@ -1,0 +1,25 @@
+accent colours found in before captures (>=100 px, b-r>=40): #5e6ca1, #6872a3, #7a84b5
+after-dark             launch     band rows 0..59: accent px=0
+after-dark             three-tabs band rows 0..59: accent px=0
+after-light            launch     band rows 0..59: accent px=0
+after-light            three-tabs band rows 0..59: accent px=0
+after-lightterm        launch     band rows 0..59: accent px=0
+after-lightterm        three-tabs band rows 0..59: accent px=0
+afterw10-dark          launch     band rows 0..47: accent px=0
+afterw10-dark          three-tabs band rows 0..47: accent px=0
+afterw10-light         launch     band rows 0..47: accent px=0
+afterw10-light         three-tabs band rows 0..47: accent px=0
+afterw10-lightterm     launch     band rows 0..47: accent px=0
+afterw10-lightterm     three-tabs band rows 0..47: accent px=0
+before-dark            launch     band rows 0..59: accent px=1708
+before-dark            three-tabs band rows 0..59: accent px=1618
+before-light           launch     band rows 0..59: accent px=1708
+before-light           three-tabs band rows 0..59: accent px=1618
+before-lightterm       launch     band rows 0..59: accent px=1708
+before-lightterm       three-tabs band rows 0..59: accent px=1618
+beforew10-dark         launch     band rows 0..47: accent px=5458
+beforew10-dark         three-tabs band rows 0..47: accent px=5458
+beforew10-light        launch     band rows 0..47: accent px=5458
+beforew10-light        three-tabs band rows 0..47: accent px=5458
+beforew10-lightterm    launch     band rows 0..47: accent px=5458
+beforew10-lightterm    three-tabs band rows 0..47: accent px=5458
