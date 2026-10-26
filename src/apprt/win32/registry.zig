@@ -331,11 +331,13 @@ test "Registry adds in order and removes the first match by swapping the last" {
     // Duplicates are not introduced by production registration, but matching
     // the first reference is part of the original removal's identity rule.
     try registry.addHost(std.testing.allocator, &hosts[2]);
+    try registry.addHost(std.testing.allocator, &hosts[0]);
     try registry.addWindow(std.testing.allocator, &surfaces[2]);
+    try registry.addWindow(std.testing.allocator, &surfaces[0]);
     try std.testing.expect(registry.removeHost(&hosts[2]));
     registry.removeWindow(&surfaces[2]);
-    try std.testing.expect(std.mem.eql(*Host, &.{ &hosts[2], &hosts[1] }, registry.hosts.items));
-    try std.testing.expect(std.mem.eql(*Surface, &.{ &surfaces[2], &surfaces[1] }, registry.windows.items));
+    try std.testing.expect(std.mem.eql(*Host, &.{ &hosts[0], &hosts[1], &hosts[2] }, registry.hosts.items));
+    try std.testing.expect(std.mem.eql(*Surface, &.{ &surfaces[0], &surfaces[1], &surfaces[2] }, registry.windows.items));
 }
 
 const LookupFixture = struct {
@@ -433,8 +435,8 @@ test "Registry identity lookups preserve list then tab tree search and collectio
     try std.testing.expectEqual(@as(usize, 0), absent.items.len);
 
     // Equal ids return the windows match before any tab-tree match.
-    fixture.a.core_surface.id = 202;
-    try std.testing.expectEqual(&fixture.a, registry.findSurfaceById(202).?);
+    fixture.c.core_surface.id = 202;
+    try std.testing.expectEqual(&fixture.c, registry.findSurfaceById(202).?);
     const hwnd: HWND = @ptrFromInt(0x1000);
     fixture.first.hwnd = hwnd;
     fixture.second.hwnd = hwnd;
