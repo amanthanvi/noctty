@@ -9695,7 +9695,7 @@ const dialog_test = struct {
         fn profileChoices(ctx: *anyopaque, alloc: std.mem.Allocator, reference: ?[]const u8, draft: ?[]const u8, ask: bool) std.mem.Allocator.Error!ProfileChoices {
             const self: *Fixture = @ptrCast(@alignCast(ctx));
             // The fixture's drafts are its own keys, which no label stands
-            // in for (`settingsDraftProfileLabel` is tested in win32.zig).
+            // in for (`settingsDraftProfileLabel` is tested in win32/app.zig).
             _ = draft;
             self.profile_lists += 1;
             if (!ask) self.profile_refills += 1;

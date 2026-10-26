@@ -4,9 +4,10 @@
 //! of an application; a bare F6 belongs to the program in the pane) move
 //! keyboard focus between the regions of a window. This module owns the cycle
 //! order and the rule for skipping a region that is not currently on screen,
-//! as pure data so it can be tested without a window. `win32.zig` owns the
-//! mapping from a region to the HWND that actually takes focus, because
-//! only real Win32 focus raises a UIA focus-changed event.
+//! as pure data so it can be tested without a window. `Host.focusRegionHwnd`
+//! in `win32/host.zig` owns the mapping from a region to the HWND that
+//! actually takes focus, because only real Win32 focus raises a UIA
+//! focus-changed event.
 
 const std = @import("std");
 

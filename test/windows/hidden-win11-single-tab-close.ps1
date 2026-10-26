@@ -145,8 +145,8 @@ $script:samples=[Collections.Generic.List[object]]::new()
 $script:processes=[Collections.Generic.List[object]]::new()
 $desktopPath="WinSta0\$DesktopName"
 $runClass='noctty-test-tabx-' + [guid]::NewGuid().ToString('N').Substring(0,8)
-# Control IDs (src/apprt/win32.zig): the tab buttons are 1000 + index, the
-# confirm prompt's Allow button is 2003.
+# Control IDs (src/apprt/win32/host.zig, src/apprt/win32/overlay_session.zig):
+# the tab buttons are 1000 + index, the confirm prompt's Allow button is 2003.
 $Id=@{ Tab0=1000; Accept=2003 }
 function Pane($h) {
     $all=@([HiddenLocal]::Surfaces($h)); $shown=@($all|Where-Object {[Ds]::Visible($_)})

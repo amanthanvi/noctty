@@ -288,7 +288,7 @@ test "automation-action safety rejects terminal input and crash actions" {
     // hold a `clear_screen` entry, and redoing it calls
     // `reapplyUndoableAction`, which queues the same
     // `.clear_screen{ .history = true }` io message the direct action does
-    // (src/apprt/win32.zig `reapplyUndoableAction`) -- i.e. a pty write and a
+    // (src/apprt/win32/terminal_window.zig `reapplyUndoableAction`) -- i.e. a pty write and a
     // full scrollback erase, reachable without ever naming `clear_screen`.
     // Undo additionally restores a snapshot title straight into the apprt
     // cache, bypassing the title sanitizer these setters otherwise enforce.
@@ -1162,7 +1162,7 @@ fn automationActionTargetError(
 ///
 /// This is only the boundary for the `.perform_action` IPC request kind.
 /// The `.new_window` kind on the same pipe carries argv and is filtered
-/// separately in `apprt/win32.zig` (`applyNewWindowArguments`); the pipe
+/// separately in `apprt/win32/ipc_server.zig` (`applyNewWindowArguments`); the pipe
 /// itself is restricted to the same user and is not a privilege boundary.
 ///
 /// New action variants default to unsafe until they are reviewed.

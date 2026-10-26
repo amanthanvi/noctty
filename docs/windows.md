@@ -2558,8 +2558,9 @@ verify the distribution starts in a normal PowerShell session first.
 ### A copy does not reach a Remote Desktop session
 
 noctty writes a copy in one Win32 clipboard transaction, owned by the
-pane's window. `Surface.writeClipboardText` in `src/apprt/win32.zig`
-writes `CF_UNICODETEXT` for `copy_to_clipboard:plain` and a program's OSC 52
+pane's window. `Surface.writeClipboardText` in
+`src/apprt/win32/terminal_window.zig` writes `CF_UNICODETEXT` for
+`copy_to_clipboard:plain` and a program's OSC 52
 write. The default copy bindings (including Ctrl+Shift+C) and
 `copy-on-select` use the `mixed` format: `Surface.writeClipboardHtml`
 writes `HTML Format` and `CF_UNICODETEXT` together. `copy_to_clipboard:html`

@@ -67,6 +67,68 @@ foreach ($movedWin32TestModule in $movedWin32TestFloors.Keys) {
     }
 }
 
+# The modules cut out of win32.zig by R03 to R06a (#584 to #590) hold most of
+# the runtime's tests, and the block above does not fit them twice over. The
+# facade reaches them from its root `test {}` block by binding name
+# (`_ = app_module;`), not as `_ = @import("win32/<m>.zig");`, and many of their
+# tests sit inside containers (`App`, `Host`, `Surface`, `HostControls`,
+# `HostScene`), which the top-level-only count above does not see. So each
+# module needs its import binding at the start of a line, its root line inside
+# the root `test {}` block (a comment, or `_ = x;` in another function, does not
+# count), and a floor over the named tests at any indent. A floor is the number
+# of named tests the module declared when it was cut out: 59, 43, 23, 33, 10, 41,
+# 15, 4, 2, 7 and 1 below, the numbers the #584 to #590 reviews measured as the
+# tests a module filter runs above the no-match control. Lower one only for a
+# deliberate consolidation. test_support.zig declares no tests, so it has no
+# floor.
+$extractedWin32TestModules = [ordered]@{
+    'app.zig' = @{ Binding = 'app_module'; Floor = 59 }
+    'host.zig' = @{ Binding = 'host_module'; Floor = 43 }
+    'terminal_window.zig' = @{ Binding = 'terminal_window_module'; Floor = 23 }
+    'session.zig' = @{ Binding = 'session_module'; Floor = 33 }
+    'quick_terminal_host.zig' = @{ Binding = 'quick_terminal_host'; Floor = 10 }
+    'window_state.zig' = @{ Binding = 'window_state'; Floor = 41 }
+    'surface_presentation.zig' = @{ Binding = 'surface_presentation'; Floor = 15 }
+    'search_controls.zig' = @{ Binding = 'search_controls'; Floor = 4 }
+    'overlay_session.zig' = @{ Binding = 'overlay_session'; Floor = 2 }
+    'palette_controller.zig' = @{ Binding = 'palette_controller'; Floor = 7 }
+    'chrome_scene.zig' = @{ Binding = 'chrome_scene'; Floor = 1 }
+}
+$win32RootTestBlock = [regex]::Match(
+    $win32RuntimeText,
+    '(?ms)^test \{\r?\n(?<body>.*?)^\}'
+)
+if (-not $win32RootTestBlock.Success) {
+    throw 'Win32 runtime has no root test block.'
+}
+foreach ($extractedWin32Module in $extractedWin32TestModules.Keys) {
+    $extractedWin32Binding = $extractedWin32TestModules[$extractedWin32Module].Binding
+    $extractedWin32Floor = $extractedWin32TestModules[$extractedWin32Module].Floor
+    $extractedWin32ImportPattern = '(?m)^const ' + [regex]::Escape($extractedWin32Binding) +
+        ' = @import\("win32/' + [regex]::Escape($extractedWin32Module) + '"\);[ \t]*\r?$'
+    if (-not [regex]::IsMatch($win32RuntimeText, $extractedWin32ImportPattern)) {
+        throw "Win32 runtime is missing decomposition module import: const $extractedWin32Binding = @import(win32/$extractedWin32Module)"
+    }
+    $extractedWin32RootPattern = '(?m)^[ \t]+_ = ' + [regex]::Escape($extractedWin32Binding) +
+        ';[ \t]*\r?$'
+    if (-not [regex]::IsMatch($win32RootTestBlock.Groups['body'].Value, $extractedWin32RootPattern)) {
+        throw "Win32 runtime root test block is missing: _ = $extractedWin32Binding;"
+    }
+    $extractedWin32Path = @($win32RuntimeModuleFiles | Where-Object {
+        (Split-Path -Leaf $_) -ceq $extractedWin32Module
+    })
+    if ($extractedWin32Path.Count -ne 1) {
+        throw "Extracted Win32 test module is missing: $extractedWin32Module"
+    }
+    $extractedWin32Count = [regex]::Matches(
+        (Get-Content -LiteralPath $extractedWin32Path[0] -Raw),
+        '(?m)^[ \t]*test "[^"\r\n]+" \{\r?$'
+    ).Count
+    if ($extractedWin32Count -lt $extractedWin32Floor) {
+        throw "$extractedWin32Module declares $extractedWin32Count named Zig tests; the floor is $extractedWin32Floor."
+    }
+}
+
 $nativeKeyFilters = @('VK_PACKET', 'deferred char')
 foreach ($nativeKeyFilter in $nativeKeyFilters) {
     # Zig accepts a zero-match test filter. A narrow declaration check is

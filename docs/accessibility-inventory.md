@@ -39,8 +39,9 @@ Keyboard reachability is a focus-region cycle: `cycle_focus_region`
 pane, the tab strip, the docked search query, and the host banner,
 skipping regions that are not on screen; Escape returns to the terminal.
 The order and the skip rule live in `src/apprt/win32/focus_region.zig`
-as a pure model with unit tests; `win32.zig` maps a region to the HWND
-that takes focus. Real focus is the contract, because each landing HWND
+as a pure model with unit tests; `Host.focusRegionHwnd` in
+`src/apprt/win32/host.zig` maps a region to the HWND that takes focus.
+Real focus is the contract, because each landing HWND
 raises its own UIA focus-changed event from `WM_SETFOCUS`. In the host
 banner, focus lands on its first button (Open Release or Install on the
 update notice, the close button on a message); the buttons are real

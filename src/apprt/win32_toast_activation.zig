@@ -12,8 +12,8 @@
 //! activator, or a cold start after the first process ended) must not be
 //! resolved against them.
 //!
-//! This module is pure parsing with no Win32 API dependency. `win32.zig`
-//! owns argv scanning and App dispatch.
+//! This module is pure parsing with no Win32 API dependency. `win32.zig` owns
+//! argv scanning; `win32/app.zig` owns App dispatch.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

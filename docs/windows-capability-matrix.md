@@ -532,8 +532,8 @@ best-effort failures continue without limits unless hard-fail is set.
 - `src/config/Config.zig` — config docs, keybinds, feature gates, and limits.
 - `src/termio/shell_integration.zig` and `src/config/windows_shell.zig` —
   shell integration and Windows shell detection.
-- `src/apprt/win32.zig`, `src/apprt/win32_quick_terminal.zig`,
-  `src/apprt/win32_search_bar.zig`, and
+- `src/apprt/win32.zig`, `src/apprt/win32/*.zig`,
+  `src/apprt/win32_quick_terminal.zig`, `src/apprt/win32_search_bar.zig`, and
   `src/apprt/win32_scrollbar_geometry.zig` — Win32 runtime and interactive UI.
 - `src/apprt/win32_toast_winrt.zig`, `src/apprt/win32_toast_activation.zig`,
   `src/apprt/win32_toast_activator.zig`, `src/apprt/win32_aumid.zig`, and `src/apprt/win32_taskbar_progress.zig` —

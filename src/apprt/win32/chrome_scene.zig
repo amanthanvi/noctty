@@ -211,9 +211,12 @@ pub const HostScene = struct {
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 
-    /// Paint the 3 caption buttons (min / max-or-restore / close) at
-    /// the top-right of the tab row. Called from `paintChrome` only
-    /// when this host is actively using the integrated titlebar.
+    /// Draw one titlebar glyph centered in `rect`: the icon font's glyph when
+    /// that font is loaded and `DrawTextW` succeeds, else the `win32_icons`
+    /// fallback shape.
+    /// `caption_button` selects the caption icon font and a 10 DIP glyph;
+    /// otherwise it is the action icon font and 12 DIP (the tab row's new-tab
+    /// and dropdown buttons).
     pub fn drawTitlebarGlyph(
         self: *Host,
         hdc: HDC,
@@ -290,6 +293,9 @@ pub const HostScene = struct {
         self.drawTitlebarGlyph(hdc, rect, glyph, visual.glyph, true);
     }
 
+    /// Paint the 3 caption buttons (min / max-or-restore / close) at
+    /// the top-right of the tab row. Called from `paintChrome` only
+    /// when this host is actively using the integrated titlebar.
     pub fn paintCaptionButtons(
         self: *Host,
         hdc: HDC,

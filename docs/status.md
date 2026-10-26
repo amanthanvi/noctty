@@ -386,9 +386,14 @@ transient status instead.
 
 ### Win32 runtime extraction
 
-The Win32 runtime is still centered on one large file
-(`src/apprt/win32.zig`). Extraction into focused modules is in progress and
-lands incrementally.
+The Win32 runtime's `App`, `Host` and `Surface` types live in
+`src/apprt/win32/app.zig`, `host.zig` and `terminal_window.zig`, beside
+focused modules for session restore, the quick terminal host, window state,
+surface presentation, the docked search controls, overlay and palette
+orchestration and the chrome scene. `src/apprt/win32.zig` still holds the
+forwarding aliases, the native window procedures, shared helpers and the tests
+that combine owners. Extraction into smaller modules is in progress and lands
+incrementally.
 
 ## Known caveats
 
@@ -537,7 +542,7 @@ No formal roadmap. Likely next areas:
   already recorded there, and UI Automation for overlay rows and menus.
 - Keyboard reach for the chrome the focus-region cycle still skips (the
   search buttons, overlay rows and menus).
-- Continuing the `src/apprt/win32.zig` extraction.
+- Continuing the Win32 runtime extraction under `src/apprt/win32/`.
 - Broader local crash metadata and report packaging.
 - ARB-context OpenGL migration paired with atlas rebuild.
 

@@ -3,8 +3,9 @@ name: Windows 10 branches
 # Not a required check and not part of the PR gate. GitHub offers no Windows 10
 # image (windows-2019 was retired on 2025-06-30). windows-2022 is Windows Server
 # 2022, build 20348: below 22000, so every `os_build >= 22000` gate in
-# src/apprt/win32.zig takes its Windows 10 branch. docs/windows10-release-checklist.md
-# lists what this job covers and what only a Windows 10 desktop can.
+# src/apprt/win32.zig and src/apprt/win32/ (window_state.zig, host.zig) takes
+# its Windows 10 branch. docs/windows10-release-checklist.md lists what this job
+# covers and what only a Windows 10 desktop can.
 #
 # Pull requests run it only when this file changes, to test the file itself.
 on:
@@ -42,7 +43,7 @@ jobs:
           Write-Host "$($os.Caption) version $($os.Version) build $build"
           "windows_build=$build" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($build -ge 22000) {
-            throw "windows-2022 is build $build; the Windows 10 gates in src/apprt/win32.zig take their Windows 11 branch at 22000. Pick another image or retire this workflow."
+            throw "windows-2022 is build $build; the Windows 10 gates in src/apprt/win32.zig and src/apprt/win32/*.zig take their Windows 11 branch at 22000. Pick another image or retire this workflow."
           }
 
       # Exercise desktop window enumeration and driver self-receipts before long Zig builds.

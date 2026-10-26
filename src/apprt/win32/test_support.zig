@@ -29,7 +29,13 @@ const WINDOWPOS = sys.WINDOWPOS;
 const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
 
 /// Bind the private runtime types and operations once, keeping one fixture
-/// implementation for tests that remain in win32.zig and tests moved later.
+/// implementation for the tests in win32.zig and in the modules under win32/.
+///
+/// Only `win32.test_support` may instantiate `Fixtures`. Every module that
+/// carries tests takes its fixtures from that one instance, so the fixtures'
+/// static state (for example the window-start fixture's observations) stays
+/// shared; a second `Fixtures(...)` instantiation would carry its own copy of
+/// that state.
 pub fn Fixtures(comptime runtime: anytype) type {
     return struct {
         const App = runtime.App;

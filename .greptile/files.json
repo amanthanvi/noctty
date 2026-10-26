@@ -14,6 +14,10 @@
         "src/build/ConptyRedist.zig",
         "scripts/stage-conpty-redist.ps1",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/surface_presentation.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/process_shared.zig",
         "src/main_ghostty.zig",
         "src/terminal/Screen.zig",
@@ -43,6 +47,9 @@
         "src/os/hostname.zig",
         "src/config/windows_shell.zig",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_elevation.zig"
       ]
     },
@@ -57,6 +64,11 @@
         "src/apprt/win32/gl_startup.zig",
         "src/apprt/win32_compositor*.zig",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/surface_presentation.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/termio/Thread.zig"
       ]
     },
@@ -65,6 +77,14 @@
       "description": "Self-Correction Log: window frame, non-client area, DPI, placement, opacity and the quick terminal.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/quick_terminal_host.zig",
+        "src/apprt/win32/session.zig",
+        "src/apprt/win32/surface_presentation.zig",
+        "src/apprt/win32/terminal_window.zig",
+        "src/apprt/win32/window_state.zig",
         "src/apprt/win32_nc_layout.zig",
         "src/apprt/win32_quick_terminal.zig",
         "src/apprt/win32/chrome_layout.zig",
@@ -76,6 +96,14 @@
       "description": "Self-Correction Log: tab strip, chrome theme and accent, focus cues, icons, chrome repaint and text caches.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/overlay_session.zig",
+        "src/apprt/win32/palette_controller.zig",
+        "src/apprt/win32/search_controls.zig",
+        "src/apprt/win32/surface_presentation.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_theme.zig",
         "src/apprt/win32_tab_*.zig",
         "src/apprt/win32_icons.zig",
@@ -91,6 +119,12 @@
       "description": "Self-Correction Log: command palette, confirm and profile overlays, host banners.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/overlay_session.zig",
+        "src/apprt/win32/palette_controller.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_palette*.zig",
         "src/apprt/win32_universal_palette.zig",
         "src/apprt/win32/labels.zig"
@@ -101,6 +135,11 @@
       "description": "Self-Correction Log: docked search bar and overlay scrollbar.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/search_controls.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_search_bar.zig",
         "src/apprt/win32_scrollbar_geometry.zig"
       ]
@@ -110,6 +149,13 @@
       "description": "Self-Correction Log: tabs, splits, close flows, focus, shell reducer and undo/redo.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/overlay_session.zig",
+        "src/apprt/win32/session.zig",
+        "src/apprt/win32/surface_presentation.zig",
+        "src/apprt/win32/terminal_window.zig",
+        "src/apprt/win32/window_state.zig",
         "src/apprt/win32_undo.zig",
         "src/apprt/win32_structural_history.zig",
         "src/apprt/win32_shell.zig",
@@ -122,6 +168,10 @@
       "scope": [
         "src/apprt/win32/input.zig",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/palette_controller.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/input/**",
         "src/config/Config.zig",
         "src/Surface.zig"
@@ -142,6 +192,10 @@
         "src/config/url.zig",
         "src/apprt/win32/local_target.zig",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/session.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/terminal/kitty/graphics_image.zig",
         "src/config/Config.zig",
         "src/config/windows_visual_studio.zig",
@@ -155,6 +209,10 @@
       "description": "Self-Correction Log: clipboard, CF_HTML, OSC 52, paste protection and drag-and-drop.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/overlay_session.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32_clipboard_html.zig",
         "src/apprt/win32_paste_protection.zig",
         "src/apprt/win32_surface_drop*.zig",
@@ -170,6 +228,10 @@
         "src/apprt/win32/save_target.zig",
         "test/windows/settings-uia-*.ps1",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/apprt/win32/bench_trace.zig"
       ]
     },
@@ -179,7 +241,13 @@
       "scope": [
         "src/apprt/win32_uia/**",
         "src/apprt/win32_terminal_accessibility.zig",
-        "src/apprt/win32.zig"
+        "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/overlay_session.zig",
+        "src/apprt/win32/palette_controller.zig",
+        "src/apprt/win32/search_controls.zig",
+        "src/apprt/win32/terminal_window.zig"
       ]
     },
     {
@@ -190,6 +258,9 @@
         "src/cli/**",
         "src/apprt/win32/config_problems.zig",
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/terminal_window.zig",
         "src/input/command.zig",
         "src/Surface.zig"
       ]
@@ -199,6 +270,13 @@
       "description": "Self-Correction Log: startup, safe mode, state files, IPC, identity, jump list, notifications, crash dumps, handoff and the CLI.",
       "scope": [
         "src/apprt/win32.zig",
+        "src/apprt/win32/app.zig",
+        "src/apprt/win32/chrome_scene.zig",
+        "src/apprt/win32/host.zig",
+        "src/apprt/win32/quick_terminal_host.zig",
+        "src/apprt/win32/session.zig",
+        "src/apprt/win32/terminal_window.zig",
+        "src/apprt/win32/window_state.zig",
         "src/apprt/win32_aumid.zig",
         "src/apprt/win32_jump_list.zig",
         "src/apprt/win32_toast*.zig",
@@ -248,7 +326,8 @@
         ".github/workflows/**",
         "src/pty_transport_probe.zig",
         "src/terminal/search/Thread.zig",
-        "scripts/windows-harness-history.ps1"
+        "scripts/windows-harness-history.ps1",
+        "src/apprt/win32/test_support.zig"
       ]
     },
     {

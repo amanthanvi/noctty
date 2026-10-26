@@ -3,7 +3,9 @@
 //! This module owns pure chrome decisions: dirty text zones, repaint masks,
 //! child repaint policy, reduced-motion/DPI helpers, profile/inspector
 //! visibility, overlay cache dirtiness, and shell-chrome fallback decisions.
-//! Native HWND/GDI/DirectComposition painting remains in `win32.zig`.
+//! Native HWND/GDI painting remains in `win32/chrome_scene.zig` and
+//! `win32/host.zig`; the DirectComposition shell chrome is driven from
+//! `win32/app.zig`.
 
 const std = @import("std");
 const win32_theme = @import("win32_theme.zig");

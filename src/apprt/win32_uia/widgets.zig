@@ -153,7 +153,7 @@ fn sendButtonClicked(hwnd: com.HWND) com.HRESULT {
 
 /// Shape-of-life contract callers implement so the provider can ask
 /// the owning widget for its current live text. Decouples the
-/// provider from `Host` (which lives in `win32.zig` and would pull a
+/// provider from `Host` (which lives in `win32/host.zig` and would pull a
 /// cycle into this module).
 pub const PaletteListState = struct {
     ctx: *anyopaque,

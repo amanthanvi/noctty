@@ -113,9 +113,14 @@ reading step under [Self-Correction Log](#self-correction-log).
 ## Directory Structure
 
 - Shared Zig core: `src/`
-- Win32 application runtime: `src/apprt/win32.zig` coordinates App, Host, and
-  Surface behavior; `src/apprt/win32_theme.zig` owns theme policy; focused
-  support modules under `src/apprt/win32/` own Win32 constants/externs,
+- Win32 application runtime: `src/apprt/win32.zig` holds the forwarding
+  aliases for App, Host, and Surface, the native window procedures, shared
+  helpers, and the tests that combine owners; `src/apprt/win32/app.zig`,
+  `host.zig`, and `terminal_window.zig` hold App, Host, and Surface;
+  `src/apprt/win32_theme.zig` owns theme policy; focused modules under
+  `src/apprt/win32/` own session capture and restore, the quick terminal host,
+  window state, surface presentation, the docked search controls, overlay and
+  palette orchestration, the chrome scene, Win32 constants/externs,
   labels/input, startup/render tracing, chrome rectangle math, and GDI paint
   primitives.
 - Windows packaging: `dist/windows/` + `scripts/package-windows.ps1`
@@ -194,21 +199,23 @@ that govern each symbol you change, or that none does.
   (`split_dim`, `Host.syncSplitDim`), `win32/pixel_format.zig`, Windows font
   discovery (`src/font/discovery_windows.zig`: the registry scan, variable
   `wght` bounds, bold matching), font fallback and `font-thicken`, renderer
-  wakeups from `termio` and typing latency, repaint during live resize, and
-  which DLLs a CLI action or the D3D11 backend loads (the OpenGL32 static
-  import).
+  wakeups from `termio` and typing latency, repaint during live resize
+  (`win32/surface_presentation.zig`), and which DLLs a CLI action or the D3D11
+  backend loads (the OpenGL32 static import).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
   fullscreen and restore placement (the `maximize`/`fullscreen` keys at
-  window start: `Surface.applyWindowStart`; what a session saves and restores
-  of a fullscreen window: `WindowState.fullscreen` and `fullscreen_maximized`
-  in `win32_session_state.zig`, `sessionWindowPlacementOn`,
-  `restoreSessionWindow`), what a new window copies from its source and which
-  forwarded keys it keeps (`inheritWindowStateFrom`, `WindowKeeps`),
-  `WM_DPICHANGED` and mixed-DPI moves, `window-width`/`window-height`,
-  `background-opacity` and DWM backdrop, the window menu, the quick terminal
-  (`win32_quick_terminal.zig`).
+  window start: `Surface.applyWindowStart` in `win32/window_state.zig`; what a
+  session saves and restores of a fullscreen window: `WindowState.fullscreen`
+  and `fullscreen_maximized` in `win32_session_state.zig`,
+  `sessionWindowPlacementOn` and `restoreSessionWindow` in
+  `win32/session.zig`), what a new window copies from its source and which
+  forwarded keys it keeps (`inheritWindowStateFrom`, `WindowKeeps`, both in
+  `win32/window_state.zig`), `WM_DPICHANGED` and mixed-DPI moves,
+  `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
+  window menu, the quick terminal (`win32_quick_terminal.zig`,
+  `win32/quick_terminal_host.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
   (`tabButtonProc`, `drawButton`, labels, tooltips, close X, underline,
   `win32_tab_visual.zig`), `window-show-tab-bar`, chrome theme and system
@@ -216,15 +223,18 @@ that govern each symbol you change, or that none does.
   `win32_icons.zig`, titlebar and tab-row icon fonts
   (`recreateTitlebarIconFonts`, `createIconFontWithGlyphs`,
   `fontGlyphCoverage`, `drawTitlebarGlyph`), chrome child z-order, host paint
-  and invalidation scopes and text caches (`paintChrome`, `invalidateChrome*`,
-  `repaintTopChrome`, `appendOwnedString`), tweens.
+  and invalidation scopes and text caches (`win32/chrome_scene.zig`:
+  `paintChrome`, `invalidateChrome*`, `repaintTopChrome`; `appendOwnedString`),
+  tweens.
 - [chrome-overlays.md](docs/agents/log/chrome-overlays.md): the command
-  palette (`win32_palette.zig`, ranking, MRU, palette list), the confirm
-  overlay (`showConfirm`, `invokeConfirmAccept`/`Cancel` lifetime), the
-  profile overlay, host banners and the update notice, overlay EDIT writes
+  palette (`win32_palette.zig`, `win32/palette_controller.zig`, ranking, MRU,
+  palette list), the confirm overlay (`win32/overlay_session.zig`:
+  `showConfirm`, `invokeConfirmAccept`/`Cancel` lifetime), the profile
+  overlay, host banners and the update notice, overlay EDIT writes
   (`setOverlayEditText`).
 - [search-scrollbar.md](docs/agents/log/search-scrollbar.md): the docked
-  search bar (`win32_search_bar.zig`, `searchEditProc`, visible Up/Down versus
+  search bar (`win32_search_bar.zig`, `searchEditProc` in
+  `win32/search_controls.zig`, visible Up/Down versus
   core `.next`/`.previous`, debounce) and the layered overlay scrollbar
   (`win32_scrollbar_geometry.zig`, heartbeat, alpha, markers).
 - [tabs-panes.md](docs/agents/log/tabs-panes.md): tabs, splits and windows as
@@ -233,7 +243,8 @@ that govern each symbol you change, or that none does.
   close and close-confirm flows, quit teardown (`destroyAllWindows`,
   `App.destroyPaneOf`), focus after a close, shell reducer effects,
   local and structural undo/redo (`win32_undo.zig`,
-  `win32_structural_history.zig`, `undo-timeout`).
+  `win32_structural_history.zig`, `undo-timeout`, split undo and redo through
+  the shell model: `Host.applyCommittedSplitHistory`).
 - [input.md](docs/agents/log/input.md): `win32/input.zig` and key messages
   (`WM_KEYDOWN`/`WM_CHAR`/`WM_SYSCHAR`, dead keys, `ToUnicode`, non-Latin
   layouts), default Windows keybindings, Win32 input mode (DEC 9001), IME
@@ -274,7 +285,10 @@ that govern each symbol you change, or that none does.
   `themeChanged`), its own UIA patterns, combo and open traces
   (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
   `win32/bench_trace.zig`), the Default profile row
-  (`field_model.Kind.profile`, `AppHandle.profileChoices`), and the save path
+  (`field_model.Kind.profile`, `AppHandle.profileChoices`), the
+  changed-from-default marks, Reset buttons and row menu (`syncDefaultMarks`,
+  `takeResetButton`, `releaseResetButton`, `resetDraftRow`, `showRowMenu`,
+  `field_model.effectiveSettingValue`), and the save path
   (`settingsSaveAndReload`, `patchOrAppendEdits`, save target, masked
   values).
 - [accessibility.md](docs/agents/log/accessibility.md): new widgets and UI
@@ -298,7 +312,8 @@ that govern each symbol you change, or that none does.
   the config file, adding config keys.
 - [app-lifecycle.md](docs/agents/log/app-lifecycle.md): `App.init` and
   startup stalls, a cold `--launch-layout` (`App.startup_launch_layout`,
-  `forgetLaunchLayout`), startup attempts and safe mode, session state and
+  `forgetLaunchLayout`), startup attempts and safe mode, session state
+  (capture, restore, owner lock and quarantine: `win32/session.zig`) and
   state-file schemas, IPC and single instance (`win32/ipc_server.zig`), AUMID
   and portable identity, the jump list, toasts and desktop notifications
   (their tab attribution, tags and history removal, `App.showToast`, the COM
@@ -327,13 +342,15 @@ that govern each symbol you change, or that none does.
   `test/windows/renderer/Invoke-RendererParity.ps1`), CI test steps, the Zig
   test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
   `std.Progress.lockStdErr`, the search-thread tests in
-  `src/terminal/search/Thread.zig`), PSReadLine history isolation
+  `src/terminal/search/Thread.zig`), the shared Win32 test fixtures
+  (`win32/test_support.zig`, `TestSession`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), and a
   test count or result that contradicts the code.
 - [tooling.md](docs/agents/log/tooling.md): declaring `extern` functions or
   structs, casting Win32 handles and `LPARAM`/`LRESULT` (`@intCast`,
-  `@bitCast`, `@ptrFromInt`), passing `[:0]u16` to text APIs, renaming Zig
-  declarations, `union(enum)` tests, PowerShell language traps, and `gh`,
+  `@bitCast`, `@ptrFromInt`), passing `[:0]u16` to text APIs, renaming or moving
+  Zig declarations (the `src/apprt/win32.zig` split into `win32/*.zig`),
+  `union(enum)` tests, PowerShell language traps, and `gh`,
   git and codex commands.
 
 A comment that cites AGENTS.md (by date, issue number, symbol or an old line
