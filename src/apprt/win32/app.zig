@@ -7222,7 +7222,6 @@ pub const App = struct {
         return true;
     }
 
-
     pub const hideQuickTerminalHost = quick_terminal_host.hideQuickTerminalHost;
 
     pub const showQuickTerminalWindow = quick_terminal_host.showQuickTerminalWindow;
