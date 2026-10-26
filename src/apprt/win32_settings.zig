@@ -1987,6 +1987,12 @@ pub const SettingsWindow = struct {
     /// Which form rows' draft differs from `defaults`, as the marker, the
     /// Reset button and UIA last said it (`syncDefaultMarks`).
     differs_from_default: [form_field_count]bool = @splat(false),
+    /// Whether each field's MSAA description says it differs from its
+    /// default: what the last annotation that took said, tried again on
+    /// every pass until it matches `differs_from_default`.
+    described_changed: [form_field_count]bool = @splat(false),
+    /// For tests: the annotation service the marks use in place of oleacc's.
+    annotation_service: ?*IAccPropServices = null,
     /// A row's Reset button: the shown page's rows that differ from their
     /// default have one, hidden while the row does not differ. Another page's
     /// rows give theirs up to `reset_spares` (`syncDefaultMarks`).
@@ -2765,7 +2771,7 @@ pub const SettingsWindow = struct {
         const active = self.activeFormRows();
         // Made once, when first needed, for what this pass annotates for
         // MSAA: the fields whose state changed and the buttons it hands out.
-        var annotations: Annotations = .{};
+        var annotations: Annotations = .{ .fake = self.annotation_service };
         defer annotations.deinit();
         inline for (field_model.form_fields, 0..) |row, index| {
             const control = @field(self.fields, row.native.binding);
@@ -2773,8 +2779,12 @@ pub const SettingsWindow = struct {
             if (differs != self.differs_from_default[index]) {
                 self.differs_from_default[index] = differs;
                 if (self.control_uia_providers[index]) |provider| provider.setChangedFromDefault(differs);
-                if (annotations.service()) |service| if (control) |field| setChangedDescription(service, field, differs);
             }
+            // An annotation can fail (low memory), so what MSAA says is
+            // followed on its own and tried again until it takes.
+            if (control) |field| if (self.described_changed[index] != differs) if (annotations.service()) |service| {
+                if (setChangedDescription(service, field, differs)) self.described_changed[index] = differs;
+            };
             // Only the shown page's rows hold Reset buttons, so the window
             // has at most one page's worth (ten, on Appearance) however many
             // fields differ in all. Rows give theirs up before rows take one.
@@ -2798,11 +2808,13 @@ pub const SettingsWindow = struct {
     const Annotations = struct {
         made: ?*IAccPropServices = null,
         tried: bool = false,
+        /// `annotation_service`, for tests.
+        fake: ?*IAccPropServices = null,
 
         fn service(self: *Annotations) ?*IAccPropServices {
             if (!self.tried) {
                 self.tried = true;
-                self.made = createAccPropServices();
+                self.made = if (self.fake) |fake| fake.addRef() else createAccPropServices();
             }
             return self.made;
         }
@@ -2849,6 +2861,12 @@ pub const SettingsWindow = struct {
     /// z-order, which is the order Tab and the arrows take, and beside it at
     /// the right end of the row (`settingsFormItemRects` keeps the room). Its
     /// id says which row it resets.
+    ///
+    /// A button's MSAA name names the row its id resets, or is the bare
+    /// "Reset" of a new button that could not be named: never another row's.
+    /// So a spare takes this row's id only once it has this row's name; when
+    /// renaming fails (`SetHwndPropStr` can, for lack of memory) the row
+    /// goes without a button, and the next pass tries again.
     fn takeResetButton(self: *SettingsWindow, index: usize, own_only: bool, annotations: *Annotations) void {
         const viewport = self.viewport orelse return;
         const control = self.controlHwnd(index) orelse return;
@@ -2864,9 +2882,10 @@ pub const SettingsWindow = struct {
         const button = if (own) |i|
             self.takeSpare(i)
         else if (spares.len > 0 and names != null) renamed: {
-            const spare = self.takeSpare(spares.len - 1);
+            const spare = spares[spares.len - 1];
+            if (!setAccessibleNameText(names.?, spare, reset_button_names[index])) return;
+            _ = self.takeSpare(spares.len - 1);
             _ = sys.SetWindowLongPtrW(spare, GWLP_ID, id);
-            setAccessibleNameText(names.?, spare, reset_button_names[index]);
             break :renamed spare;
         } else made: {
             const made = self.finishChild(
@@ -2874,7 +2893,7 @@ pub const SettingsWindow = struct {
                 self.ui_font,
                 .control,
             ) orelse return;
-            if (names) |service| setAccessibleNameText(service, made, reset_button_names[index]);
+            if (names) |service| _ = setAccessibleNameText(service, made, reset_button_names[index]);
             break :made made;
         };
         _ = if (childRectIn(viewport, control)) |rect|
@@ -3722,6 +3741,7 @@ pub const SettingsWindow = struct {
         self.reset_buttons = @splat(null);
         self.reset_spare_count = 0;
         self.differs_from_default = @splat(false);
+        self.described_changed = @splat(false);
         self.marker_rects = @splat(null);
     }
 
@@ -5806,6 +5826,11 @@ const IAccPropServices = extern struct {
         _ = self.vtbl.Release(self.asRaw());
     }
 
+    fn addRef(self: *IAccPropServices) *IAccPropServices {
+        _ = self.vtbl.AddRef(self.asRaw());
+        return self;
+    }
+
     fn setName(self: *IAccPropServices, hwnd: HWND, comptime name: []const u8) HRESULT {
         return self.vtbl.SetHwndPropStr(
             self.asRaw(),
@@ -5842,22 +5867,24 @@ fn setAccessibleName(service: *IAccPropServices, hwnd_opt: ?HWND, comptime name:
     }
 }
 
-/// `setAccessibleName` for a name made at run time.
-fn setAccessibleNameText(service: *IAccPropServices, hwnd: HWND, name: []const u8) void {
+/// `setAccessibleName` for a name made at run time. Whether it took.
+fn setAccessibleNameText(service: *IAccPropServices, hwnd: HWND, name: []const u8) bool {
     var name_w: [128]u16 = undefined;
     const hr = service.vtbl.SetHwndPropStr(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, utf8ToW(&name_w, name));
     if (hr < 0) std.log.warn("settings: failed to set accessible name '{s}' hr=0x{x}", .{ name, @as(u32, @bitCast(hr)) });
+    return hr >= 0;
 }
 
 /// The MSAA description of a field that differs from its default, or none.
 /// The field's UIA `ItemStatus` says the same; this is for a reader that
 /// takes a standard Edit, Button or ComboBox through MSAA, as NVDA does.
-fn setChangedDescription(service: *IAccPropServices, hwnd: HWND, changed: bool) void {
+fn setChangedDescription(service: *IAccPropServices, hwnd: HWND, changed: bool) bool {
     const hr = if (changed)
         service.vtbl.SetHwndPropStr(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_DESCRIPTION, std.unicode.utf8ToUtf16LeStringLiteral(win32_uia.SettingsControlProvider.changed_from_default_status))
     else
         service.vtbl.ClearHwndProps(service.asRaw(), hwnd, OBJID_CLIENT, CHILDID_SELF, &.{PROPID_ACC_DESCRIPTION}, 1);
     if (hr < 0) std.log.warn("settings: failed to annotate a field's default state hr=0x{x}", .{@as(u32, @bitCast(hr))});
+    return hr >= 0;
 }
 
 /// `child`'s window rect in `parent`'s client coordinates.
@@ -9554,6 +9581,14 @@ const dialog_test = struct {
         /// The fixture over a config in which every editable row differs
         /// from its default (`field_model.round_trip_config`), opened.
         fn startChanged(custom_uia: bool) !*Fixture {
+            const self = try prepareChanged(custom_uia);
+            errdefer self.finish();
+            try self.settings.open();
+            return self;
+        }
+
+        /// `startChanged`, not opened yet.
+        fn prepareChanged(custom_uia: bool) !*Fixture {
             const self = try prepare(custom_uia);
             errdefer self.finish();
             var tmp = std.testing.tmpDir(.{});
@@ -9567,7 +9602,6 @@ const dialog_test = struct {
             // which is the default there (`effectiveSettingValue`).
             const release_channel = @import("../build_config.zig").release_channel;
             self.config.@"auto-update-channel" = if (release_channel == .stable) .tip else .stable;
-            try self.settings.open();
             return self;
         }
 
@@ -12682,6 +12716,155 @@ test "settings a reset after the file changed under an edit is the default, to s
             try std.testing.expect(!settings.hasConflict(.font_size));
             try std.testing.expect(settings.transaction.?.entryConst(.font_size).?.dirty);
             try std.testing.expect(std.mem.endsWith(u8, try statusTextOf(settings, &buf), "back to its default (12 pt). Save to keep it."));
+        }
+    }.body);
+}
+
+/// An `IAccPropServices` for tests (`SettingsWindow.annotation_service`):
+/// records the MSAA names and descriptions set through it, and fails every
+/// call while `fail` is set, as `SetHwndPropStr` can for lack of memory.
+const FakeAnnotations = struct {
+    service: IAccPropServices = .{ .vtbl = &vtbl },
+    fail: bool = false,
+    entries: [96]Entry = undefined,
+    count: usize = 0,
+
+    const Entry = struct {
+        hwnd: HWND,
+        name: [96]u8 = undefined,
+        name_len: usize = 0,
+        described: bool = false,
+    };
+
+    const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
+    const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
+
+    const vtbl: IAccPropServicesVtbl = .{
+        .QueryInterface = queryInterface,
+        .AddRef = refCount,
+        .Release = refCount,
+        .SetPropValue = @ptrCast(&unused),
+        .SetPropServer = @ptrCast(&unused),
+        .ClearProps = @ptrCast(&unused),
+        .SetHwndProp = @ptrCast(&unused),
+        .SetHwndPropStr = setHwndPropStr,
+        .SetHwndPropServer = @ptrCast(&unused),
+        .ClearHwndProps = clearHwndProps,
+    };
+
+    fn unused() callconv(.winapi) void {}
+
+    fn fromRaw(raw: *anyopaque) *FakeAnnotations {
+        const service: *IAccPropServices = @ptrCast(@alignCast(raw));
+        return @fieldParentPtr("service", service);
+    }
+
+    fn queryInterface(_: *anyopaque, _: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+        out.* = null;
+        return E_NOINTERFACE;
+    }
+
+    /// The fake lives on the test's stack; it counts nothing.
+    fn refCount(_: *anyopaque) callconv(.winapi) u32 {
+        return 1;
+    }
+
+    fn entry(self: *FakeAnnotations, hwnd: HWND) *Entry {
+        for (self.entries[0..self.count]) |*existing| if (existing.hwnd == hwnd) return existing;
+        self.entries[self.count] = .{ .hwnd = hwnd };
+        self.count += 1;
+        return &self.entries[self.count - 1];
+    }
+
+    fn setHwndPropStr(raw: *anyopaque, hwnd: HWND, _: u32, _: u32, prop: GUID, text: LPCWSTR) callconv(.winapi) HRESULT {
+        const self = fromRaw(raw);
+        if (self.fail) return E_OUTOFMEMORY;
+        const record = self.entry(hwnd);
+        if (std.meta.eql(prop, PROPID_ACC_NAME)) {
+            record.name_len = std.unicode.utf16LeToUtf8(&record.name, std.mem.span(text)) catch 0;
+        } else record.described = true;
+        return 0;
+    }
+
+    fn clearHwndProps(raw: *anyopaque, hwnd: HWND, _: u32, _: u32, _: [*]const GUID, _: c_int) callconv(.winapi) HRESULT {
+        const self = fromRaw(raw);
+        if (self.fail) return E_OUTOFMEMORY;
+        self.entry(hwnd).described = false;
+        return 0;
+    }
+
+    fn nameOf(self: *FakeAnnotations, hwnd: HWND) []const u8 {
+        for (self.entries[0..self.count]) |*record| if (record.hwnd == hwnd) return record.name[0..record.name_len];
+        return "";
+    }
+
+    fn describedOf(self: *FakeAnnotations, hwnd: HWND) bool {
+        for (self.entries[0..self.count]) |*record| if (record.hwnd == hwnd) return record.described;
+        return false;
+    }
+
+    /// Every Reset button the window has, held or spare, has the MSAA name
+    /// of the row its id resets: none says one action and does another.
+    fn expectButtonsNamedForTheirIds(self: *FakeAnnotations, settings: *const SettingsWindow) !void {
+        for (settings.reset_buttons, 0..) |held, index| if (held) |button| {
+            try std.testing.expectEqualStrings(reset_button_names[index], self.nameOf(button));
+            try std.testing.expectEqual(@as(LONG_PTR, @intCast(BTN_RESET_FIRST + index)), sys.GetWindowLongPtrW(button, GWLP_ID));
+        };
+        for (settings.reset_spares[0..settings.reset_spare_count]) |spare| {
+            const id: usize = @intCast(sys.GetWindowLongPtrW(spare, GWLP_ID));
+            try std.testing.expectEqualStrings(reset_button_names[id - BTN_RESET_FIRST], self.nameOf(spare));
+            try std.testing.expect(sys.IsWindowVisible(spare) == 0);
+        }
+    }
+};
+
+test "settings a Reset button whose MSAA name cannot change serves no other row, and is named on the next try" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            var fake: FakeAnnotations = .{};
+            const fixture = try dialog_test.Fixture.prepareChanged(false);
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            settings.annotation_service = &fake.service;
+            try settings.open();
+            // Every field made, and described, while names can be set; only
+            // Appearance's rows have held buttons.
+            dialog_test.makeAllSections(settings);
+            try fake.expectButtonsNamedForTheirIds(settings);
+
+            // Names cannot be set now. Terminal's rows find only Appearance's
+            // spares, which would need renaming: they stay Appearance's,
+            // hidden, and Terminal's rows go without a button for now.
+            fake.fail = true;
+            settings.setActiveSection(.terminal);
+            try fake.expectButtonsNamedForTheirIds(settings);
+            var waiting: usize = 0;
+            for (0..form_field_count) |index| {
+                const on_page = if (settings.controlSection(index)) |page| page == .terminal else false;
+                if (!on_page or !settings.differs_from_default[index]) continue;
+                try std.testing.expectEqual(@as(?HWND, null), settings.reset_buttons[index]);
+                waiting += 1;
+            }
+            try std.testing.expect(waiting > 0);
+            // A field reset now keeps the description it had in MSAA.
+            const scrollback = settings.fields.edit_scrollback.?;
+            try std.testing.expect(fake.describedOf(scrollback));
+            settings.resetRow(settings.controlIndex(scrollback).?);
+            try std.testing.expect(!settings.differs_from_default[settings.controlIndex(scrollback).?]);
+            try std.testing.expect(fake.describedOf(scrollback));
+
+            // Names can be set again: the next pass gives the rows their
+            // buttons, named, and the description follows the reset.
+            fake.fail = false;
+            settings.syncDefaultMarks();
+            try fake.expectButtonsNamedForTheirIds(settings);
+            for (0..form_field_count) |index| {
+                const on_page = if (settings.controlSection(index)) |page| page == .terminal else false;
+                if (!on_page) continue;
+                try std.testing.expectEqual(settings.differs_from_default[index], settings.reset_buttons[index] != null);
+                if (settings.reset_buttons[index]) |button| try std.testing.expect(sys.IsWindowVisible(button) != 0);
+            }
+            try std.testing.expect(!fake.describedOf(scrollback));
         }
     }.body);
 }
