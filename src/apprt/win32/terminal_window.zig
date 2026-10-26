@@ -4209,7 +4209,7 @@ pub const Surface = struct {
 
     /// What the keyboard and IME dispatch in `win32_input` needs from the
     /// surface.
-    const KeyTarget = struct {
+    pub const KeyTarget = struct {
         surface: *Surface,
 
         pub fn keyCallback(self: KeyTarget, event: input.KeyEvent) !CoreSurface.InputEffect {
