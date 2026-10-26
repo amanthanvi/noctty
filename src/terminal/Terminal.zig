@@ -196,6 +196,8 @@ pub const ScrollingRegion = struct {
 };
 
 pub const Options = struct {
+    /// The size of the terminal grid in cells. Both must be at least 1,
+    /// otherwise `init` returns `error.InvalidValue`.
     cols: size.CellCountInt,
     rows: size.CellCountInt,
     max_scrollback: usize = 10_000,
@@ -206,13 +208,30 @@ pub const Options = struct {
     default_modes: modespkg.ModePacked = .{},
 };
 
-/// Initialize a new terminal.
+/// Initialize a new terminal with the given options.
+///
+/// The returned terminal owns its memory. Call `deinit` with the same
+/// allocator when you are done with it.
+///
+/// ```zig
+/// var t: Terminal = try .init(alloc, .{ .cols = 80, .rows = 24 });
+/// defer t.deinit(alloc);
+/// ```
+///
+/// Returns `error.InvalidValue` if `cols` or `rows` is zero. This check
+/// happens before anything is allocated. If the size comes from an
+/// untrusted source, you can rely on this check instead of validating
+/// it yourself.
 pub fn init(
     alloc: Allocator,
     opts: Options,
 ) !Terminal {
     const cols = opts.cols;
     const rows = opts.rows;
+
+    // The screens and scrolling region need at least one row and column.
+    // Check this before allocating so there is nothing to clean up.
+    if (cols == 0 or rows == 0) return error.InvalidValue;
 
     var screen_set: ScreenSet = try .init(alloc, .{
         .cols = cols,
@@ -3187,6 +3206,19 @@ pub fn resize(
         .left = 0,
         .right = cols - 1,
     };
+}
+
+test "Terminal: init rejects zero dimensions" {
+    const alloc = testing.allocator;
+
+    try testing.expectError(error.InvalidValue, init(alloc, .{
+        .cols = 0,
+        .rows = 5,
+    }));
+    try testing.expectError(error.InvalidValue, init(alloc, .{
+        .cols = 10,
+        .rows = 0,
+    }));
 }
 
 /// Set the pwd for the terminal.
