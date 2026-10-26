@@ -156,12 +156,15 @@ that govern each symbol you change, or that none does.
   write pool in `termio/Exec.zig`, `ResizePseudoConsole`, in-box conhost
   versus the bundled `conpty.dll`/`OpenConsole.exe`
   (`scripts/stage-conpty-redist.ps1`), what ConPTY's buffer holds after a
-  resize, minimize, clear or undo, the Ctrl+C-ignore attribute hosted shells
-  inherit (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
+  resize, minimize, clear or undo and the column reflow that has to match it
+  (`Screen.resize`, `src/terminal/resize_replay.zig`), the Ctrl+C-ignore
+  attribute hosted shells inherit (`process_shared.enableGuiChildCtrlC` in
+  `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under
   `src/shell-integration/` (PowerShell `integration.ps1`, cmd/Clink, Git
   Bash's `ghostty.bash`) and their injection (`termio/shell_integration.zig`
-  argv analysis, `win32_powershell_install.zig`): the OSC 133 and OSC 7 marks
+  argv analysis, `windows_visual_studio.devShellPrelude`,
+  `win32_powershell_install.zig`): the OSC 133 and OSC 7 marks
   a shell emits, PSReadLine hooks, execution policy, keyboard-mode recovery at
   the prompt after a TUI leaves Kitty or modifyOtherKeys flags set
   (`CSI <99u`, `CSI >4;0m`).
@@ -180,17 +183,21 @@ that govern each symbol you change, or that none does.
   timers, synchronized output, vsync, `RenderPass` viewport, cursor sprites,
   search highlights after a resize, the IME preedit and composition caret in
   `rebuildCells` and `State.Preedit.layout`), the unfocused-split dim
-  (`split_dim`, `Host.syncSplitDim`), `win32/pixel_format.zig`, font fallback
-  and `font-thicken`, renderer wakeups from `termio` and typing latency,
-  repaint during live resize, and which DLLs a CLI action or the D3D11
-  backend loads (the OpenGL32 static import).
+  (`split_dim`, `Host.syncSplitDim`), `win32/pixel_format.zig`, Windows font
+  discovery (`src/font/discovery_windows.zig`: the registry scan, variable
+  `wght` bounds, bold matching), font fallback and `font-thicken`, renderer
+  wakeups from `termio` and typing latency, repaint during live resize, and
+  which DLLs a CLI action or the D3D11 backend loads (the OpenGL32 static
+  import).
 - [window-frame.md](docs/agents/log/window-frame.md): the top-level window:
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
   fullscreen and restore placement (the `maximize`/`fullscreen` keys at
-  window start: `Surface.applyWindowStart`), what a new window copies from
-  its source and which forwarded keys it keeps (`inheritWindowStateFrom`,
-  `WindowKeeps`), `WM_DPICHANGED` and mixed-DPI moves,
+  window start: `Surface.applyWindowStart`; what a session saves of a
+  fullscreen window: `sessionWindowPlacementOn`, `restoreSessionWindow`),
+  what a new window copies from its source and which forwarded keys it keeps
+  (`inheritWindowStateFrom`, `WindowKeeps`), `WM_DPICHANGED` and mixed-DPI
+  moves,
   `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
   window menu, the quick terminal (`win32_quick_terminal.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
@@ -232,8 +239,11 @@ that govern each symbol you change, or that none does.
   `src/config/windows_visual_studio.zig`; `win32_elevation.RelaunchProfile`),
   safe mode's
   `cmd.exe /D`, `CreateProcessW` name resolution, Git Bash discovery, WSL
-  (`wsl_env.zig`, terminfo probe, `TERM`), the terminfo install
-  (`win32_terminfo.zig`); path safety (`os.path.isNetworkOrDevicePath`,
+  (`wsl_env.zig`, the terminfo probe and its cache, `TERM`), the terminfo
+  install (`win32_terminfo.zig`), `noctty +list-profiles`
+  (`src/cli/list_profiles.zig`), what a log line may print of a command, an
+  argument, an environment value or a directory (`os/redact.zig`,
+  `Command.redacted()`); path safety (`os.path.isNetworkOrDevicePath`,
   `OBJ_DONT_REPARSE`) for every program-reported path before it is opened
   (OSC 7/9;9/1337 pwd, kitty graphics `t=f`/`t=t` files in
   `terminal/kitty/graphics_image.zig`); link and quick-select path detection
@@ -249,7 +259,8 @@ that govern each symbol you change, or that none does.
 - [settings.md](docs/agents/log/settings.md): the Settings window
   (`win32_settings.zig`, `win32_settings_fields.zig`): its controls and when
   they are made (`SettingsWindow.open`, `materializeSection`), dialog
-  manager, viewport, live preview, theming (`SettingsThemeAdapter`,
+  manager, viewport, live preview (`App.settings_preview`, `App.shownConfig`,
+  `App.shownBackgroundOpacity`), theming (`SettingsThemeAdapter`,
   `themeChanged`), its own UIA patterns, combo and open traces
   (`NOCTTY_SETTINGS_COMBO_TRACE`, `NOCTTY_SETTINGS_OPEN_TRACE`,
   `win32/bench_trace.zig`), the Default profile row
@@ -302,7 +313,8 @@ that govern each symbol you change, or that none does.
   claims about behaviour.
 - [test-harnesses.md](docs/agents/log/test-harnesses.md): writing or running
   `test/windows/` harnesses (hidden desktops, the foreground, sandboxes, the
-  interactive composite, the flagship contracts), CI test steps, the Zig test
+  interactive composite, the flagship contracts, the renderer parity harness
+  `test/windows/renderer/Invoke-RendererParity.ps1`), CI test steps, the Zig test
   runner's probe children and thread tests (`src/pty_transport_probe.zig`,
   `std.Progress.lockStdErr`, the search-thread tests in
   `src/terminal/search/Thread.zig`), PSReadLine history isolation

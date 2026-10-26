@@ -15,7 +15,10 @@
         "scripts/stage-conpty-redist.ps1",
         "src/apprt/win32.zig",
         "src/process_shared.zig",
-        "src/main_ghostty.zig"
+        "src/main_ghostty.zig",
+        "src/terminal/Screen.zig",
+        "src/terminal/resize_replay.zig",
+        "test/windows/interactive-win11-conpty-sync.ps1"
       ]
     },
     {
@@ -26,7 +29,8 @@
         "src/termio/shell_integration.zig",
         "src/apprt/win32_powershell_install.zig",
         "test/windows/*shell-integration*.ps1",
-        "test/windows/cmd-clink.*"
+        "test/windows/cmd-clink.*",
+        "src/config/windows_visual_studio.zig"
       ]
     },
     {
@@ -63,7 +67,8 @@
         "src/apprt/win32.zig",
         "src/apprt/win32_nc_layout.zig",
         "src/apprt/win32_quick_terminal.zig",
-        "src/apprt/win32/chrome_layout.zig"
+        "src/apprt/win32/chrome_layout.zig",
+        "src/apprt/win32_session_state.zig"
       ]
     },
     {
@@ -140,7 +145,8 @@
         "src/terminal/kitty/graphics_image.zig",
         "src/config/Config.zig",
         "src/config/windows_visual_studio.zig",
-        "src/apprt/win32_elevation.zig"
+        "src/apprt/win32_elevation.zig",
+        "src/cli/list_profiles.zig"
       ]
     },
     {
