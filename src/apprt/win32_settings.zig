@@ -4148,7 +4148,7 @@ pub const SettingsWindow = struct {
         if (self.search_query.active()) if (self.controlIndex(control)) |index| {
             if (index < settings_clipped_control_count and !self.searchFinds(index)) self.dropSearch();
         };
-        self.setActiveSection(section);
+        self.showSection(section, true);
         self.ensureControlVisible(control);
     }
 
@@ -4173,8 +4173,15 @@ pub const SettingsWindow = struct {
         self.killSearchAnnounce();
         self.showKeyboardCues();
         if (self.search_counts[@intFromEnum(self.active_section)] == 0) {
-            if (firstPageWithMatches(&self.search_counts)) |section| self.setActiveSection(section);
+            if (firstPageWithMatches(&self.search_counts)) |section| self.showSection(section, true);
+            // With `@modified` the counts were the last pass's; the switch
+            // found again, and the first page may have none now.
+            if (self.formItems().len == 0) if (firstPageWithMatches(&self.search_counts)) |section| {
+                if (section != self.active_section) self.showSection(section, true);
+            };
         }
+        // Nothing found after all: the focus stays in the field.
+        if (self.formItems().len == 0) return;
         for (self.formItems()) |item| {
             const control = self.controlHwnd(item.control_index) orelse continue;
             if (sys.IsWindowEnabled(control) == 0) continue;
@@ -4366,6 +4373,14 @@ pub const SettingsWindow = struct {
     /// Only the form and the header text repaint; the frame window does not.
     /// The first time a section is shown its rows are made here, hidden.
     fn setActiveSection(self: *SettingsWindow, next: Section) void {
+        self.showSection(next, false);
+    }
+
+    /// `setActiveSection`. With `focus_follows` the caller focuses a control
+    /// of the page next, so a focused row the search hides keeps the focus
+    /// until then rather than passing it through the search field: one focus
+    /// move, one announcement.
+    fn showSection(self: *SettingsWindow, next: Section, focus_follows: bool) void {
         const changed = self.active_section != next;
         self.materializeSection(next);
         self.active_section = next;
@@ -4385,7 +4400,7 @@ pub const SettingsWindow = struct {
         layoutChildren(self);
         self.applySectionVisibility();
         // A row of this page the search no longer finds may hold the focus.
-        if (self.search_query.active()) self.keepFocusShown();
+        if (self.search_query.active() and !focus_follows) self.keepFocusShown();
         if (self.hwnd) |hwnd| _ = RedrawWindow(hwnd, null, null, RDW_UPDATENOW | RDW_ALLCHILDREN);
         if (changed) {
             if (self.sectionProvider(next)) |provider| provider.raiseSelected();
@@ -5391,8 +5406,16 @@ pub const SettingsWindow = struct {
         // its quiet period.
         self.showRawScalarErrors(null);
         if (self.validation_control) |control| {
-            _ = sys.SetFocus(control);
-            self.ensureControlVisible(control);
+            // Save and close shows the field once its prompt has gone
+            // (`surfaceNextValidation`); otherwise a field another page or the
+            // search hides is shown before it takes the focus.
+            if (!self.close_prompt_visible) {
+                if (sys.IsWindowVisible(control) == 0) if (self.controlIndex(control)) |index| {
+                    if (self.controlSection(index)) |section| self.revealControl(section, control);
+                };
+                _ = sys.SetFocus(control);
+                self.ensureControlVisible(control);
+            }
             return;
         }
         // The check may merge a changed file into this window, so it runs on
@@ -5828,7 +5851,7 @@ pub const SettingsWindow = struct {
         // below lays out and paints once.
         if (self.search_query.active() and !self.searchFinds(settingControlIndex(field))) self.dropSearch();
         const section = self.settingDestination(field).section;
-        self.setActiveSection(section);
+        self.showSection(section, true);
         // Asked again: the section's rows may have been made just now.
         const destination = self.settingDestination(field);
         if (destination.hwnd) |control| {
@@ -11543,6 +11566,46 @@ test "settings the palette's jump to a field clears a search that hides it" {
     }.body);
 }
 
+test "settings Enter follows @modified as it is now, not as the counts last said" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            const search = settings.edit_search.?;
+            // Font size (Appearance) and Scrollback limit (Terminal) changed.
+            _ = sys.SetWindowTextW(settings.fields.edit_font_size.?, std.unicode.utf8ToUtf16LeStringLiteral("15"));
+            settings.setActiveSection(.terminal);
+            _ = sys.SetWindowTextW(settings.fields.edit_scrollback.?, std.unicode.utf8ToUtf16LeStringLiteral("5000"));
+            settings.setActiveSection(.privacy);
+            _ = SetFocus(search);
+            typeSearch(settings, "@modified");
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.appearance)]);
+            // Font size goes back to its default after the search ran: the
+            // counts still say Appearance.
+            settings.resetRow(settings.controlIndex(settings.fields.edit_font_size.?).?);
+            try std.testing.expectEqual(@as(u16, 1), settings.search_counts[@intFromEnum(Section.appearance)]);
+            // Enter finds Appearance empty when it gets there, and goes on to
+            // Terminal.
+            try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expectEqual(settings.fields.edit_scrollback.?, GetFocus().?);
+            // When nothing is left anywhere by the time Enter gets there, the
+            // focus stays in the field.
+            settings.setActiveSection(.privacy);
+            _ = SetFocus(search);
+            typeSearch(settings, "@modified font");
+            typeSearch(settings, "@modified");
+            try std.testing.expectEqual(@as(usize, 1), settings.search_total);
+            settings.resetRow(settings.controlIndex(settings.fields.edit_scrollback.?).?);
+            try std.testing.expect(settings.handleAccelerator(search, WM_KEYDOWN, VK_RETURN, 0));
+            try std.testing.expectEqual(Section.terminal, settings.active_section);
+            try std.testing.expectEqual(@as(usize, 0), settings.search_total);
+            try std.testing.expectEqual(search, GetFocus().?);
+        }
+    }.body);
+}
+
 test "settings a value Settings will not take is shown and focused through a search that hides it" {
     try dialog_test.onHiddenDesktop(struct {
         fn body() !void {
@@ -15024,6 +15087,10 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
     else
         colors.text;
     _ = SetTextColor(hdc, text_color);
+    // The label stops short of the marker's place, or of the count.
+    if (section) |value| if (settings.section_markers[@intFromEnum(value)] != .none) {
+        text_rect.right = @max(text_rect.left, sectionMarkerRect(settings, rect, .invalid).left - settings.px(settings_metrics.space_2));
+    };
     if (found) |count| if (count != 0) {
         var digits: [8:0]u16 = @splat(0);
         var digits_utf8: [8]u8 = undefined;
@@ -15034,7 +15101,6 @@ fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
         var measured = count_rect;
         _ = DrawTextW(hdc, &digits, @intCast(text.len), &measured, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
         _ = DrawTextW(hdc, &digits, @intCast(text.len), &count_rect, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
-        // The label stops short of the count.
         text_rect.right = @max(text_rect.left, count_rect.right - (measured.right - measured.left) - settings.px(settings_metrics.space_2));
     };
     if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);

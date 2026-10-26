@@ -1737,7 +1737,8 @@ all and on the page shown (or, on a page with none, how many the first page
 with matches has), and screen readers hear it as a polite live region once
 typing pauses. Enter in the field goes to the first setting found, on the
 page shown or else on the first page that has one; Escape in the field clears
-it (Escape in an empty field closes Settings as before). Rows the search hides
+it. Escape in an empty field, or while the close prompt is up, does what it
+does elsewhere in Settings: it asks to close, or is the prompt's Keep editing. Rows the search hides
 are out of the Tab order and the UI Automation tree. With `@modified`, the list
 is taken when the search runs: an edit, a reset, Discard changes or a reload
 leaves the rows where they are until the search changes or a page is shown
