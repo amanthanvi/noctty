@@ -43,6 +43,9 @@ reviews:
     - path: "src/apprt/win32*.zig"
       instructions: |
         Win32 UI fixes should preserve child HWND invalidation, split-pane focus tracking, and repaint coalescing semantics documented in the Self-Correction Log (docs/agents/log/, indexed by AGENTS.md). Flag stale paint, lifetime, and message-ordering regressions over stylistic nits.
+    - path: "src/apprt/win32/*.zig"
+      instructions: |
+        Win32 UI fixes should preserve child HWND invalidation, split-pane focus tracking, and repaint coalescing semantics documented in the Self-Correction Log (docs/agents/log/, indexed by AGENTS.md). Flag stale paint, lifetime, and message-ordering regressions over stylistic nits.
   tools:
     github-checks:
       enabled: true

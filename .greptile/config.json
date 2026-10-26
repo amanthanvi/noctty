@@ -15,7 +15,7 @@
     {
       "id": "win32-repaint-scope",
       "rule": "Win32 chrome or pane layout changes must explicitly invalidate affected child HWND or content regions; avoid full-window invalidation unless the repaint scope is truly unknown.",
-      "scope": ["src/apprt/win32*.zig"],
+      "scope": ["src/apprt/win32*.zig", "src/apprt/win32/*.zig"],
       "severity": "medium"
     },
     {
