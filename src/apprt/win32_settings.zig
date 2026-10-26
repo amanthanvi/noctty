@@ -208,7 +208,6 @@ const BTN_KEYBINDINGS_EDITOR: usize = displayFieldId("btn_keybindings_editor");
 const BTN_CONFLICT_KEEP: usize = 303;
 const BTN_CONFLICT_USE_DISK: usize = 304;
 const BTN_CLOSE_SAVE: usize = 305;
-const BTN_CLOSE_DISCARD: usize = 306;
 const BTN_DISCARD_CHANGES: usize = 307;
 // IsDialogMessageW maps Escape to the conventional cancel command ID
 // (IDCANCEL), including when focus is inside an EDIT or COMBO child. The
@@ -1117,7 +1116,6 @@ const settings_action_controls = [_]FormControl{
     .{ .role = .button, .name = "Keep mine", .binding = "btn_conflict_keep", .id = BTN_CONFLICT_KEEP },
     .{ .role = .button, .name = "Use disk", .binding = "btn_conflict_use_disk", .id = BTN_CONFLICT_USE_DISK },
     .{ .role = .button, .name = "Save and close", .binding = "btn_close_save", .id = BTN_CLOSE_SAVE },
-    .{ .role = .button, .name = "Discard changes", .binding = "btn_close_discard", .id = BTN_CLOSE_DISCARD },
     .{ .role = .button, .name = "Keep editing", .binding = "btn_close_keep_editing", .id = BTN_CLOSE_KEEP_EDITING },
     .{ .role = .button, .name = "Discard changes", .binding = "btn_discard_changes", .id = BTN_DISCARD_CHANGES },
 };
@@ -1212,10 +1210,11 @@ const row_menu_reset: usize = 1;
 /// Indices of the text providers: the header texts, then the field labels.
 const text_header_index = 0;
 const text_summary_index = 1;
+/// The status line, which also says the close prompt's question while the
+/// prompt is up: the two never show at once, so one window is enough.
 const text_status_index = 2;
-const text_close_prompt_index = 3;
-const text_help_index = 4;
-const text_first_label_index = 5;
+const text_help_index = 3;
+const text_first_label_index = 4;
 const settings_text_count = text_first_label_index + settings_label_specs.len;
 const background_blur_label = field_model.descriptor(.background_blur).nativeNames().?.caption.?;
 
@@ -1917,7 +1916,6 @@ pub const SettingsWindow = struct {
     btn_conflict_keep: ?HWND = null,
     btn_conflict_use_disk: ?HWND = null,
     btn_close_save: ?HWND = null,
-    btn_close_discard: ?HWND = null,
     btn_close_keep_editing: ?HWND = null,
     text_header: ?HWND = null,
     text_summary: ?HWND = null,
@@ -1936,7 +1934,10 @@ pub const SettingsWindow = struct {
     /// The status row the last layout applied (see `StatusRow`).
     status_row_separate: bool = false,
     status_row_height: i32 = 0,
-    text_close_prompt: ?HWND = null,
+    /// What the status line says when the close prompt does not hold its
+    /// window (`setStatus`); written back when the prompt goes.
+    status_line: [status_line_capacity]u8 = undefined,
+    status_line_len: usize = 0,
     text_help: ?HWND = null,
     field_labels: [settings_label_specs.len]?HWND = [_]?HWND{null} ** settings_label_specs.len,
     text_uia_prev_proc: ?*const anyopaque = null,
@@ -2230,9 +2231,7 @@ pub const SettingsWindow = struct {
         self.btn_conflict_keep = null;
         self.btn_conflict_use_disk = null;
         self.btn_close_save = null;
-        self.btn_close_discard = null;
         self.btn_close_keep_editing = null;
-        self.text_close_prompt = null;
         self.resetClosePromptState();
         self.quit_after_close = false;
         self.clearPending();
@@ -2393,12 +2392,12 @@ pub const SettingsWindow = struct {
             self.conflictCount() == 0 and
             self.hasPendingChanges();
         if (self.btn_save) |button| _ = sys.EnableWindow(button, @intFromBool(enabled));
-        if (self.btn_discard_changes) |button| {
+        if (self.btn_discard_changes) |button| if (!self.close_prompt_visible) {
             const discardable = self.hasPendingChanges();
             // Disabling the focused button would strand the keyboard on it.
             if (!discardable and GetFocus() == button) self.focusAfterConflictResolution();
             _ = sys.EnableWindow(button, @intFromBool(discardable));
-        }
+        };
         self.updateClosePromptActions();
         self.syncIdleStatus();
         self.syncFieldFrames();
@@ -3491,8 +3490,9 @@ pub const SettingsWindow = struct {
         if (self.btn_conflict_keep) |button| _ = ShowWindow(button, show);
         if (self.btn_conflict_use_disk) |button| _ = ShowWindow(button, show);
         if (show == SW_HIDE and conflict_button_focused) self.focusAfterConflictResolution();
-        // Discard takes the conflict buttons' place the rest of the time.
-        const discard_hidden = show != SW_HIDE or self.close_prompt_visible;
+        // Discard takes the conflict buttons' place the rest of the time, and
+        // is the prompt's own Discard while the prompt is up.
+        const discard_hidden = show != SW_HIDE and !self.close_prompt_visible;
         if (self.btn_discard_changes) |button| {
             const was_focused = focused == button;
             _ = ShowWindow(button, if (discard_hidden) SW_HIDE else SW_SHOWNORMAL);
@@ -3572,7 +3572,6 @@ pub const SettingsWindow = struct {
         self.text_header = null;
         self.text_summary = null;
         self.text_status = null;
-        self.text_close_prompt = null;
         self.text_help = null;
         self.field_labels = [_]?HWND{null} ** settings_label_specs.len;
         self.deleteUiFont();
@@ -3592,7 +3591,6 @@ pub const SettingsWindow = struct {
         self.btn_conflict_keep = null;
         self.btn_conflict_use_disk = null;
         self.btn_close_save = null;
-        self.btn_close_discard = null;
         self.btn_close_keep_editing = null;
         self.fields = std.mem.zeroes(FieldWindows);
         self.resetClosePromptState();
@@ -3640,7 +3638,6 @@ pub const SettingsWindow = struct {
             text_header_index => self.text_header,
             text_summary_index => self.text_summary,
             text_status_index => self.text_status,
-            text_close_prompt_index => self.text_close_prompt,
             text_help_index => self.text_help,
             else => if (index - text_first_label_index < self.field_labels.len) self.field_labels[index - text_first_label_index] else null,
         };
@@ -3681,7 +3678,7 @@ pub const SettingsWindow = struct {
     fn attachTextUiaProvider(self: *SettingsWindow, index: usize) void {
         const text = self.textHwnd(index) orelse return;
         const role: SettingsControlRole = switch (index) {
-            text_status_index, text_close_prompt_index => .live_text,
+            text_status_index => .live_text,
             else => .text,
         };
         const provider = win32_uia.SettingsControlProvider.create(std.heap.page_allocator, text, role, null) catch |err| {
@@ -4142,6 +4139,9 @@ pub const SettingsWindow = struct {
     /// A static text holds 2047 UTF-16 units, so the page is built in as many
     /// bytes.
     const help_text_bytes = 2047;
+    /// The longest status line kept across the close prompt: the longest
+    /// sentence names a file, which Save keeps within 230 characters.
+    const status_line_capacity = 1024;
 
     /// The text above the form: Keybindings and Advanced have one.
     fn helpText(self: *const SettingsWindow, buf: *[help_text_bytes]u8) []const u8 {
@@ -4188,6 +4188,10 @@ pub const SettingsWindow = struct {
 
     fn setStatus(self: *SettingsWindow, text: []const u8) void {
         const status = self.text_status orelse return;
+        self.rememberStatusLine(text);
+        // The prompt's question holds the window; the line comes back with
+        // everything that changed meanwhile when the prompt goes.
+        if (self.close_prompt_visible) return;
         if (!setWindowTextUtf8IfChanged(status, text)) return;
         self.status_measure_width = -1;
         if (self.statusAnnounces()) self.announceText(text_status_index);
@@ -4198,6 +4202,23 @@ pub const SettingsWindow = struct {
             layoutChildren(self);
             if (GetFocus()) |focused| self.ensureControlVisible(focused);
         }
+    }
+
+    fn rememberStatusLine(self: *SettingsWindow, text: []const u8) void {
+        var len = @min(text.len, self.status_line.len);
+        // Never cut a UTF-8 sequence in two.
+        while (len < text.len and len > 0 and (text[len] & 0xC0) == 0x80) len -= 1;
+        @memcpy(self.status_line[0..len], text[0..len]);
+        self.status_line_len = len;
+    }
+
+    /// Put the status line back in its window after the close prompt, in its
+    /// own font.
+    fn restoreStatusLine(self: *SettingsWindow) void {
+        const status = self.text_status orelse return;
+        self.syncStatusFont();
+        setWindowTextUtf8(status, self.status_line[0..self.status_line_len]);
+        self.status_measure_width = -1;
     }
 
     /// Whether the line now says something a screen reader should speak: an
@@ -4290,7 +4311,6 @@ pub const SettingsWindow = struct {
         for (0..settings_clipped_control_count) |index| if (controlIndexIsCheckbox(index)) {
             if (self.controlHwnd(index)) |control| _ = SendMessageW(control, WM_SETFONT, @intFromPtr(self.secondary_font), 1);
         };
-        if (self.text_close_prompt) |prompt| _ = SendMessageW(prompt, WM_SETFONT, @intFromPtr(self.emphasis_font), 1);
         self.syncStatusFont();
         self.refreshFieldFrames();
         self.updateComboMetrics();
@@ -4321,6 +4341,8 @@ pub const SettingsWindow = struct {
     }
 
     fn statusFont(self: *const SettingsWindow) HGDIOBJ {
+        // The close prompt's question, in the window it shares with the line.
+        if (self.close_prompt_visible) return self.emphasis_font;
         return switch (self.nextStatus()) {
             .conflict, .owned_conflict => self.emphasis_font,
             .raw_validation, .owned_validation, .none => self.secondary_font,
@@ -4996,13 +5018,17 @@ pub const SettingsWindow = struct {
             // typing there; restore focus only when the prompt owned it.
             const focused = sys.GetFocus();
             const restore_focus = focused != null and (focused == self.btn_close_save or
-                focused == self.btn_close_discard or focused == self.btn_close_keep_editing);
+                focused == self.btn_discard_changes or focused == self.btn_close_keep_editing);
             self.dismissPrompt(false, restore_focus);
             return;
         }
         const actions = closePromptActions(self.close_prompt_visible, self.close_posted);
         if (self.btn_close_save) |button| _ = sys.EnableWindow(button, @intFromBool(actions.save and !self.discard_prompt));
-        if (self.btn_close_discard) |button| _ = sys.EnableWindow(button, @intFromBool(actions.discard));
+        // The bar's Discard is the prompt's while the prompt is up; the rest of
+        // the time `updateSaveEnabled` decides it.
+        if (self.close_prompt_visible) if (self.btn_discard_changes) |button| {
+            _ = sys.EnableWindow(button, @intFromBool(actions.discard));
+        };
         if (self.btn_close_keep_editing) |button| {
             _ = sys.EnableWindow(button, @intFromBool(actions.keep_editing));
         }
@@ -5021,12 +5047,22 @@ pub const SettingsWindow = struct {
     }
 
     fn syncClosePromptText(self: *SettingsWindow, announce: bool) void {
-        const text = self.text_close_prompt orelse return;
+        const text = self.text_status orelse return;
         var buffer: [128]u8 = undefined;
+        self.syncStatusFont();
         setWindowTextUtf8(text, self.promptText(&buffer));
         self.discard_prompt_count = self.pendingFieldCount();
         self.close_prompt_measure_height = 0;
-        if (announce) self.announceText(text_close_prompt_index);
+        if (announce) self.announceText(text_status_index);
+    }
+
+    /// Where the one "Discard changes" button sits in z-order, which is the
+    /// order Tab and the arrows take: after "Use disk" in the bar, after
+    /// "Save and close" in the prompt.
+    fn placeDiscardButton(self: *SettingsWindow) void {
+        const button = self.btn_discard_changes orelse return;
+        const after = (if (self.close_prompt_visible) self.btn_close_save else self.btn_conflict_use_disk) orelse return;
+        _ = SetWindowPos(button, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     fn showClosePrompt(self: *SettingsWindow) void {
@@ -5041,14 +5077,12 @@ pub const SettingsWindow = struct {
         if (!self.close_prompt_visible) self.close_prior_focus = sys.GetFocus();
         self.close_prompt_visible = true;
         self.discard_prompt = discard;
-        if (self.text_status) |text| _ = sys.ShowWindow(text, SW_HIDE);
         if (self.btn_conflict_keep) |button| _ = sys.ShowWindow(button, SW_HIDE);
         if (self.btn_conflict_use_disk) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.btn_discard_changes) |button| _ = sys.ShowWindow(button, SW_HIDE);
         if (self.btn_save) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.text_close_prompt) |text| _ = sys.ShowWindow(text, SW_SHOWNORMAL);
         if (self.btn_close_save) |button| _ = sys.ShowWindow(button, if (discard) SW_HIDE else SW_SHOWNORMAL);
-        if (self.btn_close_discard) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
+        self.placeDiscardButton();
+        if (self.btn_discard_changes) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
         if (self.btn_close_keep_editing) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
         self.syncClosePromptText(true);
         self.updateClosePromptActions();
@@ -5095,11 +5129,10 @@ pub const SettingsWindow = struct {
         self.discard_prompt = false;
         self.close_after_save = false;
         self.close_prior_focus = null;
-        if (self.text_close_prompt) |text| _ = ShowWindow(text, SW_HIDE);
         if (self.btn_close_save) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.btn_close_discard) |button| _ = ShowWindow(button, SW_HIDE);
         if (self.btn_close_keep_editing) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.text_status) |text| _ = ShowWindow(text, SW_SHOWNORMAL);
+        self.placeDiscardButton();
+        self.restoreStatusLine();
         if (self.btn_save) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
         _ = self.syncConflictControls();
         self.updateSaveEnabled();
@@ -5548,7 +5581,7 @@ pub const SettingsWindow = struct {
         self.text_header = self.finishChild(makeStatic(hwnd, hinstance, self.active_section.headerText(), WS_VISIBLE | WS_GROUP), self.header_font, .control);
         self.text_summary = self.finishChild(makeStatic(hwnd, hinstance, self.active_section.placeholderText(), WS_VISIBLE), self.secondary_font, .control);
         self.text_status = self.finishChild(makeStatic(hwnd, hinstance, status_text, WS_VISIBLE), self.statusFont(), .control);
-        self.text_close_prompt = self.finishChild(makeStatic(hwnd, hinstance, "Save changes before closing?", 0), self.emphasis_font, .control);
+        self.rememberStatusLine(status_text);
 
         // Left-rail section buttons. Clicks arrive via WM_COMMAND on
         // the parent; the id maps back to a `Section` via
@@ -5619,7 +5652,6 @@ pub const SettingsWindow = struct {
         self.btn_discard_changes = self.finishChild(makePushButton(hwnd, hinstance, discard_label, BTN_DISCARD_CHANGES, 128, WS_VISIBLE), self.ui_font, .control);
         self.btn_save = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Save"), BTN_SAVE, 96, WS_VISIBLE), self.ui_font, .control);
         self.btn_close_save = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Save and close"), BTN_CLOSE_SAVE, 120, 0), self.ui_font, .control);
-        self.btn_close_discard = self.finishChild(makePushButton(hwnd, hinstance, discard_label, BTN_CLOSE_DISCARD, 128, 0), self.ui_font, .control);
         self.btn_close_keep_editing = self.finishChild(makePushButton(hwnd, hinstance, std.unicode.utf8ToUtf16LeStringLiteral("Keep editing"), BTN_CLOSE_KEEP_EDITING, 112, 0), self.ui_font, .control);
         stamps.mark(.create_actions);
 
@@ -7057,10 +7089,12 @@ test "settings open and a first visit create each window once in its final form"
                 std.debug.print("settings open: {d} windows, {d} messages to them\n", .{ tree.len, totals.messages });
                 Work.print(&tree);
             }
-            // The frame, its 19 children (one is the viewport), and in the
+            // The frame, its 17 children (one is the viewport), and in the
             // viewport the help text and Appearance's 11 fields and 9 labels.
             // The other sections' 31 rows are made when they are first shown.
-            try std.testing.expectEqual(@as(usize, 41), tree.len);
+            // The status line also carries the close prompt's question, and one
+            // "Discard changes" serves the bar and the prompt.
+            try std.testing.expectEqual(@as(usize, 39), tree.len);
             for (tree.slice()) |hwnd| {
                 const counts = Work.of(hwnd);
                 try std.testing.expectEqual(@as(u16, 1), counts.created);
@@ -7124,7 +7158,7 @@ test "settings open and a first visit create each window once in its final form"
             try std.testing.expectEqual(@as(usize, 0), Work.created().len);
             // Every section shown: the whole form, and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 74), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 72), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -7192,7 +7226,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 74), states[0].len);
+            try std.testing.expectEqual(@as(usize, 72), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -7708,11 +7742,11 @@ test "settings status and close prompt are live regions" {
             dialog_test.makeAllSections(settings);
             const Role = win32_uia.SettingsControlProvider.Role;
 
+            // The status line, which also says the close prompt's question.
             try std.testing.expectEqual(Role.live_text, settings.text_uia_providers[text_status_index].?.role);
-            try std.testing.expectEqual(Role.live_text, settings.text_uia_providers[text_close_prompt_index].?.role);
             // Everything else read aloud on request stays ordinary text.
             for (0..settings_text_count) |index| {
-                if (index == text_status_index or index == text_close_prompt_index) continue;
+                if (index == text_status_index) continue;
                 const provider = settings.text_uia_providers[index] orelse continue;
                 try std.testing.expectEqual(Role.text, provider.role);
             }
@@ -7956,7 +7990,7 @@ test "SET Discard asks before losing edits and supports keyboard cancellation" {
             try std.testing.expect(settings.close_prompt_visible);
             try std.testing.expectEqual(@as(f64, 0.5), fixture.config.@"background-opacity");
             var text_buf: [128]u8 = undefined;
-            try std.testing.expectEqualStrings("Discard unsaved changes to 1 field?", readEditUtf8(settings.text_close_prompt.?, &text_buf).?);
+            try std.testing.expectEqualStrings("Discard unsaved changes to 1 field?", readEditUtf8(settings.text_status.?, &text_buf).?);
             try std.testing.expect(sys.IsWindowVisible(settings.btn_close_save.?) == 0);
             try std.testing.expectEqual(settings.btn_close_keep_editing.?, sys.GetFocus().?);
             try std.testing.expect(fixture.pumpKey(0x1B));
@@ -7984,7 +8018,7 @@ test "SET UI Automation can request and accept Discard without closing Settings"
             // The hidden Save and close action cannot turn Discard into a save.
             settings.saveAndClose();
             try std.testing.expectEqual(@as(u32, 0), fixture.saved);
-            const accept = &settings.control_uia_providers[settings.controlIndex(settings.btn_close_discard.?).?].?.invoke_iface;
+            const accept = &settings.control_uia_providers[settings.controlIndex(settings.btn_discard_changes.?).?].?.invoke_iface;
             try std.testing.expectEqual(@as(HRESULT, 0), accept.vtbl.Invoke(accept));
             dialog_test.pump();
             try std.testing.expect(!settings.hasPendingChanges());
@@ -8117,7 +8151,7 @@ test "SET close and quit switch the Discard prompt in place and preserve cancell
             try std.testing.expect(!settings.discard_prompt);
             try std.testing.expect(settings.close_prompt_visible);
             try std.testing.expectEqual(@as(usize, 1), events.testing_live_regions);
-            try std.testing.expectEqualStrings(closePromptText(false), readEditUtf8(settings.text_close_prompt.?, &buffer).?);
+            try std.testing.expectEqualStrings(closePromptText(false), readEditUtf8(settings.text_status.?, &buffer).?);
             try std.testing.expect(sys.IsWindowVisible(settings.btn_close_save.?) != 0);
             try std.testing.expect(fixture.pumpKey(0x1B));
             try std.testing.expectEqual(settings.btn_discard_changes.?, sys.GetFocus().?);
@@ -8126,7 +8160,7 @@ test "SET close and quit switch the Discard prompt in place and preserve cancell
             try std.testing.expect(settings.holdQuitForUnsavedChanges());
             try std.testing.expect(!settings.discard_prompt);
             try std.testing.expectEqual(@as(usize, 1), events.testing_live_regions);
-            try std.testing.expectEqualStrings(closePromptText(true), readEditUtf8(settings.text_close_prompt.?, &buffer).?);
+            try std.testing.expectEqualStrings(closePromptText(true), readEditUtf8(settings.text_status.?, &buffer).?);
             try std.testing.expect(fixture.pumpKey(0x1B));
             try std.testing.expect(!settings.takeQuitAfterClose());
             try std.testing.expect(settings.hasPendingChanges());
@@ -8229,8 +8263,8 @@ test "settings Discard changes throws the draft away and keeps the window" {
             _ = sys.SendMessageW(discard, BM_CLICK, 0, 0);
             try std.testing.expect(settings.hasPendingChanges());
             var prompt_buf: [128]u8 = undefined;
-            try std.testing.expectEqualStrings("Discard unsaved changes to 3 fields?", readEditUtf8(settings.text_close_prompt.?, &prompt_buf).?);
-            _ = sys.SetFocus(settings.btn_close_discard.?);
+            try std.testing.expectEqualStrings("Discard unsaved changes to 3 fields?", readEditUtf8(settings.text_status.?, &prompt_buf).?);
+            _ = sys.SetFocus(settings.btn_discard_changes.?);
             try std.testing.expect(fixture.pumpKey(0x0D));
 
             // Everything is back to what is saved, the window is open, and the
@@ -8276,11 +8310,17 @@ test "settings Discard changes gives way to the conflict choices and to the clos
             settings.syncCombo(.cursor_style);
             try std.testing.expect(sys.IsWindowVisible(discard) != 0);
 
-            // The close prompt hides it with Save and brings it back with Save.
+            // The close prompt keeps it as the prompt's own Discard, after
+            // "Save and close" where Tab reaches it, and gives it back to the
+            // bar, before Save, when it goes.
+            const GW_HWNDNEXT: UINT = 2;
             settings.showClosePrompt();
-            try std.testing.expect(sys.IsWindowVisible(discard) == 0);
+            try std.testing.expect(sys.IsWindowVisible(discard) != 0);
+            try std.testing.expect(sys.IsWindowVisible(settings.btn_save.?) == 0);
+            try std.testing.expectEqual(discard, sys.GetWindow(settings.btn_close_save.?, GW_HWNDNEXT).?);
             settings.cancelClosePrompt();
             try std.testing.expect(sys.IsWindowVisible(discard) != 0);
+            try std.testing.expectEqual(discard, sys.GetWindow(settings.btn_conflict_use_disk.?, GW_HWNDNEXT).?);
 
             // A disk change to the same setting is a conflict: Keep mine and
             // Use disk take the row, and Discard does not share it.
@@ -9076,8 +9116,8 @@ fn ChildPlacements(comptime capacity: usize) type {
     };
 }
 
-/// Rail buttons, header, summary, viewport, status, prompt, seven action buttons.
-const settings_frame_child_count = section_count + 12;
+/// Rail buttons, header, summary, viewport, status, six action buttons.
+const settings_frame_child_count = section_count + 10;
 /// Every label, field and Reset button of the largest section, and the help text.
 const settings_form_child_count = settings_max_form_items * 3 + 1;
 
@@ -9199,23 +9239,26 @@ fn layoutChildren(self: *SettingsWindow) void {
     const action_gap = self.px(settings_action_gap);
     const normal_actions = action_bar.normal_actions;
     frame.add(self.btn_save, pane_left + normal_actions.save_x, row_top + normal_actions.save_y, normal_actions.save_width, normal_actions.button_height);
-    frame.add(self.btn_discard_changes, pane_left + normal_actions.discard_x, row_top + normal_actions.save_y, normal_actions.discard_width, normal_actions.button_height);
     frame.add(self.btn_conflict_keep, pane_left + normal_actions.keep_mine_x, row_top + normal_actions.keep_mine_y, normal_actions.keep_mine_width, normal_actions.button_height);
     frame.add(self.btn_conflict_use_disk, pane_left + normal_actions.use_disk_x, row_top + normal_actions.use_disk_y, normal_actions.use_disk_width, normal_actions.button_height);
-    if (action_bar.status_separate) {
-        frame.addText(self.text_status, pane_left, action_bar_top + action_bar.status_top, column_width, action_bar.status_height);
+    const close_actions = action_bar.actions;
+    const close_top = action_bar_top + action_bar.actions_top;
+    if (self.close_prompt_visible) {
+        // The prompt's question, in the status line's window.
+        const prompt_width = if (close_actions.stacked) column_width else @max(0, close_actions.first_x - action_gap);
+        frame.addText(self.text_status, pane_left, action_bar_top + action_bar.prompt_top, prompt_width, action_bar.prompt_height);
+        frame.add(self.btn_discard_changes, pane_left + close_actions.second_x, close_top + close_actions.second_y, close_actions.second_width, close_actions.button_height);
     } else {
-        frame.addText(self.text_status, pane_left, row_top + self.px(6), @max(0, normal_actions.status_right), self.px(20));
+        if (action_bar.status_separate) {
+            frame.addText(self.text_status, pane_left, action_bar_top + action_bar.status_top, column_width, action_bar.status_height);
+        } else {
+            frame.addText(self.text_status, pane_left, row_top + self.px(6), @max(0, normal_actions.status_right), self.px(20));
+        }
+        frame.add(self.btn_discard_changes, pane_left + normal_actions.discard_x, row_top + normal_actions.save_y, normal_actions.discard_width, normal_actions.button_height);
     }
     self.status_row_separate = action_bar.status_separate;
     self.status_row_height = action_bar.status_height;
-
-    const close_actions = action_bar.actions;
-    const close_top = action_bar_top + action_bar.actions_top;
-    const prompt_width = if (close_actions.stacked) column_width else @max(0, close_actions.first_x - action_gap);
-    frame.addText(self.text_close_prompt, pane_left, action_bar_top + action_bar.prompt_top, prompt_width, action_bar.prompt_height);
     frame.add(self.btn_close_save, pane_left + close_actions.first_x, close_top, close_actions.first_width, close_actions.button_height);
-    frame.add(self.btn_close_discard, pane_left + close_actions.second_x, close_top + close_actions.second_y, close_actions.second_width, close_actions.button_height);
     frame.add(self.btn_close_keep_editing, pane_left + close_actions.third_x, close_top + close_actions.third_y, close_actions.third_width, close_actions.button_height);
 
     const frame_batched = frame.apply();
@@ -10499,7 +10542,7 @@ test "settings arrow-key groups stop at the rail and the action bar" {
 
             // The close prompt's three buttons are the same run.
             settings.showClosePrompt();
-            const prompt = [_]HWND{ settings.btn_close_save.?, settings.btn_close_discard.?, settings.btn_close_keep_editing.? };
+            const prompt = [_]HWND{ settings.btn_close_save.?, settings.btn_discard_changes.?, settings.btn_close_keep_editing.? };
             for (prompt, 0..) |button, index| {
                 try std.testing.expect(sys.IsWindowVisible(button) != 0 and sys.IsWindowEnabled(button) != 0);
                 _ = sys.SetFocus(button);
@@ -10711,10 +10754,9 @@ test "settings fields, labels and help live in a viewport that clips them" {
             for (settings.field_labels) |label| try std.testing.expectEqual(viewport, sys.GetParent(label.?).?);
             try std.testing.expectEqual(viewport, sys.GetParent(settings.text_help.?).?);
             for ([_]?HWND{
-                settings.text_header,            settings.text_summary,   settings.text_status,
-                settings.text_close_prompt,      settings.btn_save,       settings.btn_conflict_keep,
-                settings.btn_conflict_use_disk,  settings.btn_close_save, settings.btn_close_discard,
-                settings.btn_close_keep_editing,
+                settings.text_header,    settings.text_summary,        settings.text_status,
+                settings.btn_save,       settings.btn_conflict_keep,   settings.btn_conflict_use_disk,
+                settings.btn_close_save, settings.btn_discard_changes, settings.btn_close_keep_editing,
             }) |child| try std.testing.expectEqual(hwnd, sys.GetParent(child.?).?);
             // The UIA subclasses find the window through the control's parent.
             for (0..settings_control_count) |index| {
@@ -14098,6 +14140,8 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                         colors.disabled_text
                     else if (edit_like)
                         colors.edit_text
+                    else if (control == o.text_status and o.close_prompt_visible)
+                        colors.text
                     else if (control == o.text_status)
                         switch (o.nextStatus()) {
                             .raw_validation, .owned_validation => colors.error_text,
@@ -14262,15 +14306,11 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 return 0;
             }
             if (clickedButton(id, notify, BTN_DISCARD_CHANGES)) {
-                if (owner) |o| o.discardChanges();
+                if (owner) |o| if (o.close_prompt_visible) o.discardAndClose() else o.discardChanges();
                 return 0;
             }
             if (clickedButton(id, notify, BTN_CLOSE_SAVE)) {
                 if (owner) |o| o.saveAndClose();
-                return 0;
-            }
-            if (clickedButton(id, notify, BTN_CLOSE_DISCARD)) {
-                if (owner) |o| o.discardAndClose();
                 return 0;
             }
             if (id == BTN_CONFLICT_KEEP and notify == BN_CLICKED) {

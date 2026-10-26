@@ -6390,7 +6390,7 @@ test "PKG-39 a Windows light/dark switch leaves an unsaved Settings preview a dr
 
             // Discard takes the preview back.
             _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);
-            _ = sys.SendMessageW(settings.btn_close_discard.?, bm_click, 0, 0);
+            _ = sys.SendMessageW(settings.btn_discard_changes.?, bm_click, 0, 0);
             try std.testing.expect(!settings.hasPendingChanges());
             try std.testing.expect(app.settings_preview == null);
             if (!isHighContrastActive()) try std.testing.expect(app.resolved_theme.is_dark);
