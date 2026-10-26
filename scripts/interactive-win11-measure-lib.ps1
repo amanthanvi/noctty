@@ -114,7 +114,7 @@ function Assert-InteractiveWin11MeasureOriginal {
     if ((Get-InteractiveWin11MeasureHead $Layout.Repo) -cne $Head) { throw 'Measurement HEAD changed; preserve this tree and use a fresh task directory.' }
     $status = Invoke-InteractiveWin11MeasureGit $Layout.Repo @('status', '--porcelain=v1', '--untracked-files=all')
     if ($status.Length -ne 0) { throw 'Measurement provenance requires a clean checkout at HEAD (including untracked files).' }
-    foreach ($relativePath in @('src/apprt/win32_aumid.zig', 'src/apprt/win32.zig')) {
+    foreach ($relativePath in @('src/apprt/win32_aumid.zig', 'src/apprt/win32/app.zig')) {
         $originalPath = Join-Path $Layout.Repo $relativePath
         Assert-InteractiveWin11MeasurePlainPath $originalPath
         $original = [IO.File]::ReadAllBytes($originalPath)
@@ -217,7 +217,7 @@ function Assert-InteractiveWin11MeasureSource {
             if (-not $remaining.Remove($path)) { throw "Missing measurement source file: $($entry.FullName)" }
             $entryStream = $entry.Open()
             try {
-                if ($entry.FullName -ceq 'src/apprt/win32_aumid.zig' -or $entry.FullName -ceq 'src/apprt/win32.zig') {
+                if ($entry.FullName -ceq 'src/apprt/win32_aumid.zig' -or $entry.FullName -ceq 'src/apprt/win32/app.zig') {
                     $bytes = [IO.MemoryStream]::new()
                     try { $entryStream.CopyTo($bytes); $wanted = $bytes.ToArray() }
                     finally { $bytes.Dispose() }
@@ -332,7 +332,7 @@ function Invoke-InteractiveWin11MeasureBuild {
             $original = [IO.File]::ReadAllBytes($sourcePath)
             $patched = Get-InteractiveWin11MeasurePatchedBytes $original
             [IO.File]::WriteAllBytes($sourcePath, $patched)
-            $notifierPath = Join-Path $layout.Source 'src\apprt\win32.zig'
+            $notifierPath = Join-Path $layout.Source 'src\apprt\win32\app.zig'
             $originalNotifier = [IO.File]::ReadAllBytes($notifierPath)
             Assert-InteractiveWin11MeasureProductNotifierSource $originalNotifier
             $sourceReceipt = [ordered]@{

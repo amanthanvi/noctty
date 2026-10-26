@@ -181,8 +181,8 @@ $win10Contracts = @(
         Description = 'the Windows 10 workflow runs on the Server 2022 image, the only hosted one below build 22000'
     }
     @{
-        File = (Join-Path $repoRoot 'src/apprt/win32.zig')
-        Content = { Get-Content -LiteralPath (Join-Path $repoRoot 'src/apprt/win32.zig') -Raw }
+        File = (Join-Path $repoRoot 'src/apprt/win32/app.zig')
+        Content = { Get-Content -LiteralPath (Join-Path $repoRoot 'src/apprt/win32/app.zig') -Raw }
         Pattern = 'log\.info\("win32 os_build=\{d\} integrated_titlebar=\{\}"'
         Kind = 'Text'
         Description = 'the startup log format still matches the workflow and checklist evidence reader'

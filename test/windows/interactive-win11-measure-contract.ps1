@@ -30,7 +30,7 @@ Test-MultipleGitCandidates
 $liveHead = Get-InteractiveWin11MeasureHead $libraryRepo
 $liveOriginal = Invoke-InteractiveWin11MeasureGit $libraryRepo @('show', "${liveHead}:src/apprt/win32_aumid.zig")
 [void] (Get-InteractiveWin11MeasurePatchedBytes $liveOriginal)
-$liveNotifier = Invoke-InteractiveWin11MeasureGit $libraryRepo @('show', "${liveHead}:src/apprt/win32.zig")
+$liveNotifier = Invoke-InteractiveWin11MeasureGit $libraryRepo @('show', "${liveHead}:src/apprt/win32/app.zig")
 Assert-InteractiveWin11MeasureProductNotifierSource $liveNotifier
 $liveTransport = [Text.Encoding]::UTF8.GetString((Invoke-InteractiveWin11MeasureGit $libraryRepo @('show', "${liveHead}:src/apprt/win32_toast_winrt.zig")))
 foreach ($anchor in @('fns.create_string(aumid.ptr, aumid_len, &aumid_hs)', 'factory.vtbl.CreateToastNotifierWithId(factory.asRaw(), aumid_hs.?, &notifier_raw)')) {
@@ -41,7 +41,7 @@ $fixtureRoot = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $script:measureContractHead = '1234567890123456789012345678901234567890'
 $layout = Get-InteractiveWin11MeasureLayout $fixtureRoot -Head $script:measureContractHead
 [void] [IO.Directory]::CreateDirectory($layout.Root)
-[void] [IO.Directory]::CreateDirectory((Join-Path $fixtureRoot 'src\apprt'))
+[void] [IO.Directory]::CreateDirectory((Join-Path $fixtureRoot 'src\apprt\win32'))
 $script:measureContractDirty = $false
 $script:measureContractOriginal = [Text.Encoding]::UTF8.GetBytes(@'
 const std = @import("std");
@@ -55,17 +55,17 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator, portable: bool) void {
 $originalPath = Join-Path $fixtureRoot 'src\apprt\win32_aumid.zig'
 [IO.File]::WriteAllBytes($originalPath, $script:measureContractOriginal)
 $script:measureContractNotifier = [Text.Encoding]::UTF8.GetBytes('const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");' + "`n" + 'win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16)' + "`n")
-$originalNotifierPath = Join-Path $fixtureRoot 'src\apprt\win32.zig'
+$originalNotifierPath = Join-Path $fixtureRoot 'src\apprt\win32\app.zig'
 [IO.File]::WriteAllBytes($originalNotifierPath, $script:measureContractNotifier)
 $archiveStream = New-Object IO.MemoryStream
 $zip = New-Object IO.Compression.ZipArchive($archiveStream, [IO.Compression.ZipArchiveMode]::Create, $true)
-foreach ($name in @('src/apprt/win32_aumid.zig', 'src/apprt/win32.zig', 'build.zig')) {
+foreach ($name in @('src/apprt/win32_aumid.zig', 'src/apprt/win32/app.zig', 'build.zig')) {
     $entry = $zip.CreateEntry($name)
     $entryStream = $entry.Open()
     try {
         $content = switch ($name) {
             'build.zig' { [Text.Encoding]::UTF8.GetBytes('// synthetic build input') }
-            'src/apprt/win32.zig' { $script:measureContractNotifier }
+            'src/apprt/win32/app.zig' { $script:measureContractNotifier }
             default { $script:measureContractOriginal }
         }
         $entryStream.Write($content, 0, $content.Length)
@@ -85,7 +85,7 @@ if ([regex]::Matches($patchedText, 'io\.github\.amanthanvi\.noctty\.measure').Co
 }
 $measuredSourcePath = Join-Path $layout.Source 'src\apprt\win32_aumid.zig'
 [IO.File]::WriteAllBytes($measuredSourcePath, $patched)
-$measuredNotifierPath = Join-Path $layout.Source 'src\apprt\win32.zig'
+$measuredNotifierPath = Join-Path $layout.Source 'src\apprt\win32\app.zig'
 Assert-InteractiveWin11MeasureProductNotifierSource $script:measureContractNotifier
 $sourceReceipt = [ordered]@{
     Schema = 2; Head = $script:measureContractHead; Patch = 'aumid-isolate-product-toast-v2'
@@ -132,7 +132,7 @@ function Invoke-InteractiveWin11MeasureGit {
             return ,[byte[]]@()
         }
         'show' {
-            if ($Arguments[1].EndsWith(':src/apprt/win32.zig')) { return ,$script:measureContractNotifier }
+            if ($Arguments[1].EndsWith(':src/apprt/win32/app.zig')) { return ,$script:measureContractNotifier }
             return ,$script:measureContractOriginal
         }
         'archive' { return ,$script:measureContractArchive }
