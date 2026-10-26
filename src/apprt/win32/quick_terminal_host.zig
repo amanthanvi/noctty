@@ -40,17 +40,6 @@ const win32_tween = runtime.win32_tween;
 
 pub const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
 
-/// The quick terminal is its host window, whatever tabs and splits it
-/// holds. Surfaces carry no flag of their own: one opened inside it later
-/// is as much the quick terminal as the pane it was created with, and
-/// that pane closing leaves it where it is.
-pub fn quickTerminalHost(self: *App) ?*Host {
-    for (self.hosts.items) |host| {
-        if (host.quick_terminal) return host;
-    }
-    return null;
-}
-
 pub fn hideQuickTerminalHost(host: *Host) void {
     host.cancelQuickTerminalAnimation();
     host.setVisible(false);
@@ -96,7 +85,7 @@ pub fn toggleQuickTerminal(self: *App) !void {
         std.log.warn("quick-terminal-keyboard-interactivity=exclusive maps to focused input on Win32; global keyboard capture is unsupported", .{});
     }
 
-    if (self.quickTerminalHost()) |host| {
+    if (self.registry.quickTerminalHost()) |host| {
         // The quick terminal is its host window, an outer frame around
         // child GL surfaces. Visibility + geometry apply to the HOST
         // hwnd: using a child hwnd would leave an empty host window on
@@ -453,7 +442,7 @@ test "win32 toggle_quick_terminal follows its host after the first pane is gone"
             try std.testing.expect(fixture.surface.window_visible);
             // A second quick terminal was never made.
             try std.testing.expectEqual(@as(usize, 0), QuickTerminalCreateCounter.calls);
-            try std.testing.expectEqual(@as(usize, 1), fixture.app.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 1), fixture.app.registry.hosts.items.len);
         }
     }.body);
 }
@@ -471,7 +460,7 @@ pub const QuickTerminalFreshTab = struct {
         const surface = &fixture.fresh;
         var prepared = (try app.prepareShellSurfaceCreate(&fixture.host, opts)).?;
         defer prepared.deinit();
-        try app.windows.append(app.core_app.alloc, surface);
+        try app.registry.addWindow(app.core_app.alloc, surface);
         try fixture.host.tabs.insert(
             app.core_app.alloc,
             0,
@@ -689,7 +678,7 @@ test "win32 toggle_visibility does not show a quick terminal the user dismissed"
             // An ordinary window beside it. Neither host has anything to
             // activate once the windows are back, since `other` has no tab
             // and the quick terminal's surface has no window.
-            try fixture.app.hosts.append(std.testing.allocator, &fixture.other);
+            try fixture.app.registry.addHost(std.testing.allocator, &fixture.other);
             // The quick terminal is dismissed by its own toggle.
             _ = sys.ShowWindow(fixture.host.hwnd.?, c.SW_HIDE);
 

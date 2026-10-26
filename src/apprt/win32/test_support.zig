@@ -119,7 +119,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
         /// A quick terminal host that a test has put on screen, with the pieces a
         /// toggle needs: a registered host, one tab, and the surface that tab shows.
         /// `other` is a second host with a window and no tab, not registered until a
-        /// test appends it to `app.hosts`.
+        /// test appends it to `app.registry.hosts`.
         pub const QuickTerminalToggleFixture = struct {
             core_app: CoreApp = undefined,
             app: App = undefined,
@@ -320,7 +320,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     host.tween_sched.init(self.allocator);
                     self.hosts[self.host_count] = host;
                     self.host_count += 1;
-                    if (host_options.register) try options.app.hosts.append(self.allocator, host);
+                    if (host_options.register) try options.app.registry.addHost(self.allocator, host);
                 }
 
                 for (options.surfaces) |surface_options| {
@@ -351,7 +351,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         .free_launch_profile_key = surface_options.free_launch_profile_key_on_deinit,
                     };
                     self.surface_count += 1;
-                    if (surface_options.register) try options.app.windows.append(self.allocator, surface);
+                    if (surface_options.register) try options.app.registry.addWindow(self.allocator, surface);
                 }
 
                 for (options.tabs) |tab_options| {
@@ -414,8 +414,8 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     app.shell_runtime.deinit();
                     runtime.appDropSettingsPreview(app);
                     app.config.deinit();
-                    app.hosts.deinit(self.allocator);
-                    app.windows.deinit(self.allocator);
+                    app.registry.hosts.deinit(self.allocator);
+                    app.registry.windows.deinit(self.allocator);
                     app.toast_removals.deinit(self.allocator);
                     runtime.appDiscardDeferredOpens(app);
                 }
@@ -434,7 +434,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
             var app: App = undefined;
             app.os_build = c.OS_BUILD_WIN11_21H2;
             app.config = .{};
-            app.hosts = .empty;
+            app.registry.hosts = .empty;
             return app;
         }
 
@@ -558,7 +558,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
             }
 
             pub fn newest(self: *WindowStartTestApp) *Surface {
-                return self.app.windows.items[self.app.windows.items.len - 1];
+                return self.app.registry.windows.items[self.app.registry.windows.items.len - 1];
             }
 
             /// Closes the window `surface` is in, a pane at a time as closing its
@@ -568,7 +568,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                 const host = surface.host.?;
                 var left: usize = 16;
                 while (left > 0) : (left -= 1) {
-                    const pane = for (self.app.windows.items) |other| {
+                    const pane = for (self.app.registry.windows.items) |other| {
                         if (other.host == host) break other;
                     } else break;
                     self.core_app.deleteSurface(pane);
@@ -578,7 +578,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
 
             pub fn closeWindows(self: *WindowStartTestApp) void {
                 var left: usize = 16;
-                while (self.app.windows.items.len > 0 and left > 0) : (left -= 1) self.closeWindow(self.newest());
+                while (self.app.registry.windows.items.len > 0 and left > 0) : (left -= 1) self.closeWindow(self.newest());
             }
 
             pub fn stage(surface: *Surface, at: SurfaceInitStage) anyerror!void {
@@ -599,7 +599,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                         // `createHost` cascaded it.
                         if (initial_size) |size| {
                             try runtime.surfaceSetInitialSize(surface, size);
-                        } else if (surface.app.hosts.items.len == 1) {
+                        } else if (surface.app.registry.hosts.items.len == 1) {
                             const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
                             const work = (monitorInfo(monitor) orelse return lastError()).work_area;
                             if (sys.SetWindowPos(hwnd, null, work.left + 48, work.top + 40, 640, 480, c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0) return lastError();

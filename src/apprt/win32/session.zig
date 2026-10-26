@@ -180,7 +180,7 @@ pub const SessionRestoreTransaction = struct {
             app.rollbackSessionRestoreHost(host);
             // A failed DestroyWindow deliberately retains the partial host.
             // Do not make that live surface look like a fresh first surface.
-            if (std.mem.indexOfScalar(*Host, app.hosts.items, host) != null) return;
+            if (std.mem.indexOfScalar(*Host, app.registry.hosts.items, host) != null) return;
         };
         self.core_first.* = self.core_first_before;
     }
@@ -556,7 +556,7 @@ pub fn restoreSessionTab(
         },
         .split => {},
     };
-    if (self.findTabForSurface(selected)) |found| {
+    if (self.registry.findTabForSurface(selected)) |found| {
         // No errdefer: nothing can fail before the tab takes the tree, and
         // from then on the tab frees it, also when `layout` fails.
         const restored_tree = try buildRestoredSessionSplitTree(
@@ -629,14 +629,14 @@ test "restoreSessionTab leaves the restored tree to the tab when layout fails" {
             const alloc = hook_app.core_app.alloc;
             const surface = panes[created];
             created += 1;
-            const target = hook_app.findHostById(opts.host_id.?).?;
+            const target = hook_app.registry.findHostById(opts.host_id.?).?;
             const source = opts.clone_state_from orelse {
                 var tab = try Tab.init(alloc, target.nextTabId(), surface);
                 errdefer tab.deinit();
                 try target.tabs.append(alloc, tab);
                 return surface;
             };
-            const found = hook_app.findTabForSurface(@constCast(source)).?;
+            const found = hook_app.registry.findTabForSurface(@constCast(source)).?;
             var inserted = try SplitTreeSurface.init(alloc, surface);
             defer inserted.deinit();
             const next = try found.tab.tree.split(alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
@@ -711,7 +711,7 @@ pub fn restoreSessionPane(
     }
 
     const tab_id = if (tab_surface) |source|
-        (self.findTabForSurface(source) orelse return error.NoActiveSurface).tab.id
+        (self.registry.findTabForSurface(source) orelse return error.NoActiveSurface).tab.id
     else
         null;
     const surface = try self.createWindowSurface(&config, default_title, .{
@@ -835,7 +835,7 @@ pub fn applyRestoredWindowPlacement(
 /// Whether a window holds tabs the session records (`hostSessionTabs`).
 /// The quick terminal and a window kept empty for undo hold none.
 pub fn hasSessionWindows(self: *const App) bool {
-    for (self.hosts.items) |host| {
+    for (self.registry.hosts.items) |host| {
         if (hostSessionTabs(host).len > 0) return true;
     }
     return false;
@@ -845,7 +845,7 @@ pub fn hasSessionWindows(self: *const App) bool {
 /// and no other window does.
 pub fn closingEndsSession(self: *const App, host: *const Host) bool {
     if (hostSessionTabs(host).len == 0) return false;
-    for (self.hosts.items) |other| {
+    for (self.registry.hosts.items) |other| {
         if (other != host and hostSessionTabs(other).len > 0) return false;
     }
     return true;
@@ -870,7 +870,7 @@ pub fn saveSessionAsItEnds(self: *App) void {
 pub fn sessionIsFailedRestore(self: *const App) bool {
     if (!self.restored_session_untouched) return false;
     var panes: usize = 0;
-    for (self.hosts.items) |host| for (hostSessionTabs(host)) |tab| {
+    for (self.registry.hosts.items) |host| for (hostSessionTabs(host)) |tab| {
         var it = tab.tree.iterator();
         while (it.next()) |entry| : (panes += 1) {
             if (!entry.view.programEnded()) return false;
@@ -960,14 +960,14 @@ pub fn buildSessionState(
     scrollback_lines: usize,
 ) !win32_session_state.SessionState {
     var count: usize = 0;
-    for (self.hosts.items) |host| {
+    for (self.registry.hosts.items) |host| {
         if (hostSessionTabs(host).len > 0) count += 1;
     }
 
     const windows_state = try alloc.alloc(win32_session_state.Window, count);
     var remaining_scrollback_budget = win32_session_state.max_total_scrollback_bytes;
     var built: usize = 0;
-    for (self.hosts.items) |host| {
+    for (self.registry.hosts.items) |host| {
         if (hostSessionTabs(host).len == 0) continue;
         windows_state[built] = try buildSessionWindow(
             alloc,
@@ -1769,11 +1769,11 @@ test "win32 a restored tab has the saved shape in the shell model, so closing a 
             const alloc = hook_app.core_app.alloc;
             const surface = panes[created];
             created += 1;
-            const target = hook_app.findHostById(opts.host_id.?).?;
+            const target = hook_app.registry.findHostById(opts.host_id.?).?;
             var prepared = (try hook_app.prepareShellSurfaceCreate(target, opts)).?;
             defer prepared.deinit();
             if (opts.clone_state_from) |source| {
-                const found = hook_app.findTabForSurface(@constCast(source)).?;
+                const found = hook_app.registry.findTabForSurface(@constCast(source)).?;
                 var inserted = try SplitTreeSurface.init(alloc, surface);
                 defer inserted.deinit();
                 const next = try found.tab.tree.split(alloc, found.tab.findHandle(@constCast(source)).?, opts.split_direction, 0.5, &inserted);
@@ -2406,8 +2406,8 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     core_app.alloc = std.testing.allocator;
     var app: App = undefined;
     app.core_app = &core_app;
-    app.hosts = .empty;
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.hosts = .empty;
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var renderer_mutex: std.Thread.Mutex = .{};
     var secure_surface: Surface = .{ .app = &app };
@@ -2446,7 +2446,7 @@ test "win32 session state scrollback capture enforces line cap budget and secure
     );
     host.tabs.items[0].tree.deinit();
     host.tabs.items[0].tree = split_tree;
-    try app.hosts.append(std.testing.allocator, &host);
+    try app.registry.addHost(std.testing.allocator, &host);
 
     var state_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer state_arena.deinit();
@@ -2814,8 +2814,8 @@ test "win32 session save skips every tab of the quick terminal host" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.hosts = .empty;
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.hosts = .empty;
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var quick_host: Host = .{
         .app = &app,
@@ -2839,7 +2839,7 @@ test "win32 session save skips every tab of the quick terminal host" {
     var second: Surface = undefined;
     try quick_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &first));
     try quick_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
-    try app.hosts.append(std.testing.allocator, &quick_host);
+    try app.registry.addHost(std.testing.allocator, &quick_host);
 
     const state = try app.buildSessionState(std.testing.allocator, 0);
     defer std.testing.allocator.free(state.windows);
@@ -2857,7 +2857,7 @@ test "win32 session save skips every tab of the quick terminal host" {
     normal_surface.title_override = null;
     normal_surface.tab_title_override = null;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &normal_surface));
-    try app.hosts.append(std.testing.allocator, &host);
+    try app.registry.addHost(std.testing.allocator, &host);
 
     const mixed_state = try app.buildSessionState(std.testing.allocator, 0);
     defer {
@@ -2876,8 +2876,8 @@ test "security regression win32 session save drops one hostile pane field" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.hosts = .empty;
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.hosts = .empty;
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host: Host = .{
         .app = &app,
@@ -2895,7 +2895,7 @@ test "security regression win32 session save drops one hostile pane field" {
     surface.title_override = "Build\x1b\x07";
     surface.tab_title_override = "Docs";
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
-    try app.hosts.append(std.testing.allocator, &host);
+    try app.registry.addHost(std.testing.allocator, &host);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

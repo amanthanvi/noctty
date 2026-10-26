@@ -215,7 +215,7 @@ pub fn inheritHostWindowState(self: *App, destination: *Host, source: *Host, pos
 
 pub fn syncHostWindowState(self: *App, source: *Surface) !void {
     if (!shouldPropagateSharedHostWindowState(source)) return;
-    var host_surfaces = try self.collectHostSurfaces(self.core_app.alloc, source.host_id);
+    var host_surfaces = try self.registry.collectHostSurfaces(self.core_app.alloc, source.host_id);
     defer host_surfaces.deinit(self.core_app.alloc);
     for (host_surfaces.items) |candidate| {
         if (candidate == source) continue;
@@ -509,7 +509,7 @@ pub fn newWindowPlacement(app: *App, source: HWND, fullscreen: bool, destination
     // and opens another, or when Windows does not activate a forwarded one.
     var placed = cascadedRect(rect, step, info.rcWork);
     var steps: u8 = 0;
-    while (steps < 8 and app.windowStartsAt(placed, destination)) : (steps += 1) {
+    while (steps < 8 and app.registry.windowStartsAt(placed, destination)) : (steps += 1) {
         placed = cascadedRect(placed, step, info.rcWork);
     }
     return .{ .rect = placed, .maximize = null };
@@ -1748,14 +1748,14 @@ test "win32 new_window does not copy state from a quick terminal" {
     try std.testing.expect(Hook.clone_state_from == &surface);
 
     // With no ordinary window it is an ordinary new window.
-    _ = app.hosts.orderedRemove(1);
+    _ = app.registry.hosts.orderedRemove(1);
     _ = app.performAction(.app, .new_window, .{}) catch {};
     try std.testing.expectEqual(@as(usize, 2), Hook.calls);
     try std.testing.expect(Hook.clone_state_from == null);
 
     // An ordinary window is what a new one copies.
-    app.hosts.clearRetainingCapacity();
-    try app.hosts.append(std.testing.allocator, &host);
+    app.registry.hosts.clearRetainingCapacity();
+    try app.registry.addHost(std.testing.allocator, &host);
     _ = app.performAction(.app, .new_window, .{}) catch {};
     try std.testing.expectEqual(@as(usize, 3), Hook.calls);
     try std.testing.expect(Hook.clone_state_from == &surface);
@@ -1918,7 +1918,7 @@ test "win32 new windows from one source step past the windows already there" {
         fn body() !void {
             _ = sys.SetThreadDpiAwarenessContext(-4);
             var app = placementTestApp();
-            defer app.hosts.deinit(std.testing.allocator);
+            defer app.registry.hosts.deinit(std.testing.allocator);
             var source = try placementTestSurface(&app, 50, 50);
             defer _ = sys.DestroyWindow(source.hwnd.?);
             var clone = try placementTestSurface(&app, 700, 300);
@@ -1940,16 +1940,16 @@ test "win32 new windows from one source step past the windows already there" {
                 _ = sys.ShowWindow(opened.hwnd.?, c.SW_SHOWNOACTIVATE);
                 const host = try std.testing.allocator.create(Host);
                 host.* = .{ .app = &app, .id = @intCast(n), .hwnd = opened.hwnd };
-                try app.hosts.append(std.testing.allocator, host);
+                try app.registry.addHost(std.testing.allocator, host);
                 // Kept until the end of the body: `opened` is a copy of the
                 // window handle, destroyed with the loop's other windows.
                 _ = &opened;
             }
-            for (app.hosts.items) |host| {
+            for (app.registry.hosts.items) |host| {
                 _ = sys.DestroyWindow(host.hwnd.?);
                 std.testing.allocator.destroy(host);
             }
-            app.hosts.clearRetainingCapacity();
+            app.registry.hosts.clearRetainingCapacity();
         }
     }.body);
 }
@@ -2121,11 +2121,11 @@ const ForwardedKeysTest = struct {
     /// core init asks for that client size, as it does when the window's
     /// config has `window-width` and `window-height`.
     fn forward(self: *ForwardedKeysTest, arguments: ?[]const [:0]const u8, size: ?apprt.action.InitialSize) !*Surface {
-        const count = self.fixture.app.windows.items.len;
+        const count = self.fixture.app.registry.windows.items.len;
         Fixture.initial_size = size;
         defer Fixture.initial_size = null;
         try std.testing.expect(try self.fixture.app.performAction(.app, .new_window, .{ .arguments = arguments }));
-        try std.testing.expectEqual(count + 1, self.fixture.app.windows.items.len);
+        try std.testing.expectEqual(count + 1, self.fixture.app.registry.windows.items.len);
         return self.fixture.newest();
     }
 
@@ -2629,7 +2629,7 @@ test "win32 a forwarded window copies the window activated last, not the first i
             // Closing the first window moves the newest into its slot.
             try activate(second);
             t.fixture.closeWindow(t.source);
-            try std.testing.expect(app.hosts.items[0] == third.host.?);
+            try std.testing.expect(app.registry.hosts.items[0] == third.host.?);
             try expectCopies(&t, second);
 
             // A window kept with no tab for undo has no pane to copy, even
@@ -2721,7 +2721,7 @@ test "win32 a config reload of maximize and fullscreen leaves the windows alread
         /// What a reload does once the file is read (`CoreApp.updateConfig`):
         /// each pane's config change, then the app's.
         fn reload(app: *App, config: *const configpkg.Config) !void {
-            for (app.windows.items) |surface| {
+            for (app.registry.windows.items) |surface| {
                 try std.testing.expect(try app.performAction(.{ .surface = surface.core() }, .config_change, .{ .config = config }));
             }
             try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));

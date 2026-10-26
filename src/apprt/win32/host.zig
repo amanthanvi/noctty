@@ -2225,7 +2225,7 @@ pub const Host = struct {
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme();
-        for (self.app.windows.items) |surface| {
+        for (self.app.registry.windows.items) |surface| {
             surface.core().updateConfig(&self.app.config) catch |err| {
                 log.warn("palette theme core apply failed err={}", .{err});
             };
@@ -2233,7 +2233,7 @@ pub const Host = struct {
                 log.warn("palette theme runtime apply failed err={}", .{err});
             };
         }
-        for (self.app.hosts.items) |host| {
+        for (self.app.registry.hosts.items) |host| {
             host.refreshChrome() catch |err| {
                 log.warn("palette theme chrome refresh failed err={}", .{err});
             };
@@ -2446,7 +2446,7 @@ pub const Host = struct {
 
     pub fn dispatchDeferredNewTab(self: *Host, source_surface_id: ?u64) void {
         if (source_surface_id) |surface_id| {
-            if (self.app.findSurfaceById(surface_id)) |surface| {
+            if (self.app.registry.findSurfaceById(surface_id)) |surface| {
                 runUiActionOrLog("deferred new tab dispatch failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
                 return;
             }
@@ -3268,7 +3268,7 @@ pub const Host = struct {
         const source_root = source_model.root;
         const source_surface = self.tabs.items[source_index].focusedSurface() orelse return false;
         const target_surface = self.tab_drop_target_surface orelse return false;
-        const target_found = self.app.findTabForSurface(target_surface) orelse return false;
+        const target_found = self.app.registry.findTabForSurface(target_surface) orelse return false;
         if (target_found.host != self or target_found.index != self.active_tab) return false;
         const target_pane = target_surface.shell_id orelse return false;
         const target_tab_id = self.tabs.items[self.active_tab].id;
@@ -4588,7 +4588,7 @@ pub const Host = struct {
     /// complete one). The copy is no newer than a discovery in flight, so it
     /// leaves the generation alone.
     fn adoptProfilesFromAnotherHost(self: *Host, complete_only: bool) bool {
-        for (self.app.hosts.items) |other| {
+        for (self.app.registry.hosts.items) |other| {
             if (other == self or (complete_only and !other.profiles_complete)) continue;
             const source = other.profiles orelse continue;
             const copy = windows_shell.cloneProfiles(self.app.core_app.alloc, source) catch return false;
@@ -7202,7 +7202,7 @@ pub const Host = struct {
             if (self.overlay_edit_hwnd) |edit| _ = sys.SendMessageW(edit, c.WM_SETFONT, @intFromPtr(font), 1);
             if (self.overlay_label_hwnd) |label| _ = sys.SendMessageW(label, c.WM_SETFONT, @intFromPtr(font), 1);
             if (self.overlay_hint_hwnd) |hint| _ = sys.SendMessageW(hint, c.WM_SETFONT, @intFromPtr(font), 1);
-            for (self.app.windows.items) |surface| {
+            for (self.app.registry.windows.items) |surface| {
                 if (surface.host != self) continue;
                 surface.applySearchBarFont(font);
             }
@@ -7428,7 +7428,7 @@ pub const Host = struct {
 
         // A modal menu pumps window messages. A close can free the Host,
         // so resolve its identity through the still-live App before reading it.
-        var live = app.findHostById(host_id) orelse return true;
+        var live = app.registry.findHostById(host_id) orelse return true;
         if (cmd > 0) {
             // The tabs may have moved while the menu was up: find ours again.
             const index = live.findTabIndexById(tab_id) orelse return true;
@@ -7464,7 +7464,7 @@ pub const Host = struct {
         // activation put it on, and the next arrow press would go to the
         // PTY. Rename and a close that asks first opened an overlay, which
         // owns the keyboard now.
-        live = app.findHostById(host_id) orelse return true;
+        live = app.registry.findHostById(host_id) orelse return true;
         if (live.hwnd != null and labels.tabContextMenuRestoresStripFocus(origin == .keyboard, live.overlay_mode != .none)) {
             live.restoreTabStripFocus();
         }
@@ -7725,7 +7725,7 @@ pub const Host = struct {
     /// settings window). The tab-strip action buttons count as the tab
     /// strip so Ctrl+F6 from them continues the cycle instead of dead-ending.
     fn focusRegionForHwnd(self: *Host, child: HWND) ?focus_region.Region {
-        for (self.app.windows.items) |surface| {
+        for (self.app.registry.windows.items) |surface| {
             if (surface.host != self) continue;
             if (surface.hwnd) |surface_hwnd| {
                 if (surface_hwnd == child) return .terminal;
@@ -7812,7 +7812,7 @@ pub const Host = struct {
     }
 
     pub fn searchControlSurface(self: *const Host, child: HWND) ?*Surface {
-        for (self.app.windows.items) |surface| {
+        for (self.app.registry.windows.items) |surface| {
             if (surface.host != self) continue;
             if (surface.ownsSearchBarControl(child)) return surface;
         }
@@ -7820,7 +7820,7 @@ pub const Host = struct {
     }
 
     pub fn searchBarBackgroundSurface(self: *const Host, child: HWND) ?*Surface {
-        for (self.app.windows.items) |surface| {
+        for (self.app.registry.windows.items) |surface| {
             if (surface.host != self) continue;
             if (surface.search_bar_bg_hwnd != null and child == surface.search_bar_bg_hwnd.?) {
                 return surface;
@@ -8740,7 +8740,7 @@ pub const Host = struct {
     /// The index of the tab of this window that holds `surface`, unless
     /// that tab is the one in front.
     fn backgroundTabIndex(self: *Host, surface: *Surface) ?usize {
-        const found = self.app.findTabForSurface(surface) orelse return null;
+        const found = self.app.registry.findTabForSurface(surface) orelse return null;
         if (found.host != self or found.index == self.active_tab) return null;
         return found.index;
     }
@@ -10582,7 +10582,7 @@ test "win32 a toast shown while its tab is undo-closed is removed" {
     };
     w.recorder.during_show = .{ .ctx = &close, .run = Close.run };
     try w.osc(&w.p, "", "newer");
-    try std.testing.expect(w.app.findTabForSurface(&w.p) == null);
+    try std.testing.expect(w.app.registry.findTabForSurface(&w.p) == null);
     try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
     w.app.flushToastRemovals();
     var buf: [64]u8 = undefined;

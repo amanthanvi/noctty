@@ -630,7 +630,7 @@ pub const Surface = struct {
     ) !void {
         log.debug("surface.init begin", .{});
         const existing_host = if (opts.host_id) |host_id|
-            app.findHostById(host_id) orelse return error.InvalidHost
+            app.registry.findHostById(host_id) orelse return error.InvalidHost
         else
             null;
         var shell_prepared = try app.prepareShellSurfaceCreate(existing_host, opts);
@@ -765,9 +765,9 @@ pub const Surface = struct {
         // restart it once this Surface has left `windows`, or an app left
         // with no window would never quit.
         const quit_timer_was_running = app.quit_timer_id != null;
-        try app.windows.append(app.core_app.alloc, self);
+        try app.registry.addWindow(app.core_app.alloc, self);
         errdefer {
-            app.removeWindow(self);
+            app.registry.removeWindow(self);
             if (quit_timer_was_running) app.startQuitTimer();
         }
         log.debug("surface.init appended to app windows", .{});
@@ -1124,7 +1124,7 @@ pub const Surface = struct {
         try std.testing.expect(sys.IsWindow(Stage.surface_hwnd.?) == 0);
         try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
         try std.testing.expectEqual(&existing, host.tabs.items[0].focusedSurface().?);
-        try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
+        try std.testing.expectEqual(@as(usize, 0), app.registry.windows.items.len);
         try std.testing.expectEqual(@as(usize, 0), core_app.surfaces.items.len);
         try std.testing.expect(app.quit_timer_id != null);
         // No terminal opened, so `terminate` must still keep that snapshot
@@ -1159,7 +1159,7 @@ pub const Surface = struct {
         core_app.deleteSurface(created);
         try std.testing.expect(sys.DestroyWindow(created.hwnd.?) != 0);
         try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
-        try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
+        try std.testing.expectEqual(@as(usize, 0), app.registry.windows.items.len);
     }
 
     test "Surface.init that fails before the core starts destroys the host window it created" {
@@ -1209,7 +1209,7 @@ pub const Surface = struct {
         };
         // Before the fix the Host was freed and its hidden window left behind.
         try std.testing.expect(sys.IsWindow(host_hwnd) == 0);
-        try std.testing.expectEqual(@as(usize, 0), app.hosts.items.len);
+        try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
     }
 
     pub fn deinit(self: *Surface) void {
@@ -1323,7 +1323,7 @@ pub const Surface = struct {
     pub fn requestClose(self: *Surface) bool {
         const hwnd = self.hwnd orelse return false;
         if (self.pending_close_tree != null or self.pending_shell_close != null) return false;
-        const found = self.app.findTabForSurface(self) orelse {
+        const found = self.app.registry.findTabForSurface(self) orelse {
             // Detached structural-history objects are deliberately outside
             // active ShellState and can be destroyed during history disposal.
             if (self.host) |host| if (host.structural_history_disposing) {
@@ -1412,7 +1412,7 @@ pub const Surface = struct {
     }
 
     pub fn invalidateRedoForUnsupportedTabStructuralAction(self: *Surface) void {
-        const found = self.app.findTabForSurface(self) orelse {
+        const found = self.app.registry.findTabForSurface(self) orelse {
             self.invalidateRedoForUnsupportedStructuralAction();
             return;
         };
@@ -1421,13 +1421,13 @@ pub const Surface = struct {
     }
 
     pub fn invalidateStructuralHistoryForClose(self: *Surface) bool {
-        const found = self.app.findTabForSurface(self) orelse return true;
+        const found = self.app.registry.findTabForSurface(self) orelse return true;
         found.tab.clearRedoHistory();
         return found.host.tryClearStructuralHistory(.normal);
     }
 
     pub fn invalidateStructuralHistoryForDestroy(self: *Surface) void {
-        const found = self.app.findTabForSurface(self) orelse return;
+        const found = self.app.registry.findTabForSurface(self) orelse return;
         found.tab.clearRedoHistoryExcept(self);
         if (found.tab.tree.nodes.len == 1) {
             found.host.clearStructuralHistory(.normal);
@@ -2446,7 +2446,7 @@ pub const Surface = struct {
             log.warn("win32 bell title refresh failed err={}", .{err});
         };
         // The tab's UIA ItemStatus says "Bell" while it rings.
-        if (self.app.findTabForSurface(self)) |found| found.host.refreshTabStatus(found.index);
+        if (self.app.registry.findTabForSurface(self)) |found| found.host.refreshTabStatus(found.index);
     }
 
     /// The user focused this terminal or typed into it: the bell has been
@@ -4117,7 +4117,7 @@ pub const Surface = struct {
         // A terminal gains focus when the user activates its window or
         // switches to its tab, which is the user looking at it.
         if (focused) {
-            if (self.app.findTabForSurface(self)) |found| self.app.acknowledgeTab(found.host, found.index);
+            if (self.app.registry.findTabForSurface(self)) |found| self.app.acknowledgeTab(found.host, found.index);
         }
     }
 
@@ -5226,7 +5226,7 @@ pub const Surface = struct {
         if (host.overlay_mode == .confirm) return error.ConfirmPromptOpen;
         // Nor the palette, search or a rename the user is typing in.
         if (host.overlay_mode != .none) return error.OverlayOpen;
-        if (self.app.findTabForSurface(self) == null) return error.NotInATab;
+        if (self.app.registry.findTabForSurface(self) == null) return error.NotInATab;
     }
 
     fn programClipboardPromptBody(self: *Surface, request: labels.ProgramClipboardRequest) ![]u8 {
@@ -5478,7 +5478,7 @@ test "win32 a committed Restart Manager close keeps every window through WM_CLOS
 
             // Nothing committed: the loop's step does nothing.
             try std.testing.expect(!try app.finishEndSessionClose());
-            try std.testing.expectEqual(@as(usize, 2), app.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
 
             // Restart Manager's fallback WM_CLOSE closes nothing once the
             // close is committed: one window at a time would leave the
@@ -5487,19 +5487,19 @@ test "win32 a committed Restart Manager close keeps every window through WM_CLOS
             for ([_]*Surface{ first, second }) |surface| {
                 try std.testing.expectEqual(@as(LRESULT, 0), sys.SendMessageW(surface.windowHwnd().?, c.WM_CLOSE, 0, 0));
             }
-            try std.testing.expectEqual(@as(usize, 2), app.hosts.items.len);
-            try std.testing.expectEqual(@as(usize, 2), app.windows.items.len);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.windows.items.len);
 
             // The loop's step quits them all, though
             // quit-after-last-window-closed is off. The stand-in cores never
             // started, so `destroy` leaves them registered; the core's own
             // teardown would not.
-            for (app.windows.items) |surface| fixture.core_app.deleteSurface(surface);
+            for (app.registry.windows.items) |surface| fixture.core_app.deleteSurface(surface);
             try std.testing.expect(try app.finishEndSessionClose());
             try std.testing.expect(!app.end_session_quit_pending);
             try std.testing.expect(!app.running);
-            try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
-            try std.testing.expectEqual(@as(usize, 0), app.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 0), app.registry.windows.items.len);
+            try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
             var msg: MSG = undefined;
             try std.testing.expect(sys.PeekMessageW(&msg, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE) != 0);
         }

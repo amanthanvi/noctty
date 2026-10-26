@@ -673,6 +673,7 @@ pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").
 
 test {
     _ = app_module;
+    _ = @import("win32/registry.zig");
     _ = host_module;
     _ = terminal_window_module;
     _ = search_controls;
@@ -3078,14 +3079,7 @@ pub fn recordOpenUrlForTest(alloc: Allocator, url: []const u8) !bool {
 
 pub const App = app_module.App;
 
-pub fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) bool {
-    for (hosts.items, 0..) |item, i| {
-        if (item != host) continue;
-        _ = hosts.swapRemove(i);
-        return true;
-    }
-    return false;
-}
+pub const detachHostReference = @import("win32/registry.zig").detachHostReference;
 
 pub fn automationHostFocused(
     host_hwnd: ?HWND,
@@ -6227,11 +6221,11 @@ pub fn settingsAppIconThunk(ctx: *anyopaque, small: bool) HICON {
 
 pub fn settingsOwnerWindowThunk(ctx: *anyopaque) ?HWND {
     const app: *App = @ptrCast(@alignCast(ctx));
-    const focused = app.focusedSurfaceForUndoRedo();
+    const focused = app.registry.focusedSurfaceForUndoRedo();
     if (focused) |surface| app.settings_restore_surface_id = surface.core().id;
     const surface = focused orelse
-        (if (app.settings_restore_surface_id) |id| app.findSurfaceById(id) else null) orelse
-        app.primarySurface() orelse return null;
+        (if (app.settings_restore_surface_id) |id| app.registry.findSurfaceById(id) else null) orelse
+        app.registry.primarySurface() orelse return null;
     return surface.windowHwnd();
 }
 
@@ -6256,8 +6250,8 @@ test "settings close prefers the originating surface in a two-host session" {
 }
 
 fn settingsRestoreSurface(app: *App, saved: ?u64) ?*Surface {
-    const focused = app.focusedSurfaceForUndoRedo();
-    const primary = app.primarySurface();
+    const focused = app.registry.focusedSurfaceForUndoRedo();
+    const primary = app.registry.primarySurface();
     const order = settingsRestoreCandidateOrder(
         saved,
         if (focused) |surface| surface.core().id else null,
@@ -6265,7 +6259,7 @@ fn settingsRestoreSurface(app: *App, saved: ?u64) ?*Surface {
     );
     for (order) |candidate| {
         if (candidate) |id| {
-            if (app.findSurfaceById(id)) |surface| return surface;
+            if (app.registry.findSurfaceById(id)) |surface| return surface;
         }
     }
     return null;
@@ -6883,7 +6877,7 @@ pub fn closeOtherTabsConfirmAccept(userdata: ?*anyopaque) void {
 pub fn closeThisTabConfirmAccept(userdata: ?*anyopaque) void {
     const surface: *Surface = @ptrCast(@alignCast(userdata orelse return));
     const app = surface.app;
-    const found = app.findTabForSurface(surface) orelse return;
+    const found = app.registry.findTabForSurface(surface) orelse return;
     _ = app.closeTabUndoable(found.host, found.index) catch |err| {
         log.warn("close tab after confirm failed err={}", .{err});
     };
@@ -8050,13 +8044,13 @@ test "win32 config problems wait for a later host and clear queued errors on a c
     // No hosts exist when an initial-window=false process loads its config.
     try std.testing.expect(app.reportConfigProblems(&app.config));
     try std.testing.expect(app.config_problems_banner != null);
-    try app.hosts.append(alloc, &first);
+    try app.registry.addHost(alloc, &first);
     app.presentConfigProblemsOnHost(&first);
     try std.testing.expectEqualStrings(app.config_problems_banner.?, first.banner_text.?);
     try first.setBanner(.none, null);
     // Another window still receives the load's problems after the first
     // window acknowledged its own banner. No config load or font scan here.
-    try app.hosts.append(alloc, &later);
+    try app.registry.addHost(alloc, &later);
     app.presentConfigProblemsOnHost(&later);
     try std.testing.expectEqualStrings(app.config_problems_banner.?, later.banner_text.?);
     try later.setBanner(.err, "Layout could not be opened.");
@@ -8090,7 +8084,7 @@ test "win32 config problems list configured fonts once per load without any term
     try std.testing.expect(app.reportConfigProblems(&app.config));
     try std.testing.expectEqual(@as(usize, 2), app.config_problems.count());
     const before = app.config_problems.fingerprint();
-    try app.hosts.append(alloc, &host);
+    try app.registry.addHost(alloc, &host);
     app.presentConfigProblemsOnHost(&host);
     try std.testing.expectEqual(before, app.config_problems.fingerprint());
     try std.testing.expectEqual(@as(usize, 2), app.config_problems.count());
@@ -10046,12 +10040,8 @@ pub var cloak_event_app: ?*App = null;
 /// recovery path would be the thing that fails to recover.
 pub fn onHostCloakEvent(hwnd: HWND, cloaked: bool) void {
     const app = cloak_event_app orelse return;
-    for (app.hosts.items) |host| {
-        const host_hwnd = host.hwnd orelse continue;
-        if (host_hwnd != hwnd) continue;
-        host.refreshSurfaceVisibilityObserving(cloaked);
-        return;
-    }
+    const host = app.registry.findHostByHwnd(hwnd) orelse return;
+    host.refreshSurfaceVisibilityObserving(cloaked);
 }
 
 /// A child window that can take keyboard focus right now. Hidden chrome
@@ -10431,8 +10421,8 @@ const Pkg19NativeDeliveryTest = struct {
         defer closeAppWindow(&app_a);
         try app_b.createMessageWindow();
         defer closeAppWindow(&app_b);
-        const a = app_a.message_hwnd.?;
-        const b = app_b.message_hwnd.?;
+        const a = app_a.registry.message_hwnd.?;
+        const b = app_b.registry.message_hwnd.?;
         var fake: FakeUia = .{};
         try postUia(app_a.delivery.?, &fake);
         const uia = try queued(a, c.WM_WINHOSTTY_UIA_DISCONNECT);
@@ -10508,8 +10498,8 @@ const ToastActivatorDeliveryTest = struct {
 
     /// Dispatch the one queued activation message, as the App's pump would.
     fn dispatch(app: *App) !void {
-        const msg = try Pkg19NativeDeliveryTest.queued(app.message_hwnd.?, c.WM_WINHOSTTY_TOAST_ACTIVATION);
-        _ = sys.SendMessageW(app.message_hwnd.?, msg.message, msg.wParam, msg.lParam);
+        const msg = try Pkg19NativeDeliveryTest.queued(app.registry.message_hwnd.?, c.WM_WINHOSTTY_TOAST_ACTIVATION);
+        _ = sys.SendMessageW(app.registry.message_hwnd.?, msg.message, msg.wParam, msg.lParam);
     }
 
     fn routesBody() !void {
@@ -10582,7 +10572,7 @@ const ToastActivatorDeliveryTest = struct {
         defer alloc.free(launch_z);
         try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = &.{launch_z} }));
         try std.testing.expect(app.pending_toast_activation == null);
-        try std.testing.expectEqual(@as(usize, 0), app.hosts.items.len);
+        try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
 
         // Another toast is another click.
         const other: win32_toast_activation.ActivationTarget = .{ .surface_id = 42, .pid = sys.GetCurrentProcessId(), .action = .focus };
@@ -14342,7 +14332,7 @@ test "automation in-app new_tab action does not query source pwd" {
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
-            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, created_ref);
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
                 opts.tab_insert_index orelse host_ref.tabs.items.len,
@@ -14432,7 +14422,7 @@ test "automation explicit-window new_tab reanchors inactive host cwd and overrid
             created.app = hook_app;
             created.host = host_ref;
             created.host_id = host_ref.id;
-            try hook_app.windows.append(hook_app.core_app.alloc, created);
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, created);
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
                 opts.tab_insert_index.?,
@@ -14551,7 +14541,7 @@ test "win32 new_tab action inserts after the active tab by default, clears curre
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
-            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
@@ -14573,7 +14563,7 @@ test "win32 new_tab action inserts after the active tab by default, clears curre
     try std.testing.expect(Hook.captured_clone_state_from == &source);
     try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), host.active_tab);
-    try std.testing.expectEqual(@as(usize, 4), app.windows.items.len);
+    try std.testing.expectEqual(@as(usize, 4), app.registry.windows.items.len);
     try std.testing.expectEqual(@as(u32, 1), host.tabs.items[0].id);
     try std.testing.expectEqual(@as(u32, 3), host.tabs.items[1].id);
     try std.testing.expectEqual(@as(u32, 2), host.tabs.items[2].id);
@@ -14635,7 +14625,7 @@ test "win32 new_tab action appends when window-new-tab-position is end" {
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
-            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
@@ -14713,7 +14703,7 @@ test "win32 profile tab open appends when window-new-tab-position is end" {
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
-            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
@@ -14803,7 +14793,7 @@ test "win32 profile tab open inserts after active tab when window-new-tab-positi
             created_ref.app = hook_app;
             created_ref.host = host_ref;
             created_ref.host_id = host_ref.id;
-            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
@@ -15383,7 +15373,7 @@ test "win32 quit asks once on the window it came from" {
     surface_b.core_initialized = false;
     try std.testing.expectEqual(HostOverlayMode.confirm, host_b.overlay_mode);
     try std.testing.expect(app.running);
-    try std.testing.expectEqual(@as(usize, 2), app.hosts.items.len);
+    try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
     host_b.invokeConfirmCancel();
 
     // Save or Discard in a Settings prompt that a quit raised resumes it,
@@ -16358,7 +16348,7 @@ test "win32 a quick terminal or a window kept empty for undo does not hold the s
     // Then the quick terminal is the last window, and its close saves
     // nothing over that snapshot. Before, `hosts.len == 1` made it the last
     // window, and its empty snapshot deleted the file.
-    _ = detachHostReference(&app.hosts, &host);
+    _ = detachHostReference(&app.registry.hosts, &host);
     quick.closeConfirmed();
     try std.testing.expect(app.session_state_saved_before_last_host_close);
     try std.testing.expectEqual(@as(u32, 1), app.test_session_saves_as_it_ends);
@@ -16366,9 +16356,9 @@ test "win32 a quick terminal or a window kept empty for undo does not hold the s
     // The same with a window kept empty for undo in place of the quick
     // terminal.
     app.session_state_saved_before_last_host_close = false;
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.hosts.append(std.testing.allocator, &emptied);
-    _ = detachHostReference(&app.hosts, &quick);
+    try app.registry.addHost(std.testing.allocator, &host);
+    try app.registry.addHost(std.testing.allocator, &emptied);
+    _ = detachHostReference(&app.registry.hosts, &quick);
     host.closeConfirmed();
     try std.testing.expect(app.session_state_saved_before_last_host_close);
     try std.testing.expectEqual(@as(u32, 2), app.test_session_saves_as_it_ends);
@@ -16451,11 +16441,11 @@ test "win32 closing the session's last pane saves the session as it goes" {
     }
 
     // The last pane of a window while another window holds the session.
-    try app.hosts.append(std.testing.allocator, &other);
+    try app.registry.addHost(std.testing.allocator, &other);
     try Stand.in(&surface_b);
     try std.testing.expect(surface_b.requestClose());
     try std.testing.expect(!app.session_state_saved_before_last_host_close);
-    _ = detachHostReference(&app.hosts, &other);
+    _ = detachHostReference(&app.registry.hosts, &other);
     try std.testing.expectEqual(@as(u32, 0), app.test_session_saves_as_it_ends);
 
     // The session's last pane (`close_surface`, its shell exiting): saved
@@ -16509,9 +16499,9 @@ test "win32 closing the session's last pane saves the session as it goes" {
     try std.testing.expectEqual(@as(u32, 3), app.test_session_saves_as_it_ends);
     // Not while the session holds a program still running.
     surface_b.core_initialized = true;
-    try app.hosts.append(std.testing.allocator, &other);
+    try app.registry.addHost(std.testing.allocator, &other);
     const with_other = app.sessionIsFailedRestore();
-    _ = detachHostReference(&app.hosts, &other);
+    _ = detachHostReference(&app.registry.hosts, &other);
     const alone = app.sessionIsFailedRestore();
     // A key into a pane whose program has ended only closes the pane: it
     // does not use the session, or the restore that failed would be saved
@@ -16930,7 +16920,7 @@ test "win32 prune preserves empty host while structural undo remains" {
 
     _ = app.pruneUndoHistoryBefore(0);
 
-    try std.testing.expectEqual(@as(usize, 1), app.hosts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), host.structural_undo_entries.items.len);
     try std.testing.expect(host.destroy_after_structural_dispose);
@@ -17030,7 +17020,7 @@ test "PKG32 empty second host undo key restores its own tab and redo cannot targ
     try std.testing.expect(host_a.banner_text == null);
 
     // A pruned host can be removed; retain only its ID through dispatch.
-    _ = app.hosts.orderedRemove(1);
+    _ = app.registry.hosts.orderedRemove(1);
     try std.testing.expect(app.emptyHostKeyEvent(host_b.id, undo));
     try std.testing.expect(app.emptyHostKeyEvent(host_b.id, redo));
     try std.testing.expect(host_a.banner_text == null);
@@ -17840,8 +17830,8 @@ test "win32 windowDestroyed backup clears affected tab redo and structural redo 
 
     app.windowDestroyed(&surface_a);
 
-    try std.testing.expectEqual(@as(usize, 1), app.windows.items.len);
-    try std.testing.expectEqual(@as(*Surface, &surface_b), app.windows.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), app.registry.windows.items.len);
+    try std.testing.expectEqual(@as(*Surface, &surface_b), app.registry.windows.items[0]);
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
     try std.testing.expectEqual(@as(usize, 1), host.structural_undo_entries.items.len);
@@ -17904,8 +17894,8 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
 
     app.windowDestroyed(&surface_a);
 
-    try std.testing.expectEqual(@as(usize, 1), app.windows.items.len);
-    try std.testing.expectEqual(@as(*Surface, &surface_b), app.windows.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), app.registry.windows.items.len);
+    try std.testing.expectEqual(@as(*Surface, &surface_b), app.registry.windows.items[0]);
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
@@ -19212,7 +19202,7 @@ test "win32 a startup launch-layout whose name could not be kept still opens as 
             // Nothing asked for: `run` goes on to session restore or, as
             // here, waits without a window.
             try std.testing.expect(!try app.openStartupLaunchLayout());
-            try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
+            try std.testing.expectEqual(@as(usize, 0), app.registry.windows.items.len);
 
             // Copying the name fails. The app config still forgets the
             // request, which `init`'s color-scheme sync would drop anyway.
@@ -19239,8 +19229,8 @@ test "win32 a startup launch-layout whose name could not be kept still opens as 
             const app = &fixture.app;
             try std.testing.expect(try app.openStartupLaunchLayout());
             try std.testing.expect(app.startup_launch_layout == .none);
-            try std.testing.expectEqual(@as(usize, 1), app.windows.items.len);
-            const host = app.primarySurface().?.host.?;
+            try std.testing.expectEqual(@as(usize, 1), app.registry.windows.items.len);
+            const host = app.registry.primarySurface().?.host.?;
             try std.testing.expectEqualStrings("Layout could not be opened.", host.banner_text.?);
             fixture.closeWindows();
         }
@@ -19900,7 +19890,7 @@ test "win32 a quit tears down every pane of every tab, hidden tabs and splits to
             try std.testing.expect(host.activateTabIndex(2));
             _ = try app.createWindowSurface(&app.config, default_title, .{
                 .host_id = front.host_id,
-                .tab_id = app.findTabForSurface(split).?.tab.id,
+                .tab_id = app.registry.findTabForSurface(split).?.tab.id,
                 .clone_state_from = split,
             });
             try std.testing.expect(host.activateTabIndex(0));
@@ -19909,15 +19899,15 @@ test "win32 a quit tears down every pane of every tab, hidden tabs and splits to
             const other = fixture.newest();
             _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = other.host_id });
             try std.testing.expect(other.host.?.activateTabIndex(1));
-            try std.testing.expectEqual(@as(usize, 6), app.windows.items.len);
-            try std.testing.expectEqual(@as(usize, 2), app.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 6), app.registry.windows.items.len);
+            try std.testing.expectEqual(@as(usize, 2), app.registry.hosts.items.len);
 
             // The stand-in cores never started, so `destroy` leaves them
             // registered (`deinitCore`); the core's own teardown would not.
-            for (app.windows.items) |surface| fixture.core_app.deleteSurface(surface);
+            for (app.registry.windows.items) |surface| fixture.core_app.deleteSurface(surface);
             app.quitConfirmed();
-            try std.testing.expectEqual(@as(usize, 0), app.windows.items.len);
-            try std.testing.expectEqual(@as(usize, 0), app.hosts.items.len);
+            try std.testing.expectEqual(@as(usize, 0), app.registry.windows.items.len);
+            try std.testing.expectEqual(@as(usize, 0), app.registry.hosts.items.len);
             var msg: MSG = undefined;
             try std.testing.expect(sys.PeekMessageW(&msg, null, c.WM_QUIT, c.WM_QUIT, c.PM_REMOVE) != 0);
         }
@@ -20602,8 +20592,8 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
     app.ipc_namespace = "lane_9";
     app.test_automation_pwd = &struct {
         fn query(alloc: Allocator, surface: *Surface) !?[]const u8 {
@@ -20615,8 +20605,8 @@ test "automation-window-list win32 json includes host tab and pane ids" {
             };
         }
     }.query;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 17;
@@ -20677,9 +20667,9 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     host.tabs.items[1].focused = host.tabs.items[1].findHandle(&tab1_primary) orelse host.tabs.items[1].focused;
     prev_tree.deinit();
 
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &tab0_surface);
-    try app.windows.append(std.testing.allocator, &tab1_primary);
+    try app.registry.addHost(std.testing.allocator, &host);
+    try app.registry.addWindow(std.testing.allocator, &tab0_surface);
+    try app.registry.addWindow(std.testing.allocator, &tab1_primary);
 
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
@@ -20754,16 +20744,16 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
     app.ipc_namespace = "empty-host-test";
     app.test_automation_pwd = &struct {
         fn query(_: Allocator, _: *Surface) !?[]const u8 {
             return null;
         }
     }.query;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var empty_host: Host = undefined;
     empty_host.id = 16;
@@ -20795,9 +20785,9 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     surface.tab_title_override = null;
 
     try live_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 5, &surface));
-    try app.hosts.append(std.testing.allocator, &empty_host);
-    try app.hosts.append(std.testing.allocator, &live_host);
-    try app.windows.append(std.testing.allocator, &surface);
+    try app.registry.addHost(std.testing.allocator, &empty_host);
+    try app.registry.addHost(std.testing.allocator, &live_host);
+    try app.registry.addWindow(std.testing.allocator, &surface);
 
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
@@ -20930,8 +20920,8 @@ test "automation focus selects exact targets without fallback" {
     surface_c.core_surface.id = 103;
     detached_surface.core_surface.id = 104;
 
-    try std.testing.expectEqual(@as(?*Surface, &surface_a), app.findLiveSurfaceById(101));
-    try std.testing.expect(app.findLiveSurfaceById(104) == null);
+    try std.testing.expectEqual(@as(?*Surface, &surface_a), app.registry.findLiveSurfaceById(101));
+    try std.testing.expect(app.registry.findLiveSurfaceById(104) == null);
 
     try app.performAutomationCommand(.{ .focus = .{ .surface_id = 102 } });
     try std.testing.expectEqual(@as(usize, 1), host_a.active_tab);
@@ -21886,10 +21876,10 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
             const surface = &storage[next];
             next += 1;
             const id = opts.host_id orelse return surface;
-            const tab_host = hook_app.findHostById(id) orelse return surface;
-            try hook_app.windows.append(hook_app.core_app.alloc, surface);
+            const tab_host = hook_app.registry.findHostById(id) orelse return surface;
+            try hook_app.registry.addWindow(hook_app.core_app.alloc, surface);
             if (opts.tab_id != null) {
-                const found = hook_app.findTabForSurface(@constCast(opts.clone_state_from.?)).?;
+                const found = hook_app.registry.findTabForSurface(@constCast(opts.clone_state_from.?)).?;
                 var inserted = try SplitTreeSurface.init(hook_app.core_app.alloc, surface);
                 defer inserted.deinit();
                 const tree = try found.tab.tree.split(hook_app.core_app.alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
@@ -23490,7 +23480,7 @@ test "win32 a sign-out latches the session snapshot, and a Restart Manager close
     try std.testing.expect(app.session_ending);
     try std.testing.expect(app.end_session_quit_pending);
     try std.testing.expectEqual(@as(u32, 1), app.test_session_saves_as_it_ends);
-    try std.testing.expectEqual(@as(usize, 1), app.hosts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), app.registry.hosts.items.len);
     try std.testing.expect(app.running);
     // Another window's copy of the message saves nothing more, and a query
     // that follows the commit agrees.
@@ -23699,7 +23689,7 @@ test "win32 the lifecycle window is a top-level window that never shows and answ
                 if (delivery) |d| d.release();
             }
             const hwnd = app.lifecycle_hwnd orelse return error.TestUnexpectedResult;
-            const message_hwnd = app.message_hwnd orelse return error.TestUnexpectedResult;
+            const message_hwnd = app.registry.message_hwnd orelse return error.TestUnexpectedResult;
 
             // A child of the desktop, not of the message-only parent, so
             // Windows sends it what it sends every top-level window; a tool
@@ -24264,8 +24254,8 @@ test "win32 activeSurfaceForHost isolates taskbar progress by host and tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.hosts = .empty;
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.hosts = .empty;
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host_a: Host = undefined;
     host_a.id = 11;
@@ -24309,21 +24299,21 @@ test "win32 activeSurfaceForHost isolates taskbar progress by host and tab" {
     try host_a.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &host_a_progress));
     try host_a.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &host_a_idle));
     try host_b.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &host_b_progress));
-    try app.hosts.append(std.testing.allocator, &host_a);
-    try app.hosts.append(std.testing.allocator, &host_b);
+    try app.registry.addHost(std.testing.allocator, &host_a);
+    try app.registry.addHost(std.testing.allocator, &host_b);
 
-    const host_a_report = app.activeSurfaceForHost(host_a.id).?.taskbar_progress.?;
+    const host_a_report = app.registry.activeSurfaceForHost(host_a.id).?.taskbar_progress.?;
     try std.testing.expectEqual(win32_taskbar_progress.ProgressState.set, host_a_report.state);
     try std.testing.expectEqual(@as(?u8, 30), host_a_report.progress);
 
-    const host_b_report = app.activeSurfaceForHost(host_b.id).?.taskbar_progress.?;
+    const host_b_report = app.registry.activeSurfaceForHost(host_b.id).?.taskbar_progress.?;
     try std.testing.expectEqual(win32_taskbar_progress.ProgressState.@"error", host_b_report.state);
     try std.testing.expectEqual(@as(?u8, 80), host_b_report.progress);
 
     host_a.active_tab = 1;
-    try std.testing.expect(app.activeSurfaceForHost(host_a.id).?.taskbar_progress == null);
+    try std.testing.expect(app.registry.activeSurfaceForHost(host_a.id).?.taskbar_progress == null);
 
-    const host_b_after_tab_switch = app.activeSurfaceForHost(host_b.id).?.taskbar_progress.?;
+    const host_b_after_tab_switch = app.registry.activeSurfaceForHost(host_b.id).?.taskbar_progress.?;
     try std.testing.expectEqual(win32_taskbar_progress.ProgressState.@"error", host_b_after_tab_switch.state);
     try std.testing.expectEqual(@as(?u8, 80), host_b_after_tab_switch.progress);
 }
@@ -24332,10 +24322,10 @@ test "win32 resolveToastActivationSurface prefers exact surface id" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var primary: Surface = undefined;
     primary.core_surface = undefined;
@@ -24345,10 +24335,10 @@ test "win32 resolveToastActivationSurface prefers exact surface id" {
     exact.core_surface = undefined;
     exact.core_surface.id = 202;
 
-    try app.windows.append(std.testing.allocator, &primary);
-    try app.windows.append(std.testing.allocator, &exact);
+    try app.registry.addWindow(std.testing.allocator, &primary);
+    try app.registry.addWindow(std.testing.allocator, &exact);
 
-    const resolved = app.resolveToastActivationSurface(.{
+    const resolved = app.registry.resolveToastActivationSurface(.{
         .pid = sys.GetCurrentProcessId(),
         .surface_id = 202,
         .window_id = 999,
@@ -24361,10 +24351,10 @@ test "win32 resolveToastActivationSurface finds split pane by exact surface id" 
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 66;
@@ -24404,10 +24394,10 @@ test "win32 resolveToastActivationSurface finds split pane by exact surface id" 
     host.tabs.items[0].tree = next_tree;
     prev_tree.deinit();
 
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &primary);
+    try app.registry.addHost(std.testing.allocator, &host);
+    try app.registry.addWindow(std.testing.allocator, &primary);
 
-    const resolved = app.resolveToastActivationSurface(.{
+    const resolved = app.registry.resolveToastActivationSurface(.{
         .pid = sys.GetCurrentProcessId(),
         .surface_id = 502,
         .action = .focus,
@@ -24419,10 +24409,10 @@ test "win32 resolveToastActivationSurface falls back to primary surface" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 77;
@@ -24440,10 +24430,10 @@ test "win32 resolveToastActivationSurface falls back to primary surface" {
     primary.host_id = host.id;
 
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &primary));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &primary);
+    try app.registry.addHost(std.testing.allocator, &host);
+    try app.registry.addWindow(std.testing.allocator, &primary);
 
-    const resolved = app.resolveToastActivationSurface(.{
+    const resolved = app.registry.resolveToastActivationSurface(.{
         .pid = sys.GetCurrentProcessId(),
         .surface_id = 999,
         .window_id = 999,
@@ -24456,10 +24446,10 @@ test "win32 resolveToastActivationSurface prefers requested host tab when surfac
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 88;
@@ -24484,11 +24474,11 @@ test "win32 resolveToastActivationSurface prefers requested host tab when surfac
 
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &tab0_surface));
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &tab1_surface));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &tab0_surface);
-    try app.windows.append(std.testing.allocator, &tab1_surface);
+    try app.registry.addHost(std.testing.allocator, &host);
+    try app.registry.addWindow(std.testing.allocator, &tab0_surface);
+    try app.registry.addWindow(std.testing.allocator, &tab1_surface);
 
-    const resolved = app.resolveToastActivationSurface(.{
+    const resolved = app.registry.resolveToastActivationSurface(.{
         .pid = sys.GetCurrentProcessId(),
         .surface_id = 999,
         .tab_id = 2,
@@ -24532,10 +24522,10 @@ test "launch string round-trips pid; a foreign pid only presents" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
-    app.windows = .empty;
-    app.hosts = .empty;
-    defer app.windows.deinit(std.testing.allocator);
-    defer app.hosts.deinit(std.testing.allocator);
+    app.registry.windows = .empty;
+    app.registry.hosts = .empty;
+    defer app.registry.windows.deinit(std.testing.allocator);
+    defer app.registry.hosts.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 93;
@@ -24560,25 +24550,25 @@ test "launch string round-trips pid; a foreign pid only presents" {
 
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &first));
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &first);
-    try app.windows.append(std.testing.allocator, &second);
+    try app.registry.addHost(std.testing.allocator, &host);
+    try app.registry.addWindow(std.testing.allocator, &first);
+    try app.registry.addWindow(std.testing.allocator, &second);
 
     // The pane's own launch string names this process and routes to it.
     const launch = try buildToastLaunchForSurface(std.testing.allocator, &second);
     defer std.testing.allocator.free(launch);
     const own = try win32_toast_activation.parseLaunchArg(launch);
     try std.testing.expectEqual(@as(?u32, sys.GetCurrentProcessId()), own.pid);
-    try std.testing.expectEqual(@as(?*Surface, &second), app.resolveToastActivationSurface(own));
+    try std.testing.expectEqual(@as(?*Surface, &second), app.registry.resolveToastActivationSurface(own));
 
     // The same ids from another process, or from a launch with no pid, are
     // not this process's: only the primary surface is presented.
     var foreign = own;
     foreign.pid = sys.GetCurrentProcessId() +% 4;
-    try std.testing.expectEqual(@as(?*Surface, &first), app.resolveToastActivationSurface(foreign));
+    try std.testing.expectEqual(@as(?*Surface, &first), app.registry.resolveToastActivationSurface(foreign));
     var unnamed = own;
     unnamed.pid = null;
-    try std.testing.expectEqual(@as(?*Surface, &first), app.resolveToastActivationSurface(unnamed));
+    try std.testing.expectEqual(@as(?*Surface, &first), app.registry.resolveToastActivationSurface(unnamed));
 }
 
 /// Records what `App.showToast` hands its sink, in place of WinRT.
@@ -24825,7 +24815,7 @@ test "win32 toast context names the window only when several are open" {
     w.other_host.quick_terminal = false;
 
     // Once the other window is gone, one window needs no number.
-    _ = w.app.hosts.orderedRemove(1);
+    _ = w.app.registry.hosts.orderedRemove(1);
     try w.osc(&w.p, "", "x");
     try w.recorder.expect(.attribution, "Tab 2: cargo build");
 }
@@ -24946,8 +24936,8 @@ test "win32 focus without an outstanding toast makes no history call" {
     defer _ = sys.DestroyWindow(hwnd);
     w.host.hwnd = hwnd;
     defer w.host.hwnd = null;
-    w.app.message_hwnd = hwnd;
-    defer w.app.message_hwnd = null;
+    w.app.registry.message_hwnd = hwnd;
+    defer w.app.registry.message_hwnd = null;
 
     // No toast at all.
     w.app.acknowledgeTabWithForeground(&w.host, 0, hwnd);
@@ -25117,7 +25107,7 @@ test "win32 removal runs from the posted message, not inside acknowledgeTab" {
         w.app.delivery = null;
         delivery.release();
     }
-    const message_hwnd = w.app.message_hwnd.?;
+    const message_hwnd = w.app.registry.message_hwnd.?;
 
     try w.osc(&w.p, "", "x");
     try w.osc(&w.front, "", "x");

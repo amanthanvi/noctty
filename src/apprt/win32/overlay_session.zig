@@ -723,7 +723,7 @@ pub const HostControls = struct {
             // catalogs borrow config strings. Keep exactly one palette live
             // across all host windows so closing the prior palette reverts its
             // preview and releases its catalog before this host builds one.
-            for (self.app.hosts.items) |other| {
+            for (self.app.registry.hosts.items) |other| {
                 if (other != self and other.overlay_mode == .command_palette) {
                     other.hideOverlay();
                 }

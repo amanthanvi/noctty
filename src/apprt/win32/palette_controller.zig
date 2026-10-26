@@ -1263,7 +1263,7 @@ pub const HostControls = struct {
                 _ = self.activateTabIndex(index);
             },
             .pane => |surface_id| {
-                const surface = self.app.findSurfaceById(surface_id) orelse {
+                const surface = self.app.registry.findSurfaceById(surface_id) orelse {
                     self.abortPaletteAction("Pane is no longer available; reopen the palette.");
                     return;
                 };
@@ -1461,11 +1461,11 @@ pub const HostControls = struct {
                 self.abortPaletteAction("Tab move is no longer available; reopen the palette.");
                 return;
             };
-            const target = self.app.findSurfaceById(transfer.target_pane) orelse {
+            const target = self.app.registry.findSurfaceById(transfer.target_pane) orelse {
                 self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
                 return;
             };
-            const target_found = self.app.findTabForSurface(target) orelse {
+            const target_found = self.app.registry.findTabForSurface(target) orelse {
                 self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
                 return;
             };

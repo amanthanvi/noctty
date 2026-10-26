@@ -15,6 +15,7 @@ const HGLRC = win32.HGLRC;
 const HINSTANCE = win32.HINSTANCE;
 const HWND = win32.HWND;
 const Host = win32.Host;
+const Registry = @import("registry.zig").Registry;
 const HostBannerKind = win32.HostBannerKind;
 const HostTabStatus = win32.HostTabStatus;
 const LPARAM = win32.LPARAM;
@@ -93,7 +94,6 @@ const default_title = win32.default_title;
 const deinitImeWindowFormsTracePath = win32.deinitImeWindowFormsTracePath;
 const desiredMoveIndex = win32.desiredMoveIndex;
 const desiredTabIndex = win32.desiredTabIndex;
-const detachHostReference = win32.detachHostReference;
 const detectDefaultProfileHint = win32.detectDefaultProfileHint;
 const detectDefaultProfileTarget = win32.detectDefaultProfileTarget;
 const detectExplicitStartupWorkingDirectory = win32.detectExplicitStartupWorkingDirectory;
@@ -495,8 +495,7 @@ pub const App = struct {
     tab_tooltip_class_atom: ATOM = 0,
     scrollbar_class_atom: ATOM = 0,
     quick_select_class_atom: ATOM = 0,
-    hosts: std.ArrayListUnmanaged(*Host) = .empty,
-    windows: std.ArrayListUnmanaged(*Surface) = .empty,
+    registry: Registry = .{},
     /// Owned shell requests waiting for the top of the message loop;
     /// see `runDeferredOpens`.
     deferred_opens: std.ArrayListUnmanaged(DeferredOpen) = .empty,
@@ -589,7 +588,6 @@ pub const App = struct {
     /// Numbers each worker, so a late result from an abandoned one leaves the
     /// running state and watchdog of the attempt that replaced it alone.
     profile_discovery_attempt: u64 = 0,
-    message_hwnd: ?HWND = null,
     /// The never-shown top-level window that answers end-session messages
     /// (`createLifecycleWindow`); null if it could not be made.
     lifecycle_hwnd: ?HWND = null,
@@ -1234,7 +1232,7 @@ pub const App = struct {
             // Handled, as for a skipped restore window.
             gl_startup.clearOpenGLStartupFailure();
             try self.createWindow(default_title);
-            if (self.primarySurface()) |surface| if (surface.host) |host| {
+            if (self.registry.primarySurface()) |surface| if (surface.host) |host| {
                 host.setBanner(.err, "Layout could not be opened.") catch {};
             };
         }
@@ -1394,7 +1392,7 @@ pub const App = struct {
             if (!restored) try self.createWindow(default_title);
             self.adoptSessionOwner(owner_lock);
             if (!restored and self.startup_profile_picker) {
-                if (self.primarySurface()) |surface| {
+                if (self.registry.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
             }
@@ -1417,7 +1415,7 @@ pub const App = struct {
 
         if (!self.embedding_mode) self.initializeJumpList();
         if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
-        if (!self.embedding_mode and self.windows.items.len == 0) {
+        if (!self.embedding_mode and self.registry.windows.items.len == 0) {
             self.syncDirtyGlobalHotkeys();
             self.startQuitTimer();
         }
@@ -1441,8 +1439,8 @@ pub const App = struct {
         self.update_startup_ready = true;
         // Before the check below: staging compares the state it started from
         // with the state it finishes in, and this clears a field in it.
-        if (self.windows.items.len > 0) self.reportFailedInstallerApply();
-        if (self.windows.items.len > 0) self.maybeScheduleAutomaticUpdateCheck();
+        if (self.registry.windows.items.len > 0) self.reportFailedInstallerApply();
+        if (self.registry.windows.items.len > 0) self.maybeScheduleAutomaticUpdateCheck();
         const portable_failure = updatepkg.takePortableUpdateFailure(self.core_app.alloc) catch |err| failure: {
             log.warn("failed to read portable update failure err={}", .{err});
             break :failure null;
@@ -1486,7 +1484,7 @@ pub const App = struct {
                     if (msg.wParam == timer_id) {
                         self.stopTerminalHandoffIdleTimer();
                         self.drainPendingHandoffs();
-                        if (self.embedding_mode and self.windows.items.len == 0) {
+                        if (self.embedding_mode and self.registry.windows.items.len == 0) {
                             if (self.exitEmbeddingServerIfIdle()) {
                                 log.info("terminal handoff server idle timeout", .{});
                                 self.running = false;
@@ -1507,10 +1505,10 @@ pub const App = struct {
                         // Profile discovery is app-wide, so any host will do —
                         // `initial-window=false` starts without a primary
                         // surface. The request stays pending until one exists.
-                        if (self.hosts.items.len > 0 and
+                        if (self.registry.hosts.items.len > 0 and
                             jump_list.startupProfileDiscoveryPending())
                         {
-                            const host = self.hosts.items[0];
+                            const host = self.registry.hosts.items[0];
                             if (host.profiles != null and host.profiles_complete) {
                                 jump_list.completeStartupProfileDiscovery();
                             } else {
@@ -1552,7 +1550,7 @@ pub const App = struct {
                 if (threadTimerFired(&msg, self.profile_discovery_watchdog_id)) {
                     self.stopProfileDiscoveryWatchdog();
                     const pending = if (self.jump_list) |*jump_list| jump_list.startupProfileDiscoveryPending() else false;
-                    if ((pending or self.anyHostRequestedProfiles()) and self.hosts.items.len > 0) self.startProfileDiscovery();
+                    if ((pending or self.anyHostRequestedProfiles()) and self.registry.hosts.items.len > 0) self.startProfileDiscovery();
                     continue;
                 }
             }
@@ -1597,7 +1595,7 @@ pub const App = struct {
     fn finishLoopStep(self: *App) !bool {
         self.syncDirtyGlobalHotkeys();
         try self.tickCoreApp();
-        return !self.running and self.windows.items.len == 0;
+        return !self.running and self.registry.windows.items.len == 0;
     }
 
     pub fn terminate(self: *App) void {
@@ -1632,8 +1630,8 @@ pub const App = struct {
         // reference by now, so no further callback can reach a freed App.
         win32_power.setCloakEventHandler(null);
         win32.cloak_event_app = null;
-        self.hosts.deinit(self.core_app.alloc);
-        self.windows.deinit(self.core_app.alloc);
+        self.registry.hosts.deinit(self.core_app.alloc);
+        self.registry.windows.deinit(self.core_app.alloc);
         self.discardDeferredOpens();
         self.global_hotkeys.deinit(self.core_app.alloc);
         if (self.launcher_profile_key) |value| self.core_app.alloc.free(value);
@@ -1960,7 +1958,7 @@ pub const App = struct {
     /// Whether a quit would ask about a terminal (`pendingCloseAsk`), without
     /// waiting for a renderer mutex (`Surface.needsCloseConfirmNoWait`).
     fn anyTerminalNeedsCloseConfirmNoWait(self: *const App) bool {
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (tabsCloseConfirmCountNoWait(host.tabs.items) > 0) return true;
         }
         return false;
@@ -2001,7 +1999,7 @@ pub const App = struct {
     pub const loadSessionStateAt = session_module.loadSessionStateAt;
 
     pub fn launchNamedLayout(self: *App, name: []const u8, preferred_banner_host: ?*Host) bool {
-        const banner_host = preferred_banner_host orelse if (self.primarySurface()) |surface|
+        const banner_host = preferred_banner_host orelse if (self.registry.primarySurface()) |surface|
             surface.host
         else
             null;
@@ -2121,7 +2119,7 @@ pub const App = struct {
     }
 
     fn saveNamedLayout(self: *App, target: apprt.Target, name: []const u8) bool {
-        const surface = self.findSurfaceForTarget(target) orelse {
+        const surface = self.registry.findSurfaceForTarget(target) orelse {
             log.warn("named layout save has no target surface name={s}", .{name});
             return false;
         };
@@ -2250,7 +2248,7 @@ pub const App = struct {
             null,
         ) orelse return lastError();
         setWindowData(hwnd, self);
-        self.message_hwnd = hwnd;
+        self.registry.message_hwnd = hwnd;
         self.delivery = delivery;
         if (self.winrt_toast) |*toast| {
             toast.setActivationCallback(delivery, winrtToastActivationCallback, .{
@@ -2280,10 +2278,10 @@ pub const App = struct {
         delivery.update_running.store(false, .release);
         delivery.profiles_running.store(false, .release);
         delivery.toast_pending.store(false, .release);
-        if (self.message_hwnd) |hwnd| {
+        if (self.registry.message_hwnd) |hwnd| {
             setWindowData(hwnd, null);
             _ = sys.DestroyWindow(hwnd);
-            self.message_hwnd = null;
+            self.registry.message_hwnd = null;
         }
     }
 
@@ -2373,7 +2371,7 @@ pub const App = struct {
                 win32_terminal_handoff.appendHandoffMilestone(self.core_app.alloc, "adopted_window_failed");
                 log.err("terminal handoff surface creation failed err={}", .{err});
             };
-            if (self.windows.items.len == 0) self.startTerminalHandoffIdleTimer();
+            if (self.registry.windows.items.len == 0) self.startTerminalHandoffIdleTimer();
         }
     }
 
@@ -2768,7 +2766,7 @@ pub const App = struct {
     /// re-extract it) while the user may be about to press Install.
     fn updateRecheckWanted(self: *const App) bool {
         if (self.update_notice) |notice| if (notice.staged) return false;
-        return self.running and self.windows.items.len > 0 and self.automaticUpdateChecksEnabled();
+        return self.running and self.registry.windows.items.len > 0 and self.automaticUpdateChecksEnabled();
     }
 
     test "the update recheck timer is armed once, stopped on request, and ticks only with a window" {
@@ -2801,8 +2799,8 @@ pub const App = struct {
         defer app.ui_thread_id = 0;
         app.running = true;
         try std.testing.expect(!app.updateRecheckWanted());
-        try app.windows.append(std.testing.allocator, &surface);
-        defer app.windows.clearAndFree(std.testing.allocator);
+        try app.registry.addWindow(std.testing.allocator, &surface);
+        defer app.registry.windows.clearAndFree(std.testing.allocator);
         try std.testing.expect(app.updateRecheckWanted());
         // A staged notice that is already up is left alone; an unstaged one
         // is not, since a newer release should replace it.
@@ -3025,10 +3023,10 @@ pub const App = struct {
     /// its startup discovery is pending and that host has no complete list.
     pub fn handleProfileDiscovery(self: *App, completion: *const ProfileDiscoveryCompletion) void {
         // With no host, `scheduleIfStartupPending` re-arms when one appears.
-        if (self.hosts.items.len == 0) return;
+        if (self.registry.hosts.items.len == 0) return;
         // Settings' Default profile dropdown reads the windows' lists.
         defer self.settings_window.profilesChanged();
-        const primary = self.hosts.items[0];
+        const primary = self.registry.hosts.items[0];
         const jump_list: ?*win32_jump_list.JumpList = if (self.jump_list) |*value|
             if (value.startupProfileDiscoveryPending()) value else null
         else
@@ -3050,14 +3048,14 @@ pub const App = struct {
         }
         const discovery = completion.result catch |err| {
             log.warn("deferred profile discovery failed err={}", .{err});
-            for (self.hosts.items) |host| {
+            for (self.registry.hosts.items) |host| {
                 if (!host.profiles_requested) continue;
                 host.profiles_requested = false;
                 if (host != self.profiles_requesting_host) host.profilesArrived(host.profiles != null);
             }
             return;
         };
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (!host.profiles_requested and !(host == primary and primary_wants)) continue;
             host.profiles_requested = false;
             const had_profiles = host.profiles != null;
@@ -3086,21 +3084,21 @@ pub const App = struct {
     /// window has a list, and asking again from there would start another at
     /// once, and another when it failed. Null with no window or no list.
     pub fn settingsProfileList(self: *App, ask: bool) ?struct { profiles: []const windows_shell.Profile, complete: bool } {
-        for (self.hosts.items) |host| if (host.profiles_complete) {
+        for (self.registry.hosts.items) |host| if (host.profiles_complete) {
             if (host.profiles) |profiles| return .{ .profiles = profiles, .complete = true };
         };
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (host.profiles) |profiles| return .{ .profiles = profiles, .complete = false };
         }
-        if (!ask or self.hosts.items.len == 0) return null;
-        const host = self.hosts.items[0];
+        if (!ask or self.registry.hosts.items.len == 0) return null;
+        const host = self.registry.hosts.items[0];
         _ = host.profilesForChrome();
         const profiles = host.profiles orelse return null;
         return .{ .profiles = profiles, .complete = host.profiles_complete };
     }
 
     fn anyHostRequestedProfiles(self: *const App) bool {
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (host.profiles_requested) return true;
         }
         return false;
@@ -3162,18 +3160,18 @@ pub const App = struct {
         self.update_notice = try UpdateNotice.init(self.core_app.alloc, version_text, release_url, staged);
         // Announce it once: in the window the user is in, else the first.
         const foreground = sys.GetForegroundWindow();
-        var announcer: ?*Host = if (self.hosts.items.len > 0) self.hosts.items[0] else null;
-        for (self.hosts.items) |host| {
+        var announcer: ?*Host = if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
+        for (self.registry.hosts.items) |host| {
             if (host.hwnd != null and host.hwnd == foreground) announcer = host;
         }
-        for (self.hosts.items) |host| host.updateNoticeChanged(host == announcer);
+        for (self.registry.hosts.items) |host| host.updateNoticeChanged(host == announcer);
     }
 
     fn clearUpdateNotice(self: *App) void {
         if (self.update_notice) |*notice| {
             notice.deinit(self.core_app.alloc);
             self.update_notice = null;
-            for (self.hosts.items) |host| host.updateNoticeChanged(false);
+            for (self.registry.hosts.items) |host| host.updateNoticeChanged(false);
         }
     }
 
@@ -3398,12 +3396,12 @@ pub const App = struct {
         // with no tab (its last one detached for undo) still shows a banner.
         // Opening the release can pump messages, so check that the pressing
         // window is still open before using it.
-        const pressed_in: ?*Host = if (self.update_action_host) |pressed| for (self.hosts.items) |live| {
+        const pressed_in: ?*Host = if (self.update_action_host) |pressed| for (self.registry.hosts.items) |live| {
             if (live == pressed) break pressed;
         } else null else null;
         const host: ?*Host = pressed_in orelse blk: {
-            if (self.primarySurface()) |surface| if (surface.host) |value| break :blk value;
-            break :blk if (self.hosts.items.len > 0) self.hosts.items[0] else null;
+            if (self.registry.primarySurface()) |surface| if (surface.host) |value| break :blk value;
+            break :blk if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
         };
         if (host) |value| return value.setBanner(kind, message);
         try showInfoMessage(.app, "noctty", message);
@@ -3433,7 +3431,7 @@ pub const App = struct {
         try std.testing.expectEqualStrings("Install failed.", second.banner_text.?);
 
         // A pressing window that has since closed is not used.
-        _ = app.hosts.swapRemove(1);
+        _ = app.registry.hosts.swapRemove(1);
         try app.showUpdateInfo(.err, "Still failed.");
         try std.testing.expectEqualStrings("Still failed.", first.banner_text.?);
 
@@ -3459,7 +3457,7 @@ pub const App = struct {
     /// draft. Palette / confirm overlays are owned by their Host and
     /// therefore don't need their own count.
     pub fn hasLiveUiWindows(self: *const App) bool {
-        if (self.windows.items.len != 0) return true;
+        if (self.registry.windows.items.len != 0) return true;
         if (self.settings_window.hwnd != null) return true;
         return false;
     }
@@ -3614,12 +3612,12 @@ pub const App = struct {
 
     pub fn oldestUndoTimestamp(self: *const App) ?u64 {
         var oldest: ?u64 = null;
-        for (self.windows.items) |surface| {
+        for (self.registry.windows.items) |surface| {
             if (surface.undo_stack.oldestTimestamp()) |timestamp| {
                 if (oldest == null or timestamp < oldest.?) oldest = timestamp;
             }
         }
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (host.oldestStructuralTimestamp()) |timestamp| {
                 if (oldest == null or timestamp < oldest.?) oldest = timestamp;
             }
@@ -3656,13 +3654,13 @@ pub const App = struct {
 
     pub fn pruneUndoHistoryBefore(self: *App, min_timestamp_ms: u64) bool {
         var complete = true;
-        for (self.windows.items) |surface| {
+        for (self.registry.windows.items) |surface| {
             surface.undo_stack.discardExpired(min_timestamp_ms);
         }
 
         var i: usize = 0;
-        while (i < self.hosts.items.len) {
-            const host = self.hosts.items[i];
+        while (i < self.registry.hosts.items.len) {
+            const host = self.registry.hosts.items[i];
             if (!host.pruneStructuralHistoryBefore(min_timestamp_ms)) complete = false;
             if (host.destroy_after_structural_dispose and host.tabs.items.len == 0 and !host.hasStructuralHistory()) {
                 if (host.hwnd) |hwnd| {
@@ -3672,7 +3670,7 @@ pub const App = struct {
                 }
                 host.destroy_after_structural_dispose = false;
             }
-            if (i < self.hosts.items.len and self.hosts.items[i] == host) {
+            if (i < self.registry.hosts.items.len and self.registry.hosts.items[i] == host) {
                 i += 1;
             }
         }
@@ -3761,11 +3759,11 @@ pub const App = struct {
                     else => return err,
                 };
                 if (config.@"launch-layout") |name| {
-                    const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                    const banner_host = if (self.registry.findSurfaceForTarget(target)) |source| source.host else null;
                     _ = self.launchNamedLayout(name, banner_host);
                     return true;
                 }
-                const source = self.newWindowSource(target);
+                const source = self.registry.newWindowSource(target);
                 const window_surface = self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = source,
                     .forwarded_arguments = forwarded_arguments,
@@ -3776,7 +3774,7 @@ pub const App = struct {
                     // is detached for undo, when it has no surface.
                     const banner_host: ?*Host = if (source) |surface|
                         surface.host
-                    else if (self.hosts.items.len > 0) self.hosts.items[0] else null;
+                    else if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
                     if (banner_host) |host| host.setBanner(.err, "New window could not be opened.") catch {};
                     return err;
                 };
@@ -3785,7 +3783,7 @@ pub const App = struct {
             },
 
             .launch_layout => {
-                const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                const banner_host = if (self.registry.findSurfaceForTarget(target)) |source| source.host else null;
                 return layoutActionResult(self.launchNamedLayout(value.name, banner_host));
             },
 
@@ -3795,7 +3793,7 @@ pub const App = struct {
 
             .new_window_elevated => {
                 const alloc = self.core_app.alloc;
-                const source = self.findSurfaceForTarget(target);
+                const source = self.registry.findSurfaceForTarget(target);
 
                 const cwd = cwd: {
                     if (source) |surface| {
@@ -3884,13 +3882,13 @@ pub const App = struct {
             },
 
             .new_tab => {
-                const source = self.findSurfaceForTarget(target);
+                const source = self.registry.findSurfaceForTarget(target);
                 _ = try self.createNewTab(source, null, false, false);
                 return true;
             },
 
             .new_split => {
-                const source = self.findSurfaceForTarget(target) orelse return false;
+                const source = self.registry.findSurfaceForTarget(target) orelse return false;
                 _ = try self.createNewSplit(source, splitDirectionFromAction(value), null, false);
                 return true;
             },
@@ -3906,7 +3904,7 @@ pub const App = struct {
             },
 
             .close_window => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     if (surface.host) |host| host.close();
                     return true;
                 }
@@ -3945,7 +3943,7 @@ pub const App = struct {
                         // borrowed catalog before the incoming config replaces
                         // the baseline. A later Escape can never resurrect the
                         // stale pre-reload config.
-                        for (self.hosts.items) |host| {
+                        for (self.registry.hosts.items) |host| {
                             if (host.overlay_mode == .command_palette) host.hideOverlay();
                         }
                         self.unregisterGlobalHotkeys();
@@ -3964,9 +3962,9 @@ pub const App = struct {
                         // bumps the generation, which would make a discovery
                         // started in between stale.
                         if (profiles_changed) {
-                            for (self.hosts.items) |host| host.invalidateProfiles();
+                            for (self.registry.hosts.items) |host| host.invalidateProfiles();
                         }
-                        for (self.hosts.items) |host| {
+                        for (self.registry.hosts.items) |host| {
                             if (profiles_changed and host.overlay_mode == .profile) {
                                 host.requestProfiles();
                                 host.refreshProfileChrome();
@@ -3978,22 +3976,22 @@ pub const App = struct {
                         }
                         self.scheduleGlobalHotkeySync();
                         self.reconfigureTheme();
-                        for (self.windows.items) |surface| {
+                        for (self.registry.windows.items) |surface| {
                             try surface.applyRuntimeConfig(&self.config);
                         }
                         // A reload that turns automatic checks on in a process
                         // that started with them off (or on another channel).
-                        if (self.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();
+                        if (self.registry.windows.items.len > 0 and self.update_startup_ready) self.maybeScheduleAutomaticUpdateCheck();
                         self.settings_window.externalConfigChanged(&self.config, self.config_revision);
                         self.refreshConfigProblems();
-                        if (self.windows.items.len == 0) {
+                        if (self.registry.windows.items.len == 0) {
                             self.startQuitTimer();
                         } else {
                             self.stopQuitTimer();
                         }
                     },
                     .surface => |core_surface| {
-                        const surface = self.findSurfaceByCore(core_surface) orelse return false;
+                        const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
                         try surface.applyRuntimeConfig(value.config);
                         try self.syncHostWindowState(surface);
                     },
@@ -4057,7 +4055,7 @@ pub const App = struct {
 
             .present_terminal, .color_change, .mouse_over_link => {
                 if (action == .present_terminal) {
-                    if (self.findSurfaceForTarget(target)) |surface| {
+                    if (self.registry.findSurfaceForTarget(target)) |surface| {
                         surface.present();
                         return true;
                     }
@@ -4067,7 +4065,7 @@ pub const App = struct {
             },
 
             .renderer_health => {
-                const surface = self.findSurfaceForTarget(target) orelse return false;
+                const surface = self.registry.findSurfaceForTarget(target) orelse return false;
                 return surface.handleRendererHealth(value);
             },
 
@@ -4083,18 +4081,18 @@ pub const App = struct {
             .toggle_visibility => {
                 self.windows_hidden = !self.windows_hidden;
                 if (self.windows_hidden) {
-                    for (self.hosts.items) |host| host.hideForToggle();
+                    for (self.registry.hosts.items) |host| host.hideForToggle();
                 } else {
-                    for (self.hosts.items) |host| try host.showAfterToggle();
+                    for (self.registry.hosts.items) |host| try host.showAfterToggle();
                     // Focus goes to a window that is on screen: a quick
                     // terminal dismissed before the hide stays dismissed.
-                    if (self.shownSurfaceForTarget(target)) |surface| self.activateSurface(surface);
+                    if (self.registry.shownSurfaceForTarget(target)) |surface| self.activateSurface(surface);
                 }
                 return true;
             },
 
             .toggle_background_opacity => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     const changed = try surface.toggleBackgroundOpacity();
                     if (!changed) return false;
                     try self.syncHostWindowState(surface);
@@ -4128,14 +4126,14 @@ pub const App = struct {
             },
 
             .toggle_tab_overview => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     return try surface.toggleTabOverview();
                 }
                 return false;
             },
 
             .cycle_focus_region => {
-                const surface = self.findSurfaceForTarget(target) orelse return false;
+                const surface = self.registry.findSurfaceForTarget(target) orelse return false;
                 const host = surface.host orelse return false;
                 return host.cycleFocusRegionFromCurrentFocus(switch (value) {
                     .previous => .previous,
@@ -4149,7 +4147,7 @@ pub const App = struct {
             },
 
             .toggle_maximize => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.toggleMaximize();
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4158,7 +4156,7 @@ pub const App = struct {
             },
 
             .toggle_fullscreen => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.toggleFullscreen(value);
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4167,7 +4165,7 @@ pub const App = struct {
             },
 
             .toggle_window_decorations => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.toggleDecorations();
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4176,7 +4174,7 @@ pub const App = struct {
             },
 
             .float_window => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setFloatWindow(value);
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4185,7 +4183,7 @@ pub const App = struct {
             },
 
             .initial_size => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setInitialSize(value);
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4194,7 +4192,7 @@ pub const App = struct {
             },
 
             .reset_window_size => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.resetWindowSize();
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4203,7 +4201,7 @@ pub const App = struct {
             },
 
             .size_limit => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.setSizeLimit(value);
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4212,7 +4210,7 @@ pub const App = struct {
             },
 
             .cell_size => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.setCellSize(value);
                     try self.syncHostWindowState(surface);
                     return true;
@@ -4221,8 +4219,8 @@ pub const App = struct {
             },
 
             .toggle_split_zoom => {
-                if (self.findSurfaceForTarget(target)) |surface| {
-                    const found = self.findTabForSurface(surface) orelse return false;
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
+                    const found = self.registry.findTabForSurface(surface) orelse return false;
                     const handle = found.tab.findHandle(surface) orelse found.tab.focused;
                     found.tab.tree.zoom(if (found.tab.tree.zoomed != null) null else handle);
                     surface.invalidateRedoForUnsupportedTabStructuralAction();
@@ -4235,10 +4233,10 @@ pub const App = struct {
             .render => {
                 return switch (target) {
                     .app => blk: {
-                        for (self.windows.items) |surface| try self.renderSurface(surface);
+                        for (self.registry.windows.items) |surface| try self.renderSurface(surface);
                         break :blk true;
                     },
-                    .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
+                    .surface => if (self.registry.findSurfaceForTarget(target)) |surface| blk: {
                         try self.renderSurface(surface);
                         break :blk true;
                     } else false,
@@ -4246,7 +4244,7 @@ pub const App = struct {
             },
 
             .render_inspector => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.redrawInspector();
                     return true;
                 }
@@ -4255,21 +4253,21 @@ pub const App = struct {
             },
 
             .inspector => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     return try self.setInspectorActionForSurface(surface, value);
                 }
                 return false;
             },
 
             .show_gtk_inspector => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     return try self.setInspectorActionForSurface(surface, .show);
                 }
                 return false;
             },
 
             .set_title => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setTitle(value.title);
                     return true;
                 }
@@ -4278,7 +4276,7 @@ pub const App = struct {
             },
 
             .set_tab_title => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setTabTitleOverride(if (value.title.len == 0) null else value.title);
                     return true;
                 }
@@ -4287,7 +4285,7 @@ pub const App = struct {
             },
 
             .prompt_title => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.promptTitle(value);
                     return true;
                 }
@@ -4296,21 +4294,21 @@ pub const App = struct {
             },
 
             .toggle_command_palette => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     return try surface.toggleCommandPalette();
                 }
                 return false;
             },
 
             .toggle_quick_select => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     return try surface.toggleQuickSelect();
                 }
                 return false;
             },
 
             .pwd => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setPwd(value.pwd);
                     if (self.jump_list) |*jump_list| jump_list.noteRecent(value.pwd);
                     return true;
@@ -4320,7 +4318,7 @@ pub const App = struct {
             },
 
             .mouse_shape => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.setMouseShape(value);
                     return true;
                 }
@@ -4328,7 +4326,7 @@ pub const App = struct {
             },
 
             .mouse_visibility => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     surface.setMouseVisibility(value);
                     return true;
                 }
@@ -4336,7 +4334,7 @@ pub const App = struct {
             },
 
             .progress_report => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setProgressReport(value);
                     return true;
                 }
@@ -4344,7 +4342,7 @@ pub const App = struct {
             },
 
             .program_status => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try self.applyProgramStatus(surface, value);
                     return true;
                 }
@@ -4359,7 +4357,7 @@ pub const App = struct {
             },
 
             .start_search => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.showSearchOverlay(value.needle);
                     return true;
                 }
@@ -4367,7 +4365,7 @@ pub const App = struct {
             },
 
             .end_search => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.closeDockedSearchBar(false, false);
                     return true;
                 }
@@ -4375,7 +4373,7 @@ pub const App = struct {
             },
 
             .search_total => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setSearchTotal(value.total, value.invalid);
                     return true;
                 }
@@ -4383,7 +4381,7 @@ pub const App = struct {
             },
 
             .search_selected => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setSearchSelected(value.selected);
                     return true;
                 }
@@ -4391,7 +4389,7 @@ pub const App = struct {
             },
 
             .search_match_rows => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setSearchMatchRows(value.rows);
                     return true;
                 }
@@ -4399,7 +4397,7 @@ pub const App = struct {
             },
 
             .secure_input => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setSecureInput(value);
                     return true;
                 }
@@ -4408,10 +4406,10 @@ pub const App = struct {
 
             // The core enforces read-only input. There is no separate chrome
             // indicator now that the dormant status bar has been removed.
-            .readonly => return self.findSurfaceForTarget(target) != null,
+            .readonly => return self.registry.findSurfaceForTarget(target) != null,
 
             .key_sequence => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setKeySequenceActive(switch (value) {
                         .trigger => true,
                         .end => false,
@@ -4422,7 +4420,7 @@ pub const App = struct {
             },
 
             .key_table => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setKeyTable(value);
                     return true;
                 }
@@ -4430,7 +4428,7 @@ pub const App = struct {
             },
 
             .scrollbar => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     try surface.setScrollbar(value);
                     return true;
                 }
@@ -4568,7 +4566,7 @@ pub const App = struct {
             },
 
             .copy_title_to_clipboard => {
-                if (self.findSurfaceForTarget(target)) |surface| {
+                if (self.registry.findSurfaceForTarget(target)) |surface| {
                     const title = surface.getTitle() orelse return false;
                     try surface.writeClipboardText(title);
                     return true;
@@ -4743,7 +4741,7 @@ pub const App = struct {
                         .explicit_window_target = false,
                     },
                     .window_id => |id| .{
-                        .source = self.activeSurfaceForHost(id),
+                        .source = self.registry.activeSurfaceForHost(id),
                         .explicit_window_target = true,
                     },
                     .surface_id => return error.InvalidAutomationTarget,
@@ -4762,7 +4760,7 @@ pub const App = struct {
                 }
                 const source = switch (value.target) {
                     .focused => self.automationDefaultSurface(),
-                    .surface_id => |id| self.findSurfaceById(id),
+                    .surface_id => |id| self.registry.findSurfaceById(id),
                     .window_id => return error.InvalidAutomationTarget,
                 } orelse return error.AutomationTargetNotFound;
                 const direction: SplitTreeSurface.Split.Direction = switch (value.direction) {
@@ -4775,15 +4773,15 @@ pub const App = struct {
             },
             .focus => |target| {
                 const surface = switch (target) {
-                    .surface_id => |id| self.findLiveSurfaceById(id),
-                    .window_id => |id| self.activeSurfaceForHost(id),
+                    .surface_id => |id| self.registry.findLiveSurfaceById(id),
+                    .window_id => |id| self.registry.activeSurfaceForHost(id),
                     .focused => return error.InvalidAutomationTarget,
                 } orelse return error.AutomationTargetNotFound;
                 self.activateSurface(surface);
             },
             .send_text => |value| {
                 const surface = switch (value.target) {
-                    .surface_id => |id| self.findLiveSurfaceById(id),
+                    .surface_id => |id| self.registry.findLiveSurfaceById(id),
                     .focused, .window_id => return error.InvalidAutomationTarget,
                 } orelse return error.AutomationTargetNotFound;
                 if (!automationTextAllowed(value.text)) return error.AutomationPolicyRefused;
@@ -4843,7 +4841,7 @@ pub const App = struct {
             alloc.free(window_entries);
         }
 
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (host.tabs.items.len == 0) continue;
             window_entries[built] = try self.buildAutomationWindow(alloc, host);
             built += 1;
@@ -4854,7 +4852,7 @@ pub const App = struct {
 
     fn automationWindowCount(self: *const App) usize {
         var count: usize = 0;
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (host.tabs.items.len == 0) continue;
             count += 1;
         }
@@ -5243,7 +5241,7 @@ pub const App = struct {
         working_directory: ?[]const u8,
         inherit_launch_config: bool,
     ) !*Surface {
-        const tab_info = self.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
+        const tab_info = self.registry.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
@@ -5355,7 +5353,7 @@ pub const App = struct {
         profile: *const windows_shell.Profile,
         open_target: ProfileOpenTarget,
     ) !*Surface {
-        const source = self.findSurfaceForTarget(target);
+        const source = self.registry.findSurfaceForTarget(target);
         var config = try apprt.surface.newConfig(
             self.core_app,
             &self.config,
@@ -5371,7 +5369,7 @@ pub const App = struct {
         const tab_id = switch (open_target) {
             .split => blk: {
                 const source_surface = source orelse return error.NoActiveSurface;
-                const tab_info = self.findTabForSurface(source_surface) orelse return error.NoActiveSurface;
+                const tab_info = self.registry.findTabForSurface(source_surface) orelse return error.NoActiveSurface;
                 break :blk tab_info.tab.id;
             },
             else => null,
@@ -5387,7 +5385,7 @@ pub const App = struct {
             else
                 null,
             .tab_id = tab_id,
-            .clone_state_from = if (open_target == .window) self.newWindowSource(target) else source,
+            .clone_state_from = if (open_target == .window) self.registry.newWindowSource(target) else source,
         });
         try self.noteProfileLaunch(surface, profile);
         return surface;
@@ -5570,7 +5568,7 @@ pub const App = struct {
             Observe.caption = @splat(0);
             Observe.shows = 0;
             try app.createAdoptedWindow(&pending);
-            const surface = app.windows.items[app.windows.items.len - 1];
+            const surface = app.registry.windows.items[app.registry.windows.items.len - 1];
             const host_hwnd = surface.host.?.hwnd.?;
             defer {
                 core_app.deleteSurface(surface);
@@ -5638,7 +5636,7 @@ pub const App = struct {
 
     pub fn refreshSystemScrollbarPreference(self: *App) void {
         self.system_dynamic_scrollbars = readDynamicScrollbars(self.system_dynamic_scrollbars);
-        for (self.windows.items) |surface| {
+        for (self.registry.windows.items) |surface| {
             surface.refreshScrollbarWindow() catch |err| {
                 log.warn("win32 scrollbar refresh failed err={}", .{err});
             };
@@ -5651,7 +5649,7 @@ pub const App = struct {
         // Surface state must change before the app-wide reload because
         // App.updateConfig applies each surface's own conditional state and
         // Termio reports mode 2031 only after installing that derived config.
-        for (self.windows.items) |surface| {
+        for (self.registry.windows.items) |surface| {
             surface.core().colorSchemeCallback(scheme);
         }
         try self.core_app.colorSchemeEvent(self, scheme);
@@ -5661,7 +5659,7 @@ pub const App = struct {
         const snapshot = SystemThemeSnapshot.capture(self.shownConfig());
         const changed = self.system_theme_refresh.accept(snapshot) or !std.meta.eql(snapshot.theme, self.resolved_theme);
         if (!changed) {
-            const missing_resources = for (self.hosts.items) |host| {
+            const missing_resources = for (self.registry.hosts.items) |host| {
                 if (host.hwnd != null and (host.chrome_brush == null or
                     host.overlay_brush == null or host.edit_brush == null or
                     host.chrome_font == null or host.preview_font == null or
@@ -5693,7 +5691,7 @@ pub const App = struct {
         // The theme as Settings previews it.
         const shown = self.shownConfig();
         self.resolved_theme = resolveTheme(shown);
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             host.rebuildThemeBrushes();
             host.recreateChromeFont();
             // High Contrast turns the split dim off and back on.
@@ -5736,7 +5734,7 @@ pub const App = struct {
                 );
             }
         }
-        for (self.windows.items) |surface| surface.invalidateScrollbarWindow();
+        for (self.registry.windows.items) |surface| surface.invalidateScrollbarWindow();
         self.theme_rebuilds +%= 1;
         self.settings_window.themeChanged();
     }
@@ -5784,7 +5782,7 @@ pub const App = struct {
         switch (effect) {
             .none => {},
             .theme => self.reconfigureTheme(),
-            .opacity => for (self.windows.items) |surface| {
+            .opacity => for (self.registry.windows.items) |surface| {
                 surface.applyRuntimeConfig(&self.config) catch |err| {
                     log.warn("settings live preview apply failed err={}", .{err});
                 };
@@ -5886,7 +5884,7 @@ pub const App = struct {
 
         try appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[slot_ordinal], key);
 
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             runUiActionOrLog("quick slot profile refresh failed", host.reapplyLauncherProfilePreferences());
             host.refreshProfileChrome();
         }
@@ -5920,7 +5918,7 @@ pub const App = struct {
             runUiActionOrLog("quick slot clear failed", appendOwnedString(self.core_app.alloc, value, null));
         }
 
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             // The pins reordered the list in place; a fresh one from the
             // discovery worker restores discovery order.
             if (host.profiles != null) host.requestProfiles();
@@ -5984,7 +5982,7 @@ pub const App = struct {
     pub fn validateShellNativeMapping(self: *App) !void {
         const state = &self.shell_runtime.state;
         var mapped_hosts: usize = 0;
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             const window_id = host.shell_id orelse continue;
             mapped_hosts += 1;
             const window = state.windowConst(window_id) orelse return error.MissingShellWindow;
@@ -6129,7 +6127,7 @@ pub const App = struct {
         // compositor is running), which must exist by then.
         restoreRequestedHostWindowStyle(hwnd, startup_style);
 
-        try self.hosts.append(self.core_app.alloc, host);
+        try self.registry.addHost(self.core_app.alloc, host);
         host_registered = true;
         errdefer {
             // Keep the registered Host and its GWLP_USERDATA alive through
@@ -6331,119 +6329,13 @@ pub const App = struct {
         }));
     }
 
-    pub fn findHostById(self: *App, id: u32) ?*Host {
-        for (self.hosts.items) |host| {
-            if (host.id == id) return host;
-        }
-        return null;
-    }
-
-    pub fn activeSurfaceForHost(self: *App, host_id: u32) ?*Surface {
-        const host = self.findHostById(host_id) orelse return null;
-        return host.activeSurface();
-    }
-
-    pub fn findSurfaceById(self: *App, surface_id: u64) ?*Surface {
-        for (self.windows.items) |surface| {
-            if (surface.core().id == surface_id) return surface;
-        }
-
-        for (self.hosts.items) |host| {
-            for (host.tabs.items) |*tab| {
-                if (tab.findSurfaceByCoreId(surface_id)) |surface| return surface;
-            }
-        }
-
-        return null;
-    }
-
-    pub fn findLiveSurfaceById(self: *App, surface_id: u64) ?*Surface {
-        const surface = self.findSurfaceById(surface_id) orelse return null;
-        _ = self.findTabForSurface(surface) orelse return null;
-        return surface;
-    }
-
-    /// Whether a window on screen has its top-left corner where `rect` does,
-    /// other than `except`.
-    pub fn windowStartsAt(self: *App, rect: RECT, except: ?HWND) bool {
-        for (self.hosts.items) |host| {
-            const hwnd = host.hwnd orelse continue;
-            if (hwnd == except or sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) continue;
-            var other: RECT = undefined;
-            if (sys.GetWindowRect(hwnd, &other) == 0) continue;
-            if (other.left == rect.left and other.top == rect.top) return true;
-        }
-        return false;
-    }
-
     pub const inheritHostWindowState = window_state.inheritHostWindowState;
-
-    fn findSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
-        return switch (target) {
-            .app => self.primarySurface(),
-            .surface => |core_surface| self.findSurfaceByCore(core_surface),
-        };
-    }
-
-    /// `findSurfaceForTarget`, unless its window is hidden: then the active
-    /// surface of the first window on screen.
-    fn shownSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
-        if (self.findSurfaceForTarget(target)) |surface| {
-            if (surface.windowHwnd()) |hwnd| {
-                if (sys.IsWindowVisible(hwnd) != 0) return surface;
-            }
-        }
-        for (self.hosts.items) |host| {
-            const hwnd = host.hwnd orelse continue;
-            if (sys.IsWindowVisible(hwnd) == 0) continue;
-            if (host.activeSurface()) |surface| return surface;
-        }
-        return null;
-    }
-
-    /// The window a new one copies its state from: the target's, or, for a
-    /// request no window made (a forwarded launch), one from the quick
-    /// terminal or one whose surface is gone, the ordinary window activated
-    /// last. Never the quick terminal, a floating, undecorated strip pinned
-    /// to a screen edge that a copy would repeat, and never a window kept
-    /// with no tab for undo, which has no pane to copy. With neither, an
-    /// ordinary new window. `hosts` is no guide: `detachHostReference`
-    /// reorders it.
-    fn newWindowSource(self: *App, target: apprt.Target) ?*Surface {
-        switch (target) {
-            .app => {},
-            .surface => |core_surface| if (self.findSurfaceByCore(core_surface)) |surface| {
-                const host = surface.host orelse return surface;
-                if (!host.quick_terminal) return surface;
-            },
-        }
-        var latest: ?*Host = null;
-        for (self.hosts.items) |host| {
-            if (host.quick_terminal or host.activeSurface() == null) continue;
-            if (latest == null or host.activated > latest.?.activated) latest = host;
-        }
-        return if (latest) |host| host.activeSurface() else null;
-    }
-
-    pub fn focusedSurfaceForUndoRedo(self: *App) ?*Surface {
-        for (self.hosts.items) |host| {
-            if (host.activeSurface()) |surface| {
-                if (surface.window_focused) return surface;
-            }
-        }
-
-        for (self.windows.items) |surface| {
-            if (surface.window_focused) return surface;
-        }
-
-        return null;
-    }
 
     pub fn automationDefaultSurface(self: *App) ?*Surface {
         if (self.core_app.focusedSurface()) |core_surface| {
-            if (self.findSurfaceByCore(core_surface)) |surface| return surface;
+            if (self.registry.findSurfaceByCore(core_surface)) |surface| return surface;
         }
-        return self.focusedSurfaceForUndoRedo() orelse self.primarySurface();
+        return self.registry.focusedSurfaceForUndoRedo() orelse self.registry.primarySurface();
     }
 
     pub fn emptyHostKeyEvent(self: *App, host_id: u32, event: input.KeyEvent) bool {
@@ -6456,49 +6348,44 @@ pub const App = struct {
     fn undoRedoSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
         return switch (target) {
             .app => if (self.empty_host_key_id) |id|
-                if (self.findHostById(id)) |host| host.activeSurface() else null
+                if (self.registry.findHostById(id)) |host| host.activeSurface() else null
             else
-                self.focusedSurfaceForUndoRedo() orelse self.primarySurface(),
-            .surface => |core_surface| self.findSurfaceByCore(core_surface),
+                self.registry.focusedSurfaceForUndoRedo() orelse self.registry.primarySurface(),
+            .surface => |core_surface| self.registry.findSurfaceByCore(core_surface),
         };
     }
 
     fn structuralUndoHostForTarget(self: *App, target: apprt.Target) ?*Host {
         if (target == .app) {
-            if (self.empty_host_key_id) |id| return self.findHostById(id);
+            if (self.empty_host_key_id) |id| return self.registry.findHostById(id);
         }
         if (self.undoRedoSurfaceForTarget(target)) |surface| {
             if (surface.host) |host| return host;
         }
 
         return switch (target) {
-            .app => self.hostWithNewestStructuralUndo() orelse if (self.hosts.items.len > 0) self.hosts.items[0] else null,
+            .app => self.registry.hostWithNewestStructuralUndo() orelse if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null,
             .surface => null,
         };
     }
 
     fn structuralRedoHostForTarget(self: *App, target: apprt.Target) ?*Host {
         if (target == .app) {
-            if (self.empty_host_key_id) |id| return self.findHostById(id);
+            if (self.empty_host_key_id) |id| return self.registry.findHostById(id);
         }
         if (self.undoRedoSurfaceForTarget(target)) |surface| {
             if (surface.host) |host| return host;
         }
 
         return switch (target) {
-            .app => self.hostWithNewestStructuralRedo() orelse if (self.hosts.items.len > 0) self.hosts.items[0] else null,
+            .app => self.registry.hostWithNewestStructuralRedo() orelse if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null,
             .surface => null,
         };
     }
 
-    pub fn primarySurface(self: *App) ?*Surface {
-        if (self.hosts.items.len == 0) return null;
-        return self.activeSurfaceForHost(self.hosts.items[0].id);
-    }
-
     fn showPendingConPtyFallbackBanner(self: *App) void {
         if (!ptypkg.hasPendingConPtyFallbackBanner()) return;
-        const surface = self.primarySurface() orelse return;
+        const surface = self.registry.primarySurface() orelse return;
         const host = surface.host orelse return;
         const text = ptypkg.takeConPtyFallbackBanner() orelse return;
         // Shown once per process and naming why output may be degraded, so
@@ -6508,90 +6395,12 @@ pub const App = struct {
         };
     }
 
-    fn hostWithNewestStructuralUndo(self: *App) ?*Host {
-        var best: ?*Host = null;
-        var best_ts: u64 = 0;
-        var best_seq: u64 = 0;
-        for (self.hosts.items) |host| {
-            const entry = host.peekStructuralUndo() orelse continue;
-            if (best == null or win32_structural_history.sortsAfter(
-                entry.timestamp_ms,
-                entry.sequence_id,
-                best_ts,
-                best_seq,
-            )) {
-                best = host;
-                best_ts = entry.timestamp_ms;
-                best_seq = entry.sequence_id;
-            }
-        }
-        return best;
-    }
-
-    fn hostWithNewestStructuralRedo(self: *App) ?*Host {
-        var best: ?*Host = null;
-        var best_ts: u64 = 0;
-        var best_seq: u64 = 0;
-        for (self.hosts.items) |host| {
-            const entry = host.peekStructuralRedo() orelse continue;
-            if (best == null or win32_structural_history.sortsAfter(
-                entry.timestamp_ms,
-                entry.sequence_id,
-                best_ts,
-                best_seq,
-            )) {
-                best = host;
-                best_ts = entry.timestamp_ms;
-                best_seq = entry.sequence_id;
-            }
-        }
-        return best;
-    }
-
     pub fn undoCutoffTimestampMs(self: *const App) u64 {
         return sys.GetTickCount64() -| self.undoTimeoutMs();
     }
 
-    fn findSurfaceByCore(self: *App, core_surface: *CoreSurface) ?*Surface {
-        for (self.windows.items) |surface| {
-            if (surface.core() == core_surface) return surface;
-        }
-
-        return null;
-    }
-
-    fn collectHostIds(self: *App, alloc: Allocator) !std.ArrayListUnmanaged(u32) {
-        var ids: std.ArrayListUnmanaged(u32) = .empty;
-        errdefer ids.deinit(alloc);
-        for (self.hosts.items) |host| try ids.append(alloc, host.id);
-        return ids;
-    }
-
-    pub fn collectHostSurfaces(self: *App, alloc: Allocator, host_id: u32) !std.ArrayListUnmanaged(*Surface) {
-        var surfaces: std.ArrayListUnmanaged(*Surface) = .empty;
-        errdefer surfaces.deinit(alloc);
-        const host = self.findHostById(host_id) orelse return surfaces;
-        for (host.tabs.items) |*tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                try surfaces.append(alloc, entry.view);
-            }
-        }
-        return surfaces;
-    }
-
-    pub fn findTabForSurface(_: *App, surface: *Surface) ?struct { host: *Host, index: usize, tab: *Tab } {
-        const host = surface.host orelse return null;
-        for (host.tabs.items, 0..) |*tab, index| {
-            if (tab.findHandle(surface) != null) {
-                return .{ .host = host, .index = index, .tab = tab };
-            }
-        }
-        return null;
-    }
-
     fn tabHasInspectorForSurface(self: *App, surface: *Surface) bool {
-        const found = self.findTabForSurface(surface) orelse return surface.inspector_visible;
+        const found = self.registry.findTabForSurface(surface) orelse return surface.inspector_visible;
         var it = found.tab.tree.iterator();
         while (it.next()) |entry| {
             if (entry.view.inspector_visible) return true;
@@ -6600,7 +6409,7 @@ pub const App = struct {
     }
 
     fn setTabInspectorVisibleForSurface(self: *App, surface: *Surface, visible: bool) !bool {
-        const found = self.findTabForSurface(surface) orelse return try surface.setInspectorVisible(visible);
+        const found = self.registry.findTabForSurface(surface) orelse return try surface.setInspectorVisible(visible);
         var changed = false;
         var it = found.tab.tree.iterator();
         while (it.next()) |entry| {
@@ -6624,7 +6433,7 @@ pub const App = struct {
         const host = surface.host orelse return .{};
         const total = host.tabs.items.len;
         var index: usize = 0;
-        if (self.findTabForSurface(@constCast(surface))) |found| index = found.index;
+        if (self.registry.findTabForSurface(@constCast(surface))) |found| index = found.index;
         return .{
             .index = index,
             .total = if (total == 0) 1 else total,
@@ -6633,7 +6442,7 @@ pub const App = struct {
 
     pub fn showHostSurface(self: *App, surface: *Surface, focus: bool) void {
         const host = surface.host orelse return;
-        const tab_info = self.findTabForSurface(surface) orelse return;
+        const tab_info = self.registry.findTabForSurface(surface) orelse return;
         const previous_surface = host.activeSurface();
         const previous_tab_id = if (host.active_tab < host.tabs.items.len)
             host.tabs.items[host.active_tab].id
@@ -6658,7 +6467,7 @@ pub const App = struct {
         defer self.auditCreationAfterActivation();
         const was_windows_hidden = self.windows_hidden;
         self.windows_hidden = false;
-        if (self.findTabForSurface(surface)) |found| {
+        if (self.registry.findTabForSurface(surface)) |found| {
             const handle = found.tab.findHandle(surface) orelse found.tab.focused;
             const host_window_visible = if (found.host.hwnd) |hwnd|
                 sys.IsWindowVisible(hwnd) != 0
@@ -6764,7 +6573,7 @@ pub const App = struct {
         const pane = state.paneConst(pane_id) orelse return;
         const model_tab = state.tabConst(pane.tab) orelse return;
         const window = state.windowConst(model_tab.window) orelse return;
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             const window_id = host.shell_id orelse continue;
             if (!window_id.eql(window.id)) continue;
             for (host.tabs.items, 0..) |*tab, index| {
@@ -6787,9 +6596,9 @@ pub const App = struct {
 
     pub fn syncTaskbarProgressForHost(self: *App, host_id: u32) void {
         const taskbar = if (self.taskbar_progress) |*value| value else return;
-        const host = self.findHostById(host_id) orelse return;
+        const host = self.registry.findHostById(host_id) orelse return;
         const hwnd = host.hwnd orelse return;
-        const report = if (self.activeSurfaceForHost(host_id)) |surface|
+        const report = if (self.registry.activeSurfaceForHost(host_id)) |surface|
             surface.effectiveTaskbarProgress()
         else
             null;
@@ -6802,51 +6611,12 @@ pub const App = struct {
         };
     }
 
-    fn focusedSurfaceForHostTab(_: *App, host: *Host, tab_id: u32) ?*Surface {
-        for (host.tabs.items) |*tab| {
-            if (tab.id != tab_id) continue;
-            return tab.focusedSurface();
-        }
-
-        return null;
-    }
-
-    pub fn resolveToastActivationSurface(
-        self: *App,
-        activation: win32_toast_activation.ActivationTarget,
-    ) ?*Surface {
-        // Ids are this process's only when the toast is: a click on another
-        // noctty's toast (COM hands it to whichever process registered the
-        // activator, or to a new one after that process ended) must not
-        // pick a window or tab that happens to share a number here.
-        if (activation.pid != sys.GetCurrentProcessId()) return self.primarySurface();
-
-        if (activation.surface_id) |surface_id| {
-            if (self.findSurfaceById(surface_id)) |surface| {
-                return surface;
-            }
-        }
-
-        if (activation.window_id) |window_id| {
-            if (self.findHostById(window_id)) |host| {
-                if (activation.tab_id) |tab_id| {
-                    if (self.focusedSurfaceForHostTab(host, tab_id)) |surface| {
-                        return surface;
-                    }
-                }
-                if (host.activeSurface()) |surface| return surface;
-            }
-        }
-
-        return self.primarySurface();
-    }
-
     fn handleToastActivation(self: *App, activation: win32_toast_activation.ActivationTarget) bool {
         if (activation.action) |action| switch (action) {
             .focus => {},
         };
 
-        const surface = self.resolveToastActivationSurface(activation) orelse return false;
+        const surface = self.registry.resolveToastActivationSurface(activation) orelse return false;
         surface.present();
         return true;
     }
@@ -6928,7 +6698,7 @@ pub const App = struct {
     pub fn activateSurfaceNoFocus(self: *App, surface: *Surface) void {
         defer self.auditCreationAfterActivation();
         const was_windows_hidden = self.windows_hidden;
-        if (self.findTabForSurface(surface)) |found| {
+        if (self.registry.findTabForSurface(surface)) |found| {
             const handle = found.tab.findHandle(surface) orelse found.tab.focused;
             const host_window_visible = if (found.host.hwnd) |hwnd|
                 sys.IsWindowVisible(hwnd) != 0
@@ -6957,7 +6727,7 @@ pub const App = struct {
     }
 
     pub fn noteSurfaceFocused(self: *App, surface: *Surface) bool {
-        const found = self.findTabForSurface(surface) orelse return false;
+        const found = self.registry.findTabForSurface(surface) orelse return false;
         const handle = found.tab.findHandle(surface) orelse return false;
         const previous_tab_id = if (found.host.active_tab < found.host.tabs.items.len)
             found.host.tabs.items[found.host.active_tab].id
@@ -6980,23 +6750,14 @@ pub const App = struct {
 
     const syncHostWindowState = window_state.syncHostWindowState;
 
-    pub fn removeWindow(self: *App, surface: *Surface) void {
-        for (self.windows.items, 0..) |item, i| {
-            if (item == surface) {
-                _ = self.windows.swapRemove(i);
-                break;
-            }
-        }
-    }
-
     pub fn removeHost(self: *App, host: *Host) void {
-        if (!detachHostReference(&self.hosts, host)) return;
+        if (!self.registry.removeHost(host)) return;
         host.deinit();
         self.core_app.alloc.destroy(host);
     }
 
     pub fn windowDestroyed(self: *App, surface: *Surface) void {
-        self.removeWindow(surface);
+        self.registry.removeWindow(surface);
         // A closed pane's toast can no longer focus anything.
         self.forgetSurfaceToast(surface);
         if (surface.host) |host| {
@@ -7121,7 +6882,7 @@ pub const App = struct {
             }
         }
 
-        if (self.windows.items.len == 0 and self.running) {
+        if (self.registry.windows.items.len == 0 and self.running) {
             if (self.embedding_mode) {
                 if (self.exitEmbeddingServerIfIdle()) {
                     self.running = false;
@@ -7136,11 +6897,11 @@ pub const App = struct {
     }
 
     fn gotoWindow(self: *App, target: apprt.Target, direction: apprt.action.GotoWindow) !bool {
-        var host_ids = try self.collectHostIds(self.core_app.alloc);
+        var host_ids = try self.registry.collectHostIds(self.core_app.alloc);
         defer host_ids.deinit(self.core_app.alloc);
         if (host_ids.items.len <= 1) return false;
 
-        const current = self.findSurfaceForTarget(target) orelse self.windows.items[0];
+        const current = self.registry.findSurfaceForTarget(target) orelse self.registry.windows.items[0];
         var current_host_idx: usize = 0;
         for (host_ids.items, 0..) |host_id, i| {
             if (host_id == current.host_id) {
@@ -7153,14 +6914,14 @@ pub const App = struct {
             .next => (current_host_idx + 1) % host_ids.items.len,
             .previous => (current_host_idx + host_ids.items.len - 1) % host_ids.items.len,
         };
-        const next_surface = self.activeSurfaceForHost(host_ids.items[next_idx]) orelse return false;
+        const next_surface = self.registry.activeSurfaceForHost(host_ids.items[next_idx]) orelse return false;
         self.activateSurface(next_surface);
         return true;
     }
 
     fn gotoSplitFallback(self: *App, target: apprt.Target, to: apprt.action.GotoSplit) !bool {
-        const current = self.findSurfaceForTarget(target) orelse return false;
-        const found = self.findTabForSurface(current) orelse return false;
+        const current = self.registry.findSurfaceForTarget(target) orelse return false;
+        const found = self.registry.findTabForSurface(current) orelse return false;
         const from = found.tab.findHandle(current) orelse found.tab.focused;
         const goto: SplitTreeSurface.Goto = switch (to) {
             .previous => .previous_wrapped,
@@ -7198,8 +6959,8 @@ pub const App = struct {
     }
 
     pub fn resizeSplitFallback(self: *App, target: apprt.Target, value: apprt.action.ResizeSplit) !bool {
-        const surface = self.findSurfaceForTarget(target) orelse return false;
-        const found = self.findTabForSurface(surface) orelse return false;
+        const surface = self.registry.findSurfaceForTarget(target) orelse return false;
+        const found = self.registry.findTabForSurface(surface) orelse return false;
         const handle = found.tab.findHandle(surface) orelse found.tab.focused;
         const layout: SplitTreeSurface.Split.Layout = switch (value.direction) {
             .left, .right => .horizontal,
@@ -7229,8 +6990,8 @@ pub const App = struct {
     }
 
     pub fn equalizeSplitsFallback(self: *App, target: apprt.Target) !bool {
-        const surface = self.findSurfaceForTarget(target) orelse return false;
-        const found = self.findTabForSurface(surface) orelse return false;
+        const surface = self.registry.findSurfaceForTarget(target) orelse return false;
+        const found = self.registry.findTabForSurface(surface) orelse return false;
         const next_tree = try found.tab.tree.equalize(self.core_app.alloc);
         if (splitTreeEquivalent(&found.tab.tree, &next_tree)) {
             var unchanged = next_tree;
@@ -7250,8 +7011,8 @@ pub const App = struct {
     }
 
     pub fn closeTab(self: *App, target: apprt.Target, mode: apprt.action.CloseTabMode) !bool {
-        const current = self.findSurfaceForTarget(target) orelse return false;
-        const found = self.findTabForSurface(current) orelse return false;
+        const current = self.registry.findSurfaceForTarget(target) orelse return false;
+        const found = self.registry.findTabForSurface(current) orelse return false;
         const host = found.host;
         const current_idx = found.index;
 
@@ -7386,7 +7147,7 @@ pub const App = struct {
     /// replaces or removes its tab's split tree.
     pub fn closeTabsBeside(self: *App, current: *Surface, comptime beside: apprt.action.CloseTabMode) !bool {
         comptime std.debug.assert(beside != .this);
-        const found = self.findTabForSurface(current) orelse return false;
+        const found = self.registry.findTabForSurface(current) orelse return false;
         const host = found.host;
         const keep = found.index;
         const alloc = self.core_app.alloc;
@@ -7411,9 +7172,9 @@ pub const App = struct {
     }
 
     fn gotoTab(self: *App, target: apprt.Target, goto: apprt.action.GotoTab) !bool {
-        if (self.windows.items.len == 0) return false;
-        const current = self.findSurfaceForTarget(target) orelse self.windows.items[0];
-        const found = self.findTabForSurface(current) orelse return false;
+        if (self.registry.windows.items.len == 0) return false;
+        const current = self.registry.findSurfaceForTarget(target) orelse self.registry.windows.items[0];
+        const found = self.registry.findTabForSurface(current) orelse return false;
         const desired = desiredTabIndex(found.host.tabs.items.len, found.index, goto) orelse return false;
         const current_idx = found.index;
         if (desired == current_idx) return false;
@@ -7424,9 +7185,9 @@ pub const App = struct {
     }
 
     pub fn moveTab(self: *App, target: apprt.Target, move: apprt.action.MoveTab) !bool {
-        if (self.windows.items.len <= 1 or move.amount == 0) return false;
-        const current = self.findSurfaceForTarget(target) orelse return false;
-        const found = self.findTabForSurface(current) orelse return false;
+        if (self.registry.windows.items.len <= 1 or move.amount == 0) return false;
+        const current = self.registry.findSurfaceForTarget(target) orelse return false;
+        const found = self.registry.findTabForSurface(current) orelse return false;
         if (found.host.tabs.items.len <= 1) return false;
         const current_idx = found.index;
         const desired = desiredMoveIndex(found.host.tabs.items.len, current_idx, move.amount) orelse return false;
@@ -7461,7 +7222,6 @@ pub const App = struct {
         return true;
     }
 
-    pub const quickTerminalHost = quick_terminal_host.quickTerminalHost;
 
     pub const hideQuickTerminalHost = quick_terminal_host.hideQuickTerminalHost;
 
@@ -7495,11 +7255,11 @@ pub const App = struct {
         // whole (a global key, automation) asks on the focused window, if
         // any, else on a window with a running process.
         const near: ?*Surface = switch (target) {
-            .app => self.focusedSurfaceForUndoRedo(),
-            .surface => |core_surface| self.findSurfaceByCore(core_surface),
+            .app => self.registry.focusedSurfaceForUndoRedo(),
+            .surface => |core_surface| self.registry.findSurfaceByCore(core_surface),
         };
         const post_host = (if (near) |surface| surface.host else null) orelse
-            if (self.hosts.items.len > 0) self.hosts.items[0] else null;
+            if (self.registry.hosts.items.len > 0) self.registry.hosts.items[0] else null;
         // A failed post declines the quit: running it here instead is the
         // teardown under the key handler that this function exists to avoid.
         if (post_host) |host| if (host.hwnd) |hwnd| {
@@ -7576,7 +7336,7 @@ pub const App = struct {
         var count: usize = 0;
         var open: ?*Host = null;
         var busy: ?*Host = null;
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             if (host.showsConfirm(on_accept, self)) open = host;
             const host_count = tabsCloseConfirmCount(host.tabs.items);
             if (host_count == 0) continue;
@@ -7611,7 +7371,7 @@ pub const App = struct {
         // its windows: save them while they are whole.
         if (self.hasSessionWindows()) self.saveSessionAsItEnds();
         self.destroyAllWindows();
-        if (self.windows.items.len == 0) sys.PostQuitMessage(0);
+        if (self.registry.windows.items.len == 0) sys.PostQuitMessage(0);
     }
 
     /// Each window goes a pane at a time, as closing it does: the last pane's
@@ -7625,8 +7385,8 @@ pub const App = struct {
     fn destroyAllWindows(self: *App) void {
         self.quitting = true;
         defer self.quitting = false;
-        while (self.hosts.items.len > 0) {
-            const host = self.hosts.items[self.hosts.items.len - 1];
+        while (self.registry.hosts.items.len > 0) {
+            const host = self.registry.hosts.items[self.registry.hosts.items.len - 1];
             const hwnd = host.hwnd orelse {
                 self.removeHost(host);
                 continue;
@@ -7641,7 +7401,7 @@ pub const App = struct {
     /// Destroys one of `host`'s panes through its own window. False when
     /// none is left that could be.
     fn destroyPaneOf(self: *App, host: *const Host) bool {
-        for (self.windows.items) |surface| {
+        for (self.registry.windows.items) |surface| {
             if (surface.host != host) continue;
             const pane = surface.hwnd orelse continue;
             if (sys.DestroyWindow(pane) != 0) return true;
@@ -8869,7 +8629,7 @@ pub const App = struct {
     /// target uses its own configuration, `.app` the app's, and only a
     /// surface target marks a terminal with the title glyph.
     fn ringBell(self: *App, target: apprt.Target) void {
-        const surface = self.findSurfaceForTarget(target);
+        const surface = self.registry.findSurfaceForTarget(target);
         const alerted: ?*Surface = switch (target) {
             .surface => surface,
             .app => null,
@@ -9052,7 +8812,7 @@ pub const App = struct {
     ) !void {
         switch (target) {
             .app => {},
-            .surface => if (self.findSurfaceForTarget(target)) |surface| {
+            .surface => if (self.registry.findSurfaceForTarget(target)) |surface| {
                 return self.showSurfaceToast(surface, title, body);
             },
         }
@@ -9078,7 +8838,7 @@ pub const App = struct {
         var tab_title: std.Io.Writer = .fixed(&title_buf);
         var context_buf: [160]u8 = undefined;
         var context: std.Io.Writer = .fixed(&context_buf);
-        const attribution: ?[]const u8 = if (self.findTabForSurface(surface)) |found| context: {
+        const attribution: ?[]const u8 = if (self.registry.findTabForSurface(surface)) |found| context: {
             const name = toastTabName(found.tab, surface);
             try self.writeToastContext(&context, found.host, found.index, name);
             if (title.len == 0) {
@@ -9128,7 +8888,7 @@ pub const App = struct {
     /// its toast removed at once.
     fn noteToastShown(self: *App, surface_id: u64) void {
         self.toast_group_used = true;
-        if (self.findLiveSurfaceById(surface_id)) |surface| {
+        if (self.registry.findLiveSurfaceById(surface_id)) |surface| {
             surface.toast_outstanding = surface_id;
         } else {
             // Failing that, exit's group removal takes it.
@@ -9162,7 +8922,7 @@ pub const App = struct {
         if (!self.toast_removals_posted) {
             // No message window (before `run` creates it, after it closes
             // at exit): exit's `removeOwnToasts` takes the whole group.
-            if (self.message_hwnd) |hwnd| {
+            if (self.registry.message_hwnd) |hwnd| {
                 self.toast_removals_posted = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_TOAST_REMOVALS, 0, 0) != 0;
             }
         }
@@ -9181,7 +8941,7 @@ pub const App = struct {
     /// A toast the pane showed meanwhile is outstanding and replaced the
     /// older one, so its removal waits for the next chance.
     fn restoreToastRemoval(self: *App, surface_id: u64) void {
-        const surface = self.findSurfaceById(surface_id);
+        const surface = self.registry.findSurfaceById(surface_id);
         if (surface) |pane| if (pane.toast_outstanding != null) return;
         if (self.queueToastRemoval(surface_id)) return;
         // Out of memory: kept outstanding, so a later chance retries.
@@ -9249,7 +9009,7 @@ pub const App = struct {
         } else {
             var window_count: usize = 0;
             var number: ?usize = null;
-            for (self.hosts.items) |item| {
+            for (self.registry.hosts.items) |item| {
                 if (item.quick_terminal) continue;
                 window_count += 1;
                 if (item == host) number = window_count;
@@ -9315,7 +9075,7 @@ pub const App = struct {
         target: apprt.Target,
         finished: apprt.action.CommandFinished,
     ) !void {
-        const surface = self.findSurfaceForTarget(target) orelse return;
+        const surface = self.registry.findSurfaceForTarget(target) orelse return;
         const config = &surface.core().config;
         const plan = commandFinishPlan(
             config.notify_on_command_finish,
@@ -9373,13 +9133,13 @@ pub const App = struct {
                 break :news null;
             },
         };
-        const found = self.findTabForSurface(surface) orelse return;
+        const found = self.registry.findTabForSurface(surface) orelse return;
         const seen = tabSeenByUser(found.host, found.index);
         // The user is looking at this tab, so a program that finished or
         // failed has been seen the moment it says so.
         if (seen) _ = surface.program_status.acknowledge();
         found.host.refreshTabStatus(found.index);
-        if (self.activeSurfaceForHost(found.host.id) == surface and
+        if (self.registry.activeSurfaceForHost(found.host.id) == surface and
             !std.meta.eql(taskbar_before, surface.effectiveTaskbarProgress()))
         {
             self.syncTaskbarProgressForHost(found.host.id);
@@ -9474,7 +9234,7 @@ pub const App = struct {
     /// timer that only exists while something waits.
     fn flushProgramStatusNotifications(self: *App) void {
         var waiting = false;
-        for (self.windows.items) |surface| {
+        for (self.registry.windows.items) |surface| {
             if (!surface.program_status_notify_pending) continue;
             const owed = self.owedProgramStatus(surface) orelse {
                 surface.program_status_notify_pending = false;
@@ -9506,7 +9266,7 @@ pub const App = struct {
         record: *const win32_program_status.Record,
     } {
         if (!surface.core().config.desktop_notifications) return null;
-        const found = self.findTabForSurface(surface) orelse return null;
+        const found = self.registry.findTabForSurface(surface) orelse return null;
         const record = surface.program_status.headline() orelse return null;
         if (tabSeenByUser(found.host, found.index) or
             !win32_program_status.Indicator.of(record).needsUser()) return null;
@@ -9532,8 +9292,8 @@ pub const App = struct {
     /// window by window.
     fn gotoAttention(self: *App, target: apprt.Target) !bool {
         const alloc = self.core_app.alloc;
-        const current = if (self.findSurfaceForTarget(target)) |surface|
-            self.findTabForSurface(surface)
+        const current = if (self.registry.findSurfaceForTarget(target)) |surface|
+            self.registry.findTabForSurface(surface)
         else
             null;
 
@@ -9542,7 +9302,7 @@ pub const App = struct {
         var surfaces: std.ArrayListUnmanaged(?*Surface) = .empty;
         defer surfaces.deinit(alloc);
         var current_index: ?usize = null;
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             for (host.tabs.items, 0..) |*tab, i| {
                 if (current) |found| {
                     if (found.host == host and found.index == i) current_index = indicators.items.len;
@@ -9584,7 +9344,7 @@ pub const App = struct {
         kind: HostBannerKind,
         message: []const u8,
     ) !bool {
-        const surface = self.findSurfaceForTarget(target) orelse return false;
+        const surface = self.registry.findSurfaceForTarget(target) orelse return false;
         const host = surface.host orelse return false;
         try host.setBanner(kind, message);
         return true;
@@ -9660,8 +9420,8 @@ pub const App = struct {
         // Kept so a later load that finds nothing can take down this banner,
         // and no other.
         self.config_problems_banner = text;
-        for (self.hosts.items) |host| self.presentConfigProblemsOnHost(host);
-        return self.hosts.items.len > 0;
+        for (self.registry.hosts.items) |host| self.presentConfigProblemsOnHost(host);
+        return self.registry.hosts.items.len > 0;
     }
 
     pub fn presentConfigProblemsOnHost(self: *App, host: *Host) void {
@@ -9678,7 +9438,7 @@ pub const App = struct {
             alloc.free(ours);
             self.config_problems_banner = null;
         }
-        for (self.hosts.items) |host| {
+        for (self.registry.hosts.items) |host| {
             // Remove a queued config banner as well, before clearing the
             // active one, so a clean load cannot resurrect stale problems.
             appendOwnedString(alloc, &host.config_problems_text, null) catch unreachable;
@@ -9694,7 +9454,7 @@ pub const App = struct {
 test "win32 Settings' profile choices follow what the loaded config made of the value" {
     const alloc = std.testing.allocator;
     var app: App = undefined;
-    app.hosts = .empty;
+    app.registry.hosts = .empty;
     app.config = try configpkg.Config.default(alloc);
     defer app.config.deinit();
     const arena = app.config._arena.?.allocator();
@@ -9762,7 +9522,7 @@ test "win32 Settings names a staged ssh: profile the list left out by its label"
     // Through the App, with no window's list: the saved value's answer and
     // the draft's label together, and every allocation can fail.
     var app: App = undefined;
-    app.hosts = .empty;
+    app.registry.hosts = .empty;
     app.config = try configpkg.Config.default(alloc);
     defer app.config.deinit();
     var choices = try settingsProfileChoicesThunk(&app, alloc, "user:gone", "ssh:box", false);
