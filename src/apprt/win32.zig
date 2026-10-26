@@ -1,3 +1,5 @@
+const window_state = @import("win32/window_state.zig");
+const surface_presentation = @import("win32/surface_presentation.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -113,6 +115,82 @@ const first_frame = @import("win32/first_frame.zig");
 const win32_config_problems = @import("win32/config_problems.zig");
 
 // Explicit dependencies of the extracted runtime modules.
+pub const window_state_runtime = .{
+    .App = App,
+    .HWND = HWND,
+    .HWND_NOTOPMOST = HWND_NOTOPMOST,
+    .HWND_TOPMOST = HWND_TOPMOST,
+    .Host = Host,
+    .LPARAM = LPARAM,
+    .MINMAXINFO = MINMAXINFO,
+    .MONITORINFO = MONITORINFO,
+    .POINT = POINT,
+    .RECT = RECT,
+    .Surface = Surface,
+    .SurfaceInitOptions = SurfaceInitOptions,
+    .UINT = UINT,
+    .WINDOWPLACEMENT = WINDOWPLACEMENT,
+    .WS_OVERLAPPEDWINDOW = WS_OVERLAPPEDWINDOW,
+    .alphaByteForOpacity = alphaByteForOpacity,
+    .apprt = apprt,
+    .c = c,
+    .configpkg = configpkg,
+    .configuredHostWindowPosition = configuredHostWindowPosition,
+    .effectiveBackgroundOpacity = effectiveBackgroundOpacity,
+    .forwardedArgvSetsKey = forwardedArgvSetsKey,
+    .lastError = lastError,
+    .log = log,
+    .scaleInitialClientSize = scaleInitialClientSize,
+    .std = std,
+    .sys = sys,
+    .win32_theme = win32_theme,
+};
+pub const window_state_test_runtime = if (builtin.is_test) .{
+    .BOOL = BOOL,
+    .CoreApp = CoreApp,
+    .HDC = HDC,
+    .LPCWSTR = LPCWSTR,
+    .SafeModeAppFixture = SafeModeAppFixture,
+    .Tab = Tab,
+    .TestSession = TestSession,
+    .WindowStartTestApp = WindowStartTestApp,
+    .builtin = builtin,
+    .createTestHostWindow = createTestHostWindow,
+    .default_title = default_title,
+    .deinitTestHostWindowFixture = deinitTestHostWindowFixture,
+    .initTestHostWindowFixture = initTestHostWindowFixture,
+    .monitorInfo = monitorInfo,
+    .placementTestApp = placementTestApp,
+    .placementTestSurface = placementTestSurface,
+    .prompt_label_class = prompt_label_class,
+    .runOnHiddenDesktop = runOnHiddenDesktop,
+    .testHostIsLayered = testHostIsLayered,
+    .testLayeredAlpha = testLayeredAlpha,
+    .testWindowStyle = testWindowStyle,
+    .win32_quick_terminal = win32_quick_terminal,
+    .win32_terminal_handoff = win32_terminal_handoff,
+} else .{};
+pub const surface_presentation_runtime = .{
+    .App = App,
+    .Host = Host,
+    .Surface = Surface,
+    .UINT = UINT,
+    .apprt = apprt,
+    .c = c,
+    .first_frame = first_frame,
+    .lastError = lastError,
+    .log = log,
+    .rendererpkg = rendererpkg,
+    .std = std,
+    .sys = sys,
+    .windows = windows,
+};
+pub const surface_presentation_test_runtime = if (builtin.is_test) .{
+    .Tab = Tab,
+    .builtin = builtin,
+    .createTestHostWindow = createTestHostWindow,
+} else .{};
+
 pub const session_runtime = .{
     .killThreadTimer = App.killThreadTimer,
     .Allocator = Allocator,
@@ -274,6 +352,8 @@ pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").
 }) else struct {};
 
 test {
+    _ = window_state;
+    _ = surface_presentation;
     _ = session_module;
     _ = quick_terminal_host;
     _ = ipc_server;
@@ -599,18 +679,7 @@ fn shouldUseIntegratedTitlebar(
     return os_build >= c.OS_BUILD_WIN11_21H2 and show_tab_bar != .never;
 }
 
-/// Whether `window-decoration = none` keeps the system frame and only
-/// collapses its caption, the integrated titlebar's mechanism with a 0 px
-/// row. The frame gives the window its resize edges, shadow, Snap,
-/// work-area maximize and the Alt+Space window menu, with nothing to
-/// paint. Windows 11 only: Windows 10 draws its window border inside the
-/// non-client top this would remove, and stays frameless. So does the
-/// quick terminal, which is sized from config and placed flush with a
-/// screen edge by its window rect: the frame's invisible resize margins
-/// would pull it in from that edge.
-fn undecoratedKeepsFrame(os_build: u32, quick_terminal: bool) bool {
-    return os_build >= c.OS_BUILD_WIN11_21H2 and !quick_terminal;
-}
+const undecoratedKeepsFrame = window_state.undecoratedKeepsFrame;
 
 fn dispatchDwmNcMessage(
     hwnd: HWND,
@@ -692,65 +761,19 @@ const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
 const GlobalHotkeySpec = win32_input.GlobalHotkeySpec;
 const RegisteredGlobalHotkey = win32_input.RegisteredGlobalHotkey;
 
-fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
-    return value != .none;
-}
+const decorationsVisibleForConfig = window_state.decorationsVisibleForConfig;
 
-fn initialDecorationsVisibleForSource(config: *const configpkg.Config, clone_state_from: ?*const Surface) bool {
-    if (clone_state_from) |source| return source.decorations_visible;
-    return decorationsVisibleForConfig(config.@"window-decoration");
-}
+const initialDecorationsVisibleForSource = window_state.initialDecorationsVisibleForSource;
 
 fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visible: bool) bool {
     return active_surface_visible orelse cached_visible;
 }
 
-fn startupHostWindowStyle(framed: bool, fullscreen: bool) u32 {
-    return effectiveHostWindowStyle(framed, fullscreen, true) & ~@as(u32, c.WS_VISIBLE);
-}
+const startupHostWindowStyle = window_state.startupHostWindowStyle;
 
-/// The style to write back over the one `CreateWindowEx` gave a host
-/// created with `requested`, or null when it kept the request.
-///
-/// `WS_OVERLAPPED` is 0, so the undecorated host style on Windows 10 (see
-/// `undecoratedKeepsFrame`) is a top-level window with neither `WS_POPUP`
-/// nor `WS_CHILD`, and `CreateWindowEx` gives every such window
-/// `WS_CAPTION` whatever the request says.
-/// `SetWindowLongPtr` does not. So with `window-decoration = none`, every
-/// window created with no window to copy (the first one, the quick
-/// terminal, a restored or adopted window) had a title bar, and a
-/// `new_window` clone did not: it and every runtime toggle set the style
-/// afterwards through `Surface.applyWindowStyle`. Creating the host as `WS_POPUP` instead would
-/// avoid the added caption, but `CW_USEDEFAULT` puts a popup at (0, 0)
-/// rather than at the next default position, so the first window would
-/// move. Windows also forces `WS_CLIPSIBLINGS` on every top-level window,
-/// through either API, so that bit is ignored here.
-fn createdHostWindowStyleCorrection(requested: u32, created: u32) ?u32 {
-    const forced: u32 = c.WS_CLIPSIBLINGS;
-    if ((requested & ~forced) == (created & ~forced)) return null;
-    return requested;
-}
+const createdHostWindowStyleCorrection = window_state.createdHostWindowStyleCorrection;
 
-/// Put back the host style `CreateWindowEx` altered (see
-/// `createdHostWindowStyleCorrection`). `App.createHost` calls this while
-/// the host is still hidden and has no tabs, so no terminal is sized
-/// against, or shown with, the frame Windows added.
-fn restoreRequestedHostWindowStyle(hwnd: HWND, requested: u32) void {
-    const created: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
-    const style = createdHostWindowStyleCorrection(requested, created) orelse return;
-    _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(usize, style)));
-    if (sys.SetWindowPos(
-        hwnd,
-        null,
-        0,
-        0,
-        0,
-        0,
-        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-    ) == 0) {
-        log.warn("win32 host style restore failed err={}", .{lastError()});
-    }
-}
+const restoreRequestedHostWindowStyle = window_state.restoreRequestedHostWindowStyle;
 
 /// Windows clipboard text ends its lines with CRLF; the core, and whatever
 /// reads an OSC 52 reply, expect LF. A paste turns each LF into one CR, the
@@ -1006,80 +1029,27 @@ fn surfaceWindowStyle() u32 {
     return c.WS_CHILD | c.WS_CLIPSIBLINGS;
 }
 
-/// `framed` picks the system frame: decorated windows, and on Windows 11
-/// undecorated ones too (`undecoratedKeepsFrame`).
-fn effectiveHostWindowStyle(
-    framed: bool,
-    fullscreen: bool,
-    hosted: bool,
-) u32 {
-    if (fullscreen) {
-        return if (hosted)
-            c.WS_VISIBLE | c.WS_POPUP | c.WS_CLIPCHILDREN
-        else
-            c.WS_VISIBLE | c.WS_POPUP;
-    }
+const effectiveHostWindowStyle = window_state.effectiveHostWindowStyle;
 
-    if (framed) {
-        return if (hosted)
-            c.WS_VISIBLE | WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN
-        else
-            c.WS_VISIBLE | WS_OVERLAPPEDWINDOW;
-    }
+const sharesHostWindowState = window_state.sharesHostWindowState;
 
-    return if (hosted)
-        c.WS_VISIBLE | c.WS_OVERLAPPED | c.WS_CLIPCHILDREN
-    else
-        c.WS_VISIBLE | c.WS_OVERLAPPED;
-}
-
-fn sharesHostWindowState(dst_host_id: ?u32, src_host_id: ?u32) bool {
-    return dst_host_id != null and src_host_id != null and dst_host_id.? == src_host_id.?;
-}
-
-fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
-    return a.min_width == b.min_width and
-        a.min_height == b.min_height and
-        a.max_width == b.max_width and
-        a.max_height == b.max_height;
-}
+const sizeLimitEquals = window_state.sizeLimitEquals;
 
 fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
 }
 
-fn shouldResizeHostForInitialSize(host_surface_count: usize) bool {
-    return host_surface_count == 1;
-}
+const shouldResizeHostForInitialSize = window_state.shouldResizeHostForInitialSize;
 
-fn sharedHostWindowFrameStateEquals(a: *const Surface, b: *const Surface) bool {
-    return a.decorations_visible == b.decorations_visible and
-        a.fullscreen == b.fullscreen and
-        sizeLimitEquals(a.size_limit, b.size_limit);
-}
+const sharedHostWindowFrameStateEquals = window_state.sharedHostWindowFrameStateEquals;
 
-fn sharedHostWindowTopmostEquals(a: *const Surface, b: *const Surface) bool {
-    return a.topmost == b.topmost;
-}
+const sharedHostWindowTopmostEquals = window_state.sharedHostWindowTopmostEquals;
 
-fn sharedHostWindowOpacityEquals(a: *const Surface, b: *const Surface) bool {
-    return alphaByteForOpacity(effectiveBackgroundOpacity(
-        a.background_opacity_default,
-        a.background_opacity_force_opaque,
-    )) == alphaByteForOpacity(effectiveBackgroundOpacity(
-        b.background_opacity_default,
-        b.background_opacity_force_opaque,
-    ));
-}
+const sharedHostWindowOpacityEquals = window_state.sharedHostWindowOpacityEquals;
 
-fn shouldPropagateSharedHostWindowState(source: *const Surface) bool {
-    const host = source.host orelse return true;
-    return host.activeSurface() == source;
-}
+const shouldPropagateSharedHostWindowState = window_state.shouldPropagateSharedHostWindowState;
 
-fn shouldApplyConfigDecorations(decorations_visible_overridden: bool) bool {
-    return !decorations_visible_overridden;
-}
+const shouldApplyConfigDecorations = window_state.shouldApplyConfigDecorations;
 
 fn usesIntegratedTitlebar(
     enabled: bool,
@@ -4916,12 +4886,7 @@ pub const App = struct {
         };
     }
 
-    fn rendererRepaintModeThisTick(self: *App, host: ?*const Host) SurfaceRepaintRequestMode {
-        return rendererTickRepaintMode(
-            rendererRepaintRequestMode(host, sys.GetTickCount64()),
-            &self.renderer_sync_paint_spent,
-        );
-    }
+    pub const rendererRepaintModeThisTick = surface_presentation.rendererRepaintModeThisTick;
 
     /// The `render` action for one surface: request a repaint, drain the
     /// terminal output its accessibility session waits for, and tell that
@@ -8968,7 +8933,7 @@ pub const App = struct {
 
     /// Whether a window on screen has its top-left corner where `rect` does,
     /// other than `except`.
-    fn windowStartsAt(self: *App, rect: RECT, except: ?HWND) bool {
+    pub fn windowStartsAt(self: *App, rect: RECT, except: ?HWND) bool {
         for (self.hosts.items) |host| {
             const hwnd = host.hwnd orelse continue;
             if (hwnd == except or sys.IsWindowVisible(hwnd) == 0 or sys.IsIconic(hwnd) != 0) continue;
@@ -8979,24 +8944,7 @@ pub const App = struct {
         return false;
     }
 
-    /// `positioned`: `WindowKeeps.position`.
-    fn inheritHostWindowState(self: *App, destination: *Host, source: *Host, positioned: bool) !void {
-        const dst_hwnd = destination.hwnd orelse return;
-        const src_hwnd = source.hwnd orelse return;
-        const fullscreen = if (source.activeSurface()) |surface| surface.fullscreen else false;
-        const placed = try newWindowPlacement(self, src_hwnd, fullscreen, dst_hwnd, null);
-        if (sys.SetWindowPos(
-            dst_hwnd,
-            null,
-            placed.rect.left,
-            placed.rect.top,
-            placed.rect.right - placed.rect.left,
-            placed.rect.bottom - placed.rect.top,
-            newWindowSetPosFlags(positioned, false, placed),
-        ) == 0) {
-            return lastError();
-        }
-    }
+    pub const inheritHostWindowState = window_state.inheritHostWindowState;
 
     fn findSurfaceForTarget(self: *App, target: apprt.Target) ?*Surface {
         return switch (target) {
@@ -9187,7 +9135,7 @@ pub const App = struct {
         return ids;
     }
 
-    fn collectHostSurfaces(self: *App, alloc: Allocator, host_id: u32) !std.ArrayListUnmanaged(*Surface) {
+    pub fn collectHostSurfaces(self: *App, alloc: Allocator, host_id: u32) !std.ArrayListUnmanaged(*Surface) {
         var surfaces: std.ArrayListUnmanaged(*Surface) = .empty;
         errdefer surfaces.deinit(alloc);
         const host = self.findHostById(host_id) orelse return surfaces;
@@ -9598,15 +9546,7 @@ pub const App = struct {
         return changed;
     }
 
-    fn syncHostWindowState(self: *App, source: *Surface) !void {
-        if (!shouldPropagateSharedHostWindowState(source)) return;
-        var host_surfaces = try self.collectHostSurfaces(self.core_app.alloc, source.host_id);
-        defer host_surfaces.deinit(self.core_app.alloc);
-        for (host_surfaces.items) |candidate| {
-            if (candidate == source) continue;
-            try candidate.inheritWindowStateFrom(source, .{});
-        }
-    }
+    const syncHostWindowState = window_state.syncHostWindowState;
 
     fn removeWindow(self: *App, surface: *Surface) void {
         for (self.windows.items, 0..) |item, i| {
@@ -10305,7 +10245,7 @@ pub const App = struct {
         log.debug("win32 current directory reset cwd={f}", .{internal_os.redact.bytes(profile)});
     }
 
-    fn clientSize(self: *App, hwnd: HWND) !apprt.SurfaceSize {
+    pub fn clientSize(self: *App, hwnd: HWND) !apprt.SurfaceSize {
         _ = self;
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) {
@@ -14987,7 +14927,7 @@ const Host = struct {
         }
     }
 
-    fn detachTabForUndo(self: *Host, index: usize) ?StructuralUndoEntry {
+    pub fn detachTabForUndo(self: *Host, index: usize) ?StructuralUndoEntry {
         // Load-bearing guard: detached tabs retain their surface
         // allocations + host pointers so undo can reinsert them
         // without replaying process startup. Detaching the last tab
@@ -15037,7 +14977,7 @@ const Host = struct {
         };
     }
 
-    fn restoreClosedTabEntryNative(self: *Host, value: *CloseTabUndo) Allocator.Error!bool {
+    pub fn restoreClosedTabEntryNative(self: *Host, value: *CloseTabUndo) Allocator.Error!bool {
         const tab = value.tab orelse return false;
         const insert_index = clampTabInsertIndex(value.index, self.tabs.items.len);
         // A tab that closed behind the front one comes back behind it.
@@ -15777,44 +15717,13 @@ const Host = struct {
         if (!still_alive) self.killTweenTimer();
     }
 
-    fn ensureResizeSettleTimer(self: *Host) void {
-        if (self.resize_settle_timer_active) return;
-        const hwnd = self.hwnd orelse return;
-        const prev = sys.SetTimer(hwnd, c.RESIZE_SETTLE_TIMER_ID, c.RESIZE_SETTLE_TIMER_INTERVAL_MS, null);
-        if (prev == 0) {
-            std.log.warn("resize-settle: SetTimer failed; final pane repaint may wait for input", .{});
-            return;
-        }
-        self.resize_settle_timer_active = true;
-    }
+    pub const ensureResizeSettleTimer = surface_presentation.ensureResizeSettleTimer;
 
-    fn killResizeSettleTimer(self: *Host) void {
-        if (!self.resize_settle_timer_active) return;
-        const hwnd = self.hwnd orelse {
-            self.resize_settle_timer_active = false;
-            return;
-        };
-        _ = sys.KillTimer(hwnd, c.RESIZE_SETTLE_TIMER_ID);
-        self.resize_settle_timer_active = false;
-    }
+    pub const killResizeSettleTimer = surface_presentation.killResizeSettleTimer;
 
-    fn startResizeSettleRepaints(self: *Host) void {
-        self.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
-        self.resize_settle_until_ms = sys.GetTickCount64() +| resize_settle_deadline_ms;
-        self.ensureResizeSettleTimer();
-    }
+    pub const startResizeSettleRepaints = surface_presentation.startResizeSettleRepaints;
 
-    fn tickResizeSettleRepaint(self: *Host) void {
-        if (self.resize_settle_repaint_ticks == 0) {
-            self.killResizeSettleTimer();
-            return;
-        }
-
-        self.forceVisibleSurfaceRepaintsNow();
-        self.forceHostCompositionPaint();
-        self.resize_settle_repaint_ticks -= 1;
-        if (self.resize_settle_repaint_ticks == 0) self.killResizeSettleTimer();
-    }
+    const tickResizeSettleRepaint = surface_presentation.tickResizeSettleRepaint;
 
     /// Retarget the focused-tab underline toward the pixel rect
     /// `(left, width)` (in parent HWND coords). Snaps on the first
@@ -15988,7 +15897,7 @@ const Host = struct {
         return sys.TrackMouseEvent(&track) != 0;
     }
 
-    fn handleNcMouseLeave(self: *Host) void {
+    pub fn handleNcMouseLeave(self: *Host) void {
         self.caption_track_armed = false;
         self.setCaptionHover(.none);
         self.clearCaptionPressed();
@@ -20018,22 +19927,7 @@ const Host = struct {
         if (self.surfaces_visible) self.noteFirstFrameShown();
     }
 
-    /// Drive the one-shot post-show frame handshake for every surface this
-    /// host actually puts on screen.
-    ///
-    /// `surfaces_visible` already accounts for hidden, minimized and
-    /// DWM-cloaked, so gating on it means a window that is shown but still
-    /// cloaked does not spend the one-shot; the refresh that observes the
-    /// uncloak gets it instead. See `win32/first_frame.zig` (#224).
-    fn noteFirstFrameShown(self: *Host) void {
-        if (!self.surfaces_visible) return;
-        for (self.tabs.items) |*tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                if (entry.view.window_visible) entry.view.noteFirstFrame(.host_shown);
-            }
-        }
-    }
+    pub const noteFirstFrameShown = surface_presentation.noteFirstFrameShown;
 
     fn present(self: *Host) void {
         const hwnd = self.hwnd orelse return;
@@ -24745,7 +24639,7 @@ const Host = struct {
     /// carries the build/config floor, but host-side non-client
     /// handling must also respect whether this host is actually
     /// reserving a visible caption/tab row.
-    fn usingIntegratedTitlebar(self: *const Host) bool {
+    pub fn usingIntegratedTitlebar(self: *const Host) bool {
         return usesIntegratedTitlebar(
             self.app.use_integrated_titlebar,
             self.shouldShowTabBar(),
@@ -24906,7 +24800,7 @@ const Host = struct {
     /// change stalls the window's message loop at exactly the moment a
     /// reader is asking it questions. Posting moves them to a point where
     /// the loop is free.
-    fn scheduleCaptionUiaSync(self: *Host) void {
+    pub fn scheduleCaptionUiaSync(self: *Host) void {
         const hwnd = self.hwnd orelse return;
         if (self.caption_sync_pending) return;
         self.caption_sync_pending = true;
@@ -25144,7 +25038,7 @@ const Host = struct {
         return changed;
     }
 
-    fn refreshChrome(self: *Host) !void {
+    pub fn refreshChrome(self: *Host) !void {
         try self.refreshModeIndicator();
         var invalidate = self.chrome_repaint_dirty;
         _ = try self.syncWindowTitle();
@@ -25565,29 +25459,11 @@ const Host = struct {
         self.repaintChrome();
     }
 
-    fn shouldDeferSurfaceRepaints(self: *const Host) bool {
-        return self.is_live_resize.load(.acquire) or self.defer_surface_repaints_until_flush;
-    }
+    pub const shouldDeferSurfaceRepaints = surface_presentation.shouldDeferSurfaceRepaints;
 
-    fn flushDeferredVisibleSurfaceRepaints(self: *Host) void {
-        self.flushDeferredVisibleSurfaceRepaintsWith(struct {
-            fn repaint(surface: *Surface) !void {
-                try surface.queuePaintRequest(true);
-            }
-        }.repaint);
-    }
+    const flushDeferredVisibleSurfaceRepaints = surface_presentation.flushDeferredVisibleSurfaceRepaints;
 
-    fn flushDeferredVisibleSurfaceRepaintsWith(self: *Host, repaint_fn: anytype) void {
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                if (!entry.view.window_visible) continue;
-                _ = entry.view.flushDeferredLiveResizeRepaint(repaint_fn) catch |err| {
-                    log.err("win32 deferred live-resize repaint flush failed err={}", .{err});
-                };
-            }
-        }
-    }
+    pub const flushDeferredVisibleSurfaceRepaintsWith = surface_presentation.flushDeferredVisibleSurfaceRepaintsWith;
 
     /// `MoveWindow` / `SetWindowPos` with repaint suppressed does not reliably
     /// queue `WM_PAINT` on child HWNDs. Owner-draw tab controls always repaint
@@ -25647,7 +25523,7 @@ const Host = struct {
         }
     }
 
-    fn forceHostCompositionPaint(self: *Host) void {
+    pub fn forceHostCompositionPaint(self: *Host) void {
         self.repaintFullHost();
         self.invalidateChromeChildPaint();
         self.redrawHostWindowNow();
@@ -25658,69 +25534,13 @@ const Host = struct {
         self.forceHostCompositionPaint();
     }
 
-    fn applyDpiChangeToVisibleSurfaces(self: *Host) void {
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                if (!entry.view.window_visible) continue;
-                entry.view.applyDpiChange();
-            }
-        }
-    }
+    const applyDpiChangeToVisibleSurfaces = surface_presentation.applyDpiChangeToVisibleSurfaces;
 
-    fn syncVisibleSurfaceCoreSizesFromClientRects(self: *Host) void {
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                if (!entry.view.window_visible) continue;
-                entry.view.syncCoreSizeFromClientRect();
-            }
-        }
-    }
+    pub const syncVisibleSurfaceCoreSizesFromClientRects = surface_presentation.syncVisibleSurfaceCoreSizesFromClientRects;
 
-    fn forceVisibleSurfaceRepaintsNow(self: *Host) void {
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                if (!entry.view.window_visible) continue;
-                entry.view.syncCoreSizeFromClientRect();
-                entry.view.invalidateSearchBarChildPaint();
-                switch (resizeSettleSurfaceAction(entry.view.shouldDrawRendererPaintContent())) {
-                    .present_renderer => entry.view.queuePaintRequest(true) catch |err| {
-                        entry.view.cancelRendererRepaintRequest();
-                        log.err("win32 resize-settle renderer paint request failed err={}", .{err});
-                    },
-                    .wake_renderer => entry.view.requestRendererFrameNow(.apprt_resize_settle),
-                }
-            }
-        }
-    }
+    pub const forceVisibleSurfaceRepaintsNow = surface_presentation.forceVisibleSurfaceRepaintsNow;
 
-    fn invalidateVisibleSurfaceChildPaint(
-        self: *Host,
-        repaint_hosted_child: bool,
-        repaint_search_controls: bool,
-    ) void {
-        const defer_surface_repaints = repaint_hosted_child and self.shouldDeferSurfaceRepaints();
-        if (self.activeTab()) |tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                if (!entry.view.window_visible) continue;
-
-                if (repaint_hosted_child) {
-                    if (defer_surface_repaints) {
-                        entry.view.markLiveResizeRepaintDeferred();
-                    } else {
-                        entry.view.repaintHostedChild() catch |err| {
-                            log.err("win32 hosted child repaint request failed err={}", .{err});
-                        };
-                    }
-                }
-
-                if (repaint_search_controls) entry.view.invalidateSearchBarChildPaint();
-            }
-        }
-    }
+    const invalidateVisibleSurfaceChildPaint = surface_presentation.invalidateVisibleSurfaceChildPaint;
 
     fn freeCachedChromeStrings(self: *Host) void {
         const alloc = self.app.core_app.alloc;
@@ -27585,115 +27405,9 @@ const SurfaceInitOptions = struct {
     forwarded_arguments: ?[]const [:0]const u8 = null,
 };
 
-/// What a new window keeps of its own config over the state it copies from
-/// the window it is opened from (`new_window`, a forwarded launch, a profile
-/// in a new window; `Surface.inheritWindowStateFrom`). By default it copies
-/// that window's size, one cascade step off it, its maximized or fullscreen
-/// state, its decorations and its background opacity.
-const WindowKeeps = struct {
-    /// `window-position-x/y` place it: it stays where `App.createHost` put
-    /// it and takes only the size.
-    position: bool = false,
-    /// The size core init gave it from its `window-width`/`window-height`.
-    /// Its state is still the source's: maximized or fullscreen, it returns
-    /// to that size.
-    size: bool = false,
-    /// Its own `window-decoration`.
-    decoration: bool = false,
-    /// Its own `background-opacity`.
-    background_opacity: bool = false,
+const WindowKeeps = window_state.WindowKeeps;
 
-    /// What a window `Surface.init` creates keeps: its position whenever its
-    /// config places it, as for every new window, and the rest when a
-    /// forwarded launch set them. docs/windows.md ("Forwarded arguments")
-    /// says the running noctty honors them, and copying the source dropped
-    /// them all. The same keys from the app config are still the source's.
-    fn forNewSurface(config: *const configpkg.Config, opts: SurfaceInitOptions) WindowKeeps {
-        const argv = opts.forwarded_arguments orelse &.{};
-        return .{
-            .position = configuredHostWindowPosition(config) != null,
-            // Core init sizes the window only when both are set.
-            .size = (forwardedArgvSetsKey(argv, "window-width") or forwardedArgvSetsKey(argv, "window-height")) and
-                config.@"window-width" > 0 and config.@"window-height" > 0,
-            .decoration = forwardedArgvSetsKey(argv, "window-decoration"),
-            .background_opacity = forwardedArgvSetsKey(argv, "background-opacity"),
-        };
-    }
-};
-
-test "win32 a new window keeps the forwarded window keys and the configured position" {
-    var config = try configpkg.Config.default(std.testing.allocator);
-    defer config.deinit();
-    try std.testing.expectEqual(WindowKeeps{}, WindowKeeps.forNewSurface(&config, .{}));
-    const argv: []const [:0]const u8 = &.{ "--window-width=80", "--window-decoration=none", "--background-opacity=0.5" };
-    // A size needs both keys in the window's config, as core init does.
-    try std.testing.expectEqual(
-        WindowKeeps{ .decoration = true, .background_opacity = true },
-        WindowKeeps.forNewSurface(&config, .{ .forwarded_arguments = argv }),
-    );
-    config.@"window-width" = 80;
-    config.@"window-height" = 24;
-    try std.testing.expectEqual(
-        WindowKeeps{ .size = true, .decoration = true, .background_opacity = true },
-        WindowKeeps.forNewSurface(&config, .{ .forwarded_arguments = argv }),
-    );
-    // From the app config they stay the source's; the position is the
-    // window's either way.
-    config.@"window-position-x" = 10;
-    try std.testing.expectEqual(WindowKeeps{}, WindowKeeps.forNewSurface(&config, .{}));
-    config.@"window-position-y" = 20;
-    try std.testing.expectEqual(WindowKeeps{ .position = true }, WindowKeeps.forNewSurface(&config, .{}));
-}
-
-/// The state a new top-level window starts in from its config's `maximize`
-/// and `fullscreen` (#496). Both apply to every new window, restored and
-/// forwarded ones included, but never to a tab, a split, the quick terminal
-/// or a handed-off console, which keeps the show state its client asked for.
-/// A config reload does not change the windows already open.
-const WindowStart = struct {
-    maximize: bool = false,
-    fullscreen: bool = false,
-
-    pub fn fromConfig(config: *const configpkg.Config) WindowStart {
-        return .{ .maximize = config.maximize, .fullscreen = config.fullscreen != .false };
-    }
-
-    /// What `Surface.init` applies to the window it creates.
-    fn forNewSurface(config: *const configpkg.Config, opts: SurfaceInitOptions) WindowStart {
-        if (opts.host_id != null or opts.quick_terminal or opts.adopted_session != null or
-            !opts.config_window_start) return .{};
-        return fromConfig(config);
-    }
-};
-
-test "win32 maximize and fullscreen start only a new ordinary window" {
-    var config = try configpkg.Config.default(std.testing.allocator);
-    defer config.deinit();
-    config.maximize = true;
-    config.fullscreen = .true;
-    const both: WindowStart = .{ .maximize = true, .fullscreen = true };
-    try std.testing.expectEqual(both, WindowStart.forNewSurface(&config, .{}));
-    // A clone of another window takes them too (after it copies the
-    // source's state), and so does a window a forwarded argv configured.
-    var source: Surface = undefined;
-    try std.testing.expectEqual(both, WindowStart.forNewSurface(&config, .{ .clone_state_from = &source }));
-    // Not a tab or a split of a window that is already open, the quick
-    // terminal, a handed-off console, or a restored window, which applies
-    // them once it is at its saved rect.
-    var pending: win32_terminal_handoff.PendingSession = undefined;
-    for ([_]SurfaceInitOptions{
-        .{ .host_id = 1 },
-        .{ .host_id = 1, .tab_id = 1, .clone_state_from = &source },
-        .{ .quick_terminal = true },
-        .{ .adopted_session = &pending },
-        .{ .config_window_start = false },
-    }) |opts| {
-        try std.testing.expectEqual(WindowStart{}, WindowStart.forNewSurface(&config, opts));
-    }
-    config.maximize = false;
-    config.fullscreen = .false;
-    try std.testing.expectEqual(WindowStart{}, WindowStart.forNewSurface(&config, .{}));
-}
+const WindowStart = window_state.WindowStart;
 
 /// The first show of a new host window.
 const InitialShow = enum {
@@ -28561,89 +28275,31 @@ fn surfaceLayoutRuntimeSync(visibility_changed: bool, pane_rect_changed: bool) S
     };
 }
 
-const SurfaceRepaintRequestMode = enum {
-    queue,
-    update_now,
-    defer_until_flush,
-};
+const SurfaceRepaintRequestMode = surface_presentation.SurfaceRepaintRequestMode;
 
-const ResizeSettleSurfaceAction = enum {
-    wake_renderer,
-    present_renderer,
-};
+const ResizeSettleSurfaceAction = surface_presentation.ResizeSettleSurfaceAction;
 
-const RendererHealthSurfaceAction = enum {
-    clear_recovery,
-    recover_with_followup_repaint,
-};
+const RendererHealthSurfaceAction = surface_presentation.RendererHealthSurfaceAction;
 
-/// Settle mode normally ends with its timer's last tick. Its 12 ticks of 16 ms
-/// can take about twice that, because at the default 15.6 ms clock resolution
-/// a 16 ms timer fires about every 31 ms, so the deadline only cuts settle
-/// short when a busy pump starves WM_TIMER.
-const resize_settle_deadline_ms: u64 = 2 * @as(u64, c.RESIZE_SETTLE_REPAINT_TICKS) * c.RESIZE_SETTLE_TIMER_INTERVAL_MS;
+const resize_settle_deadline_ms = surface_presentation.resize_settle_deadline_ms;
 
-fn resizeSettleActive(h: *const Host, now_ms: u64) bool {
-    return h.resize_settle_timer_active and now_ms < h.resize_settle_until_ms;
-}
+const resizeSettleActive = surface_presentation.resizeSettleActive;
 
-fn surfaceRepaintRequestMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
-    const h = host orelse return .queue;
-    if (h.is_live_resize.load(.acquire)) return .defer_until_flush;
-    if (resizeSettleActive(h, now_ms)) return .update_now;
-    return .queue;
-}
+const surfaceRepaintRequestMode = surface_presentation.surfaceRepaintRequestMode;
 
-fn rendererRepaintRequestMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
-    return surfaceRepaintRequestMode(host, now_ms);
-}
+const rendererRepaintRequestMode = surface_presentation.rendererRepaintRequestMode;
 
-/// Renderer frames reach the UI thread as `redraw_surface` mailbox messages,
-/// and `App.drainMailbox` pops until the mailbox is empty. An `update_now`
-/// paint blocks in SwapBuffers until vblank and only then releases the
-/// surface's repaint reservation, so when a present takes longer than the
-/// renderer's frame interval (a 60 Hz display against the 8 ms animation
-/// timer, or heavy output) the next frame is usually queued before the drain
-/// looks again. With every frame painted synchronously, drains ran back to
-/// back, and each frame also posted a WAKE, which outranks input and WM_TIMER:
-/// the backlog grew faster than the pump retired it, and typing waited for
-/// seconds (#297). One synchronous paint per core-app tick keeps settle mode's
-/// prompt present; later frames in the same tick queue an invalidate, whose
-/// WM_PAINT ranks below input.
-fn rendererTickRepaintMode(
-    mode: SurfaceRepaintRequestMode,
-    sync_paint_spent: *bool,
-) SurfaceRepaintRequestMode {
-    if (mode != .update_now) return mode;
-    if (sync_paint_spent.*) return .queue;
-    sync_paint_spent.* = true;
-    return mode;
-}
+const rendererTickRepaintMode = surface_presentation.rendererTickRepaintMode;
 
-fn surfaceSizeChangeRepaintMode(host: ?*const Host, now_ms: u64) SurfaceRepaintRequestMode {
-    const h = host orelse return .queue;
-    if (h.is_live_resize.load(.acquire) or resizeSettleActive(h, now_ms)) return .update_now;
-    return .queue;
-}
+const surfaceSizeChangeRepaintMode = surface_presentation.surfaceSizeChangeRepaintMode;
 
-fn surfaceSizeChangePrimesRenderer(repaint_mode: SurfaceRepaintRequestMode) bool {
-    return repaint_mode == .update_now;
-}
+const surfaceSizeChangePrimesRenderer = surface_presentation.surfaceSizeChangePrimesRenderer;
 
-fn resizeSettleSurfaceAction(renderer_repaint_requested: bool) ResizeSettleSurfaceAction {
-    return if (renderer_repaint_requested) .present_renderer else .wake_renderer;
-}
+const resizeSettleSurfaceAction = surface_presentation.resizeSettleSurfaceAction;
 
-fn rendererHealthSurfaceAction(health: rendererpkg.Health) RendererHealthSurfaceAction {
-    return switch (health) {
-        .healthy => .clear_recovery,
-        .unhealthy => .recover_with_followup_repaint,
-    };
-}
+const rendererHealthSurfaceAction = surface_presentation.rendererHealthSurfaceAction;
 
-fn surfacePixelSizeChanged(previous: apprt.SurfaceSize, next: apprt.SurfaceSize) bool {
-    return previous.width != next.width or previous.height != next.height;
-}
+const surfacePixelSizeChanged = surface_presentation.surfacePixelSizeChanged;
 
 fn scaleInitialClientSize(size: apprt.SurfaceSize, scale: apprt.ContentScale) apprt.SurfaceSize {
     return .{
@@ -30687,212 +30343,29 @@ const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 
 const QuickTerminalToggleFixture = test_support.QuickTerminalToggleFixture;
 
-const FullscreenMonitor = struct {
-    monitor: sys.HMONITOR,
-    info: MONITORINFO,
-    dpi: u32,
-};
+const FullscreenMonitor = window_state.FullscreenMonitor;
 
-fn fullscreenRestoreRect(rect: RECT, old_work: RECT, new_work: RECT, old_dpi: u32, new_dpi: u32) RECT {
-    const width = rect.right - rect.left;
-    const height = rect.bottom - rect.top;
-    const scale = old_dpi > 0 and new_dpi > 0;
-    return fitRectInWork(
-        rect.left + new_work.left - old_work.left,
-        rect.top + new_work.top - old_work.top,
-        if (scale) sys.MulDiv(width, @intCast(new_dpi), @intCast(old_dpi)) else width,
-        if (scale) sys.MulDiv(height, @intCast(new_dpi), @intCast(old_dpi)) else height,
-        new_work,
-    );
-}
+const fullscreenRestoreRect = window_state.fullscreenRestoreRect;
 
-/// The rect at (`left`, `top`) of the given size, moved to the nearest place
-/// inside `work`. Keep the logical size when it fits. An oversized rectangle
-/// can overlap a neighbour more than this monitor, causing Windows to select
-/// that neighbour's DPI again; cap it to the work area.
-fn fitRectInWork(left: i32, top: i32, width: i32, height: i32, work: RECT) RECT {
-    const fitted_width = @min(width, work.right - work.left);
-    const fitted_height = @min(height, work.bottom - work.top);
-    const fitted_left = @max(work.left, @min(left, work.right - fitted_width));
-    const fitted_top = @max(work.top, @min(top, work.bottom - fitted_height));
-    return .{
-        .left = fitted_left,
-        .top = fitted_top,
-        .right = fitted_left + fitted_width,
-        .bottom = fitted_top + fitted_height,
-    };
-}
+const fitRectInWork = window_state.fitRectInWork;
 
-/// How far a new window sits below and right of the one it was opened from,
-/// about a caption height.
-fn cascadeStep(dpi: u32) i32 {
-    return sys.MulDiv(32, @intCast(@max(dpi, 96)), 96);
-}
+const cascadeStep = window_state.cascadeStep;
 
-/// A rect in workspace coordinates (what `GetWindowPlacement` reports for a
-/// window without `WS_EX_TOOLWINDOW`) as screen coordinates, for the monitor
-/// the window is on. This is the convention `leaveFullscreen` uses.
-fn workspaceRectToScreen(rect: RECT, monitor: MONITORINFO) RECT {
-    const dx = monitor.rcWork.left - monitor.rcMonitor.left;
-    const dy = monitor.rcWork.top - monitor.rcMonitor.top;
-    return .{
-        .left = rect.left + dx,
-        .top = rect.top + dy,
-        .right = rect.right + dx,
-        .bottom = rect.bottom + dy,
-    };
-}
+const workspaceRectToScreen = window_state.workspaceRectToScreen;
 
-/// Makes `rect` (screen coordinates) the rect the minimized `hwnd` returns
-/// to, and leaves it minimized.
-fn setMinimizedNormalRect(hwnd: HWND, rect: RECT) !void {
-    var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
-    placement.length = @sizeOf(WINDOWPLACEMENT);
-    if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
-    // Workspace coordinates of the monitor the rect is on, as
-    // `sessionWindowPlacementOn` reads them.
-    const center: POINT = .{
-        .x = @divTrunc(rect.left, 2) + @divTrunc(rect.right, 2),
-        .y = @divTrunc(rect.top, 2) + @divTrunc(rect.bottom, 2),
-    };
-    const monitor = sys.MonitorFromPoint(center, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-    var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-    info.cbSize = @sizeOf(MONITORINFO);
-    if (sys.GetMonitorInfoW(monitor, &info) == 0) return lastError();
-    placement.rcNormalPosition = Surface.screenRectToWorkspace(rect, info);
-    placement.showCmd = c.SW_SHOWMINNOACTIVE;
-    if (sys.SetWindowPlacement(hwnd, &placement) == 0) return lastError();
-}
+const setMinimizedNormalRect = window_state.setMinimizedNormalRect;
 
-/// `SetWindowPos` flags for a window placed like the one it was opened from.
-/// `window-position-x/y` says where every new window goes, so when its config
-/// sets them (`positioned`, `WindowKeeps.position`) the window keeps that
-/// place and takes only the size. With a size of its own as well (`sized`,
-/// `WindowKeeps.size`) it takes neither: core init already gave it that size
-/// where it is, which can be another monitor than the source's, whose work
-/// area `newWindowPlacement` fits the rect to. A fullscreen window covers its
-/// monitor wherever the config would put it.
-fn newWindowSetPosFlags(positioned: bool, sized: bool, placed: NewWindowPlacement) UINT {
-    var flags: UINT = c.SWP_NOACTIVATE;
-    if (!placed.copied and positioned) {
-        flags |= c.SWP_NOMOVE;
-        if (sized) flags |= c.SWP_NOSIZE;
-    }
-    return flags;
-}
+const newWindowSetPosFlags = window_state.newWindowSetPosFlags;
 
-test "win32 a new window placed and sized by its own config takes neither from the window it copies" {
-    const cascaded: NewWindowPlacement = .{ .rect = std.mem.zeroes(RECT), .maximize = null };
-    const fullscreen: NewWindowPlacement = .{ .rect = std.mem.zeroes(RECT), .maximize = null, .copied = true };
-    try std.testing.expectEqual(@as(UINT, c.SWP_NOACTIVATE), newWindowSetPosFlags(false, false, cascaded));
-    // A size alone is still moved one cascade step off the source and
-    // fitted to its monitor, where the window goes.
-    try std.testing.expectEqual(@as(UINT, c.SWP_NOACTIVATE), newWindowSetPosFlags(false, true, cascaded));
-    try std.testing.expectEqual(@as(UINT, c.SWP_NOACTIVATE | c.SWP_NOMOVE), newWindowSetPosFlags(true, false, cascaded));
-    try std.testing.expectEqual(@as(UINT, c.SWP_NOACTIVATE | c.SWP_NOMOVE | c.SWP_NOSIZE), newWindowSetPosFlags(true, true, cascaded));
-    // A fullscreen window covers the source's monitor all the same.
-    try std.testing.expectEqual(@as(UINT, c.SWP_NOACTIVATE), newWindowSetPosFlags(true, true, fullscreen));
-}
+const WindowSize = window_state.WindowSize;
 
-/// A window's outer size, in physical pixels.
-const WindowSize = struct { width: i32, height: i32 };
+const rectWithSize = window_state.rectWithSize;
 
-/// `rect` with its top-left corner kept and its size `size`.
-fn rectWithSize(rect: RECT, size: WindowSize) RECT {
-    return .{ .left = rect.left, .top = rect.top, .right = rect.left + size.width, .bottom = rect.top + size.height };
-}
+const NewWindowPlacement = window_state.NewWindowPlacement;
 
-/// Where a window opened from another one (`new_window`, a profile in a new
-/// window) starts.
-const NewWindowPlacement = struct {
-    /// In screen coordinates: the size the source has when it is a normal
-    /// window, one cascade step down and right so the new window does not
-    /// sit exactly on it, kept inside the source's monitor. Never the rect of
-    /// a minimized source, which is not on screen, nor the monitor-sized rect
-    /// of a maximized one.
-    rect: RECT,
-    /// Set when the source is, or restores to, maximized: its placement,
-    /// for `Surface.maximizeWithPlacement`.
-    maximize: ?WINDOWPLACEMENT,
-    /// `rect` is the source's own, unchanged: it is fullscreen, so the new
-    /// window is too and covers the same monitor.
-    copied: bool = false,
-};
+const newWindowPlacement = window_state.newWindowPlacement;
 
-/// `destination` is the window being placed, if it already exists: it is not
-/// one of the windows the new one steps past. `size` is the window's own
-/// size (`WindowKeeps.size`), which replaces the source's. A fullscreen window
-/// covers the monitor whatever its size.
-fn newWindowPlacement(app: *App, source: HWND, fullscreen: bool, destination: ?HWND, size: ?WindowSize) !NewWindowPlacement {
-    var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
-    placement.length = @sizeOf(WINDOWPLACEMENT);
-    if (sys.GetWindowPlacement(source, &placement) == 0) return lastError();
-    // For a minimized window this is the monitor it was on, not the one its
-    // icon is on.
-    const monitor = sys.MonitorFromWindow(source, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-    var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-    info.cbSize = @sizeOf(MONITORINFO);
-    if (sys.GetMonitorInfoW(monitor, &info) == 0) return lastError();
-
-    // The monitor, not the source's rect, which is a sliver under the
-    // taskbar once the source is minimized.
-    if (fullscreen) return .{ .rect = info.rcMonitor, .maximize = null, .copied = true };
-
-    const iconic = sys.IsIconic(source) != 0;
-    if (restoresMaximized(source, &placement)) {
-        // It is maximized again, never minimized with it.
-        placement.showCmd = c.SW_MAXIMIZE;
-        var normal = workspaceRectToScreen(placement.rcNormalPosition, info);
-        if (size) |own| {
-            normal = fitRectInWork(normal.left, normal.top, own.width, own.height, info.rcWork);
-            placement.rcNormalPosition = Surface.screenRectToWorkspace(normal, info);
-        }
-        return .{ .rect = normal, .maximize = placement };
-    }
-
-    var rect: RECT = undefined;
-    if (iconic) {
-        rect = workspaceRectToScreen(placement.rcNormalPosition, info);
-    } else if (sys.GetWindowRect(source, &rect) == 0) {
-        return lastError();
-    }
-    if (size) |own| rect = rectWithSize(rect, own);
-    const step = cascadeStep(sys.GetDpiForWindow(source));
-    // One step off the source, and on past any window already there: one
-    // window can be the source of several, as when the user goes back to it
-    // and opens another, or when Windows does not activate a forwarded one.
-    var placed = cascadedRect(rect, step, info.rcWork);
-    var steps: u8 = 0;
-    while (steps < 8 and app.windowStartsAt(placed, destination)) : (steps += 1) {
-        placed = cascadedRect(placed, step, info.rcWork);
-    }
-    return .{ .rect = placed, .maximize = null };
-}
-
-/// `rect` moved `step` down and right, kept inside `work`.
-fn cascadedRect(rect: RECT, step: i32, work: RECT) RECT {
-    return fitRectInWork(rect.left + step, rect.top + step, rect.right - rect.left, rect.bottom - rect.top, work);
-}
-
-test "win32 fullscreen restore translates work areas and scales size to fit" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const old_work: RECT = .{ .left = 0, .top = 40, .right = 3840, .bottom = 2160 };
-    const new_work: RECT = .{ .left = -1920, .top = -1080, .right = 0, .bottom = 0 };
-    const rect: RECT = .{ .left = 100, .top = 140, .right = 1500, .bottom = 1040 };
-    try std.testing.expectEqualDeep(rect, fullscreenRestoreRect(rect, old_work, old_work, 144, 144));
-    const moved = fullscreenRestoreRect(rect, old_work, new_work, 144, 96);
-    try std.testing.expectEqualDeep(RECT{ .left = -1820, .top = -980, .right = -887, .bottom = -380 }, moved);
-    // MulDiv rounds the fractional width. Returning to the old scale is
-    // within one physical pixel and never scales absolute desktop origins.
-    const back = fullscreenRestoreRect(moved, new_work, old_work, 96, 144);
-    try std.testing.expectEqualDeep(rect, back);
-    const portrait: RECT = .{ .left = -1080, .top = 0, .right = 0, .bottom = 1872 };
-    const edge: RECT = .{ .left = 3000, .top = 1700, .right = 3800, .bottom = 2100 };
-    const clamped = fullscreenRestoreRect(edge, old_work, portrait, 144, 96);
-    try std.testing.expectEqualDeep(RECT{ .left = -533, .top = 1605, .right = 0, .bottom = 1872 }, clamped);
-    const oversized: RECT = .{ .left = 150, .top = 190, .right = 3950, .bottom = 1390 };
-    try std.testing.expectEqualDeep(RECT{ .left = -1080, .top = 150, .right = 0, .bottom = 950 }, fullscreenRestoreRect(oversized, old_work, portrait, 144, 96));
-}
+const cascadedRect = window_state.cascadedRect;
 
 const monitorInfo = quick_terminal_host.monitorInfo;
 
@@ -30910,14 +30383,7 @@ const allMonitorsEnumProc = quick_terminal_host.allMonitorsEnumProc;
 
 const allMonitorsInfo = quick_terminal_host.allMonitorsInfo;
 
-/// Whether the window is, or when restored becomes, maximized. A window
-/// minimized from maximized restores to maximized. The flag alone says
-/// nothing about a window that was restored since: Windows keeps it set on a
-/// normal window.
-fn restoresMaximized(hwnd: HWND, placement: *const WINDOWPLACEMENT) bool {
-    return sys.IsZoomed(hwnd) != 0 or
-        (sys.IsIconic(hwnd) != 0 and (placement.flags & c.WPF_RESTORETOMAXIMIZED) != 0);
-}
+const restoresMaximized = window_state.restoresMaximized;
 
 /// The work areas of the monitors there are now, in screen coordinates.
 const WorkAreas = struct {
@@ -38291,7 +37757,7 @@ pub const Surface = struct {
         return self.search_bar_button_prev_procs[@intFromEnum(role)];
     }
 
-    fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
+    pub fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
         const keeps = WindowKeeps.forNewSurface(config, opts);
         return initialDecorationsVisibleForSource(config, if (keeps.decoration) null else opts.clone_state_from);
     }
@@ -39647,234 +39113,41 @@ pub const Surface = struct {
         self.memory_stage_trace.setWglPixelFormat(value);
     }
 
-    /// Reserve the repaint slot for a renderer frame before the expensive
-    /// `updateFrame` work, so a paint that completes during that work cannot
-    /// be lost.
-    pub fn beginRendererFrameUpdate(self: *Surface) bool {
-        return self.beginRendererRepaintRequest();
-    }
+    pub const beginRendererFrameUpdate = surface_presentation.beginRendererFrameUpdate;
 
-    /// Close the interleaving where paint completion clears the reservation
-    /// and checks retry_pending after the renderer observed the old pending
-    /// reservation but before it publishes retry_pending. Either the paint
-    /// completion consumes the retry and sends a wake, or this requester
-    /// reacquires the now-idle reservation and continues immediately.
-    fn completeRendererRepaintCoalesce(self: *Surface) bool {
-        if (self.renderer_repaint_requested.load(.acquire)) return false;
-        if (!self.renderer_repaint_retry_pending.swap(false, .acq_rel)) return false;
-        if (self.renderer_repaint_requested.cmpxchgStrong(
-            false,
-            true,
-            .acq_rel,
-            .acquire,
-        ) == null) return true;
+    pub const completeRendererRepaintCoalesce = surface_presentation.completeRendererRepaintCoalesce;
 
-        // Another renderer request acquired the reservation between the
-        // idle observation and CAS. Its paint must retain our retry.
-        self.renderer_repaint_retry_pending.store(true, .release);
-        return false;
-    }
+    pub const beginRendererRepaintRequest = surface_presentation.beginRendererRepaintRequest;
 
-    pub fn beginRendererRepaintRequest(self: *Surface) bool {
-        if (!self.renderer_repaint_requested.swap(true, .acq_rel)) {
-            self.render_trace.noteRendererRepaintAccepted();
-            return true;
-        }
-        self.renderer_repaint_retry_pending.store(true, .release);
-        if (self.completeRendererRepaintCoalesce()) {
-            self.render_trace.noteRendererRepaintAccepted();
-            return true;
-        }
-        self.render_trace.noteRendererRepaintCoalesced();
-        return false;
-    }
+    pub const cancelRendererRepaintRequest = surface_presentation.cancelRendererRepaintRequest;
 
-    pub fn cancelRendererRepaintRequest(self: *Surface) void {
-        self.renderer_repaint_requested.store(false, .release);
-        self.renderer_repaint_retry_pending.store(false, .release);
-    }
+    pub const consumeRendererRepaintRetryPending = surface_presentation.consumeRendererRepaintRetryPending;
 
-    fn consumeRendererRepaintRetryPending(self: *Surface) bool {
-        return self.renderer_repaint_retry_pending.swap(false, .acq_rel);
-    }
+    pub const shouldDrawRendererPaintContent = surface_presentation.shouldDrawRendererPaintContent;
 
-    fn shouldDrawRendererPaintContent(self: *Surface) bool {
-        return self.renderer_repaint_requested.load(.acquire);
-    }
+    pub const finishRendererRepaintRequest = surface_presentation.finishRendererRepaintRequest;
 
-    fn finishRendererRepaintRequest(self: *Surface) void {
-        self.renderer_repaint_requested.store(false, .release);
-        // As `requestRendererFrameNow`: a surface whose core is not running
-        // has no renderer to wake.
-        if (self.consumeRendererRepaintRetryPending() and self.core_initialized) {
-            self.core_surface.renderer_state.noteWakeSource(.apprt_repaint_retry);
-            self.core_surface.renderer_thread.wakeup.notify() catch |err| {
-                log.warn("win32 renderer repaint retry wake failed err={}", .{err});
-            };
-        }
-    }
+    pub const requestRendererFrameNow = surface_presentation.requestRendererFrameNow;
 
-    fn requestRendererFrameNow(
-        self: *Surface,
-        source: rendererpkg.State.WakeSource,
-    ) void {
-        if (!self.core_initialized) return;
-        self.core_surface.renderer_state.noteWakeSource(source);
-        self.core_surface.renderer_thread.wakeup.notify() catch |err| {
-            log.warn("win32 renderer frame wake failed err={}", .{err});
-        };
-    }
+    const handleRendererHealth = surface_presentation.handleRendererHealth;
 
-    fn handleRendererHealth(self: *Surface, health: rendererpkg.Health) bool {
-        switch (rendererHealthSurfaceAction(health)) {
-            .clear_recovery => {
-                self.cancelRendererRepaintRequest();
-                return true;
-            },
-            .recover_with_followup_repaint => {
-                _ = self.beginRendererRepaintRequest();
-                self.renderer_repaint_retry_pending.store(true, .release);
-                self.requestRepaintWithMode(self.app.rendererRepaintModeThisTick(self.host)) catch |err| {
-                    log.warn("win32 renderer health repaint request failed err={}", .{err});
-                    return false;
-                };
-                self.requestRendererFrameNow(.apprt_health_recovery);
-                return true;
-            },
-        }
-    }
+    pub const markLiveResizeRepaintDeferred = surface_presentation.markLiveResizeRepaintDeferred;
 
-    fn markLiveResizeRepaintDeferred(self: *Surface) void {
-        self.live_resize_repaint_deferred = true;
-    }
+    pub const queuePaintRequest = surface_presentation.queuePaintRequest;
 
-    fn queuePaintRequest(self: *Surface, update_now: bool) !void {
-        const hwnd = self.hwnd orelse return error.NoWindow;
-        self.render_trace.noteQueuePaint(update_now);
-        if (self.paint_pending) {
-            if (update_now) {
-                self.requestRendererFrameNow(.apprt_paint_pending);
-                try self.forcePaintRequestNow();
-            }
-            return;
-        }
+    pub const forcePaintRequestNow = surface_presentation.forcePaintRequestNow;
 
-        self.paint_pending = true;
-        errdefer self.paint_pending = false;
+    pub const noteFirstFrame = surface_presentation.noteFirstFrame;
 
-        if (sys.InvalidateRect(hwnd, null, 0) == 0) {
-            return lastError();
-        }
-        if (update_now) _ = sys.UpdateWindow(hwnd);
-    }
+    pub const requestFirstFrame = surface_presentation.requestFirstFrame;
 
-    fn forcePaintRequestNow(self: *Surface) !void {
-        const hwnd = self.hwnd orelse return error.NoWindow;
-        self.render_trace.noteForcePaintNow();
-        self.paint_pending = false;
-        const flags: UINT = c.RDW_INVALIDATE | c.RDW_INTERNALPAINT | c.RDW_UPDATENOW;
-        if (sys.RedrawWindow(hwnd, null, null, flags) == 0) {
-            return lastError();
-        }
-    }
+    pub const flushDeferredLiveResizeRepaint = surface_presentation.flushDeferredLiveResizeRepaint;
 
-    /// Feed the one-shot post-show handshake and act on its verdict.
-    ///
-    /// See `win32/first_frame.zig` for why this edge has to exist at all.
-    /// The action is deliberately asynchronous: `noteFirstFrame(.host_shown)`
-    /// runs inside the `ShowWindow` call at the end of `Surface.init`, and
-    /// forcing a synchronous `WM_PAINT` there would re-enter
-    /// `core_surface.draw()` before the shell entity and window state have
-    /// been committed. An invalidate that the normal pump answers is enough,
-    /// because the pump is running by the time anything can observe it.
-    fn noteFirstFrame(self: *Surface, event: first_frame.Event) void {
-        switch (self.first_frame.observe(event)) {
-            .none => {},
-            .request_frame => self.requestFirstFrame(),
-        }
-    }
+    pub const repaintHostedChild = surface_presentation.repaintHostedChild;
 
-    fn requestFirstFrame(self: *Surface) void {
-        // The renderer thread does no work at all while it believes the
-        // surface is invisible (`minimumPresentIntervalMs` returns null), and
-        // the occlusion state it was given was computed while the host window
-        // was still hidden. Re-assert it before asking for a frame; both
-        // `syncOcclusion` and `occlusionCallback` are no-ops when the state
-        // already agrees.
-        self.syncOcclusion();
-        self.requestRendererFrameNow(.apprt_first_show);
+    pub const requestRepaintWithMode = surface_presentation.requestRepaintWithMode;
 
-        // Not `queuePaintRequest`: that drops the invalidate whenever
-        // `paint_pending` is already set, which is exactly the latch that can
-        // be stuck from a paint request made while the window was hidden.
-        // Going straight to `RedrawWindow` re-arms the update region without
-        // `RDW_UPDATENOW`, so the paint is answered by the message pump
-        // rather than re-entrantly here.
-        const hwnd = self.hwnd orelse return;
-        const flags: UINT = c.RDW_INVALIDATE | c.RDW_INTERNALPAINT;
-        if (sys.RedrawWindow(hwnd, null, null, flags) == 0) {
-            log.warn(
-                "win32 first-frame invalidate failed err={}",
-                .{windows.kernel32.GetLastError()},
-            );
-        }
-    }
-
-    fn flushDeferredLiveResizeRepaint(self: *Surface, repaint_fn: anytype) !bool {
-        if (!self.live_resize_repaint_deferred) return false;
-        if (self.paint_pending) {
-            self.live_resize_repaint_deferred = false;
-            return true;
-        }
-
-        try repaint_fn(self);
-        self.live_resize_repaint_deferred = false;
-        return true;
-    }
-
-    fn repaintHostedChild(self: *Surface) !void {
-        if (self.live_resize_repaint_deferred) {
-            _ = try self.flushDeferredLiveResizeRepaint(struct {
-                fn repaint(surface: *Surface) !void {
-                    try surface.queuePaintRequest(true);
-                }
-            }.repaint);
-            return;
-        }
-
-        try self.queuePaintRequest(true);
-    }
-
-    fn requestRepaintWithMode(self: *Surface, repaint_mode: SurfaceRepaintRequestMode) !void {
-        _ = self.hwnd orelse return;
-        if (repaint_mode == .defer_until_flush) {
-            self.markLiveResizeRepaintDeferred();
-            return;
-        }
-        self.queuePaintRequest(repaint_mode == .update_now) catch |err| {
-            self.cancelRendererRepaintRequest();
-            return err;
-        };
-    }
-
-    pub fn requestRepaint(self: *Surface) !void {
-        // During an interactive drag-resize the OS drives WM_SIZE →
-        // WM_PAINT on every mouse-delta; stacking additional
-        // InvalidateRect calls from the renderer thread just piles
-        // pressure onto the pump without producing extra visible
-        // frames. Drop the wake and let the WM_SIZE-driven cadence
-        // own pacing. WM_EXITSIZEMOVE and layout finish with
-        // `InvalidateRect` on the host plus hosted child HWNDs so nothing
-        // is permanently lost.
-        //
-        // Gate on THIS surface's own Host — an App-wide flag would
-        // freeze background windows whenever any foreground window
-        // enters a drag. Surfaces outside a Host (quick-terminal
-        // pre-host-attach, pre-init paint) fall through without
-        // gating.
-        const repaint_mode = surfaceRepaintRequestMode(self.host, sys.GetTickCount64());
-        try self.requestRepaintWithMode(repaint_mode);
-    }
+    pub const requestRepaint = surface_presentation.requestRepaint;
 
     pub fn redraw(self: *Surface) !void {
         if (!self.core_initialized) return;
@@ -40879,7 +40152,7 @@ pub const Surface = struct {
         _ = applyChildRect(overlay, &self.quick_select_placement, rect);
     }
 
-    fn closeQuickSelect(self: *Surface, restore_focus: bool) void {
+    pub fn closeQuickSelect(self: *Surface, restore_focus: bool) void {
         // Callers include unconditional lifecycle hooks (resize, hide,
         // teardown), so closing when nothing is open must be a no-op —
         // otherwise `restore_focus` would steal focus on every resize.
@@ -41672,7 +40945,7 @@ pub const Surface = struct {
         }
     }
 
-    fn invalidateSearchBarChildPaint(self: *Surface) void {
+    pub fn invalidateSearchBarChildPaint(self: *Surface) void {
         if (!self.search_bar_frame_visible) return;
         const handles = [_]?HWND{
             self.search_bar_bg_hwnd,
@@ -42406,11 +41679,7 @@ pub const Surface = struct {
         if (caption_changed or tabs_changed) host.invalidateTopChromeText();
     }
 
-    fn toggleMaximize(self: *Surface) void {
-        const hwnd = self.windowHwnd() orelse return;
-        if (self.fullscreen) return;
-        _ = sys.ShowWindow(hwnd, if (sys.IsZoomed(hwnd) != 0) c.SW_RESTORE else c.SW_MAXIMIZE);
-    }
+    const toggleMaximize = window_state.toggleMaximize;
 
     fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
         self.applyBellFeatures(config.@"bell-features");
@@ -42428,12 +41697,7 @@ pub const Surface = struct {
         try self.refreshScrollbarWindow();
     }
 
-    fn toggleBackgroundOpacity(self: *Surface) !bool {
-        if (self.background_opacity_default >= 0.999) return false;
-        self.background_opacity_force_opaque = !self.background_opacity_force_opaque;
-        try self.applyBackgroundOpacity();
-        return true;
-    }
+    pub const toggleBackgroundOpacity = window_state.toggleBackgroundOpacity;
 
     fn resizeSplitFallback(self: *Surface, value: apprt.action.ResizeSplit) !bool {
         const hwnd = self.hwnd orelse return false;
@@ -42452,752 +41716,79 @@ pub const Surface = struct {
         return true;
     }
 
-    pub fn toggleFullscreen(self: *Surface, mode: apprt.action.Fullscreen) !void {
-        _ = mode;
-        if (self.fullscreen) {
-            try self.leaveFullscreen();
-            return;
-        }
-        try self.enterFullscreen();
-    }
+    pub const toggleFullscreen = window_state.toggleFullscreen;
 
-    fn toggleDecorations(self: *Surface) !void {
-        try self.setDecorationsVisible(!self.decorations_visible);
-        self.decorations_visible_overridden = true;
-    }
+    pub const toggleDecorations = window_state.toggleDecorations;
 
-    fn setInitialSize(self: *Surface, size: apprt.action.InitialSize) !void {
-        self.default_client_size = .{
-            .width = @intCast(size.width),
-            .height = @intCast(size.height),
-        };
-        if (self.fullscreen or
-            (if (self.windowHwnd()) |hwnd| sys.IsZoomed(hwnd) != 0 else false) or
-            !shouldResizeHostForInitialSize(self.hostSurfaceCount())) return;
-        const client_size = scaleInitialClientSize(self.default_client_size.?, self.content_scale);
-        try self.resizeClientArea(client_size.width, client_size.height);
-    }
+    const setInitialSize = window_state.setInitialSize;
 
-    fn hostSurfaceCount(self: *const Surface) usize {
-        const host = self.host orelse return 1;
-        var count: usize = 0;
-        for (host.tabs.items) |*tab| count += tab.leafCount();
-        return count;
-    }
+    pub const hostSurfaceCount = window_state.hostSurfaceCount;
 
-    fn resetWindowSize(self: *Surface) !void {
-        const size = self.default_client_size orelse return;
-        if (self.fullscreen) try self.leaveFullscreen();
-        if (self.windowHwnd()) |hwnd| _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-        const client_size = scaleInitialClientSize(size, self.content_scale);
-        try self.resizeClientArea(client_size.width, client_size.height);
-    }
+    const resetWindowSize = window_state.resetWindowSize;
 
-    fn setSizeLimit(self: *Surface, limit: apprt.action.SizeLimit) void {
-        if (sizeLimitEquals(self.size_limit, limit)) return;
-        self.size_limit = limit;
-        if (self.host != null) {
-            self.refreshSharedWindowFrame();
-            return;
-        }
-        const hwnd = self.windowHwnd() orelse return;
-        _ = sys.SetWindowPos(
-            hwnd,
-            null,
-            0,
-            0,
-            0,
-            0,
-            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-        );
-    }
+    const setSizeLimit = window_state.setSizeLimit;
 
     fn setCellSize(self: *Surface, size: apprt.action.CellSize) void {
         self.cell_size_pixels = size;
     }
 
-    pub fn setFloatWindow(self: *Surface, mode: apprt.action.FloatWindow) !void {
-        self.topmost = switch (mode) {
-            .on => true,
-            .off => false,
-            .toggle => !self.topmost,
-        };
-        try self.applyTopmost();
-    }
+    pub const setFloatWindow = window_state.setFloatWindow;
 
-    /// Puts a new top-level window in the state `maximize` and `fullscreen`
-    /// ask for (`WindowStart`), on top of the state it already has: a window
-    /// that is maximized stays so, and one that is fullscreen stays so.
-    ///
-    /// A window that is still hidden is made fullscreen in place: it was
-    /// created framed, and its first show is then at the monitor's rect. The
-    /// host is never created with the popup style (`CW_USEDEFAULT` puts a
-    /// popup at (0,0), which would be the rect leaving fullscreen returns to)
-    /// and a popup is never maximized (that covers only the work area and
-    /// sets `WS_MAXIMIZE` on a fullscreen window). With both, the window
-    /// leaves fullscreen maximized, over the normal rect it has now.
-    ///
-    /// A failure is logged: how a window starts is a preference, and a
-    /// window in its ordinary state is still a usable window.
-    pub fn applyWindowStart(self: *Surface, start: WindowStart) void {
-        const hwnd = self.windowHwnd() orelse return;
-        if (start.fullscreen and !self.fullscreen) {
-            // A launcher's show command (`start /min`, a shortcut set to Run:
-            // Minimized or Maximized) goes to the first framed top-level
-            // window the process calls ShowWindow on. A popup's show does not
-            // take it, so the next framed window would: Settings, or a window
-            // opened from this one after it left fullscreen, would open
-            // minimized. SW_HIDE takes it while this window is still framed,
-            // and shows nothing.
-            if (sys.IsWindowVisible(hwnd) == 0) _ = sys.ShowWindow(hwnd, c.SW_HIDE);
-            self.enterFullscreen() catch |err| {
-                log.warn("win32 startup fullscreen failed err={}", .{err});
-            };
-        }
-        if (start.maximize) {
-            if (self.fullscreen) {
-                // `leaveFullscreen` maximizes a window whose placement says
-                // it was maximized.
-                self.restore_placement.showCmd = c.SW_MAXIMIZE;
-            } else if (sys.IsZoomed(hwnd) == 0) {
-                _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-            }
-        }
-    }
+    pub const applyWindowStart = window_state.applyWindowStart;
 
-    fn enterFullscreen(self: *Surface) !void {
-        const hwnd = self.windowHwnd() orelse return;
-        // A minimized window comes back first. SetWindowPos would move only
-        // its icon, and it would return from the taskbar as a popup at its
-        // normal rect. A restored session's first window is minimized here
-        // under a minimized launch (`applyRestoredWindowPlacement`).
-        if (sys.IsIconic(hwnd) != 0) _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
-        // Captured before the style write below, which drops WS_MAXIMIZE:
-        // the monitor-sized SetWindowPos after it would otherwise land on a
-        // normal window and overwrite its normal rect.
-        self.restore_placement.length = @sizeOf(WINDOWPLACEMENT);
-        if (sys.GetWindowPlacement(hwnd, &self.restore_placement) == 0 or
-            sys.GetWindowRect(hwnd, &self.restore_rect) == 0) return lastError();
-        const monitor = try windowMonitor(hwnd);
-        self.restore_monitor = monitor;
-        self.fullscreen = true;
-        try self.applyWindowStyle();
+    pub const enterFullscreen = window_state.enterFullscreen;
 
-        const screen = monitor.info.rcMonitor;
-        if (sys.SetWindowPos(
-            hwnd,
-            if (self.topmost) HWND_TOPMOST else null,
-            screen.left,
-            screen.top,
-            screen.right - screen.left,
-            screen.bottom - screen.top,
-            c.SWP_FRAMECHANGED | c.SWP_NOACTIVATE,
-        ) == 0) {
-            return lastError();
-        }
-    }
+    pub const FullscreenReturn = window_state.FullscreenReturn;
 
-    /// The window leaving fullscreen gives back: the one it was when it
-    /// entered fullscreen, moved to the monitor it is on now.
-    pub const FullscreenReturn = struct {
-        /// Its rect, in screen coordinates.
-        rect: RECT,
-        /// Its placement. `rcNormalPosition` is in the workspace coordinates
-        /// of `monitor`.
-        placement: WINDOWPLACEMENT,
-        /// The monitor it is on now, if entering fullscreen recorded one.
-        monitor: ?MONITORINFO,
-    };
+    pub const fullscreenReturn = window_state.fullscreenReturn;
 
-    pub fn fullscreenReturn(self: *const Surface, hwnd: HWND) !FullscreenReturn {
-        var back: FullscreenReturn = .{ .rect = self.restore_rect, .placement = self.restore_placement, .monitor = null };
-        const source = self.restore_monitor orelse return back;
-        const target = try windowMonitor(hwnd);
-        back.monitor = target.info;
-        if (target.monitor != source.monitor or target.dpi != source.dpi) {
-            back.rect = fullscreenRestoreRect(back.rect, source.info.rcWork, target.info.rcWork, source.dpi, target.dpi);
-            // WINDOWPLACEMENT uses workspace coordinates for a normal
-            // host (no WS_EX_TOOLWINDOW). Convert to screen coordinates
-            // before the work-area translation, and back afterwards.
-            const normal = workspaceRectToScreen(back.placement.rcNormalPosition, source.info);
-            back.placement.rcNormalPosition = screenRectToWorkspace(
-                fullscreenRestoreRect(normal, source.info.rcWork, target.info.rcWork, source.dpi, target.dpi),
-                target.info,
-            );
-        }
-        return back;
-    }
+    pub const leaveFullscreen = window_state.leaveFullscreen;
 
-    fn leaveFullscreen(self: *Surface) !void {
-        const hwnd = self.windowHwnd() orelse return;
-        const back = try self.fullscreenReturn(hwnd);
-        const rect = back.rect;
-        const placement = back.placement;
-        self.fullscreen = false;
-        try self.applyWindowStyle();
+    pub const maximizeWithPlacement = window_state.maximizeWithPlacement;
 
-        // A maximized window is maximized again and given back the normal
-        // rect it had before. Moving it to its maximized rect first, while
-        // it was a normal window, made that rect its normal rect, so a
-        // later restore kept it maximized-size. Any other window returns to
-        // its exact rect: the placement of a snapped window holds its
-        // pre-snap rect.
-        if (placement.showCmd == c.SW_MAXIMIZE) {
-            return maximizeWithPlacement(hwnd, &placement);
-        }
-        if (sys.SetWindowPos(
-            hwnd,
-            if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
-            rect.left,
-            rect.top,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            c.SWP_FRAMECHANGED | c.SWP_NOACTIVATE,
-        ) == 0) {
-            return lastError();
-        }
-    }
+    pub const windowMonitor = window_state.windowMonitor;
 
-    /// Maximizes `hwnd` with the normal rect of `placement`. Maximizing
-    /// first leaves SetWindowPlacement only the normal rect to write: on a
-    /// normal window it moves the window to that rect before maximizing it,
-    /// a second resize that also changes monitor if the rect is on another.
-    fn maximizeWithPlacement(hwnd: HWND, placement: *const WINDOWPLACEMENT) !void {
-        _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-        if (sys.SetWindowPlacement(hwnd, placement) == 0) return lastError();
-    }
+    pub const screenRectToWorkspace = window_state.screenRectToWorkspace;
 
-    /// The monitor nearest `hwnd`, its info and the window's DPI.
-    fn windowMonitor(hwnd: HWND) !FullscreenMonitor {
-        const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-        var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-        info.cbSize = @sizeOf(MONITORINFO);
-        if (sys.GetMonitorInfoW(monitor, &info) == 0) return lastError();
-        return .{ .monitor = monitor, .info = info, .dpi = sys.GetDpiForWindow(hwnd) };
-    }
+    pub const setDecorationsVisible = window_state.setDecorationsVisible;
 
-    /// The inverse of `workspaceRectToScreen`.
-    fn screenRectToWorkspace(rect: RECT, info: MONITORINFO) RECT {
-        const dx = info.rcWork.left - info.rcMonitor.left;
-        const dy = info.rcWork.top - info.rcMonitor.top;
-        return .{
-            .left = rect.left - dx,
-            .top = rect.top - dy,
-            .right = rect.right - dx,
-            .bottom = rect.bottom - dy,
-        };
-    }
+    pub const rollbackDecorationsVisible = window_state.rollbackDecorationsVisible;
 
-    fn setDecorationsVisible(self: *Surface, visible: bool) !void {
-        if (self.decorations_visible == visible) return;
+    pub const resizeClientArea = window_state.resizeClientArea;
 
-        const previous_visible = self.decorations_visible;
-        const host = self.host;
-        const should_refresh_host = shouldPropagateSharedHostWindowState(self);
-        const used_integrated_titlebar_before = if (should_refresh_host and host != null)
-            host.?.usingIntegratedTitlebar()
-        else
-            false;
+    pub const copySharedWindowStateFrom = window_state.copySharedWindowStateFrom;
 
-        self.decorations_visible = visible;
+    pub const activeSharedHostWindowHwnd = window_state.activeSharedHostWindowHwnd;
 
-        if (!should_refresh_host) return;
-        self.applyWindowStyle() catch |err| {
-            self.rollbackDecorationsVisible(previous_visible, host, false);
-            return err;
-        };
+    const syncSharedHostWindowState = window_state.syncSharedHostWindowState;
 
-        if (host) |value| {
-            const integrated_titlebar_changed = used_integrated_titlebar_before != value.usingIntegratedTitlebar();
-            if (integrated_titlebar_changed) {
-                // Switching between stock and app-owned caption chrome can
-                // strand hover state until the next NC leave.
-                value.handleNcMouseLeave();
-            }
-            value.layout() catch |err| {
-                self.rollbackDecorationsVisible(previous_visible, host, integrated_titlebar_changed);
-                return err;
-            };
-            value.refreshChrome() catch |err| {
-                self.rollbackDecorationsVisible(previous_visible, host, integrated_titlebar_changed);
-                return err;
-            };
-            value.cached_decorations_visible = visible;
-            value.scheduleCaptionUiaSync();
-        }
-    }
+    pub const refreshSharedWindowFrame = window_state.refreshSharedWindowFrame;
 
-    fn rollbackDecorationsVisible(
-        self: *Surface,
-        previous_visible: bool,
-        host: ?*Host,
-        integrated_titlebar_changed: bool,
-    ) void {
-        self.decorations_visible = previous_visible;
-        self.applyWindowStyle() catch |err| {
-            log.warn("win32 decoration rollback style update failed err={}", .{err});
-        };
+    pub const inheritWindowStateFrom = window_state.inheritWindowStateFrom;
 
-        if (host) |value| {
-            value.cached_decorations_visible = previous_visible;
-            if (integrated_titlebar_changed) value.handleNcMouseLeave();
-            value.layout() catch |err| {
-                log.warn("win32 decoration rollback layout failed err={}", .{err});
-            };
-            value.refreshChrome() catch |err| {
-                log.warn("win32 decoration rollback chrome refresh failed err={}", .{err});
-            };
-            value.scheduleCaptionUiaSync();
-        }
-    }
+    const updateMinMaxInfo = window_state.updateMinMaxInfo;
 
-    fn resizeClientArea(self: *Surface, client_width: u32, client_height: u32) !void {
-        const hwnd = self.windowHwnd() orelse return;
-        const hosted = self.host != null;
-        var client_rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &client_rect) == 0) {
-            return lastError();
-        }
-        var window_rect: RECT = undefined;
-        if (sys.GetWindowRect(hwnd, &window_rect) == 0) {
-            return lastError();
-        }
+    pub const keepsFrameUndecorated = window_state.keepsFrameUndecorated;
 
-        const current_client_width = client_rect.right - client_rect.left;
-        const current_client_height = client_rect.bottom - client_rect.top;
-        const current_window_width = window_rect.right - window_rect.left;
-        const current_window_height = window_rect.bottom - window_rect.top;
-        const frame_width = current_window_width - current_client_width;
-        const frame_height = current_window_height - current_client_height;
+    pub const applyWindowStyle = window_state.applyWindowStyle;
 
-        if (sys.SetWindowPos(
-            hwnd,
-            null,
-            0,
-            0,
-            @as(i32, @intCast(client_width)) + frame_width,
-            @as(i32, @intCast(client_height)) + frame_height,
-            c.SWP_NOMOVE | c.SWP_NOZORDER | c.SWP_NOACTIVATE,
-        ) == 0) {
-            return lastError();
-        }
+    pub const applyInitialBackgroundOpacity = window_state.applyInitialBackgroundOpacity;
 
-        if (hosted) {
-            const host = self.host orelse unreachable;
-            try host.layout();
-            host.syncVisibleSurfaceCoreSizesFromClientRects();
-        } else {
-            self.syncCoreSizeFromClientRect();
-        }
-    }
+    pub const applyBackgroundOpacity = window_state.applyBackgroundOpacity;
 
-    /// Takes the window state of `source`, but what `keeps` names stays this
-    /// surface's own.
-    pub fn copySharedWindowStateFrom(self: *Surface, source: *const Surface, keeps: WindowKeeps) void {
-        if (!keeps.decoration) {
-            self.decorations_visible = source.decorations_visible;
-            self.decorations_visible_overridden = source.decorations_visible_overridden;
-        }
-        if (self.host) |host| {
-            if (host.activeSurface() == self) {
-                host.cached_decorations_visible = self.decorations_visible;
-            }
-        }
-        self.fullscreen = source.fullscreen;
-        self.topmost = source.topmost;
-        self.restore_rect = source.restore_rect;
-        self.restore_placement = source.restore_placement;
-        self.restore_monitor = source.restore_monitor;
-        if (!keeps.size) self.default_client_size = source.default_client_size;
-        self.cell_size_pixels = source.cell_size_pixels;
-        if (!keeps.background_opacity) {
-            self.background_opacity_default = source.background_opacity_default;
-            self.background_opacity_force_opaque = source.background_opacity_force_opaque;
-        }
-        self.size_limit = source.size_limit;
-    }
+    pub const applyTopmost = window_state.applyTopmost;
 
-    fn activeSharedHostWindowHwnd(self: *const Surface) ?HWND {
-        const host = self.host orelse return self.hwnd;
-        if (host.activeSurface() != self) return null;
-        return host.hwnd;
-    }
+    pub const syncCoreSizeFromClientRect = surface_presentation.syncCoreSizeFromClientRect;
 
-    fn syncSharedHostWindowState(self: *Surface, previous_surface: ?*const Surface) void {
-        const host = self.host orelse return;
-        if (host.activeSurface() != self) return;
+    pub const syncCoreSizeNow = surface_presentation.syncCoreSizeNow;
 
-        if (previous_surface == null or
-            !sharedHostWindowFrameStateEquals(previous_surface.?, self))
-        {
-            self.refreshSharedWindowFrame();
-        }
-        if (previous_surface == null or
-            !sharedHostWindowTopmostEquals(previous_surface.?, self))
-        {
-            self.applyTopmost() catch |err| {
-                log.warn("win32 shared host topmost sync failed err={}", .{err});
-            };
-        }
-        if (previous_surface == null or
-            !sharedHostWindowOpacityEquals(previous_surface.?, self))
-        {
-            self.applyBackgroundOpacity() catch |err| {
-                log.warn("win32 shared host opacity sync failed err={}", .{err});
-            };
-        }
-    }
+    pub const applyDpiChange = surface_presentation.applyDpiChange;
 
-    fn refreshSharedWindowFrame(self: *Surface) void {
-        const hwnd = self.windowHwnd() orelse return;
-        const host = self.host orelse return;
-        if (host.activeSurface() != self) return;
-        if (self.keepsFrameUndecorated()) {
-            win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, self.decorations_visible);
-        }
+    pub const beginCoreResizeBatch = surface_presentation.beginCoreResizeBatch;
 
-        _ = sys.SetWindowPos(
-            hwnd,
-            null,
-            0,
-            0,
-            0,
-            0,
-            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-        );
-    }
+    pub const endCoreResizeBatch = surface_presentation.endCoreResizeBatch;
 
-    /// Gives this surface's window the state of `source`'s, keeping what
-    /// `keeps` names.
-    fn inheritWindowStateFrom(self: *Surface, source: *const Surface, keeps: WindowKeeps) !void {
-        // The size core init gave the window, before it takes the source's
-        // state.
-        var own_size: ?WindowSize = null;
-        if (keeps.size) if (self.windowHwnd()) |hwnd| {
-            var rect: RECT = undefined;
-            if (sys.GetWindowRect(hwnd, &rect) == 0) return lastError();
-            own_size = .{ .width = rect.right - rect.left, .height = rect.bottom - rect.top };
-        };
-        self.copySharedWindowStateFrom(source, keeps);
-        if (own_size) |size| if (self.fullscreen) if (self.windowHwnd()) |hwnd| {
-            // It leaves fullscreen to that size, where the source would, and
-            // inside the work area there, as a window opened from a normal
-            // or maximized source is. The source's return is in the pixels
-            // of the monitor it entered fullscreen on, which leaving scales
-            // from, and `size` is in this window's, on the monitor the
-            // source covers now. So the return is first taken as leaving
-            // fullscreen here gives it, then sized and fitted here, and
-            // leaving does not scale `size` too.
-            const back = try self.fullscreenReturn(hwnd);
-            const here = try windowMonitor(hwnd);
-            const work = here.info.rcWork;
-            self.restore_monitor = here;
-            self.restore_rect = fitRectInWork(back.rect.left, back.rect.top, size.width, size.height, work);
-            self.restore_placement = back.placement;
-            const normal = workspaceRectToScreen(back.placement.rcNormalPosition, here.info);
-            self.restore_placement.rcNormalPosition = screenRectToWorkspace(
-                fitRectInWork(normal.left, normal.top, size.width, size.height, work),
-                here.info,
-            );
-        };
-
-        try self.applyWindowStyle();
-        try self.applyTopmost();
-        try self.applyBackgroundOpacity();
-
-        const hwnd = self.windowHwnd() orelse return;
-        const source_hwnd = source.windowHwnd() orelse return;
-        const placed = try newWindowPlacement(self.app, source_hwnd, source.fullscreen, hwnd, own_size);
-        var flags = newWindowSetPosFlags(keeps.position, own_size != null, placed) | c.SWP_FRAMECHANGED;
-        // Another tab of the source's own window is already where it goes.
-        if (hwnd == source_hwnd) flags |= c.SWP_NOMOVE | c.SWP_NOSIZE;
-        if (sys.SetWindowPos(
-            hwnd,
-            if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
-            placed.rect.left,
-            placed.rect.top,
-            placed.rect.right - placed.rect.left,
-            placed.rect.bottom - placed.rect.top,
-            flags,
-        ) == 0) {
-            return lastError();
-        }
-
-        if (!self.fullscreen) {
-            if (placed.maximize) |*placement| {
-                // The source's normal rect, not the monitor-sized one.
-                try maximizeWithPlacement(hwnd, placement);
-            } else {
-                _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-            }
-        }
-    }
-
-    fn updateMinMaxInfo(self: *Surface, lParam: LPARAM) void {
-        if (self.size_limit.min_width == 0 and
-            self.size_limit.min_height == 0 and
-            self.size_limit.max_width == 0 and
-            self.size_limit.max_height == 0) return;
-
-        const info: *MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lParam)));
-        const hwnd = self.windowHwnd() orelse return;
-        var client_rect: RECT = undefined;
-        var window_rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
-        if (sys.GetWindowRect(hwnd, &window_rect) == 0) return;
-
-        const frame_width = (window_rect.right - window_rect.left) - (client_rect.right - client_rect.left);
-        const frame_height = (window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top);
-
-        if (self.size_limit.min_width > 0) {
-            info.ptMinTrackSize.x = @as(i32, @intCast(self.size_limit.min_width)) + frame_width;
-        }
-        if (self.size_limit.min_height > 0) {
-            info.ptMinTrackSize.y = @as(i32, @intCast(self.size_limit.min_height)) + frame_height;
-        }
-        if (self.size_limit.max_width > 0) {
-            info.ptMaxTrackSize.x = @as(i32, @intCast(self.size_limit.max_width)) + frame_width;
-        }
-        if (self.size_limit.max_height > 0) {
-            info.ptMaxTrackSize.y = @as(i32, @intCast(self.size_limit.max_height)) + frame_height;
-        }
-    }
-
-    /// `undecoratedKeepsFrame` for this surface's host window. The quick
-    /// terminal flag is the host's: a split or tab opened inside the quick
-    /// terminal is an ordinary surface in the quick terminal's window.
-    fn keepsFrameUndecorated(self: *const Surface) bool {
-        const quick_terminal = if (self.host) |host| host.quick_terminal else false;
-        return undecoratedKeepsFrame(self.app.os_build, quick_terminal);
-    }
-
-    fn applyWindowStyle(self: *Surface) !void {
-        const hwnd = self.activeSharedHostWindowHwnd() orelse return;
-        const keeps_frame = self.keepsFrameUndecorated();
-        const current: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
-        // The write keeps the window's own visibility. Forcing WS_VISIBLE on
-        // showed a hidden quick terminal on a config reload without its
-        // surface knowing (see `App.toggleQuickTerminal`).
-        const style = (effectiveHostWindowStyle(
-            self.decorations_visible or keeps_frame,
-            self.fullscreen,
-            self.host != null,
-        ) & ~@as(u32, c.WS_VISIBLE)) | (current & c.WS_VISIBLE);
-        // On Windows 11 a decoration toggle keeps the frame, so the style is
-        // already right, and writing it anyway would drop WS_MAXIMIZE: a
-        // maximized window left un-maximized in its maximized rect.
-        const state_bits: u32 = c.WS_VISIBLE | c.WS_MAXIMIZE | c.WS_MINIMIZE | c.WS_CLIPSIBLINGS;
-        if ((current & ~state_bits) != (style & ~state_bits)) {
-            _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(isize, @intCast(style))));
-        }
-        if (keeps_frame) win32_theme.WindowThemeAdapter.setHostBorderVisible(hwnd, self.decorations_visible);
-        if (sys.SetWindowPos(
-            hwnd,
-            null,
-            0,
-            0,
-            0,
-            0,
-            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-        ) == 0) {
-            return lastError();
-        }
-    }
-
-    /// Give a brand-new host window its `background-opacity` before the
-    /// window is shown for the first time.
-    ///
-    /// On Win32 the host window's layered alpha is the only mechanism that
-    /// makes `background-opacity` visible: DWM discards the GL child's
-    /// framebuffer alpha and nothing here opts into
-    /// `DwmExtendFrameIntoClientArea` or `WS_EX_NOREDIRECTIONBITMAP`.
-    /// `App.createHost` passes `dwExStyle = 0`, and the only callers of
-    /// `applyBackgroundOpacity` used to be config reload, tab/window
-    /// activation and `inheritWindowStateFrom` — none of which a
-    /// cold-start window reaches — so window 1 stayed fully opaque while
-    /// every later window faded (issue #234).
-    ///
-    /// Only `Surface.init`'s `activate_during_init` branch may call this: it
-    /// is the one path that owns a brand-new host window. A same-host tab or
-    /// split inherits an HWND whose alpha is already correct, and for a split
-    /// `tab.focused` already points at the new surface, so calling this there
-    /// would write to the live window rather than no-op through
-    /// `activeSharedHostWindowHwnd`.
-    ///
-    /// The unit tests cover this function against a live HWND, but nothing
-    /// unit-testable reaches `Surface.init` (it needs a GL context and a real
-    /// `CoreSurface`), so neither the call site nor its ordering against the
-    /// first show is machine-checked. Both were verified by running the app
-    /// and reading back `GWL_EXSTYLE` / `GetLayeredWindowAttributes`.
-    ///
-    /// Failure is logged rather than propagated: a window that could not be
-    /// layered is still a usable window.
-    fn applyInitialBackgroundOpacity(self: *Surface, clone_state_from: ?*const Surface) void {
-        if (clone_state_from) |source| {
-            // `inheritWindowStateFrom` copies the source's opacity wholesale,
-            // but it only runs after the clone is already on screen. Seed it
-            // here so a clone of a window the user forced opaque with
-            // `toggle_background_opacity` is never briefly shown faded.
-            self.background_opacity_default = source.background_opacity_default;
-            self.background_opacity_force_opaque = source.background_opacity_force_opaque;
-        }
-        self.applyBackgroundOpacity() catch |err| {
-            log.warn("win32 initial background opacity failed err={}", .{err});
-        };
-    }
-
-    fn applyBackgroundOpacity(self: *Surface) !void {
-        const hwnd = self.activeSharedHostWindowHwnd() orelse return;
-        const opacity = effectiveBackgroundOpacity(
-            self.background_opacity_default,
-            self.background_opacity_force_opaque,
-        );
-        const ex_style_raw = sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
-        var ex_style: u32 = @intCast(@as(usize, @bitCast(ex_style_raw)));
-
-        if (opacity >= 0.999) {
-            if ((ex_style & c.WS_EX_LAYERED) != 0) {
-                ex_style &= ~@as(u32, c.WS_EX_LAYERED);
-                _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
-                _ = sys.SetWindowPos(
-                    hwnd,
-                    null,
-                    0,
-                    0,
-                    0,
-                    0,
-                    c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-                );
-            }
-            return;
-        }
-
-        if ((ex_style & c.WS_EX_LAYERED) == 0) {
-            ex_style |= c.WS_EX_LAYERED;
-            _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
-        }
-
-        if (sys.SetLayeredWindowAttributes(hwnd, 0, alphaByteForOpacity(opacity), c.LWA_ALPHA) == 0) {
-            return lastError();
-        }
-    }
-
-    fn applyTopmost(self: *Surface) !void {
-        const hwnd = self.activeSharedHostWindowHwnd() orelse return;
-        if (sys.SetWindowPos(
-            hwnd,
-            if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
-            0,
-            0,
-            0,
-            0,
-            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
-        ) == 0) {
-            return lastError();
-        }
-    }
-
-    /// Refresh `self.size` from `GetClientRect` and notify the core. Call this
-    /// after `MoveWindow` from `Host.layout` as well as from `WM_SIZE`: with
-    /// `bRepaint = false`, the child can receive `WM_PAINT` before `WM_SIZE`,
-    /// leaving a stale screen size until the next resize event. Before the
-    /// core is initialized this only records the size; `Surface.init` hands
-    /// the core whatever it missed as soon as init finishes.
-    fn syncCoreSizeFromClientRect(self: *Surface) void {
-        // A drag onto a monitor of another DPI resizes the window to its new
-        // size before `WM_DPICHANGED` changes the font, and the core would
-        // lay the old font out in that size: on 144 -> 96 DPI, about 66
-        // columns, which wraps long lines and can push them into scrollback.
-        // Hold the size until the new font is in; `applyDpiChange` syncs it
-        // afterwards. Nothing is recorded, so that sync sees it.
-        if (self.host) |host| if (host.dpi_change_pending) return;
-        self.syncCoreSizeNow();
-    }
-
-    fn syncCoreSizeNow(self: *Surface) void {
-        const hwnd = self.hwnd orelse return;
-        const next_size = self.app.clientSize(hwnd) catch return;
-        if (!surfacePixelSizeChanged(self.size, next_size)) return;
-        self.size = next_size;
-
-        if (!self.core_initialized) return;
-        self.core_surface.sizeCallback(self.size) catch |err| {
-            log.err("win32 size callback failed err={}", .{err});
-        };
-    }
-
-    /// The new DPI's font, then the client size, as one terminal resize:
-    /// the core batches the resize each of them sends, so termio never lays
-    /// out the old pixel size in the new cells, however long the font takes.
-    fn applyDpiChange(self: *Surface) void {
-        if (!self.core_initialized) return self.syncContentScaleToHostDpiNow();
-        self.core_surface.beginResizeBatch();
-        defer self.core_surface.endResizeBatch();
-        self.syncContentScaleToHostDpiNow();
-        self.syncCoreSizeNow();
-    }
-
-    /// Hold this pane's terminal resizes until `endCoreResizeBatch`, which
-    /// sends one with the size and cells as they are then. A pane of a tab
-    /// that was hidden while its window moved to another DPI gets its new
-    /// size and its new font as separate resizes when it is shown, in either
-    /// order (`Host.layout` places it, then `setVisible` puts the font in;
-    /// a zoomed pane and `Host.showTabPanes` put the font in first). On its
-    /// own the first is the wrong grid, the new pixel size in the old cells or
-    /// the old one in the new cells (66x18 where the pane ends at 93x29,
-    /// measured on a move from 144 to 96 DPI), which termio applies when the
-    /// font build outlasts its 25 ms coalescing and which wraps long lines
-    /// into scrollback. So `Host.layout` wraps each pane it places in one,
-    /// and `Host.showTabPanes` the whole tab. Returns whether a batch was
-    /// opened; there is none before the core exists.
-    fn beginCoreResizeBatch(self: *Surface) bool {
-        if (!self.core_initialized) return false;
-        self.core_surface.beginResizeBatch();
-        return true;
-    }
-
-    fn endCoreResizeBatch(self: *Surface, opened: bool) void {
-        if (opened and self.core_initialized) self.core_surface.endResizeBatch();
-    }
-
-    test "a pane's resize batch needs a started core" {
-        var surface: Surface = undefined;
-        surface.core_initialized = false;
-        // Before `Surface.init` starts the core, its storage is not a core.
-        surface.core_surface.resize_batch = .{};
-        const opened = surface.beginCoreResizeBatch();
-        try std.testing.expect(!opened);
-        surface.endCoreResizeBatch(opened);
-        try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
-
-        surface.core_initialized = true;
-        try std.testing.expect(surface.beginCoreResizeBatch());
-        try std.testing.expectEqual(@as(u8, 1), surface.core_surface.resize_batch.depth);
-        // No resize was held, so closing it sends nothing (`core_surface.io`
-        // is not set up here, and is not touched).
-        surface.endCoreResizeBatch(true);
-        try std.testing.expectEqual(@as(u8, 0), surface.core_surface.resize_batch.depth);
-    }
-
-    fn windowSizeChanged(self: *Surface) void {
-        self.syncCoreSizeFromClientRect();
-
-        // Quick select holds a viewport snapshot plus the cell metrics that
-        // were current when it opened. A resize or font-size change invalidates
-        // both, so labels would land on the wrong cells; close it instead of
-        // repositioning a stale overlay.
-        self.closeQuickSelect(true);
-
-        // `MoveWindow(..., bRepaint = false)` resizes the child HWND without
-        // guaranteeing a follow-up paint for the newly exposed pixels. Request
-        // one from the child itself after `WM_SIZE`, when the default
-        // framebuffer and client rect have both advanced to the new size.
-        const repaint_mode = surfaceSizeChangeRepaintMode(self.host, sys.GetTickCount64());
-        if (surfaceSizeChangePrimesRenderer(repaint_mode)) _ = self.beginRendererRepaintRequest();
-        self.requestRepaintWithMode(repaint_mode) catch |err| {
-            log.err("win32 size-change repaint request failed err={}", .{err});
-        };
-    }
+    const windowSizeChanged = surface_presentation.windowSizeChanged;
 
     fn setSplitDimmed(self: *Surface, dimmed: bool) void {
         self.split_dimmed = dimmed;
@@ -43897,7 +42488,7 @@ pub const Surface = struct {
 
     /// Hidden tabs, zoomed panes and undo-retained surfaces catch up when
     /// shown, independently of layouts already completed by other panes.
-    fn syncContentScaleToHostDpi(self: *Surface) void {
+    pub fn syncContentScaleToHostDpi(self: *Surface) void {
         // During a DPI change only `applyDpiChange` puts the font in, inside
         // the core's resize batch; a layout running in between would change
         // it outside the batch and send the old pixel size in the new cells.
@@ -43905,7 +42496,7 @@ pub const Surface = struct {
         self.syncContentScaleToHostDpiNow();
     }
 
-    fn syncContentScaleToHostDpiNow(self: *Surface) void {
+    pub fn syncContentScaleToHostDpiNow(self: *Surface) void {
         self.syncContentScaleToHostDpiWith(
             &self.core_surface,
             CoreSurface.contentScaleCallback,
@@ -43934,7 +42525,7 @@ pub const Surface = struct {
         }
     }
 
-    fn syncOcclusion(self: *Surface) void {
+    pub fn syncOcclusion(self: *Surface) void {
         // Restoring a minimized or hidden host can make a pane visible
         // without changing the child's visibility or placement. Reconcile
         // its scale before waking the renderer, even in that path.
@@ -50953,36 +49544,6 @@ test "win32 mouseButtonFromMessage maps standard buttons" {
     try std.testing.expect(mouseButtonFromMessage(c.WM_XBUTTONUP) == null);
 }
 
-test "win32 renderer repaint request coalesces until paint completes" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var surface: Surface = undefined;
-    surface.renderer_repaint_requested = .init(false);
-    surface.renderer_repaint_retry_pending = .init(false);
-
-    try std.testing.expect(surface.beginRendererRepaintRequest());
-    try std.testing.expect(!surface.beginRendererRepaintRequest());
-    try std.testing.expect(surface.consumeRendererRepaintRetryPending());
-    try std.testing.expect(!surface.consumeRendererRepaintRetryPending());
-
-    surface.cancelRendererRepaintRequest();
-    try std.testing.expect(surface.beginRendererRepaintRequest());
-
-    surface.finishRendererRepaintRequest();
-    try std.testing.expect(surface.beginRendererRepaintRequest());
-}
-
-test "win32 paint draws terminal content only for renderer-requested frames" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var surface: Surface = undefined;
-    surface.renderer_repaint_requested = .init(false);
-    try std.testing.expect(!surface.shouldDrawRendererPaintContent());
-
-    surface.renderer_repaint_requested = .init(true);
-    try std.testing.expect(surface.shouldDrawRendererPaintContent());
-}
-
 test "win32 host composition redraw avoids terminal child HWNDs" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -50995,76 +49556,10 @@ test "win32 host composition redraw avoids terminal child HWNDs" {
     try std.testing.expect((flags & c.RDW_ALLCHILDREN) == 0);
 }
 
-test "win32 requestRepaint preserves renderer request during live resize" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var host: Host = undefined;
-    host.is_live_resize = .init(true);
-
-    var surface: Surface = undefined;
-    surface.hwnd = @ptrFromInt(1);
-    surface.host = &host;
-    surface.paint_pending = false;
-    surface.renderer_repaint_requested = .init(true);
-
-    try surface.requestRepaint();
-
-    try std.testing.expect(surface.renderer_repaint_requested.load(.acquire));
-    try std.testing.expect(surface.live_resize_repaint_deferred);
-    try std.testing.expect(!surface.paint_pending);
-}
-
 test "win32 hostChromeNeedsFocusRepaint only trips for split panes" {
     try std.testing.expect(!hostChromeNeedsFocusRepaint(0));
     try std.testing.expect(!hostChromeNeedsFocusRepaint(1));
     try std.testing.expect(hostChromeNeedsFocusRepaint(2));
-}
-
-test "win32 flushDeferredVisibleSurfaceRepaints schedules deferred visible surface once" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var active_surface: Surface = undefined;
-    active_surface.window_visible = true;
-    active_surface.live_resize_repaint_deferred = true;
-    active_surface.paint_pending = false;
-
-    var inactive_surface: Surface = undefined;
-    inactive_surface.window_visible = true;
-    inactive_surface.live_resize_repaint_deferred = true;
-    inactive_surface.paint_pending = false;
-
-    var host: Host = undefined;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &active_surface));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &inactive_surface));
-
-    var queue_calls: usize = 0;
-    const TestRepaint = struct {
-        var counter: *usize = undefined;
-
-        fn repaint(surface: *Surface) !void {
-            surface.paint_pending = true;
-            counter.* += 1;
-        }
-    };
-    TestRepaint.counter = &queue_calls;
-
-    host.flushDeferredVisibleSurfaceRepaintsWith(TestRepaint.repaint);
-
-    try std.testing.expectEqual(@as(usize, 1), queue_calls);
-    try std.testing.expect(active_surface.paint_pending);
-    try std.testing.expect(!active_surface.live_resize_repaint_deferred);
-    try std.testing.expect(inactive_surface.live_resize_repaint_deferred);
-
-    host.flushDeferredVisibleSurfaceRepaintsWith(TestRepaint.repaint);
-
-    try std.testing.expectEqual(@as(usize, 1), queue_calls);
 }
 
 test "win32 getSize prefers live hwnd client rect over cached size" {
@@ -51190,144 +49685,7 @@ test "win32 named layout encoding uses the persistence read limit" {
     try std.testing.expect(!App.namedLayoutEncodingFitsReadLimit(limit + 1));
 }
 
-test "win32 decorationsVisibleForConfig only hides none" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(decorationsVisibleForConfig(.auto));
-    try std.testing.expect(decorationsVisibleForConfig(.client));
-    try std.testing.expect(decorationsVisibleForConfig(.server));
-    try std.testing.expect(!decorationsVisibleForConfig(.none));
-}
-
-test "win32 startupHostWindowStyle respects decoration and fullscreen frame state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        effectiveHostWindowStyle(true, false, true) & ~@as(u32, c.WS_VISIBLE),
-        startupHostWindowStyle(true, false),
-    );
-    try std.testing.expectEqual(
-        effectiveHostWindowStyle(false, false, true) & ~@as(u32, c.WS_VISIBLE),
-        startupHostWindowStyle(false, false),
-    );
-    try std.testing.expectEqual(
-        effectiveHostWindowStyle(false, true, true) & ~@as(u32, c.WS_VISIBLE),
-        startupHostWindowStyle(false, true),
-    );
-    try std.testing.expect((startupHostWindowStyle(true, false) & c.WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((startupHostWindowStyle(true, false) & c.WS_VISIBLE) == 0);
-}
-
-test "win32 createdHostWindowStyleCorrection takes back only what CreateWindowEx added" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // Measured: `CreateWindowEx` answers the undecorated request with
-    // 0x06C00000, i.e. the request plus WS_CAPTION and WS_CLIPSIBLINGS.
-    const undecorated = startupHostWindowStyle(false, false);
-    try std.testing.expectEqual(
-        @as(?u32, undecorated),
-        createdHostWindowStyleCorrection(undecorated, undecorated | c.WS_CAPTION | c.WS_CLIPSIBLINGS),
-    );
-    try std.testing.expectEqual(@as(?u32, null), createdHostWindowStyleCorrection(undecorated, undecorated));
-
-    // Decorated and fullscreen requests come back with only the
-    // WS_CLIPSIBLINGS every top-level window carries, and stay untouched.
-    const decorated = startupHostWindowStyle(true, false);
-    try std.testing.expectEqual(@as(?u32, null), createdHostWindowStyleCorrection(decorated, decorated | c.WS_CLIPSIBLINGS));
-    const fullscreen = startupHostWindowStyle(false, true);
-    try std.testing.expectEqual(@as(?u32, null), createdHostWindowStyleCorrection(fullscreen, fullscreen | c.WS_CLIPSIBLINGS));
-}
-
 const testWindowStyle = test_support.testWindowStyle;
-
-test "win32 restoreRequestedHostWindowStyle removes the caption CreateWindowEx adds" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // Never shown, so it reaches neither the desktop nor the taskbar.
-    const requested = startupHostWindowStyle(false, false);
-    const hwnd = sys.CreateWindowExW(
-        0,
-        prompt_label_class,
-        std.unicode.utf8ToUtf16LeStringLiteral(""),
-        requested,
-        0,
-        0,
-        640,
-        400,
-        null,
-        null,
-        sys.GetModuleHandleW(null),
-        null,
-    ) orelse return lastError();
-    defer _ = sys.DestroyWindow(hwnd);
-
-    // The premise of the bug: nothing in the request asks for a caption,
-    // and the window has one anyway, eating into the client area.
-    try std.testing.expectEqual(@as(u32, c.WS_CAPTION), testWindowStyle(hwnd) & c.WS_CAPTION);
-    var client: RECT = undefined;
-    try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
-    try std.testing.expect(client.bottom < 400);
-
-    restoreRequestedHostWindowStyle(hwnd, requested);
-    try std.testing.expectEqual(requested, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
-    try std.testing.expect(sys.GetClientRect(hwnd, &client) != 0);
-    try std.testing.expectEqual(@as(i32, 640), client.right - client.left);
-    try std.testing.expectEqual(@as(i32, 400), client.bottom - client.top);
-
-    // Already right: nothing to do, and the style stays put.
-    restoreRequestedHostWindowStyle(hwnd, requested);
-    try std.testing.expectEqual(requested, testWindowStyle(hwnd) & ~@as(u32, c.WS_CLIPSIBLINGS));
-}
-
-test "win32 initialDecorationsVisible follows startup source" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var config: configpkg.Config = .{};
-
-    config.@"window-decoration" = .none;
-    try std.testing.expect(!Surface.initialDecorationsVisible(&config, .{}));
-
-    config.@"window-decoration" = .auto;
-    try std.testing.expect(Surface.initialDecorationsVisible(&config, .{}));
-
-    var source: Surface = undefined;
-    source.host = null;
-    source.decorations_visible = false;
-    try std.testing.expect(!Surface.initialDecorationsVisible(
-        &config,
-        .{ .clone_state_from = &source },
-    ));
-
-    source.decorations_visible = true;
-    try std.testing.expect(Surface.initialDecorationsVisible(
-        &config,
-        .{
-            .host_id = 7,
-            .clone_state_from = &source,
-        },
-    ));
-
-    // A forwarded `--window-decoration` (already applied to `config`) wins
-    // over the source's.
-    config.@"window-decoration" = .none;
-    try std.testing.expect(!Surface.initialDecorationsVisible(
-        &config,
-        .{ .clone_state_from = &source, .forwarded_arguments = &.{"--window-decoration=none"} },
-    ));
-    try std.testing.expect(Surface.initialDecorationsVisible(&config, .{ .clone_state_from = &source }));
-
-    config.@"window-decoration" = .none;
-    try std.testing.expect(!Surface.initialDecorationsVisible(
-        &config,
-        .{ .host_id = 7 },
-    ));
-
-    config.@"window-decoration" = .auto;
-    try std.testing.expect(Surface.initialDecorationsVisible(
-        &config,
-        .{ .host_id = 7 },
-    ));
-}
 
 test "win32 decorationVisibilityForChrome uses cached fallback until active surface" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -51385,15 +49743,6 @@ test "win32 shouldUseIntegratedTitlebar gates on Win11 build floor" {
     try std.testing.expect(!shouldUseIntegratedTitlebar(c.OS_BUILD_WIN11_22H2, .never));
 }
 
-test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect((effectiveHostWindowStyle(true, false, true) & c.WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((effectiveHostWindowStyle(false, false, true) & c.WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((effectiveHostWindowStyle(true, true, true) & c.WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((effectiveHostWindowStyle(true, false, false) & c.WS_CLIPCHILDREN) == 0);
-}
-
 test "win32 failed cloned-host registration detaches the host reference" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -51414,1393 +49763,13 @@ test "win32 failed cloned-host registration detaches the host reference" {
     try std.testing.expect(!detachHostReference(&hosts, &failed_clone));
 }
 
-test "win32 sharesHostWindowState only for same-host clones" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(sharesHostWindowState(7, 7));
-    try std.testing.expect(!sharesHostWindowState(7, 8));
-    try std.testing.expect(!sharesHostWindowState(7, null));
-    try std.testing.expect(!sharesHostWindowState(null, 7));
-}
-
-test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var source: Surface = undefined;
-    source.decorations_visible = false;
-    source.decorations_visible_overridden = true;
-    source.fullscreen = true;
-    source.topmost = true;
-    source.restore_rect = .{ .left = 10, .top = 20, .right = 30, .bottom = 40 };
-    source.restore_monitor = .{ .monitor = @ptrFromInt(1), .info = std.mem.zeroes(MONITORINFO), .dpi = 144 };
-    source.restore_placement = std.mem.zeroes(WINDOWPLACEMENT);
-    source.restore_placement.showCmd = c.SW_MAXIMIZE;
-    source.restore_placement.rcNormalPosition = .{ .left = 50, .top = 60, .right = 70, .bottom = 80 };
-    source.default_client_size = .{ .width = 123, .height = 456 };
-    source.cell_size_pixels = .{ .width = 9, .height = 21 };
-    source.background_opacity_default = 0.75;
-    source.background_opacity_force_opaque = true;
-    source.size_limit = .{
-        .min_width = 111,
-        .min_height = 222,
-        .max_width = 333,
-        .max_height = 444,
-    };
-    var dest: Surface = undefined;
-    dest.host = null;
-
-    dest.copySharedWindowStateFrom(&source, .{});
-
-    try std.testing.expectEqual(source.decorations_visible, dest.decorations_visible);
-    try std.testing.expectEqual(source.decorations_visible_overridden, dest.decorations_visible_overridden);
-    try std.testing.expectEqual(source.fullscreen, dest.fullscreen);
-    try std.testing.expectEqual(source.topmost, dest.topmost);
-    try std.testing.expectEqualDeep(source.restore_rect, dest.restore_rect);
-    try std.testing.expectEqualDeep(source.restore_placement, dest.restore_placement);
-    try std.testing.expectEqualDeep(source.restore_monitor, dest.restore_monitor);
-    try std.testing.expectEqualDeep(source.default_client_size, dest.default_client_size);
-    try std.testing.expectEqualDeep(source.cell_size_pixels, dest.cell_size_pixels);
-    try std.testing.expectEqual(source.background_opacity_default, dest.background_opacity_default);
-    try std.testing.expectEqual(source.background_opacity_force_opaque, dest.background_opacity_force_opaque);
-    try std.testing.expect(sizeLimitEquals(source.size_limit, dest.size_limit));
-
-    // What a forwarded launch set stays the window's own; the state and the
-    // rest are still the source's.
-    var own: Surface = undefined;
-    own.host = null;
-    own.decorations_visible = true;
-    own.decorations_visible_overridden = false;
-    own.default_client_size = .{ .width = 7, .height = 8 };
-    own.background_opacity_default = 0.5;
-    own.background_opacity_force_opaque = false;
-    own.copySharedWindowStateFrom(&source, .{ .position = true, .size = true, .decoration = true, .background_opacity = true });
-    try std.testing.expect(own.decorations_visible and !own.decorations_visible_overridden);
-    try std.testing.expectEqualDeep(@as(?apprt.SurfaceSize, .{ .width = 7, .height = 8 }), own.default_client_size);
-    try std.testing.expectEqual(@as(f64, 0.5), own.background_opacity_default);
-    try std.testing.expect(!own.background_opacity_force_opaque);
-    try std.testing.expectEqual(source.fullscreen, own.fullscreen);
-    try std.testing.expectEqualDeep(source.restore_placement, own.restore_placement);
-    try std.testing.expect(sizeLimitEquals(source.size_limit, own.size_limit));
-}
-
-test "win32 leaveFullscreen and new_window keep the normal rect of a maximized window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // Maximizing shows a window, so these live on a desktop of their own and
-    // never reach the user's.
-    try runOnHiddenDesktop(struct {
-        fn window(app: *App, origin: i32) !Surface {
-            var surface: Surface = undefined;
-            surface.app = app;
-            surface.host = null;
-            surface.hwnd = sys.CreateWindowExW(
-                0,
-                prompt_label_class,
-                std.unicode.utf8ToUtf16LeStringLiteral(""),
-                WS_OVERLAPPEDWINDOW,
-                origin,
-                origin,
-                640,
-                480,
-                null,
-                null,
-                sys.GetModuleHandleW(null),
-                null,
-            ) orelse return lastError();
-            surface.decorations_visible = true;
-            surface.fullscreen = false;
-            surface.topmost = false;
-            surface.background_opacity_default = 1.0;
-            surface.background_opacity_force_opaque = false;
-            return surface;
-        }
-
-        fn normalRect(hwnd: HWND) !RECT {
-            var placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
-            placement.length = @sizeOf(WINDOWPLACEMENT);
-            if (sys.GetWindowPlacement(hwnd, &placement) == 0) return lastError();
-            return placement.rcNormalPosition;
-        }
-
-        const Monitors = struct {
-            handles: [8]sys.HMONITOR = undefined,
-            count: usize = 0,
-
-            fn collect(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
-                const self: *@This() = @ptrFromInt(@as(usize, @bitCast(data)));
-                if (self.count == self.handles.len) return 0;
-                self.handles[self.count] = monitor;
-                self.count += 1;
-                return 1;
-            }
-        };
-
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var app = placementTestApp();
-            var surface = try window(&app, 100);
-            const hwnd = surface.hwnd.?;
-            defer _ = sys.DestroyWindow(hwnd);
-
-            _ = sys.ShowWindow(hwnd, c.SW_SHOW);
-            var normal_rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(hwnd, &normal_rect) != 0);
-            const normal = try normalRect(hwnd);
-
-            // Before the fix, the maximized rect became the normal one.
-            for ([_]bool{ false, true }) |maximized| {
-                if (maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-                try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
-                var before: RECT = undefined;
-                try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
-                try surface.enterFullscreen();
-                try surface.leaveFullscreen();
-                try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
-                var rect: RECT = undefined;
-                try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
-                try std.testing.expectEqualDeep(before, rect);
-                try std.testing.expectEqualDeep(normal, try normalRect(hwnd));
-                if (maximized) _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-                try std.testing.expect(sys.GetWindowRect(hwnd, &rect) != 0);
-                try std.testing.expectEqualDeep(normal_rect, rect);
-            }
-
-            // new_window from a maximized window, into a window created
-            // elsewhere, so it has to take the source's normal rect.
-            var clone = try window(&app, 200);
-            defer _ = sys.DestroyWindow(clone.hwnd.?);
-            _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-            try clone.inheritWindowStateFrom(&surface, .{});
-            try std.testing.expect(sys.IsZoomed(clone.hwnd.?) != 0);
-            try std.testing.expectEqualDeep(normal, try normalRect(clone.hwnd.?));
-
-            // Exercise real monitor/DPI transitions on this hidden desktop.
-            var monitors: Monitors = .{};
-            _ = sys.EnumDisplayMonitors(null, null, Monitors.collect, @bitCast(@intFromPtr(&monitors)));
-            for (monitors.handles[0..monitors.count]) |source_monitor| {
-                const source_info = monitorInfo(source_monitor) orelse return lastError();
-                for (monitors.handles[0..monitors.count]) |dest_monitor| {
-                    if (source_monitor == dest_monitor) continue;
-                    const dest_info = monitorInfo(dest_monitor) orelse return lastError();
-                    for ([_]i32{ 600, source_info.work_area.width() - 40 }) |normal_width| {
-                        for ([_]bool{ false, true }) |maximized| {
-                            _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-                            try std.testing.expect(sys.SetWindowPos(hwnd, null, source_info.work_area.left + 100, source_info.work_area.top + 100, normal_width, 400, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-                            const source_dpi = sys.GetDpiForWindow(hwnd);
-                            var before: RECT = undefined;
-                            try std.testing.expect(sys.GetWindowRect(hwnd, &before) != 0);
-                            if (maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-                            try surface.enterFullscreen();
-                            try std.testing.expect(sys.SetWindowPos(hwnd, null, dest_info.full_rect.left, dest_info.full_rect.top, dest_info.full_rect.width(), dest_info.full_rect.height(), c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-                            const dest_dpi = sys.GetDpiForWindow(hwnd);
-                            try surface.leaveFullscreen();
-                            try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
-                            try std.testing.expectEqual(dest_monitor, sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST).?);
-                            const width = @min(dest_info.work_area.width(), sys.MulDiv(before.right - before.left, @intCast(dest_dpi), @intCast(source_dpi)));
-                            const height = @min(dest_info.work_area.height(), sys.MulDiv(before.bottom - before.top, @intCast(dest_dpi), @intCast(source_dpi)));
-                            const expected_left = @max(dest_info.work_area.left, @min(before.left + dest_info.work_area.left - source_info.work_area.left, dest_info.work_area.right - width));
-                            const expected_top = @max(dest_info.work_area.top, @min(before.top + dest_info.work_area.top - source_info.work_area.top, dest_info.work_area.bottom - height));
-                            if (maximized) {
-                                const placed = try normalRect(hwnd);
-                                try std.testing.expectEqual(expected_left - (dest_info.work_area.left - dest_info.full_rect.left), placed.left);
-                                try std.testing.expectEqual(expected_top - (dest_info.work_area.top - dest_info.full_rect.top), placed.top);
-                                try std.testing.expectEqual(width, placed.right - placed.left);
-                                try std.testing.expectEqual(height, placed.bottom - placed.top);
-                                _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-                                try std.testing.expectEqual(dest_monitor, sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST).?);
-                            } else {
-                                var restored: RECT = undefined;
-                                try std.testing.expect(sys.GetWindowRect(hwnd, &restored) != 0);
-                                try std.testing.expectEqual(expected_left, restored.left);
-                                try std.testing.expectEqual(expected_top, restored.top);
-                                try std.testing.expectEqual(width, restored.right - restored.left);
-                                try std.testing.expectEqual(height, restored.bottom - restored.top);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }.body);
-}
-
 const placementTestApp = test_support.placementTestApp;
 
 const placementTestSurface = test_support.placementTestSurface;
 
-test "win32 a window opened from a minimized one starts on screen at its restored size" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var app = placementTestApp();
-            var source = try placementTestSurface(&app, 50, 50);
-            defer _ = sys.DestroyWindow(source.hwnd.?);
-            var clone = try placementTestSurface(&app, 700, 300);
-            defer _ = sys.DestroyWindow(clone.hwnd.?);
-
-            _ = sys.ShowWindow(source.hwnd.?, c.SW_SHOWNOACTIVATE);
-            var restored: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &restored) != 0);
-            _ = sys.ShowWindow(source.hwnd.?, c.SW_SHOWMINNOACTIVE);
-            try std.testing.expect(sys.IsIconic(source.hwnd.?) != 0);
-
-            try clone.inheritWindowStateFrom(&source, .{});
-
-            // The iconic rect is near (-32000, -32000); what the source
-            // restores to is its normal rect.
-            try std.testing.expect(sys.IsIconic(clone.hwnd.?) == 0);
-            var rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
-            try std.testing.expectEqual(restored.right - restored.left, rect.right - rect.left);
-            try std.testing.expectEqual(restored.bottom - restored.top, rect.bottom - rect.top);
-            // One cascade step down and right, so it does not cover the
-            // source's restored place.
-            const dx = rect.left - restored.left;
-            const dy = rect.top - restored.top;
-            try std.testing.expect(dx > 0 and dx <= 96);
-            try std.testing.expect(dy > 0 and dy <= 96);
-        }
-    }.body);
-}
-
-test "win32 a new window cascades from its source, stays on its monitor and follows its state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var app = placementTestApp();
-            var source = try placementTestSurface(&app, 50, 50);
-            defer _ = sys.DestroyWindow(source.hwnd.?);
-            var clone = try placementTestSurface(&app, 700, 300);
-            defer _ = sys.DestroyWindow(clone.hwnd.?);
-            const source_hwnd = source.hwnd.?;
-            const clone_hwnd = clone.hwnd.?;
-            _ = sys.ShowWindow(source_hwnd, c.SW_SHOWNOACTIVATE);
-            var restored: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(source_hwnd, &restored) != 0);
-            const step = sys.MulDiv(32, @intCast(sys.GetDpiForWindow(source_hwnd)), 96);
-
-            // A normal source: one step down and right, same size.
-            try clone.inheritWindowStateFrom(&source, .{});
-            var rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(clone_hwnd, &rect) != 0);
-            try std.testing.expectEqual(restored.left + step, rect.left);
-            try std.testing.expectEqual(restored.top + step, rect.top);
-            try std.testing.expectEqual(restored.right - restored.left, rect.right - rect.left);
-            try std.testing.expectEqual(restored.bottom - restored.top, rect.bottom - rect.top);
-
-            // At the corner of its monitor there is no room to step: the new
-            // window stays on the monitor, at the same size.
-            const monitor = sys.MonitorFromWindow(source_hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-            const info = monitorInfo(monitor) orelse return lastError();
-            try std.testing.expect(sys.SetWindowPos(source_hwnd, null, info.work_area.right - 640, info.work_area.bottom - 480, 640, 480, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-            try clone.inheritWindowStateFrom(&source, .{});
-            try std.testing.expect(sys.GetWindowRect(clone_hwnd, &rect) != 0);
-            try std.testing.expect(rect.left >= info.work_area.left and rect.right <= info.work_area.right);
-            try std.testing.expect(rect.top >= info.work_area.top and rect.bottom <= info.work_area.bottom);
-            try std.testing.expectEqual(@as(i32, 640), rect.right - rect.left);
-            try std.testing.expectEqual(@as(i32, 480), rect.bottom - rect.top);
-
-            // `window-position-x/y` still says where it goes (`createHost`
-            // put it there); only the size comes from the source.
-            try std.testing.expect(sys.SetWindowPos(source_hwnd, null, 80, 90, 640, 480, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-            try std.testing.expect(sys.SetWindowPos(clone_hwnd, null, 300, 310, 400, 300, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-            try clone.inheritWindowStateFrom(&source, .{ .position = true });
-            try std.testing.expect(sys.GetWindowRect(clone_hwnd, &rect) != 0);
-            try std.testing.expectEqual(@as(i32, 300), rect.left);
-            try std.testing.expectEqual(@as(i32, 310), rect.top);
-            try std.testing.expectEqual(@as(i32, 640), rect.right - rect.left);
-            try std.testing.expectEqual(@as(i32, 480), rect.bottom - rect.top);
-
-            // A source minimized from maximized restores to maximized, so
-            // the new window is maximized, with the source's normal rect.
-            var normal_placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
-            normal_placement.length = @sizeOf(WINDOWPLACEMENT);
-            try std.testing.expect(sys.GetWindowPlacement(source_hwnd, &normal_placement) != 0);
-            _ = sys.ShowWindow(source_hwnd, c.SW_MAXIMIZE);
-            _ = sys.ShowWindow(source_hwnd, c.SW_SHOWMINNOACTIVE);
-            try std.testing.expect(sys.IsIconic(source_hwnd) != 0);
-            try clone.inheritWindowStateFrom(&source, .{});
-            try std.testing.expect(sys.IsIconic(clone_hwnd) == 0);
-            try std.testing.expect(sys.IsZoomed(clone_hwnd) != 0);
-            var clone_placement: WINDOWPLACEMENT = std.mem.zeroes(WINDOWPLACEMENT);
-            clone_placement.length = @sizeOf(WINDOWPLACEMENT);
-            try std.testing.expect(sys.GetWindowPlacement(clone_hwnd, &clone_placement) != 0);
-            try std.testing.expectEqualDeep(normal_placement.rcNormalPosition, clone_placement.rcNormalPosition);
-        }
-    }.body);
-}
-
 const SafeModeAppFixture = test_support.SafeModeAppFixture;
 
-test "win32 a host opened from a minimized host starts on screen" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var fixture: SafeModeAppFixture = .{};
-            try fixture.init();
-            defer fixture.deinit();
-            const app = &fixture.app;
-            const title = std.unicode.utf8ToUtf16LeStringLiteral("");
-            const source = try app.createHost(title, &app.config, .{});
-            const hwnd = source.hwnd.?;
-            try std.testing.expect(sys.SetWindowPos(hwnd, null, 60, 70, 700, 500, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-            _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
-            var restored: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(hwnd, &restored) != 0);
-            _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
-            try std.testing.expect(sys.IsIconic(hwnd) != 0);
-
-            // `createHost` gives the new host the source's place before
-            // anything is shown.
-            const clone = try app.createHost(title, &app.config, .{});
-            try app.inheritHostWindowState(clone, source, false);
-            var rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
-            try std.testing.expectEqual(restored.right - restored.left, rect.right - rect.left);
-            try std.testing.expectEqual(restored.bottom - restored.top, rect.bottom - rect.top);
-            try std.testing.expect(rect.left > restored.left and rect.left <= restored.left + 96);
-            try std.testing.expect(rect.top > restored.top and rect.top <= restored.top + 96);
-        }
-    }.body);
-}
-
-test "win32 new_window does not copy state from a quick terminal" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var core_app: CoreApp = undefined;
-    var app: App = undefined;
-    var quick_host: Host = undefined;
-    var host: Host = undefined;
-    var quick_surface: Surface = undefined;
-    var surface: Surface = undefined;
-    var session: TestSession = .{};
-    try session.init(.{
-        .core_app = &core_app,
-        .app = &app,
-        // The quick terminal comes first, so it is what the app target
-        // resolves to.
-        .hosts = &.{
-            .{ .storage = &quick_host, .id = 1, .register = true, .next_tab_id = 2 },
-            .{ .storage = &host, .id = 2, .register = true, .next_tab_id = 2 },
-        },
-        .surfaces = &.{
-            .{ .storage = &quick_surface, .host = &quick_host, .register = true },
-            .{ .storage = &surface, .host = &host, .register = true },
-        },
-        .tabs = &.{
-            .{ .host = &quick_host, .surface = &quick_surface, .id = 1 },
-            .{ .host = &host, .surface = &surface, .id = 1 },
-        },
-    });
-    defer session.deinit();
-    quick_host.quick_terminal = true;
-
-    const Hook = struct {
-        var calls: usize = 0;
-        var clone_state_from: ?*const Surface = null;
-
-        fn createSurface(_: *App, _: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
-            calls += 1;
-            clone_state_from = opts.clone_state_from;
-            return error.TestWindowCreateFailed;
-        }
-    };
-    app.test_create_window_surface = &Hook.createSurface;
-
-    // The quick terminal is a floating strip pinned to a screen edge: a
-    // window copied from it would be topmost and sit on that strip. A new
-    // window opened from it follows an ordinary one.
-    Hook.calls = 0;
-    _ = app.performAction(.app, .new_window, .{}) catch {};
-    try std.testing.expectEqual(@as(usize, 1), Hook.calls);
-    try std.testing.expect(Hook.clone_state_from == &surface);
-
-    // With no ordinary window it is an ordinary new window.
-    _ = app.hosts.orderedRemove(1);
-    _ = app.performAction(.app, .new_window, .{}) catch {};
-    try std.testing.expectEqual(@as(usize, 2), Hook.calls);
-    try std.testing.expect(Hook.clone_state_from == null);
-
-    // An ordinary window is what a new one copies.
-    app.hosts.clearRetainingCapacity();
-    try app.hosts.append(std.testing.allocator, &host);
-    _ = app.performAction(.app, .new_window, .{}) catch {};
-    try std.testing.expectEqual(@as(usize, 3), Hook.calls);
-    try std.testing.expect(Hook.clone_state_from == &surface);
-}
-
-test "win32 new_window from the app copies the window activated last, never the quick terminal or a window kept empty for undo" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var core_app: CoreApp = undefined;
-    var app: App = undefined;
-    var empty_host: Host = undefined;
-    var quick_host: Host = undefined;
-    var first_host: Host = undefined;
-    var second_host: Host = undefined;
-    var quick_surface: Surface = undefined;
-    var first: Surface = undefined;
-    var second: Surface = undefined;
-    var session: TestSession = .{};
-    try session.init(.{
-        .core_app = &core_app,
-        .app = &app,
-        // First in the list: a window whose last tab was closed and is kept
-        // for undo, then the quick terminal. Neither has a pane to copy.
-        .hosts = &.{
-            .{ .storage = &empty_host, .id = 1, .register = true, .next_tab_id = 2 },
-            .{ .storage = &quick_host, .id = 2, .register = true, .next_tab_id = 2 },
-            .{ .storage = &first_host, .id = 3, .register = true, .next_tab_id = 2 },
-            .{ .storage = &second_host, .id = 4, .register = true, .next_tab_id = 2 },
-        },
-        .surfaces = &.{
-            .{ .storage = &quick_surface, .host = &quick_host, .register = true },
-            .{ .storage = &first, .host = &first_host, .register = true },
-            .{ .storage = &second, .host = &second_host, .register = true },
-        },
-        .tabs = &.{
-            .{ .host = &quick_host, .surface = &quick_surface, .id = 1 },
-            .{ .host = &first_host, .surface = &first, .id = 1 },
-            .{ .host = &second_host, .surface = &second, .id = 1 },
-        },
-    });
-    defer session.deinit();
-    quick_host.quick_terminal = true;
-
-    const Hook = struct {
-        var clone_state_from: ?*const Surface = null;
-
-        fn createSurface(_: *App, _: *const configpkg.Config, _: LPCWSTR, opts: SurfaceInitOptions) anyerror!*Surface {
-            clone_state_from = opts.clone_state_from;
-            return error.TestWindowCreateFailed;
-        }
-
-        fn source(a: *App, target: apprt.Target) !?*const Surface {
-            clone_state_from = null;
-            _ = a.performAction(target, .new_window, .{}) catch {};
-            return clone_state_from;
-        }
-    };
-    app.test_create_window_surface = &Hook.createSurface;
-
-    // Never activated: the first ordinary window with a pane, in list order.
-    try std.testing.expect(try Hook.source(&app, .app) == &first);
-
-    // The ordinary window activated last, though the empty window and the
-    // quick terminal were activated after it. Before, the empty window in
-    // the first slot gave nothing to copy.
-    first_host.activated = 1;
-    second_host.activated = 2;
-    quick_host.activated = 3;
-    empty_host.activated = 4;
-    try std.testing.expect(try Hook.source(&app, .app) == &second);
-    first_host.activated = 5;
-    try std.testing.expect(try Hook.source(&app, .app) == &first);
-
-    // From the quick terminal too. Before, that was the first ordinary
-    // window in the list.
-    second_host.activated = 6;
-    try std.testing.expect(try Hook.source(&app, .{ .surface = quick_surface.core() }) == &second);
-    // From an ordinary window, that window, whenever it was activated.
-    try std.testing.expect(try Hook.source(&app, .{ .surface = first.core() }) == &first);
-}
-
-test "win32 a new window is not maximized by a restore-to-maximized flag left on a normal window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var app = placementTestApp();
-            var source = try placementTestSurface(&app, 50, 50);
-            defer _ = sys.DestroyWindow(source.hwnd.?);
-            var clone = try placementTestSurface(&app, 700, 300);
-            defer _ = sys.DestroyWindow(clone.hwnd.?);
-            const hwnd = source.hwnd.?;
-
-            // Maximize, minimize, restore (back to maximized), restore again.
-            // Windows keeps WPF_RESTORETOMAXIMIZED in the placement of the
-            // normal window this leaves.
-            _ = sys.ShowWindow(hwnd, c.SW_SHOWNOACTIVATE);
-            _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
-            _ = sys.ShowWindow(hwnd, c.SW_SHOWMINNOACTIVE);
-            _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-            try std.testing.expect(sys.IsZoomed(hwnd) != 0);
-            _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-            try std.testing.expect(sys.IsZoomed(hwnd) == 0 and sys.IsIconic(hwnd) == 0);
-
-            try clone.inheritWindowStateFrom(&source, .{});
-            try std.testing.expect(sys.IsZoomed(clone.hwnd.?) == 0);
-
-            // Another tab of the same window syncing its state does not
-            // maximize the window either.
-            var twin = source;
-            try twin.inheritWindowStateFrom(&source, .{});
-            try std.testing.expect(sys.IsZoomed(hwnd) == 0);
-        }
-    }.body);
-}
-
-test "win32 a new window from a fullscreen window covers the same monitor" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var app = placementTestApp();
-            var source = try placementTestSurface(&app, 50, 50);
-            defer _ = sys.DestroyWindow(source.hwnd.?);
-            var clone = try placementTestSurface(&app, 700, 300);
-            defer _ = sys.DestroyWindow(clone.hwnd.?);
-            const monitor = sys.MonitorFromWindow(source.hwnd.?, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-            const full = (monitorInfo(monitor) orelse return lastError()).full_rect;
-            _ = sys.ShowWindow(source.hwnd.?, c.SW_SHOWNOACTIVATE);
-            source.fullscreen = true;
-            try std.testing.expect(sys.SetWindowPos(source.hwnd.?, null, full.left, full.top, full.width(), full.height(), c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-
-            // Not stepped down and fitted to the work area, which would show
-            // the taskbar under a window that is meant to be fullscreen, and
-            // not moved by `window-position-x/y`.
-            for ([_]bool{ false, true }) |configured| {
-                try std.testing.expect(sys.SetWindowPos(clone.hwnd.?, null, 700, 300, 640, 480, c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
-                try clone.inheritWindowStateFrom(&source, .{ .position = configured });
-                try std.testing.expect(clone.fullscreen);
-                var rect: RECT = undefined;
-                try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
-                try std.testing.expectEqualDeep(RECT{ .left = full.left, .top = full.top, .right = full.right, .bottom = full.bottom }, rect);
-            }
-
-            // Minimized, the source's own rect is a sliver under the
-            // taskbar; the monitor is still where it is fullscreen.
-            _ = sys.ShowWindow(source.hwnd.?, c.SW_SHOWMINNOACTIVE);
-            try std.testing.expect(sys.IsIconic(source.hwnd.?) != 0);
-            try clone.inheritWindowStateFrom(&source, .{});
-            var rect: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
-            try std.testing.expectEqualDeep(RECT{ .left = full.left, .top = full.top, .right = full.right, .bottom = full.bottom }, rect);
-        }
-    }.body);
-}
-
-test "win32 new windows from one source step past the windows already there" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var app = placementTestApp();
-            defer app.hosts.deinit(std.testing.allocator);
-            var source = try placementTestSurface(&app, 50, 50);
-            defer _ = sys.DestroyWindow(source.hwnd.?);
-            var clone = try placementTestSurface(&app, 700, 300);
-            defer _ = sys.DestroyWindow(clone.hwnd.?);
-            _ = sys.ShowWindow(source.hwnd.?, c.SW_SHOWNOACTIVATE);
-            var origin: RECT = undefined;
-            try std.testing.expect(sys.GetWindowRect(source.hwnd.?, &origin) != 0);
-            const step = sys.MulDiv(32, @intCast(sys.GetDpiForWindow(source.hwnd.?)), 96);
-
-            // Several new windows opened from the same window: the next one
-            // goes where the last one is not.
-            var rect: RECT = undefined;
-            for ([_]i32{ 1, 2, 3 }) |n| {
-                try clone.inheritWindowStateFrom(&source, .{});
-                try std.testing.expect(sys.GetWindowRect(clone.hwnd.?, &rect) != 0);
-                try std.testing.expectEqual(origin.left + n * step, rect.left);
-                try std.testing.expectEqual(origin.top + n * step, rect.top);
-                var opened = try placementTestSurface(&app, rect.left, rect.top);
-                _ = sys.ShowWindow(opened.hwnd.?, c.SW_SHOWNOACTIVATE);
-                const host = try std.testing.allocator.create(Host);
-                host.* = .{ .app = &app, .id = @intCast(n), .hwnd = opened.hwnd };
-                try app.hosts.append(std.testing.allocator, host);
-                // Kept until the end of the body: `opened` is a copy of the
-                // window handle, destroyed with the loop's other windows.
-                _ = &opened;
-            }
-            for (app.hosts.items) |host| {
-                _ = sys.DestroyWindow(host.hwnd.?);
-                std.testing.allocator.destroy(host);
-            }
-            app.hosts.clearRetainingCapacity();
-        }
-    }.body);
-}
-
 const WindowStartTestApp = test_support.WindowStartTestApp;
-
-test "win32 maximize and fullscreen start a new window in that state at its first show" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var fixture: WindowStartTestApp = .{};
-            try fixture.init();
-            defer fixture.deinit();
-            const app = &fixture.app;
-            const Fixture = WindowStartTestApp;
-
-            for ([_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } }) |case| {
-                const maximize, const fullscreen = case;
-                app.config.maximize = maximize;
-                app.config.fullscreen = if (fullscreen) .true else .false;
-                try app.createWindow(default_title);
-                const surface = fixture.newest();
-                const hwnd = surface.windowHwnd().?;
-                const created = Fixture.hidden_rect;
-                const shown = Fixture.first_show orelse return error.TestWindowNeverShown;
-                const screen = try Fixture.monitorRect(hwnd);
-
-                try std.testing.expectEqual(fullscreen, surface.fullscreen);
-                if (fullscreen) {
-                    // Shown at the monitor's rect, without a frame: no
-                    // framed window first. And never a maximized popup,
-                    // which covers only the work area.
-                    try std.testing.expectEqualDeep(screen, shown.rect);
-                    try std.testing.expect(shown.style & c.WS_POPUP != 0 and shown.style & c.WS_CAPTION == 0);
-                    try std.testing.expect(!shown.zoomed);
-                    try std.testing.expect(sys.IsZoomed(hwnd) == 0);
-                    try std.testing.expectEqualDeep(screen, try Fixture.screenRect(hwnd));
-                    // Leaving it gives back the window it was created as,
-                    // maximized with both.
-                    try surface.toggleFullscreen(.native);
-                    try std.testing.expect(!surface.fullscreen);
-                    try std.testing.expect(Fixture.framed(hwnd));
-                    try std.testing.expectEqual(maximize, sys.IsZoomed(hwnd) != 0);
-                    try std.testing.expectEqualDeep(created, try Fixture.normalRect(hwnd));
-                    if (!maximize) try std.testing.expectEqualDeep(created, try Fixture.screenRect(hwnd));
-                } else {
-                    // Already maximized when it first appeared: no normal
-                    // window first.
-                    try std.testing.expectEqual(maximize, shown.zoomed);
-                    try std.testing.expectEqual(maximize, sys.IsZoomed(hwnd) != 0);
-                    try std.testing.expectEqualDeep(created, try Fixture.normalRect(hwnd));
-                    if (!maximize) try std.testing.expectEqualDeep(created, shown.rect);
-                }
-
-                if (maximize and !fullscreen) {
-                    // The state is the window's start, not a rule: a tab
-                    // opened in a window the user restored leaves it so.
-                    _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-                    try std.testing.expect(sys.IsZoomed(hwnd) == 0);
-                    _ = try app.createWindowSurface(&app.config, default_title, .{ .host_id = surface.host_id });
-                    try std.testing.expect(sys.IsZoomed(hwnd) == 0);
-                    try std.testing.expectEqualDeep(created, try Fixture.screenRect(hwnd));
-                }
-                fixture.closeWindows();
-            }
-        }
-    }.body);
-}
-
-test "win32 a new window from a normal one takes maximize, and a forwarded --maximize or --fullscreen=true" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var fixture: WindowStartTestApp = .{};
-            try fixture.init();
-            defer fixture.deinit();
-            const app = &fixture.app;
-            const Fixture = WindowStartTestApp;
-
-            try app.createWindow(default_title);
-            const source = fixture.newest();
-            const source_hwnd = source.windowHwnd().?;
-            const source_rect = try Fixture.screenRect(source_hwnd);
-            const step = cascadeStep(sys.GetDpiForWindow(source_hwnd));
-            const cascaded: RECT = .{
-                .left = source_rect.left + step,
-                .top = source_rect.top + step,
-                .right = source_rect.right + step,
-                .bottom = source_rect.bottom + step,
-            };
-            const screen = try Fixture.monitorRect(source_hwnd);
-
-            const Case = struct {
-                config_maximize: bool = false,
-                arguments: ?[]const [:0]const u8 = null,
-                maximized: bool = false,
-                fullscreen: bool = false,
-            };
-            for ([_]Case{
-                // Neither: a normal window, cascaded from the source.
-                .{},
-                .{ .config_maximize = true, .maximized = true },
-                .{ .arguments = &.{"--maximize"}, .maximized = true },
-                .{ .arguments = &.{"--fullscreen=true"}, .fullscreen = true },
-                .{ .arguments = &.{ "--maximize", "--fullscreen=true" }, .maximized = true, .fullscreen = true },
-            }) |case| {
-                app.config.maximize = case.config_maximize;
-                try std.testing.expect(try app.performAction(.app, .new_window, .{ .arguments = case.arguments }));
-                const clone = fixture.newest();
-                try std.testing.expect(clone != source);
-                const hwnd = clone.windowHwnd().?;
-                try std.testing.expectEqual(case.fullscreen, clone.fullscreen);
-                if (case.fullscreen) {
-                    // On the source's monitor, and back to the cascaded
-                    // window when it leaves, maximized with both.
-                    try std.testing.expectEqualDeep(screen, try Fixture.screenRect(hwnd));
-                    try std.testing.expect(sys.IsZoomed(hwnd) == 0);
-                    try clone.toggleFullscreen(.native);
-                }
-                // Before the fix every one of these ended in the source's
-                // SW_RESTORE.
-                try std.testing.expectEqual(case.maximized, sys.IsZoomed(hwnd) != 0);
-                try std.testing.expectEqualDeep(cascaded, try Fixture.normalRect(hwnd));
-                // The source is left as it was.
-                try std.testing.expect(sys.IsZoomed(source_hwnd) == 0 and !source.fullscreen);
-                try std.testing.expectEqualDeep(source_rect, try Fixture.screenRect(source_hwnd));
-                fixture.closeWindow(clone);
-            }
-        }
-    }.body);
-}
-
-/// A running app with one normal window, for the tests of what a new window
-/// opened from it keeps of the keys a forwarded launch gives it (#496): a
-/// second `noctty` or `noctty +new-window` while one runs.
-const ForwardedKeysTest = struct {
-    fixture: WindowStartTestApp = .{},
-    source: *Surface = undefined,
-    /// The source window's rect, and that rect one cascade step off it.
-    source_rect: RECT = undefined,
-    cascaded: RECT = undefined,
-    work: win32_quick_terminal.Rect = undefined,
-
-    const Fixture = WindowStartTestApp;
-    /// What core init asks for when the window's config has both
-    /// `window-width` and `window-height`, as `sized` gives it.
-    const own: apprt.action.InitialSize = .{ .width = 400, .height = 300 };
-    const sized: []const [:0]const u8 = &.{ "--window-width=50", "--window-height=15" };
-
-    fn init(self: *ForwardedKeysTest) !void {
-        _ = sys.SetThreadDpiAwarenessContext(-4);
-        try self.fixture.init();
-        errdefer self.fixture.deinit();
-        try self.fixture.app.createWindow(default_title);
-        self.source = self.fixture.newest();
-        const hwnd = self.source.windowHwnd().?;
-        self.source_rect = try Fixture.screenRect(hwnd);
-        const step = cascadeStep(sys.GetDpiForWindow(hwnd));
-        self.cascaded = at(self.source_rect, self.source_rect.left + step, self.source_rect.top + step);
-        const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse return lastError();
-        self.work = (monitorInfo(monitor) orelse return lastError()).work_area;
-    }
-
-    fn deinit(self: *ForwardedKeysTest) void {
-        self.fixture.deinit();
-    }
-
-    /// A `new_window` with `arguments` as its forwarded argv. With `size`,
-    /// core init asks for that client size, as it does when the window's
-    /// config has `window-width` and `window-height`.
-    fn forward(self: *ForwardedKeysTest, arguments: ?[]const [:0]const u8, size: ?apprt.action.InitialSize) !*Surface {
-        const count = self.fixture.app.windows.items.len;
-        Fixture.initial_size = size;
-        defer Fixture.initial_size = null;
-        try std.testing.expect(try self.fixture.app.performAction(.app, .new_window, .{ .arguments = arguments }));
-        try std.testing.expectEqual(count + 1, self.fixture.app.windows.items.len);
-        return self.fixture.newest();
-    }
-
-    /// `--window-position-x/y` at (`x`, `y`), formatted into `buf`.
-    fn placedAt(buf: *[2][32]u8, x: i32, y: i32) ![2][:0]const u8 {
-        return .{
-            try std.fmt.bufPrintZ(&buf[0], "--window-position-x={d}", .{x}),
-            try std.fmt.bufPrintZ(&buf[1], "--window-position-y={d}", .{y}),
-        };
-    }
-
-    fn at(rect: RECT, left: i32, top: i32) RECT {
-        return .{ .left = left, .top = top, .right = left + rect.right - rect.left, .bottom = top + rect.bottom - rect.top };
-    }
-
-    fn clientSize(hwnd: HWND) !apprt.SurfaceSize {
-        var rect: RECT = undefined;
-        if (sys.GetClientRect(hwnd, &rect) == 0) return lastError();
-        return .{ .width = @intCast(rect.right - rect.left), .height = @intCast(rect.bottom - rect.top) };
-    }
-
-    /// The client size `own` gives a window at its DPI.
-    fn ownClient(surface: *const Surface) apprt.SurfaceSize {
-        return scaleInitialClientSize(.{ .width = own.width, .height = own.height }, surface.content_scale);
-    }
-
-    fn style(hwnd: HWND) u32 {
-        return testWindowStyle(hwnd) & ~@as(u32, c.WS_VISIBLE | c.WS_CLIPSIBLINGS);
-    }
-
-    fn undecoratedStyle(surface: *const Surface) u32 {
-        return effectiveHostWindowStyle(surface.keepsFrameUndecorated(), false, true) & ~@as(u32, c.WS_VISIBLE);
-    }
-
-    /// The monitors of the desktop, at most `buf.len`. A CI runner has one,
-    /// so the legs that need two run only on a machine with more.
-    fn monitors(buf: *[8]MONITORINFO) ![]const MONITORINFO {
-        const Collect = struct {
-            infos: *[8]MONITORINFO,
-            count: usize = 0,
-            failed: bool = false,
-
-            fn add(monitor: sys.HMONITOR, _: HDC, _: *RECT, data: LPARAM) callconv(.winapi) BOOL {
-                const self: *@This() = @ptrFromInt(@as(usize, @bitCast(data)));
-                if (self.count == self.infos.len) return 0;
-                var info: MONITORINFO = std.mem.zeroes(MONITORINFO);
-                info.cbSize = @sizeOf(MONITORINFO);
-                if (sys.GetMonitorInfoW(monitor, &info) == 0) {
-                    self.failed = true;
-                    return 0;
-                }
-                self.infos[self.count] = info;
-                self.count += 1;
-                return 1;
-            }
-        };
-        var collect: Collect = .{ .infos = buf };
-        _ = sys.EnumDisplayMonitors(null, null, Collect.add, @bitCast(@intFromPtr(&collect)));
-        if (collect.failed) return lastError();
-        return buf[0..collect.count];
-    }
-
-    /// Moves the source, a normal window, to (100, 100) in `work`, asking
-    /// for 800x600 (onto a monitor of another DPI it takes the size its DPI
-    /// change scales that to), and returns its DPI there.
-    fn moveSource(self: *ForwardedKeysTest, work: RECT) !u32 {
-        const hwnd = self.source.windowHwnd().?;
-        if (sys.SetWindowPos(hwnd, null, work.left + 100, work.top + 100, 800, 600, c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0) return lastError();
-        return sys.GetDpiForWindow(hwnd);
-    }
-};
-
-test "win32 a forwarded window position places a new window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-            const app = &t.fixture.app;
-
-            // Controls, as before the fix: with nothing forwarded a new window
-            // is one cascade step off the source at its size, and
-            // `window-position-x/y` in the config place it at that size.
-            {
-                const clone = try t.forward(null, null);
-                try std.testing.expectEqualDeep(t.cascaded, try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
-                t.fixture.closeWindow(clone);
-            }
-            app.config.@"window-position-x" = @intCast(t.work.left + 200);
-            app.config.@"window-position-y" = @intCast(t.work.top + 100);
-            {
-                const clone = try t.forward(null, null);
-                try std.testing.expectEqualDeep(ForwardedKeysTest.at(t.source_rect, t.work.left + 200, t.work.top + 100), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
-                t.fixture.closeWindow(clone);
-            }
-
-            // A forwarded position places it, at the source's size, over the
-            // config's as well. Before the fix it went where the config said,
-            // or one cascade step off the source. The first pass runs with the
-            // config's position still set.
-            for ([_]bool{ true, false }) |configured| {
-                if (!configured) {
-                    app.config.@"window-position-x" = null;
-                    app.config.@"window-position-y" = null;
-                }
-                var buf: [2][32]u8 = undefined;
-                const x = t.work.left + 300;
-                const y = t.work.top + 200;
-                const placed = try ForwardedKeysTest.placedAt(&buf, x, y);
-                const clone = try t.forward(&placed, null);
-                try std.testing.expectEqualDeep(ForwardedKeysTest.at(t.source_rect, x, y), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
-                t.fixture.closeWindow(clone);
-            }
-        }
-    }.body);
-}
-
-test "win32 a forwarded window size sizes a new window, also one opened from a maximized or fullscreen window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-            const Fixture = ForwardedKeysTest.Fixture;
-            const source_hwnd = t.source.windowHwnd().?;
-
-            // The client core init asked for, one cascade step off the source.
-            // Before the fix it took the source's size.
-            {
-                const clone = try t.forward(ForwardedKeysTest.sized, ForwardedKeysTest.own);
-                const hwnd = clone.windowHwnd().?;
-                try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
-                const rect = try Fixture.screenRect(hwnd);
-                try std.testing.expectEqual(t.cascaded.left, rect.left);
-                try std.testing.expectEqual(t.cascaded.top, rect.top);
-                // And what `reset_window_size` returns to.
-                try std.testing.expectEqualDeep(@as(?apprt.SurfaceSize, .{ .width = ForwardedKeysTest.own.width, .height = ForwardedKeysTest.own.height }), clone.default_client_size);
-                t.fixture.closeWindow(clone);
-            }
-
-            // From a maximized source: the normal rect the maximized new
-            // window returns to, where the source's is.
-            _ = sys.ShowWindow(source_hwnd, c.SW_MAXIMIZE);
-            const source_normal = try Fixture.normalRect(source_hwnd);
-            {
-                const clone = try t.forward(ForwardedKeysTest.sized, ForwardedKeysTest.own);
-                const hwnd = clone.windowHwnd().?;
-                try std.testing.expect(sys.IsZoomed(hwnd) != 0);
-                const normal = try Fixture.normalRect(hwnd);
-                try std.testing.expectEqual(source_normal.left, normal.left);
-                try std.testing.expectEqual(source_normal.top, normal.top);
-                _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-                try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
-                t.fixture.closeWindow(clone);
-            }
-            _ = sys.ShowWindow(source_hwnd, c.SW_RESTORE);
-            try std.testing.expectEqualDeep(t.source_rect, try Fixture.screenRect(source_hwnd));
-
-            // From a fullscreen source: the window the fullscreen new window
-            // leaves fullscreen to, where the source's is.
-            try t.source.toggleFullscreen(.native);
-            {
-                const clone = try t.forward(ForwardedKeysTest.sized, ForwardedKeysTest.own);
-                const hwnd = clone.windowHwnd().?;
-                try std.testing.expect(clone.fullscreen);
-                try std.testing.expectEqualDeep(try Fixture.monitorRect(hwnd), try Fixture.screenRect(hwnd));
-                try clone.toggleFullscreen(.native);
-                try std.testing.expect(!clone.fullscreen and sys.IsZoomed(hwnd) == 0);
-                try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
-                const rect = try Fixture.screenRect(hwnd);
-                try std.testing.expectEqual(t.source_rect.left, rect.left);
-                try std.testing.expectEqual(t.source_rect.top, rect.top);
-                t.fixture.closeWindow(clone);
-            }
-            try t.source.toggleFullscreen(.native);
-        }
-    }.body);
-}
-
-test "win32 a forwarded size from a fullscreen window is in the pixels of the monitor the new window is on" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        /// Moves the source, a normal window, near the far corner of `work`,
-        /// where its rect fits and a new window of the forwarded size does
-        /// not, also on a 1024x768 runner at 96 DPI.
-        fn toCorner(hwnd: HWND, work: RECT) !void {
-            if (sys.SetWindowPos(hwnd, null, work.right - 300, work.bottom - 200, 280, 180, c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0) return lastError();
-        }
-
-        /// The new window leaves fullscreen, maximized if the source was
-        /// before it went fullscreen, and is then restored: it has the client
-        /// its forwarded size gives it, inside `work`. Returns its rect.
-        fn leaveInside(clone: *Surface, maximized: bool, work: RECT) !RECT {
-            const hwnd = clone.windowHwnd().?;
-            try std.testing.expect(clone.fullscreen);
-            try clone.toggleFullscreen(.native);
-            try std.testing.expect(!clone.fullscreen);
-            try std.testing.expectEqual(maximized, sys.IsZoomed(hwnd) != 0);
-            if (maximized) _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-            try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
-            const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
-            try std.testing.expect(rect.left >= work.left and rect.top >= work.top);
-            try std.testing.expect(rect.right <= work.right and rect.bottom <= work.bottom);
-            return rect;
-        }
-
-        /// The source leaves fullscreen too. `rect`, the new window's, is
-        /// where the source comes back to, moved only as far as its own
-        /// size needs to stay inside `work`.
-        fn expectAtSource(t: *ForwardedKeysTest, maximized: bool, rect: RECT, work: RECT) !void {
-            const hwnd = t.source.windowHwnd().?;
-            try t.source.toggleFullscreen(.native);
-            const back = if (maximized) try ForwardedKeysTest.Fixture.normalRect(hwnd) else try ForwardedKeysTest.Fixture.screenRect(hwnd);
-            try std.testing.expectEqualDeep(fitRectInWork(back.left, back.top, rect.right - rect.left, rect.bottom - rect.top, work), rect);
-            if (maximized) _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
-        }
-
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-            const Fixture = ForwardedKeysTest.Fixture;
-            const source_hwnd = t.source.windowHwnd().?;
-
-            // The source entered fullscreen while its monitor's scale was
-            // twice what it is now, so leaving gives it its rect at half the
-            // size. The new window's forwarded size is its own, in pixels of
-            // the scale it has now. Before the fix it was halved too.
-            try t.source.toggleFullscreen(.native);
-            const dpi = t.source.restore_monitor.?.dpi;
-            t.source.restore_monitor.?.dpi = dpi * 2;
-            {
-                const clone = try t.forward(ForwardedKeysTest.sized, ForwardedKeysTest.own);
-                t.source.restore_monitor.?.dpi = dpi;
-                const hwnd = clone.windowHwnd().?;
-                try std.testing.expect(clone.fullscreen);
-                try clone.toggleFullscreen(.native);
-                try std.testing.expect(!clone.fullscreen and sys.IsZoomed(hwnd) == 0);
-                try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
-                const rect = try Fixture.screenRect(hwnd);
-                try std.testing.expectEqual(t.source_rect.left, rect.left);
-                try std.testing.expectEqual(t.source_rect.top, rect.top);
-                t.fixture.closeWindow(clone);
-            }
-            try t.source.toggleFullscreen(.native);
-
-            // Near the far corner of the work area the source fits and the
-            // new window does not, so it comes back moved inside, as one
-            // opened from a normal or maximized source is. Also from a source
-            // maximized before it went fullscreen, which leaves to its
-            // placement, and at the doubled scale above. Before the fix it
-            // reached past the work area at either scale, and from the
-            // maximized source at the doubled scale its client was halved.
-            const work = (try Surface.windowMonitor(source_hwnd)).info.rcWork;
-            for ([_]bool{ false, true }) |maximized| {
-                for ([_]u32{ 1, 2 }) |scale| {
-                    try toCorner(source_hwnd, work);
-                    if (maximized) _ = sys.ShowWindow(source_hwnd, c.SW_MAXIMIZE);
-                    try t.source.toggleFullscreen(.native);
-                    t.source.restore_monitor.?.dpi = dpi * scale;
-                    const clone = try t.forward(ForwardedKeysTest.sized, ForwardedKeysTest.own);
-                    t.source.restore_monitor.?.dpi = dpi;
-                    const rect = try leaveInside(clone, maximized, work);
-                    t.fixture.closeWindow(clone);
-                    try expectAtSource(&t, maximized, rect, work);
-                }
-            }
-
-            // The same with real monitors: the source entered fullscreen on
-            // one and was moved to another while fullscreen. Measured on
-            // main with a 144 DPI and two 96 DPI monitors: the new window
-            // left fullscreen with a 261x187 client on a 96 DPI monitor and
-            // 911x703 on the 144 DPI one, where 400x300 and 600x450 were
-            // asked for. Monitors of the same DPI were right before the fix.
-            // The maximized source pins the placement's half of the fix.
-            var buf: [8]MONITORINFO = undefined;
-            const monitors = try ForwardedKeysTest.monitors(&buf);
-            for (monitors) |entered| {
-                for (monitors) |now| {
-                    if (std.meta.eql(entered.rcMonitor, now.rcMonitor)) continue;
-                    for ([_]bool{ false, true }) |maximized| {
-                        _ = try t.moveSource(entered.rcWork);
-                        try toCorner(source_hwnd, entered.rcWork);
-                        if (maximized) _ = sys.ShowWindow(source_hwnd, c.SW_MAXIMIZE);
-                        try t.source.toggleFullscreen(.native);
-                        const screen = now.rcMonitor;
-                        if (sys.SetWindowPos(source_hwnd, null, screen.left, screen.top, screen.right - screen.left, screen.bottom - screen.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0) return lastError();
-                        const now_dpi = sys.GetDpiForWindow(source_hwnd);
-                        const clone = try t.forward(ForwardedKeysTest.sized, ForwardedKeysTest.own);
-                        const hwnd = clone.windowHwnd().?;
-                        try std.testing.expectEqualDeep(screen, try Fixture.screenRect(hwnd));
-                        const rect = try leaveInside(clone, maximized, now.rcWork);
-                        try std.testing.expectEqualDeep(screen, try Fixture.monitorRect(hwnd));
-                        try std.testing.expectEqual(now_dpi, sys.GetDpiForWindow(hwnd));
-                        t.fixture.closeWindow(clone);
-                        try expectAtSource(&t, maximized, rect, now.rcWork);
-                    }
-                }
-            }
-        }
-    }.body);
-}
-
-test "win32 a new window placed and sized by forwarded arguments keeps that size on any monitor" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn forwardAt(t: *ForwardedKeysTest, x: i32, y: i32, size: apprt.action.InitialSize) !void {
-            var buf: [2][32]u8 = undefined;
-            const placed = try ForwardedKeysTest.placedAt(&buf, x, y);
-            const clone = try t.forward(&.{ placed[0], placed[1], ForwardedKeysTest.sized[0], ForwardedKeysTest.sized[1] }, size);
-            const hwnd = clone.windowHwnd().?;
-            const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
-            try std.testing.expectEqual(x, rect.left);
-            try std.testing.expectEqual(y, rect.top);
-            try std.testing.expectEqualDeep(
-                scaleInitialClientSize(.{ .width = size.width, .height = size.height }, clone.content_scale),
-                try ForwardedKeysTest.clientSize(hwnd),
-            );
-            t.fixture.closeWindow(clone);
-        }
-
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-            const source_hwnd = t.source.windowHwnd().?;
-
-            // Placed where the arguments say, a window keeps the size they
-            // give it, as a first window would, even where it does not fit
-            // the source's work area: the cascade that fits a new window to
-            // that area does not place this one. Before the fix it was cut
-            // to that area. On the source's monitor, that is a window taller
-            // than the work area, up to the tallest a window can be.
-            {
-                const monitor = try Surface.windowMonitor(source_hwnd);
-                const work = monitor.info.rcWork;
-                const scale: apprt.ContentScale = .{
-                    .x = @as(f32, @floatFromInt(monitor.dpi)) / 96.0,
-                    .y = @as(f32, @floatFromInt(monitor.dpi)) / 96.0,
-                };
-                const frame_height = (t.source_rect.bottom - t.source_rect.top) -
-                    @as(i32, @intCast((try ForwardedKeysTest.clientSize(source_hwnd)).height));
-                const height: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(work.bottom - work.top - frame_height + 1)) / scale.y));
-                const client = scaleInitialClientSize(.{ .width = ForwardedKeysTest.own.width, .height = height }, scale);
-                // SM_CYMAXTRACK.
-                const tallest = sys.GetSystemMetricsForDpi(60, monitor.dpi);
-                if (@as(i32, @intCast(client.height)) + frame_height <= tallest) {
-                    try forwardAt(&t, work.left + 40, work.top, .{ .width = ForwardedKeysTest.own.width, .height = height });
-                }
-            }
-
-            // Placed on another monitor, larger than the source's work area
-            // and inside its own. Measured on main with 3840x2088,
-            // 1920x1032 and 1080x1872 work areas: every window larger than
-            // the source's work area was cut to it, at the right place.
-            var buf: [8]MONITORINFO = undefined;
-            const monitors = try ForwardedKeysTest.monitors(&buf);
-            for (monitors) |source| {
-                for (monitors) |target| {
-                    if (std.meta.eql(source.rcMonitor, target.rcMonitor)) continue;
-                    const target_dpi: i32 = @intCast(try t.moveSource(target.rcWork));
-                    _ = try t.moveSource(source.rcWork);
-                    const width = @min(target.rcWork.right - target.rcWork.left - 120, @max(source.rcWork.right - source.rcWork.left + 60, 600));
-                    const height = @min(target.rcWork.bottom - target.rcWork.top - 120, @max(source.rcWork.bottom - source.rcWork.top + 40, 400));
-                    try forwardAt(&t, target.rcWork.left + 40, target.rcWork.top + 30, .{
-                        .width = @intCast(@divTrunc(width * 96, target_dpi)),
-                        .height = @intCast(@divTrunc(height * 96, target_dpi)),
-                    });
-                }
-            }
-        }
-    }.body);
-}
-
-test "win32 forwarded window decorations win over the ones a new window copies" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-            const style = ForwardedKeysTest.style;
-            const undecorated = ForwardedKeysTest.undecoratedStyle;
-            const framed = effectiveHostWindowStyle(true, false, true) & ~@as(u32, c.WS_VISIBLE);
-
-            // Windows 10's frameless undecorated window, and Windows 11's,
-            // which keeps the frame (`undecoratedKeepsFrame`), so there only
-            // the decoration state tells the two apart: a style check passes
-            // either way.
-            for ([_]u32{ 19045, c.OS_BUILD_WIN11_21H2 }) |os_build| {
-                t.fixture.app.os_build = os_build;
-                // Before the fix a new window always took the source's.
-                {
-                    const clone = try t.forward(&.{"--window-decoration=none"}, null);
-                    try std.testing.expect(!clone.decorations_visible and !clone.host.?.cached_decorations_visible);
-                    try std.testing.expectEqual(undecorated(clone), style(clone.windowHwnd().?));
-                    try std.testing.expectEqual(clone.keepsFrameUndecorated(), undecorated(clone) == framed);
-                    t.fixture.closeWindow(clone);
-                }
-                try t.source.toggleDecorations();
-                // The control: without them it copies the source's.
-                {
-                    const clone = try t.forward(null, null);
-                    try std.testing.expect(!clone.decorations_visible);
-                    try std.testing.expectEqual(undecorated(clone), style(clone.windowHwnd().?));
-                    t.fixture.closeWindow(clone);
-                }
-                {
-                    const clone = try t.forward(&.{"--window-decoration=auto"}, null);
-                    try std.testing.expect(clone.decorations_visible and clone.host.?.cached_decorations_visible);
-                    try std.testing.expectEqual(framed, style(clone.windowHwnd().?));
-                    // A config reload gives it the config's decorations
-                    // again, as it does a window that took them from the
-                    // config.
-                    try std.testing.expect(!clone.decorations_visible_overridden);
-                    t.fixture.closeWindow(clone);
-                }
-                try t.source.toggleDecorations();
-            }
-        }
-    }.body);
-}
-
-test "win32 a forwarded window background opacity wins over the one a new window copies" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-
-            // The control: an opaque source, an opaque copy.
-            {
-                const clone = try t.forward(null, null);
-                try std.testing.expect(!testHostIsLayered(clone.windowHwnd().?));
-                t.fixture.closeWindow(clone);
-            }
-            // Before the fix the copy stayed opaque.
-            {
-                const clone = try t.forward(&.{"--background-opacity=0.5"}, null);
-                const hwnd = clone.windowHwnd().?;
-                try std.testing.expectEqual(@as(f64, 0.5), clone.background_opacity_default);
-                try std.testing.expect(testHostIsLayered(hwnd));
-                try std.testing.expect((testLayeredAlpha(hwnd) orelse 255) < 255);
-                t.fixture.closeWindow(clone);
-            }
-        }
-    }.body);
-}
-
-test "win32 forwarded window keys apply to a new window when no window is open" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-
-            // Nothing to copy: before the fix the window took the app
-            // config's position and decorations instead.
-            t.fixture.closeWindows();
-            var buf: [2][32]u8 = undefined;
-            const x = t.work.left + 300;
-            const y = t.work.top + 200;
-            const placed = try ForwardedKeysTest.placedAt(&buf, x, y);
-            const clone = try t.forward(&.{ placed[0], placed[1], ForwardedKeysTest.sized[0], ForwardedKeysTest.sized[1], "--window-decoration=none" }, ForwardedKeysTest.own);
-            const hwnd = clone.windowHwnd().?;
-            const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
-            try std.testing.expectEqual(x, rect.left);
-            try std.testing.expectEqual(y, rect.top);
-            try std.testing.expectEqualDeep(ForwardedKeysTest.ownClient(clone), try ForwardedKeysTest.clientSize(hwnd));
-            try std.testing.expect(!clone.decorations_visible and !clone.host.?.cached_decorations_visible);
-            try std.testing.expectEqual(ForwardedKeysTest.undecoratedStyle(clone), ForwardedKeysTest.style(hwnd));
-        }
-    }.body);
-}
-
-test "win32 a forwarded window copies the window activated last, not the first in the list" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            var t: ForwardedKeysTest = .{};
-            try t.init();
-            defer t.deinit();
-            const app = &t.fixture.app;
-
-            // Two more windows, each where no copy is cascaded onto, and with
-            // room for a copy of `second` on a 1024x768 runner.
-            var buf: [2][2][32]u8 = undefined;
-            const second_at = try ForwardedKeysTest.placedAt(&buf[0], t.work.left + 240, t.work.top + 140);
-            const second = try t.forward(&second_at, null);
-            const third_at = try ForwardedKeysTest.placedAt(&buf[1], t.work.left + 120, t.work.top + 120);
-            const third = try t.forward(&third_at, null);
-
-            // The first window is first in the list, and was copied before.
-            try activate(second);
-            try expectCopies(&t, second);
-
-            // Closing the first window moves the newest into its slot.
-            try activate(second);
-            t.fixture.closeWindow(t.source);
-            try std.testing.expect(app.hosts.items[0] == third.host.?);
-            try expectCopies(&t, second);
-
-            // A window kept with no tab for undo has no pane to copy, even
-            // first in the list and activated last. Before, the forwarded
-            // window then opened as if no window were open.
-            const kept = third.host.?;
-            var entry = kept.detachTabForUndo(0).?;
-            // Back in its window before teardown closes it, if a check fails.
-            errdefer _ = kept.restoreClosedTabEntryNative(&entry.payload.close_tab) catch false;
-            try activate(second);
-            try activateHost(kept);
-            try expectCopies(&t, second);
-            try std.testing.expect(try kept.restoreClosedTabEntryNative(&entry.payload.close_tab));
-        }
-
-        fn activate(surface: *Surface) !void {
-            try activateHost(surface.host.?);
-        }
-
-        /// Real activation: `WM_ACTIVATE` from the window manager.
-        fn activateHost(host: *Host) !void {
-            const hwnd = host.hwnd.?;
-            _ = sys.SetActiveWindow(hwnd);
-            try std.testing.expect(sys.GetActiveWindow() == hwnd);
-            try std.testing.expectEqual(host.app.activations, host.activated);
-        }
-
-        /// A plain forward is one cascade step off `source`, at its size,
-        /// kept in its work area as `newWindowPlacement` keeps it.
-        fn expectCopies(t: *ForwardedKeysTest, source: *Surface) !void {
-            const hwnd = source.windowHwnd().?;
-            const rect = try ForwardedKeysTest.Fixture.screenRect(hwnd);
-            const work = (try Surface.windowMonitor(hwnd)).info.rcWork;
-            const clone = try t.forward(null, null);
-            try std.testing.expectEqualDeep(cascadedRect(rect, cascadeStep(sys.GetDpiForWindow(hwnd)), work), try ForwardedKeysTest.Fixture.screenRect(clone.windowHwnd().?));
-            t.fixture.closeWindow(clone);
-        }
-    }.body);
-}
-
-test "win32 a config reload of maximize and fullscreen leaves the windows already open alone" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try runOnHiddenDesktop(struct {
-        fn body() !void {
-            _ = sys.SetThreadDpiAwarenessContext(-4);
-            var fixture: WindowStartTestApp = .{};
-            try fixture.init();
-            defer fixture.deinit();
-            const app = &fixture.app;
-            const Fixture = WindowStartTestApp;
-
-            try app.createWindow(default_title);
-            const plain = fixture.newest();
-            const plain_hwnd = plain.windowHwnd().?;
-            const plain_rect = try Fixture.screenRect(plain_hwnd);
-
-            // Turned on: the window that is open stays as it is.
-            var both = try app.config.clone(std.testing.allocator);
-            defer both.deinit();
-            both.maximize = true;
-            both.fullscreen = .true;
-            try reload(app, &both);
-            try std.testing.expect(app.config.maximize and app.config.fullscreen == .true);
-            try std.testing.expect(sys.IsZoomed(plain_hwnd) == 0 and !plain.fullscreen);
-            try std.testing.expectEqualDeep(plain_rect, try Fixture.screenRect(plain_hwnd));
-
-            // A window opened after the reload takes them.
-            try app.createWindow(default_title);
-            const started = fixture.newest();
-            const started_hwnd = started.windowHwnd().?;
-            try std.testing.expect(started.fullscreen);
-            const started_rect = try Fixture.screenRect(started_hwnd);
-
-            // Turned off: neither window changes, and the second still
-            // leaves fullscreen to a maximized window, as it started.
-            var neither = try app.config.clone(std.testing.allocator);
-            defer neither.deinit();
-            neither.maximize = false;
-            neither.fullscreen = .false;
-            try reload(app, &neither);
-            try std.testing.expect(started.fullscreen and sys.IsZoomed(started_hwnd) == 0);
-            try std.testing.expectEqualDeep(started_rect, try Fixture.screenRect(started_hwnd));
-            try std.testing.expect(sys.IsZoomed(plain_hwnd) == 0 and !plain.fullscreen);
-            try std.testing.expectEqualDeep(plain_rect, try Fixture.screenRect(plain_hwnd));
-            try started.toggleFullscreen(.native);
-            try std.testing.expect(sys.IsZoomed(started_hwnd) != 0);
-        }
-
-        /// What a reload does once the file is read (`CoreApp.updateConfig`):
-        /// each pane's config change, then the app's.
-        fn reload(app: *App, config: *const configpkg.Config) !void {
-            for (app.windows.items) |surface| {
-                try std.testing.expect(try app.performAction(.{ .surface = surface.core() }, .config_change, .{ .config = config }));
-            }
-            try std.testing.expect(try app.performAction(.app, .config_change, .{ .config = config }));
-        }
-    }.body);
-}
 
 test "win32 a quit tears down every pane of every tab, hidden tabs and splits too, and ends the app" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
@@ -52857,84 +49826,6 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(shouldShowSurfaceImmediately(null));
     try std.testing.expect(!shouldShowSurfaceImmediately(1));
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
-}
-
-test "win32 shouldPropagateSharedHostWindowState only for active shared-host surfaces" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var standalone: Surface = undefined;
-    standalone.host = null;
-    try std.testing.expect(shouldPropagateSharedHostWindowState(&standalone));
-
-    var host: Host = undefined;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var active_surface: Surface = undefined;
-    active_surface.host = &host;
-    var inactive_surface: Surface = undefined;
-    inactive_surface.host = &host;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &active_surface));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &inactive_surface));
-
-    try std.testing.expect(shouldPropagateSharedHostWindowState(&active_surface));
-    try std.testing.expect(!shouldPropagateSharedHostWindowState(&inactive_surface));
-
-    host.active_tab = 1;
-    try std.testing.expect(!shouldPropagateSharedHostWindowState(&active_surface));
-    try std.testing.expect(shouldPropagateSharedHostWindowState(&inactive_surface));
-}
-
-test "win32 config decoration reload respects runtime override" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(shouldApplyConfigDecorations(false));
-    try std.testing.expect(!shouldApplyConfigDecorations(true));
-}
-
-test "win32 shouldResizeHostForInitialSize only for single-surface hosts" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!shouldResizeHostForInitialSize(0));
-    try std.testing.expect(shouldResizeHostForInitialSize(1));
-    try std.testing.expect(!shouldResizeHostForInitialSize(2));
-    try std.testing.expect(!shouldResizeHostForInitialSize(8));
-}
-
-test "win32 sharedHostWindowFrameStateEquals ignores non-frame host state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var a: Surface = undefined;
-    a.decorations_visible = true;
-    a.fullscreen = false;
-    a.topmost = false;
-    a.background_opacity_default = 1.0;
-    a.background_opacity_force_opaque = false;
-    a.size_limit = .{
-        .min_width = 0,
-        .min_height = 0,
-        .max_width = 0,
-        .max_height = 0,
-    };
-
-    var b: Surface = a;
-    b.topmost = true;
-    b.background_opacity_default = 0.6;
-    b.background_opacity_force_opaque = true;
-
-    try std.testing.expect(sharedHostWindowFrameStateEquals(&a, &b));
-
-    b.decorations_visible = false;
-    try std.testing.expect(!sharedHostWindowFrameStateEquals(&a, &b));
-    b.decorations_visible = a.decorations_visible;
-
-    b.size_limit = .{ .min_width = 123, .min_height = 0, .max_width = 0, .max_height = 0 };
-    try std.testing.expect(!sharedHostWindowFrameStateEquals(&a, &b));
 }
 
 const testHostExStyle = test_support.testHostExStyle;
@@ -53705,114 +50596,6 @@ const initTestHostWindowFixture = test_support.initTestHostWindowFixture;
 
 const deinitTestHostWindowFixture = test_support.deinitTestHostWindowFixture;
 
-test "win32 applyInitialBackgroundOpacity layers the cold-start host window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-
-    var host: Host = undefined;
-    var surface: Surface = undefined;
-    try initTestHostWindowFixture(&host, &surface, hwnd);
-    defer deinitTestHostWindowFixture(&host);
-
-    // Regression for #234: a cold-start window never reached
-    // `applyBackgroundOpacity`, so it stayed opaque while cloned windows
-    // faded. `WS_EX_LAYERED` plus `LWA_ALPHA` is the whole mechanism.
-    surface.background_opacity_default = 0.75;
-    surface.applyInitialBackgroundOpacity(null);
-    try std.testing.expect(testHostIsLayered(hwnd));
-    try std.testing.expectEqual(@as(?u8, 191), testLayeredAlpha(hwnd));
-
-    // `toggle_background_opacity` forces the window opaque, which must drop
-    // the layered style entirely rather than set alpha 255.
-    try std.testing.expect(try surface.toggleBackgroundOpacity());
-    try std.testing.expect(!testHostIsLayered(hwnd));
-
-    try std.testing.expect(try surface.toggleBackgroundOpacity());
-    try std.testing.expect(testHostIsLayered(hwnd));
-    try std.testing.expectEqual(@as(?u8, 191), testLayeredAlpha(hwnd));
-}
-
-test "win32 applyInitialBackgroundOpacity leaves a fully opaque window unlayered" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-
-    var host: Host = undefined;
-    var surface: Surface = undefined;
-    try initTestHostWindowFixture(&host, &surface, hwnd);
-    defer deinitTestHostWindowFixture(&host);
-
-    // The default configuration must not start layering every window: that
-    // would put all of Win32 on a composition path it does not need.
-    surface.applyInitialBackgroundOpacity(null);
-    try std.testing.expect(!testHostIsLayered(hwnd));
-    try std.testing.expectEqual(@as(?u8, null), testLayeredAlpha(hwnd));
-}
-
-test "win32 applyInitialBackgroundOpacity seeds a clone from its source window" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-
-    var host: Host = undefined;
-    var surface: Surface = undefined;
-    try initTestHostWindowFixture(&host, &surface, hwnd);
-    defer deinitTestHostWindowFixture(&host);
-
-    // `new_window` from an existing surface presents the clone before
-    // `inheritWindowStateFrom` runs, so the source's opacity has to be seeded
-    // up front. The fixture left the clone on the configured 1.0, so reading
-    // 0.6 back off the clone is the seed and nothing else.
-    var source: Surface = undefined;
-    source.background_opacity_default = 0.6;
-    source.background_opacity_force_opaque = false;
-
-    surface.applyInitialBackgroundOpacity(&source);
-    try std.testing.expectEqual(@as(f64, 0.6), surface.background_opacity_default);
-    try std.testing.expect(testHostIsLayered(hwnd));
-    try std.testing.expectEqual(@as(?u8, 153), testLayeredAlpha(hwnd));
-
-    // Cloning a window the user forced opaque with
-    // `toggle_background_opacity` must not flash the clone translucent.
-    var opaque_source: Surface = undefined;
-    opaque_source.background_opacity_default = 0.6;
-    opaque_source.background_opacity_force_opaque = true;
-
-    surface.applyInitialBackgroundOpacity(&opaque_source);
-    try std.testing.expect(surface.background_opacity_force_opaque);
-    try std.testing.expect(!testHostIsLayered(hwnd));
-}
-
-test "win32 shared host topmost and opacity equality track separate window state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var a: Surface = undefined;
-    a.topmost = false;
-    a.background_opacity_default = 0.5;
-    a.background_opacity_force_opaque = false;
-
-    var b: Surface = a;
-    try std.testing.expect(sharedHostWindowTopmostEquals(&a, &b));
-    try std.testing.expect(sharedHostWindowOpacityEquals(&a, &b));
-
-    b.topmost = true;
-    try std.testing.expect(!sharedHostWindowTopmostEquals(&a, &b));
-    try std.testing.expect(sharedHostWindowOpacityEquals(&a, &b));
-
-    b.topmost = a.topmost;
-    b.background_opacity_force_opaque = true;
-    try std.testing.expect(sharedHostWindowTopmostEquals(&a, &b));
-    try std.testing.expect(!sharedHostWindowOpacityEquals(&a, &b));
-
-    b.background_opacity_force_opaque = false;
-    b.background_opacity_default = 0.5001;
-    try std.testing.expect(sharedHostWindowOpacityEquals(&a, &b));
-}
-
 test "win32 hostPresentShowCommand skips redundant maximize for visible hosts" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -53837,103 +50620,6 @@ test "win32 forwardedActivationExtraArgCount counts args bundled with activation
 
     const malformed = [_][:0]const u8{"wgh://activate?surface=abc"};
     try std.testing.expectEqual(@as(usize, 0), forwardedActivationExtraArgCount(&malformed));
-}
-
-test "win32 first-frame one-shot survives a cloaked show and fires on uncloak" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var host: Host = undefined;
-    host.id = 224;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    host.surfaces_visible = false;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    // `core_initialized = false` and `hwnd = null` make every side effect of
-    // `requestFirstFrame` a no-op, so this test observes only the gating.
-    var on_screen: Surface = undefined;
-    on_screen.host = &host;
-    on_screen.host_id = host.id;
-    on_screen.hwnd = null;
-    on_screen.core_initialized = false;
-    on_screen.window_visible = true;
-    on_screen.first_frame = .{};
-
-    var background_tab: Surface = undefined;
-    background_tab.host = &host;
-    background_tab.host_id = host.id;
-    background_tab.hwnd = null;
-    background_tab.core_initialized = false;
-    background_tab.window_visible = false;
-    background_tab.first_frame = .{};
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &on_screen));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &background_tab));
-
-    // `ShowWindow` ran but DWM still reports the window cloaked, so
-    // `refreshSurfaceVisibilityObserving` left `surfaces_visible` false. The
-    // show must not spend the one-shot: nothing is on screen to paint yet.
-    host.noteFirstFrameShown();
-    try std.testing.expect(!on_screen.first_frame.shown_requested);
-
-    // The uncloak arrives as a WinEvent with no window message behind it
-    // (`onHostCloakEvent`), so it reaches the handshake only because the call
-    // lives in `refreshSurfaceVisibilityObserving` rather than in the show
-    // and window-position message handlers. Without that, this window would
-    // never get its post-show frame.
-    host.surfaces_visible = true;
-    host.noteFirstFrameShown();
-    try std.testing.expect(on_screen.first_frame.shown_requested);
-    // A surface in a background tab is not on screen, so it keeps its
-    // one-shot for whenever its tab is actually activated.
-    try std.testing.expect(!background_tab.first_frame.shown_requested);
-
-    // A second uncloak, a restore from minimized, a virtual-desktop switch
-    // back: all free once the latch is spent.
-    on_screen.first_frame.shown_requested = false;
-    host.noteFirstFrameShown();
-    try std.testing.expect(on_screen.first_frame.shown_requested);
-
-    // And once a real swap has settled the handshake, nothing rearms it. This
-    // is what keeps `refreshSurfaceVisibilityObserving` -- which runs on every
-    // non-live-resize `WM_WINDOWPOSCHANGED` -- from becoming a wake source and
-    // regressing the #134 idle budget.
-    on_screen.first_frame.shown_requested = false;
-    on_screen.first_frame.settled = true;
-    host.noteFirstFrameShown();
-    try std.testing.expect(!on_screen.first_frame.shown_requested);
-}
-
-test "win32 hostSurfaceCount tracks surfaces attached to one host" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var host: Host = undefined;
-    host.id = 42;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var first: Surface = undefined;
-    first.host = &host;
-    first.host_id = host.id;
-
-    var second: Surface = undefined;
-    second.host = &host;
-    second.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &first));
-    try std.testing.expectEqual(@as(usize, 1), first.hostSurfaceCount());
-    try std.testing.expect(shouldResizeHostForInitialSize(first.hostSurfaceCount()));
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
-    try std.testing.expectEqual(@as(usize, 2), first.hostSurfaceCount());
-    try std.testing.expect(!shouldResizeHostForInitialSize(first.hostSurfaceCount()));
 }
 
 test "automation-window-list win32 json includes host tab and pane ids" {
@@ -59898,118 +56584,6 @@ test "win32 an in-app install relaunches noctty one way, through /RELAUNCH=1" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, args, "RELAUNCH"));
 }
 
-/// Both the surface's and the renderer's repaint requests queue outside
-/// resize, paint at once while a resize settles, and wait for the flush
-/// during a live resize.
-fn expectSettleRepaintModes(comptime mode: fn (?*const Host, u64) SurfaceRepaintRequestMode) !void {
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, mode(null, 1000));
-
-    var host: Host = undefined;
-    host.is_live_resize = .init(false);
-    host.resize_settle_timer_active = false;
-    host.resize_settle_until_ms = 0;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, mode(&host, 1000));
-
-    host.resize_settle_timer_active = true;
-    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, mode(&host, 1000));
-
-    host.is_live_resize = .init(true);
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, mode(&host, 1000));
-}
-
-test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try expectSettleRepaintModes(surfaceRepaintRequestMode);
-}
-
-test "win32 rendererRepaintRequestMode paints synchronously only during resize settle" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    try expectSettleRepaintModes(rendererRepaintRequestMode);
-}
-
-test "win32 resize settle paint mode ends with its timer or at its deadline" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var host: Host = undefined;
-    host.hwnd = null;
-    host.is_live_resize = .init(false);
-    host.resize_settle_timer_active = false;
-    const start_ms = sys.GetTickCount64();
-    host.startResizeSettleRepaints();
-    try std.testing.expect(host.resize_settle_until_ms >= start_ms + resize_settle_deadline_ms);
-    try std.testing.expect(host.resize_settle_until_ms <= sys.GetTickCount64() + resize_settle_deadline_ms);
-
-    // The timer's last tick ends settle mode before the deadline.
-    host.resize_settle_timer_active = false;
-    host.resize_settle_until_ms = 5000;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 4999));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceSizeChangeRepaintMode(&host, 4999));
-
-    // A busy pump delays WM_TIMER, so the timer can still be armed, with
-    // repaint ticks left, after the deadline has passed.
-    host.resize_settle_timer_active = true;
-    host.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
-    host.resize_settle_until_ms = 5000;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host, 4999));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host, 5000));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, surfaceSizeChangeRepaintMode(&host, 4999));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, surfaceSizeChangeRepaintMode(&host, 5000));
-}
-
-test "win32 a core-app tick spends at most one synchronous renderer paint" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var spent = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.queue, &spent));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererTickRepaintMode(.defer_until_flush, &spent));
-    try std.testing.expect(!spent);
-
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererTickRepaintMode(.update_now, &spent));
-    try std.testing.expect(spent);
-    // Every later settle-mode frame in the same tick queues, so the pump can
-    // reach input before it paints again.
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.update_now, &spent));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererTickRepaintMode(.update_now, &spent));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererTickRepaintMode(.defer_until_flush, &spent));
-
-    // The App's per-tick budget, as `tickCoreApp` resets it for each tick.
-    var host: Host = undefined;
-    host.is_live_resize = .init(false);
-    host.resize_settle_timer_active = true;
-    host.resize_settle_until_ms = std.math.maxInt(u64);
-    var app: App = undefined;
-    app.renderer_sync_paint_spent = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, app.rendererRepaintModeThisTick(&host));
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, app.rendererRepaintModeThisTick(&host));
-    app.renderer_sync_paint_spent = false;
-    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, app.rendererRepaintModeThisTick(&host));
-}
-
-test "win32 renderer health policy recovers unhealthy frames and clears healthy state" {
-    try std.testing.expectEqual(
-        RendererHealthSurfaceAction.clear_recovery,
-        rendererHealthSurfaceAction(.healthy),
-    );
-    try std.testing.expectEqual(
-        RendererHealthSurfaceAction.recover_with_followup_repaint,
-        rendererHealthSurfaceAction(.unhealthy),
-    );
-}
-
-test "win32 resize settle presents pending renderer frames before waking renderer" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        ResizeSettleSurfaceAction.wake_renderer,
-        resizeSettleSurfaceAction(false),
-    );
-    try std.testing.expectEqual(
-        ResizeSettleSurfaceAction.present_renderer,
-        resizeSettleSurfaceAction(true),
-    );
-}
-
 test "win32 palette UIA state exposes rows and can select a row" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -60203,84 +56777,6 @@ test "win32 palette list and columns stay inside narrow client bounds" {
     ));
     try std.testing.expectEqual(@as(u32, 0x33), paletteRowTitleColor(true, true, 0x11, 0x22, 0x33));
     try std.testing.expectEqual(@as(u32, 0x33), paletteRowTitleColor(true, false, 0x11, 0x22, 0x33));
-}
-
-test "win32 surface size-change repaint stays synchronous during live resize" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        SurfaceRepaintRequestMode.queue,
-        surfaceSizeChangeRepaintMode(null, 1000),
-    );
-
-    var host: Host = undefined;
-    host.is_live_resize = .init(false);
-    host.resize_settle_timer_active = false;
-    host.resize_settle_until_ms = 0;
-    try std.testing.expectEqual(
-        SurfaceRepaintRequestMode.queue,
-        surfaceSizeChangeRepaintMode(&host, 1000),
-    );
-
-    host.resize_settle_timer_active = true;
-    host.resize_settle_until_ms = 1000 + resize_settle_deadline_ms;
-    try std.testing.expectEqual(
-        SurfaceRepaintRequestMode.update_now,
-        surfaceSizeChangeRepaintMode(&host, 1000),
-    );
-
-    host.resize_settle_timer_active = false;
-    host.is_live_resize = .init(true);
-    try std.testing.expectEqual(
-        SurfaceRepaintRequestMode.update_now,
-        surfaceSizeChangeRepaintMode(&host, 1000),
-    );
-
-    try std.testing.expect(!surfaceSizeChangePrimesRenderer(.queue));
-    try std.testing.expect(surfaceSizeChangePrimesRenderer(.update_now));
-    try std.testing.expect(!surfaceSizeChangePrimesRenderer(.defer_until_flush));
-}
-
-test "win32 surfacePixelSizeChanged only trips on width or height deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const stable = apprt.SurfaceSize{ .width = 800, .height = 600 };
-    try std.testing.expect(!surfacePixelSizeChanged(stable, .{ .width = 800, .height = 600 }));
-    try std.testing.expect(surfacePixelSizeChanged(stable, .{ .width = 801, .height = 600 }));
-    try std.testing.expect(surfacePixelSizeChanged(stable, .{ .width = 800, .height = 601 }));
-}
-
-test "win32 a pending DPI change holds the surface size and font, and the next sync catches up" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const hwnd = try createTestHostWindow();
-    defer _ = sys.DestroyWindow(hwnd);
-    var app: App = undefined;
-    var host: Host = undefined;
-    host.dpi_change_pending = true;
-    host.current_dpi = 144;
-    host.surfaces_visible = true;
-    var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.hwnd = hwnd;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.size = .{ .width = 0, .height = 0 };
-    surface.content_scale = .{ .x = 1, .y = 1 };
-
-    surface.syncCoreSizeFromClientRect();
-    surface.syncContentScaleToHostDpi();
-    try std.testing.expectEqual(apprt.SurfaceSize{ .width = 0, .height = 0 }, surface.size);
-    try std.testing.expectEqual(@as(f32, 1), surface.content_scale.x);
-
-    // Nothing was recorded while held, so the sync after the font change
-    // still sees the new size.
-    host.dpi_change_pending = false;
-    surface.syncCoreSizeFromClientRect();
-    surface.syncContentScaleToHostDpi();
-    try std.testing.expectEqual(apprt.SurfaceSize{ .width = 320, .height = 240 }, surface.size);
-    try std.testing.expectEqual(@as(f32, 1.5), surface.content_scale.x);
 }
 
 test "win32 scaleInitialClientSize converts logical initial size to physical pixels" {
