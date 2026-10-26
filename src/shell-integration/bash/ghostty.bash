@@ -284,8 +284,11 @@ function __ghostty_precmd() {
       # noctty reads a Windows directory in an OSC 7 as `/C:/Users/me`;
       # `/c/Users/me` would be taken for a WSL path. Rewrite the drive
       # mount here and only ask cygpath about the rest (/tmp, /home/...).
+      # MSYS and Cygwin show the characters U+F001-U+F01F that a Windows
+      # name holds for control bytes as the raw bytes in $PWD, so such a
+      # directory also goes through cygpath, which maps them back.
       [[ "$cwd" == /cygdrive/* ]] && cwd="${cwd#/cygdrive}"
-      if [[ "$cwd" == /[A-Za-z] || "$cwd" == /[A-Za-z]/* ]]; then
+      if [[ "$cwd" != *[[:cntrl:]]* && ( "$cwd" == /[A-Za-z] || "$cwd" == /[A-Za-z]/* ) ]]; then
         builtin local drive="${cwd:1:1}"
         cwd="/${drive^^}:/${cwd:3}"
       elif [[ "$cwd" == [A-Za-z]:[\\/]* ]]; then
@@ -297,7 +300,12 @@ function __ghostty_precmd() {
         [[ "$cwd" == [A-Za-z]:/* ]] && cwd="/${cwd^}" || cwd=""
       fi
     fi
-    [[ -n "$cwd" ]] && builtin printf "\e]7;kitty-shell-cwd://%s%s\a" "$HOSTNAME" "$cwd"
+    # Remove control bytes from the hostname and directory before sending
+    # them. A directory name that contains a raw ESC or BEL byte could
+    # otherwise end our OSC 7 early and start a sequence of its own, such
+    # as an OSC 52 clipboard write. Backslashes are safe here because
+    # printf only expands escapes in the format string, not in %s values.
+    [[ -n "$cwd" ]] && builtin printf "\e]7;kitty-shell-cwd://%s%s\a" "${HOSTNAME//[[:cntrl:]]/}" "${cwd//[[:cntrl:]]/}"
   fi
 
   _ghostty_executing=0

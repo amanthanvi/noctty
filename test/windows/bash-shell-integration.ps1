@@ -163,6 +163,41 @@ try {
         Assert-True ($report[1] -match '^/[A-Z]:/') "OSC 7 path '$($report[1])' is not in the /X:/... form."
     }
 
+    # A directory name is untrusted text. Git Bash shows the characters
+    # U+F001-U+F01F that a Windows name holds for control bytes as the raw
+    # bytes in $PWD, so a BEL and an ESC in the name would end the OSC 7 early
+    # and send an OSC 52 of their own, and an SOH would ride inside it. The
+    # report names the real directory instead, and the host name, which a user
+    # can set, loses its control bytes too.
+    $sohName = 'z' + [char]0xF001 + 'q'
+    $escName = 'x' + [char]0xF007 + [char]0xF01B + ']52;c;SGVsbG8=' + [char]0xF007
+    foreach ($name in @($sohName, $escName)) {
+        [System.IO.Directory]::CreateDirectory((Join-Path $script:TempDir $name)) | Out-Null
+    }
+    # Git's own prompt from /etc/bash.bashrc prints $PWD raw in its title and
+    # is not noctty's, so the first line replaces it. The host name changes
+    # only after the SOH directory: its ESC would cut that report short.
+    $stdin = "PS1='`$ '`necho PWDNOW:`$PWD`ncd z*`nHOSTNAME=`$'h\e]52;c;SGk=\a'`ncd ../x*`nexit`n"
+    $out = Invoke-Bash -StartPwd $script:TempDir -WorkingDirectory $script:TempDir -Stdin $stdin
+    # Started from /tmp (where Git Bash mounts TEMP), cd would take the cygpath
+    # branch, which never passed the raw bytes on.
+    $posix = [regex]::Match($out, 'PWDNOW:([^\r\n]*)').Groups[1].Value
+    Assert-True ($posix -match '^/[a-z]/') "The control-byte case did not start on a drive mount: '$posix'"
+    Assert-True (-not $out.Contains("$([char]27)]52;")) "A directory or host name sent an OSC 52 (output: $(Show-Output $out))"
+    foreach ($body in [regex]::Matches($out, "\x1b\]7;([^\x07\x1b]*)")) {
+        Assert-True ($body.Groups[1].Value -notmatch '[\x00-\x1f\x7f]') "An OSC 7 carried a control byte: '$(Show-Output $body.Groups[1].Value)'"
+    }
+    # bash's output is read as Latin-1, so match the UTF-8 bytes of each name.
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $osc7 = [regex]::Matches($out, "\x1b\]7;kitty-shell-cwd://([^/\x07]*)(/[^\x07]*)\x07")
+    foreach ($name in @($sohName, $escName)) {
+        $tail = '/' + $latin1.GetString([System.Text.Encoding]::UTF8.GetBytes($name))
+        $report = @($osc7 | Where-Object { $_.Groups[2].Value.EndsWith($tail) })
+        Assert-True ($report.Count -eq 1) "No OSC 7 named the directory '$(Show-Output $tail)' (output: $(Show-Output $out))"
+    }
+    # The last report is the ESC directory's, sent after the host name changed.
+    Assert-True ($report[0].Groups[1].Value -ceq 'h]52;c;SGk=') "OSC 7 host was '$(Show-Output $report[0].Groups[1].Value)', expected the host name without its controls"
+
     # Normalising the Windows PWD keeps a junction in the path and leaves
     # OLDPWD as it was, set or not.
     $real = Join-Path $script:TempDir 'real'
