@@ -70,7 +70,6 @@ const first_frame = @import("first_frame.zig");
 const gl_startup = @import("gl_startup.zig");
 const highWord = win32.highWord;
 const hostChromeNeedsFocusRepaint = win32.hostChromeNeedsFocusRepaint;
-const host_banner_inspector_inactive = win32.host_banner_inspector_inactive;
 const imeWindowForms = win32.imeWindowForms;
 const initialDecorationsVisibleForSource = win32.initialDecorationsVisibleForSource;
 const input = @import("../../input.zig");
@@ -129,7 +128,6 @@ const scrollbarPaintKeyChanged = win32.scrollbarPaintKeyChanged;
 const scrollbarProxyPointFromSurfaceCoords = win32.scrollbarProxyPointFromSurfaceCoords;
 const scrollbarProxyPointFromSurfaceCursor = win32.scrollbarProxyPointFromSurfaceCursor;
 const scrollbar_class_name = win32.scrollbar_class_name;
-const scrollbar_transparent_key = win32.scrollbar_transparent_key;
 const searchBarDisplayStateChanged = win32.searchBarDisplayStateChanged;
 const searchBarSearchedStateForSelected = win32.searchBarSearchedStateForSelected;
 const searchBarSearchedStateForTotal = win32.searchBarSearchedStateForTotal;
@@ -211,6 +209,10 @@ const prompt_label_class = win32.prompt_label_class;
 const runOnHiddenDesktop = win32.runOnHiddenDesktop;
 const toastTestSplit = win32.toastTestSplit;
 const uninitializedInertStorage = win32.uninitializedInertStorage;
+
+const scrollbar_transparent_key = win32_theme.rgb(0xFF, 0x00, 0xFF);
+
+const host_banner_inspector_inactive = labels.host_banner_inspector_inactive;
 
 /// Deep-copy of one `apprt.ClipboardContent` entry so it can survive an
 /// async confirm-overlay roundtrip. Freed via `PendingClipboardOp.deinit`.
@@ -1323,7 +1325,7 @@ pub const Surface = struct {
     pub fn requestClose(self: *Surface) bool {
         const hwnd = self.hwnd orelse return false;
         if (self.pending_close_tree != null or self.pending_shell_close != null) return false;
-        const found = self.app.registry.findTabForSurface(self) orelse {
+        const found = Host.findTabForSurface(self) orelse {
             // Detached structural-history objects are deliberately outside
             // active ShellState and can be destroyed during history disposal.
             if (self.host) |host| if (host.structural_history_disposing) {
@@ -1412,7 +1414,7 @@ pub const Surface = struct {
     }
 
     pub fn invalidateRedoForUnsupportedTabStructuralAction(self: *Surface) void {
-        const found = self.app.registry.findTabForSurface(self) orelse {
+        const found = Host.findTabForSurface(self) orelse {
             self.invalidateRedoForUnsupportedStructuralAction();
             return;
         };
@@ -1421,13 +1423,13 @@ pub const Surface = struct {
     }
 
     pub fn invalidateStructuralHistoryForClose(self: *Surface) bool {
-        const found = self.app.registry.findTabForSurface(self) orelse return true;
+        const found = Host.findTabForSurface(self) orelse return true;
         found.tab.clearRedoHistory();
         return found.host.tryClearStructuralHistory(.normal);
     }
 
     pub fn invalidateStructuralHistoryForDestroy(self: *Surface) void {
-        const found = self.app.registry.findTabForSurface(self) orelse return;
+        const found = Host.findTabForSurface(self) orelse return;
         found.tab.clearRedoHistoryExcept(self);
         if (found.tab.tree.nodes.len == 1) {
             found.host.clearStructuralHistory(.normal);
@@ -2446,7 +2448,7 @@ pub const Surface = struct {
             log.warn("win32 bell title refresh failed err={}", .{err});
         };
         // The tab's UIA ItemStatus says "Bell" while it rings.
-        if (self.app.registry.findTabForSurface(self)) |found| found.host.refreshTabStatus(found.index);
+        if (Host.findTabForSurface(self)) |found| found.host.refreshTabStatus(found.index);
     }
 
     /// The user focused this terminal or typed into it: the bell has been
@@ -4031,8 +4033,6 @@ pub const Surface = struct {
 
     pub const leaveFullscreen = window_state.leaveFullscreen;
 
-    pub const maximizeWithPlacement = window_state.maximizeWithPlacement;
-
     pub const windowMonitor = window_state.windowMonitor;
 
     pub const screenRectToWorkspace = window_state.screenRectToWorkspace;
@@ -4117,7 +4117,7 @@ pub const Surface = struct {
         // A terminal gains focus when the user activates its window or
         // switches to its tab, which is the user looking at it.
         if (focused) {
-            if (self.app.registry.findTabForSurface(self)) |found| self.app.acknowledgeTab(found.host, found.index);
+            if (Host.findTabForSurface(self)) |found| self.app.acknowledgeTab(found.host, found.index);
         }
     }
 
@@ -5226,7 +5226,7 @@ pub const Surface = struct {
         if (host.overlay_mode == .confirm) return error.ConfirmPromptOpen;
         // Nor the palette, search or a rename the user is typing in.
         if (host.overlay_mode != .none) return error.OverlayOpen;
-        if (self.app.registry.findTabForSurface(self) == null) return error.NotInATab;
+        if (Host.findTabForSurface(self) == null) return error.NotInATab;
     }
 
     fn programClipboardPromptBody(self: *Surface, request: labels.ProgramClipboardRequest) ![]u8 {

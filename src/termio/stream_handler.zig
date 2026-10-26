@@ -1797,7 +1797,6 @@ test "semantic output capture follows real stream handler parser" {
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
     var rt_app: apprt.App = undefined;
-    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
@@ -2032,7 +2031,6 @@ test "issue149 config change queues exactly one color scheme report" {
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
     var rt_app: apprt.App = undefined;
-    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
@@ -2106,7 +2104,6 @@ test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
     var rt_app: apprt.App = undefined;
-    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
@@ -2324,7 +2321,6 @@ test "cmd OSC 9;9 URI updates terminal pwd" {
     renderer_state.mutex = &renderer_mutex;
     renderer_state.terminal = &term;
     var rt_app: apprt.App = undefined;
-    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);
@@ -2463,7 +2459,6 @@ const TestStream = struct {
         self.renderer_state.mutex = &self.renderer_mutex;
         self.renderer_state.terminal = &self.term;
         self.rt_app = undefined;
-        self.rt_app.registry.windows = .empty;
         self.rt_app.ui_thread_id = 0;
         self.app_queue = try AppMailbox.Queue.create(alloc);
         errdefer self.app_queue.destroy(alloc);

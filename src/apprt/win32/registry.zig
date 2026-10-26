@@ -23,6 +23,12 @@ pub const Registry = struct {
     windows: std.ArrayListUnmanaged(*Surface) = .empty,
     message_hwnd: ?HWND = null,
 
+    /// Release the reference lists after App has torn down their objects.
+    pub inline fn deinit(self: *Registry, alloc: Allocator) void {
+        self.hosts.deinit(alloc);
+        self.windows.deinit(alloc);
+    }
+
     pub fn addHost(self: *Registry, alloc: Allocator, host: *Host) !void {
         try self.hosts.append(alloc, host);
     }
@@ -33,7 +39,7 @@ pub const Registry = struct {
 
     /// Detach before Host.deinit, which can reenter App via native teardown.
     /// As before, removing the first match swaps the last reference into it.
-    pub fn removeHost(self: *Registry, host: *Host) bool {
+    pub fn detachHost(self: *Registry, host: *Host) bool {
         return detachHostReference(&self.hosts, host);
     }
 
@@ -86,7 +92,7 @@ pub const Registry = struct {
 
     pub fn findLiveSurfaceById(self: *Registry, surface_id: u64) ?*Surface {
         const surface = self.findSurfaceById(surface_id) orelse return null;
-        _ = self.findTabForSurface(surface) orelse return null;
+        _ = Host.findTabForSurface(surface) orelse return null;
         return surface;
     }
 
@@ -237,25 +243,6 @@ pub const Registry = struct {
         return surfaces;
     }
 
-    pub fn findTabForSurface(_: *Registry, surface: *Surface) ?struct { host: *Host, index: usize, tab: *Tab } {
-        const host = surface.host orelse return null;
-        for (host.tabs.items, 0..) |*tab, index| {
-            if (tab.findHandle(surface) != null) {
-                return .{ .host = host, .index = index, .tab = tab };
-            }
-        }
-        return null;
-    }
-
-    pub fn focusedSurfaceForHostTab(_: *Registry, host: *Host, tab_id: u32) ?*Surface {
-        for (host.tabs.items) |*tab| {
-            if (tab.id != tab_id) continue;
-            return tab.focusedSurface();
-        }
-
-        return null;
-    }
-
     pub fn resolveToastActivationSurface(
         self: *Registry,
         activation: win32_toast_activation.ActivationTarget,
@@ -275,7 +262,7 @@ pub const Registry = struct {
         if (activation.window_id) |window_id| {
             if (self.findHostById(window_id)) |host| {
                 if (activation.tab_id) |tab_id| {
-                    if (self.focusedSurfaceForHostTab(host, tab_id)) |surface| {
+                    if (host.focusedSurfaceForTab(tab_id)) |surface| {
                         return surface;
                     }
                 }
@@ -308,8 +295,7 @@ pub fn detachHostReference(hosts: *std.ArrayListUnmanaged(*Host), host: *Host) b
 
 test "Registry adds in order and removes the first match by swapping the last" {
     var registry: Registry = .{};
-    defer registry.hosts.deinit(std.testing.allocator);
-    defer registry.windows.deinit(std.testing.allocator);
+    defer registry.deinit(std.testing.allocator);
     var hosts: [3]Host = undefined;
     var surfaces: [3]Surface = undefined;
     for (&hosts, &surfaces) |*host, *surface| {
@@ -319,11 +305,11 @@ test "Registry adds in order and removes the first match by swapping the last" {
     try std.testing.expect(std.mem.eql(*Host, &.{ &hosts[0], &hosts[1], &hosts[2] }, registry.hosts.items));
     try std.testing.expect(std.mem.eql(*Surface, &.{ &surfaces[0], &surfaces[1], &surfaces[2] }, registry.windows.items));
 
-    try std.testing.expect(registry.removeHost(&hosts[0]));
+    try std.testing.expect(registry.detachHost(&hosts[0]));
     registry.removeWindow(&surfaces[0]);
     try std.testing.expect(std.mem.eql(*Host, &.{ &hosts[2], &hosts[1] }, registry.hosts.items));
     try std.testing.expect(std.mem.eql(*Surface, &.{ &surfaces[2], &surfaces[1] }, registry.windows.items));
-    try std.testing.expect(!registry.removeHost(&hosts[0]));
+    try std.testing.expect(!registry.detachHost(&hosts[0]));
     registry.removeWindow(&surfaces[0]);
     try std.testing.expect(std.mem.eql(*Host, &.{ &hosts[2], &hosts[1] }, registry.hosts.items));
     try std.testing.expect(std.mem.eql(*Surface, &.{ &surfaces[2], &surfaces[1] }, registry.windows.items));
@@ -334,7 +320,7 @@ test "Registry adds in order and removes the first match by swapping the last" {
     try registry.addHost(std.testing.allocator, &hosts[0]);
     try registry.addWindow(std.testing.allocator, &surfaces[2]);
     try registry.addWindow(std.testing.allocator, &surfaces[0]);
-    try std.testing.expect(registry.removeHost(&hosts[2]));
+    try std.testing.expect(registry.detachHost(&hosts[2]));
     registry.removeWindow(&surfaces[2]);
     try std.testing.expect(std.mem.eql(*Host, &.{ &hosts[0], &hosts[1], &hosts[2] }, registry.hosts.items));
     try std.testing.expect(std.mem.eql(*Surface, &.{ &surfaces[0], &surfaces[1], &surfaces[2] }, registry.windows.items));
@@ -413,12 +399,12 @@ test "Registry identity lookups preserve list then tab tree search and collectio
     // Core-pointer lookup intentionally consults only windows, even though
     // the id lookup finds this split in its tab tree.
     try std.testing.expect(registry.findSurfaceByCore(&fixture.split.core_surface) == null);
-    const found = registry.findTabForSurface(&fixture.split).?;
+    const found = Host.findTabForSurface(&fixture.split).?;
     try std.testing.expectEqual(&fixture.second, found.host);
     try std.testing.expectEqual(@as(usize, 0), found.index);
     try std.testing.expectEqual(&fixture.second.tabs.items[0], found.tab);
-    try std.testing.expectEqual(&fixture.b, registry.focusedSurfaceForHostTab(&fixture.first, 12).?);
-    try std.testing.expect(registry.focusedSurfaceForHostTab(&fixture.first, 99) == null);
+    try std.testing.expectEqual(&fixture.b, fixture.first.focusedSurfaceForTab(12).?);
+    try std.testing.expect(fixture.first.focusedSurfaceForTab(99) == null);
 
     var ids = try registry.collectHostIds(std.testing.allocator);
     defer ids.deinit(std.testing.allocator);
@@ -455,14 +441,14 @@ test "Registry removal lookups preserve tab identity until the tab itself is det
     try std.testing.expectEqual(&fixture.a, registry.findSurfaceById(101).?);
     try std.testing.expectEqual(&fixture.a, registry.findLiveSurfaceById(101).?);
     try std.testing.expect(registry.findSurfaceByCore(&fixture.a.core_surface) == null);
-    try std.testing.expectEqual(&fixture.first.tabs.items[0], registry.findTabForSurface(&fixture.a).?.tab);
+    try std.testing.expectEqual(&fixture.first.tabs.items[0], Host.findTabForSurface(&fixture.a).?.tab);
 
     // App.removeHost detaches the reference before Host.deinit. A surface
     // still follows its owner while callbacks run in that teardown interval.
-    try std.testing.expect(registry.removeHost(&fixture.first));
+    try std.testing.expect(registry.detachHost(&fixture.first));
     try std.testing.expect(registry.findHostById(1) == null);
     try std.testing.expect(registry.findSurfaceById(101) == null);
-    try std.testing.expectEqual(&fixture.first, registry.findTabForSurface(&fixture.a).?.host);
+    try std.testing.expectEqual(&fixture.first, Host.findTabForSurface(&fixture.a).?.host);
     // A different pane still in windows remains findable, and live, even
     // though its owner has just left hosts.
     try std.testing.expectEqual(&fixture.b, registry.findLiveSurfaceById(102).?);
@@ -470,7 +456,7 @@ test "Registry removal lookups preserve tab identity until the tab itself is det
     defer removed.deinit();
     try std.testing.expectEqual(&fixture.b, registry.findSurfaceById(102).?);
     try std.testing.expect(registry.findLiveSurfaceById(102) == null);
-    try std.testing.expect(registry.findTabForSurface(&fixture.b) == null);
+    try std.testing.expect(Host.findTabForSurface(&fixture.b) == null);
     registry.removeWindow(&fixture.b);
     try std.testing.expect(registry.findSurfaceById(102) == null);
     // Swap removal made the retained empty host primary; do not skip it in
@@ -506,17 +492,17 @@ test "Registry target focus and new window choices retain fallback and activatio
     fixture.first.quick_terminal = true;
     try std.testing.expectEqual(&fixture.first, registry.quickTerminalHost().?);
     try std.testing.expect(registry.newWindowSource(.app) == null);
-    try std.testing.expect(registry.removeHost(&fixture.first));
+    try std.testing.expect(registry.detachHost(&fixture.first));
     try std.testing.expectEqual(&fixture.second, registry.quickTerminalHost().?);
     fixture.empty.quick_terminal = true;
     // Host removal swapped this zero-tab host to the front: quick-terminal
     // identity remains reachable there even while it has no active pane.
     try std.testing.expectEqual(&fixture.empty, registry.quickTerminalHost().?);
-    try std.testing.expect(registry.removeHost(&fixture.empty));
+    try std.testing.expect(registry.detachHost(&fixture.empty));
     try std.testing.expectEqual(&fixture.second, registry.quickTerminalHost().?);
     fixture.b.host = null;
     try std.testing.expectEqual(&fixture.b, registry.newWindowSource(.{ .surface = &fixture.b.core_surface }).?);
-    try std.testing.expect(registry.findTabForSurface(&fixture.b) == null);
+    try std.testing.expect(Host.findTabForSurface(&fixture.b) == null);
 }
 
 test "Registry structural history choices keep sequence ties and empty hosts reachable" {

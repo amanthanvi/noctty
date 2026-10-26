@@ -82,7 +82,6 @@ const cliVisualStudioProfilesArg = win32.cliVisualStudioProfilesArg;
 const closeOtherTabsConfirmAccept = win32.closeOtherTabsConfirmAccept;
 const closeRightTabsConfirmAccept = win32.closeRightTabsConfirmAccept;
 const closeThisTabConfirmAccept = win32.closeThisTabConfirmAccept;
-const cold_toast_activation_wait_ms = win32.cold_toast_activation_wait_ms;
 const config_edit = @import("../../config/edit.zig");
 const config_file_load = @import("../../config/file_load.zig");
 const configpkg = @import("../../config.zig");
@@ -128,7 +127,6 @@ const lastError = win32.lastError;
 const launcherQuickSlotAssignmentNeedsChange = win32.launcherQuickSlotAssignmentNeedsChange;
 const launcherQuickSlotPinsAlreadyClear = win32.launcherQuickSlotPinsAlreadyClear;
 const layoutActionResult = win32.layoutActionResult;
-const lifecycle_class_name = win32.lifecycle_class_name;
 const listProfilesForConfig = win32.listProfilesForConfig;
 const loadAppIcon = win32.loadAppIcon;
 const localAppDataPathAlloc = win32.localAppDataPathAlloc;
@@ -147,7 +145,6 @@ const probeWindowsBuild = win32.probeWindowsBuild;
 const processDeferredUiaDisconnect = win32.processDeferredUiaDisconnect;
 const profileDiscoveryThreadMain = win32.profileDiscoveryThreadMain;
 const profileIndexByKey = win32.profileIndexByKey;
-const profile_discovery_abandon_ms = win32.profile_discovery_abandon_ms;
 const ptypkg = @import("../../pty.zig");
 const pumpUntilColdToastActivation = win32.pumpUntilColdToastActivation;
 const queueTerminalHandoff = win32.queueTerminalHandoff;
@@ -166,14 +163,11 @@ const recoveryRetryDue = win32.recoveryRetryDue;
 const recoverySafeModeNotice = win32.recoverySafeModeNotice;
 const recoverySafeModeNoticeThread = win32.recoverySafeModeNoticeThread;
 const recovery_ledger_lock_wait_ms = win32.recovery_ledger_lock_wait_ms;
-const recovery_ready_persist_attempts = win32.recovery_ready_persist_attempts;
 const recovery_ready_retry_delay_ms = win32.recovery_ready_retry_delay_ms;
 const releaseToastDelivery = win32.releaseToastDelivery;
-const releases_url = win32.releases_url;
 const requestedTabInsertIndex = win32.requestedTabInsertIndex;
 const resolveIpcPipeNameForTarget = win32.resolveIpcPipeNameForTarget;
 const resolveTheme = win32.resolveTheme;
-const restart_flags = win32.restart_flags;
 const restart_max_cmd_line = win32.restart_max_cmd_line;
 const restoreRequestedHostWindowStyle = win32.restoreRequestedHostWindowStyle;
 const retainToastDelivery = win32.retainToastDelivery;
@@ -224,9 +218,6 @@ const settingsTextPrimaryThunk = win32.settingsTextPrimaryThunk;
 const settingsThemeColorsThunk = win32.settingsThemeColorsThunk;
 const settingsUserEditedKeys = win32.settingsUserEditedKeys;
 const settings_masked_keys_capacity = win32.settings_masked_keys_capacity;
-const shell_audit_warn_interval_ms = win32.shell_audit_warn_interval_ms;
-const shell_open = win32.shell_open;
-const shell_runas = win32.shell_runas;
 const shouldInheritSplitWorkingDirectory = win32.shouldInheritSplitWorkingDirectory;
 const shouldResetNewTabWorkingDirectory = win32.shouldResetNewTabWorkingDirectory;
 const shouldUseIntegratedTitlebar = win32.shouldUseIntegratedTitlebar;
@@ -259,13 +250,11 @@ const unixMillis = win32.unixMillis;
 const updateApplyConfirmAccept = win32.updateApplyConfirmAccept;
 const updateApplyFailureMessage = win32.updateApplyFailureMessage;
 const updateCheckThreadMain = win32.updateCheckThreadMain;
-const update_recheck_interval_ms = win32.update_recheck_interval_ms;
 const updatepkg = @import("../../update/github_releases.zig");
 const userProfileKeysChanged = win32.userProfileKeysChanged;
 const warnPortableIgnoredLocalData = win32.warnPortableIgnoredLocalData;
 const win32_aumid = @import("../win32_aumid.zig");
 const win32_bell = @import("../win32_bell.zig");
-const win32_chrome_state = @import("../win32_chrome_state.zig");
 const win32_compositor = @import("../win32_compositor.zig");
 const win32_compositor_native = @import("../win32_compositor_native.zig");
 const win32_config_problems = @import("config_problems.zig");
@@ -341,6 +330,46 @@ test "win32 safe mode reload keeps recovery without loading config" {
     try app.settingsReconcileDisk(&config, &config, false);
     try app.settingsReconcileDisk(&config, &config, true);
 }
+
+const releases_url = updatepkg.releases_url;
+
+const lifecycle_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.lifecycle");
+
+const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
+
+const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
+
+/// How often a running process asks the automatic check to run again. The
+/// check's 24 hour throttle (`updatepkg.throttle_seconds`) decides whether a
+/// request is actually made, so this only has to be shorter than the throttle
+/// by a margin: six hours means a release is noticed within a day of the
+/// throttle expiring, and an early tick just reads the saved state.
+const update_recheck_interval_ms: u32 = 6 * 60 * 60 * 1000;
+
+/// How many message-loop ticks may attempt the ready-marker write before the
+/// launch is given up as unresolved.
+const recovery_ready_persist_attempts: u8 = 3;
+
+const shell_audit_warn_interval_ms: u64 = 60 * std.time.ms_per_s;
+
+/// Longer than a discovery can take when it works (two 1.5 s wsl.exe
+/// timeouts and the SSH config read budget).
+const profile_discovery_abandon_ms: u64 = 10 * std.time.ms_per_s;
+
+/// How long a cold `-ToastActivated` start waits for COM's `Activate`. COM
+/// calls it as soon as the class object is registered; the wait only bounds
+/// a start that never gets the call (run by hand, or COM gave up).
+const cold_toast_activation_wait_ms = 5000;
+
+/// RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT: no restart after a
+/// crash or a hang (Windows Error Reporting), nor after a reboot an update
+/// forces. Nothing in the flags covers a sign-out, a reboot the user chose or
+/// Windows' option to restart apps at sign-in: the registration lasts only
+/// from an agreeing Restart Manager query until the process ends or the close
+/// is called off, and a sign-out, shutdown or reboot takes it back
+/// (`App.onQueryEndSession`, `App.onEndSession`). Not RESTART_NO_PATCH, which
+/// is the flag that stops an installer's restart.
+const restart_flags: DWORD = 0x1 | 0x2 | 0x8;
 
 /// Retry budget for the ready marker, spent across message-loop ticks.
 ///
@@ -1630,8 +1659,7 @@ pub const App = struct {
         // reference by now, so no further callback can reach a freed App.
         win32_power.setCloakEventHandler(null);
         win32.cloak_event_app = null;
-        self.registry.hosts.deinit(self.core_app.alloc);
-        self.registry.windows.deinit(self.core_app.alloc);
+        self.registry.deinit(self.core_app.alloc);
         self.discardDeferredOpens();
         self.global_hotkeys.deinit(self.core_app.alloc);
         if (self.launcher_profile_key) |value| self.core_app.alloc.free(value);
@@ -4220,7 +4248,7 @@ pub const App = struct {
 
             .toggle_split_zoom => {
                 if (self.registry.findSurfaceForTarget(target)) |surface| {
-                    const found = self.registry.findTabForSurface(surface) orelse return false;
+                    const found = Host.findTabForSurface(surface) orelse return false;
                     const handle = found.tab.findHandle(surface) orelse found.tab.focused;
                     found.tab.tree.zoom(if (found.tab.tree.zoomed != null) null else handle);
                     surface.invalidateRedoForUnsupportedTabStructuralAction();
@@ -5241,7 +5269,7 @@ pub const App = struct {
         working_directory: ?[]const u8,
         inherit_launch_config: bool,
     ) !*Surface {
-        const tab_info = self.registry.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
+        const tab_info = Host.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
         defer config.deinit();
         config.@"working-directory" = self.config.@"working-directory";
@@ -5369,7 +5397,7 @@ pub const App = struct {
         const tab_id = switch (open_target) {
             .split => blk: {
                 const source_surface = source orelse return error.NoActiveSurface;
-                const tab_info = self.registry.findTabForSurface(source_surface) orelse return error.NoActiveSurface;
+                const tab_info = Host.findTabForSurface(source_surface) orelse return error.NoActiveSurface;
                 break :blk tab_info.tab.id;
             },
             else => null,
@@ -6225,59 +6253,6 @@ pub const App = struct {
         if (changed) self.commitShellCompositor();
     }
 
-    fn renderShellChromeText(
-        self: *App,
-        hwnd: HWND,
-        args: win32_compositor_native.ChromeText,
-    ) bool {
-        if (!self.shell_compositor_initialized or
-            self.shell_compositor.status().state != .active) return false;
-
-        self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |err| switch (win32_chrome_state.shellChromeFallbackAction(err)) {
-            .recover_and_retry => {
-                self.shell_compositor.markDeviceLost();
-                self.shell_compositor.recover() catch |recover_err| {
-                    log.warn("shell chrome DWrite recovery failed err={}", .{recover_err});
-                    return false;
-                };
-                self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |retry_err| {
-                    if (retry_err == error.DeviceLost) self.shell_compositor.markDeviceLost();
-                    log.warn("shell chrome DWrite retry failed err={}", .{retry_err});
-                    return false;
-                };
-            },
-            .use_gdi_fallback => {
-                log.warn("shell chrome DWrite unavailable err={}", .{err});
-                return false;
-            },
-            .ignore => return false,
-        };
-        self.shell_compositor.commit() catch |err| switch (win32_chrome_state.shellChromeFallbackAction(err)) {
-            .recover_and_retry => {
-                self.shell_compositor.markDeviceLost();
-                self.shell_compositor.recover() catch |recover_err| {
-                    log.warn("shell chrome DWrite commit recovery failed err={}", .{recover_err});
-                    return false;
-                };
-                self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |retry_render_err| {
-                    if (retry_render_err == error.DeviceLost) self.shell_compositor.markDeviceLost();
-                    log.warn("shell chrome DWrite commit recovery render retry failed err={}", .{retry_render_err});
-                    return false;
-                };
-                self.shell_compositor.commit() catch |retry_commit_err| {
-                    log.warn("shell chrome DWrite commit recovery commit retry failed err={}", .{retry_commit_err});
-                    return false;
-                };
-            },
-            .use_gdi_fallback => {
-                log.warn("shell chrome DWrite commit failed err={}", .{err});
-                return false;
-            },
-            .ignore => return false,
-        };
-        return true;
-    }
-
     fn commitShellCompositor(self: *App) void {
         self.shell_compositor.commit() catch |err| switch (err) {
             error.DeviceLost => {
@@ -6312,21 +6287,12 @@ pub const App = struct {
         try std.testing.expect(!app.shell_compositor_driver.isStarted());
         try std.testing.expectEqual(win32_compositor.State.fallback, app.shell_compositor.status().state);
 
-        // A host that appears now gets no target, and DirectWrite chrome
-        // text reports nothing drawn. Banners do not use it any more: the
-        // banner child paints itself with GDI (`Host.paintBanner`).
+        // A host that appears now gets no target. The banner child paints
+        // itself with GDI (`Host.paintBanner`).
         const hwnd: HWND = @ptrFromInt(0x1000);
         app.attachShellCompositorWindow(hwnd);
         try std.testing.expect(!app.shell_compositor.status().compositionActive());
         try std.testing.expectEqual(@as(u32, 0), app.shell_compositor.status().active_target_count);
-        try std.testing.expect(!app.renderShellChromeText(hwnd, .{
-            .text = std.unicode.utf8ToUtf16LeStringLiteral("Nothing to undo."),
-            .left_px = 0,
-            .top_px = 0,
-            .right_px = 100,
-            .bottom_px = 24,
-            .color_ref = 0,
-        }));
     }
 
     pub const inheritHostWindowState = window_state.inheritHostWindowState;
@@ -6400,7 +6366,8 @@ pub const App = struct {
     }
 
     fn tabHasInspectorForSurface(self: *App, surface: *Surface) bool {
-        const found = self.registry.findTabForSurface(surface) orelse return surface.inspector_visible;
+        _ = self;
+        const found = Host.findTabForSurface(surface) orelse return surface.inspector_visible;
         var it = found.tab.tree.iterator();
         while (it.next()) |entry| {
             if (entry.view.inspector_visible) return true;
@@ -6409,7 +6376,8 @@ pub const App = struct {
     }
 
     fn setTabInspectorVisibleForSurface(self: *App, surface: *Surface, visible: bool) !bool {
-        const found = self.registry.findTabForSurface(surface) orelse return try surface.setInspectorVisible(visible);
+        _ = self;
+        const found = Host.findTabForSurface(surface) orelse return try surface.setInspectorVisible(visible);
         var changed = false;
         var it = found.tab.tree.iterator();
         while (it.next()) |entry| {
@@ -6430,10 +6398,11 @@ pub const App = struct {
     }
 
     pub fn hostTabStatus(self: *App, surface: *const Surface) HostTabStatus {
+        _ = self;
         const host = surface.host orelse return .{};
         const total = host.tabs.items.len;
         var index: usize = 0;
-        if (self.registry.findTabForSurface(@constCast(surface))) |found| index = found.index;
+        if (Host.findTabForSurface(@constCast(surface))) |found| index = found.index;
         return .{
             .index = index,
             .total = if (total == 0) 1 else total,
@@ -6441,8 +6410,9 @@ pub const App = struct {
     }
 
     pub fn showHostSurface(self: *App, surface: *Surface, focus: bool) void {
+        _ = self;
         const host = surface.host orelse return;
-        const tab_info = self.registry.findTabForSurface(surface) orelse return;
+        const tab_info = Host.findTabForSurface(surface) orelse return;
         const previous_surface = host.activeSurface();
         const previous_tab_id = if (host.active_tab < host.tabs.items.len)
             host.tabs.items[host.active_tab].id
@@ -6467,7 +6437,7 @@ pub const App = struct {
         defer self.auditCreationAfterActivation();
         const was_windows_hidden = self.windows_hidden;
         self.windows_hidden = false;
-        if (self.registry.findTabForSurface(surface)) |found| {
+        if (Host.findTabForSurface(surface)) |found| {
             const handle = found.tab.findHandle(surface) orelse found.tab.focused;
             const host_window_visible = if (found.host.hwnd) |hwnd|
                 sys.IsWindowVisible(hwnd) != 0
@@ -6698,7 +6668,7 @@ pub const App = struct {
     pub fn activateSurfaceNoFocus(self: *App, surface: *Surface) void {
         defer self.auditCreationAfterActivation();
         const was_windows_hidden = self.windows_hidden;
-        if (self.registry.findTabForSurface(surface)) |found| {
+        if (Host.findTabForSurface(surface)) |found| {
             const handle = found.tab.findHandle(surface) orelse found.tab.focused;
             const host_window_visible = if (found.host.hwnd) |hwnd|
                 sys.IsWindowVisible(hwnd) != 0
@@ -6727,7 +6697,7 @@ pub const App = struct {
     }
 
     pub fn noteSurfaceFocused(self: *App, surface: *Surface) bool {
-        const found = self.registry.findTabForSurface(surface) orelse return false;
+        const found = Host.findTabForSurface(surface) orelse return false;
         const handle = found.tab.findHandle(surface) orelse return false;
         const previous_tab_id = if (found.host.active_tab < found.host.tabs.items.len)
             found.host.tabs.items[found.host.active_tab].id
@@ -6751,7 +6721,7 @@ pub const App = struct {
     const syncHostWindowState = window_state.syncHostWindowState;
 
     pub fn removeHost(self: *App, host: *Host) void {
-        if (!self.registry.removeHost(host)) return;
+        if (!self.registry.detachHost(host)) return;
         host.deinit();
         self.core_app.alloc.destroy(host);
     }
@@ -6921,7 +6891,7 @@ pub const App = struct {
 
     fn gotoSplitFallback(self: *App, target: apprt.Target, to: apprt.action.GotoSplit) !bool {
         const current = self.registry.findSurfaceForTarget(target) orelse return false;
-        const found = self.registry.findTabForSurface(current) orelse return false;
+        const found = Host.findTabForSurface(current) orelse return false;
         const from = found.tab.findHandle(current) orelse found.tab.focused;
         const goto: SplitTreeSurface.Goto = switch (to) {
             .previous => .previous_wrapped,
@@ -6960,7 +6930,7 @@ pub const App = struct {
 
     pub fn resizeSplitFallback(self: *App, target: apprt.Target, value: apprt.action.ResizeSplit) !bool {
         const surface = self.registry.findSurfaceForTarget(target) orelse return false;
-        const found = self.registry.findTabForSurface(surface) orelse return false;
+        const found = Host.findTabForSurface(surface) orelse return false;
         const handle = found.tab.findHandle(surface) orelse found.tab.focused;
         const layout: SplitTreeSurface.Split.Layout = switch (value.direction) {
             .left, .right => .horizontal,
@@ -6991,7 +6961,7 @@ pub const App = struct {
 
     pub fn equalizeSplitsFallback(self: *App, target: apprt.Target) !bool {
         const surface = self.registry.findSurfaceForTarget(target) orelse return false;
-        const found = self.registry.findTabForSurface(surface) orelse return false;
+        const found = Host.findTabForSurface(surface) orelse return false;
         const next_tree = try found.tab.tree.equalize(self.core_app.alloc);
         if (splitTreeEquivalent(&found.tab.tree, &next_tree)) {
             var unchanged = next_tree;
@@ -7012,7 +6982,7 @@ pub const App = struct {
 
     pub fn closeTab(self: *App, target: apprt.Target, mode: apprt.action.CloseTabMode) !bool {
         const current = self.registry.findSurfaceForTarget(target) orelse return false;
-        const found = self.registry.findTabForSurface(current) orelse return false;
+        const found = Host.findTabForSurface(current) orelse return false;
         const host = found.host;
         const current_idx = found.index;
 
@@ -7147,7 +7117,7 @@ pub const App = struct {
     /// replaces or removes its tab's split tree.
     pub fn closeTabsBeside(self: *App, current: *Surface, comptime beside: apprt.action.CloseTabMode) !bool {
         comptime std.debug.assert(beside != .this);
-        const found = self.registry.findTabForSurface(current) orelse return false;
+        const found = Host.findTabForSurface(current) orelse return false;
         const host = found.host;
         const keep = found.index;
         const alloc = self.core_app.alloc;
@@ -7174,7 +7144,7 @@ pub const App = struct {
     fn gotoTab(self: *App, target: apprt.Target, goto: apprt.action.GotoTab) !bool {
         if (self.registry.windows.items.len == 0) return false;
         const current = self.registry.findSurfaceForTarget(target) orelse self.registry.windows.items[0];
-        const found = self.registry.findTabForSurface(current) orelse return false;
+        const found = Host.findTabForSurface(current) orelse return false;
         const desired = desiredTabIndex(found.host.tabs.items.len, found.index, goto) orelse return false;
         const current_idx = found.index;
         if (desired == current_idx) return false;
@@ -7187,7 +7157,7 @@ pub const App = struct {
     pub fn moveTab(self: *App, target: apprt.Target, move: apprt.action.MoveTab) !bool {
         if (self.registry.windows.items.len <= 1 or move.amount == 0) return false;
         const current = self.registry.findSurfaceForTarget(target) orelse return false;
-        const found = self.registry.findTabForSurface(current) orelse return false;
+        const found = Host.findTabForSurface(current) orelse return false;
         if (found.host.tabs.items.len <= 1) return false;
         const current_idx = found.index;
         const desired = desiredMoveIndex(found.host.tabs.items.len, current_idx, move.amount) orelse return false;
@@ -8837,7 +8807,7 @@ pub const App = struct {
         var tab_title: std.Io.Writer = .fixed(&title_buf);
         var context_buf: [160]u8 = undefined;
         var context: std.Io.Writer = .fixed(&context_buf);
-        const attribution: ?[]const u8 = if (self.registry.findTabForSurface(surface)) |found| context: {
+        const attribution: ?[]const u8 = if (Host.findTabForSurface(surface)) |found| context: {
             const name = toastTabName(found.tab, surface);
             try self.writeToastContext(&context, found.host, found.index, name);
             if (title.len == 0) {
@@ -9132,7 +9102,7 @@ pub const App = struct {
                 break :news null;
             },
         };
-        const found = self.registry.findTabForSurface(surface) orelse return;
+        const found = Host.findTabForSurface(surface) orelse return;
         const seen = tabSeenByUser(found.host, found.index);
         // The user is looking at this tab, so a program that finished or
         // failed has been seen the moment it says so.
@@ -9264,8 +9234,9 @@ pub const App = struct {
         index: usize,
         record: *const win32_program_status.Record,
     } {
+        _ = self;
         if (!surface.core().config.desktop_notifications) return null;
-        const found = self.registry.findTabForSurface(surface) orelse return null;
+        const found = Host.findTabForSurface(surface) orelse return null;
         const record = surface.program_status.headline() orelse return null;
         if (tabSeenByUser(found.host, found.index) or
             !win32_program_status.Indicator.of(record).needsUser()) return null;
@@ -9292,7 +9263,7 @@ pub const App = struct {
     fn gotoAttention(self: *App, target: apprt.Target) !bool {
         const alloc = self.core_app.alloc;
         const current = if (self.registry.findSurfaceForTarget(target)) |surface|
-            self.registry.findTabForSurface(surface)
+            Host.findTabForSurface(surface)
         else
             null;
 

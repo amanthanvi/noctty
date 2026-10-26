@@ -97,7 +97,6 @@ const destroySubclassedWindowWithPrev = win32.destroySubclassedWindowWithPrev;
 const detachChromeControlProvider = win32.detachChromeControlProvider;
 const drawRoundedRect = win32.drawRoundedRect;
 const drawTextWz = win32.drawTextWz;
-const empty_confirm_text_placement = win32.empty_confirm_text_placement;
 const fillSolidRect = win32.fillSolidRect;
 const focus_cue = @import("focus_cue.zig");
 const focus_region = @import("focus_region.zig");
@@ -120,13 +119,8 @@ const host_overlay_padding = win32.host_overlay_padding;
 const host_overlay_row_height = win32.host_overlay_row_height;
 const host_search_bar_height = win32.host_search_bar_height;
 const host_tab_close_zone_width = win32.host_tab_close_zone_width;
-const host_tab_dropdown_button_label = win32.host_tab_dropdown_button_label;
-const host_tab_height = win32.host_tab_height;
 const host_tab_height_integrated = win32.host_tab_height_integrated;
 const host_tab_max_button_width = win32.host_tab_max_button_width;
-const host_tab_new_button_label = win32.host_tab_new_button_label;
-const host_tab_overflow_button_width = win32.host_tab_overflow_button_width;
-const host_tab_small_button_width = win32.host_tab_small_button_width;
 const host_titlebar_action_button_size = win32.host_titlebar_action_button_size;
 const infoBannersExpire = win32.infoBannersExpire;
 const input = @import("../../input.zig");
@@ -159,8 +153,6 @@ const overlayEmptySubmitDismisses = win32.overlayEmptySubmitDismisses;
 const overlayLabelReservation = win32.overlayLabelReservation;
 const overlayPanelInterior = win32.overlayPanelInterior;
 const overlayTextNeedsRefill = win32.overlayTextNeedsRefill;
-const overlay_edit_child_inset_x_base = win32.overlay_edit_child_inset_x_base;
-const overlay_edit_child_inset_y_base = win32.overlay_edit_child_inset_y_base;
 const overlay_session = @import("overlay_session.zig");
 const ownedStringEquals = win32.ownedStringEquals;
 const paintPinnedSlotBadge = win32.paintPinnedSlotBadge;
@@ -172,9 +164,7 @@ const paletteListWidthIsReadable = win32.paletteListWidthIsReadable;
 const paletteReleaseThunk = win32.paletteReleaseThunk;
 const paletteThemeSaveFailureMessage = win32.paletteThemeSaveFailureMessage;
 const paletteVisibleRowCapacity = win32.paletteVisibleRowCapacity;
-const palette_catalog_capacity = win32.palette_catalog_capacity;
 const palette_catalog_label_bytes = win32.palette_catalog_label_bytes;
-const palette_catalog_label_capacity = win32.palette_catalog_label_capacity;
 const palette_controller = @import("palette_controller.zig");
 const palette_row_height = win32.palette_row_height;
 const pinnedSlotBadgeDigit = win32.pinnedSlotBadgeDigit;
@@ -221,11 +211,6 @@ const tabDirectionFromWheelDelta = win32.tabDirectionFromWheelDelta;
 const tabStatusHeadline = win32.tabStatusHeadline;
 const tabStatusKey = win32.tabStatusKey;
 const tabStripChildVisible = win32.tabStripChildVisible;
-const tab_bell_status_key = win32.tab_bell_status_key;
-const tab_label_min_cells = win32.tab_label_min_cells;
-const tab_status_badge_cells = win32.tab_status_badge_cells;
-const tab_status_badge_size = win32.tab_status_badge_size;
-const tab_status_badge_slot = win32.tab_status_badge_slot;
 const tab_tooltip_class_name = win32.tab_tooltip_class_name;
 const tabsCloseConfirmCount = win32.tabsCloseConfirmCount;
 const takeOverlayButtonUiaProviders = win32.takeOverlayButtonUiaProviders;
@@ -236,7 +221,6 @@ const themepkg = @import("../../config/theme.zig");
 const titlebarButtonVisual = win32.titlebarButtonVisual;
 const titlebarCaptionFromHitTest = win32.titlebarCaptionFromHitTest;
 const titlebarRoleFromCaption = win32.titlebarRoleFromCaption;
-const titlebar_hover_fade_ms = win32.titlebar_hover_fade_ms;
 const titlebar_icon_faces = win32.titlebar_icon_faces;
 const titlebar_icon_glyphs = win32.titlebar_icon_glyphs;
 const undecoratedKeepsFrame = win32.undecoratedKeepsFrame;
@@ -265,10 +249,10 @@ const win32_tween = @import("../win32_tween.zig");
 const win32_uia = @import("../win32_uia/mod.zig");
 const win32_undo = @import("../win32_undo.zig");
 const windowTitleSyncChanged = win32.windowTitleSyncChanged;
-const windows = win32.windows;
 const windows_shell = @import("../../config/windows_shell.zig");
 
 // Test dependencies.
+const windows = win32.windows;
 const GlyphCoverage = win32.GlyphCoverage;
 const fontGlyphCoverage = win32.fontGlyphCoverage;
 const CoreApp = @import("../../App.zig");
@@ -296,6 +280,43 @@ const tabSeenWithForeground = win32.tabSeenWithForeground;
 const testExpectNoLaunchLayout = win32.testExpectNoLaunchLayout;
 const toastTestSplit = win32.toastTestSplit;
 const userProfileKeysChanged = win32.userProfileKeysChanged;
+
+const overlay_edit_child_inset_x_base = chrome_layout.overlay_edit_child_inset_x_base;
+
+const overlay_edit_child_inset_y_base = chrome_layout.overlay_edit_child_inset_y_base;
+
+const empty_confirm_text_placement = chrome_layout.empty_confirm_text_placement;
+
+const host_tab_height: i32 = (win32_theme.ThemeMetrics{}).height_tab;
+
+const host_tab_small_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_small_button_width;
+
+const host_tab_overflow_button_width: i32 = (win32_theme.ThemeMetrics{}).tab_overflow_button_width;
+
+pub const palette_catalog_capacity: usize = 768;
+
+const palette_catalog_label_capacity: usize = 768;
+
+/// The program status badge a tab draws before its label, and the room it
+/// takes from the label with the gap after it, in DIPs and in label cells
+/// (about 7 DIPs each in the chrome font).
+const tab_status_badge_size: i32 = 10;
+
+const tab_status_badge_slot: i32 = tab_status_badge_size + 5;
+
+const tab_status_badge_cells: usize = 2;
+
+/// The fewest cells `hostTabLabelMaxWidth` gives a label.
+const tab_label_min_cells: usize = 6;
+
+const host_tab_new_button_label = std.unicode.utf8ToUtf16LeStringLiteral("+");
+
+const host_tab_dropdown_button_label = std.unicode.utf8ToUtf16LeStringLiteral("\u{25BE}"); // dropdown chevron
+
+const titlebar_hover_fade_ms: u16 = 150;
+
+/// An even status key cannot collide with a program status's odd hash.
+const tab_bell_status_key: u64 = 2;
 
 const PaletteCatalogConfigSource = enum {
     /// Catalog strings borrow the current `app.config`.
@@ -2642,6 +2663,25 @@ pub const Host = struct {
         return &self.tabs.items[self.active_tab];
     }
 
+    pub fn findTabForSurface(surface: *Surface) ?struct { host: *Host, index: usize, tab: *Tab } {
+        const host = surface.host orelse return null;
+        for (host.tabs.items, 0..) |*tab, index| {
+            if (tab.findHandle(surface) != null) {
+                return .{ .host = host, .index = index, .tab = tab };
+            }
+        }
+        return null;
+    }
+
+    pub fn focusedSurfaceForTab(host: *Host, tab_id: u32) ?*Surface {
+        for (host.tabs.items) |*tab| {
+            if (tab.id != tab_id) continue;
+            return tab.focusedSurface();
+        }
+
+        return null;
+    }
+
     pub fn activeSurface(self: *const Host) ?*Surface {
         if (self.tabs.items.len == 0 or self.active_tab >= self.tabs.items.len) return null;
         const tab: *const Tab = &self.tabs.items[self.active_tab];
@@ -3268,7 +3308,7 @@ pub const Host = struct {
         const source_root = source_model.root;
         const source_surface = self.tabs.items[source_index].focusedSurface() orelse return false;
         const target_surface = self.tab_drop_target_surface orelse return false;
-        const target_found = self.app.registry.findTabForSurface(target_surface) orelse return false;
+        const target_found = Host.findTabForSurface(target_surface) orelse return false;
         if (target_found.host != self or target_found.index != self.active_tab) return false;
         const target_pane = target_surface.shell_id orelse return false;
         const target_tab_id = self.tabs.items[self.active_tab].id;
@@ -8740,7 +8780,7 @@ pub const Host = struct {
     /// The index of the tab of this window that holds `surface`, unless
     /// that tab is the one in front.
     fn backgroundTabIndex(self: *Host, surface: *Surface) ?usize {
-        const found = self.app.registry.findTabForSurface(surface) orelse return null;
+        const found = Host.findTabForSurface(surface) orelse return null;
         if (found.host != self or found.index == self.active_tab) return null;
         return found.index;
     }
@@ -10582,7 +10622,7 @@ test "win32 a toast shown while its tab is undo-closed is removed" {
     };
     w.recorder.during_show = .{ .ctx = &close, .run = Close.run };
     try w.osc(&w.p, "", "newer");
-    try std.testing.expect(w.app.registry.findTabForSurface(&w.p) == null);
+    try std.testing.expect(Host.findTabForSurface(&w.p) == null);
     try std.testing.expectEqual(@as(?u64, null), w.p.toast_outstanding);
     w.app.flushToastRemovals();
     var buf: [64]u8 = undefined;

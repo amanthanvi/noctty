@@ -1,8 +1,8 @@
 //! Overlay and confirmation lifecycle. Host and Surface retain coordination.
+const labels = @import("labels.zig");
 const win32 = @import("../win32.zig");
 const runtime = win32.overlay_session_runtime;
 const Allocator = runtime.Allocator;
-const App = runtime.App;
 const HWND = runtime.HWND;
 const Host = runtime.Host;
 const HostOverlayMode = runtime.HostOverlayMode;
@@ -11,7 +11,6 @@ const LONG_PTR = runtime.LONG_PTR;
 const OverlayConfirmPreview = runtime.OverlayConfirmPreview;
 const OverlayConfirmText = runtime.OverlayConfirmText;
 const OverlayFocusSlot = runtime.OverlayFocusSlot;
-const Surface = runtime.Surface;
 const WPARAM = runtime.WPARAM;
 const appendOwnedString = runtime.appendOwnedString;
 const applyChildVisibility = runtime.applyChildVisibility;
@@ -29,17 +28,11 @@ const buildTabOverviewOverlayLabel = runtime.buildTabOverviewOverlayLabel;
 const c = runtime.c;
 const chromeSyncOrLog = runtime.chromeSyncOrLog;
 const confirmPromptUiaName = runtime.confirmPromptUiaName;
-const confirm_preview_limit = runtime.confirm_preview_limit;
 const destroySubclassedWindow = runtime.destroySubclassedWindow;
 const detachChromeControlProvider = runtime.detachChromeControlProvider;
 const editSnapshot = runtime.editSnapshot;
 const hostButtonProc = runtime.hostButtonProc;
-const host_overlay_command_palette_label = runtime.host_overlay_command_palette_label;
-const host_overlay_command_palette_label_utf8 = runtime.host_overlay_command_palette_label_utf8;
 const host_overlay_height = runtime.host_overlay_height;
-const host_overlay_profile_label_utf8 = runtime.host_overlay_profile_label_utf8;
-const host_overlay_surface_title_label_utf8 = runtime.host_overlay_surface_title_label_utf8;
-const host_overlay_tab_title_label_utf8 = runtime.host_overlay_tab_title_label_utf8;
 const lastError = runtime.lastError;
 const log = runtime.log;
 const nativeEditSelection = runtime.nativeEditSelection;
@@ -54,11 +47,8 @@ const palette_max_visible_rows = runtime.palette_max_visible_rows;
 const palette_row_height = runtime.palette_row_height;
 const program_confirm_arming_ms = runtime.program_confirm_arming_ms;
 const prompt_button_class = runtime.prompt_button_class;
-const prompt_cancel_label = runtime.prompt_cancel_label;
 const prompt_edit_class = runtime.prompt_edit_class;
 const prompt_label_class = runtime.prompt_label_class;
-const prompt_ok_label = runtime.prompt_ok_label;
-const prompt_text_static_style = runtime.prompt_text_static_style;
 const readWindowTextUtf8Alloc = runtime.readWindowTextUtf8Alloc;
 const refocusActiveSurface = runtime.refocusActiveSurface;
 const runUiActionOrLog = runtime.runUiActionOrLog;
@@ -70,10 +60,39 @@ const syncWindowTextUtf8Cached = runtime.syncWindowTextUtf8Cached;
 const syncWindowTextUtf8CachedAfterSet = runtime.syncWindowTextUtf8CachedAfterSet;
 const sys = runtime.sys;
 const win32_uia = runtime.win32_uia;
+const App = test_runtime.App;
+const Surface = test_runtime.Surface;
 const test_runtime = if (@import("builtin").is_test) win32.overlay_session_test_runtime else struct {};
 const CoreApp = test_runtime.CoreApp;
 const TestSession = test_runtime.TestSession;
 const builtin = test_runtime.builtin;
+
+/// Style for the confirm prompt's title and body STATICs.
+///
+/// Owner-drawn rather than a plain text STATIC so both renderers of those
+/// two lines stay one function: `WM_DRAWITEM` runs the same
+/// `gdi.drawTextWz` call with the same `DrawText` flags chrome paint uses
+/// for the fallback. A stock STATIC would have to re-derive the vertical
+/// position, and `SS_CENTERIMAGE` rounds its half-leading up where
+/// `DT_VCENTER` truncates, which measurably moved the body line by a
+/// pixel at 150% DPI.
+const prompt_text_static_style: u32 = c.SS_OWNERDRAW;
+
+const prompt_ok_label = std.unicode.utf8ToUtf16LeStringLiteral("OK");
+
+const prompt_cancel_label = std.unicode.utf8ToUtf16LeStringLiteral("Cancel");
+
+const host_overlay_command_palette_label_utf8 = "Command:";
+
+const host_overlay_profile_label_utf8 = "Profile:";
+
+const host_overlay_surface_title_label_utf8 = "Window title:";
+
+const host_overlay_tab_title_label_utf8 = "Tab title:";
+
+const host_overlay_command_palette_label = std.unicode.utf8ToUtf16LeStringLiteral("Command:");
+
+const confirm_preview_limit = labels.confirm_preview_limit;
 
 /// What a caller is asking the user to approve. A struct rather than
 /// positional arguments because every string field has the same type:

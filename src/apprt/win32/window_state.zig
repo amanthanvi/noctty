@@ -3,7 +3,6 @@ const win32 = @import("../win32.zig");
 const runtime = win32.window_state_runtime;
 const App = runtime.App;
 const HWND = runtime.HWND;
-const HWND_NOTOPMOST = runtime.HWND_NOTOPMOST;
 const HWND_TOPMOST = runtime.HWND_TOPMOST;
 const Host = runtime.Host;
 const LPARAM = runtime.LPARAM;
@@ -222,6 +221,8 @@ pub fn syncHostWindowState(self: *App, source: *Surface) !void {
         try candidate.inheritWindowStateFrom(source, .{});
     }
 }
+
+const HWND_NOTOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -2))));
 
 /// What a new window keeps of its own config over the state it copies from
 /// the window it is opened from (`new_window`, a forwarded launch, a profile
@@ -458,7 +459,7 @@ pub const NewWindowPlacement = struct {
     /// of a maximized one.
     rect: RECT,
     /// Set when the source is, or restores to, maximized: its placement,
-    /// for `Surface.maximizeWithPlacement`.
+    /// for `maximizeWithPlacement`.
     maximize: ?WINDOWPLACEMENT,
     /// `rect` is the source's own, unchanged: it is fullscreen, so the new
     /// window is too and covers the same monitor.
@@ -768,7 +769,7 @@ pub fn leaveFullscreen(self: *Surface) !void {
 /// first leaves SetWindowPlacement only the normal rect to write: on a
 /// normal window it moves the window to that rect before maximizing it,
 /// a second resize that also changes monitor if the rect is on another.
-pub fn maximizeWithPlacement(hwnd: HWND, placement: *const WINDOWPLACEMENT) !void {
+fn maximizeWithPlacement(hwnd: HWND, placement: *const WINDOWPLACEMENT) !void {
     _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
     if (sys.SetWindowPlacement(hwnd, placement) == 0) return lastError();
 }

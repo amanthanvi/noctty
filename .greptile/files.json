@@ -78,6 +78,7 @@
       "scope": [
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
+        "src/apprt/win32/registry.zig",
         "src/apprt/win32/chrome_scene.zig",
         "src/apprt/win32/host.zig",
         "src/apprt/win32/quick_terminal_host.zig",
@@ -150,6 +151,7 @@
       "scope": [
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
+        "src/apprt/win32/registry.zig",
         "src/apprt/win32/host.zig",
         "src/apprt/win32/overlay_session.zig",
         "src/apprt/win32/session.zig",
@@ -271,6 +273,7 @@
       "scope": [
         "src/apprt/win32.zig",
         "src/apprt/win32/app.zig",
+        "src/apprt/win32/registry.zig",
         "src/apprt/win32/chrome_scene.zig",
         "src/apprt/win32/host.zig",
         "src/apprt/win32/quick_terminal_host.zig",
@@ -327,7 +330,8 @@
         "src/pty_transport_probe.zig",
         "src/terminal/search/Thread.zig",
         "scripts/windows-harness-history.ps1",
-        "src/apprt/win32/test_support.zig"
+        "src/apprt/win32/test_support.zig",
+        "src/apprt/win32/registry.zig"
       ]
     },
     {

@@ -2099,7 +2099,6 @@ test "Windows pty reader cancel is retried for a read that starts after the firs
 test "child exit report gives up on a full app mailbox once the surface is closing" {
     const alloc = std.testing.allocator;
     var rt_app: apprt.App = undefined;
-    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
     const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
     const app_queue = try AppMailbox.Queue.create(alloc);

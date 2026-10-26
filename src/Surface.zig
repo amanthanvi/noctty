@@ -337,11 +337,10 @@ test "Surface: ending a search does not wait for room in a full app mailbox" {
     defer alloc.destroy(app);
     @memset(std.mem.asBytes(app), 0);
     app.mailbox = .{};
-    // No windows and no UI thread: waking the app does nothing.
+    // No UI thread: waking the app returns without reading other fields.
     const rt_app = try alloc.create(apprt.runtime.App);
     defer alloc.destroy(rt_app);
     @memset(std.mem.asBytes(rt_app), 0);
-    rt_app.registry.windows = .empty;
     rt_app.ui_thread_id = 0;
 
     const surface = try alloc.create(Surface);

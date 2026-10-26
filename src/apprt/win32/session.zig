@@ -1,6 +1,7 @@
 //! Session persistence, restore, placement and scrollback snapshots.
 const win32 = @import("../win32.zig");
 const runtime = win32.session_runtime;
+const test_runtime = if (@import("builtin").is_test) win32.session_test_runtime else struct {};
 const killThreadTimer = runtime.killThreadTimer;
 const Allocator = runtime.Allocator;
 const App = runtime.App;
@@ -57,8 +58,8 @@ const std = runtime.std;
 const sys = runtime.sys;
 const terminal = runtime.terminal;
 const terminal_options = runtime.terminal_options;
-const testUserProfileList = runtime.testUserProfileList;
-const testVisualStudioList = runtime.testVisualStudioList;
+const testUserProfileList = test_runtime.testUserProfileList;
+const testVisualStudioList = test_runtime.testVisualStudioList;
 const unixMillis = runtime.unixMillis;
 const win32_session_persistence = runtime.win32_session_persistence;
 const win32_session_state = runtime.win32_session_state;
@@ -163,7 +164,7 @@ pub const SessionRestoreTransaction = struct {
         };
     }
 
-    pub fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
+    fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
         if (self.host == null) {
             self.app = surface.app;
             self.host = surface.host;
@@ -556,7 +557,7 @@ pub fn restoreSessionTab(
         },
         .split => {},
     };
-    if (self.registry.findTabForSurface(selected)) |found| {
+    if (Host.findTabForSurface(selected)) |found| {
         // No errdefer: nothing can fail before the tab takes the tree, and
         // from then on the tab frees it, also when `layout` fails.
         const restored_tree = try buildRestoredSessionSplitTree(
@@ -636,7 +637,7 @@ test "restoreSessionTab leaves the restored tree to the tab when layout fails" {
                 try target.tabs.append(alloc, tab);
                 return surface;
             };
-            const found = hook_app.registry.findTabForSurface(@constCast(source)).?;
+            const found = Host.findTabForSurface(@constCast(source)).?;
             var inserted = try SplitTreeSurface.init(alloc, surface);
             defer inserted.deinit();
             const next = try found.tab.tree.split(alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
@@ -711,7 +712,7 @@ pub fn restoreSessionPane(
     }
 
     const tab_id = if (tab_surface) |source|
-        (self.registry.findTabForSurface(source) orelse return error.NoActiveSurface).tab.id
+        (Host.findTabForSurface(source) orelse return error.NoActiveSurface).tab.id
     else
         null;
     const surface = try self.createWindowSurface(&config, default_title, .{
@@ -1773,7 +1774,7 @@ test "win32 a restored tab has the saved shape in the shell model, so closing a 
             var prepared = (try hook_app.prepareShellSurfaceCreate(target, opts)).?;
             defer prepared.deinit();
             if (opts.clone_state_from) |source| {
-                const found = hook_app.registry.findTabForSurface(@constCast(source)).?;
+                const found = Host.findTabForSurface(@constCast(source)).?;
                 var inserted = try SplitTreeSurface.init(alloc, surface);
                 defer inserted.deinit();
                 const next = try found.tab.tree.split(alloc, found.tab.findHandle(@constCast(source)).?, opts.split_direction, 0.5, &inserted);

@@ -1,3 +1,4 @@
+const registry_module = @import("win32/registry.zig");
 const app_module = @import("win32/app.zig");
 const host_module = @import("win32/host.zig");
 const terminal_window_module = @import("win32/terminal_window.zig");
@@ -87,7 +88,6 @@ pub const automationTextAllowed = ipc_server.automationTextAllowed;
 pub const automationWorkingDirectoryAllowed = ipc_server.automationWorkingDirectoryAllowed;
 pub const forwardedArgvRejection = ipc_server.forwardedArgvRejection;
 pub const forwardedArgvSetsKey = ipc_server.forwardedArgvSetsKey;
-const forwardedKeyAllowed = ipc_server.forwardedKeyAllowed;
 pub const logForwardedArgvRejection = ipc_server.logForwardedArgvRejection;
 pub const resolveIpcPipeNameForTarget = ipc_server.resolveIpcPipeNameForTarget;
 pub const scanLaunchLayoutIpcArgument = ipc_server.scanLaunchLayoutIpcArgument;
@@ -202,7 +202,6 @@ pub const chrome_scene_test_runtime = if (builtin.is_test) .{
 
 pub const overlay_session_runtime = .{
     .Allocator = Allocator,
-    .App = App,
     .HWND = HWND,
     .Host = Host,
     .HostOverlayMode = HostOverlayMode,
@@ -211,7 +210,6 @@ pub const overlay_session_runtime = .{
     .OverlayConfirmPreview = OverlayConfirmPreview,
     .OverlayConfirmText = OverlayConfirmText,
     .OverlayFocusSlot = OverlayFocusSlot,
-    .Surface = Surface,
     .WPARAM = WPARAM,
     .appendOwnedString = appendOwnedString,
     .applyChildVisibility = applyChildVisibility,
@@ -229,17 +227,11 @@ pub const overlay_session_runtime = .{
     .c = c,
     .chromeSyncOrLog = chromeSyncOrLog,
     .confirmPromptUiaName = confirmPromptUiaName,
-    .confirm_preview_limit = confirm_preview_limit,
     .destroySubclassedWindow = destroySubclassedWindow,
     .detachChromeControlProvider = detachChromeControlProvider,
     .editSnapshot = editSnapshot,
     .hostButtonProc = hostButtonProc,
-    .host_overlay_command_palette_label = host_overlay_command_palette_label,
-    .host_overlay_command_palette_label_utf8 = host_overlay_command_palette_label_utf8,
     .host_overlay_height = host_overlay_height,
-    .host_overlay_profile_label_utf8 = host_overlay_profile_label_utf8,
-    .host_overlay_surface_title_label_utf8 = host_overlay_surface_title_label_utf8,
-    .host_overlay_tab_title_label_utf8 = host_overlay_tab_title_label_utf8,
     .lastError = lastError,
     .log = log,
     .nativeEditSelection = nativeEditSelection,
@@ -254,11 +246,8 @@ pub const overlay_session_runtime = .{
     .palette_row_height = palette_row_height,
     .program_confirm_arming_ms = program_confirm_arming_ms,
     .prompt_button_class = prompt_button_class,
-    .prompt_cancel_label = prompt_cancel_label,
     .prompt_edit_class = prompt_edit_class,
     .prompt_label_class = prompt_label_class,
-    .prompt_ok_label = prompt_ok_label,
-    .prompt_text_static_style = prompt_text_static_style,
     .readWindowTextUtf8Alloc = readWindowTextUtf8Alloc,
     .refocusActiveSurface = refocusActiveSurface,
     .runUiActionOrLog = runUiActionOrLog,
@@ -273,6 +262,8 @@ pub const overlay_session_runtime = .{
 };
 
 pub const overlay_session_test_runtime = if (builtin.is_test) .{
+    .Surface = Surface,
+    .App = App,
     .CoreApp = CoreApp,
     .TestSession = TestSession,
     .builtin = builtin,
@@ -289,8 +280,6 @@ pub const palette_controller_runtime = .{
     .PAINTSTRUCT = PAINTSTRUCT,
     .PaletteCatalog = PaletteCatalog,
     .PaletteCompletion = PaletteCompletion,
-    .PaletteItem = PaletteItem,
-    .PalettePayload = PalettePayload,
     .PalettePresentation = PalettePresentation,
     .PaletteRanked = PaletteRanked,
     .PaletteSnapshot = PaletteSnapshot,
@@ -311,7 +300,6 @@ pub const palette_controller_runtime = .{
     .ownedStringEquals = ownedStringEquals,
     .paint_text = paint_text,
     .paletteCompletionText = paletteCompletionText,
-    .palette_action_capacity = palette_action_capacity,
     .palette_catalog_label_bytes = palette_catalog_label_bytes,
     .palette_list_class_name = palette_list_class_name,
     .palette_max_visible_rows = palette_max_visible_rows,
@@ -333,6 +321,8 @@ pub const palette_controller_runtime = .{
 };
 
 pub const palette_controller_test_runtime = if (builtin.is_test) .{
+    .PalettePayload = PalettePayload,
+    .PaletteItem = PaletteItem,
     .BannerTestWindow = Host.BannerTestWindow,
     .CoreApp = CoreApp,
     .TestSession = TestSession,
@@ -438,7 +428,6 @@ pub const search_controls_test_runtime = if (builtin.is_test) .{
 pub const window_state_runtime = .{
     .App = App,
     .HWND = HWND,
-    .HWND_NOTOPMOST = HWND_NOTOPMOST,
     .HWND_TOPMOST = HWND_TOPMOST,
     .Host = Host,
     .LPARAM = LPARAM,
@@ -562,8 +551,6 @@ pub const session_runtime = .{
     .sys = sys,
     .terminal = terminal,
     .terminal_options = terminal_options,
-    .testUserProfileList = testUserProfileList,
-    .testVisualStudioList = testVisualStudioList,
     .unixMillis = unixMillis,
     .win32_session_persistence = win32_session_persistence,
     .win32_session_state = win32_session_state,
@@ -573,6 +560,11 @@ pub const session_runtime = .{
     .workspaceRectToScreen = workspaceRectToScreen,
     .writePersistentFileAlloc = writePersistentFileAlloc,
 };
+
+pub const session_test_runtime = if (builtin.is_test) .{
+    .testUserProfileList = testUserProfileList,
+    .testVisualStudioList = testVisualStudioList,
+} else .{};
 
 pub const quick_terminal_host_runtime = .{
     .App = App,
@@ -621,8 +613,8 @@ pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").
     .SurfaceInitStage = Surface.InitStage,
     .PaletteItem = PaletteItem,
     .PalettePayload = PalettePayload,
+    .palette_catalog_capacity = host_module.palette_catalog_capacity,
     .PaletteRanked = PaletteRanked,
-    .palette_catalog_capacity = palette_catalog_capacity,
     .WS_OVERLAPPEDWINDOW = WS_OVERLAPPEDWINDOW,
     .class_name = class_name,
     .host_class_name = host_class_name,
@@ -673,7 +665,7 @@ pub const test_support = if (builtin.is_test) @import("win32/test_support.zig").
 
 test {
     _ = app_module;
-    _ = @import("win32/registry.zig");
+    _ = registry_module;
     _ = host_module;
     _ = terminal_window_module;
     _ = search_controls;
@@ -732,15 +724,12 @@ pub const overlayLabelReservation = chrome_layout.overlayLabelReservation;
 pub const confirmPreviewRect = chrome_layout.confirmPreviewRect;
 pub const overlayActionLayoutForWidth = chrome_layout.overlayActionLayoutForWidth;
 pub const overlayEditChildRectFromFrame = chrome_layout.overlayEditChildRectFromFrame;
-pub const overlay_edit_child_inset_x_base = chrome_layout.overlay_edit_child_inset_x_base;
-pub const overlay_edit_child_inset_y_base = chrome_layout.overlay_edit_child_inset_y_base;
 pub const confirmTitlePaintRect = chrome_layout.confirmTitlePaintRect;
 const overlayFeedbackLineRect = chrome_layout.overlayFeedbackLineRect;
 pub const confirmBodyPaintRect = chrome_layout.confirmBodyPaintRect;
 pub const confirmTextPlacement = chrome_layout.confirmTextPlacement;
 pub const overlayPanelInterior = chrome_layout.overlayPanelInterior;
 pub const ConfirmTextPlacement = chrome_layout.ConfirmTextPlacement;
-pub const empty_confirm_text_placement = chrome_layout.empty_confirm_text_placement;
 pub const blendColorRGB = gdi.blendColorRGB;
 pub const fillSolidRect = gdi.fillSolidRect;
 const drawRectBorder = gdi.drawRectBorder;
@@ -830,12 +819,9 @@ pub const reportStartupFailure = gl_startup.reportStartupFailure;
 pub const ATOM = win32_types.ATOM;
 pub const LPCWSTR = win32_types.LPCWSTR;
 pub const HBRUSH = win32_types.HBRUSH;
-const HCURSOR = win32_types.HCURSOR;
 pub const HDC = win32_types.HDC;
 pub const HGLRC = win32_types.HGLRC;
 pub const HGDIOBJ = win32_types.HGDIOBJ;
-const HMODULE = win32_types.HMODULE;
-const HMENU = win32_types.HMENU;
 const HICON = win32_types.HICON;
 pub const LPARAM = win32_types.LPARAM;
 pub const WPARAM = win32_types.WPARAM;
@@ -844,7 +830,6 @@ pub const LONG_PTR = win32_types.LONG_PTR;
 pub const UINT = win32_types.UINT;
 pub const UINT_PTR = win32_types.UINT_PTR;
 pub const DWORD = win32_types.DWORD;
-const WORD = win32_types.WORD;
 pub const BYTE = win32_types.BYTE;
 pub const BOOL = win32_types.BOOL;
 pub const HWND = win32_types.HWND;
@@ -852,7 +837,6 @@ pub const HINSTANCE = win32_types.HINSTANCE;
 pub const INTRESOURCE = win32_types.INTRESOURCE;
 
 const HWND_TOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
-const HWND_NOTOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -2))));
 
 const DeferredUiaDisconnect = struct {
     ctx: *anyopaque,
@@ -870,7 +854,6 @@ pub fn hostCompositionRedrawFlags() UINT {
 // source of truth. Old call sites that read `host_tab_height`, etc.
 // keep compiling; new code should consume `ThemeMetrics` via `Theme`.
 const default_metrics: win32_theme.ThemeMetrics = .{};
-pub const host_tab_height: i32 = default_metrics.height_tab;
 pub const host_tab_height_integrated: i32 = default_metrics.height_tab_integrated;
 pub const host_caption_button_h: i32 = default_metrics.caption_button_h;
 pub const host_overlay_height: i32 = default_metrics.height_overlay;
@@ -881,42 +864,21 @@ pub const host_overlay_label_width: i32 = default_metrics.overlay_label_width;
 pub const host_overlay_row_height: i32 = default_metrics.overlay_row_height;
 pub const host_overlay_accept_width: i32 = default_metrics.overlay_accept_width;
 pub const host_overlay_cancel_width: i32 = default_metrics.overlay_cancel_width;
-pub const host_tab_small_button_width: i32 = default_metrics.tab_small_button_width;
-pub const host_tab_overflow_button_width: i32 = default_metrics.tab_overflow_button_width;
 pub const host_titlebar_action_button_size: i32 = 32;
 /// Non-owning view over the palette's command lists. Points into
 /// config arena storage — lifetime matches `app.config`. Re-exported
 /// from `win32_palette.zig` so it can be shared with the bench harness.
 const PaletteSnapshot = win32_palette.Snapshot;
-const RankedIndex = win32_palette.RankedIndex;
-const palette_max_tokens = win32_palette.max_tokens;
-const palette_max_ranked = win32_palette.max_ranked;
 pub const PaletteCatalog = win32_palette.catalog.Catalog;
 pub const PaletteItem = win32_palette.catalog.Item;
 pub const PalettePayload = win32_palette.catalog.Payload;
 pub const PaletteRanked = win32_palette.catalog.Ranked;
 pub const PaletteStableId = @TypeOf((@as(PaletteItem, undefined)).id);
-pub const palette_catalog_capacity: usize = 768;
-const palette_action_capacity: usize = 384;
-pub const palette_catalog_label_capacity: usize = 768;
 pub const palette_catalog_label_bytes: usize = 128;
 const PalettePresentation = labels.PalettePresentation;
-
 const PaletteCompletion = labels.PaletteCompletion;
-const tokenizePaletteQuery = win32_palette.tokenizeQuery;
-const rankPaletteEntry = win32_palette.rankEntry;
-const rankedIndicesForQuery = win32_palette.rankedForQuery;
-pub const releases_url = updatepkg.releases_url;
 pub const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 pub const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
-/// The program status badge a tab draws before its label, and the room it
-/// takes from the label with the gap after it, in DIPs and in label cells
-/// (about 7 DIPs each in the chrome font).
-pub const tab_status_badge_size: i32 = 10;
-pub const tab_status_badge_slot: i32 = tab_status_badge_size + 5;
-pub const tab_status_badge_cells: usize = 2;
-/// The fewest cells `hostTabLabelMaxWidth` gives a label.
-pub const tab_label_min_cells: usize = 6;
 
 // Context menu constants
 
@@ -925,7 +887,6 @@ const SHORT = i16;
 
 pub const POINT = sys.POINT;
 pub const RECT = sys.RECT;
-const PIXELFORMATDESCRIPTOR = sys.PIXELFORMATDESCRIPTOR;
 pub const MSG = sys.MSG;
 pub const PAINTSTRUCT = sys.PAINTSTRUCT;
 pub const DRAWITEMSTRUCT = sys.DRAWITEMSTRUCT;
@@ -1014,7 +975,6 @@ pub const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
 pub const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
 pub const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.palette_list");
 pub const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.scrollbar");
-pub const lifecycle_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.lifecycle");
 pub const tab_tooltip_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.tab_tooltip");
 pub const quick_select_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.quick_select");
 
@@ -1023,34 +983,13 @@ pub const palette_row_height: i32 = 36;
 /// Max rows visible at once; beyond this, mouse wheel scrolls.
 const palette_max_visible_rows: usize = 7;
 pub const default_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
-const quick_terminal_title = quick_terminal_host.quick_terminal_title;
 pub const prompt_label_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
-/// Style for the confirm prompt's title and body STATICs.
-///
-/// Owner-drawn rather than a plain text STATIC so both renderers of those
-/// two lines stay one function: `WM_DRAWITEM` runs the same
-/// `gdi.drawTextWz` call with the same `DrawText` flags chrome paint uses
-/// for the fallback. A stock STATIC would have to re-derive the vertical
-/// position, and `SS_CENTERIMAGE` rounds its half-leading up where
-/// `DT_VCENTER` truncates, which measurably moved the body line by a
-/// pixel at 150% DPI.
-const prompt_text_static_style: u32 = c.SS_OWNERDRAW;
 /// `DrawText` flags shared by the chrome paint fallback and the
 /// owner-draw handler for the confirm prompt lines.
 pub const confirm_prompt_text_format: u32 = c.DT_LEFT | c.DT_VCENTER |
     c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS;
 const prompt_edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
 pub const prompt_button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
-const prompt_ok_label = std.unicode.utf8ToUtf16LeStringLiteral("OK");
-const prompt_cancel_label = std.unicode.utf8ToUtf16LeStringLiteral("Cancel");
-pub const scrollbar_transparent_key = rgb(0xFF, 0x00, 0xFF);
-const host_overlay_command_palette_label_utf8 = "Command:";
-const host_overlay_profile_label_utf8 = "Profile:";
-const host_overlay_surface_title_label_utf8 = "Window title:";
-const host_overlay_tab_title_label_utf8 = "Tab title:";
-const host_overlay_command_palette_label = std.unicode.utf8ToUtf16LeStringLiteral("Command:");
-pub const host_tab_new_button_label = std.unicode.utf8ToUtf16LeStringLiteral("+");
-pub const host_tab_dropdown_button_label = std.unicode.utf8ToUtf16LeStringLiteral("\u{25BE}"); // dropdown chevron
 const titlebar_icon_font_fluent = std.unicode.utf8ToUtf16LeStringLiteral("Segoe Fluent Icons");
 const titlebar_icon_font_mdl2 = std.unicode.utf8ToUtf16LeStringLiteral("Segoe MDL2 Assets");
 const titlebar_glyph_minimize = std.unicode.utf8ToUtf16LeStringLiteral("\u{E921}");
@@ -1059,9 +998,6 @@ const titlebar_glyph_restore = std.unicode.utf8ToUtf16LeStringLiteral("\u{E923}"
 const titlebar_glyph_close = std.unicode.utf8ToUtf16LeStringLiteral("\u{E8BB}");
 const titlebar_glyph_new_tab = std.unicode.utf8ToUtf16LeStringLiteral("\u{E710}");
 const titlebar_glyph_dropdown = std.unicode.utf8ToUtf16LeStringLiteral("\u{E70D}");
-pub const host_banner_inspector_inactive = labels.host_banner_inspector_inactive;
-pub const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
-pub const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
 
 pub const GlobalHotkeySpec = win32_input.GlobalHotkeySpec;
 pub const RegisteredGlobalHotkey = win32_input.RegisteredGlobalHotkey;
@@ -1075,8 +1011,6 @@ pub fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_
 }
 
 pub const startupHostWindowStyle = window_state.startupHostWindowStyle;
-
-const createdHostWindowStyleCorrection = window_state.createdHostWindowStyleCorrection;
 
 pub const restoreRequestedHostWindowStyle = window_state.restoreRequestedHostWindowStyle;
 
@@ -1338,21 +1272,9 @@ const effectiveHostWindowStyle = window_state.effectiveHostWindowStyle;
 
 pub const sharesHostWindowState = window_state.sharesHostWindowState;
 
-const sizeLimitEquals = window_state.sizeLimitEquals;
-
 pub fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
 }
-
-const shouldResizeHostForInitialSize = window_state.shouldResizeHostForInitialSize;
-
-const sharedHostWindowFrameStateEquals = window_state.sharedHostWindowFrameStateEquals;
-
-const sharedHostWindowTopmostEquals = window_state.sharedHostWindowTopmostEquals;
-
-const sharedHostWindowOpacityEquals = window_state.sharedHostWindowOpacityEquals;
-
-const shouldPropagateSharedHostWindowState = window_state.shouldPropagateSharedHostWindowState;
 
 pub const shouldApplyConfigDecorations = window_state.shouldApplyConfigDecorations;
 
@@ -1798,13 +1720,6 @@ pub const UpdateNotice = struct {
     }
 };
 
-/// How often a running process asks the automatic check to run again. The
-/// check's 24 hour throttle (`updatepkg.throttle_seconds`) decides whether a
-/// request is actually made, so this only has to be shorter than the throttle
-/// by a margin: six hours means a release is noticed within a day of the
-/// throttle expiring, and an early tick just reads the saved state.
-pub const update_recheck_interval_ms: u32 = 6 * 60 * 60 * 1000;
-
 pub const UpdateCheckRequest = struct {
     alloc: Allocator,
     delivery: *AppDelivery,
@@ -1942,7 +1857,6 @@ const recovery_session_set_aside_banner_w = blk: {
 };
 /// Suffix for a saved session that the last launches died restoring.
 const recovery_set_aside_suffix = ".restore-failed";
-const restore_ended_suffix = session_module.restore_ended_suffix;
 const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
 
 /// Filename infix for a startup-ledger record whose write already failed and
@@ -2108,10 +2022,6 @@ pub fn recoverySafeModeNotice(decision: win32_recovery.Decision, session_set_asi
     if (decision == .normal) return null;
     return if (session_set_aside) recovery_session_set_aside_banner_w else recovery_safe_mode_banner_w;
 }
-
-/// How many message-loop ticks may attempt the ready-marker write before the
-/// launch is given up as unresolved.
-pub const recovery_ready_persist_attempts: u8 = 3;
 
 /// Delay before a retried ready-marker write. `GetMessageW` blocks, so an
 /// otherwise idle app produces no further ticks on its own and each remaining
@@ -3020,16 +2930,12 @@ pub fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []cons
     try win32_session_persistence.writeFileAtomic(path, temporary_path, data);
 }
 
-const sessionStatePolicyAllows = session_module.sessionStatePolicyAllows;
-
 pub fn layoutActionResult(success: bool) !bool {
     if (!success) return error.LayoutActionFailed;
     return true;
 }
 
 const SessionRestoreTransaction = session_module.SessionRestoreTransaction;
-
-const sessionRestorePolicyAllows = session_module.sessionRestorePolicyAllows;
 
 /// A profile named on the command line (`--default-profile=<reference>`,
 /// which a jump-list link to a user profile carries) makes an explicit
@@ -3040,12 +2946,6 @@ fn startupNamesProfile(config: *const configpkg.Config) bool {
     const reference = config._default_profile_cli orelse return false;
     return reference.len > 0;
 }
-
-const SessionSaveKind = session_module.SessionSaveKind;
-
-const session_checkpoint_delay_ms = session_module.session_checkpoint_delay_ms;
-
-pub const shell_audit_warn_interval_ms: u64 = 60 * std.time.ms_per_s;
 
 pub const SessionOwnerLock = session_module.SessionOwnerLock;
 
@@ -3126,10 +3026,6 @@ pub fn jumpListRebuildThreadMain(delivery: *AppDelivery, job: *win32_jump_list.R
     var payload: AppDeliveryPayload = .{ .jump_list = job };
     if (!delivery.post(c.WM_WINHOSTTY_JUMP_LIST, payload)) payload.deinit();
 }
-
-/// Longer than a discovery can take when it works (two 1.5 s wsl.exe
-/// timeouts and the SSH config read budget).
-pub const profile_discovery_abandon_ms: u64 = 10 * std.time.ms_per_s;
 
 fn testProfileList(alloc: Allocator, keys: []const []const u8) ![]windows_shell.Profile {
     var source: [4]windows_shell.Profile = undefined;
@@ -3933,11 +3829,6 @@ pub fn toastActivatorSink(delivery: *AppDelivery) win32_toast_activator.Sink {
     };
 }
 
-/// How long a cold `-ToastActivated` start waits for COM's `Activate`. COM
-/// calls it as soon as the class object is registered; the wait only bounds
-/// a start that never gets the call (run by hand, or COM gave up).
-pub const cold_toast_activation_wait_ms = 5000;
-
 /// Dispatch this thread's messages until `capture` has its call or
 /// `timeout_ms` has passed, and say whether the call came. COM hands an
 /// incoming call to this STA as a message, so the dispatch is what runs
@@ -4081,8 +3972,6 @@ pub const TitlebarGlyphKind = enum {
     new_tab,
     dropdown,
 };
-
-pub const titlebar_hover_fade_ms: u16 = 150;
 
 const TitlebarButtonVisual = struct {
     bg: ?u32 = null,
@@ -4653,8 +4542,6 @@ pub const Tab = struct {
 
 pub const ChromeTextDirty = win32_chrome_state.TextDirty;
 pub const ChromeRepaintMask = win32_chrome_state.RepaintMask;
-const LayoutChildPaintPlan = win32_chrome_state.LayoutChildPaintPlan;
-
 pub const QuickTerminalAnimation = quick_terminal_host.QuickTerminalAnimation;
 
 pub const Host = host_module.Host;
@@ -4836,18 +4723,6 @@ pub const RestoredTerminalUndoState = struct {
 };
 
 const undo_snapshot_magic = "WUH3";
-
-const sessionScrollbackLineAllowed = session_module.sessionScrollbackLineAllowed;
-
-const captureTerminalScrollbackSnapshotAlloc = session_module.captureTerminalScrollbackSnapshotAlloc;
-
-const printSessionSnapshotLine = session_module.printSessionSnapshotLine;
-
-const formatSessionSnapshotMarker = session_module.formatSessionSnapshotMarker;
-
-const terminalScreenIsUnpainted = session_module.terminalScreenIsUnpainted;
-
-const restoreTerminalScrollbackSnapshot = session_module.restoreTerminalScrollbackSnapshot;
 
 fn terminalUndoTrailingBlankRows(terminal_state: *const terminal.Terminal) usize {
     var rows: usize = 0;
@@ -5461,32 +5336,6 @@ pub fn surfaceLayoutRuntimeSync(visibility_changed: bool, pane_rect_changed: boo
         .core_size_sync = pane_rect_changed,
     };
 }
-
-const SurfaceRepaintRequestMode = surface_presentation.SurfaceRepaintRequestMode;
-
-const ResizeSettleSurfaceAction = surface_presentation.ResizeSettleSurfaceAction;
-
-const RendererHealthSurfaceAction = surface_presentation.RendererHealthSurfaceAction;
-
-const resize_settle_deadline_ms = surface_presentation.resize_settle_deadline_ms;
-
-const resizeSettleActive = surface_presentation.resizeSettleActive;
-
-const surfaceRepaintRequestMode = surface_presentation.surfaceRepaintRequestMode;
-
-const rendererRepaintRequestMode = surface_presentation.rendererRepaintRequestMode;
-
-const rendererTickRepaintMode = surface_presentation.rendererTickRepaintMode;
-
-const surfaceSizeChangeRepaintMode = surface_presentation.surfaceSizeChangeRepaintMode;
-
-const surfaceSizeChangePrimesRenderer = surface_presentation.surfaceSizeChangePrimesRenderer;
-
-const resizeSettleSurfaceAction = surface_presentation.resizeSettleSurfaceAction;
-
-const rendererHealthSurfaceAction = surface_presentation.rendererHealthSurfaceAction;
-
-const surfacePixelSizeChanged = surface_presentation.surfacePixelSizeChanged;
 
 fn scaleInitialClientSize(size: apprt.SurfaceSize, scale: apprt.ContentScale) apprt.SurfaceSize {
     return .{
@@ -6811,9 +6660,6 @@ pub fn tabStatusHeadline(tab: *const Tab) ?TabProgramStatus {
     return best;
 }
 
-/// An even status key cannot collide with a program status's odd hash.
-pub const tab_bell_status_key: u64 = 2;
-
 /// What a screen reader is told about a tab's status, as a hash that
 /// progress alone doesn't change; never 0, which stands for no status.
 pub fn tabStatusKey(status: TabProgramStatus) u64 {
@@ -6879,7 +6725,7 @@ pub fn closeOtherTabsConfirmAccept(userdata: ?*anyopaque) void {
 pub fn closeThisTabConfirmAccept(userdata: ?*anyopaque) void {
     const surface: *Surface = @ptrCast(@alignCast(userdata orelse return));
     const app = surface.app;
-    const found = app.registry.findTabForSurface(surface) orelse return;
+    const found = Host.findTabForSurface(surface) orelse return;
     _ = app.closeTabUndoable(found.host, found.index) catch |err| {
         log.warn("close tab after confirm failed err={}", .{err});
     };
@@ -7104,12 +6950,6 @@ pub fn surfaceDropPayloadCallback(ctx: *anyopaque, payload: []const u8) void {
     };
 }
 
-const QuickTerminalGeometrySize = quick_terminal_host.QuickTerminalGeometrySize;
-
-const quickTerminalSizeForGeometry = quick_terminal_host.quickTerminalSizeForGeometry;
-
-const sizeToGeometry = quick_terminal_host.sizeToGeometry;
-
 fn rectEqual(a: RECT, b: RECT) bool {
     return a.left == b.left and
         a.top == b.top and
@@ -7121,47 +6961,15 @@ pub const setQuickTerminalRect = quick_terminal_host.setQuickTerminalRect;
 
 pub const runOnHiddenDesktop = test_support.runOnHiddenDesktop;
 
-const QuickTerminalToggleFixture = test_support.QuickTerminalToggleFixture;
-
 pub const FullscreenMonitor = window_state.FullscreenMonitor;
 
-const fullscreenRestoreRect = window_state.fullscreenRestoreRect;
-
 const fitRectInWork = window_state.fitRectInWork;
-
-const cascadeStep = window_state.cascadeStep;
 
 const workspaceRectToScreen = window_state.workspaceRectToScreen;
 
 const setMinimizedNormalRect = window_state.setMinimizedNormalRect;
 
-const newWindowSetPosFlags = window_state.newWindowSetPosFlags;
-
-const WindowSize = window_state.WindowSize;
-
-const rectWithSize = window_state.rectWithSize;
-
-const NewWindowPlacement = window_state.NewWindowPlacement;
-
-const newWindowPlacement = window_state.newWindowPlacement;
-
-const cascadedRect = window_state.cascadedRect;
-
 const monitorInfo = quick_terminal_host.monitorInfo;
-
-const PrimaryMonitorSearch = quick_terminal_host.PrimaryMonitorSearch;
-
-const primaryMonitorEnumProc = quick_terminal_host.primaryMonitorEnumProc;
-
-const primaryMonitor = quick_terminal_host.primaryMonitor;
-
-const AllMonitorsSearch = quick_terminal_host.AllMonitorsSearch;
-
-const isVisibleMonitorInfo = quick_terminal_host.isVisibleMonitorInfo;
-
-const allMonitorsEnumProc = quick_terminal_host.allMonitorsEnumProc;
-
-const allMonitorsInfo = quick_terminal_host.allMonitorsInfo;
 
 const restoresMaximized = window_state.restoresMaximized;
 
@@ -7430,15 +7238,6 @@ fn cliClassArgs(argv: []const []const u8) ?[]const u8 {
 /// 1023 characters and the NUL, and returns E_INVALIDARG for 1024 (measured
 /// on build 26300).
 pub const restart_max_cmd_line = 1024;
-/// RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT: no restart after a
-/// crash or a hang (Windows Error Reporting), nor after a reboot an update
-/// forces. Nothing in the flags covers a sign-out, a reboot the user chose or
-/// Windows' option to restart apps at sign-in: the registration lasts only
-/// from an agreeing Restart Manager query until the process ends or the close
-/// is called off, and a sign-out, shutdown or reboot takes it back
-/// (`App.onQueryEndSession`, `App.onEndSession`). Not RESTART_NO_PATCH, which
-/// is the flag that stops an installer's restart.
-pub const restart_flags: DWORD = 0x1 | 0x2 | 0x8;
 
 /// The arguments Setup's restart replays (`App.registerInstallerRestart`):
 /// the launch's last `--config-file`, as the absolute path `App.init` resolved
@@ -9761,7 +9560,6 @@ pub const inspectorBannerStateChanged = labels.inspectorBannerStateChanged;
 
 pub const windowTitleSyncChanged = labels.windowTitleSyncChanged;
 
-const bindingActionsToggleCommandPalette = labels.bindingActionsToggleCommandPalette;
 pub const remapWin32KeyEvent = labels.remapWin32KeyEvent;
 pub const keyEventTogglesCommandPalette = labels.keyEventTogglesCommandPalette;
 
@@ -9772,8 +9570,6 @@ const quickSlotShortcutProfileIndex = labels.quickSlotShortcutProfileIndex;
 const quickSlotPinOrdinalFromKey = labels.quickSlotPinOrdinalFromKey;
 
 const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
-
-const ProfileSelection = labels.ProfileSelection;
 
 const startsWithIgnoreCase = labels.startsWithIgnoreCase;
 
@@ -9870,8 +9666,6 @@ pub fn listProfilesForConfig(
     return try list(alloc, config.@"ssh-config-hosts", &user);
 }
 
-const isSessionRestorableProfile = session_module.isSessionRestorableProfile;
-
 pub const preferredProfileIndex = labels.preferredProfileIndex;
 
 pub const resolveWindowBaseTitle = labels.resolveWindowBaseTitle;
@@ -9946,12 +9740,7 @@ pub const shouldShowPaneCount = labels.shouldShowPaneCount;
 
 pub const visibleTabRange = labels.visibleTabRange;
 
-const buildTabButtonLabel = labels.buildTabButtonLabel;
-
 const buildSearchBarResultsText = labels.buildSearchBarResultsText;
-
-const SearchBarResultsVisual = labels.SearchBarResultsVisual;
-const SearchBarToolbarVisual = labels.SearchBarToolbarVisual;
 
 const SearchBarButtonRole = labels.SearchBarButtonRole;
 
@@ -9998,7 +9787,6 @@ const OverlayConfirmText = labels.ConfirmText;
 const OverlayConfirmPreview = labels.ConfirmPreview;
 const buildConfirmPreview = labels.buildConfirmPreview;
 const buildConfirmPreviewCaption = labels.buildConfirmPreviewCaption;
-const confirm_preview_limit = labels.confirm_preview_limit;
 const buildOverlayPaintLabelText = labels.buildOverlayPaintLabelText;
 
 const buildOverlayFeedbackText = labels.buildOverlayFeedbackText;
@@ -10113,8 +9901,6 @@ const buildCommandPaletteOverlayLabel = labels.buildCommandPaletteOverlayLabel;
 const buildCommandPaletteFeedbackText = labels.buildCommandPaletteFeedbackText;
 
 const paletteCompletionText = labels.paletteCompletionText;
-
-const commandPaletteBannerText = labels.commandPaletteBannerText;
 
 fn readWindowTextUtf8Alloc(alloc: Allocator, hwnd: HWND) ![:0]u8 {
     const len_w = sys.GetWindowTextLengthW(hwnd);
@@ -20018,7 +19804,7 @@ test "win32 a quit tears down every pane of every tab, hidden tabs and splits to
             try std.testing.expect(host.activateTabIndex(2));
             _ = try app.createWindowSurface(&app.config, default_title, .{
                 .host_id = front.host_id,
-                .tab_id = app.registry.findTabForSurface(split).?.tab.id,
+                .tab_id = Host.findTabForSurface(split).?.tab.id,
                 .clone_state_from = split,
             });
             try std.testing.expect(host.activateTabIndex(0));
@@ -20049,8 +19835,6 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(!shouldShowSurfaceImmediately(1));
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
 }
-
-const testHostExStyle = test_support.testHostExStyle;
 
 const testHostIsLayered = test_support.testHostIsLayered;
 
@@ -20733,8 +20517,7 @@ test "automation-window-list win32 json includes host tab and pane ids" {
             };
         }
     }.query;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 17;
@@ -20880,8 +20663,7 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
             return null;
         }
     }.query;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var empty_host: Host = undefined;
     empty_host.id = 16;
@@ -22007,7 +21789,7 @@ test "win32 default-profile runs where nothing chose a launch, and only there" {
             const tab_host = hook_app.registry.findHostById(id) orelse return surface;
             try hook_app.registry.addWindow(hook_app.core_app.alloc, surface);
             if (opts.tab_id != null) {
-                const found = hook_app.registry.findTabForSurface(@constCast(opts.clone_state_from.?)).?;
+                const found = Host.findTabForSurface(@constCast(opts.clone_state_from.?)).?;
                 var inserted = try SplitTreeSurface.init(hook_app.core_app.alloc, surface);
                 defer inserted.deinit();
                 const tree = try found.tab.tree.split(hook_app.core_app.alloc, found.tab.focused, opts.split_direction, 0.5, &inserted);
@@ -24452,8 +24234,7 @@ test "win32 resolveToastActivationSurface prefers exact surface id" {
     var app: App = undefined;
     app.registry.windows = .empty;
     app.registry.hosts = .empty;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var primary: Surface = undefined;
     primary.core_surface = undefined;
@@ -24481,8 +24262,7 @@ test "win32 resolveToastActivationSurface finds split pane by exact surface id" 
     var app: App = undefined;
     app.registry.windows = .empty;
     app.registry.hosts = .empty;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 66;
@@ -24539,8 +24319,7 @@ test "win32 resolveToastActivationSurface falls back to primary surface" {
     var app: App = undefined;
     app.registry.windows = .empty;
     app.registry.hosts = .empty;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 77;
@@ -24576,8 +24355,7 @@ test "win32 resolveToastActivationSurface prefers requested host tab when surfac
     var app: App = undefined;
     app.registry.windows = .empty;
     app.registry.hosts = .empty;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 88;
@@ -24652,8 +24430,7 @@ test "launch string round-trips pid; a foreign pid only presents" {
     var app: App = undefined;
     app.registry.windows = .empty;
     app.registry.hosts = .empty;
-    defer app.registry.windows.deinit(std.testing.allocator);
-    defer app.registry.hosts.deinit(std.testing.allocator);
+    defer app.registry.deinit(std.testing.allocator);
 
     var host: Host = undefined;
     host.id = 93;

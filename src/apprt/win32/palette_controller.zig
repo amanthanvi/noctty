@@ -11,8 +11,6 @@ const LRESULT = runtime.LRESULT;
 const PAINTSTRUCT = runtime.PAINTSTRUCT;
 const PaletteCatalog = runtime.PaletteCatalog;
 const PaletteCompletion = runtime.PaletteCompletion;
-const PaletteItem = runtime.PaletteItem;
-const PalettePayload = runtime.PalettePayload;
 const PalettePresentation = runtime.PalettePresentation;
 const PaletteRanked = runtime.PaletteRanked;
 const PaletteSnapshot = runtime.PaletteSnapshot;
@@ -33,7 +31,6 @@ const overlayEditText = runtime.overlayEditText;
 const ownedStringEquals = runtime.ownedStringEquals;
 const paint_text = runtime.paint_text;
 const paletteCompletionText = runtime.paletteCompletionText;
-const palette_action_capacity = runtime.palette_action_capacity;
 const palette_catalog_label_bytes = runtime.palette_catalog_label_bytes;
 const palette_list_class_name = runtime.palette_list_class_name;
 const palette_max_visible_rows = runtime.palette_max_visible_rows;
@@ -52,12 +49,16 @@ const win32_palette = runtime.win32_palette;
 const win32_settings = runtime.win32_settings;
 const win32_uia = runtime.win32_uia;
 const windowData = runtime.windowData;
+const PaletteItem = test_runtime.PaletteItem;
+const PalettePayload = test_runtime.PalettePayload;
 const test_runtime = if (@import("builtin").is_test) win32.palette_controller_test_runtime else struct {};
 const BannerTestWindow = test_runtime.BannerTestWindow;
 const CoreApp = test_runtime.CoreApp;
 const TestSession = test_runtime.TestSession;
 const builtin = test_runtime.builtin;
 const runOnPrivateDesktop = test_runtime.runOnPrivateDesktop;
+
+const palette_action_capacity: usize = 384;
 
 const PaletteListTransition = struct {
     relayout: bool,
@@ -1465,7 +1466,7 @@ pub const HostControls = struct {
                 self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
                 return;
             };
-            const target_found = self.app.registry.findTabForSurface(target) orelse {
+            const target_found = Host.findTabForSurface(target) orelse {
                 self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
                 return;
             };

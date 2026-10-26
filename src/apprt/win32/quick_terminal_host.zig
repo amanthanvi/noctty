@@ -409,7 +409,7 @@ test "win32 DPI suggestions preserve a quick terminal tween but resize ordinary 
     try std.testing.expect(sys.IsWindowVisible(hwnd) == 0);
 }
 
-pub const QuickTerminalCreateCounter = struct {
+const QuickTerminalCreateCounter = struct {
     var calls: usize = 0;
     var host_id: ?u32 = null;
 
@@ -449,7 +449,7 @@ test "win32 toggle_quick_terminal follows its host after the first pane is gone"
 
 /// Stands in for the tab `toggleQuickTerminal` opens in an empty quick
 /// terminal host: `fixture.fresh`, inserted as the host's only tab.
-pub const QuickTerminalFreshTab = struct {
+const QuickTerminalFreshTab = struct {
     var fixture: *QuickTerminalToggleFixture = undefined;
     var calls: usize = 0;
     var host_id: ?u32 = null;
@@ -530,7 +530,7 @@ test "win32 toggle_quick_terminal opens a fresh floating tab instead of showing 
 
 /// What a quick terminal toggle hands `createWindowSurface`, for the
 /// `default-profile` test: the program and the profile's variable.
-pub const QuickTerminalDefaultProfile = struct {
+const QuickTerminalDefaultProfile = struct {
     /// Copies: the config is freed when the toggle returns.
     var arena: std.heap.ArenaAllocator = undefined;
     var program: ?[]const u8 = null;

@@ -414,8 +414,7 @@ pub fn Fixtures(comptime runtime: anytype) type {
                     app.shell_runtime.deinit();
                     runtime.appDropSettingsPreview(app);
                     app.config.deinit();
-                    app.registry.hosts.deinit(self.allocator);
-                    app.registry.windows.deinit(self.allocator);
+                    app.registry.deinit(self.allocator);
                     app.toast_removals.deinit(self.allocator);
                     runtime.appDiscardDeferredOpens(app);
                 }
