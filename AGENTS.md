@@ -157,9 +157,10 @@ that govern each symbol you change, or that none does.
   versus the bundled `conpty.dll`/`OpenConsole.exe`
   (`scripts/stage-conpty-redist.ps1`), what ConPTY's buffer holds after a
   resize, minimize, clear or undo and the column reflow that has to match it
-  (`Screen.resize`, `src/terminal/resize_replay.zig`), the Ctrl+C-ignore
-  attribute hosted shells inherit (`process_shared.enableGuiChildCtrlC` in
-  `src/main_ghostty.zig`).
+  (`Screen.resize`, the replay tests in `src/terminal/resize_replay.zig`, the
+  sync harness `test/windows/interactive-win11-conpty-sync.ps1`), the
+  Ctrl+C-ignore attribute hosted shells inherit
+  (`process_shared.enableGuiChildCtrlC` in `src/main_ghostty.zig`).
 - [shell-integration.md](docs/agents/log/shell-integration.md): scripts under
   `src/shell-integration/` (PowerShell `integration.ps1`, cmd/Clink, Git
   Bash's `ghostty.bash`) and their injection (`termio/shell_integration.zig`
@@ -193,13 +194,14 @@ that govern each symbol you change, or that none does.
   `WM_NCCALCSIZE`/`WM_NCHITTEST` (`win32_nc_layout.zig`), integrated titlebar
   and caption buttons, `window-decoration = none`, resize bands, maximize,
   fullscreen and restore placement (the `maximize`/`fullscreen` keys at
-  window start: `Surface.applyWindowStart`; what a session saves of a
-  fullscreen window: `sessionWindowPlacementOn`, `restoreSessionWindow`),
-  what a new window copies from its source and which forwarded keys it keeps
-  (`inheritWindowStateFrom`, `WindowKeeps`), `WM_DPICHANGED` and mixed-DPI
-  moves,
-  `window-width`/`window-height`, `background-opacity` and DWM backdrop, the
-  window menu, the quick terminal (`win32_quick_terminal.zig`).
+  window start: `Surface.applyWindowStart`; what a session saves and restores
+  of a fullscreen window: `WindowState.fullscreen` and `fullscreen_maximized`
+  in `win32_session_state.zig`, `sessionWindowPlacementOn`,
+  `restoreSessionWindow`), what a new window copies from its source and which
+  forwarded keys it keeps (`inheritWindowStateFrom`, `WindowKeeps`),
+  `WM_DPICHANGED` and mixed-DPI moves, `window-width`/`window-height`,
+  `background-opacity` and DWM backdrop, the window menu, the quick terminal
+  (`win32_quick_terminal.zig`).
 - [chrome-tabs-paint.md](docs/agents/log/chrome-tabs-paint.md): tab buttons
   (`tabButtonProc`, `drawButton`, labels, tooltips, close X, underline,
   `win32_tab_visual.zig`), `window-show-tab-bar`, chrome theme and system
@@ -241,7 +243,8 @@ that govern each symbol you change, or that none does.
   `cmd.exe /D`, `CreateProcessW` name resolution, Git Bash discovery, WSL
   (`wsl_env.zig`, the terminfo probe and its cache, `TERM`), the terminfo
   install (`win32_terminfo.zig`), `noctty +list-profiles`
-  (`src/cli/list_profiles.zig`), what a log line may print of a command, an
+  (`src/cli/list_profiles.zig`, which applies the system color scheme through
+  `os/color_scheme.zig`), what a log line may print of a command, an
   argument, an environment value or a directory (`os/redact.zig`,
   `Command.redacted()`); path safety (`os.path.isNetworkOrDevicePath`,
   `OBJ_DONT_REPARSE`) for every program-reported path before it is opened
@@ -314,8 +317,8 @@ that govern each symbol you change, or that none does.
 - [test-harnesses.md](docs/agents/log/test-harnesses.md): writing or running
   `test/windows/` harnesses (hidden desktops, the foreground, sandboxes, the
   interactive composite, the flagship contracts, the renderer parity harness
-  `test/windows/renderer/Invoke-RendererParity.ps1`), CI test steps, the Zig test
-  runner's probe children and thread tests (`src/pty_transport_probe.zig`,
+  `test/windows/renderer/Invoke-RendererParity.ps1`), CI test steps, the Zig
+  test runner's probe children and thread tests (`src/pty_transport_probe.zig`,
   `std.Progress.lockStdErr`, the search-thread tests in
   `src/terminal/search/Thread.zig`), PSReadLine history isolation
   (`scripts/windows-harness-history.ps1`, `--command=cmd.exe` pins), and a
