@@ -4141,8 +4141,9 @@ pub const SettingsWindow = struct {
         const viewport = self.viewport orelse return;
         if (IsChild(viewport, focused) == 0) return;
         const active = self.activeFormRows();
+        // Field rows hold Reset buttons; the display rows after them do not.
         const stays = for (0..settings_clipped_control_count) |index| {
-            if (focused == self.controlHwnd(index) or focused == self.reset_buttons[index]) break active.controls[index];
+            if (focused == self.controlHwnd(index) or (index < form_field_count and focused == self.reset_buttons[index])) break active.controls[index];
         } else true;
         if (!stays) if (self.edit_search) |search| {
             _ = SetFocus(search);
@@ -11390,6 +11391,28 @@ test "settings a search pass draws the form again when it is done, and leaves no
             try std.testing.expect(sys.IsWindowVisible(reset) != 0);
             _ = SetFocus(reset);
             typeSearch(settings, "font");
+            try std.testing.expectEqual(settings.edit_search.?, GetFocus().?);
+        }
+    }.body);
+}
+
+test "settings a search changed while a button row has the focus keeps it there, or gives it to the search field" {
+    try dialog_test.onHiddenDesktop(struct {
+        fn body() !void {
+            const fixture = try dialog_test.Fixture.start();
+            defer fixture.finish();
+            const settings = &fixture.settings;
+            // Advanced's one row is a button, a display row after every field
+            // row, so it has no Reset button for the focus check to ask about.
+            settings.setActiveSection(.advanced);
+            const button = settings.fields.btn_open_editor.?;
+            typeSearch(settings, "editor");
+            try std.testing.expect(sys.IsWindowVisible(button) != 0);
+            _ = SetFocus(button);
+            typeSearch(settings, "raw");
+            try std.testing.expectEqual(button, GetFocus().?);
+            typeSearch(settings, "padding");
+            try std.testing.expect(sys.IsWindowVisible(button) == 0);
             try std.testing.expectEqual(settings.edit_search.?, GetFocus().?);
         }
     }.body);
