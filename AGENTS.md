@@ -98,6 +98,13 @@ reading step under [Self-Correction Log](#self-correction-log).
   app-lifecycle.md: 2026-10-09 minidump;
   accessibility.md: 2026-04-16 VARIANT.)
 
+## Logging
+
+- Never write a command, its arguments, an environment value or a working
+  directory into a log line: log its kind and size with `src/os/redact.zig`
+  (`bytes`, `optionalBytes`, `argv`) or `Command.redacted()`.
+  (launch-and-paths.md: 2026-10-25 LIST-PROFILES, trap (2).)
+
 ## libghostty-vt
 
 - Build: `zig build -Demit-lib-vt`
