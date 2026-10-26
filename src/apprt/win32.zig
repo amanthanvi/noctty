@@ -181,7 +181,6 @@ pub const chrome_scene_runtime = .{
     .searchBarToolbarVisual = searchBarToolbarVisual,
     .std = std,
     .sys = sys,
-    .tabAccent = tabAccent,
     .textOutWz = textOutWz,
     .themeSurface = themeSurface,
     .titlebarButtonVisual = titlebarButtonVisual,
@@ -702,7 +701,6 @@ pub const HostOverlayMode = win32_theme.HostOverlayMode;
 pub const darkTheme = win32_theme.darkTheme;
 pub const lightTheme = win32_theme.lightTheme;
 pub const adjustColor = win32_theme.adjustColor;
-pub const tabAccent = win32_theme.tabAccent;
 pub const buttonColorsFromTheme = win32_theme.buttonColorsFromTheme;
 const overlayAccentColor = win32_theme.overlayAccentColor;
 const overlayEditBorderColor = win32_theme.overlayEditBorderColor;
@@ -739,7 +737,6 @@ pub const drawRoundedRect = gdi.drawRoundedRect;
 const paintRectVisible = gdi.paintRectVisible;
 
 const ThemeSurface = enum {
-    tab_accent,
     caption_cluster_bg,
     caption_cluster_border,
     overlay_panel_bg,
@@ -751,7 +748,6 @@ const ThemeSurface = enum {
 
 pub fn themeSurface(theme: *const ThemeColors, surface: ThemeSurface) u32 {
     return switch (surface) {
-        .tab_accent => tabAccentStrip(theme),
         .caption_cluster_bg => if (theme.is_dark)
             adjustColor(theme.chrome_bg, 8, 8, 10)
         else
@@ -5560,30 +5556,6 @@ pub fn readDynamicScrollbars(default_value: bool) bool {
     return data != 0;
 }
 
-/// Read the current Windows system accent colour from
-/// `HKCU\Software\Microsoft\Windows\DWM\AccentColor`. DWM stores it as
-/// a DWORD in 0xAABBGGRR order (alpha in the high byte). We discard
-/// the alpha and return a COLORREF (0x00BBGGRR).
-///
-/// Returns null if the key is unreadable — callers then skip the
-/// accent-follow blend and fall back to the hardcoded overlay accent.
-fn resolveSystemAccentColor() ?u32 {
-    const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\DWM");
-    const value_name = std.unicode.utf8ToUtf16LeStringLiteral("AccentColor");
-    var hkey: sys.HKEY = undefined;
-    if (sys.RegOpenKeyExW(@ptrFromInt(c.HKEY_CURRENT_USER), subkey, 0, c.KEY_READ, &hkey) != c.ERROR_SUCCESS) return null;
-    defer _ = sys.RegCloseKey(hkey);
-
-    var data: u32 = 0;
-    var data_size: DWORD = @sizeOf(u32);
-    var reg_type: DWORD = 0;
-    if (sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != c.ERROR_SUCCESS) return null;
-    if (reg_type != c.REG_DWORD or data_size != @sizeOf(u32)) return null;
-
-    // Drop alpha; keep 0x00BBGGRR.
-    return data & 0x00FFFFFF;
-}
-
 pub fn resolveTheme(config: *const configpkg.Config) ThemeColors {
     if (isHighContrastActive()) return highContrastThemeFromSysColors();
     const theme = switch (config.@"window-theme") {
@@ -5593,11 +5565,7 @@ pub fn resolveTheme(config: *const configpkg.Config) ThemeColors {
         .auto => if (isSystemDarkMode()) darkTheme() else lightTheme(),
         .ghostty => darkTheme(),
     };
-    const follow = config.@"accent-follow-system";
-    return withSplitDividerColor(
-        withSystemTabAccent(theme, follow, if (follow) resolveSystemAccentColor() else null),
-        config.@"split-divider-color",
-    );
+    return withSplitDividerColor(theme, config.@"split-divider-color");
 }
 
 /// `split-divider-color` recolors the gap between split panes; unset, the
@@ -5621,70 +5589,10 @@ test "split-divider-color recolors the pane gap" {
     var config = try configpkg.Config.default(std.testing.allocator);
     defer config.deinit();
     config.@"window-theme" = .dark;
-    config.@"accent-follow-system" = false;
     config.@"split-divider-color" = .{ .r = 0x12, .g = 0x34, .b = 0x56 };
     if (!isHighContrastActive()) {
         try std.testing.expectEqual(rgb(0x12, 0x34, 0x56), resolveTheme(&config).pane_divider);
     }
-}
-
-/// DESIGN.md's floor for essential non-text indicators against the surface
-/// they sit on.
-const tab_accent_min_contrast: f64 = 3.0;
-
-/// Point the tab strip at the Windows accent when `accent-follow-system` is
-/// on and one could be read. A system accent of 0 means there is nothing to
-/// follow (see `blendSemanticAccent`), so the theme's own accent stays.
-fn withSystemTabAccent(theme: ThemeColors, follow: bool, system_accent: ?u32) ThemeColors {
-    var result = theme;
-    if (!follow) return result;
-    const accent = system_accent orelse return result;
-    if (accent == 0) return result;
-    result.tab_accent = readableTabAccent(accent, theme.chrome_bg, theme.is_dark);
-    result.system_accent = accent;
-    return result;
-}
-
-/// The active tab's border, derived from the tab accent.
-pub fn tabAccentBorder(accent: u32, is_dark: bool) u32 {
-    return if (is_dark) adjustColor(accent, -10, -6, -2) else accent;
-}
-
-/// The accent strip above a separate tab row, derived from the tab accent.
-/// Only that layout paints it, so `readableTabAccent` does not judge a
-/// followed accent by it. Where the shift would take a followed accent below
-/// `tab_accent_min_contrast`, the strip paints the accent itself, which was
-/// made to clear it against the same `chrome_bg`.
-fn tabAccentStrip(theme: *const ThemeColors) u32 {
-    const accent = tabAccent(theme);
-    const strip = if (theme.is_dark)
-        adjustColor(accent, -12, -12, -12)
-    else
-        adjustColor(accent, 18, 18, 18);
-    if (theme.tab_accent == null) return strip;
-    const background = rgbFromColorRef(theme.chrome_bg);
-    if (rgbFromColorRef(strip).contrast(background) >= tab_accent_min_contrast) return strip;
-    return accent;
-}
-
-/// The Windows accent can be anything, including a color that disappears
-/// into the tab strip, such as a dark accent on the dark theme. Keep it as
-/// chosen when what every layout paints from it (the underline and
-/// `tabAccentBorder`) already reaches `tab_accent_min_contrast` against
-/// `background`; otherwise move it toward white on a dark strip, or black on
-/// a light one, only as far as it takes.
-fn readableTabAccent(accent: u32, background: u32, is_dark: bool) u32 {
-    const toward = if (is_dark) rgb(0xFF, 0xFF, 0xFF) else rgb(0x00, 0x00, 0x00);
-    const surface = rgbFromColorRef(background);
-    var step: u32 = 0;
-    while (step <= 20) : (step += 1) {
-        const candidate = blendColorRGB(accent, toward, @as(f32, @floatFromInt(step)) / 20.0);
-        const painted = [_]u32{ candidate, tabAccentBorder(candidate, is_dark) };
-        for (painted) |color| {
-            if (rgbFromColorRef(color).contrast(surface) < tab_accent_min_contrast) break;
-        } else return candidate;
-    }
-    return toward;
 }
 
 /// One notice for a setting Win32 cannot honour, shared by startup and the
@@ -5796,15 +5704,6 @@ pub fn clientTitlebarTheme(
         result.button_disabled_bg = derived_theme.button_disabled_bg;
         result.button_disabled_border = derived_theme.button_disabled_border;
         result.button_disabled_fg = derived_theme.button_disabled_fg;
-
-        // A followed Windows accent was made readable against the theme's
-        // strip; the band paints it over this background instead. Start
-        // again from the Windows color: `tab_accent` may already have been
-        // moved for the other polarity, such as a dark accent lifted for the
-        // dark strip that was readable on a light band as chosen.
-        if (result.system_accent) |accent| {
-            result.tab_accent = readableTabAccent(accent, result.chrome_bg, result.is_dark);
-        }
     }
     if (config.@"window-titlebar-foreground" != null) {
         const foreground = titlebarTextColor(theme, config);
@@ -5814,6 +5713,59 @@ pub fn clientTitlebarTheme(
         result.button_chrome_fg = foreground;
     }
     return result;
+}
+
+/// The colors the active tab draws over `background`, its terminal's
+/// background, which it takes so it reads as part of the terminal below it
+/// (Windows Terminal's `terminalBackground` tab). Where `background` has the
+/// band's polarity this is `theme` unchanged, so a configured titlebar
+/// foreground still applies. A terminal of the other polarity, such as the
+/// default dark terminal under the light window theme, gets that polarity's
+/// label, close glyph, status badge and focus ring colors, the way
+/// `clientTitlebarTheme` does for a configured band; `theme`'s would be
+/// unreadable there (1.23:1 for the light label on `#282C34`).
+pub fn activeTabTheme(theme: *const ThemeColors, background: u32) ThemeColors {
+    var result = theme.*;
+    const is_dark = titlebarBandIsDark(rgbFromColorRef(background));
+    if (is_dark == theme.is_dark) return result;
+    const derived = if (is_dark) darkTheme() else lightTheme();
+    result.is_dark = is_dark;
+    result.text_primary = derived.text_primary;
+    result.text_secondary = derived.text_secondary;
+    result.text_disabled = derived.text_disabled;
+    result.button_chrome_fg = derived.button_chrome_fg;
+    result.accent = derived.accent;
+    result.error_fg = derived.error_fg;
+    result.button_active_focus_ring = derived.button_active_focus_ring;
+    return result;
+}
+
+test "the active tab draws over its terminal background with readable colors" {
+    const terminal_default = rgb(0x28, 0x2C, 0x34);
+    const white = rgb(0xFF, 0xFF, 0xFF);
+    const dark = darkTheme();
+    const light = lightTheme();
+    // Same polarity: the band's colors, unchanged.
+    try std.testing.expectEqualDeep(dark, activeTabTheme(&dark, terminal_default));
+    try std.testing.expectEqualDeep(light, activeTabTheme(&light, white));
+    // The default dark terminal under the light window theme, and a light
+    // terminal under the dark one, take the other palette's tokens.
+    const crossed = [_]struct { theme: ThemeColors, background: u32 }{
+        .{ .theme = light, .background = terminal_default },
+        .{ .theme = dark, .background = white },
+    };
+    for (crossed) |case| {
+        const tab = activeTabTheme(&case.theme, case.background);
+        try std.testing.expect(tab.is_dark != case.theme.is_dark);
+        const surface = rgbFromColorRef(case.background);
+        try std.testing.expect(rgbFromColorRef(tab.text_primary).contrast(surface) >= 4.5);
+        try std.testing.expect(rgbFromColorRef(tab.button_chrome_fg).contrast(surface) >= 4.5);
+        try std.testing.expect(rgbFromColorRef(tab.button_active_focus_ring).contrast(surface) >= 3.0);
+        try std.testing.expect(rgbFromColorRef(case.theme.text_primary).contrast(surface) < 3.0);
+        // What the band itself is painted with stays the band's.
+        try std.testing.expectEqual(case.theme.chrome_bg, tab.chrome_bg);
+        try std.testing.expectEqual(case.theme.chrome_border, tab.chrome_border);
+    }
 }
 
 pub fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const configpkg.Config, os_build: u32) void {
@@ -7074,7 +7026,6 @@ comptime {
     _ = win32_nc_layout.metricsDefault;
     // Tab visual-state helpers.
     _ = win32_tab_visual.CloseState;
-    _ = win32_tab_visual.UnderlineState;
     _ = win32_tab_visual.easeInOutCubic;
     _ = win32_tab_visual.closeHitRect;
 }
@@ -12013,15 +11964,6 @@ pub fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) cal
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         c.WM_THEMECHANGED, c.WM_SYSCOLORCHANGE => {
-            if (host) |v| {
-                v.app.reconfigureSystemTheme();
-            }
-            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-        },
-        // Fired by DWM when the user's accent color changes. Re-resolve
-        // the theme so any accent-derived tokens pick up the new value
-        // without requiring a config reload.
-        c.WM_DWMCOLORIZATIONCOLORCHANGED => {
             if (host) |v| {
                 v.app.reconfigureSystemTheme();
             }
@@ -19314,120 +19256,17 @@ test "win32 titlebar band polarity follows readability, not a luminance cutoff" 
     try std.testing.expectEqual(@as(u8, 3), unpacked.b);
 }
 
-test "win32 tab strip accent follows the Windows accent only when asked" {
+test "accent-follow-system no longer changes the window theme" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const dark = darkTheme();
-    const light = lightTheme();
-    const lime = rgb(45, 255, 0);
-
-    // Built-in palettes carry no tab accent, so the strip reads `accent`.
-    try std.testing.expectEqual(@as(?u32, null), dark.tab_accent);
-    try std.testing.expectEqual(dark.accent, tabAccent(&dark));
-    try std.testing.expectEqual(light.accent, tabAccent(&light));
-
-    // Opted out, nothing read, or DWM reporting no accent: the theme is
-    // returned unchanged, so the strip looks exactly as it did before.
-    try std.testing.expectEqualDeep(dark, withSystemTabAccent(dark, false, lime));
-    try std.testing.expectEqualDeep(dark, withSystemTabAccent(dark, true, null));
-    try std.testing.expectEqualDeep(dark, withSystemTabAccent(dark, true, 0));
-
-    // A readable accent is used as chosen, and only the tab accent moves.
-    const followed = withSystemTabAccent(dark, true, lime);
-    try std.testing.expectEqual(lime, tabAccent(&followed));
-    try std.testing.expectEqual(dark.accent, followed.accent);
-    try std.testing.expectEqual(dark.chrome_bg, followed.chrome_bg);
-
-    // The config default follows the system.
-    const config: configpkg.Config = .{};
-    try std.testing.expect(config.@"accent-follow-system");
-}
-
-test "win32 tab strip accent stays readable against the strip" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const dark = darkTheme();
-    const light = lightTheme();
-    const dark_bg = rgbFromColorRef(dark.chrome_bg);
-    const light_bg = rgbFromColorRef(light.chrome_bg);
-
-    // Already readable: untouched.
-    const lime = rgb(45, 255, 0);
-    try std.testing.expectEqual(lime, readableTabAccent(lime, dark.chrome_bg, true));
-
-    // A navy accent vanishes into the dark strip, so it is lifted toward
-    // white until it clears the floor, and not further than one step past.
-    const navy = rgb(0, 0, 128);
-    try std.testing.expect(rgbFromColorRef(navy).contrast(dark_bg) < tab_accent_min_contrast);
-    const lifted = readableTabAccent(navy, dark.chrome_bg, true);
-    try std.testing.expect(rgbFromColorRef(lifted).contrast(dark_bg) >= tab_accent_min_contrast);
-    try std.testing.expect(rgbFromColorRef(lifted).contrast(dark_bg) < 4.5);
-
-    // A pale accent vanishes into the light strip, so it is darkened.
-    const pale = rgb(255, 240, 150);
-    try std.testing.expect(rgbFromColorRef(pale).contrast(light_bg) < tab_accent_min_contrast);
-    const deepened = readableTabAccent(pale, light.chrome_bg, false);
-    try std.testing.expect(rgbFromColorRef(deepened).contrast(light_bg) >= tab_accent_min_contrast);
-
-    for ([_]u32{ lifted, tabAccentBorder(lifted, true) }) |painted| {
-        try std.testing.expect(rgbFromColorRef(painted).contrast(dark_bg) >= tab_accent_min_contrast);
-    }
-
-    // The strip above a separate tab row paints the followed accent, shifted.
-    const followed = withSystemTabAccent(dark, true, lime);
-    try std.testing.expectEqual(adjustColor(lime, -12, -12, -12), themeSurface(&followed, .tab_accent));
-
-    // The strip is not painted with the integrated titlebar, so it does not
-    // decide the accent: #0099BC clears the floor on the light strip as the
-    // underline and border, and is kept as chosen although its strip shift,
-    // lightened by 18, does not. Where the strip is painted, it takes the
-    // accent itself.
-    const teal = rgb(0x00, 0x99, 0xBC);
-    try std.testing.expect(rgbFromColorRef(teal).contrast(light_bg) >= tab_accent_min_contrast);
-    try std.testing.expect(rgbFromColorRef(adjustColor(teal, 18, 18, 18)).contrast(light_bg) < tab_accent_min_contrast);
-    try std.testing.expectEqual(teal, readableTabAccent(teal, light.chrome_bg, false));
-    const teal_theme = withSystemTabAccent(light, true, teal);
-    const strip = themeSurface(&teal_theme, .tab_accent);
-    try std.testing.expectEqual(teal, strip);
-    try std.testing.expect(rgbFromColorRef(strip).contrast(light_bg) >= tab_accent_min_contrast);
-
-    // The built-in accents keep their strip shift.
-    try std.testing.expectEqual(adjustColor(dark.accent, -12, -12, -12), themeSurface(&dark, .tab_accent));
-    try std.testing.expectEqual(adjustColor(light.accent, 18, 18, 18), themeSurface(&light, .tab_accent));
-}
-
-test "win32 followed tab accent is re-checked against a custom titlebar band" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const lime = rgb(45, 255, 0);
-    const followed = withSystemTabAccent(darkTheme(), true, lime);
+    // The key is still accepted (Config.zig keeps it for existing files),
+    // but nothing in the chrome follows the Windows accent any more.
     var config: configpkg.Config = .{};
-    config.@"window-theme" = .ghostty;
-    // A band in nearly the accent's own color: the accent would vanish there.
-    config.@"window-titlebar-background" = .{ .r = 40, .g = 240, .b = 10 };
-
-    const band = clientTitlebarTheme(&followed, &config, true, false);
-    const band_bg = rgbFromColorRef(band.chrome_bg);
-    const accent = tabAccent(&band);
-    try std.testing.expect(rgbFromColorRef(lime).contrast(band_bg) < tab_accent_min_contrast);
-    for ([_]u32{ accent, tabAccentBorder(accent, band.is_dark) }) |painted| {
-        try std.testing.expect(rgbFromColorRef(painted).contrast(band_bg) >= tab_accent_min_contrast);
-    }
-
-    // A dark accent is lifted for the dark strip, but a light band takes it
-    // as chosen: the band starts from the Windows color, not the lifted one.
-    const blue = rgb(0x00, 0x63, 0xB1);
-    const lifted = withSystemTabAccent(darkTheme(), true, blue);
-    try std.testing.expect(tabAccent(&lifted) != blue);
-    config.@"window-titlebar-background" = .{ .r = 0xF0, .g = 0xF0, .b = 0xF0 };
-    const light_band = clientTitlebarTheme(&lifted, &config, true, false);
-    try std.testing.expect(!light_band.is_dark);
-    try std.testing.expectEqual(blue, tabAccent(&light_band));
-
-    // Not following: the band keeps using the theme accent, untouched.
-    const plain = darkTheme();
-    const own = clientTitlebarTheme(&plain, &config, true, false);
-    try std.testing.expectEqual(@as(?u32, null), own.tab_accent);
+    config.@"window-theme" = .dark;
+    config.@"accent-follow-system" = true;
+    const following = resolveTheme(&config);
+    config.@"accent-follow-system" = false;
+    try std.testing.expectEqualDeep(following, resolveTheme(&config));
+    if (!isHighContrastActive()) try std.testing.expectEqualDeep(darkTheme(), following);
 }
 
 test "win32 titlebar colors honor ghostty overrides" {
@@ -19949,6 +19788,8 @@ fn testTabGapHost(decorated: bool) !void {
     surface.decorations_visible = decorated;
     surface.fullscreen = false;
     surface.inspector_visible = false;
+    // The background the active tab takes.
+    surface.tab_background = rgb(0x28, 0x2C, 0x34);
     try host.tabs.ensureTotalCapacity(std.testing.allocator, 1);
     host.tabs.appendAssumeCapacity(try Tab.init(std.testing.allocator, 1, &surface));
     defer {
@@ -20075,7 +19916,8 @@ fn testTabGapHost(decorated: bool) !void {
             const pixel = canvas.pixel(@divTrunc(canvas.width, 2), 0);
             if (maximized) {
                 try std.testing.expect(pixel != theme.chrome_bg);
-                if (active and !isHighContrastActive()) try std.testing.expectEqual(tabAccentBorder(tabAccent(&theme), theme.is_dark), pixel);
+                // The active tab has no border: its edge is its terminal's background.
+                if (active and !isHighContrastActive()) try std.testing.expectEqual(rgb(0x28, 0x2C, 0x34), pixel);
             } else try std.testing.expectEqual(theme.chrome_bg, pixel);
         }
         host.active_tab = 1;

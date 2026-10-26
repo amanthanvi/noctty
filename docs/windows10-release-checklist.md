@@ -213,12 +213,12 @@ theme's own colours. `background-opacity = 0.8` fades the whole window (layered
 alpha, independent of the build); `background-blur = true` changes nothing, as on
 Windows 11.
 
-**W10-13 Accent follows Windows.** Settings > Personalization > Colors, choose a
-custom accent, with `accent-follow-system` at its default. Expected: the active
-tab's underline and border take the accent (made readable against the strip) and
-change live when you pick another. With the default accent where
-`HKCU\Software\Microsoft\Windows\DWM\AccentColor` does not exist, the strip keeps
-the theme accent and nothing is logged.
+**W10-13 Active tab (Core).** Open three tabs. Expected: the active tab takes
+the terminal's background and runs on into the terminal below it, with no border,
+underline or strip above the tab row in any accent colour; its label starts with
+`* `. Picking another Windows accent (Settings > Personalization > Colors)
+changes nothing in the tab row. A config that still sets `accent-follow-system`
+loads without an error.
 
 **W10-14 High Contrast.** Turn on a High Contrast theme (Settings > Ease of
 Access), then off. Expected: chrome switches to system colours with a visible

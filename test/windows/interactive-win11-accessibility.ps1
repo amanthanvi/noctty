@@ -5498,7 +5498,6 @@ try {
                 @{ Name = 'Window padding X'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Window padding Y'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Window padding balance'; Type = [System.Windows.Automation.ControlType]::ComboBox },
-                @{ Name = 'Follow Windows accent color'; Type = [System.Windows.Automation.ControlType]::CheckBox },
                 @{ Name = 'Background blur (not supported on Windows)'; Type = [System.Windows.Automation.ControlType]::CheckBox },
                 @{ Name = 'Search settings'; Type = [System.Windows.Automation.ControlType]::Edit },
                 @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button },

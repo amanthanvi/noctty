@@ -2385,18 +2385,14 @@ keybind: Keybinds = .{},
 /// Supported in the Windows-only fork.
 @"window-theme": WindowTheme = .auto,
 
-/// Follow the Windows accent color (Settings > Personalization > Colors) in
-/// the window chrome. When `false`, the chrome keeps the built-in accent of
-/// the resolved `window-theme`.
+/// Deprecated compatibility setting retained for configuration parsing.
+/// It has no effect in this Windows-only fork.
 ///
-/// The tab strip is the first part of the chrome that follows it: the active
-/// tab's border and underline, and the accent strip above a separate tab row.
-/// The color is lightened or darkened only as far as needed to stay readable
-/// against the tab strip. Changing the Windows accent applies immediately.
-/// Windows High Contrast always uses system colors, regardless of this
-/// setting.
-///
-/// Supported in the Windows-only fork.
+/// It made the active tab's border and underline follow the Windows accent
+/// color. The tab strip no longer uses an accent color: the active tab takes
+/// the terminal's background instead, as in Windows Terminal, so nothing in
+/// the window chrome follows the Windows accent. Existing configurations that
+/// set it still load without an error.
 @"accent-follow-system": bool = true,
 
 /// The color space to use when interpreting terminal colors. "Terminal colors"
@@ -14339,6 +14335,20 @@ test "compatibility: removed selection-invert-fg-bg" {
             TerminalColor.@"cell-foreground",
             cfg.@"selection-background",
         );
+    }
+}
+
+test "compatibility: accent-follow-system still loads without a diagnostic" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_][]const u8{ "--accent-follow-system=false", "--accent-follow-system=true", "--accent-follow-system" }) |arg| {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{arg} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(cfg._diagnostics.empty());
     }
 }
 

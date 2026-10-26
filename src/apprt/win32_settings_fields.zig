@@ -69,7 +69,6 @@ pub const SettingField = enum {
     padding_balance,
     auto_update,
     auto_update_channel,
-    accent_follow_system,
 
     pub fn label(self: SettingField) []const u8 {
         if (projection(self)) |part| return part.label;
@@ -256,11 +255,10 @@ pub const descriptors = [_]Descriptor{
     .{ .key = .@"window-theme", .native = .{ .binding = "combo_window_theme", .id = 405, .order = 4, .form_label = "Window theme", .accessible_name = "Window theme" }, .field = .window_theme, .label = "Window theme", .help = "Choose the appearance of window chrome independently of the terminal theme.", .section = .appearance, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration window-theme dark light mode", .preview = .theme },
     .{ .key = .@"shell-integration", .native = .{ .binding = "combo_shell_integ", .id = 406, .order = 2, .form_label = "Shell integration", .accessible_name = "Shell integration" }, .field = .shell_integration, .label = "Shell integration", .help = "Enable prompt and command tracking for the selected shell. Automatic includes PowerShell and cmd.", .section = .shell, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration shell-integration powershell bash prompt" },
     .{ .key = .@"cursor-style", .native = .{ .binding = "combo_cursor_style", .id = 409, .order = 5, .form_label = "Cursor style", .accessible_name = "Cursor style" }, .field = .cursor_style, .label = "Cursor style", .help = "Default cursor shape. A terminal program can choose its own cursor shape.", .section = .appearance, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration cursor-style caret block bar underline" },
-    .{ .key = .@"background-blur", .native = .{ .binding = "chk_bg_blur", .id = 410, .order = 10, .caption = "Background blur", .accessible_name = "Background blur" }, .field = .background_blur, .label = "Background blur", .help = "Request background blur behind the terminal.", .section = .appearance, .kind = .blur, .apply = .live, .support = .unsupported_on_windows, .keywords = "settings preferences configuration background-blur" },
+    .{ .key = .@"background-blur", .native = .{ .binding = "chk_bg_blur", .id = 410, .order = 9, .caption = "Background blur", .accessible_name = "Background blur" }, .field = .background_blur, .label = "Background blur", .help = "Request background blur behind the terminal.", .section = .appearance, .kind = .blur, .apply = .live, .support = .unsupported_on_windows, .keywords = "settings preferences configuration background-blur" },
     .{ .key = .@"window-padding-balance", .native = .{ .binding = "combo_pad_balance", .id = 411, .order = 8, .form_label = "Window padding balance", .accessible_name = "Window padding balance" }, .field = .padding_balance, .label = "Window padding balance", .help = "Distribute remaining cell space across the terminal padding.", .section = .appearance, .kind = .choice, .apply = .new_terminals, .keywords = "settings preferences configuration window-padding-balance margin" },
     .{ .key = .@"auto-update", .native = .{ .binding = "combo_auto_update", .id = 420, .order = 0, .form_label = "Auto-update mode", .accessible_name = "Auto-update mode" }, .field = .auto_update, .label = "Auto-update mode", .help = "Choose whether noctty checks for updates and prompts to install them.", .section = .updates, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration auto-update upgrade" },
     .{ .key = .@"auto-update-channel", .native = .{ .binding = "combo_auto_update_channel", .id = 421, .order = 1, .form_label = "Auto-update channel", .accessible_name = "Auto-update channel" }, .field = .auto_update_channel, .label = "Auto-update channel", .help = "Choose stable releases or tip builds for update checks.", .section = .updates, .kind = .choice, .apply = .live, .keywords = "settings preferences configuration auto-update-channel stable tip release" },
-    .{ .key = .@"accent-follow-system", .native = .{ .binding = "chk_accent_follow", .id = 426, .order = 9, .caption = "Follow Windows accent color", .accessible_name = "Follow Windows accent color" }, .field = .accent_follow_system, .label = "Follow Windows accent color", .help = "Use the Windows accent color for the active tab highlight.", .section = .appearance, .kind = .boolean, .apply = .live, .keywords = "settings preferences configuration accent-follow-system accent color highlight tab windows personalization", .preview = .theme },
     .{ .key = .@"font-family", .native = .{ .binding = "edit_font_family", .id = 412, .order = 0, .form_label = "Font family fallbacks (comma-separated)", .accessible_name = "Font family fallbacks" }, .label = "Font family", .help = "Comma-separated font fallback families. Leave blank to use the default font.", .placeholder = "Default font", .section = .appearance, .kind = .font_families, .apply = .live, .validation = .font_families, .keywords = "settings preferences configuration font-family", .default_display = .inherited },
     .{ .key = .theme, .native = .{ .binding = "edit_theme", .id = 413, .order = 2, .form_label = "Terminal theme name, absolute path, or light/dark pair", .accessible_name = "Terminal theme" }, .label = "Terminal theme", .help = "Built-in theme name, absolute path, or a light/dark theme pair. Leave blank for the default.", .placeholder = "Default theme", .section = .appearance, .kind = .theme, .apply = .live, .validation = .theme, .keywords = "settings preferences configuration theme", .default_display = .inherited },
     .{ .key = .command, .native = .{ .binding = "edit_command", .id = 414, .order = 0, .form_label = "Default command (blank = Default profile or auto-detect)", .accessible_name = "Default command" }, .label = "Default command", .help = "Command for new terminals. It wins over Default profile; leave it blank to start that profile, or to detect a shell when Default profile is Automatic.", .placeholder = "Default profile or automatic shell", .section = .shell, .kind = .command, .apply = .new_terminals, .validation = .command, .keywords = "settings preferences configuration command", .default_display = .automatic },
@@ -670,7 +668,6 @@ pub const round_trip_config =
     \\window-padding-balance = equal
     \\auto-update = off
     \\auto-update-channel = tip
-    \\accent-follow-system = false
     \\font-family = Font #; 🚀
     \\font-family = Second Font
     \\theme = light:Light,dark:Dark
@@ -764,7 +761,6 @@ test "settings model separates saved apply timing from edit previews and Windows
     try std.testing.expectEqual(PreviewEffect.none, descriptor(.font_size).preview);
     try std.testing.expectEqual(PreviewEffect.opacity, descriptor(.background_opacity).preview);
     try std.testing.expectEqual(PreviewEffect.theme, descriptor(.window_theme).preview);
-    try std.testing.expectEqual(PreviewEffect.theme, descriptor(.accent_follow_system).preview);
 }
 
 test "settings model has a Default profile selector beside Default command" {

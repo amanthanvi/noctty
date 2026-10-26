@@ -352,6 +352,11 @@ test "quick select label placement stops at its comparison budget" {
     ) == null);
 }
 
+/// A config color as a GDI COLORREF.
+fn colorRefFromConfig(color: configpkg.Config.Color) u32 {
+    return win32_theme.rgb(color.r, color.g, color.b);
+}
+
 pub const Surface = struct {
     app: *App,
     shell_id: ?win32_shell.model.PaneId = null,
@@ -420,6 +425,12 @@ pub const Surface = struct {
     cell_size_pixels: apprt.action.CellSize = .{ .width = 0, .height = 0 },
     background_opacity_default: f64 = 1.0,
     background_opacity_force_opaque: bool = false,
+    /// The configured terminal background (`background`, which a `theme`
+    /// sets), as a COLORREF. The active tab takes it so it reads as the top
+    /// of this terminal (`Host.tabBackground`). Only this terminal's own
+    /// config sets it (`setTabBackground`); background colors a program sets
+    /// at run time (OSC 11) are not followed.
+    tab_background: u32 = colorRefFromConfig(std.meta.fieldInfo(configpkg.Config, .background).defaultValue().?),
     scrollbar_config: configpkg.Config.Scrollbar = .system,
     size_limit: apprt.action.SizeLimit = .{
         .min_width = 0,
@@ -697,6 +708,7 @@ pub const Surface = struct {
             self.drop_target = null;
         }
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
+        self.tab_background = colorRefFromConfig(config.background);
         // First memory-stage sample. Every later stage's private-bytes delta
         // is measured against this one, so it has to be the first thing that
         // happens after the trace field exists and before any window, DC,
@@ -3984,6 +3996,18 @@ pub const Surface = struct {
         }
         try self.applyBackgroundOpacity();
         try self.refreshScrollbarWindow();
+    }
+
+    /// Take `color`, from this terminal's own config (its `config_change`),
+    /// as the background its tab shows when active. Not from
+    /// `applyRuntimeConfig`: the app's config reaches that for every
+    /// window (a reload, a Settings opacity preview), and a window opened
+    /// with a forwarded `--background` keeps its own.
+    pub fn setTabBackground(self: *Surface, color: configpkg.Config.Color) void {
+        const value = colorRefFromConfig(color);
+        if (value == self.tab_background) return;
+        self.tab_background = value;
+        if (self.host) |host| host.repaintTabOf(self);
     }
 
     pub const toggleBackgroundOpacity = window_state.toggleBackgroundOpacity;

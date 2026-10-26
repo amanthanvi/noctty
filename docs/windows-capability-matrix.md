@@ -365,6 +365,9 @@ them changes nothing on Windows:
   are applied (see [Notifications and progress](#notifications-and-progress)).
 - `quick-terminal-space-behavior`: copied into the quick-terminal settings,
   where nothing reads it.
+- `accent-follow-system`: it made the active tab's border and underline follow
+  the Windows accent; the tab strip no longer uses an accent colour, and the
+  active tab takes the terminal's background instead.
 - The GTK and X11 keys: `gtk-opengl-debug`, `gtk-single-instance`,
   `gtk-custom-css`, `gtk-quick-terminal-layer`, `gtk-quick-terminal-namespace`,
   `gtk-titlebar`, `gtk-titlebar-style`, `gtk-titlebar-hide-when-maximized`,

@@ -80,7 +80,9 @@ Focus is never represented by hover styling.
 - One adaptive tab row with readable minimum widths and searchable overflow.
 - Preserve the active and recently used tabs longest during compression.
 - Active tab treatment is restrained but visible in active and inactive
-  windows.
+  windows. The active tab takes its terminal's background and runs on into
+  the terminal, with no accent colour; its `* ` label marker is the essential
+  cue, so the background (often under 3:1 against the tab row) is extra.
 - Active pane uses a thin accent indicator. Direction and size labels appear
   only while navigating or resizing.
 - Drag previews appear only during drag and name the resulting operation.

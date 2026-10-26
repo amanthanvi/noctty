@@ -607,7 +607,6 @@ const field_adapters = .{
     .combo_window_theme = comboAdapter(.window_theme),
     .combo_shell_integ = comboAdapter(.shell_integration),
     .combo_cursor_style = comboAdapter(.cursor_style),
-    .chk_accent_follow = checkboxAdapter(.accent_follow_system),
     .chk_bg_blur = FieldAdapter{ .display = SettingsWindow.displayBgBlurInCheckbox, .changed = SettingsWindow.syncBgBlurFromCheckbox },
     .combo_pad_balance = comboAdapter(.padding_balance),
     .combo_auto_update = comboAdapter(.auto_update),
@@ -670,7 +669,7 @@ pub const editable_keys = .{
     Config.Key.@"shell-integration",      Config.Key.@"cursor-style",      Config.Key.@"background-blur",
     Config.Key.@"window-padding-balance", Config.Key.@"auto-update",       Config.Key.@"auto-update-channel",
     Config.Key.@"font-family",            Config.Key.theme,                Config.Key.command,
-    Config.Key.@"accent-follow-system",   Config.Key.@"default-profile",
+    Config.Key.@"default-profile",
 };
 
 /// Scalar EDIT controls whose raw text can temporarily be invalid and
@@ -7741,12 +7740,12 @@ test "settings open and a first visit create each window once in its final form"
                 Work.print(&tree);
             }
             // The frame, its 18 children (one is the viewport, one the search
-            // field), and in the viewport the help text and Appearance's 11
+            // field), and in the viewport the help text and Appearance's 10
             // fields and 9 labels. The other sections' 31 rows are made when
             // they are first shown. The status line also carries the close
             // prompt's question, and one "Discard changes" serves the bar and
             // the prompt.
-            try std.testing.expectEqual(@as(usize, 40), tree.len);
+            try std.testing.expectEqual(@as(usize, 39), tree.len);
             for (tree.slice()) |hwnd| {
                 const counts = Work.of(hwnd);
                 try std.testing.expectEqual(@as(u16, 1), counts.created);
@@ -7810,7 +7809,7 @@ test "settings open and a first visit create each window once in its final form"
             try std.testing.expectEqual(@as(usize, 0), Work.created().len);
             // Every section shown: the whole form, and still one font build.
             for (std.enums.values(Section)) |section| settings.setActiveSection(section);
-            try std.testing.expectEqual(@as(usize, 73), Work.Tree.of(fixture.hwnd()).len);
+            try std.testing.expectEqual(@as(usize, 72), Work.Tree.of(fixture.hwnd()).len);
             try std.testing.expectEqual(@as(u32, 1), settings.font_builds);
             try std.testing.expectEqual(@as(u32, 0), settings.theme_applications);
         }
@@ -7878,7 +7877,7 @@ test "settings sections shown in any order leave the window as one made whole at
             // Every window in the same z-order, with the same styles, place,
             // client area, check, dropdown heights, text and font, and every
             // field and text with its UIA provider.
-            try std.testing.expectEqual(@as(usize, 73), states[0].len);
+            try std.testing.expectEqual(@as(usize, 72), states[0].len);
             try State.expectSame(&states[0], &states[1]);
             try std.testing.expectEqual(providers[0], providers[1]);
             for (providers[1]) |provided| try std.testing.expect(provided);
@@ -8531,48 +8530,6 @@ test "settings discarding the draft keeps it whole when copying the saved config
         break;
     } else return error.TestUnexpectedResult;
     settings.handle.alloc = std.testing.allocator;
-}
-
-test "settings offers accent-follow-system as a checkbox that previews the theme" {
-    try dialog_test.onHiddenDesktop(struct {
-        fn body() !void {
-            const fixture = try dialog_test.Fixture.start();
-            defer fixture.finish();
-            const settings = &fixture.settings;
-            const chk = settings.fields.chk_accent_follow.?;
-            var buf: [256]u8 = undefined;
-
-            // It sits in Appearance, shows the config value, and is not the
-            // disabled blur box.
-            try std.testing.expectEqual(Section.appearance, settings.controlSection(settings.controlIndex(chk).?).?);
-            try std.testing.expect(sys.SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            try std.testing.expect(sys.IsWindowEnabled(chk) != 0);
-            try std.testing.expectEqual(PreviewEffect.theme, previewEffect(.accent_follow_system));
-
-            fixture.live_previews = true;
-            _ = sys.SendMessageW(chk, BM_SETCHECK, BST_UNCHECKED, 0);
-            settings.syncCheckbox(.accent_follow_system);
-            try std.testing.expect(!settings.pending.?.@"accent-follow-system");
-            try std.testing.expect(!fixture.config.@"accent-follow-system");
-            try std.testing.expect(sys.IsWindowEnabled(settings.btn_save.?) != 0);
-            try std.testing.expectEqualStrings("Previewing now. Save to keep it.", try statusTextOf(settings, &buf));
-            try std.testing.expectEqual(win32_uia.SettingsSectionMarker.unsaved, settings.section_markers[@intFromEnum(Section.appearance)]);
-
-            var diff: [512]u8 = undefined;
-            try std.testing.expect(std.mem.indexOf(u8, settings.pendingDiffText(&diff), "Follow Windows accent color: On -> Off") != null);
-
-            // Discard puts the box back, and the preview with it.
-            settings.discardChangesNow();
-            try std.testing.expect(sys.SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            try std.testing.expect(fixture.config.@"accent-follow-system");
-            try std.testing.expect(settings.pending.?.@"accent-follow-system");
-
-            // The palette finds it by its config key and by the words for it.
-            const keywords = paletteDescriptor(.accent_follow_system).item.keywords;
-            try std.testing.expect(std.mem.indexOf(u8, keywords, "accent-follow-system") != null);
-            try std.testing.expect(std.mem.indexOf(u8, keywords, "accent color") != null);
-        }
-    }.body);
 }
 
 test "settings previews only the fields an open window shows" {
@@ -12248,7 +12205,7 @@ test "settings display-only text row needs no persistence adapter" {
             try std.testing.expectEqual(@as(LONG_PTR, 499), sys.GetWindowLongPtrW(control, -12));
             try std.testing.expect(sys.GetWindowLongPtrW(control, GWL_STYLE) & WS_TABSTOP == 0);
             try std.testing.expect(sys.IsWindowEnabled(fixture.settings.btn_save.?) == 0);
-            try std.testing.expectEqual(@as(usize, 26), editable_keys.len);
+            try std.testing.expectEqual(@as(usize, 25), editable_keys.len);
         }
     }.body);
 }
@@ -13721,7 +13678,7 @@ test "settings UIA checkbox and combo actions update the draft and discard resto
                     try std.testing.expect(!settings.hasPendingChanges());
                 }
             }
-            try std.testing.expectEqual(@as(usize, 6), checks);
+            try std.testing.expectEqual(@as(usize, 5), checks);
             try std.testing.expectEqual(@as(usize, 13), combos);
             const retired = settings.control_uia_providers[settings.controlIndex(settings.fields.chk_trim_trail.?).?].?;
             retired.detach();

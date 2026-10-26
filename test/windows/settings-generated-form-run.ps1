@@ -335,7 +335,7 @@ if (-not $WorkerDesktop) {
     & ([scriptblock]::Create($controller)) | Out-Null
     $summary = Get-Content -LiteralPath (Join-Path $OutputDirectory 'summary.json') -Raw | ConvertFrom-Json
     Assert-Contract $summary.pass 'SETFORM worker or real-profile guard failed; inspect retained artifacts.'
-    'SETFORM PASS: 27 editable projections + 2 editor rows + 2 read-only prose rows; native order and UIA verified.'
+    'SETFORM PASS: 26 editable projections + 2 editor rows + 2 read-only prose rows; native order and UIA verified.'
     return
 }
 
@@ -367,7 +367,6 @@ $cases = @(
     @(201, 415, 'Edit', 'Window padding X', 'Window padding X (left/right or single value)', 'new terminal'),
     @(201, 416, 'Edit', 'Window padding Y', 'Window padding Y (top/bottom or single value)', 'new terminal'),
     @(201, 411, 'ComboBox', 'Window padding balance', 'Window padding balance', 'new terminal'),
-    @(201, 426, 'CheckBox', 'Follow Windows accent color', $null, 'save'),
     @(201, 410, 'CheckBox', 'Background blur (not supported on Windows)', $null, 'save'),
     @(202, 401, 'Edit', 'Scrollback limit', 'Scrollback limit (bytes; 0 = off; new terminals only)', 'new terminal'),
     @(202, 403, 'ComboBox', 'Close confirmation', 'Close confirmation', 'save'),
@@ -400,7 +399,7 @@ $helpPromises = @{
     413 = @('absolute path', 'light/dark', 'default')
     414 = @('automatic.*shell|shell.*detect|detect.*shell')
 }
-Assert-Contract ($cases.Count -eq 29 -and @($cases | Where-Object { $_[2] -ne 'Button' }).Count -eq 27) `
+Assert-Contract ($cases.Count -eq 28 -and @($cases | Where-Object { $_[2] -ne 'Button' }).Count -eq 26) `
     'Independent projection manifest is incomplete.'
 function Read-Probe([IntPtr] $Handle, [string] $Kind, [string] $Name, [string] $Tag) {
     Assert-ClipboardGuard
@@ -574,13 +573,13 @@ try {
         Assert-ClipboardGuard
     }
     Assert-Contract ($clippedChecks -gt 0) 'No fully clipped control observed; clipping coverage is absent.'
-    Assert-Contract ($visibleChecks -eq 29) 'Incomplete form control coverage.'
+    Assert-Contract ($visibleChecks -eq 28) 'Incomplete form control coverage.'
     Assert-Contract ($cueChecks -eq 4 -and $absentCueChecks -eq 1) 'Incomplete positive/absent owned edit cue coverage.'
 } finally {
     try { Stop-Fixture }
     finally {
         Write-Json (Join-Path $OutputDirectory 'form-coverage.json') ([ordered]@{
-            expectedEditableProjections = 27; expectedEditorRows = 2; expectedReadOnlyProseRows = 2
+            expectedEditableProjections = 26; expectedEditorRows = 2; expectedReadOnlyProseRows = 2
             visibleControlChecks = $visibleChecks; clippedControlChecks = $clippedChecks
             expectedCueChecks = 4; cueChecks = $cueChecks; absentCueChecks = $absentCueChecks
             completedSections = $results.Count; passedSections = @($results | Where-Object { $_.pass }).Count

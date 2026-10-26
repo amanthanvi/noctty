@@ -711,7 +711,7 @@ if (-not $WorkerDesktop) {
     Assert-Contract ($workerCode -eq 0) 'SET91 regression failed; inspect cases.json, per-control JSON and clipboard-activity.jsonl.'
     if ($ColdOpenCount -gt 0 -or $ReloadCount -gt 0) {
         "SETOPEN cohort PASS ($ColdOpenCount cold, $ReloadCount fresh-process reloads; guard metadata unchanged)"
-    } else { 'SET91 regression PASS (18 controls, 30 operation cases; guard metadata unchanged)' }
+    } else { 'SET91 regression PASS (17 controls, 29 operation cases; guard metadata unchanged)' }
     return
 }
 
@@ -742,7 +742,6 @@ $cases = @(
     @(201, 405, 'ComboBox', 'Window theme', 'window-theme'),
     @(201, 409, 'ComboBox', 'Cursor style', 'cursor-style'),
     @(201, 411, 'ComboBox', 'Window padding balance', 'window-padding-balance'),
-    @(201, 426, 'CheckBox', 'Follow Windows accent color', 'accent-follow-system'),
     @(201, 410, 'CheckBox', 'Background blur (not supported on Windows)', 'background-blur'),
     @(202, 403, 'ComboBox', 'Close confirmation', 'confirm-close-surface'),
     @(202, 404, 'ComboBox', 'Copy on select', 'copy-on-select'),
@@ -1215,7 +1214,7 @@ finally {
 }
 Assert-Contract (@($results | Where-Object { -not $_.pass }).Count -eq 0) 'One or more SET91 cases failed.'
 if (-not $cohortMode) {
-    Assert-Contract ($results.Count -eq 30) 'Default UIA case coverage is incomplete.'
+    Assert-Contract ($results.Count -eq 29) 'Default UIA case coverage is incomplete.'
     Assert-Contract ($clippedChecks -gt 0) 'No fully clipped field was observed; clipping coverage is missing.'
 } else {
     Assert-Contract ($results.Count -eq $ColdOpenCount + $ReloadCount) 'Cohort coverage is incomplete.'

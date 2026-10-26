@@ -742,8 +742,9 @@ pub fn forwardedKeyAllowed(key: []const u8) bool {
 }
 
 /// Presentation keys the Win32 runtime reads from the app's config for every
-/// window, so a forwarded value would be accepted and ignored: the theme,
-/// accent and split divider (`resolveTheme`), the titlebar colors
+/// window, so a forwarded value would be accepted and ignored: the theme and
+/// split divider (`resolveTheme`), `accent-follow-system` (which no longer
+/// has any effect but still parses), the titlebar colors
 /// (`clientTitlebarTheme`, `applyDwmThemeWithBuild`), the tab bar
 /// (`Host.shouldShowTabBar`, `App.tab_bar_visible`) and where a new tab goes
 /// (`windowNewTabInsertIndex`). They stay off the allowlist until a window

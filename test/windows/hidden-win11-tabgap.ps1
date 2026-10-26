@@ -206,24 +206,27 @@ function Sample([string]$Name,$Case,[string]$StateName,[string]$Decoration){
     }elseif($StateName -in @('restored','restored-again')){Check "$Name restored top resize" ($scans.tab1[0].Code -eq 12) 12 $scans.tab1[0].Code}
     if($ExpectFlush -and $StateName -in @('maximized','fullscreen')){
         Check "$Name painted top differs from restored background" ($pixels[0] -ne $script:restoredBackground) 'tab border rather than parent background' @($pixels[0],$script:restoredBackground)
-        Check "$Name paint positive control" ($pixels[0] -ne 'FF00FF' -and $pixels[0] -ne $pixels[2]) 'top border differs from fill' @($pixels[0],$pixels[2])
-        $belowStrip=[int][Math]::Floor(4*$s.Dpi/96)
+        Check "$Name paint positive control" ($pixels[0] -ne 'FF00FF') 'painted pixel' $pixels[0]
         foreach($key in $paintKeys){Check "$Name $key row0 capture positive control" ($pixelsByColumn[$key][0] -ne 'FF00FF') 'painted pixel' $pixelsByColumn[$key][0]}
         foreach($key in @('tab0','tab1')){
-            Check "$Name $key row0 border reaches edge" ($pixelsByColumn[$key][0] -ne $pixelsByColumn[$key][2] -and $pixelsByColumn[$key][0] -ne $pixelsByColumn.empty[0]) 'border differs from tab fill and empty chrome' @($pixelsByColumn[$key][0],$pixelsByColumn[$key][2],$pixelsByColumn.empty[0])
-        }
-        Check "$Name empty row0 has no accent strip" ($pixelsByColumn.empty[0] -eq $pixelsByColumn.empty[$belowStrip]) $pixelsByColumn.empty[$belowStrip] $pixelsByColumn.empty[0]
-        if($Decoration -eq 'none'){
-            Check "$Name old accent removed from empty row0" ($pixelsByColumn.empty[0] -ne $script:restoredBackground) 'empty chrome differs from restored accent' @($pixelsByColumn.empty[0],$script:restoredBackground)
+            # The active tab has no border: its terminal background reaches
+            # the edge. An inactive tab's border does.
+            $tabActive=@($active|ForEach-Object Id) -contains $(if($key -eq 'tab0'){1000}else{1001})
+            if($tabActive){
+                Check "$Name $key row0 active background reaches edge" ($pixelsByColumn[$key][0] -eq $pixelsByColumn[$key][2] -and $pixelsByColumn[$key][0] -ne $pixelsByColumn.empty[0]) 'tab fill, not empty chrome' @($pixelsByColumn[$key][0],$pixelsByColumn[$key][2],$pixelsByColumn.empty[0])
+            }else{
+                Check "$Name $key row0 border reaches edge" ($pixelsByColumn[$key][0] -ne $pixelsByColumn[$key][2] -and $pixelsByColumn[$key][0] -ne $pixelsByColumn.empty[0]) 'border differs from tab fill and empty chrome' @($pixelsByColumn[$key][0],$pixelsByColumn[$key][2],$pixelsByColumn.empty[0])
+            }
         }
     }else{
         Check "$Name restored row0 uniform across tab and empty columns" ($pixelsByColumn.tab0[0] -eq $pixelsByColumn.tab1[0] -and $pixelsByColumn.tab1[0] -eq $pixelsByColumn.empty[0]) $pixelsByColumn.empty[0] @($pixelsByColumn.tab0[0],$pixelsByColumn.tab1[0])
         if($StateName -eq 'restored'){$script:restoredBackground=$pixels[0]}
-        if($Decoration -eq 'none'){
-            $belowStrip=[int][Math]::Floor(4*$s.Dpi/96)
-            Check "$Name restored accent positive control" ($pixelsByColumn.empty[0] -ne $pixelsByColumn.empty[$belowStrip]) 'accent differs from empty chrome below it' @($pixelsByColumn.empty[0],$pixelsByColumn.empty[$belowStrip])
-        }
     }
+    # No layout paints an accent strip above the tabs any more. Compare row 0
+    # with the first row below where the 2 DIP strip was: 4 DIP down, a
+    # separate row's [+] [▾] cluster can already start under the column.
+    $belowStrip=[int][Math]::Max(1,[Math]::Floor(2*$s.Dpi/96))
+    Check "$Name empty row0 has no accent strip" ($pixelsByColumn.empty[0] -eq $pixelsByColumn.empty[$belowStrip]) $pixelsByColumn.empty[$belowStrip] $pixelsByColumn.empty[0]
     return $sample
 }
 function Test-WindowMenus([string]$Name,$Case){
@@ -341,7 +344,7 @@ try{
                 $lastChrome=$max.PixelsTab1.Count-2
                 $restoredTail=($before.PixelsTab1[$bottom..$lastChrome]) -join ','
                 $maximizedTail=($max.PixelsTab1[$bottom..$lastChrome]) -join ','
-                Check "$name underline and separator pixels preserved" ($restoredTail -eq $maximizedTail) $restoredTail $maximizedTail
+                Check "$name tab join and separator pixels preserved" ($restoredTail -eq $maximizedTail) $restoredTail $maximizedTail
                 # A routed post proves the actual tab procedure accepts the new
                 # top row. No mouse state or real input is changed. The midpoint
                 # is outside the tab's rightmost 22 DIP close zone.

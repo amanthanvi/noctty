@@ -4021,6 +4021,7 @@ pub const App = struct {
                     .surface => |core_surface| {
                         const surface = self.registry.findSurfaceByCore(core_surface) orelse return false;
                         try surface.applyRuntimeConfig(value.config);
+                        surface.setTabBackground(value.config.background);
                         try self.syncHostWindowState(surface);
                     },
                 }
@@ -6451,7 +6452,7 @@ pub const App = struct {
                 surface.window_visible,
                 surface.window_focused,
             );
-            if (found.tab.focused != handle) found.tab.focused = handle;
+            found.host.focusTabPane(found.tab, handle, surface);
             found.host.syncSplitDim();
             if (!needs_host_sync) {
                 surface.presentWindow();
@@ -6681,7 +6682,7 @@ pub const App = struct {
                 found.host.active_tab,
                 surface.window_visible,
             );
-            if (found.tab.focused != handle) found.tab.focused = handle;
+            found.host.focusTabPane(found.tab, handle, surface);
             found.host.syncSplitDim();
             if (!needs_host_sync) {
                 surface.setVisible(true);
@@ -9598,7 +9599,6 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     defer testFreeConfigProblems(&app, alloc);
     app.config.@"window-theme" = .dark;
     const saved_font_size = app.config.@"font-size";
-    const saved_accent = app.config.@"accent-follow-system";
 
     // A field no open window shows is not previewed at all: written into the
     // config, it reached only the terminals opened before Save.
@@ -9610,8 +9610,8 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     try std.testing.expect(app.settings_preview == null);
     try std.testing.expectEqual(baseline, app.theme_rebuilds);
 
-    // Opacity, the window theme and the accent are shown from a copy of the
-    // config; only the theme fields rebuild the theme, once per change.
+    // Opacity and the window theme are shown from a copy of the config; only
+    // the theme field rebuilds the theme, once per change.
     settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 0.5 });
     try std.testing.expectEqual(baseline, app.theme_rebuilds);
     settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
@@ -9619,14 +9619,10 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
     if (!isHighContrastActive()) try std.testing.expect(!app.resolved_theme.is_dark);
     settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .light });
     try std.testing.expectEqual(baseline + 1, app.theme_rebuilds);
-    settingsPreviewFieldThunk(&app, .accent_follow_system, .{ .accent_follow_system = !saved_accent });
-    try std.testing.expectEqual(baseline + 2, app.theme_rebuilds);
     try std.testing.expectEqual(@as(f64, 0.5), app.shownConfig().@"background-opacity");
     try std.testing.expect(app.shownConfig().@"window-theme" == .light);
-    try std.testing.expectEqual(!saved_accent, app.shownConfig().@"accent-follow-system");
     try std.testing.expectEqual(@as(f64, 1), app.config.@"background-opacity");
     try std.testing.expect(app.config.@"window-theme" == .dark);
-    try std.testing.expectEqual(saved_accent, app.config.@"accent-follow-system");
     // A window shows the previewed opacity whatever config it applies: in a
     // reload, a terminal's own config reaches its window before the app's.
     try std.testing.expectEqual(@as(f64, 0.5), app.shownBackgroundOpacity(&app.config));
@@ -9641,7 +9637,6 @@ test "PKG-39 a Settings preview is shown without reaching the config terminals a
 
     // Back to the saved values, nothing is previewed.
     settingsPreviewFieldThunk(&app, .window_theme, .{ .window_theme = .dark });
-    settingsPreviewFieldThunk(&app, .accent_follow_system, .{ .accent_follow_system = saved_accent });
     try std.testing.expect(app.settings_preview != null);
     settingsPreviewFieldThunk(&app, .background_opacity, .{ .background_opacity = 1 });
     try std.testing.expect(app.settings_preview == null);

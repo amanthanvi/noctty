@@ -124,8 +124,9 @@ Win32-validated VT protocol coverage is tracked in
   drag, the double-click maximize and the right-click menu were checked with
   real mouse input on Windows 11 build 26300 (a right-click on an active
   window opened no menu until that check found why); Snap was not measured.
-- The tab strip follows the Windows accent colour by default
-  (`accent-follow-system`); the rest of the chrome keeps its fixed palette.
+- The active tab takes its terminal's background and joins the terminal
+  below it, as in Windows Terminal; the tab strip uses no accent colour.
+  `accent-follow-system` still parses but has no effect.
 - High-contrast mode detection and palette switching.
 - IME for CJK and other composed input.
 - A local sensitive-input indicator for no-echo input. `toggle_secure_input`

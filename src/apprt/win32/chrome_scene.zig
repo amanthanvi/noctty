@@ -59,7 +59,6 @@ const searchBarSeparatorX = runtime.searchBarSeparatorX;
 const searchBarToolbarVisual = runtime.searchBarToolbarVisual;
 const std = runtime.std;
 const sys = runtime.sys;
-const tabAccent = runtime.tabAccent;
 const textOutWz = runtime.textOutWz;
 const themeSurface = runtime.themeSurface;
 const titlebarButtonVisual = runtime.titlebarButtonVisual;
@@ -356,49 +355,13 @@ pub const HostScene = struct {
             };
             fillSolidRect(hdc, tab_rect, titlebar_theme.chrome_bg);
 
-            // Focused-tab accent underline. Tabs keep their legacy bottom
-            // at scaled(3) + tab_h - scaled(6), including any fractional-DPI
-            // remainder before this lane. Drawn on the parent HWND so the single
-            // rect can slide across child button boundaries; children
-            // paint themselves above this region via WM_DRAWITEM and do
-            // not occlude it. The `scaled(3)` inset on each horizontal edge
-            // is noctty's own choice: Windows Terminal draws no accent
-            // underline or tab indicator (wt-chrome-reference.md §1).
-            {
-                const now_ms = sys.GetTickCount64();
-                const cur = self.tab_underline.currentRect(now_ms);
-                const underline_left = @as(i32, @intFromFloat(@round(cur.left))) + self.scaled(3);
-                const underline_right = @as(i32, @intFromFloat(@round(cur.left + cur.width))) - self.scaled(3);
-                if (underline_right > underline_left and cur.width > 0.5) {
-                    fillSolidRect(hdc, .{
-                        .left = underline_left,
-                        .top = tab_h - self.scaled(3),
-                        .right = underline_right,
-                        .bottom = tab_h - self.scaled(1),
-                    }, tabAccent(titlebar_theme));
-                }
-            }
-
-            // A separate tab row (Win10, or decorations without the
-            // integrated titlebar) sits under the system caption and gets
-            // a 2 px accent strip so the strip reads as ours. In the
-            // integrated titlebar the same strip landed directly under
-            // DWM's own 1 px accent border and read as a thick blue rim
-            // around the window, so there the band starts clean.
+            // The strip carries no accent color in any layout: the active
+            // tab is marked by its terminal's background, joined to the
+            // terminal below (painted after the separator), and by the `* `
+            // in its label, as in Windows Terminal (wt-chrome-reference.md
+            // §1). A separate tab row (Win10, or decorations without the
+            // integrated titlebar) keeps its framed [+] [▾] cluster.
             if (!self.usingIntegratedTitlebar()) {
-                // A flush undecorated row has no continuous lane above its tabs.
-                if (!self.tabsFlushWithTop()) {
-                    fillSolidRect(
-                        hdc,
-                        .{
-                            .left = 0,
-                            .top = 0,
-                            .right = client_rect.right,
-                            .bottom = @max(1, self.scaled(2)),
-                        },
-                        themeSurface(titlebar_theme, .tab_accent),
-                    );
-                }
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
                 const cluster_rect = RECT{
                     .left = cluster_left,
@@ -447,6 +410,9 @@ pub const HostScene = struct {
                 },
                 titlebar_theme.chrome_border,
             );
+            // The active tab runs on through the lane under its button and
+            // the separator into its terminal (`Host.activeTabJoin`).
+            if (self.activeTabJoin()) |join| fillSolidRect(hdc, join.rect, join.color);
         } // end tab bar painting
     }
 

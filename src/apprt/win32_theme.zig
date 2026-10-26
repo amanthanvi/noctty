@@ -56,15 +56,6 @@ pub const ThemeColors = struct {
     accent_hover: u32,
     chrome_accent_idle: u32,
     edit_border_unfocused: u32,
-    /// Accent for the tab strip: the active tab's border and underline and
-    /// the accent strip above a separate tab row. Null means `accent`;
-    /// `accent-follow-system` sets it from the Windows accent color. Read it
-    /// through `tabAccent`.
-    tab_accent: ?u32 = null,
-    /// The Windows accent `tab_accent` was derived from, as read. A surface
-    /// over another background (a custom titlebar band) derives its own
-    /// readable accent from this, not from the already adjusted `tab_accent`.
-    system_accent: ?u32 = null,
 
     // Buttons - idle
     button_bg: u32,
@@ -648,12 +639,6 @@ pub fn adjustColor(base: u32, dr: i16, dg: i16, db: i16) u32 {
     return rgb(r, g, b);
 }
 
-/// The tab strip's accent: the followed Windows accent when one was
-/// resolved, otherwise the theme's own.
-pub fn tabAccent(theme: *const ThemeColors) u32 {
-    return theme.tab_accent orelse theme.accent;
-}
-
 // ── Button color derivation ─────────────────────────────────────────────
 
 /// Dim inactive top chrome while preserving the system palette in high contrast.
@@ -988,7 +973,10 @@ pub fn profileKindHintColor(kind: ProfileKind, is_dark: bool) u32 {
 }
 
 // ── Accent-follow helpers ───────────────────────────────────────────────
-// Registry read: win32.zig:resolveSystemAccentColor.
+// Nothing reads the Windows accent any more: the tab strip, its only
+// consumer, stopped using an accent color. A consumer would read
+// `HKCU\Software\Microsoft\Windows\DWM\AccentColor` and handle
+// `WM_DWMCOLORIZATIONCOLORCHANGED`.
 // Blend: 60% system / 40% semantic, S clamped [0.45, 0.75], V clamped
 // [0.40, 0.90] — keeps the overlay readable against any system accent
 // while preserving the semantic cue.

@@ -1690,8 +1690,8 @@ panes, `~` profiles, `:` settings, `%` themes, `!` recent commands, `^`
 layouts, or `?` for help. The native Settings window stages edits until Save
 (or Discard changes, which first asks how many fields would be lost) and
 patches your config without rewriting unrelated text. While you edit, Window
-theme, Follow Windows accent color and Background opacity preview in the open
-windows; the other fields, font size among them, take effect when you save.
+theme and Background opacity preview in the open windows; the other fields,
+font size among them, take effect when you save.
 A preview stays a preview: a config reload or a Windows light/dark switch
 keeps it unsaved and still shown, and Discard changes or closing without
 saving takes it back. The one exception is a reload whose file now has the
@@ -2472,9 +2472,10 @@ colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
 `--background-opacity`). They are set on the new window's first terminal; a
 tab or split opened in it later starts from the instance's own configuration.
 These settings apply to every window of the instance and are not forwarded:
-`--window-theme`, `--accent-follow-system`, `--window-titlebar-background`,
+`--window-theme`, `--window-titlebar-background`,
 `--window-titlebar-foreground`, `--split-divider-color`,
-`--window-show-tab-bar` and `--window-new-tab-position`. A second `noctty` and
+`--window-show-tab-bar` and `--window-new-tab-position`, and neither is
+`--accent-follow-system`, which no longer has any effect. A second `noctty` and
 `noctty +new-window` leave them out (with a warning on standard error, where
 there is one) and still open the window.
 
